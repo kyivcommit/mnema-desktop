@@ -1,0 +1,68 @@
+[package]
+name = "mnema-extract"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# `src/bin/worker.rs` would otherwise produce a binary named `worker` — cargo's
+# default for any file under `src/bin/` is that file's own stem. Renamed here so the
+# built artifact carries a name unique across the whole workspace, since every
+# `[[bin]]` in every member ends up in one shared `target/` directory.
+[[bin]]
+name = "mnema-extract-worker"
+path = "src/bin/worker.rs"
+
+[dependencies]
+# Pinned deliberately, twice over.
+#
+# The version is exact because `pdfium-render` compiles bindings for one Pdfium C
+# API revision and the shipped binary must be that revision. A newer library under
+# older bindings yields garbage struct reads rather than a clean error.
+#
+# The API revision is named outright rather than left to the default `pdfium_latest`
+# feature. `pdfium_latest` is an alias that moves with each `pdfium-render` release
+# — under it, bumping the crate would silently demand a different Pdfium binary.
+# Named explicitly, a bump that drops this revision fails to compile, which is the
+# conversation we want to have. `PDFIUM_API_BUILD` and `scripts/fetch-pdfium.sh`
+# carry the same number.
+#
+# `image` is dropped with the default features: it exists for page *rendering*,
+# which this crate does not do.
+#
+# `thread_safe` is kept, but read its name narrowly. In 0.9.3 it adds `Send`/`Sync`
+# impls and no serialisation — its README describes a mutex in front of the FFI that
+# the source does not contain. It is kept only because holding the library handle in
+# a `static` needs `Sync`; the serialisation Pdfium actually requires is this
+# crate's own, in `lock_pdfium`.
+pdfium-render = { version = "=0.9.3", default-features = false, features = [
+    "pdfium_7881",
+    "thread_safe",
+] }
+thiserror = { workspace = true }
+mnema-core = { path = "../mnema-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The worker's own hash of a file's bytes, computed while reading it once
+# (`src/bin/worker.rs`). Same idiom as `crates/mnema-index/src/write.rs`'s
+# chunk content hash, not a shared dependency between the two crates.
+sha2 = { workspace = true }
+# Same pins as crates/mnema-deps-probe/Cargo.toml, which measured the
+# configuration this crate's `text::decode` uses — kept identical rather than
+# re-resolved independently, so the two crates cannot drift onto different
+# chardetng behaviour.
+chardetng = "1"
+encoding_rs = "0.8"
+# Same pin as crates/mnema-deps-probe/Cargo.toml's `zip` probe: task 6a's
+# `typing::identify` opens a candidate docx/xlsx/epub as a zip archive to check
+# for its required member, and the fixtures in tests/typing.rs write one with
+# the same crate. `default-features = false` + `deflate` only, for the same
+# reason the probe states it: the defaults drag in six compressors that no
+# OOXML or EPUB file uses.
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+# The markdown parser. Only its parse tree and `sourcepos` are used — nothing
+# here renders anything, and `src/markdown.rs`'s module doc says why that is
+# not a stylistic preference.
+comrak = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

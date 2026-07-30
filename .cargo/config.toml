@@ -1,0 +1,23 @@
+# One linker flag, for Windows, and only because of the test binaries.
+#
+# `tauri-build` gives the *application* binary a manifest binding it to
+# Common-Controls 6. Integration tests get no such manifest and link the same
+# library: `muda` and `tauri` import `TaskDialogIndirect`, `SetWindowSubclass`,
+# `RemoveWindowSubclass` and `DefSubclassProc`, which exist only in version 6.
+# With no activation context the loader resolves them against
+# `system32\comctl32.dll` — measured as 5.82 on Windows 11 — and kills the
+# process before the first test with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139).
+#
+# The failure is worth the file because of how it reads: cargo reports it as
+# `process didn't exit successfully … (exit code: 0xc0000139)` with no test
+# names, no panic and no mention of a DLL, on a suite that compiled cleanly.
+#
+# This cannot live in `RUSTFLAGS`: that variable splits on spaces and the flag
+# contains several, so passing it that way makes rustc fail to start at all.
+#
+# Scoped to the MSVC target. macOS and Linux builds do not see it.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+  "-C",
+  "link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'",
+]

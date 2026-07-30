@@ -1,0 +1,2 @@
+This fixture exists only to be larger than the sixteen-byte ceiling used by
+a_file_over_the_ceiling_is_refused_without_being_read.

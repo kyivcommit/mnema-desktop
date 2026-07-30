@@ -1,0 +1,4 @@
+# ripgrep honours .gitignore, which would make the design document in docs/private/
+# invisible to search — including to the sections the comments cite. .ignore has higher
+# precedence, so this line puts it back. Verified: without it, rg finds nothing there.
+!docs/private/

@@ -1,0 +1,79 @@
+//! The Tauri shell: a translation layer between the core crates and a webview.
+//!
+//! It is a library with a two-line binary in front of it rather than a binary
+//! alone, because an integration test cannot reach into a bin-only crate, and
+//! this is exactly the layer where a test has to call the commands the way the
+//! webview calls them.
+
+pub mod bridge;
+pub mod error;
+pub mod job;
+pub mod paths;
+pub mod state;
+
+use anyhow::Context as _;
+use tauri::Manager as _;
+
+/// Everything the webview is allowed to call, in one place.
+///
+/// Exposed rather than written inline in [`run`] so that a test drives the same
+/// list the application registers. A test that builds its own handler proves the
+/// commands work and nothing about whether they are reachable.
+pub fn invoke_handler<R: tauri::Runtime>()
+-> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        bridge::open_index,
+        bridge::lexical_search,
+        bridge::start_probe_job,
+        bridge::cancel_job,
+        bridge::job_status,
+    ]
+}
+
+/// Decides where the index lives and puts the state into the application.
+///
+/// Exposed for the same reason as [`invoke_handler`], and the reason is the same
+/// mistake: a test that constructs its own `AppState` proves the commands work
+/// against a directory, and nothing about which directory the application picks.
+/// This is the only place that choice is made.
+///
+/// LOCAL data, not roaming and not cache — see [`paths::index_path`] for why.
+/// Getting it wrong is silent: it works on the machine that wrote it and loses a
+/// user's index on theirs.
+pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
+    let dir = app.path().app_local_data_dir()?;
+    app.manage(state::AppState::new(dir));
+    Ok(())
+}
+
+/// Builds and runs the application. Returns only when the last window closes or
+/// start-up fails.
+pub fn run() -> anyhow::Result<()> {
+    // Process-global, and it must precede every connection: a connection opened
+    // before registration never sees the extension and only fails much later, at
+    // the first vector statement. Registering with no vector table costs
+    // nothing, which is what makes it safe to do unconditionally. G7.0 §5.7.
+    mnema_index::register_vector_extension().context("registering the sqlite-vec extension")?;
+
+    tauri::Builder::default()
+        // Registered before anything else, as the plugin requires. Two instances
+        // over one SQLite file is a second writer that can only wait, an
+        // indexing job running twice over the same folder, and the cloud spend
+        // for it billed twice.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // The second process exits as soon as it has handed its arguments
+            // over. All that is left to do here is show the window the user was
+            // asking for.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
+        .setup(|app| {
+            manage_state(app.handle())?;
+            Ok(())
+        })
+        .invoke_handler(invoke_handler())
+        .run(tauri::generate_context!())
+        .context("running the application")
+}

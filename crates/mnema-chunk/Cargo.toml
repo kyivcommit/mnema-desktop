@@ -1,0 +1,15 @@
+[package]
+name = "mnema-chunk"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# `mnema-core` and nothing else, deliberately. This crate must never reach
+# `mnema-extract`, which links `pdfium`, a C++ library: `Block` lives in
+# `mnema-core` precisely so the chunker can consume it without dragging the PDF
+# FFI into the application binary (`src-tauri/tests/dependency_boundary.rs`
+# fails if it becomes reachable). Not `mnema-index` either — the chunker is a
+# pure function, and Task 10 owns the cross-check that the database accepts what
+# it produces.
+[dependencies]
+mnema-core = { path = "../mnema-core" }

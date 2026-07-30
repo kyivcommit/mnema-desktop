@@ -1,0 +1,57 @@
+# --- Rust / Tauri ---
+target/
+**/*.rs.bk
+*.pdb
+
+# Written by tauri-build on every build, and named after the host platform —
+# `macOS-schema.json` here, `windows-schema.json` on a Windows machine. Editor
+# schemas for the capability files, derived entirely from the installed plugins.
+# Committing them would put a rebuild in every diff and one machine's platform
+# in everyone's tree. The icons under src-tauri/icons ARE committed, because
+# `generate_context!` will not compile without them.
+/src-tauri/gen/schemas/
+
+# --- Node / the copied React interface ---
+node_modules/
+dist/
+.vite/
+
+# --- Python, for the experiments only ---
+__pycache__/
+*.pyc
+.venv/
+
+# --- third-party prebuilt binaries ---
+# The Pdfium shared library is 7.7 MB and reproducible: scripts/fetch-pdfium.sh
+# fetches a pinned release and verifies its checksum before installing. The pin
+# lives in that script and in crates/mnema-extract, which is where it belongs —
+# committing the binary would put a copy of the decision in a place nobody reads.
+# Anchored: an unanchored `vendor/` matches a directory of that name at any depth,
+# and the React interface being ported from the server repository is exactly the
+# kind of tree that could end up hiding source under one.
+/vendor/
+
+# --- model artefacts and run output ---
+# A single full experiment run writes ~2.3 GB of ONNX external-data tensors.
+# All of it is reproducible from the scripts plus the model snapshot.
+models/
+_out/
+
+# --- secrets ---
+# Model-provider keys belong in the OS credential store (§4.5), never in a file.
+# This line is a backstop, not the mechanism.
+.env*
+!.env*.example
+
+# --- OS ---
+.DS_Store
+
+# local-only operator guidance for Claude Code (not committed), same as the server repository
+CLAUDE.md
+
+# The design document and the workflow output it comes from live in a separate private
+# repository, cloned here as docs/private/. Nothing under it is part of this repository:
+# §N and D<n> references in the comments point into it, and are citations rather than
+# missing pieces. A matching `!docs/private/` in .ignore keeps ripgrep able to read it.
+docs/superpowers/
+/docs/private/

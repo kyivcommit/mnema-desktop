@@ -1,0 +1,14 @@
+[package]
+name = "mnema-core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+# Promoted from a dev-dependency when `wire` moved here from `mnema-extract`:
+# the NDJSON framing functions (`to_line`, `from_line`) are the module's whole
+# point and they are JSON. Adding it costs the application nothing it did not
+# already pay — every crate that talks to a model or the wire needs it.
+serde_json = { workspace = true }
+unicode-normalization = { workspace = true }

@@ -1,0 +1,68 @@
+[workspace]
+resolver = "3"
+# Members are added as their tasks land. A member listed before its directory
+# exists makes every cargo command in the workspace fail, so the list grows.
+members = [
+    "crates/mnema-chunk",
+    "crates/mnema-core",
+    "crates/mnema-deps-probe",
+    "crates/mnema-extract",
+    "crates/mnema-index",
+    "crates/mnema-ingest",
+    "crates/mnema-pool",
+    "crates/mnema-secrets",
+    "src-tauri",
+]
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+# Dependency floor, not a promise: `ignore`, `calamine` and `zip` each require
+# Rust 1.88, so nothing below that can build this workspace. The credential
+# stores raise it too, but only where they compile — `windows-native-keyring-store`
+# and `zbus-secret-service-keyring-store` want 1.88, while the macOS pair
+# (`keyring-core`, `apple-native-keyring-store`) is happy at 1.85. It is
+# deliberately NOT declared as `rust-version` — with resolver 3 that would make
+# cargo hold dependencies back at older versions to keep the floor satisfied,
+# which is the opposite of what we want. rust-toolchain.toml pins what we build
+# with, and it is far above the floor.
+
+[profile.release]
+# This is already the default. It is written down because it is load-bearing and
+# invisible: `src-tauri/src/bridge.rs` uses `catch_unwind` so that a job which
+# panics still tells the window it ended, and under `panic = "abort"` that
+# catches nothing — the window would keep a disabled Start button for the rest
+# of its life. Tests would not notice, because the test profile always unwinds.
+#
+# Shrinking a Tauri bundle with `panic = "abort"` is the usual first suggestion,
+# so this line exists to be the thing someone has to delete rather than a default
+# they can quietly override. `src-tauri/tests/unwind_profile.rs` fails if they do.
+panic = "unwind"
+
+[workspace.dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = "2.6"
+# Pinned deliberately: pre-1.0, the author warns of breaking changes, and the
+# on-disk format carries no stability promise. Bumping it is a decision, not a
+# refresh — check that an existing database still opens.
+sqlite-vec = "=0.1.9"
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+# The tokenizer's category list is Unicode general categories, so the query side
+# has to read the same property rather than approximate it. One function, no
+# dependencies of its own, no_std.
+unicode-general-category = "1.1"
+# NFC normalisation, needed on both sides of the pipeline: `remove_diacritics 2`
+# does not fold the Cyrillic breve or diaeresis, so a precomposed `й`/`ї` and
+# its decomposed spelling tokenize as two different words without it. D32.
+unicode-normalization = "0.1.25"
+tempfile = "3"
+# CommonMark + GFM, used by `mnema-extract`'s markdown reader and nowhere else.
+# What it is used for is narrow and unusual: not rendering, but `sourcepos` —
+# every node's line and column range in the source, so a block's text can be a
+# slice of the file rather than a re-rendering of the parse tree (D38).
+comrak = "0.54.0"

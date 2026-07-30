@@ -1,0 +1,6 @@
+[toolchain]
+# Latest stable as of 2026-07-25. The dependency floor is 1.88, but a floor is
+# not a target: building on the oldest compiler that works throws away nine
+# releases of codegen and diagnostics for nothing.
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

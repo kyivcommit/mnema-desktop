@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="utf-8" />
+    <title>Mnema</title>
+    <!--
+      A placeholder, and the walking skeleton's far end: it touches all four
+      commands so the whole path can be walked by hand. The interface ported
+      from the server repository replaces it.
+
+      Script and styles are separate files rather than inline. The CSP is
+      `default-src 'self'`, under which an external file is unambiguously
+      allowed; an inline script depends on Tauri's nonce injection, and the
+      React build produces external files anyway.
+    -->
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Mnema</h1>
+      <p id="index-status" class="muted">opening the index…</p>
+
+      <section>
+        <h2>Lexical search</h2>
+        <form id="search-form">
+          <input id="query" type="search" placeholder="query" autocomplete="off" />
+          <button type="submit">Search</button>
+        </form>
+        <p id="search-status" class="muted">nothing searched yet</p>
+      </section>
+
+      <section>
+        <h2>Probe job</h2>
+        <button id="start">Start</button>
+        <button id="cancel" disabled>Cancel</button>
+        <progress id="bar" value="0" max="1"></progress>
+        <p id="job-status" class="muted">idle</p>
+      </section>
+    </main>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

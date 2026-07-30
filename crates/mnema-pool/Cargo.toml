@@ -1,0 +1,51 @@
+[package]
+name = "mnema-pool"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# Test scaffolding, not a product binary: a stand-in worker that can be told to
+# flood stderr, hang, crash or allocate without bound, so the supervisor's four
+# failure modes are exercised against a real process rather than a mock. It gets
+# a `[[bin]]` because `env!("CARGO_BIN_EXE_…")` — the only way an integration
+# test can name a built executable's path — exists for bins and for nothing
+# else. The name is prefixed to stay unique across the whole workspace, since
+# every `[[bin]]` in every member lands in one shared `target/`.
+[[bin]]
+name = "mnema-pool-test-worker"
+path = "src/bin/test_worker.rs"
+
+[dependencies]
+# `wire` (the NDJSON frames) and `Block` both live in mnema-core, and that is
+# what lets this crate run inside the application: D40 forbids `mnema-extract`
+# — the crate that links Pdfium — from entering the application's dependency
+# graph, and parsing the worker's output does not require it.
+mnema-core = { path = "../mnema-core" }
+# For `SkipRule` alone, so that `impl From<Failure> for SkipRule` can live here.
+# See `Failure`'s doc comment for why the mapping belongs on this side.
+mnema-index = { path = "../mnema-index" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# Needed on every Unix for two things: the signal numbers a wait status is read
+# against (`killed_by_us`, `classify`), and — on Linux only — the `setrlimit`
+# that imposes the memory ceiling between fork and exec. macOS has no such call
+# to make: measured 2026-07-26, it rejects RLIMIT_AS, RLIMIT_DATA and RLIMIT_RSS
+# with EINVAL. See `memory_ceiling`.
+#
+# 0.2.189 is what `cargo add libc` resolves to from the registry today (checked
+# 2026-07-26); it is also already in `Cargo.lock`, pulled in by rusqlite and
+# tempfile, so this adds no new package to the build. crates.io's newest is
+# 1.0.0-alpha.4, a prerelease, which is deliberately not used.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
+# The same crate again for the tests, which cannot see a dependency of the crate
+# they exercise: the classification tests build `ExitStatus` values from raw
+# signal numbers, and the macOS test proves the platform still refuses an
+# address-space limit.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2.189"
+
+[dev-dependencies]
+tempfile = { workspace = true }

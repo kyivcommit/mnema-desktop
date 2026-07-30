@@ -1,0 +1,40 @@
+[package]
+name = "mnema-desktop"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# A library plus a thin binary, not a binary alone. Integration tests cannot
+# `use` a bin-only crate, and the shell is exactly the layer where a test has to
+# reach the command functions and the IPC handler from outside.
+[lib]
+name = "mnema_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mnema-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+mnema-index = { path = "../crates/mnema-index" }
+# The orchestration crate. It brings `mnema-pool` and `mnema-chunk` with it and
+# NOT `mnema-extract`: the worker's output crosses as `mnema_core::Block`, so
+# the Pdfium binding stays outside this graph. `tests/dependency_boundary.rs`
+# is what says so rather than this comment.
+mnema-ingest = { path = "../crates/mnema-ingest" }
+tauri = { version = "2.11", features = [] }
+tauri-plugin-single-instance = "2.4"
+serde = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+# `test` brings in the mock runtime. Declared here rather than as a feature of
+# the crate so the shipped binary can never contain it.
+tauri = { version = "2.11", features = ["test"] }
+mnema-core = { path = "../crates/mnema-core" }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

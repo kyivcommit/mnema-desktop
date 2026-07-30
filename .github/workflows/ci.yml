@@ -1,0 +1,195 @@
+name: CI
+# `push` is deliberately narrow. With `branches: ["**"]` a branch that has an
+# open pull request runs the whole matrix twice for one commit — once for the
+# push and once for the pull request — which is what the first run of this
+# workflow did: four checks for two platforms. Work on a branch is covered by
+# the pull request; `main` is covered here, so every commit is checked exactly
+# once and nothing goes unchecked.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only for every job, declared once at the top so a new job cannot inherit
+# more by being written without a `permissions:` block. Nothing here needs to
+# write to the repository: the bundle job uploads an artefact, which is a
+# different scope, and a token that may push is one supply-chain step away from
+# a workflow that does.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Two platforms, not because the product ships on two — v1 is macOS — but
+    # because the crate list in §8 of the architecture spec was assembled from
+    # documentation, and a list that compiles on exactly one target has been
+    # checked against almost nothing. Linux is where Tauri is known to be
+    # weakest: it builds against a packaged WebKitGTK rather than an OS
+    # component, and that is the seam that breaks.
+    strategy:
+      # Both arms always report. With fail-fast the first failure cancels the
+      # other arm, and these two are meant to fail for unrelated reasons —
+      # cancelling one hides a second, independent break behind whichever
+      # happened to finish first.
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    # Measured, not guessed: across the last three green runs this job took
+    # 1.5–3.2 minutes end to end, and its longest single step — installing the
+    # Linux system libraries — ran in 51 s. Fifteen is roughly five times the
+    # slowest observed run, which is margin for a cold cache rather than a
+    # budget anyone should be near.
+    #
+    # The number exists because of what happens without it. On 2026-07-29 that
+    # same 51-second `apt-get` hung on a runner, on a commit that touched one
+    # markdown file, minutes after the identical step had passed. With no limit
+    # declared, GitHub's default applies and a hung step holds a runner for
+    # **six hours** before anything says so — burning billed minutes and, worse,
+    # reporting nothing at all in the meantime. A wedged job that never
+    # concludes is not a slow job; it is a job with no result.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # No toolchain action on purpose: rust-toolchain.toml is the single place
+      # the version and its components are named, and rustup (preinstalled on
+      # the runner) provisions exactly that. A second declaration here would
+      # drift from it silently.
+      - name: Provision the toolchain named in rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # macOS gets WebKit from the OS; on Linux it is a package, and without its
+      # headers the `tauri` crate does not build at all. librsvg and patchelf
+      # belong to the bundler rather than to the library — they are here so that
+      # a Linux bundle, if one is ever wanted, does not need a second list that
+      # nobody remembers to keep in step with this one.
+      #
+      # Measured in an ubuntu:24.04 container rather than assumed, including the
+      # negative control: with libwebkit2gtk-4.1-dev removed the build stops in
+      # `webkit2gtk-sys`, on pkg-config failing to find `webkit2gtk-4.1`.
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # mnema-extract binds to a prebuilt Pdfium library, which is not committed:
+      # it is 7.7 MB and reproducible from a pinned, checksum-verified release.
+      # It has to be here — before the tests, which fail on a missing library
+      # rather than on anything they are about, and after fmt and clippy, which
+      # do not need it and should not cost a download to report a stray newline.
+      #
+      # Both platforms in the matrix have a pin in that script; Linux was added
+      # for this matrix. Pdfium is opened by path at run time and never linked,
+      # so this is a prerequisite of the tests and not of the build — which is
+      # why the bundle job below does not have this step.
+      - name: Vendor the pinned Pdfium build
+        run: scripts/fetch-pdfium.sh
+      - run: cargo test --workspace
+      # `cargo test --workspace` above skips mnema-secrets' one `#[ignore]`d
+      # test, and that test is the only thing that checks the platform binding
+      # actually works — everything else in that crate runs against an in-memory
+      # store. Left unrun, a break in the macOS keychain path would reach a
+      # release before anything noticed.
+      #
+      # It is safe to run here because `apple-native-keyring-store` resolves its
+      # keychain through `SecKeychain::default_for_domain(User)`, which is
+      # exactly what `security default-keychain -s` sets. Pointing that at a
+      # throwaway file exercises the real Keychain Services API without going
+      # near a login keychain. Verified rather than assumed: with `forget`
+      # disabled, the credential was found in the throwaway keychain and the
+      # login keychain was empty.
+      #
+      # The `#[ignore]` stays. A plain `cargo test --workspace`, here or on a
+      # developer's machine, must never touch a credential store.
+      #
+      # macOS only, and the condition is not a convenience: `security` is a
+      # macOS binary, and the store this crate compiles on Linux is the D-Bus
+      # Secret Service, which a runner has no session for. The Linux binding
+      # stays unexercised — a gap task 7 recorded, not one this closes.
+      - name: Credential store, against a throwaway keychain
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/mnema-ci.keychain-db"
+          # Generated, not written down: this guards a file that lives for the
+          # length of one step on a VM that is destroyed afterwards, and a
+          # literal here would be a credential in the repository.
+          PASSWORD="$(uuidgen)"
+          # Trimmed, not stripped of every space: `tr -d ' '` would mangle a home
+          # directory with a space in it and restore a path that does not exist.
+          # Irrelevant on a runner, but this script is what someone pastes
+          # locally to reproduce a failure, and there it is their keychain.
+          ORIGINAL_DEFAULT="$(security default-keychain | sed -E 's/^[[:space:]]*"?//; s/"?[[:space:]]*$//')"
+          # Both arms end in `|| true`: under `set -e` a failing first command
+          # ends the trap, and the throwaway keychain would outlive the job.
+          trap 'security default-keychain -s "$ORIGINAL_DEFAULT" || true; security delete-keychain "$KEYCHAIN" 2>/dev/null || true' EXIT
+          security create-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings "$KEYCHAIN"   # no auto-lock timeout
+          security unlock-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          # `--include-ignored`, never `--ignored`. `--ignored` selects *only*
+          # ignored tests, so the day someone removes the attribute this step
+          # runs zero tests and exits 0 — a green step certifying nothing, in the
+          # one place that exists to prove the platform binding works. Measured:
+          # with the attribute removed, `--ignored` reports "0 passed; 14
+          # filtered out" and passes. `--include-ignored` runs it either way.
+          #
+          # Scoped to `--test roundtrip` so this stays the keychain step: the
+          # rest of the crate's tests already ran under `cargo test --workspace`.
+          cargo test -p mnema-secrets --test roundtrip -- --include-ignored
+
+  bundle:
+    # One architecture per package rather than a universal binary: a universal
+    # build carries both slices, so every user downloads roughly twice the
+    # application they can run. Measured, not assumed — the numbers are in
+    # docs/BUILD.md. macos-14 is arm64, which is what the artefact name claims.
+    runs-on: macos-14
+    needs: check
+    # 1.4–2.1 minutes across the same three runs. The limit is here for the same
+    # reason as the one on `check`, and it matters slightly more: this job is the
+    # one that produces the download, so a wedged run leaves someone waiting on
+    # an artefact that is never coming, with the job still showing as running.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provision the toolchain named in rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # A version range rather than a pinned build: the CLI has to agree with the
+      # `tauri` crate the workspace compiles, and that agreement is a major
+      # version on both sides. `--locked` keeps the CLI's own dependency
+      # resolution from drifting between runs.
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      # No Pdfium step here, and that is a finding rather than an omission: the
+      # shell does not depend on mnema-extract, so nothing inside the bundle can
+      # load the library. verify-bundle.sh derives that from the dependency
+      # graph and fails the day it stops being true.
+      - run: cargo tauri build
+      # Never `|| true`, never a grep whose failure is swallowed. The script
+      # opens the .dmg and looks at the application inside it; every state it
+      # rejects is produced on purpose by scripts/verify-bundle-controls.sh,
+      # which also requires the real image to pass. That script is the list —
+      # repeating one here is how the count came to disagree across three
+      # documents the first time.
+      #
+      # It looks inside the image because `target/release/bundle/macos/` is empty
+      # after the build: with targets ["dmg"] the bundler prints
+      # `Cleaning …/Mnema.app` once the image is written.
+      - name: The bundle exists, is signed, and carries what the graph says it must
+        run: scripts/verify-bundle.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mnema-macos-arm64
+          path: target/release/bundle/dmg/*.dmg
+          # Not the default. `if-no-files-found` defaults to `warn`, so a run
+          # that produced no .dmg — or produced one under a path this glob does
+          # not match, which is what `--target universal-apple-darwin` does —
+          # uploads nothing, prints a warning and leaves the job green. That is
+          # this repository's signature defect, a step that passes while doing
+          # nothing, sitting in the one job whose whole purpose is to prove a
+          # package gets built.
+          if-no-files-found: error

@@ -1,0 +1,29 @@
+[package]
+name = "mnema-secrets"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Not the `keyring` crate. `keyring` 4.x is a shim over this one whose `v1`
+# module seizes the process-wide default store on the first `Entry::new`, which
+# would force every test to write into the developer's own login keychain.
+# `keyring`'s own docs send applications that need to choose their store here,
+# and its default feature resolves to exactly the three stores below. See the
+# module docs in src/lib.rs.
+# The integration tests use this directly, and need no `[dev-dependencies]`
+# entry to do so: cargo makes a regular dependency available to tests, benches
+# and examples as well. They therefore link the same build as the library, which
+# matters here — `keyring_core`'s default store is a process-global static, and
+# two builds of the crate would be two separate stores.
+keyring-core = "1"
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1.1"
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }

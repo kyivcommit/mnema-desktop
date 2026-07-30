@@ -1,0 +1,32 @@
+[package]
+name = "mnema-ingest"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# The orchestration crate: the only place that knows the order of operations.
+# It exists because the alternative did not compile. The plan put `ingest.rs`
+# inside `mnema-index`, and `mnema-pool` already depends on `mnema-index` (for
+# `SkipRule`, so that `impl From<Failure> for SkipRule` can live on the pool
+# side) — an ingest module inside the index crate would need the pool back, and
+# cargo rejects the cycle. Splitting it out keeps `mnema-index` a storage
+# crate, `mnema-pool` a supervision crate and `mnema-chunk` a pure function.
+#
+# It does NOT reach `mnema-extract`: everything it needs from the worker
+# arrives as `mnema_core::Block` through the pool, which is what keeps the
+# Pdfium binding out of the application's dependency graph
+# (`src-tauri/tests/dependency_boundary.rs`).
+[dependencies]
+mnema-core = { path = "../mnema-core" }
+mnema-index = { path = "../mnema-index" }
+mnema-pool = { path = "../mnema-pool" }
+mnema-chunk = { path = "../mnema-chunk" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# `tests/randomised.rs` only. `document.id` is the sha256 of a file's bytes, so
+# a harness that wants to ask "is the index still holding what this file
+# actually contains?" has to be able to compute one itself — reading the answer
+# back out of the index would be the index marking its own work.
+sha2 = { workspace = true }
