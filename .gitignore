@@ -53,5 +53,14 @@ CLAUDE.md
 # repository, cloned here as docs/private/. Nothing under it is part of this repository:
 # §N and D<n> references in the comments point into it, and are citations rather than
 # missing pieces. A matching `!docs/private/` in .ignore keeps ripgrep able to read it.
-docs/superpowers/
 /docs/private/
+
+# Two symlinks into it, not directories — which is why neither pattern has a
+# trailing slash: a symlink is a file to git, and `docs/superpowers/` would not
+# have matched one. They exist so the design tooling keeps writing to the paths
+# it knows while the files land in the private repository, under version
+# control. Before the split those two paths were ignored and in no repository
+# at all: `.superpowers/sdd/` held 84 files of task briefs and reviews under a
+# `.gitignore` containing `*`, and one `git clean` would have taken them.
+docs/superpowers
+/.superpowers
