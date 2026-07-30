@@ -10,6 +10,18 @@ on:
     branches: [main]
   pull_request:
 
+# Third-party actions are pinned by commit SHA, with the version they were at in
+# a trailing comment. A tag is a movable pointer: whoever controls the action can
+# repoint `@v4` at a different commit, and this workflow would run it on the next
+# push without a diff anywhere in this repository. That is tolerable while a
+# repository is private and its runs are its owner's; it is a supply-chain step on
+# a public one, where the same workflow also runs against pull requests.
+#
+# Pinning is what makes the version legible, so it is bumped rather than frozen:
+# checkout and upload-artifact go v4 -> v7.0.1 here, which also retires the Node 20
+# deprecation warning v4 had started printing. The comment is the only thing that
+# says which version a SHA is, so it has to be updated with it.
+#
 # Read-only for every job, declared once at the top so a new job cannot inherit
 # more by being written without a `permissions:` block. Nothing here needs to
 # write to the repository: the bundle job uploads an artefact, which is a
@@ -50,14 +62,14 @@ jobs:
     # concludes is not a slow job; it is a job with no result.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No toolchain action on purpose: rust-toolchain.toml is the single place
       # the version and its components are named, and rustup (preinstalled on
       # the runner) provisions exactly that. A second declaration here would
       # drift from it silently.
       - name: Provision the toolchain named in rust-toolchain.toml
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # macOS gets WebKit from the OS; on Linux it is a package, and without its
       # headers the `tauri` crate does not build at all. librsvg and patchelf
       # belong to the bundler rather than to the library — they are here so that
@@ -154,10 +166,10 @@ jobs:
     # an artefact that is never coming, with the job still showing as running.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Provision the toolchain named in rust-toolchain.toml
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # A version range rather than a pinned build: the CLI has to agree with the
       # `tauri` crate the workspace compiles, and that agreement is a major
       # version on both sides. `--locked` keeps the CLI's own dependency
@@ -181,7 +193,7 @@ jobs:
       # `Cleaning …/Mnema.app` once the image is written.
       - name: The bundle exists, is signed, and carries what the graph says it must
         run: scripts/verify-bundle.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mnema-macos-arm64
           path: target/release/bundle/dmg/*.dmg
