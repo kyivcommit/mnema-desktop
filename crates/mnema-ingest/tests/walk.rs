@@ -1202,6 +1202,38 @@ fn an_unmounted_nested_share_deletes_nothing() {
     assert!(!f.db.search_lexical("two", 10).unwrap().is_empty());
 }
 
+/// The evidence points the opposite way from the test above, and telling the
+/// two apart is the whole of `resolve_ancestor`'s job. An unmounted share
+/// leaves its mountpoint PRESENT and empty; a directory removed outright is
+/// ABSENT — `read_dir` on it returns `Err(NotFound)`, not `Ok` at zero
+/// entries. A version of the freeze that could not tell the two apart
+/// treated `NotFound` exactly like an empty directory and froze here too:
+/// measured, `removed: 0` with both `path` rows still searchable after
+/// `gone/` was deleted along with everything in it.
+#[test]
+fn a_deleted_subdirectory_removes_its_documents() {
+    let f = Fixture::new();
+    f.write("keep.txt", "keep content");
+    f.write("gone/one.txt", "one content");
+    f.write("gone/two.txt", "two content");
+    f.walk();
+    assert!(!f.db.search_lexical("one", 10).unwrap().is_empty());
+    assert!(!f.db.search_lexical("two", 10).unwrap().is_empty());
+
+    std::fs::remove_dir_all(f.dir().join("gone")).unwrap();
+    let report = f.walk();
+
+    assert_eq!(report.stopped, StopReason::Completed);
+    assert_eq!(
+        report.removed, 2,
+        "a subdirectory removed outright is evidence of deletion, not the unmount ambiguity"
+    );
+    assert!(f.db.path_entry(f.root, "gone/one.txt").unwrap().is_none());
+    assert!(f.db.path_entry(f.root, "gone/two.txt").unwrap().is_none());
+    assert!(f.db.search_lexical("one", 10).unwrap().is_empty());
+    assert!(f.db.search_lexical("two", 10).unwrap().is_empty());
+}
+
 /// Every chunk id a document owns, ordered — used to tell "the same rows"
 /// apart from "a document that looks the same but was rebuilt from scratch,"
 /// which `document_id_of` alone cannot: content addressing gives a rebuild
@@ -1228,18 +1260,26 @@ fn chunk_ids_of(db: &Db, document_id: &str) -> Vec<i64> {
 /// rebuild it from nothing under a fresh set of chunk ids: every citation
 /// into it invalidated for a rename, which is not a deletion at all.
 ///
-/// `first.txt` and `third.txt` bracket `old.txt` deliberately, and the test
-/// is weaker without them: `chunk.id` is `INTEGER PRIMARY KEY` **without**
-/// `AUTOINCREMENT` (`crates/mnema-index/src/schema.sql`), so on a database
-/// holding only the one renamed document a wrongly-rebuilt chunk can land
-/// back on the very id the deleted one just freed — SQLite's own "reuse the
-/// highest free rowid" rule, coincidentally matching `chunk_ids_before` for
-/// a reason that has nothing to do with this test being right. A third
-/// chunk still alive at a HIGHER id than the renamed file's own forces a
-/// genuine rebuild to land above it instead, so the comparison below fails
-/// for the actual bug rather than passing by accident (measured: this test
-/// with only `old.txt` in it stayed green under the phase-3-before-phase-2
-/// mutation described below; with the bracketing files it does not).
+/// `third.txt` is the load-bearing one, and the test is wrong without it:
+/// `chunk.id` is `INTEGER PRIMARY KEY` **without** `AUTOINCREMENT`
+/// (`crates/mnema-index/src/schema.sql`), so on a database holding only the
+/// one renamed document a wrongly-rebuilt chunk can land back on the very
+/// id the deleted one just freed — SQLite's own "reuse the highest free
+/// rowid" rule, coincidentally matching `chunk_ids_before` for a reason
+/// that has nothing to do with this test being right. A chunk still alive
+/// at a HIGHER id than the renamed file's own — `third.txt`, written and
+/// walked after `old.txt` — forces a genuine rebuild to land above it
+/// instead, so the comparison below fails for the actual bug rather than
+/// passing by accident (measured: this test with only `old.txt` in it
+/// stayed green under the phase-3-before-phase-2 mutation described below;
+/// with `third.txt` present it does not). The assertion just after
+/// `chunk_ids_before` pins that property directly, so reordering the
+/// writes — `third.txt` before `old.txt`, say — cannot silently restore
+/// the coincidence by giving `third.txt` the lower id instead.
+///
+/// `first.txt` carries no such property; it is here only so the walk
+/// ingests more than one document before the rename, and its own search
+/// assertion at the end is incidental, not load-bearing.
 #[test]
 fn a_rename_keeps_the_document_and_its_chunks() {
     let f = Fixture::new();
@@ -1255,6 +1295,22 @@ fn a_rename_keeps_the_document_and_its_chunks() {
     assert!(
         !chunk_ids_before.is_empty(),
         "the file must have produced at least one chunk to make this test mean anything"
+    );
+
+    // The property the whole test depends on, pinned directly rather than
+    // left implicit: `third.txt`'s chunk must sit at a higher id than every
+    // chunk `old.txt` produced, or a wrongly-rebuilt chunk could land back
+    // on `old.txt`'s own freed id and this test would pass for the wrong
+    // reason again.
+    let third_chunk_ids = chunk_ids_of(&f.db, &f.document_id_of("third.txt"));
+    assert!(
+        !third_chunk_ids.is_empty(),
+        "third.txt must have produced at least one chunk to make this test mean anything"
+    );
+    assert!(
+        third_chunk_ids.iter().min() > chunk_ids_before.iter().max(),
+        "third.txt's chunk ids {third_chunk_ids:?} must all exceed old.txt's {chunk_ids_before:?}, \
+         or a rebuilt chunk could coincidentally land back on old.txt's own freed id"
     );
 
     std::fs::rename(f.dir().join("old.txt"), f.dir().join("new.txt")).unwrap();

@@ -13,7 +13,7 @@
 //! finished cleanly; see the gate at the top of phase 3, below, for exactly
 //! what that means.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -475,28 +475,54 @@ pub fn walk_root(
     // `mnt/one.txt`, `mnt/two.txt` under a share that then unmounted gave
     // `removed: 2, stopped: Completed`, `keep.txt` the only path left.
     //
+    // `resolve_ancestor` is what tells that shape apart from a subdirectory
+    // deleted outright, which must NOT be frozen — an earlier version of
+    // this check answered "does `read_dir` on the immediate parent fail?"
+    // with a single bool, which cannot tell "the directory exists and is
+    // empty" (D33's ambiguity) apart from "the directory does not exist at
+    // all" (evidence OF deletion, the opposite conclusion). Measured: with
+    // that version, `rm -rf`-ing `gone/` entirely — two indexed files,
+    // deleted along with their directory — gave `removed: 0` and left both
+    // `path` rows searchable forever, because `std::fs::read_dir` on a
+    // missing directory returns `Err(NotFound)`, which the old check
+    // treated exactly like `Ok` with zero entries. `resolve_ancestor`'s own
+    // doc comment has the three states this replaces that one bool with.
+    //
     // Checked per distinct PARENT DIRECTORY of a `known` path the walk did
     // not find — not for every directory under the root, and not once per
-    // missing path sharing one — so the cost stays proportional to what
+    // missing path sharing one, since `resolve_ancestor` caches every
+    // directory it visits — so the cost stays proportional to what
     // actually went missing rather than to the size of the tree. A `known`
     // path already excused by `seen` or by a `NotAFileSubtree` prefix needs
     // no second look; a top-level path (no `/` in it) has no directory of
     // its own below the root to freeze, and its absence is already the
     // root-level check's business, above.
+    //
+    // The cost of getting this right: a directory a user EMPTIES without
+    // deleting — every file inside removed, the folder itself left behind —
+    // now reads exactly like an unmounted share and is frozen the same way,
+    // where before this fix it correctly reconciled (`removed` included
+    // those files). That is D33's own tradeoff, applied one directory down
+    // rather than only at the root, not a new one invented here: pausing
+    // on an ambiguity a person could resolve in a second is preferred over
+    // guessing wrong and deleting content that is still on the disk. The
+    // cost is real and stated here rather than left to be discovered as a
+    // surprise: those files stay frozen on every future walk too, for as
+    // long as the empty directory itself remains — nothing here re-examines
+    // it once emptied, because from this code's own vantage point nothing
+    // ever changes about the shape that made it ambiguous in the first
+    // place.
     let missing: Vec<&str> = known
         .iter()
         .map(String::as_str)
         .filter(|p| !seen.contains(p) && !frozen.iter().any(|prefix| under(p, prefix)))
         .collect();
-    let mut checked_parents: HashSet<&str> = HashSet::new();
+    let mut ancestor_cache: HashMap<&str, bool> = HashMap::new();
     for relative in missing {
         let Some(parent) = relative.rfind('/').map(|i| &relative[..i]) else {
             continue;
         };
-        if !checked_parents.insert(parent) {
-            continue;
-        }
-        if root_is_empty(&root.join(parent)) {
+        if resolve_ancestor(root, parent, &mut ancestor_cache) {
             frozen.push(parent);
         }
     }
@@ -538,21 +564,85 @@ pub fn walk_root(
     Ok(report)
 }
 
-/// A raw top-level listing of one directory, with no exclusion rule applied
-/// at all — deliberately independent of `Walked`, which cannot tell an
-/// excluded entry apart from a nonexistent one. `walk_root`, this function's
-/// only caller, uses it twice: once for the watched root itself, and once
-/// per candidate parent directory of a `known` path phase 1 did not find,
-/// which is what tells an unmounted nested share apart from a genuinely
-/// deleted one — see both call sites for the reasoning.
+/// A raw top-level listing of the watched root, with no exclusion rule
+/// applied at all — deliberately independent of `Walked`, which cannot tell
+/// an excluded entry apart from a nonexistent one. `walk_root`'s only use of
+/// this is the root itself, checked once at the top of phase 3; a candidate
+/// directory further down uses `resolve_ancestor` instead, which needs a
+/// THIRD answer this function cannot give — see that function's own doc
+/// comment for why "true on any read failure" is wrong one level down.
 ///
 /// `true` on a read failure too, same as an empty directory: the
 /// conservative direction for a check whose whole job is choosing a pause
-/// over a guess.
+/// over a guess. Safe here specifically because the watched root's own
+/// existence is already established before phase 1 even runs
+/// (`!root.is_dir()`, at the top of `walk_root`) — a read failure on it
+/// during phase 3 is a race, not the ordinary case `resolve_ancestor` has
+/// to tell apart from an ordinary deletion.
 fn root_is_empty(dir: &Path) -> bool {
     std::fs::read_dir(dir)
         .map(|mut entries| entries.next().is_none())
         .unwrap_or(true)
+}
+
+/// Walks up from `dir` — a candidate directory that may not exist at all —
+/// to the shallowest ancestor that does, and says whether reconciliation
+/// must freeze everything under `dir` rather than trust its absence as
+/// evidence.
+///
+/// Three states, where an earlier version of this check had room for only
+/// two — folding `NotFound` into "read failure, so empty, so freeze" is
+/// exactly the bug this replaces, measured directly: a subdirectory removed
+/// outright (`rm -rf`) froze its own contents forever, because `read_dir`
+/// on a path that no longer exists returns `Err(NotFound)`, indistinguishable
+/// from `Ok` at zero entries under the old check.
+///
+/// - The directory exists and `read_dir` returns at least one entry: the
+///   walk saw real content there, so a `known` path missing from `seen`
+///   under it is genuinely gone. Not frozen — `false`.
+/// - The directory exists and `read_dir` returns nothing: D33's ambiguity,
+///   the same one `root_is_empty` names for the watched root itself, one
+///   level down. Frozen — `true`.
+/// - The directory does not exist (`io::ErrorKind::NotFound`): this is
+///   evidence OF deletion, not an absence of evidence, so THIS level
+///   answers nothing on its own — the walk continues to the parent
+///   directory one level up. The recursion always terminates: the watched
+///   root is the last possible ancestor, and by the time phase 3 reaches
+///   this code it is already known to exist and read non-empty (the
+///   whole-root unmount check above returned early otherwise), so running
+///   out of `/` to split on resolves to "not frozen" directly rather than
+///   recursing into a check that would only confirm what is already known.
+/// - `read_dir` fails for any other reason (permission denied, some other
+///   IO error): frozen — the conservative side, same as the old
+///   behaviour, kept for exactly the cases that are not "not found." This
+///   arm is expected to be rare: a permission failure anywhere under the
+///   watched root would normally already have cleared `Walked::complete`
+///   during phase 1 and stopped phase 3 from running at all (the gate at
+///   the top of phase 3), so reaching it here at all means phase 1 saw the
+///   entry as readable and something changed in the moment since.
+///
+/// `cache` is populated for every directory visited along the way — not
+/// only the one finally resolved — to the SAME verdict, so a second
+/// candidate that shares any part of this walk-up chain (a sibling file
+/// under the same unmounted share, another file under the same deleted
+/// tree) resolves from the cache without a second `read_dir` call. This is
+/// what keeps the cost proportional to how many distinct directories are
+/// actually involved in what went missing, not to how deep any one of them
+/// happens to be nested.
+fn resolve_ancestor<'a>(root: &Path, dir: &'a str, cache: &mut HashMap<&'a str, bool>) -> bool {
+    if let Some(&freeze) = cache.get(dir) {
+        return freeze;
+    }
+    let freeze = match std::fs::read_dir(root.join(dir)) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => match dir.rfind('/') {
+            Some(i) => resolve_ancestor(root, &dir[..i], cache),
+            None => false,
+        },
+        Err(_) => true,
+    };
+    cache.insert(dir, freeze);
+    freeze
 }
 
 /// Whether `relative` names something inside the subtree `prefix` names —
