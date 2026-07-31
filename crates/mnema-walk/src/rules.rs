@@ -11,13 +11,17 @@ use thiserror::Error;
 pub struct WalkRules {
     builtin: bool,
     gitignore: bool,
-    /// Always in canonical form once a `WalkRules` exists: no leading `./`,
-    /// no surrounding `/`, never empty, never absolute, never containing a
-    /// backslash or trailing whitespace. `WalkRules::new` is the only public
-    /// way to populate this (besides `default`/`none`, which leave it
-    /// empty), and it refuses or normalises everything on the way in — see
-    /// `normalize_prefix`. `builder()` relies on that: it does not re-trim
-    /// or re-check these before turning them into patterns.
+    /// Always exactly what the caller typed once a `WalkRules` exists —
+    /// never rewritten, only accepted or refused whole. `WalkRules::new` is
+    /// the only public way to populate this (besides `default`/`none`,
+    /// which leave it empty), and `validate_prefix` is a whitelist: every
+    /// stored entry is, by construction, a `/`-joined sequence of one or
+    /// more non-empty components, none of them `.` or `..`, none containing
+    /// a backslash or a control character, none beginning or ending with
+    /// whitespace, and — for the first component only — not shaped like a
+    /// Windows drive letter or a home-directory shorthand (review fix round
+    /// 3, Critical finding). `builder()` relies on that: it does not
+    /// re-check any of it before turning a prefix into a pattern.
     user_prefixes: Vec<String>,
 }
 
@@ -29,19 +33,43 @@ pub struct WalkRules {
 /// of the rule set is a different failure, with nowhere left to report it —
 /// see `Walked::rules_applied` (review fix round 1, Critical finding).
 ///
-/// Four variants, not one: review fix round 2 measured that `ignore`'s
-/// override matcher is, underneath, exactly a `.gitignore` line parser
-/// (`overrides.rs` forwards straight into `GitignoreBuilder::add_line`), so
-/// every one of that parser's quirks applies to a user prefix. Three of them
-/// compile to `Ok` and then match the wrong thing — the fourth kind of wrong
-/// this type has to name — so each gets a distinct, actionable message
-/// instead of being folded into `InvalidPrefix`, which is reserved for
-/// "the pattern engine rejected this outright."
+/// Round 1 caught glob metacharacters; round 2 caught a backslash, trailing
+/// whitespace, `./` and an absolute path — and round 3 found leading
+/// whitespace, a repeated `./` (`././Photos`, since a single strip only
+/// runs once), `~/Photos`, and `Photos//sub`, none of them on round 2's
+/// list. Enumerating bad forms one round at a time does not converge, so
+/// `validate_prefix` is a whitelist now: it describes what a well-formed
+/// prefix IS, component by component, and refuses everything that is not
+/// that shape, rather than blacklisting specific ways to be wrong. Every
+/// one of these still shares the same failure it was always about: `new`
+/// used to return `Ok`, the named folder was not excluded, and nothing
+/// anywhere said so — which, since D29 sends every document to a
+/// third-party embedding provider, means the folder the user excluded got
+/// sent anyway.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RulesError {
     #[error("exclusion rule {prefix:?} could not be compiled: {reason}")]
     InvalidPrefix { prefix: String, reason: String },
-    /// `gitignore.rs` compiles every glob with `backslash_escape(true))`
+    /// A leading `/`, a trailing `/`, or a doubled `/` all produce a
+    /// zero-length path component (`Photos//sub` splits to `["Photos", "",
+    /// "sub"]`) — refused rather than silently collapsed, since collapsing
+    /// `//` to `/` is itself a normalisation this round stopped doing.
+    #[error(
+        "exclusion rule {prefix:?} has an empty path component — remove the leading, trailing, \
+         or doubled `/`"
+    )]
+    EmptyComponent { prefix: String },
+    /// `.` and `..` are not folder names, they are navigation — and `..`
+    /// specifically is how a prefix would climb out of the watched root.
+    /// `././Photos` reaches this on its first component; round 2's single
+    /// `strip_prefix("./")` only ever ran once, so it missed this repeated
+    /// form.
+    #[error(
+        "exclusion rule {prefix:?} has a `{component}` path component — name the folder \
+         directly, not `.` or `..`"
+    )]
+    DotComponent { prefix: String, component: String },
+    /// `gitignore.rs` compiles every glob with `backslash_escape(true)`
     /// unconditionally, so a `\` anywhere in the pattern — not only a
     /// trailing one, which `globset::escape` cannot help with because it
     /// does not touch backslash at all — is read as an escape character.
@@ -50,28 +78,53 @@ pub enum RulesError {
     /// unambiguous, so this is refused rather than normalised.
     #[error("exclusion rule {prefix:?} cannot contain a backslash — name the folder without one")]
     ContainsBackslash { prefix: String },
-    /// `add_line` silently trims trailing whitespace unless the line ends in
-    /// `\ ` (an escaped space) — reachable through us, since nothing here
-    /// ever emits that escape — so a prefix naming a folder with a trailing
-    /// space compiles to a pattern for a same-named folder WITHOUT one.
+    /// A control character cannot be part of a real folder name that a
+    /// person typed on purpose.
+    #[error("exclusion rule {prefix:?} contains a control character, which cannot name a folder")]
+    ContainsControlCharacter { prefix: String },
+    /// `add_line` silently trims TRAILING whitespace unless the line ends
+    /// in `\ ` (an escaped space, which nothing here ever emits) — but
+    /// LEADING whitespace is a different, equally silent failure: it
+    /// compiles and matches only a folder that literally has that leading
+    /// space, which is almost never what a stray keystroke meant. Either
+    /// edge is refused (review fix round 3, Important finding — round 2
+    /// checked only the trailing edge).
     #[error(
-        "exclusion rule {prefix:?} has trailing whitespace, which the pattern engine silently \
-         drops — remove it"
+        "exclusion rule {prefix:?} has a path component that begins or ends with whitespace — \
+         remove it"
     )]
-    TrailingWhitespace { prefix: String },
-    /// A `/`-prefixed pattern can only ever match the beginning of a path
-    /// relative to the override root — so an absolute filesystem path (the
-    /// shape a folder picker or a paste from Finder produces) compiles to a
-    /// pattern that can never match anything under any watched root, ever,
-    /// with `new` returning `Ok`. Refused outright: there is no watched
-    /// root in scope here to make it relative against safely. A leading
-    /// `./` is a different, genuinely relative idiom and is normalised
-    /// instead — see `normalize_prefix`.
+    SurroundingWhitespace { prefix: String },
+    /// A single ASCII letter followed by `:` as the first component — the
+    /// shape of a Windows drive letter. `Path::is_absolute()` cannot be
+    /// used to catch this the way round 2 caught a Unix absolute path: on
+    /// Windows, `Path::new("/private").is_absolute()` is FALSE (Windows
+    /// needs a drive or a UNC prefix — confirmed against the doc comment on
+    /// `Path::is_absolute` itself, `library/std/src/path.rs:2536-2539` in
+    /// the toolchain this crate builds with: "`c:\windows` is absolute,
+    /// while `c:temp` and `\temp` are not"), so the round 2 check refused
+    /// `/private` on macOS while silently accepting it — compiling to
+    /// `!//private`, matching nothing — on Windows. Checking the shape of
+    /// the first component instead of asking the platform is what makes
+    /// this refuse the same inputs everywhere (review fix round 3, Critical
+    /// finding).
     #[error(
-        "exclusion rule {prefix:?} is an absolute path — exclusion rules are relative to the \
-         watched folder"
+        "exclusion rule {prefix:?} starts with what looks like a Windows drive letter — \
+         exclusion rules are relative to the watched folder, not an absolute path"
     )]
-    AbsolutePrefix { prefix: String },
+    DriveLetterPrefix { prefix: String },
+    /// `~` as the first component is a shell convention for a home
+    /// directory that this crate does not expand — taken literally, it
+    /// names an ordinary folder called `~`, which essentially never exists
+    /// under a watched root, so the rule silently excludes nothing. Not
+    /// one of the five properties an ordinary well-formed component has to
+    /// have, but the same failure shape as the drive-letter case: a token
+    /// that looks like it anchors somewhere outside the watched root,
+    /// refused for the same reason.
+    #[error(
+        "exclusion rule {prefix:?} starts with `~` — exclusion rules are relative to the \
+         watched folder, not a shorthand for a home directory"
+    )]
+    HomeDirectoryShorthand { prefix: String },
 }
 
 impl WalkRules {
@@ -129,9 +182,11 @@ impl WalkRules {
     /// finding).
     const BUILTIN_FILES: &'static [&'static str] = &[".DS_Store"];
 
-    /// Fails when a user prefix cannot become a rule at all, or normalises
-    /// it into the one canonical form `builder()` trusts without
-    /// re-checking — see `normalize_prefix` and `RulesError`. Trying to
+    /// Fails when a user prefix is not, by construction, a well-formed
+    /// relative path — see `validate_prefix` and `RulesError`. Nothing is
+    /// rewritten any more (round 2's `./` strip is gone): a prefix is
+    /// either exactly the shape `builder()` can turn into a rule, or it is
+    /// refused with a message naming what to type instead. Trying to
     /// exclude `target/` (`WalkRules::new(true, ..)`) never fails here: the
     /// built-in list is a fixed set of literals this crate controls, not
     /// user input.
@@ -236,10 +291,9 @@ impl WalkRules {
                 let _ = over.add(&format!("!**/{file}"));
             }
         }
-        // Already normalised by `WalkRules::new` — no leading `./`, no
-        // surrounding `/`, never absolute, never containing a backslash or
-        // trailing whitespace, never empty. Nothing left to do here but
-        // turn each one into a rooted pattern.
+        // Already validated by `WalkRules::new` — a well-formed relative
+        // path, exactly as typed (see the doc comment on `user_prefixes`).
+        // Nothing left to do here but turn each one into a rooted pattern.
         for prefix in &self.user_prefixes {
             let _ = over.add(&anchored_pattern(prefix));
         }
@@ -278,74 +332,53 @@ fn anchored_pattern(normalized_prefix: &str) -> String {
     format!("!/{}", globset::escape(normalized_prefix))
 }
 
-/// Turns a raw, user-typed prefix into the canonical form `WalkRules`
-/// stores — or refuses it, with a message a person can act on, when there
-/// is no safe way to compile it at all. `Ok(None)` means "no rule": an
-/// empty prefix, or one that normalises down to nothing (bare `/`s, a bare
-/// `./`), the same as a blank line in an exclusion list rather than an
-/// error.
-///
+/// Whitelists a prefix instead of blacklisting ways to be wrong — round 1
+/// caught glob metacharacters, round 2 caught four more specific shapes,
+/// and round 3 found four MORE that round 2's checks let through, which is
+/// what "enumerating bad forms one round at a time does not converge"
+/// means in practice. Every one of these forms shares one root cause:
 /// `ignore`'s override matcher is, underneath, exactly a `.gitignore` line
 /// parser (`overrides.rs` forwards straight into
-/// `GitignoreBuilder::add_line`), so every one of that parser's quirks
-/// applies to a prefix that reaches it. Review fix round 2 measured three
-/// that compile to `Ok` and then match the wrong thing — a defect in the
-/// same shape as round 1's escaping bug, just in territory `globset::escape`
-/// does not cover:
+/// `GitignoreBuilder::add_line`), so a prefix that is not a plain,
+/// unadorned relative path can compile to `Ok` and then match something
+/// other than what it names — usually nothing at all.
 ///
-/// 1. A `\` anywhere (not only trailing) is a live escape character to the
-///    pattern compiler regardless of escaping — refused, `ContainsBackslash`.
-/// 2. Trailing whitespace is silently trimmed by the pattern compiler —
-///    refused, `TrailingWhitespace`, checked against the prefix's own
-///    `trim_end()` so only genuinely trailing whitespace (not a legitimate
-///    leading space, which the compiler does NOT trim) is caught.
-/// 3. An absolute path can never match anything relative to a watched root
-///    — refused, `AbsolutePrefix`, checked on the raw prefix, before any
-///    trimming removes the very leading `/` that makes it absolute. A
-///    leading `./` is different: genuinely relative once dropped, so it is
-///    stripped rather than refused.
+/// A well-formed prefix is a `/`-joined sequence of one or more components,
+/// each of which is non-empty, is not `.` or `..`, contains no `\` and no
+/// control character, and does not begin or end with whitespace — plus,
+/// for the FIRST component only, is not shaped like a Windows drive letter
+/// or a home-directory shorthand. Anything else is refused outright, with a
+/// message naming what is wrong; nothing is silently rewritten any more,
+/// not even round 2's `./` strip (that normalisation is exactly how
+/// `./Photos` became a rule that compiled fine and matched nothing).
 ///
-/// (The fourth thing round 2 found — a one-component prefix matching at
-/// every depth instead of only the root — is not a prefix defect at all,
-/// so there is nothing to normalise or refuse here for it; it is fixed in
-/// `anchored_pattern` instead, at the one place the pattern is built.)
+/// `Ok(None)` is the one remaining non-error, deliberately narrow: a
+/// literal empty string, meaning "no rule" — the same as a blank row in an
+/// exclusion list, not an attempt to name a folder that then got silently
+/// misread. Every other degenerate shape (`/`, `./`, `//`) is a component
+/// that fails the whitelist and is therefore `Err`, not `Ok(None)` — round
+/// 2's doc comment claimed otherwise for two of those three without having
+/// measured it (review fix round 3, Minor finding).
 fn validate_prefix(prefix: &str) -> Result<Option<String>, RulesError> {
-    if prefix.contains('\\') {
-        return Err(RulesError::ContainsBackslash {
-            prefix: prefix.to_string(),
-        });
-    }
-    if prefix != prefix.trim_end() {
-        return Err(RulesError::TrailingWhitespace {
-            prefix: prefix.to_string(),
-        });
-    }
-    // Checked on the RAW prefix, before any trimming: stripping a leading
-    // `/` first would erase the very evidence an absolute path is absolute
-    // (review fix round 2, Critical finding). Anything that reaches the
-    // trim below is therefore already known not to start with `/`, so only
-    // a TRAILING one is ever trimmed here — a leading one would mean this
-    // function already returned.
-    if Path::new(prefix).is_absolute() {
-        return Err(RulesError::AbsolutePrefix {
-            prefix: prefix.to_string(),
-        });
-    }
-    let trimmed = prefix.trim_end_matches('/');
-    let trimmed = trimmed.strip_prefix("./").unwrap_or(trimmed);
-    if trimmed.is_empty() {
+    if prefix.is_empty() {
         return Ok(None);
+    }
+    for (index, component) in prefix.split('/').enumerate() {
+        validate_component(prefix, component, index == 0)?;
     }
 
     // Compile-probe, alone, in a throwaway `OverrideBuilder`: catches a
     // single prefix pathological enough on its own to exceed the pattern
-    // engine's size limit even after every other check above has passed
-    // (review fix round 1, Critical finding, third path). Must build the
-    // exact pattern `builder()` will use, leading `/` included, or this
-    // probe and the real walk could disagree about what compiles.
+    // engine's size limit even though every whitelist check above passed
+    // (review fix round 1, Critical finding, third path — pinned by
+    // `a_single_prefix_past_the_size_limit_is_refused_by_new` after review
+    // fix round 3 found this block could be deleted entirely without
+    // reddening any test). Must build the exact pattern `builder()` will
+    // use, leading `/` included, or this probe and the real walk could
+    // disagree about what compiles.
     let mut probe = OverrideBuilder::new(Path::new("."));
     probe
-        .add(&anchored_pattern(trimmed))
+        .add(&anchored_pattern(prefix))
         .and_then(|built| built.build())
         .map(|_| ())
         .map_err(|err| RulesError::InvalidPrefix {
@@ -353,5 +386,59 @@ fn validate_prefix(prefix: &str) -> Result<Option<String>, RulesError> {
             reason: err.to_string(),
         })?;
 
-    Ok(Some(trimmed.to_string()))
+    Ok(Some(prefix.to_string()))
+}
+
+/// One component of a `/`-split prefix against the whitelist described on
+/// `validate_prefix`. `whole` is the original, un-split prefix, carried
+/// through only so an error message can name the rule the user typed
+/// rather than the fragment that failed.
+fn validate_component(whole: &str, component: &str, is_first: bool) -> Result<(), RulesError> {
+    if component.is_empty() {
+        return Err(RulesError::EmptyComponent {
+            prefix: whole.to_string(),
+        });
+    }
+    if component == "." || component == ".." {
+        return Err(RulesError::DotComponent {
+            prefix: whole.to_string(),
+            component: component.to_string(),
+        });
+    }
+    if component.contains('\\') {
+        return Err(RulesError::ContainsBackslash {
+            prefix: whole.to_string(),
+        });
+    }
+    if component.chars().any(|c| c.is_control()) {
+        return Err(RulesError::ContainsControlCharacter {
+            prefix: whole.to_string(),
+        });
+    }
+    if component != component.trim() {
+        return Err(RulesError::SurroundingWhitespace {
+            prefix: whole.to_string(),
+        });
+    }
+    if is_first {
+        if is_drive_letter(component) {
+            return Err(RulesError::DriveLetterPrefix {
+                prefix: whole.to_string(),
+            });
+        }
+        if component == "~" {
+            return Err(RulesError::HomeDirectoryShorthand {
+                prefix: whole.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A single ASCII letter followed by `:` and nothing else — `C:`, not
+/// `CD:` and not `C:foo`. The shape `library/std/src/path.rs`'s own
+/// Windows `Prefix::Disk` parsing looks for at the start of a path.
+fn is_drive_letter(component: &str) -> bool {
+    let bytes = component.as_bytes();
+    bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }

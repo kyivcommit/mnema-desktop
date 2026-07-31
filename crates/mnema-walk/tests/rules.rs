@@ -185,14 +185,18 @@ fn a_prefix_containing_a_backslash_is_refused() {
     );
 }
 
-/// The pattern engine silently trims trailing whitespace off a line unless
+/// The pattern engine silently trims TRAILING whitespace off a line unless
 /// it ends in an escaped space, which nothing here ever emits — so a
 /// prefix naming a folder with a trailing space used to compile to a
-/// pattern for the SAME name without one. Both halves: the well-formed
-/// prefix excludes correctly; the one with trailing whitespace is refused
-/// (review fix round 2, Critical finding).
+/// pattern for the SAME name without one. LEADING whitespace is the
+/// opposite failure, found only in review fix round 3: it is NOT trimmed
+/// by the pattern engine, so it compiles fine and matches only a folder
+/// that literally has that leading space — almost never what a stray
+/// keystroke meant, and `new` returned `Ok` either way. Both edges are
+/// refused now, not only the trailing one round 2 caught (review fix
+/// round 3, Important finding).
 #[test]
-fn a_prefix_with_trailing_whitespace_is_refused() {
+fn a_prefix_with_surrounding_whitespace_is_refused() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("Photos")).unwrap();
     fs::write(root.path().join("Photos/f.txt"), b"x").unwrap();
@@ -206,48 +210,97 @@ fn a_prefix_with_trailing_whitespace_is_refused() {
         "the well-formed prefix excludes its own folder"
     );
 
-    let result = WalkRules::new(false, false, vec!["Photos ".to_string()]);
-    assert!(
-        matches!(result, Err(RulesError::TrailingWhitespace { .. })),
-        "trailing whitespace must be refused, not silently trimmed into a rule for `Photos`"
-    );
+    for malformed in ["Photos ", " Photos"] {
+        let result = WalkRules::new(false, false, vec![malformed.to_string()]);
+        assert!(
+            matches!(result, Err(RulesError::SurroundingWhitespace { .. })),
+            "{malformed:?} must be refused, not silently compiled into a rule for a \
+             differently-named folder"
+        );
+    }
 }
 
-/// A leading `./` is the ordinary "this directory" idiom — genuinely
-/// relative once it is dropped — so it is normalised rather than refused,
-/// unlike the other three forms in this round. Before the fix, `./private`
-/// stayed `./private` in the compiled pattern, which (since real relative
-/// paths from the walk never start with `./`) matched nothing at all: the
-/// rule silently excluded no files while `new` still returned `Ok` (review
-/// fix round 2, Critical finding).
+/// `.` and `..` are navigation, not folder names — and round 2's single
+/// `strip_prefix("./")` only ever ran once, so `././Photos` (a repeated
+/// `./`) slipped through it entirely, still compiling to a pattern that
+/// matches nothing (review fix round 3, Critical finding). Both halves,
+/// with a SURVIVING SIBLING FILE this time: the earlier `./`-prefix test
+/// only ever wrote one file, so `found.is_empty()` could not tell "excluded
+/// exactly `private`" apart from "excluded everything" — measured, that
+/// test stayed green even with `anchored_pattern` mutated to `"!/**"`
+/// (review fix round 3, first test-gap finding).
 #[test]
-fn a_leading_dot_slash_is_normalised_not_refused() {
+fn a_dot_or_dotdot_component_is_refused() {
     let root = tempfile::tempdir().unwrap();
-    fs::create_dir_all(root.path().join("private")).unwrap();
-    fs::write(root.path().join("private/a.txt"), b"x").unwrap();
+    for name in ["private/a.txt", "kept.txt"] {
+        let path = root.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"x").unwrap();
+    }
 
     let walked = enumerate(
         root.path(),
-        &WalkRules::new(false, false, vec!["./private".to_string()]).unwrap(),
+        &WalkRules::new(false, false, vec!["private".to_string()]).unwrap(),
+    );
+    let names: Vec<&str> = walked.found.iter().map(|f| f.relative.as_str()).collect();
+    assert_eq!(
+        names,
+        ["kept.txt"],
+        "the well-formed prefix excludes exactly `private`, nothing more and nothing less"
     );
 
-    assert!(
-        walked.found.is_empty(),
-        "`./private` must exclude exactly what `private` excludes, not match nothing"
-    );
+    for malformed in ["./private", "././private", "private/.", "private/..", ".."] {
+        let result = WalkRules::new(false, false, vec![malformed.to_string()]);
+        assert!(
+            matches!(result, Err(RulesError::DotComponent { .. })),
+            "{malformed:?} must be refused, not silently compiled into a rule that matches \
+             nothing"
+        );
+    }
 }
 
-/// An absolute filesystem path — the shape a folder picker or a path
-/// pasted from Finder produces — compiles to a pattern that can only ever
-/// match the beginning of a path relative to the watched root, which an
-/// absolute path never is. Before the fix, `WalkRules::new` trimmed only
-/// surrounding `/` characters, so `/Users/example/private` silently
-/// degraded to `Users/example/private`: a rule that excludes nothing,
-/// forever, under any real watched root, while still returning `Ok`. Both
-/// halves: the relative prefix excludes correctly; the absolute one is
-/// refused (review fix round 2, Critical finding).
+/// A leading `/`, a trailing `/`, and a doubled `/` (`Photos//sub`, found
+/// in review fix round 3) all produce an empty path component once split —
+/// including the shape an absolute filesystem path takes
+/// (`/Users/example/private` starts with `/`), which round 2 caught with a
+/// platform-dependent `Path::is_absolute()` call that this whitelist
+/// replaces (see `RulesError::DriveLetterPrefix`'s doc comment for why that
+/// call had to go). Both halves for each shape.
 #[test]
-fn an_absolute_prefix_is_refused() {
+fn an_empty_path_component_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["private/a.txt", "kept.txt"] {
+        let path = root.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"x").unwrap();
+    }
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["private".to_string()]).unwrap(),
+    );
+    let names: Vec<&str> = walked.found.iter().map(|f| f.relative.as_str()).collect();
+    assert_eq!(names, ["kept.txt"]);
+
+    for malformed in [
+        "/private",
+        "private/",
+        "Photos//sub",
+        "/Users/example/private",
+    ] {
+        let result = WalkRules::new(false, false, vec![malformed.to_string()]);
+        assert!(
+            matches!(result, Err(RulesError::EmptyComponent { .. })),
+            "{malformed:?} must be refused, not silently compiled into a rule that matches \
+             nothing"
+        );
+    }
+}
+
+/// A control character cannot be part of a folder name a person typed on
+/// purpose.
+#[test]
+fn a_prefix_containing_a_control_character_is_refused() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("private")).unwrap();
     fs::write(root.path().join("private/a.txt"), b"x").unwrap();
@@ -256,16 +309,75 @@ fn an_absolute_prefix_is_refused() {
         root.path(),
         &WalkRules::new(false, false, vec!["private".to_string()]).unwrap(),
     );
-    assert!(
-        walked.found.is_empty(),
-        "the well-formed, relative prefix excludes its own folder"
-    );
+    assert!(walked.found.is_empty());
 
-    let result = WalkRules::new(false, false, vec!["/Users/example/private".to_string()]);
-    assert!(
-        matches!(result, Err(RulesError::AbsolutePrefix { .. })),
-        "an absolute path must be refused, not silently compiled into a rule that matches nothing"
+    let result = WalkRules::new(false, false, vec!["priv\u{0007}ate".to_string()]);
+    assert!(matches!(
+        result,
+        Err(RulesError::ContainsControlCharacter { .. })
+    ));
+}
+
+/// A single ASCII letter followed by `:` as the first component is the
+/// shape of a Windows drive letter — the platform-specific replacement for
+/// round 2's `Path::is_absolute()` check, which the review measured
+/// refuses `/private` on macOS while silently accepting it, compiling to a
+/// pattern that matches nothing, on Windows (`Path::new("/private")
+/// .is_absolute()` is FALSE there — confirmed against the doc comment on
+/// `Path::is_absolute`, which this crate no longer calls at all). Checking
+/// the shape of the first component instead of asking the platform means
+/// this refuses `C:` the same way on every platform this ships to (review
+/// fix round 3, Critical finding).
+#[test]
+fn a_prefix_shaped_like_a_windows_drive_letter_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("private")).unwrap();
+    fs::write(root.path().join("private/a.txt"), b"x").unwrap();
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["private".to_string()]).unwrap(),
     );
+    assert!(walked.found.is_empty());
+
+    for malformed in ["C:", "C:/Users/example/private"] {
+        let result = WalkRules::new(false, false, vec![malformed.to_string()]);
+        assert!(matches!(result, Err(RulesError::DriveLetterPrefix { .. })));
+    }
+    // Two letters and a colon, but NOT the drive-letter shape (more than one
+    // letter before the `:`) — must not be caught by the same check.
+    let ok = WalkRules::new(false, false, vec!["CD:".to_string()]);
+    assert!(
+        ok.is_ok(),
+        "`CD:` is not a drive letter and must be accepted"
+    );
+}
+
+/// `~` as a first component is a shell convention for a home directory that
+/// this crate does not expand — taken literally it names an ordinary
+/// folder called `~`, which essentially never exists under a watched root,
+/// so `~/Photos` used to compile fine and exclude nothing (review fix
+/// round 3, Critical finding; not one of the review's five literal
+/// whitelist bullets, added because the same message named `~/Photos` as
+/// one of the four forms the whitelist was supposed to close and the
+/// literal five bullets alone do not catch it — see the report).
+#[test]
+fn a_prefix_starting_with_a_home_directory_shorthand_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("private")).unwrap();
+    fs::write(root.path().join("private/a.txt"), b"x").unwrap();
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["private".to_string()]).unwrap(),
+    );
+    assert!(walked.found.is_empty());
+
+    let result = WalkRules::new(false, false, vec!["~/Photos".to_string()]);
+    assert!(matches!(
+        result,
+        Err(RulesError::HomeDirectoryShorthand { .. })
+    ));
 }
 
 /// Without an explicit root anchor, the pattern engine prepends `**/` to
@@ -350,6 +462,30 @@ fn the_builtin_list_can_be_turned_off() {
 /// per-prefix probe). `Walked::rules_applied` is where that failure has to
 /// surface instead, since by the time `builder()` runs there is no human
 /// left to ask (review fix round 1, Critical finding).
+/// `WalkRules::new`'s compile-probe (a single prefix, alone, in a throwaway
+/// `OverrideBuilder`) had zero coverage: review fix round 3 measured that
+/// deleting that whole block left all 15 tests from round 2 green, because
+/// every prefix any test used was well under the size limit on its own —
+/// the only test that pushed a single prefix that large combined FIVE of
+/// them (`rules_applied_is_false_when_the_combined_rule_set_is_too_large`),
+/// which exercises the AGGREGATE `builder()` path, not this per-prefix one
+/// in `WalkRules::new`. Measured directly against this code (not the
+/// review's own numbers, which were close but not identical — a different
+/// construction): a single `?`-repeated prefix passes at 300,000 characters
+/// and fails at 350,000. 600,000 gives comfortable margin.
+#[test]
+fn a_single_prefix_past_the_size_limit_is_refused_by_new() {
+    let huge = "?".repeat(600_000);
+
+    let result = WalkRules::new(false, false, vec![huge]);
+
+    assert!(
+        matches!(result, Err(RulesError::InvalidPrefix { .. })),
+        "a single prefix this large must be refused by `new`'s own compile-probe, not only \
+         discovered later as part of an aggregate `rules_applied == false`"
+    );
+}
+
 #[test]
 fn rules_applied_is_false_when_the_combined_rule_set_is_too_large() {
     let root = tempfile::tempdir().unwrap();
