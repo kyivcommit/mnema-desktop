@@ -57,6 +57,13 @@ pub enum StopReason {
     /// phase 2 never starts: nothing is read, nothing is sent anywhere. Not
     /// excessive caution — the alternative is a setting that fails open.
     RulesNotApplied,
+    /// The root itself could not be entered at all — an ejected external
+    /// drive, a deleted folder. Named apart from an ordinary empty folder
+    /// (D33: a folder that disappears is a pause, not a deletion) and apart
+    /// from the per-file skip journal: the root not existing is not a fact
+    /// about any *file* under it, so nothing is written to `skipped` for it —
+    /// see the comment where this is checked, below.
+    RootUnavailable,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,11 +75,37 @@ pub struct WalkProgress {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalkReport {
+    /// How many files phase 1 handed to phase 2 — the ones that became a
+    /// worker request, a cheap-arm hit, or a phase-2 skip. Does **not**
+    /// include `refused`: `indexed + unchanged + skipped == found` is the
+    /// invariant a caller may rely on, and `refused` is a separate count of
+    /// files phase 1 never handed over in the first place.
     pub found: u64,
     pub indexed: u64,
     pub unchanged: u64,
+    /// Files phase 2 asked about and did not index — a worker refusal, or the
+    /// index staying busy through every retry (`ingest_with_busy_retry`).
     pub skipped: u64,
+    /// Files phase 1 refused before any worker was asked: an unrepresentable
+    /// name, a cloud placeholder, a symlink, an unreadable entry. Kept apart
+    /// from `skipped` because a caller summing "how many files did this walk
+    /// even look at" needs `found`, which by definition excludes these — a
+    /// dashboard that folded them into `skipped` and then computed
+    /// `(done + skipped) / total` without a matching `total` change would
+    /// show more than 100% before phase 2 read a single byte, which is
+    /// exactly what a review probe measured here.
+    pub refused: u64,
     pub removed: u64,
+    /// False if any entry under the root could not be read — an unreadable
+    /// subdirectory, most commonly. From `found` alone, an unreadable
+    /// subdirectory is indistinguishable from an empty one, so a
+    /// reconciliation that deletes rows for paths absent from `found` must
+    /// refuse to run when this is `false` (`Walked::complete`'s own doc
+    /// comment in `mnema-walk` has the reasoning in full). Mirrors that field
+    /// exactly; `stopped == Completed` does **not** imply this is `true` — a
+    /// walk can process every file it found and still have missed a whole
+    /// subtree along the way.
+    pub complete: bool,
     pub stopped: StopReason,
 }
 
@@ -85,15 +118,39 @@ pub fn walk_root(
     cancel: &AtomicBool,
     on_progress: &mut dyn FnMut(WalkProgress),
 ) -> Result<WalkReport, IngestError> {
+    // The root itself may be gone entirely: an ejected external drive, a
+    // folder deleted since the last walk. `enumerate` notices this too (its
+    // own `!root.is_dir()` guard in `mnema-walk/src/lib.rs`), but it can only
+    // express it as an ordinary `PreSkip` keyed on the root's own absolute
+    // path — and the pre-skip loop below journals every `PreSkip` it is
+    // handed under `relative_path`, a column that means "relative to the
+    // root". The root not existing is not a fact about any one file under
+    // it, so it gets a `StopReason` of its own and never reaches `enumerate`,
+    // let alone the journal, at all.
+    if !root.is_dir() {
+        return Ok(WalkReport {
+            found: 0,
+            indexed: 0,
+            unchanged: 0,
+            skipped: 0,
+            refused: 0,
+            removed: 0,
+            complete: false,
+            stopped: StopReason::RootUnavailable,
+        });
+    }
+
     // Phase 1. The only look at the disk.
     let walked = enumerate(root, rules);
-    let total = walked.found.len() as u64;
+    let total = walked.found.len() as u64 + walked.skipped.len() as u64;
     let mut report = WalkReport {
-        found: total,
+        found: walked.found.len() as u64,
         indexed: 0,
         unchanged: 0,
         skipped: 0,
+        refused: 0,
         removed: 0,
+        complete: walked.complete,
         stopped: StopReason::Completed,
     };
 
@@ -130,21 +187,28 @@ pub fn walk_root(
                  visited"
             }
         };
-        // `pre.relative` is `None` only when no `String` at all can name the
-        // failure in the `/`-separated form the rest of the journal keys on
-        // (see `PreSkip`'s own doc comment in `mnema-walk`) — a walker error
-        // with no path to peel, or a name that is not valid UTF-8, which is
-        // `UnrepresentableName`'s whole point. `pre.detail` is recorded in
-        // that case instead, purely so a person reading the journal has
-        // something to look at; it can never equal a `Found::relative` a
-        // later walk produces, so a reconciliation that matches the skip
-        // journal against what the walk found will never see this row as
-        // resolved, and will re-touch it as "still missing" on every future
-        // walk. That is a known, accepted limitation of this row, not a bug
-        // in the reconciliation that reads it.
+        // `pre.relative` is `None` for three reasons on the `mnema-walk`
+        // side, only two of which still reach this loop. A walker error with
+        // no path to peel, and a name that is not valid UTF-8
+        // (`UnrepresentableName`), both still land here. The third — the
+        // root itself failing `enumerate`'s own `!root.is_dir()` check — no
+        // longer does, because the guard above this function's phase 1 now
+        // intercepts that case before `enumerate` is ever called. What the
+        // guard above does NOT close is the narrow race inside it:
+        // `enumerate` re-checks the root once more when its walker actually
+        // reaches the depth-0 entry, and a root that vanishes in the gap
+        // between this function's check and that one still surfaces here,
+        // with `pre.detail` holding the root's own absolute path. `pre.detail`
+        // is recorded in all these `None` cases, purely so a person reading
+        // the journal has something to look at; it can never equal a
+        // `Found::relative` a later walk produces, so a reconciliation that
+        // matches the skip journal against what the walk found will never
+        // see this row as resolved, and will re-touch it as "still missing"
+        // on every future walk. That is a known, accepted limitation of this
+        // row, not a bug in the reconciliation that reads it.
         let key = pre.relative.as_deref().unwrap_or(&pre.detail);
         db.record_skip(root_id, key, None, reason, SkipRule::Unreadable, None)?;
-        report.skipped += 1;
+        report.refused += 1;
     }
 
     // The exclusion rules may not have applied to this walk at all — see
@@ -163,15 +227,26 @@ pub fn walk_root(
 
     // Phase 2.
     let mut consecutive_environmental = 0usize;
-    let broken_after = pool.live_workers().max(1) * 2;
+    // Derived from the CONFIGURED worker count, not `live_workers()`: the
+    // live count is 0 until the first file asks for a process, so reading it
+    // here — before phase 2 has touched anything — always gave 2 regardless
+    // of how the pool was actually sized, which is a threshold two ordinary
+    // unlucky files can cross by coincidence. `max(…, 8)` puts a floor under
+    // it for the same reason: this counter exists to tell "these files
+    // happen to be bad" from "this machine is broken", and two — or even
+    // four, for the smallest configured pool — in a row is still well inside
+    // what an unremarkable folder can produce (D44's own two big PDFs in a
+    // row is exactly that shape).
+    let broken_after = (pool.configured_workers() * 2).max(8);
 
-    // Emitted before the loop so a caller learns `total` — and that nothing
-    // has been read yet — before the first file is opened, not only after
-    // it. A window drawing a progress bar from the first callback needs a
-    // `done: 0` sample to draw from; without this one, the first sample it
-    // would ever see already has one file behind it.
+    // Emitted before the loop so a caller learns `total` — and how much of it
+    // is already resolved by phase 1's own refusals — before the first file
+    // in `found` is opened. `done` here is `report.refused`, not `0`: those
+    // files are already accounted for, and a window drawing a bar from this
+    // callback needs that reflected immediately, or it would show 0/`total`
+    // even though `refused` of `total` is already behind it.
     on_progress(WalkProgress {
-        done: 0,
+        done: report.refused,
         total,
         skipped: report.skipped,
     });
@@ -182,16 +257,33 @@ pub fn walk_root(
             return Ok(report);
         }
 
-        match ingest_with_busy_retry(pool, db, root_id, found)? {
-            Ingested::Indexed { .. } | Ingested::AlreadyIndexed { .. } => {
+        match ingest_with_busy_retry(pool, db, root_id, found, cancel)? {
+            Retried::Cancelled => {
+                report.stopped = StopReason::Cancelled;
+                return Ok(report);
+            }
+            Retried::StillBusy => {
+                report.skipped += 1;
+                // Write contention is not evidence about the worker, the
+                // machine or the volume at all — it is evidence about
+                // whatever else opened a write transaction, most often a
+                // window the user is looking at. Deliberately NOT touching
+                // `consecutive_environmental` in either direction: not
+                // incrementing it, because two contended files in a row must
+                // not read as a dying worker, and not resetting it either,
+                // because a contended file sitting in the middle of a
+                // genuine run of `Crash`/`Timeout`/`Memory` skips says
+                // nothing about whether that run is over.
+            }
+            Retried::Settled(Ingested::Indexed { .. } | Ingested::AlreadyIndexed { .. }) => {
                 report.indexed += 1;
                 consecutive_environmental = 0;
             }
-            Ingested::Unchanged { .. } => {
+            Retried::Settled(Ingested::Unchanged { .. }) => {
                 report.unchanged += 1;
                 consecutive_environmental = 0;
             }
-            Ingested::Skipped { rule } => {
+            Retried::Settled(Ingested::Skipped { rule }) => {
                 report.skipped += 1;
                 if rule.suggests_broken_environment() {
                     consecutive_environmental += 1;
@@ -208,7 +300,7 @@ pub fn walk_root(
         }
 
         on_progress(WalkProgress {
-            done: report.indexed + report.unchanged,
+            done: report.indexed + report.unchanged + report.skipped + report.refused,
             total,
             skipped: report.skipped,
         });
@@ -218,6 +310,21 @@ pub fn walk_root(
     Ok(report)
 }
 
+/// What one call to [`ingest_with_busy_retry`] settled.
+enum Retried {
+    /// `ingest_file` returned an ordinary outcome, on the first attempt or a
+    /// later one.
+    Settled(Ingested),
+    /// Every attempt still found the index busy; the file was journalled as
+    /// a skip without ever reaching `ingest_file`'s content-facing logic.
+    /// Kept distinct from `Settled(Ingested::Skipped { .. })` because a
+    /// caller counting consecutive environmental skips must not treat this
+    /// one as evidence about the worker — see the call site in `walk_root`.
+    StillBusy,
+    /// Cancelled while waiting out a retry, rather than between files.
+    Cancelled,
+}
+
 /// Calls [`ingest_file`], retrying up to [`BUSY_RETRIES`] times while the
 /// index answers [`IngestError::Busy`]. If every attempt still finds it busy,
 /// the file is journalled as an environmental skip rather than left uncounted
@@ -225,6 +332,12 @@ pub fn walk_root(
 /// to whoever owns the walk, and this is that: a bounded number of comebacks,
 /// then an honest record instead of a silent gap between `found` and every
 /// other counter.
+///
+/// `cancel` is checked between attempts, not only between files in the
+/// caller's own loop: three attempts can span up to fifteen seconds of
+/// waiting on one file, and a cancellation that arrived partway through that
+/// window should not have to wait it out just because the outer loop only
+/// looks between files.
 ///
 /// Recorded with [`SkipRule::Unreadable`] — the closest existing member of
 /// the closed vocabulary to "this file could not be read on this pass, for a
@@ -247,7 +360,8 @@ fn ingest_with_busy_retry(
     db: &Db,
     root_id: i64,
     found: &Found,
-) -> Result<Ingested, IngestError> {
+    cancel: &AtomicBool,
+) -> Result<Retried, IngestError> {
     let mut last_busy = None;
     for attempt in 1..=BUSY_RETRIES {
         match ingest_file(
@@ -258,13 +372,17 @@ fn ingest_with_busy_retry(
             &found.relative,
             Some(found.on_disk),
         ) {
+            Ok(ingested) => return Ok(Retried::Settled(ingested)),
             Err(IngestError::Busy(err)) => {
                 last_busy = Some(err);
-                if attempt < BUSY_RETRIES {
-                    continue;
+                if attempt == BUSY_RETRIES {
+                    break;
+                }
+                if cancel.load(Ordering::SeqCst) {
+                    return Ok(Retried::Cancelled);
                 }
             }
-            other => return other,
+            Err(other) => return Err(other),
         }
     }
     let last_busy = last_busy
@@ -280,7 +398,5 @@ fn ingest_with_busy_retry(
         SkipRule::Unreadable,
         None,
     )?;
-    Ok(Ingested::Skipped {
-        rule: SkipRule::Unreadable,
-    })
+    Ok(Retried::StillBusy)
 }

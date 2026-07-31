@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mnema_index::{Db, open};
 use mnema_ingest::{StopReason, WalkReport, walk_root};
@@ -270,10 +270,8 @@ fn rules_not_applied_stops_before_any_file_is_read() {
 /// (`SkipRule::suggests_broken_environment`'s own doc comment in
 /// `mnema-index` carries the reasoning) — a folder that happens to hold
 /// several large files in a row must not be mistaken for a dying worker.
-/// `broken_after` is `pool.live_workers().max(1) * 2`, which is 2 for a pool
-/// that has not yet started a worker, so three consecutive `TooLarge` files
-/// is already past the threshold a miscount would have tripped at the
-/// second one.
+/// `broken_after` is `(pool.configured_workers() * 2).max(8)`, which is 8 for
+/// the default two-worker pool this fixture builds — well past three.
 #[test]
 fn a_run_of_oversized_files_does_not_look_like_a_broken_worker() {
     let f = Fixture::with_config(PoolConfig {
@@ -301,17 +299,81 @@ fn a_run_of_oversized_files_does_not_look_like_a_broken_worker() {
 /// same thing again. A worker that answers every request with bytes
 /// `read_line` cannot parse reports `Crash` for every file alike — modelling
 /// exactly the half-finished install or mismatched release D44 names.
+///
+/// Nine files, not three: `broken_after` is
+/// `(pool.configured_workers() * 2).max(8)`, which is 8 for the default pool
+/// `with_broken_worker` builds (`workers: 2`), so the threshold needs eight
+/// consecutive `Crash` skips to trip, not two — deriving it from the live
+/// worker count used to make it 2 regardless of configuration, which is
+/// exactly what let two ordinary unlucky files abort a real walk.
 #[cfg(unix)]
 #[test]
 fn a_worker_that_answers_nothing_useful_stops_the_walk() {
     let f = Fixture::with_broken_worker();
-    for i in 0..5 {
+    for i in 0..9 {
         f.write(&format!("f{i}.txt"), "x");
     }
 
     let report = f.walk();
 
     assert_eq!(report.stopped, StopReason::BrokenWorker);
+    assert_eq!(report.indexed, 0);
+}
+
+/// Below the threshold, a run of genuine environmental skips must not stop
+/// the walk on its own — three is comfortably under 8, but was already past
+/// the old `pool.live_workers().max(1) * 2` threshold (2, read before phase 2
+/// had started anything, regardless of `PoolConfig::workers`), which is
+/// exactly what let two ordinary unlucky files abort a walk with nothing
+/// actually broken.
+#[cfg(unix)]
+#[test]
+fn a_few_consecutive_crashes_do_not_alone_stop_the_walk() {
+    let f = Fixture::with_broken_worker();
+    for i in 0..3 {
+        f.write(&format!("f{i}.txt"), "x");
+    }
+
+    let report = f.walk();
+
+    assert_eq!(report.stopped, StopReason::Completed);
+    assert_eq!(report.skipped, 3);
+    assert_eq!(report.indexed, 0);
+}
+
+/// A busy-exhausted file must not count toward the broken-worker threshold —
+/// write contention is evidence about whoever else is holding the write
+/// lock, not about the worker. One contended file plus seven genuine
+/// `Crash` skips stays under the threshold (8) only because the contended
+/// one was not counted; counting it would tip the eighth file over and abort
+/// the walk.
+#[cfg(unix)]
+#[test]
+fn a_busy_exhausted_file_does_not_count_toward_the_broken_worker_threshold() {
+    let f = Fixture::with_broken_worker();
+    // Sorts first: `enumerate` orders `found` by relative path, so this is
+    // the file the walk reaches while the lock below is still held.
+    f.write("a_contended.txt", "hello");
+    for i in 0..7 {
+        f.write(&format!("b{i}.txt"), "x");
+    }
+
+    let window = open(&f.index_path).unwrap();
+    window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
+    window.insert_watched_root("/Volumes/Second").unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(18));
+        window.conn().execute_batch("COMMIT").unwrap();
+    });
+
+    let report = f.walk();
+    holder.join().unwrap();
+
+    assert_eq!(report.stopped, StopReason::Completed);
+    assert_eq!(
+        report.skipped, 8,
+        "the contended file plus seven genuine crashes"
+    );
     assert_eq!(report.indexed, 0);
 }
 
@@ -371,4 +433,209 @@ fn a_file_still_busy_after_every_retry_is_skipped_not_lost() {
     assert_eq!(skips.len(), 1);
     assert_eq!(skips[0].relative_path, "contract.txt");
     assert_eq!(skips[0].rule, "unreadable");
+}
+
+/// Cancellation is checked between busy retries too, not only between files
+/// in the outer loop — a single contended file can span up to three
+/// five-second attempts, and a cancel that arrives partway through must not
+/// have to wait out every remaining one first.
+#[test]
+fn cancellation_is_checked_between_busy_retries_not_only_between_files() {
+    let f = Fixture::new();
+    f.write("contract.txt", "hello");
+
+    let window = open(&f.index_path).unwrap();
+    window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
+    window.insert_watched_root("/Volumes/Second").unwrap();
+    let cancel = AtomicBool::new(false);
+
+    // The lock is held past the point cancellation should already have
+    // stopped the walk (one busy-timeout window, ~5 s), so the walk cannot
+    // finish by outrunning contention rather than by actually noticing the
+    // cancel. It is released well short of what exhausting all three retries
+    // would need (~15 s), which is the whole point being measured.
+    let elapsed = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_secs(8));
+            window.conn().execute_batch("COMMIT").unwrap();
+        });
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_secs(2));
+            cancel.store(true, Ordering::SeqCst);
+        });
+
+        let started = Instant::now();
+        let report = walk_root(
+            &f.pool,
+            &f.db,
+            f.root,
+            f.dir(),
+            &WalkRules::none(),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(report.stopped, StopReason::Cancelled);
+        elapsed
+    });
+
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "cancellation should be noticed after the first exhausted retry attempt (~5 s), \
+         not only after all three (~15 s); took {elapsed:?}"
+    );
+}
+
+// ------------------------------------------------------- counters and totals
+
+/// `indexed + unchanged + skipped` must equal `found`, and `refused` must
+/// equal how many files phase 1 refused before any worker was asked — every
+/// file the walk saw lands in exactly one bucket, never zero and never two.
+/// A review probe found this broken: one ordinary file and three symlinks
+/// produced `indexed: 1, skipped: 3` against `found: 1`, and the very first
+/// progress callback claimed 300% done before a byte was read.
+#[cfg(unix)]
+#[test]
+fn the_report_accounts_for_every_file_the_walk_saw() {
+    use std::os::unix::fs::symlink;
+
+    let f = Fixture::with_config(PoolConfig {
+        max_bytes: 10,
+        ..PoolConfig::new(support::worker())
+    });
+    f.write("unchanged.txt", "same");
+    f.walk(); // seeds the index so the second walk answers Unchanged for it
+
+    f.write("indexed.txt", "new");
+    f.write("too_large.bin", "far more than ten bytes of content");
+    symlink(f.dir().join("indexed.txt"), f.dir().join("a_symlink.txt")).unwrap();
+
+    let report = f.walk();
+
+    assert_eq!(report.found, 3, "unchanged.txt, indexed.txt, too_large.bin");
+    assert_eq!(report.refused, 1, "the symlink, refused before any worker");
+    assert_eq!(
+        report.indexed + report.unchanged + report.skipped,
+        report.found,
+        "every found file must land in exactly one bucket"
+    );
+    assert_eq!(report.indexed, 1);
+    assert_eq!(report.unchanged, 1);
+    assert_eq!(report.skipped, 1);
+}
+
+/// `total` in `WalkProgress` must count every file phase 1 saw, including the
+/// ones it refused before any worker was asked — not only the ones handed to
+/// phase 2 — and `done` must reach `total` once a walk completes.
+#[cfg(unix)]
+#[test]
+fn progress_total_includes_files_phase_1_refused() {
+    use std::os::unix::fs::symlink;
+
+    let f = Fixture::new();
+    f.write("a.txt", "hello");
+    symlink(f.dir().join("a.txt"), f.dir().join("a_symlink.txt")).unwrap();
+    let mut progress = Vec::new();
+
+    let report = walk_root(
+        &f.pool,
+        &f.db,
+        f.root,
+        f.dir(),
+        &WalkRules::none(),
+        &AtomicBool::new(false),
+        &mut |p| progress.push(p),
+    )
+    .unwrap();
+
+    assert_eq!(report.found, 1);
+    assert_eq!(report.refused, 1);
+    assert!(
+        progress.iter().all(|p| p.total == 2),
+        "total must count the refused symlink too, not only the found file: {progress:?}"
+    );
+    assert_eq!(
+        progress.last().unwrap().done,
+        2,
+        "done must reach total on a completed walk, refused files included"
+    );
+}
+
+// --------------------------------------------------------------- completeness
+
+/// An unreadable subdirectory is, from `found` alone, indistinguishable from
+/// an empty one — `WalkReport::complete` is what tells them apart, and a
+/// reconciliation that deletes rows for paths absent from `found` must refuse
+/// to run when it is `false` (`Walked::complete`'s own doc comment in
+/// `mnema-walk` has the reasoning in full).
+#[cfg(unix)]
+#[test]
+fn complete_is_false_when_a_subdirectory_could_not_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    f.write("kept.txt", "hello");
+    let locked = f.dir().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("inside.txt"), "secret").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Root reads through any permission bits, which would make this test
+    // pass for the wrong reason (or not at all) — mirrors
+    // `an_unreadable_directory_marks_the_walk_incomplete` in
+    // `crates/mnema-walk/tests/enumerate.rs`.
+    let root_can_still_read = std::fs::read_dir(&locked).is_ok();
+    if root_can_still_read {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipped complete_is_false_when_a_subdirectory_could_not_be_read: \
+             running as root, chmod 000 has no effect"
+        );
+        return;
+    }
+
+    let report = f.walk();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        !report.complete,
+        "an unreadable subdirectory must not look like a complete walk"
+    );
+    assert_eq!(
+        report.stopped,
+        StopReason::Completed,
+        "the walk still finished; it just did not see everything"
+    );
+}
+
+/// A root that is gone entirely — an ejected external drive, a folder deleted
+/// since the last walk — must be told apart from an ordinary empty folder,
+/// and it is not a fact about any one *file*, so it must not be journalled as
+/// one under the root's own absolute path (see the comment on the pre-skip
+/// loop in `src/walk.rs`).
+#[test]
+fn a_missing_root_is_named_apart_from_an_empty_folder() {
+    let f = Fixture::new();
+    let missing = f.dir().join("does-not-exist");
+
+    let report = walk_root(
+        &f.pool,
+        &f.db,
+        f.root,
+        &missing,
+        &WalkRules::none(),
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(report.stopped, StopReason::RootUnavailable);
+    assert!(!report.complete);
+    assert_eq!(report.found, 0);
+    assert_eq!(report.refused, 0);
+    assert!(
+        f.db.skips_for_root(f.root).unwrap().is_empty(),
+        "a missing root is not a fact about any one file, so it must not be journalled as one"
+    );
 }
