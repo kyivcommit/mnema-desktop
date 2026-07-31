@@ -363,10 +363,12 @@ fn on_disk_of(meta: &std::fs::Metadata) -> Option<OnDisk> {
 ///
 /// The single implementation now. A copy of this used to live in
 /// `mnema-ingest`, deliberately disagreeing with this one: that copy returned
-/// `Option<i64>` and refused (`None`) past roughly year 2262, because its own
-/// caller could fall back to re-reading the one file involved when the cheap
-/// arm had nothing to compare against — a small, per-file cost. This one
-/// cannot afford that answer: `None` here would propagate through
+/// `Option<i64>` and refused (`None`) past roughly year 2262, and its caller
+/// then fell back to a SECOND stat — which is deterministic, so it returned
+/// `None` too, and the file was extracted by a worker and thrown away as
+/// unreadable on every walk, for ever. That is what refusing cost: not a
+/// re-read, a file that never got indexed. This one cannot afford the answer
+/// either, and for a wider reason: `None` here would propagate through
 /// `on_disk_of` into `enumerate` and clear `Walked::complete` for the WHOLE
 /// watched root over a single file, not just decline to compare that one file
 /// (see the paragraph below). Task 5 retired the `mnema-ingest` copy once

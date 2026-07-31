@@ -154,11 +154,14 @@ impl From<mnema_index::Error> for IngestError {
 /// index holding a previous version of a file it believes it re-read (§5).
 ///
 /// The freshness this buys is only as good as the measurement's age: `on_disk`
-/// must be taken immediately before this call and never reused across walks or
-/// cached between one call and the next. A caller handing in a stale or
-/// re-used measurement reintroduces exactly the defect this parameter exists
-/// to close, one level up — the cheap arm would then answer `Unchanged` for a
-/// file that has since changed.
+/// must come from the walk pass this call belongs to, and must never be carried
+/// across passes or cached between one pass and the next. The enumeration
+/// measures a whole root before anything is ingested from it, so "immediately
+/// before" is not the rule and never was — the rule is one pass, one
+/// measurement. A caller handing in a measurement from an earlier pass
+/// reintroduces exactly the defect this parameter exists to close, one level
+/// up: the cheap arm answers `Unchanged` for a file that has since changed, and
+/// the index keeps text the file no longer contains, with nothing logged.
 pub fn ingest_file(
     pool: &Pool,
     db: &Db,
