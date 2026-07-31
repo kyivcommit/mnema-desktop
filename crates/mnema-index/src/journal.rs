@@ -130,6 +130,16 @@ impl SkipRule {
     /// journal and the pool was never asked again —
     /// `a_raised_ceiling_re_examines_a_file_it_used_to_refuse` in
     /// `mnema-ingest/tests/slice.rs` pins it.
+    ///
+    /// Keeping it off this side has a price, and it is the one this function
+    /// exists to avoid paying: every file over the ceiling costs a full worker
+    /// round-trip on every walk, because the ceiling is checked *inside* the
+    /// worker (`crates/mnema-extract/src/bin/worker.rs`), not before it is
+    /// asked. A folder of large archives therefore pays per walk what a folder
+    /// of scans used to. That is the honest cost of the ceiling being a live
+    /// setting; the alternative was a file the user can never make the product
+    /// look at again.
+    ///
     /// An exhaustive `match` rather than a `matches!`, for the reason
     /// `displaces` spells out at greater length: a variant added to the enum
     /// without a decision here would otherwise fall to `false` silently. That
