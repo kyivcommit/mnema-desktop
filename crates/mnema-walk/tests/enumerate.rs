@@ -330,6 +330,35 @@ fn a_symlinked_directory_is_named_as_a_subtree_not_a_file() {
     assert_eq!(skip.relative.as_deref(), Some("docs"));
 }
 
+/// The path is stored exactly as the system gave it, with no normalisation.
+/// macOS hands out decomposed names — U+0069 U+0308, not U+00EF — and this
+/// is a deliberate exception to D32, which puts NFC normalisation on
+/// document CONTENT: there, normalisation is a condition of being found;
+/// here it would be a condition of NOT being openable, because a normalised
+/// string does not open the file on Linux, where lookup is byte-exact.
+///
+/// The equality assertion is load-bearing, not decorative: measured on this
+/// machine (task-3-report.md), APFS lookup is normalisation-insensitive for
+/// files the same way it is for directories, so `root.join(&found.relative)`
+/// would still open the file even if `relative` had been silently
+/// normalised to NFC — the reopen checks alone do not catch that mistake
+/// here. Only comparing the string itself does.
+#[test]
+fn the_relative_path_the_walk_reports_can_reopen_the_file() {
+    let root = tempfile::tempdir().unwrap();
+    // U+0069 U+0308 — decomposed "ï", the form macOS hands out.
+    let decomposed = "i\u{0308}.txt";
+    fs::write(root.path().join(decomposed), b"x").unwrap();
+
+    let walked = enumerate(root.path(), &WalkRules::none());
+
+    assert_eq!(walked.found.len(), 1);
+    let found = &walked.found[0];
+    assert!(fs::read(&found.absolute).is_ok());
+    assert!(fs::read(root.path().join(&found.relative)).is_ok());
+    assert_eq!(found.relative, decomposed);
+}
+
 /// The root itself can legitimately be a symlink to a directory — this must
 /// walk exactly as if it were the real directory. The `entry.depth() == 0`
 /// check added to close the two-syscall race (`root.is_dir()`, then the
