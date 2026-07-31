@@ -158,6 +158,49 @@ impl SkipRule {
             | SkipRule::TooLarge => false,
         }
     }
+
+    /// Whether this rule's *recurrence* — many of these in a row — says
+    /// something is wrong with the worker, the machine or the volume, rather
+    /// than with the files it keeps naming.
+    ///
+    /// A DIFFERENT question from [`is_about_content`](Self::is_about_content),
+    /// not a variant of it. `is_about_content` asks whether the same bytes
+    /// earn the same verdict again, which decides whether the skip journal is
+    /// worth trusting on its own, without spending a worker on the file a
+    /// second time. This asks whether a run of them means a walker should
+    /// stop asking a worker to do more work at all. The two questions split
+    /// the same seven variants differently, and `TooLarge` is the case that
+    /// proves it has to: it answers **no** to both. It is not a fact about
+    /// the bytes (`is_about_content` — a setting can move the ceiling out
+    /// from under a file that never changed), and it is not a fact about the
+    /// environment either — a folder that happens to hold several large
+    /// archives in a row is not a broken machine, it is an ordinary folder.
+    /// Counting it here would be the mistake `is_about_content`'s own doc
+    /// comment records as measured (a folder of large archives paying a
+    /// worker round-trip per walk was accepted as the honest cost of a
+    /// *live* ceiling), made a second time one level up: a few consecutive
+    /// large files would read as a dying worker and end a walk that has done
+    /// nothing wrong.
+    ///
+    /// Only `Crash`, `Timeout`, `Memory` and `Unreadable` qualify — the same
+    /// four `displaces` (`mnema_ingest`) keeps content for, and for the same
+    /// reason spelled out there at length: each is a reading of the
+    /// environment, not of one file, so a run of them in a row is evidence
+    /// about what is *outside* the files rather than a coincidence of which
+    /// files happened to be next in the walk.
+    ///
+    /// An exhaustive `match`, matching `is_about_content`'s own reasoning for
+    /// being one: a variant added to the enum with no line here would
+    /// otherwise answer silently, and neither default is safe to assume —
+    /// "not broken" lets a genuinely dying worker run to the end of a
+    /// multi-hour walk, and "broken" stops a walk over an ordinary folder
+    /// that has nothing wrong with it.
+    pub fn suggests_broken_environment(self) -> bool {
+        match self {
+            SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => true,
+            SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::TooLarge => false,
+        }
+    }
 }
 
 /// Mirrors `document.status`'s own CHECK (`schema.sql:71-72`). Answers only

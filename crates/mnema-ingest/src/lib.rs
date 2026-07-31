@@ -33,6 +33,9 @@ use mnema_core::{Block, BlockType, OnDisk, SourceKind};
 use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipRule};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
 
+mod walk;
+pub use walk::{StopReason, WalkProgress, WalkReport, walk_root};
+
 /// The stage `ingest_stage` records once a document's chunks are written.
 ///
 /// Named here rather than in `mnema-index` because the stages belong to

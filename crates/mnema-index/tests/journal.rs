@@ -143,6 +143,35 @@ fn every_skip_rule_is_sorted_onto_its_side_of_is_about_content() {
     }
 }
 
+/// Every `SkipRule` variant, sorted onto its side of
+/// `suggests_broken_environment` explicitly — the same discipline as the test
+/// above, and for the same reason: the mis-sorting this pins is `TooLarge`
+/// again, this time on the OTHER predicate. A folder that holds a few large
+/// archives in a row is not a broken worker, and until this line existed the
+/// mistake of treating "not about content" as "suggests a broken
+/// environment" had nothing here to catch it — mirroring exactly the defect
+/// `every_skip_rule_is_sorted_onto_its_side_of_is_about_content`'s own doc
+/// comment records for `is_about_content`, one predicate over.
+#[test]
+fn every_skip_rule_is_sorted_onto_its_side_of_suggests_broken_environment() {
+    let cases = [
+        (SkipRule::Crash, true),
+        (SkipRule::Timeout, true),
+        (SkipRule::Memory, true),
+        (SkipRule::Unsupported, false),
+        (SkipRule::NoTextLayer, false),
+        (SkipRule::Unreadable, true),
+        (SkipRule::TooLarge, false),
+    ];
+    for (rule, expected) in cases {
+        assert_eq!(
+            rule.suggests_broken_environment(),
+            expected,
+            "{rule:?} is on the wrong side of suggests_broken_environment"
+        );
+    }
+}
+
 /// The journal is a current state, not a history. Before this, `record_skip`
 /// was an unconditional INSERT: a folder of a thousand scans grew a thousand
 /// rows per walk, and every walk spent a worker process on each of them to

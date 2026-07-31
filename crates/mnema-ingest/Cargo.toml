@@ -21,6 +21,13 @@ mnema-core = { path = "../mnema-core" }
 mnema-index = { path = "../mnema-index" }
 mnema-pool = { path = "../mnema-pool" }
 mnema-chunk = { path = "../mnema-chunk" }
+# `walk.rs`'s `enumerate`, `WalkRules`, `Found`, `PreSkipRule` — this crate is
+# the only one that knows the order phases run in (see the module doc above),
+# and joining a walk to `ingest_file` is that order, one level up. Used to be
+# a `[dev-dependencies]`-only entry (`mnema_walk::stat`, for `tests/` to model
+# the walk's own measurement); it moved here rather than staying duplicated in
+# both sections once `src/walk.rs` needed it too.
+mnema-walk = { path = "../mnema-walk" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -30,9 +37,3 @@ tempfile = { workspace = true }
 # actually contains?" has to be able to compute one itself — reading the answer
 # back out of the index would be the index marking its own work.
 sha2 = { workspace = true }
-# `mnema_walk::stat` only, in `tests/`: the walk is the only thing that looks
-# at the disk (§5), and the tests here model the walk's own call rather than
-# taking a second, different-in-kind reading of their own. `OnDisk` itself is
-# `mnema_core::OnDisk` — that dependency stays in `[dependencies]` above,
-# unrelated to this one (D45).
-mnema-walk = { path = "../mnema-walk" }
