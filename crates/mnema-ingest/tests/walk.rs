@@ -59,13 +59,29 @@ impl Fixture {
     /// actually fires rather than only proving it does not mis-fire.
     #[cfg(unix)]
     fn with_broken_worker() -> Self {
+        Self::with_broken_worker_and_workers(2) // `PoolConfig::new`'s own default
+    }
+
+    /// The same broken worker, with a caller-chosen `workers` count — for the
+    /// one test that needs `Pool::configured_workers()` and
+    /// `Pool::live_workers()` to genuinely disagree
+    /// (`the_threshold_reads_the_configured_worker_count_not_the_live_one`).
+    #[cfg(unix)]
+    fn with_broken_worker_and_workers(workers: usize) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let index = tempfile::tempdir().unwrap();
         // Written into the index's own scratch directory, never `dir`: `dir`
         // is about to become the watched root, and `enumerate` would list the
         // script itself as a found file if it lived there.
         let worker = support::wrong_worker(index.path(), r"printf '\377\376\n'");
-        Self::build(dir, index, PoolConfig::new(worker))
+        Self::build(
+            dir,
+            index,
+            PoolConfig {
+                workers,
+                ..PoolConfig::new(worker)
+            },
+        )
     }
 
     fn build(dir: tempfile::TempDir, index: tempfile::TempDir, config: PoolConfig) -> Self {
@@ -341,6 +357,32 @@ fn a_few_consecutive_crashes_do_not_alone_stop_the_walk() {
     assert_eq!(report.indexed, 0);
 }
 
+/// `configured_workers()` and `live_workers()` genuinely disagree here, which
+/// the default `workers: 2` fixture above cannot show: `live_workers()` is
+/// read before phase 2 touches anything and is always 0 at that point, so the
+/// old formula gave a threshold of `0.max(1) * 2 = 2` no matter how the pool
+/// was configured. At `workers: 2` the new formula's `.max(8)` floor hides
+/// the difference too (`configured * 2 = 4`, still swallowed by the floor).
+/// `workers: 8` is where the floor stops mattering: `(8 * 2).max(8) = 16`,
+/// nowhere near what `live_workers()` would have given. Ten consecutive
+/// `Crash` skips sit strictly between the two thresholds — past the old one,
+/// short of the new one — so this only stays `Completed` if the threshold
+/// really is reading the configured count.
+#[cfg(unix)]
+#[test]
+fn the_threshold_reads_the_configured_worker_count_not_the_live_one() {
+    let f = Fixture::with_broken_worker_and_workers(8);
+    for i in 0..10 {
+        f.write(&format!("f{i}.txt"), "x");
+    }
+
+    let report = f.walk();
+
+    assert_eq!(report.stopped, StopReason::Completed);
+    assert_eq!(report.skipped, 10);
+    assert_eq!(report.indexed, 0);
+}
+
 /// A busy-exhausted file must not count toward the broken-worker threshold —
 /// write contention is evidence about whoever else is holding the write
 /// lock, not about the worker. One contended file plus seven genuine
@@ -439,6 +481,18 @@ fn a_file_still_busy_after_every_retry_is_skipped_not_lost() {
 /// in the outer loop — a single contended file can span up to three
 /// five-second attempts, and a cancel that arrives partway through must not
 /// have to wait out every remaining one first.
+///
+/// Two assertions, because one mutation each catches and the other misses.
+/// `stopped == Cancelled` is what actually fails when the per-attempt check
+/// is removed: without it, the retry that runs once the lock is released at
+/// 8 s just succeeds — the file gets indexed, the walk finishes normally,
+/// and it does so in ~8.16 s, comfortably under the 10 s bound below, so
+/// elapsed time alone would have missed this exact regression (measured).
+/// The elapsed bound exists for the other shape of the same bug: a check
+/// that is present but only runs somewhere infrequent — after every attempt
+/// is exhausted, say — would still eventually report `Cancelled`, just after
+/// the full ~15 s three attempts need, which `stopped` alone would not
+/// notice and the bound below would.
 #[test]
 fn cancellation_is_checked_between_busy_retries_not_only_between_files() {
     let f = Fixture::new();
@@ -449,11 +503,10 @@ fn cancellation_is_checked_between_busy_retries_not_only_between_files() {
     window.insert_watched_root("/Volumes/Second").unwrap();
     let cancel = AtomicBool::new(false);
 
-    // The lock is held past the point cancellation should already have
-    // stopped the walk (one busy-timeout window, ~5 s), so the walk cannot
-    // finish by outrunning contention rather than by actually noticing the
-    // cancel. It is released well short of what exhausting all three retries
-    // would need (~15 s), which is the whole point being measured.
+    // Held past the point cancellation should already have stopped the walk
+    // (one busy-timeout window, ~5 s) and released well short of what
+    // exhausting all three retries would need (~15 s) — see the two
+    // assertions below for what each half of that window is for.
     let elapsed = std::thread::scope(|scope| {
         scope.spawn(move || {
             std::thread::sleep(Duration::from_secs(8));
@@ -554,6 +607,10 @@ fn progress_total_includes_files_phase_1_refused() {
     assert!(
         progress.iter().all(|p| p.total == 2),
         "total must count the refused symlink too, not only the found file: {progress:?}"
+    );
+    assert!(
+        progress.iter().all(|p| p.refused == 1),
+        "WalkProgress::refused must mirror WalkReport::refused: {progress:?}"
     );
     assert_eq!(
         progress.last().unwrap().done,

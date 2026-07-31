@@ -70,7 +70,16 @@ pub enum StopReason {
 pub struct WalkProgress {
     pub done: u64,
     pub total: u64,
+    /// Files phase 2 asked about and did not index — mirrors
+    /// `WalkReport::skipped` exactly, and excludes phase-1 refusals for the
+    /// same reason that field does.
     pub skipped: u64,
+    /// Files phase 1 refused before any worker was asked — mirrors
+    /// `WalkReport::refused`. Without this, a window rendering "N skipped"
+    /// mid-walk under-reports by however many files phase 1 already turned
+    /// away, even though `done` already counts them: the bar would be in the
+    /// right place and the label next to it would be lying.
+    pub refused: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,14 +128,21 @@ pub fn walk_root(
     on_progress: &mut dyn FnMut(WalkProgress),
 ) -> Result<WalkReport, IngestError> {
     // The root itself may be gone entirely: an ejected external drive, a
-    // folder deleted since the last walk. `enumerate` notices this too (its
-    // own `!root.is_dir()` guard in `mnema-walk/src/lib.rs`), but it can only
-    // express it as an ordinary `PreSkip` keyed on the root's own absolute
-    // path — and the pre-skip loop below journals every `PreSkip` it is
-    // handed under `relative_path`, a column that means "relative to the
+    // folder deleted since the last walk. `enumerate` already covers PART of
+    // this gap with its own `!root.is_dir()` guard at the top of
+    // `mnema-walk/src/lib.rs`, which is exactly what this check duplicates —
+    // deliberately, so it runs before `enumerate` is even called, rather
+    // than trusting a caller to notice `enumerate`'s answer meant this.
+    // `enumerate`'s guard covers only the common shape (root already gone
+    // when the walk starts); the pre-skip loop's own comment, below, has the
+    // narrower gap neither guard closes — a root that vanishes in the moment
+    // between them. Whichever guard catches it, `enumerate` can only express
+    // "the root itself" as an ordinary `PreSkip` keyed on the root's own
+    // absolute path, and the pre-skip loop below journals every `PreSkip` it
+    // is handed under `relative_path`, a column that means "relative to the
     // root". The root not existing is not a fact about any one file under
-    // it, so it gets a `StopReason` of its own and never reaches `enumerate`,
-    // let alone the journal, at all.
+    // it, so the common case earns a `StopReason` of its own and never
+    // reaches `enumerate`, let alone the journal, at all.
     if !root.is_dir() {
         return Ok(WalkReport {
             found: 0,
@@ -249,6 +265,7 @@ pub fn walk_root(
         done: report.refused,
         total,
         skipped: report.skipped,
+        refused: report.refused,
     });
 
     for found in &walked.found {
@@ -303,6 +320,7 @@ pub fn walk_root(
             done: report.indexed + report.unchanged + report.skipped + report.refused,
             total,
             skipped: report.skipped,
+            refused: report.refused,
         });
     }
 
