@@ -30,24 +30,25 @@ use crate::state::AppState;
 /// left free to run inline on the main thread. Claiming the slot and
 /// spawning the walk's own OS thread are cheap either way; what moved this
 /// off `start_probe_job`'s blocking shape is the lookup in front of them.
+///
+/// Every fallible step below runs **before** [`AppState::claim_job`], not
+/// after: an unknown `root_id` (a folder removed by a second window, a stale
+/// id a reloaded page still has) or a `Pool` that refuses its own config
+/// must be refused without ever taking the slot. Claiming it first and
+/// releasing it on the first `?` gives the same end state one command later,
+/// but for as long as this call runs `job_status` would report a job
+/// running for a call that was always going to fail — a page polling it at
+/// the wrong moment sees a lie, however short-lived.
 #[tauri::command(async)]
 pub fn start_walk_job(
     state: State<'_, AppState>,
     root_id: i64,
     on_progress: Channel<JobEvent>,
 ) -> Result<(), Error> {
-    let slot = state.claim_job()?;
-
     let root = state
         .with_index(|db| db.watched_root_path(root_id))?
         .ok_or(Error::UnknownWatchedRoot(root_id))?;
     let root = PathBuf::from(root);
-
-    // The job's own connection, not the window's — see `AppState::
-    // open_job_index`'s own doc comment. A walk is a sequence of writes that
-    // can run for hours; the window must keep answering searches while it
-    // does.
-    let job_db = state.open_job_index()?;
 
     // No exclusion-rule command exists yet — nothing in this task adds one —
     // so every watched folder walks with the built-in list and `.gitignore`
@@ -74,6 +75,16 @@ pub fn start_walk_job(
         // is exactly that variant's own message.
         .map_err(mnema_ingest::IngestError::Pool)?;
 
+    let slot = state.claim_job()?;
+
+    // The job's own connection, not the window's — see `AppState::
+    // open_job_index`'s own doc comment. A walk is a sequence of writes that
+    // can run for hours; the window must keep answering searches while it
+    // does. After `claim_job`, unlike everything above: releasing a slot
+    // this command already holds on the way out is `JobSlot::drop`'s job,
+    // not a second thing to get right here.
+    let job_db = state.open_job_index()?;
+
     std::thread::spawn(move || {
         // The last count, and the last total, the window was actually shown —
         // read on every failure path below, not only the panic one. Updated
@@ -83,6 +94,12 @@ pub fn start_walk_job(
         let reported = AtomicU64::new(0);
         let last_total = AtomicU64::new(0);
         let started = Instant::now();
+        // Throttling state for the progress closure below, mirroring
+        // `job::run_probe`'s own `last_report` exactly — see the `due` check
+        // inside the closure for why. A plain local rather than another
+        // atomic: `walk_root` calls this closure synchronously, on this one
+        // thread, so nothing else can race it.
+        let mut last_report: Option<Instant> = None;
 
         // `AssertUnwindSafe`: unlike the probe, this closure's body reaches
         // into `pool` and `job_db` as well as the channel and two atomics —
@@ -104,6 +121,24 @@ pub fn start_walk_job(
                 &mut |progress| {
                     let done = progress.done;
                     let total = progress.total;
+
+                    // `walk_root` calls this once per file — `job::
+                    // REPORT_INTERVAL`'s own doc comment names this exact
+                    // shape: "a folder of a hundred thousand files would put
+                    // a hundred thousand messages through the IPC to move a
+                    // bar the user reads four times a second anyway." The
+                    // probe already avoids this inside `run_probe`; nothing
+                    // inside `walk_root` throttles on its caller's behalf, so
+                    // this closure is where it has to happen for a real
+                    // walk — `job::progress_is_due` is the same rule
+                    // `run_probe`'s own loop uses, pulled out so both share
+                    // one tested definition of "due" rather than two.
+                    let now = Instant::now();
+                    if !job::progress_is_due(last_report, now, job::REPORT_INTERVAL, done, total) {
+                        return;
+                    }
+                    last_report = Some(now);
+
                     if on_progress
                         .send(JobEvent::Progress(Progress {
                             done,
@@ -170,6 +205,15 @@ pub fn start_walk_job(
 /// unchanged + skipped + refused` is `done` for the same reason — each term
 /// only ever grows by exactly the work phase 2 finished before the walk
 /// stopped, cancelled, broken worker, or completed alike.
+///
+/// `report.complete` crosses unchanged, deliberately not folded into
+/// `reason` or dropped: it is the one field that tells a `Completed` walk
+/// that saw everything apart from a `Completed` walk that did not — see
+/// `Ended::complete`'s own doc comment for the exact shape (an unreadable
+/// subdirectory) that would otherwise reach the window looking identical to
+/// a clean walk. A review round found this field read from `WalkReport` and
+/// never written to `Ended` at all; the unit tests below pin every field
+/// this function reads, not only the ones a first pass happened to wire up.
 fn ended_from_report(report: &WalkReport) -> Ended {
     let total = report.found + report.refused;
     let done = report.indexed + report.unchanged + report.skipped + report.refused;
@@ -193,6 +237,10 @@ fn ended_from_report(report: &WalkReport) -> Ended {
         reason,
         done,
         total,
+        // Same merge `Progress` makes for the same reason — see the comment
+        // where the live progress event is built, above.
+        skipped: report.skipped + report.refused,
+        complete: report.complete,
         frozen,
     }
 }
@@ -214,5 +262,117 @@ fn frozen_reason_text(why: FrozenReason) -> &'static str {
         FrozenReason::UnreadableDirectory => {
             "this folder could not be read, most likely a permissions problem"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `WalkReport` with values distinct enough from each other and from
+    /// their own defaults that a swapped field, not only a dropped one,
+    /// would show up in a failing assertion.
+    fn report(stopped: StopReason) -> WalkReport {
+        WalkReport {
+            found: 8,
+            indexed: 5,
+            unchanged: 1,
+            skipped: 2,
+            refused: 3,
+            removed: 0,
+            frozen: Vec::new(),
+            complete: true,
+            stopped,
+        }
+    }
+
+    /// Pins the one thing a review round found missing entirely by mutation:
+    /// with every `StopReason` arm below collapsed to `EndReason::Completed`
+    /// and `frozen` replaced by `Vec::new()`, all seventeen tests in
+    /// `tests/commands.rs` still passed, because nothing exercised any walk
+    /// that stopped for a reason other than `Completed`. This test needs no
+    /// filesystem, no fixture, and no real walk to fail on that mutation —
+    /// only `ended_from_report` itself.
+    #[test]
+    fn every_stop_reason_becomes_its_own_end_reason() {
+        let cases = [
+            (StopReason::Completed, EndReason::Completed),
+            (StopReason::Cancelled, EndReason::Cancelled),
+            (StopReason::BrokenWorker, EndReason::BrokenWorker),
+            (StopReason::RulesNotApplied, EndReason::RulesNotApplied),
+            (StopReason::RootUnavailable, EndReason::RootUnavailable),
+            (StopReason::VolumeMissing, EndReason::VolumeMissing),
+        ];
+        for (stopped, expected) in cases {
+            assert_eq!(
+                ended_from_report(&report(stopped)).reason,
+                expected,
+                "StopReason::{stopped:?} did not become EndReason::{expected:?}"
+            );
+        }
+    }
+
+    /// The critical case: `WalkReport::complete` must cross to `Ended.
+    /// complete` unchanged, in both directions — not defaulted to `true` (the
+    /// value that reads as "reconciliation is trustworthy") for a walk that
+    /// never claimed it.
+    #[test]
+    fn completeness_crosses_the_seam_unchanged() {
+        let mut walked = report(StopReason::Completed);
+        walked.complete = true;
+        assert!(ended_from_report(&walked).complete);
+
+        walked.complete = false;
+        assert!(
+            !ended_from_report(&walked).complete,
+            "an incomplete walk must not report as one that saw everything, \
+             even when it otherwise stopped `Completed`"
+        );
+    }
+
+    #[test]
+    fn frozen_prefixes_cross_the_seam_with_a_reason_a_person_can_read() {
+        let mut walked = report(StopReason::Completed);
+        walked.frozen = vec![mnema_ingest::Frozen {
+            prefix: "mnt/share".to_string(),
+            why: FrozenReason::EmptyDirectory,
+        }];
+
+        let ended = ended_from_report(&walked);
+        assert_eq!(ended.frozen.len(), 1);
+        assert_eq!(ended.frozen[0].prefix, "mnt/share");
+        assert!(
+            !ended.frozen[0].why.is_empty(),
+            "a frozen prefix crossed with nothing saying why"
+        );
+    }
+
+    #[test]
+    fn done_and_total_include_phase_one_refusals_and_skipped_merges_both_kinds() {
+        let ended = ended_from_report(&report(StopReason::Completed));
+        // found: 8, refused: 3
+        assert_eq!(ended.total, 11);
+        // indexed: 5, unchanged: 1, skipped: 2, refused: 3
+        assert_eq!(ended.done, 11);
+        // skipped: 2, refused: 3 — the same merge `Progress` makes
+        assert_eq!(ended.skipped, 5);
+    }
+
+    /// `RootUnavailable` is the one `StopReason` `walk_root` returns before
+    /// phase 1 ever runs, with `found` and `refused` both `0` — the formula
+    /// above must not need a special case for it.
+    #[test]
+    fn root_unavailable_reports_zero_of_zero() {
+        let mut walked = report(StopReason::RootUnavailable);
+        walked.found = 0;
+        walked.indexed = 0;
+        walked.unchanged = 0;
+        walked.skipped = 0;
+        walked.refused = 0;
+
+        let ended = ended_from_report(&walked);
+        assert_eq!(ended.done, 0);
+        assert_eq!(ended.total, 0);
+        assert_eq!(ended.reason, EndReason::RootUnavailable);
     }
 }

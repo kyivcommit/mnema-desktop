@@ -54,7 +54,7 @@ fn fixture_dir() -> tempfile::TempDir {
 }
 
 /// Starts a real walk over `root_id` and blocks until the window would have
-/// heard `Ended`, asserting it says `completed`.
+/// heard `Ended`, returning its payload for the caller to inspect.
 ///
 /// Calls `walk_job::start_walk_job` directly on `state` rather than through
 /// `call`, the same choice `a_started_job_reports_progress_and_a_cancelled_
@@ -63,18 +63,24 @@ fn fixture_dir() -> tempfile::TempDir {
 /// raw-IPC path (`"__CHANNEL__:N"`) has nothing on the other end for that
 /// callback to be. IPC *reachability* is a separate question, asked by
 /// `the_walk_job_is_reachable_through_the_ipc` below.
-fn run_walk_to_completion(app: &tauri::App<MockRuntime>, root_id: i64) {
+fn run_walk_and_capture_ending(app: &tauri::App<MockRuntime>, root_id: i64) -> Value {
     let state = app.state::<AppState>();
     let (channel, events) = job_channel();
     walk_job::start_walk_job(state.clone(), root_id, channel).expect("the walk would not start");
 
-    let ending = loop {
+    loop {
         match events.recv_timeout(Duration::from_secs(20)) {
-            Ok(event) if event["event"] == json!("ended") => break event["data"].clone(),
+            Ok(event) if event["event"] == json!("ended") => return event["data"].clone(),
             Ok(_) => continue,
             Err(_) => panic!("the walk never told the window it ended"),
         }
-    };
+    }
+}
+
+/// The common case: a walk over a fixture with nothing ambiguous in it must
+/// simply finish.
+fn run_walk_to_completion(app: &tauri::App<MockRuntime>, root_id: i64) {
+    let ending = run_walk_and_capture_ending(app, root_id);
     assert_eq!(
         ending["reason"],
         json!("completed"),
@@ -832,4 +838,70 @@ fn skips_reports_what_the_walk_could_not_read() {
         "the dangling symlink was not journalled: {skips:?}"
     );
     assert_eq!(skips[0]["relativePath"], json!("broken"));
+}
+
+/// The critical case a review round found: `stopped == Completed` does not
+/// mean phase 3 ran. An unreadable subdirectory leaves the walk `Completed`
+/// — phase 2 finished everything phase 1 could hand it — but
+/// `WalkReport::complete` is `false`, and reconciliation refuses to run on
+/// an incomplete walk (`mnema-ingest/src/walk.rs`'s own gate, pinned there by
+/// `an_incomplete_walk_deletes_nothing`). Before this round `ended_from_
+/// report` never read `complete` at all, so this exact shape reached the
+/// window as `{reason: "completed", ...}` — byte-identical to a walk that
+/// saw everything, with no way to tell the two apart.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_subdirectory_tells_the_window_reconciliation_did_not_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("kept.txt"), "kept").unwrap();
+    let locked = fixture.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("inside.txt"), "secret").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("locking the subdirectory");
+
+    // Root reads through any permission bits — the same guard
+    // `crates/mnema-ingest/tests/walk.rs::complete_is_false_when_a_
+    // subdirectory_could_not_be_read` uses for the identical shape, so this
+    // test does not fail for a different reason in a container that runs as
+    // root.
+    if std::fs::read_dir(&locked).is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipped an_unreadable_subdirectory_tells_the_window_reconciliation_did_not_run: \
+             running as root, chmod 000 has no effect"
+        );
+        return;
+    }
+
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("unlocking the subdirectory so the temp dir can be cleaned up");
+
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the walk did not even stop cleanly, so this proves nothing about `complete`: {ending}"
+    );
+    assert_eq!(
+        ending["complete"],
+        json!(false),
+        "an unreadable subdirectory must not report as a walk that saw everything: {ending}"
+    );
 }

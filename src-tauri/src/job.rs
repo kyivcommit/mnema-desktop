@@ -88,6 +88,27 @@ pub struct Ended {
     pub reason: EndReason,
     pub done: u64,
     pub total: u64,
+    /// Always `0` for the probe. For a walk, mirrors `Progress::skipped`'s own
+    /// merge of `WalkProgress::skipped` and `WalkProgress::refused` — the
+    /// final counts, not only the ones a throttled progress event happened to
+    /// carry last. Without this, a page reading only the ending (the common
+    /// case: `ui/main.js` overwrites the progress line with the ending's text)
+    /// had no way to say how many files were skipped, only how many were not.
+    pub skipped: u64,
+    /// Always `true` for the probe, which has no subtree to fail to read.
+    /// For a walk, mirrors `WalkReport::complete` — **the field a walk that
+    /// stops `Completed` does not imply `true` for**, per that field's own
+    /// doc comment. An unreadable subdirectory leaves `reason: Completed`
+    /// (phase 2 finished everything phase 1 could hand it) with `complete:
+    /// false` (phase 1 did not see the whole tree), which is the one
+    /// combination that must reach the window: it is what tells "reconciled,
+    /// and there was nothing to reconcile" apart from "reconciliation never
+    /// ran, and whatever the user deleted under that unreadable folder is
+    /// still searchable." `false` on [`Ended::failed`]'s two callers, for the
+    /// same reason `frozen` is empty there: neither has a `WalkReport` to
+    /// read `complete` from, and a job that stopped for an unexplained reason
+    /// has not earned the claim that it saw everything.
+    pub complete: bool,
     /// Always empty for the probe, which reconciles nothing. For a walk,
     /// mirrors `WalkReport::frozen` — see that field's own doc comment for why
     /// `removed == 0` alone cannot say whether anything was silently left
@@ -105,12 +126,16 @@ impl Ended {
                 reason: EndReason::Completed,
                 done: total,
                 total,
+                skipped: 0,
+                complete: true,
                 frozen: Vec::new(),
             },
             Outcome::Cancelled { done } => Self {
                 reason: EndReason::Cancelled,
                 done,
                 total,
+                skipped: 0,
+                complete: true,
                 frozen: Vec::new(),
             },
         }
@@ -121,13 +146,18 @@ impl Ended {
     /// pool). `done` is the last count the window was *shown*, not the loop's
     /// internal position: those differ by whatever the throttle dropped, and
     /// a number the user never saw is a worse answer than the one they did.
-    /// `frozen` is empty because both callers reach this with no `WalkReport`
-    /// to read one from — the job stopped before producing one.
+    /// `frozen` is empty and `complete` is `false` because both callers reach
+    /// this with no `WalkReport` to read either from — the job stopped before
+    /// producing one, and `false` is the side that costs nothing to be wrong
+    /// about: it can only make a page more cautious about trusting what it
+    /// saw, never less.
     pub fn failed(done: u64, total: u64) -> Self {
         Self {
             reason: EndReason::Failed,
             done,
             total,
+            skipped: 0,
+            complete: false,
             frozen: Vec::new(),
         }
     }
@@ -181,6 +211,28 @@ pub fn seconds_left(done: u64, total: u64, elapsed: Duration) -> Option<u64> {
     Some(estimate.round() as u64)
 }
 
+/// Whether a progress report should go out now: nothing has been sent yet,
+/// `interval` has elapsed since the last one, or this report is the one that
+/// reaches `total` — always sent regardless of timing, because a bar that
+/// stops one short of the end looks like a hang.
+///
+/// Shared by [`run_probe`]'s own loop and `walk_job::start_walk_job`'s
+/// progress closure. `walk_root` (`mnema-ingest`) calls its progress
+/// callback once per file with no throttle of its own — [`REPORT_INTERVAL`]'s
+/// own doc comment names the shape that produces: "a folder of a hundred
+/// thousand files would put a hundred thousand messages through the IPC" —
+/// so whoever owns the channel on the other end of that callback has to
+/// apply this rule, or flood it.
+pub fn progress_is_due(
+    last: Option<Instant>,
+    now: Instant,
+    interval: Duration,
+    done: u64,
+    total: u64,
+) -> bool {
+    done == total || last.is_none_or(|last| now.duration_since(last) >= interval)
+}
+
 /// Runs the probe job, reporting to `on_progress` and stopping when `cancel` is
 /// raised.
 ///
@@ -216,8 +268,7 @@ where
         done += 1;
 
         let now = Instant::now();
-        let due = last_report.is_none_or(|last| now.duration_since(last) >= report_interval);
-        if due || done == total {
+        if progress_is_due(last_report, now, report_interval, done, total) {
             last_report = Some(now);
             on_progress(Progress {
                 done,
@@ -244,6 +295,8 @@ mod tests {
                 reason: EndReason::Completed,
                 done: 40,
                 total: 40,
+                skipped: 0,
+                complete: true,
                 frozen: Vec::new(),
             }
         );
@@ -257,6 +310,8 @@ mod tests {
                 reason: EndReason::Cancelled,
                 done: 7,
                 total: 40,
+                skipped: 0,
+                complete: true,
                 frozen: Vec::new(),
             }
         );
@@ -273,6 +328,60 @@ mod tests {
             failed.reason,
             Ended::of(Outcome::Cancelled { done: 7 }, 40).reason
         );
+    }
+
+    #[test]
+    fn a_report_is_due_when_none_has_been_sent_yet() {
+        assert!(progress_is_due(
+            None,
+            Instant::now(),
+            Duration::from_millis(250),
+            1,
+            100
+        ));
+    }
+
+    #[test]
+    fn a_report_is_not_due_before_the_interval_elapses() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(100);
+        assert!(!progress_is_due(
+            Some(last),
+            now,
+            Duration::from_millis(250),
+            5,
+            100
+        ));
+    }
+
+    #[test]
+    fn a_report_is_due_once_the_interval_elapses() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(300);
+        assert!(progress_is_due(
+            Some(last),
+            now,
+            Duration::from_millis(250),
+            5,
+            100
+        ));
+    }
+
+    #[test]
+    fn the_report_that_reaches_total_is_always_due() {
+        // One millisecond after the last one — nowhere near the interval —
+        // and still due, because `done == total` overrides the timer. Pins
+        // the exact exception `walk_job.rs`'s progress closure leans on to
+        // avoid a bar that stops one file short of the end.
+        let last = Instant::now();
+        let now = last + Duration::from_millis(1);
+        assert!(progress_is_due(
+            Some(last),
+            now,
+            Duration::from_millis(250),
+            100,
+            100
+        ));
     }
 
     #[test]

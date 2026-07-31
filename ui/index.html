@@ -4,9 +4,12 @@
     <meta charset="utf-8" />
     <title>Mnema</title>
     <!--
-      A placeholder, and the walking skeleton's far end: it touches all four
-      commands so the whole path can be walked by hand. The interface ported
-      from the server repository replaces it.
+      A placeholder, and the walking skeleton's far end: enough of it to walk
+      the whole path — open the index, add a folder, run a real walk, search
+      it — by hand. Not every command in `invoke_handler!`
+      (`src-tauri/src/lib.rs`) has a control here yet; `skips` and
+      `remove_watched_folder` do not. The interface ported from the server
+      repository replaces this file rather than growing it further.
 
       Script and styles are separate files rather than inline. The CSP is
       `default-src 'self'`, under which an external file is unambiguously
@@ -30,7 +33,23 @@
       </section>
 
       <section>
-        <h2>Probe job</h2>
+        <h2>Watched folder</h2>
+        <!--
+          A text field, not a native picker: a folder-choosing dialog needs
+          its own plugin and, with it, a changed ACL — the interface spec's
+          decision, not this task's, and the same seam D48 found a Windows
+          origin trap in once already. A path typed here is enough to
+          exercise `add_watched_folder` end to end.
+        -->
+        <form id="folder-form">
+          <input id="folder-path" type="text" placeholder="/path/to/folder" autocomplete="off" />
+          <button type="submit">Add folder</button>
+        </form>
+        <p id="folder-status" class="muted">no folder added yet</p>
+      </section>
+
+      <section>
+        <h2>Walk job</h2>
         <button id="start">Start</button>
         <button id="cancel" disabled>Cancel</button>
         <progress id="bar" value="0" max="1"></progress>
