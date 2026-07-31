@@ -114,11 +114,15 @@ fn every_skip_rule_is_recorded_under_its_own_string() {
 /// this pins — `TooLarge`, a fact about the *setting* `PoolConfig::max_bytes`
 /// rather than about the file, wrongly placed on the content side — was
 /// caught only by the randomised harness in `mnema-ingest`, on a random seed,
-/// which means it was caught *sometimes*. This is the deterministic form: a
-/// rule added to the enum without a line here fails to compile-check nothing,
-/// but a rule added and left off this list is a rule this test cannot vouch
-/// for, which is the best a plain equality test can do short of an exhaustive
-/// `match` — see `SkipRule::is_about_content`'s own `matches!` for that half.
+/// which means it was caught *sometimes*. This is the deterministic form.
+///
+/// On its own it does not force a decision about a NEW variant, and it was
+/// measured making exactly that mistake look covered: a variant added to the
+/// enum with no line here left this whole suite green. What forces the
+/// decision is that `is_about_content` is an exhaustive `match` — adding a
+/// variant stops the crate compiling until someone picks a side. This list is
+/// the other half: it says which side each existing variant is on, in one
+/// place, where a wrong answer is legible.
 #[test]
 fn every_skip_rule_is_sorted_onto_its_side_of_is_about_content() {
     let cases = [

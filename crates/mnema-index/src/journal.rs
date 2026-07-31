@@ -130,8 +130,23 @@ impl SkipRule {
     /// journal and the pool was never asked again —
     /// `a_raised_ceiling_re_examines_a_file_it_used_to_refuse` in
     /// `mnema-ingest/tests/slice.rs` pins it.
+    /// An exhaustive `match` rather than a `matches!`, for the reason
+    /// `displaces` spells out at greater length: a variant added to the enum
+    /// without a decision here would otherwise fall to `false` silently. That
+    /// direction is the safe one — never remembering the bytes only costs a
+    /// worker round-trip — but "safe by accident" is not what the test named
+    /// after this function claims to guarantee, and it was measured claiming
+    /// it falsely: a new variant added with no line here left the whole
+    /// journal suite green.
     pub fn is_about_content(self) -> bool {
-        matches!(self, SkipRule::Unsupported | SkipRule::NoTextLayer)
+        match self {
+            SkipRule::Unsupported | SkipRule::NoTextLayer => true,
+            SkipRule::Crash
+            | SkipRule::Timeout
+            | SkipRule::Memory
+            | SkipRule::Unreadable
+            | SkipRule::TooLarge => false,
+        }
     }
 }
 
