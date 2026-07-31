@@ -96,6 +96,24 @@ pub struct Walked {
     /// would have — so a reconciliation that deletes rows for paths absent
     /// from `found` must refuse to run when this is false.
     pub complete: bool,
+    /// False only when the override-based rule layers — the unconditional
+    /// built-in list, user prefixes, `.DS_Store` — failed to combine into a
+    /// working pattern set for this walk (`WalkRules::builder`). Past a few
+    /// thousand user prefixes, or one long enough on its own, the matching
+    /// engine can refuse the combined set even though `WalkRules::new`
+    /// already refused any prefix that fails to compile alone — this is the
+    /// aggregate failure that only shows up once every prefix is combined
+    /// with the rest. When it is false, `found` may hold files the user
+    /// excluded on purpose: every override-based exclusion silently stopped
+    /// applying for this one walk.
+    ///
+    /// This is a different KIND of fact from `complete`, not a variant of
+    /// it. `complete == false` means "the walk could not read everything
+    /// under the root, so do not trust an absence enough to delete for it."
+    /// `rules_applied == false` means "the walk may have kept files the
+    /// user asked to exclude, so do not index or send them anywhere."
+    /// Nothing in this crate reads this field yet — Task 7 does.
+    pub rules_applied: bool,
 }
 
 impl Default for Walked {
@@ -105,6 +123,7 @@ impl Default for Walked {
             unreadable: 0,
             skipped: Vec::new(),
             complete: true,
+            rules_applied: true,
         }
     }
 }
@@ -130,7 +149,9 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
         return walked;
     }
 
-    let walk = rules.builder(root).build();
+    let (builder, rules_applied) = rules.builder(root);
+    walked.rules_applied = rules_applied;
+    let walk = builder.build();
 
     for entry in walk {
         let entry = match entry {

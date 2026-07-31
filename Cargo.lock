@@ -2899,9 +2899,11 @@ dependencies = [
 name = "mnema-walk"
 version = "0.0.0"
 dependencies = [
+ "globset",
  "ignore",
  "mnema-core",
  "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

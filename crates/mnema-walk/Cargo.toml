@@ -12,6 +12,12 @@ publish.workspace = true
 # processes.
 [dependencies]
 ignore = "0.4.31"
+# `ignore` re-exports `overrides::OverrideBuilder`, which is built on this —
+# needed directly (not only transitively) for `globset::escape`, which turns
+# a user-typed path prefix into a literal pattern instead of a glob (review
+# fix round 1, Critical finding).
+globset = "0.4.19"
+thiserror = { workspace = true }
 # `OnDisk` only. It lives in the shared-types crate because `mnema-index` and
 # `mnema-ingest` both read it, and a storage crate must not depend on a walk
 # crate to name two integers (D45).
