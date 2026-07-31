@@ -18,7 +18,13 @@
 
 /// `SF_DATALESS` — the kernel states that this file's contents are not on
 /// this disk and that reading it will fetch them.
-#[allow(dead_code)] // only `is_materialised` on macOS calls this outside tests
+// Unused outside tests on every platform but this one — but the allow is
+// narrowed to those platforms on purpose. A blanket `allow` here silences
+// the one signal that catches the macOS arm of `is_materialised` being
+// gutted: with the body replaced by `true` the tests still pass (they
+// exercise the pure predicate), and only "never used" says the protection
+// is no longer wired to anything.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SF_DATALESS: u32 = 0x4000_0000;
 
 /// Measured on 914 real iCloud files, and this is NOT the obvious test.
@@ -27,14 +33,14 @@ const SF_DATALESS: u32 = 0x4000_0000;
 /// calls local, which makes the walk read it, which downloads it. The flag is
 /// what the kernel actually states; blocks are a proxy for it that is wrong in
 /// exactly the direction this function exists to prevent.
-#[allow(dead_code)] // only `is_materialised` on macOS calls this outside tests
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn materialised_from_st_flags(st_flags: u32) -> bool {
     st_flags & SF_DATALESS == 0
 }
 
 /// `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` — opening the file for read blocks
 /// on a download.
-#[allow(dead_code)] // only `is_materialised` on Windows calls this outside tests
+#[cfg_attr(not(windows), allow(dead_code))]
 const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
 /// `FILE_ATTRIBUTE_OFFLINE` — the older bit meaning the same thing; some
 /// providers set only this one.
@@ -50,14 +56,14 @@ const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
 /// `PreSkipRule::NotMaterialised` a reconciliation must read it as present,
 /// not absent, so it is never deleted for being missing either. It simply
 /// never enters the index, silently, for as long as the flag stays set.
-#[allow(dead_code)] // only `is_materialised` on Windows calls this outside tests
+#[cfg_attr(not(windows), allow(dead_code))]
 const OFFLINE: u32 = 0x0000_1000;
 
 /// Deliberately not keyed on `FILE_ATTRIBUTE_REPARSE_POINT`: measured on the
 /// stand, a *downloaded* OneDrive file carries it (Files-On-Demand uses it for
 /// everything it manages) and so does every rustup proxy. It would mean the
 /// walk refuses files that are entirely local.
-#[allow(dead_code)] // only `is_materialised` on Windows calls this outside tests
+#[cfg_attr(not(windows), allow(dead_code))]
 fn materialised_from_file_attributes(attrs: u32) -> bool {
     attrs & (RECALL_ON_DATA_ACCESS | OFFLINE) == 0
 }
