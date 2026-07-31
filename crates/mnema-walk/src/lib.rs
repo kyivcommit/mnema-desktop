@@ -27,9 +27,18 @@ pub struct Found {
 /// A file the walk refused before any worker was asked, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreSkip {
-    /// Lossy, and only ever used for display and for the journal: the point of
-    /// this variant is that the exact name is NOT representable as text.
-    pub display_path: String,
+    /// Relative to the watched root, `/`-separated — the same form as
+    /// `Found::relative`, because the reconciliation keys the skip journal on
+    /// it and compares it against what the walk found. `None` only when the
+    /// failure carried no path we can express in that form at all: no path
+    /// (a walker error with nothing to peel), or a path that is not valid
+    /// UTF-8 (`UnrepresentableName` — the whole point of that variant is
+    /// that no `String` can name it).
+    pub relative: Option<String>,
+    /// For a human and for the journal's reason column: the lossy name, or
+    /// the error text when there is no path at all. Never compared against
+    /// anything.
+    pub detail: String,
     pub rule: PreSkipRule,
 }
 
@@ -42,12 +51,19 @@ pub enum PreSkipRule {
     /// reading it would download it (§5).
     NotMaterialised,
     /// The walker could not read this entry at all: permission denied, a
-    /// directory that vanished mid-walk, or a size that does not fit `i64`.
-    /// A directory refused this way takes its whole subtree down with it —
-    /// nothing under it becomes `found`, and nothing else names it — so the
-    /// path travels here rather than being folded into a bare count
-    /// (`Walked::unreadable`). See `Walked::complete`.
+    /// directory that vanished mid-walk, a size that does not fit `i64`, or
+    /// the watched root itself not being a directory. A directory refused
+    /// this way takes its whole subtree down with it — nothing under it
+    /// becomes `found`, and nothing else names it — so the path travels here
+    /// rather than being folded into a bare count (`Walked::unreadable`).
+    /// See `Walked::complete`.
     Unreadable,
+    /// Not a regular file and not a directory: a symlink (`follow_links` is
+    /// off, so `metadata()` is an lstat and never resolves one), a FIFO, a
+    /// socket, a device. Naming it here is the whole fix — not following a
+    /// symlink is a decision, not a failure, so this does NOT clear
+    /// `Walked::complete`.
+    NotAFile,
 }
 
 #[derive(Debug)]
@@ -83,6 +99,24 @@ impl Default for Walked {
 
 pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
     let mut walked = Walked::default();
+
+    if !root.is_dir() {
+        // Not a directory at all: does not exist, or is a regular file (or a
+        // symlink to one). Nothing below names the root's own entry — the
+        // `entry.depth() == 0` case further down is skipped in silence on
+        // purpose — so without this check `found` comes back empty and
+        // `complete` stays true, indistinguishable from an empty, real
+        // folder.
+        walked.unreadable += 1;
+        walked.complete = false;
+        walked.skipped.push(PreSkip {
+            relative: None,
+            detail: root.to_string_lossy().into_owned(),
+            rule: PreSkipRule::Unreadable,
+        });
+        return walked;
+    }
+
     let walk = rules.builder(root).build();
 
     for entry in walk {
@@ -91,16 +125,21 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
             Err(err) => {
                 // The walker's own error: it could not even list this entry,
                 // so a directory here loses its whole subtree, not just
-                // itself. `ignore::Error` has no public path accessor, so
-                // `error_path` peels the wrapper variants that carry one.
-                walked.unreadable += 1;
-                walked.complete = false;
-                walked.skipped.push(PreSkip {
-                    display_path: error_path(&err)
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| err.to_string()),
-                    rule: PreSkipRule::Unreadable,
-                });
+                // itself. `Error::Partial` bundles several independent
+                // failures into one `Err`, so flatten before recording —
+                // otherwise only the first of them would ever be named.
+                for err in flatten_partial(&err) {
+                    walked.unreadable += 1;
+                    walked.complete = false;
+                    let path = error_path(err);
+                    walked.skipped.push(PreSkip {
+                        relative: path.and_then(|p| relative_of(root, p)),
+                        detail: path
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| err.to_string()),
+                        rule: PreSkipRule::Unreadable,
+                    });
+                }
                 continue;
             }
         };
@@ -113,13 +152,26 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
                 walked.unreadable += 1;
                 walked.complete = false;
                 walked.skipped.push(PreSkip {
-                    display_path: entry.path().to_string_lossy().into_owned(),
+                    relative: relative_of(root, entry.path()),
+                    detail: entry.path().to_string_lossy().into_owned(),
                     rule: PreSkipRule::Unreadable,
                 });
                 continue;
             }
         };
+        if meta.is_dir() {
+            continue;
+        }
         if !meta.is_file() {
+            // A symlink (`follow_links(false)` makes this an lstat, so a
+            // symlink is neither `is_file` nor `is_dir` here, regardless of
+            // what it points at), or a FIFO, socket, device. Named, but not
+            // a failure — see `PreSkipRule::NotAFile`.
+            walked.skipped.push(PreSkip {
+                relative: relative_of(root, entry.path()),
+                detail: entry.path().to_string_lossy().into_owned(),
+                rule: PreSkipRule::NotAFile,
+            });
             continue;
         }
         let absolute = entry.into_path();
@@ -128,7 +180,8 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
         };
         let Some(relative) = relative_string(rel) else {
             walked.skipped.push(PreSkip {
-                display_path: rel.to_string_lossy().into_owned(),
+                relative: None,
+                detail: rel.to_string_lossy().into_owned(),
                 rule: PreSkipRule::UnrepresentableName,
             });
             continue;
@@ -137,7 +190,8 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
             walked.unreadable += 1;
             walked.complete = false;
             walked.skipped.push(PreSkip {
-                display_path: relative,
+                relative: Some(relative.clone()),
+                detail: relative,
                 rule: PreSkipRule::Unreadable,
             });
             continue;
@@ -162,18 +216,37 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
     walked
 }
 
+/// `ignore::Error::Partial` bundles several independent failures into one
+/// `Err` — a caller that unwraps only the first one silently drops the rest.
+/// Flattens every leaf error out, so each gets its own `PreSkip`.
+fn flatten_partial(err: &ignore::Error) -> Vec<&ignore::Error> {
+    match err {
+        ignore::Error::Partial(errs) => errs.iter().flat_map(flatten_partial).collect(),
+        other => vec![other],
+    }
+}
+
 /// The path a walker error names, if it names one at all. `ignore::Error`
 /// exposes `.depth()` but no `.path()`; the path lives inside the
 /// `WithPath` variant, reached by peeling whatever wrapper variants
-/// (`WithDepth`, `WithLineNumber`, `Partial`) sit above it.
+/// (`WithDepth`, `WithLineNumber`) sit above it. Callers pass leaf errors
+/// already flattened by `flatten_partial`, so `Partial` needs no case here.
 fn error_path(err: &ignore::Error) -> Option<&Path> {
     match err {
         ignore::Error::WithPath { path, .. } => Some(path),
         ignore::Error::WithDepth { err, .. } => error_path(err),
         ignore::Error::WithLineNumber { err, .. } => error_path(err),
-        ignore::Error::Partial(errs) => errs.first().and_then(error_path),
         _ => None,
     }
+}
+
+/// A `PreSkip::relative` from an absolute path: root-stripped and
+/// `/`-separated, or `None` when the path is outside the root or not valid
+/// UTF-8 once relative — the skip is still recorded, just without a key a
+/// reconciliation can compare against `Found::relative`.
+fn relative_of(root: &Path, absolute: &Path) -> Option<String> {
+    let rel = absolute.strip_prefix(root).ok()?;
+    relative_string(rel)
 }
 
 /// `/`-separated and valid UTF-8, or nothing at all.

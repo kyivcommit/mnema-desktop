@@ -75,11 +75,14 @@ fn an_unreadable_directory_marks_the_walk_incomplete() {
 
         assert!(!walked.complete);
         assert!(walked.found.is_empty());
-        assert!(
-            walked.skipped.iter().any(|s| {
-                s.rule == PreSkipRule::Unreadable && s.display_path.ends_with("locked")
-            })
-        );
+        let skip = walked
+            .skipped
+            .iter()
+            .find(|s| s.rule == PreSkipRule::Unreadable)
+            .expect("the locked directory should be recorded");
+        // Root-relative, matching `Found::relative`'s form — NOT an
+        // absolute path (fix round 2, Important finding).
+        assert_eq!(skip.relative.as_deref(), Some("locked"));
     }
 
     // Restore permissions unconditionally so `tempdir`'s Drop can clean up.
@@ -126,4 +129,95 @@ fn an_ignore_file_above_the_root_has_no_effect() {
 
     assert_eq!(walked.found.len(), 1);
     assert_eq!(walked.found[0].relative, "target.txt");
+}
+
+/// A symlink is neither `is_file` nor `is_dir` once `follow_links(false)`
+/// makes `metadata()` an lstat, regardless of what it points at. It must be
+/// named, not silently dropped — but not following it is a decision, not a
+/// failure, so `complete` stays true (fix round 2, Important finding: every
+/// symlink vanished before this, not only ones pointing outside the root).
+#[test]
+#[cfg(unix)]
+fn a_symlink_is_named_but_does_not_mark_the_walk_incomplete() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("target.txt"), b"x").unwrap();
+    symlink(root.path().join("target.txt"), root.path().join("link.txt")).unwrap();
+
+    let walked = enumerate(root.path(), &WalkRules::none());
+
+    assert!(walked.complete);
+    assert_eq!(walked.found.len(), 1);
+    assert_eq!(walked.found[0].relative, "target.txt");
+    let skip = walked
+        .skipped
+        .iter()
+        .find(|s| s.rule == PreSkipRule::NotAFile)
+        .expect("the symlink should be recorded as NotAFile");
+    assert_eq!(skip.relative.as_deref(), Some("link.txt"));
+}
+
+/// Nothing in the signature says `root` must be a directory. Without a
+/// check, `enumerate` on a plain file returns an empty `found` with
+/// `complete` left true — indistinguishable from an empty, real folder
+/// (fix round 2, Important finding).
+#[test]
+fn a_root_that_is_a_file_marks_the_walk_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let not_a_folder = dir.path().join("not_a_folder.txt");
+    fs::write(&not_a_folder, b"x").unwrap();
+
+    let walked = enumerate(&not_a_folder, &WalkRules::none());
+
+    assert!(!walked.complete);
+    assert!(walked.found.is_empty());
+    assert_eq!(walked.skipped.len(), 1);
+    assert_eq!(walked.skipped[0].rule, PreSkipRule::Unreadable);
+    assert!(walked.skipped[0].detail.ends_with("not_a_folder.txt"));
+}
+
+/// `entry.metadata()` can fail even when the walker itself successfully
+/// lists an entry: a directory with read but not execute permission lets
+/// `readdir` return names (it only needs read), but resolving any child's
+/// metadata needs the execute (search) bit and fails. This is a different
+/// failure site from the walker's own `Err`
+/// (`an_unreadable_directory_marks_the_walk_incomplete` exercises that one,
+/// via a `chmod 000` directory, which fails to list at all) and nothing
+/// covered it — reverting the `metadata()` branch left every other test in
+/// this file green.
+#[test]
+#[cfg(unix)]
+fn a_failed_metadata_call_is_recorded_and_marks_the_walk_incomplete() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let noexec = root.path().join("noexec");
+    fs::create_dir(&noexec).unwrap();
+    fs::write(noexec.join("a.txt"), b"x").unwrap();
+    fs::set_permissions(&noexec, fs::Permissions::from_mode(0o400)).unwrap();
+
+    // Root resolves paths through a missing execute bit too.
+    let root_can_still_stat = fs::metadata(noexec.join("a.txt")).is_ok();
+    if !root_can_still_stat {
+        let walked = enumerate(root.path(), &WalkRules::none());
+
+        assert!(!walked.complete);
+        assert!(walked.found.is_empty());
+        let skip = walked
+            .skipped
+            .iter()
+            .find(|s| s.rule == PreSkipRule::Unreadable)
+            .expect("a.txt's failed metadata() call should be recorded");
+        assert_eq!(skip.relative.as_deref(), Some("noexec/a.txt"));
+    }
+
+    // Restore permissions unconditionally so `tempdir`'s Drop can clean up.
+    fs::set_permissions(&noexec, fs::Permissions::from_mode(0o755)).unwrap();
+    if root_can_still_stat {
+        eprintln!(
+            "skipped a_failed_metadata_call_is_recorded_and_marks_the_walk_incomplete: \
+             running as root, chmod 0o400 has no effect"
+        );
+    }
 }
