@@ -41,16 +41,44 @@ pub enum PreSkipRule {
     /// A cloud placeholder: present in the listing, absent from the disk, and
     /// reading it would download it (§5).
     NotMaterialised,
+    /// The walker could not read this entry at all: permission denied, a
+    /// directory that vanished mid-walk, or a size that does not fit `i64`.
+    /// A directory refused this way takes its whole subtree down with it —
+    /// nothing under it becomes `found`, and nothing else names it — so the
+    /// path travels here rather than being folded into a bare count
+    /// (`Walked::unreadable`). See `Walked::complete`.
+    Unreadable,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Walked {
     pub found: Vec<Found>,
-    /// How many entries the rules removed. A count, not a list: the list is the
-    /// whole excluded tree and can be larger than the kept one by three orders
-    /// of magnitude (measured: 411 kept against 384,275 unfiltered).
-    pub excluded: u64,
+    /// How many entries the walk could not read: the walker's own error, a
+    /// failed `metadata()`, or a size that does not fit `i64`. A count, not
+    /// only a list, for the same reason the old doc comment on this field
+    /// was wrong: rule removals are NOT counted here — the three rule layers
+    /// simply never produce these entries as walk candidates in the first
+    /// place, so there is nothing for this field to see. `skipped` carries
+    /// the path of every one of these; this is only the tally.
+    pub unreadable: u64,
     pub skipped: Vec<PreSkip>,
+    /// False if any entry was left out because the walk could not read it.
+    /// An unreadable subdirectory is indistinguishable from an empty one by
+    /// its absence from `found` alone — the same shape a deleted directory
+    /// would have — so a reconciliation that deletes rows for paths absent
+    /// from `found` must refuse to run when this is false.
+    pub complete: bool,
+}
+
+impl Default for Walked {
+    fn default() -> Self {
+        Self {
+            found: Vec::new(),
+            unreadable: 0,
+            skipped: Vec::new(),
+            complete: true,
+        }
+    }
 }
 
 pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
@@ -58,18 +86,38 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
     let walk = rules.builder(root).build();
 
     for entry in walk {
-        let Ok(entry) = entry else {
-            // An entry the walker itself could not read. Counted as excluded
-            // rather than invented into a path: there is nothing to record.
-            walked.excluded += 1;
-            continue;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                // The walker's own error: it could not even list this entry,
+                // so a directory here loses its whole subtree, not just
+                // itself. `ignore::Error` has no public path accessor, so
+                // `error_path` peels the wrapper variants that carry one.
+                walked.unreadable += 1;
+                walked.complete = false;
+                walked.skipped.push(PreSkip {
+                    display_path: error_path(&err)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| err.to_string()),
+                    rule: PreSkipRule::Unreadable,
+                });
+                continue;
+            }
         };
         if entry.depth() == 0 {
             continue; // the root itself
         }
-        let Ok(meta) = entry.metadata() else {
-            walked.excluded += 1;
-            continue;
+        let meta = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(_) => {
+                walked.unreadable += 1;
+                walked.complete = false;
+                walked.skipped.push(PreSkip {
+                    display_path: entry.path().to_string_lossy().into_owned(),
+                    rule: PreSkipRule::Unreadable,
+                });
+                continue;
+            }
         };
         if !meta.is_file() {
             continue;
@@ -86,7 +134,12 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
             continue;
         };
         let Some(on_disk) = on_disk_of(&meta) else {
-            walked.excluded += 1;
+            walked.unreadable += 1;
+            walked.complete = false;
+            walked.skipped.push(PreSkip {
+                display_path: relative,
+                rule: PreSkipRule::Unreadable,
+            });
             continue;
         };
         walked.found.push(Found {
@@ -107,6 +160,20 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
     // makes the order the same on two machines.
     walked.found.sort_by(|a, b| a.relative.cmp(&b.relative));
     walked
+}
+
+/// The path a walker error names, if it names one at all. `ignore::Error`
+/// exposes `.depth()` but no `.path()`; the path lives inside the
+/// `WithPath` variant, reached by peeling whatever wrapper variants
+/// (`WithDepth`, `WithLineNumber`, `Partial`) sit above it.
+fn error_path(err: &ignore::Error) -> Option<&Path> {
+    match err {
+        ignore::Error::WithPath { path, .. } => Some(path),
+        ignore::Error::WithDepth { err, .. } => error_path(err),
+        ignore::Error::WithLineNumber { err, .. } => error_path(err),
+        ignore::Error::Partial(errs) => errs.first().and_then(error_path),
+        _ => None,
+    }
 }
 
 /// `/`-separated and valid UTF-8, or nothing at all.

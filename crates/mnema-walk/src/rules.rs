@@ -26,7 +26,17 @@ impl WalkRules {
             .git_global(false)
             .git_ignore(false)
             .git_exclude(false)
-            .require_git(false);
+            .require_git(false)
+            // `ignore` and `parents` both default to true, and `parents`
+            // means "climb above the root looking for more `.ignore` files
+            // to apply" — so left alone, a `.ignore` file above the watched
+            // root silently removes files from inside it, with nothing
+            // incrementing `unreadable` to say so. The three rule layers in
+            // the design (§5: built-in list, in-tree `.gitignore`, user
+            // rules) are the whole of the rules; a file outside the root is
+            // not one of them.
+            .ignore(false)
+            .parents(false);
         b
     }
 }
