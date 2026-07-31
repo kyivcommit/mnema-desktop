@@ -158,6 +158,38 @@ fn a_symlink_is_named_but_does_not_mark_the_walk_incomplete() {
     assert_eq!(skip.relative.as_deref(), Some("link.txt"));
 }
 
+/// The follow that tells `NotAFile` apart from `NotAFileSubtree` (`lib.rs`)
+/// fails for a dangling symlink, the same way it fails for nothing at all —
+/// that failure must read as "not a directory", not as a read error:
+/// `unreadable` stays 0 and `complete` stays true. Until this test, only the
+/// succeeding-metadata case (a symlink to a live file) exercised the
+/// `NotAFile` arm; the failing-metadata case was covered by nothing (fix
+/// round 4, Minor finding).
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_is_named_but_does_not_mark_the_walk_incomplete() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    symlink(
+        root.path().join("does_not_exist.txt"),
+        root.path().join("broken.txt"),
+    )
+    .unwrap();
+
+    let walked = enumerate(root.path(), &WalkRules::none());
+
+    assert!(walked.complete);
+    assert_eq!(walked.unreadable, 0);
+    assert!(walked.found.is_empty());
+    let skip = walked
+        .skipped
+        .iter()
+        .find(|s| s.rule == PreSkipRule::NotAFile)
+        .expect("the dangling symlink should be recorded as NotAFile");
+    assert_eq!(skip.relative.as_deref(), Some("broken.txt"));
+}
+
 /// Nothing in the signature says `root` must be a directory. Without a
 /// check, `enumerate` on a plain file returns an empty `found` with
 /// `complete` left true — indistinguishable from an empty, real folder

@@ -163,18 +163,8 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
             // deleted), the walker yields it here as an ordinary entry, and
             // silently `continue`-ing would reproduce the exact state the
             // `!root.is_dir()` guard above exists to prevent — empty
-            // `found`, `complete` left true. Deliberately `std::fs::metadata`
-            // (follows symlinks), NOT `entry.metadata()` (an lstat, since
-            // `follow_links(false)`): a root that is itself a symlink to a
-            // directory is legitimate and already handled correctly (the
-            // walker still recurses into it — confirmed by probe), and
-            // `entry.metadata().is_dir()` would be `false` for it, wrongly
-            // flagging every symlinked root as unreadable. `root.is_dir()`
-            // above follows symlinks too; this matches it.
-            let is_dir = std::fs::metadata(entry.path())
-                .map(|m| m.is_dir())
-                .unwrap_or(false);
-            if !is_dir {
+            // `found`, `complete` left true.
+            if !root_entry_is_walkable(entry.path()) {
                 walked.unreadable += 1;
                 walked.complete = false;
                 walked.skipped.push(PreSkip {
@@ -264,6 +254,22 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
     walked
 }
 
+/// Whether the depth-0 entry — the root itself, at the moment the walker
+/// reached it — is still something to descend into. Deliberately
+/// `std::fs::metadata` (follows symlinks), NOT an lstat: a root that is
+/// itself a symlink to a directory is walkable and the walker already
+/// recurses into it correctly (confirmed by probe), so an lstat-based check
+/// would wrongly reject every symlinked root. `root.is_dir()`, used before
+/// the walk is even built, follows symlinks the same way; this matches it.
+/// `false` for a dangling symlink, a symlink to a regular file, a plain
+/// regular file, or anything `metadata` cannot stat at all — the four
+/// non-directory root shapes this crate has to tell apart from "still a
+/// directory" (fix round 4, Important finding: this used to be inline and
+/// pinned by nothing).
+fn root_entry_is_walkable(path: &Path) -> bool {
+    std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
+}
+
 /// `ignore::Error::Partial` bundles several independent failures into one
 /// `Err` — a caller that unwraps only the first one silently drops the rest.
 /// Flattens every leaf error out, so each gets its own `PreSkip`.
@@ -326,9 +332,22 @@ fn on_disk_of(meta: &std::fs::Metadata) -> Option<OnDisk> {
     })
 }
 
-/// Nanoseconds since the epoch, negative before it. Moved here from
-/// `mnema-ingest` unchanged: at second granularity a file edited twice within
-/// one second to the same length is indistinguishable from an untouched one.
+/// Nanoseconds since the epoch, negative before it: at second granularity a
+/// file edited twice within one second to the same length is
+/// indistinguishable from an untouched one.
+///
+/// COPIED from `mnema-ingest` (`crates/mnema-ingest/src/lib.rs:715`), not
+/// moved — and deliberately no longer identical to it. That copy still
+/// returns `Option<i64>` and still refuses (`None`) past roughly year 2262,
+/// because ITS caller falls back to re-reading the one file involved when
+/// the cheap arm has nothing to compare against — a small, per-file cost.
+/// This one cannot afford that answer: `None` here would propagate through
+/// `on_disk_of` into `enumerate` and clear `Walked::complete` for the WHOLE
+/// watched root over a single file, not just decline to compare that one
+/// file (see the paragraph below). Task 5 of the plan retires the
+/// `mnema-ingest` copy once this walk becomes the single source of the
+/// metadata `ingest_file` compares against; until then the two versions
+/// disagree on purpose, not by drift.
 ///
 /// SATURATES rather than refusing when a value does not fit `i64`: `i64::MAX`
 /// past roughly year 2262, `i64::MIN` symmetrically before it. This used to
@@ -388,5 +407,55 @@ mod tests {
             .expect("constructing a far-past SystemTime for this test");
 
         assert_eq!(mtime_nanos(far_past), i64::MIN);
+    }
+
+    /// The decision the `entry.depth() == 0` arm makes, pinned directly
+    /// rather than only through the whole-`enumerate` race, which cannot be
+    /// tested deterministically (fix round 4, Important finding: this arm
+    /// had no coverage at all — reducing it to a bare `continue` left every
+    /// test in `enumerate.rs` green). The four non-directory root shapes
+    /// this crate has to tell apart from "still walkable", plus the
+    /// ordinary case as a baseline.
+    #[test]
+    #[cfg(unix)]
+    fn root_entry_is_walkable_tells_apart_the_root_shapes_that_matter() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let real_dir = dir.path().join("real_dir");
+        std::fs::create_dir(&real_dir).unwrap();
+        assert!(
+            root_entry_is_walkable(&real_dir),
+            "a plain directory is walkable"
+        );
+
+        let dir_link = dir.path().join("dir_link");
+        symlink(&real_dir, &dir_link).unwrap();
+        assert!(
+            root_entry_is_walkable(&dir_link),
+            "a symlink to a directory is walkable"
+        );
+
+        let broken_link = dir.path().join("broken_link");
+        symlink(dir.path().join("does_not_exist"), &broken_link).unwrap();
+        assert!(
+            !root_entry_is_walkable(&broken_link),
+            "a dangling symlink is not walkable"
+        );
+
+        let real_file = dir.path().join("real_file.txt");
+        std::fs::write(&real_file, b"x").unwrap();
+        let file_link = dir.path().join("file_link");
+        symlink(&real_file, &file_link).unwrap();
+        assert!(
+            !root_entry_is_walkable(&file_link),
+            "a symlink to a regular file is not walkable"
+        );
+
+        assert!(
+            !root_entry_is_walkable(&real_file),
+            "a plain regular file is not walkable"
+        );
     }
 }
