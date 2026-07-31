@@ -109,6 +109,36 @@ fn every_skip_rule_is_recorded_under_its_own_string() {
     assert_eq!(got, expected);
 }
 
+/// Every `SkipRule` variant, sorted onto its side of `is_about_content`
+/// explicitly rather than derived from a count or a default. The mis-sorting
+/// this pins — `TooLarge`, a fact about the *setting* `PoolConfig::max_bytes`
+/// rather than about the file, wrongly placed on the content side — was
+/// caught only by the randomised harness in `mnema-ingest`, on a random seed,
+/// which means it was caught *sometimes*. This is the deterministic form: a
+/// rule added to the enum without a line here fails to compile-check nothing,
+/// but a rule added and left off this list is a rule this test cannot vouch
+/// for, which is the best a plain equality test can do short of an exhaustive
+/// `match` — see `SkipRule::is_about_content`'s own `matches!` for that half.
+#[test]
+fn every_skip_rule_is_sorted_onto_its_side_of_is_about_content() {
+    let cases = [
+        (SkipRule::Crash, false),
+        (SkipRule::Timeout, false),
+        (SkipRule::Memory, false),
+        (SkipRule::Unsupported, true),
+        (SkipRule::NoTextLayer, true),
+        (SkipRule::Unreadable, false),
+        (SkipRule::TooLarge, false),
+    ];
+    for (rule, expected) in cases {
+        assert_eq!(
+            rule.is_about_content(),
+            expected,
+            "{rule:?} is on the wrong side of is_about_content"
+        );
+    }
+}
+
 /// The journal is a current state, not a history. Before this, `record_skip`
 /// was an unconditional INSERT: a folder of a thousand scans grew a thousand
 /// rows per walk, and every walk spent a worker process on each of them to
@@ -142,9 +172,15 @@ fn a_second_skip_of_the_same_file_replaces_the_first() {
     assert_eq!(skips[0].reason, "still none");
 }
 
-/// The trap this test exists for: SQLite treats NULLs as DISTINCT in a UNIQUE
-/// index, and `page_no` is NULL for a whole-file skip. Without COALESCE in the
-/// index expression the dedup above simply does not happen — silently.
+/// What this test actually pins is `page_no` being *in* the unique key at
+/// all, not the `COALESCE` wrapped around it. Drop `page_no` from the index
+/// (and from `record_skip`'s `ON CONFLICT` arbiter) entirely and this fails
+/// loudly — `left: 1, right: 2` — because the whole-file skip and the page-4
+/// skip now share one key and the second overwrites the first. The COALESCE
+/// trap proper — two whole-file skips of the same path silently failing to
+/// dedup because SQLite treats NULL as DISTINCT from NULL — is what
+/// `a_second_skip_of_the_same_file_replaces_the_first` above pins; this test
+/// covers the other row that indexing shares, not that one.
 #[test]
 fn page_skips_and_file_skips_do_not_collide_but_each_still_dedups() {
     let db = fixture_empty();

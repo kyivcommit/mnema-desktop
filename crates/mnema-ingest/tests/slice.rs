@@ -1373,6 +1373,86 @@ fn a_lowered_ceiling_keeps_what_it_merely_excludes() {
     );
 }
 
+/// The Critical the branch review found: `TooLarge` is a statement about the
+/// *setting* `PoolConfig::max_bytes`, not about the file, so a rule fired
+/// against it must not survive that setting changing. `Unsupported` and
+/// `NoTextLayer` earn the same verdict again from the same bytes forever —
+/// that is what makes the second cheap arm (`ingest_file`, right after the
+/// `path_entry` check) safe for them. `TooLarge` does not: the very same
+/// bytes belong in the index the moment the ceiling is raised past them.
+///
+/// Measured before the fix, with this exact shape: a file refused under a low
+/// ceiling stayed `Skipped { TooLarge }` after the ceiling was raised to
+/// comfortably above the file's size, because the second cheap arm answered
+/// from the journal without ever asking the pool again.
+#[test]
+fn a_raised_ceiling_re_examines_a_file_it_used_to_refuse() {
+    let fx = Fixture::with_max_bytes(tempfile::tempdir().unwrap(), 100);
+    fx.place_at("contracts/ravella.txt", CONTRACT.as_bytes(), mtime());
+    assert!(
+        CONTRACT.len() > 100,
+        "the fixture must start over the ceiling, or the first pass proves nothing"
+    );
+
+    assert_eq!(
+        fx.ingest("contracts/ravella.txt"),
+        Ingested::Skipped {
+            rule: SkipRule::TooLarge
+        }
+    );
+
+    // Nothing about the file moved, only the setting: same bytes, same
+    // mtime — the second cheap arm's exact premise, and the one `TooLarge`
+    // must refuse to answer from once the ceiling no longer excludes it.
+    let raised = fx.ingest_under_ceiling("contracts/ravella.txt", 1 << 20);
+    assert!(
+        matches!(raised, Ingested::Indexed { .. }),
+        "a raised ceiling did not re-examine a file only the old ceiling had \
+         excluded: {raised:?}"
+    );
+    assert!(!fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
+}
+
+// ------------------- a remembered content verdict must not ask the pool
+
+/// The second cheap arm exists to save a worker process on a file whose
+/// content verdict is already known — pinned here by starving it. The file is
+/// skipped once by the real worker as `Unsupported`, then ingested again,
+/// unchanged, with a sidecar that is not the worker standing in for the pool.
+/// If the second cheap arm answers from the journal, the sidecar is never
+/// asked and the rule stays `Unsupported`. Cut the arm and the walk reaches
+/// the pool instead, where the sidecar answers every request with bytes that
+/// are not valid UTF-8 and the rule becomes `Crash`
+/// (`a_worker_that_is_not_the_worker_does_not_empty_the_index` below is the
+/// test that first pinned that translation).
+#[cfg(unix)]
+#[test]
+fn a_remembered_content_skip_is_answered_without_asking_the_pool() {
+    let fx = Fixture::new();
+    fx.place_at(
+        "scans/tender.pdf",
+        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
+        mtime(),
+    );
+    assert_eq!(
+        fx.ingest("scans/tender.pdf"),
+        Ingested::Skipped {
+            rule: SkipRule::Unsupported
+        }
+    );
+
+    let broken = wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
+    assert_eq!(
+        fx.ingest_with_worker("scans/tender.pdf", &broken),
+        Ingested::Skipped {
+            rule: SkipRule::Unsupported
+        },
+        "the rule changed, so the pool was asked — a second cheap arm that \
+         answers from the journal would never reach a worker at all, wrong or \
+         not"
+    );
+}
+
 // ------------------------------------------------- markdown, and its pages
 
 /// An invented handbook: content before the first heading, two sections, and a

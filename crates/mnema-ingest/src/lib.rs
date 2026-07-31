@@ -209,8 +209,13 @@ pub fn ingest_file(
             document_id: recorded.document_id.clone(),
         });
     }
-    // The second cheap arm: a file the worker already refused on its content.
-    // Without it, a folder of scans costs one worker process per file per walk
+    // The second cheap arm: the journal's remembered verdict, when it is
+    // still current. `skip_entry` only ever carries bytes to compare for a
+    // rule where `SkipRule::is_about_content()` is true — a reproducible
+    // reading of the file itself, not of the machine or of a setting that can
+    // change underneath it (its docstring has the case that taught this the
+    // hard way: `TooLarge` looks like a content fact and is not one). Without
+    // this arm, a folder of scans costs one worker process per file per walk
     // forever, which is the debt §16 recorded on 2026-07-27.
     if let Some(disk) = on_disk
         && let Some(skip) = db.skip_entry(root_id, relative)?

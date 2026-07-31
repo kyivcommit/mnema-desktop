@@ -98,31 +98,40 @@ impl SkipRule {
         })
     }
 
-    /// Whether this rule is a determination about the file's own bytes, as
-    /// opposed to something that happened to the worker or the machine.
+    /// Whether this rule is a **reproducible** determination about the file's
+    /// own bytes: the same bytes will earn the same verdict from the worker
+    /// again, with nothing outside the file able to change the answer.
     ///
     /// `record_skip` uses this to decide whether `bytes` is worth keeping: a
     /// content rule earns the same verdict again from the same bytes, so the
     /// next walk can answer from `stat` alone and skip the worker process
-    /// entirely (`mnema_ingest::ingest_file`'s second cheap arm). An
-    /// environmental rule says nothing about the file, so remembering its
-    /// size and mtime would make a transient condition — a busy machine, a
-    /// worker that crashed once — look permanent.
+    /// entirely (`mnema_ingest::ingest_file`'s second cheap arm). Getting this
+    /// wrong in the content direction is the expensive mistake — it makes a
+    /// verdict that *can* change look permanent, and the file is never looked
+    /// at again for the life of the index.
     ///
-    /// Shares the exact split `displaces` already draws for the same reason
-    /// (D44): `Unsupported` and `NoTextLayer` are reproducible readings of the
-    /// bytes; `Crash`, `Timeout`, `Memory` and `Unreadable` are readings of the
-    /// environment that apply to every file in the walk alike. `TooLarge`
-    /// joins the content side here even though `displaces` treats it as a
-    /// special case rather than a flat `true`: the refusal itself comes from
-    /// `stat` alone, with no worker involved, so the same size and mtime will
-    /// refuse it identically next time regardless of what caused the size to
-    /// exceed the ceiling.
+    /// Only `Unsupported` and `NoTextLayer` qualify. `Crash`, `Timeout` and
+    /// `Memory` are readings of the environment that apply to every file in
+    /// the walk alike — `displaces` draws the same line for the same reason
+    /// (D44) — and `Unreadable` is a fact about the disk, not the bytes, that
+    /// may well be transient (a file moved mid-scan, a permission fixed
+    /// afterwards).
+    ///
+    /// **`TooLarge` looks like it belongs here, and does not.** The refusal
+    /// does come from `stat` alone, and `displaces` does treat it as
+    /// reproducible enough to compare against `path.size_bytes` — which is
+    /// exactly the reasoning that put it on this side once, until a branch
+    /// review measured the case it breaks. The verdict is not a fact about
+    /// the bytes; it is a fact about `PoolConfig::max_bytes`, a setting the
+    /// user can change, and `INDEX_FORMAT_VERSION` does not move when a
+    /// slider does. Measured directly: a file refused under a low ceiling
+    /// stayed `Skipped { TooLarge }` after the ceiling was raised well past
+    /// its size, because the second cheap arm kept answering from the
+    /// journal and the pool was never asked again —
+    /// `a_raised_ceiling_re_examines_a_file_it_used_to_refuse` in
+    /// `mnema-ingest/tests/slice.rs` pins it.
     pub fn is_about_content(self) -> bool {
-        matches!(
-            self,
-            SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::TooLarge
-        )
+        matches!(self, SkipRule::Unsupported | SkipRule::NoTextLayer)
     }
 }
 
@@ -179,9 +188,13 @@ pub struct SkippedFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkipEntry {
     pub rule: SkipRule,
-    /// The bytes the walk stat'ed when this verdict was recorded — `None` when
-    /// `rule` is environmental, since `record_skip` drops them on the floor for
-    /// exactly those rules.
+    /// The bytes the walk stat'ed when this verdict was recorded. `None`
+    /// whenever `rule.is_about_content()` is false, since `record_skip` drops
+    /// them on the floor for those rules regardless of what the caller passed
+    /// — but also `None`, for any rule, when the caller had no measurement to
+    /// hand `record_skip` in the first place (`bytes: None`, e.g. a file the
+    /// walk could not stat at all). A bare `None` here does not by itself say
+    /// which of the two happened.
     pub size_bytes: Option<i64>,
     pub mtime: Option<i64>,
     pub format_version: i64,

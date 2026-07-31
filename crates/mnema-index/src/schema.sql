@@ -269,11 +269,15 @@ CREATE TABLE skipped (
     page_no         INTEGER,               -- set when a single PDF page was skipped
     reason          TEXT NOT NULL,
     rule            TEXT NOT NULL,         -- which rule fired, so v2 can find the work
-    -- Set ONLY for rules that are statements about the file's bytes
-    -- (unsupported, no_text_layer, too_large): the same bytes earn the same
-    -- verdict, so the next walk must not spend a worker process re-deriving it.
-    -- NULL for environmental rules (crash, timeout, memory, unreadable), which
-    -- are statements about the machine and have to be retried. D44's asymmetry.
+    -- Set ONLY for rules that are a reproducible statement about the file's
+    -- bytes (unsupported, no_text_layer): the same bytes earn the same
+    -- verdict, so the next walk must not spend a worker process re-deriving
+    -- it. NULL for every other rule, including too_large. too_large looks
+    -- like a bytes fact — the refusal comes from `stat` alone — but the
+    -- verdict actually depends on PoolConfig::max_bytes, a *setting*, and a
+    -- raised ceiling must get a fresh look at the same bytes rather than an
+    -- answer frozen at the old one. Put on the wrong side once; see
+    -- SkipRule::is_about_content for the measured case that moved it.
     size_bytes      INTEGER,
     mtime           INTEGER,
     -- Which build's verdict this is. Without it, shipping a reader for a format
@@ -289,8 +293,21 @@ CREATE TABLE skipped (
 --
 -- COALESCE on both nullable columns, and this is not defensive style: SQLite
 -- treats NULLs as DISTINCT inside a UNIQUE index, and `page_no` is NULL for
--- every whole-file skip. A plain UNIQUE(watched_root_id, relative_path, page_no)
--- would therefore dedup nothing at all, and would do it silently.
+-- every whole-file skip — but NOT for a per-page one, so a plain `page_no`
+-- would still dedup two skips of the same page correctly. What it would not
+-- dedup is two whole-file skips of the same path, and it would fail
+-- *silently*: each NULL compares unequal to every other NULL, so the index
+-- would hold one row per walk forever and record_skip's own
+-- `ON CONFLICT (…, page_no)` would simply never match — no error, no rows
+-- lost, just rows that keep arriving. Measured by dropping COALESCE from
+-- both this index and that ON CONFLICT clause together;
+-- a_second_skip_of_the_same_file_replaces_the_first is what catches it.
+--
+-- Dropping COALESCE from only one of the two sides is a different, louder
+-- failure, and safe rather than silent: SQLite refuses the INSERT outright
+-- with "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE
+-- constraint" the moment the ON CONFLICT target stops naming an index that
+-- exists. That is not the trap this comment is about.
 CREATE UNIQUE INDEX ux_skipped_current ON skipped(
     COALESCE(watched_root_id, -1), relative_path, COALESCE(page_no, -1)
 );
