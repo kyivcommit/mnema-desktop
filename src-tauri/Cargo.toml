@@ -25,6 +25,16 @@ mnema-index = { path = "../crates/mnema-index" }
 # the Pdfium binding stays outside this graph. `tests/dependency_boundary.rs`
 # is what says so rather than this comment.
 mnema-ingest = { path = "../crates/mnema-ingest" }
+# `walk_root`'s own signature — `Coordinate` on `Citation`, `Pool` and
+# `WalkRules` on `walk_root` itself — names types from these three crates
+# without re-exporting them, so naming them here is what lets `bridge.rs` and
+# `walk_job.rs` write the types rather than only pass them through untouched.
+# None of the three is new to the graph: `mnema-ingest` already brings all of
+# them in transitively, and `tests/dependency_boundary.rs` is what proves that
+# adding them by name changes nothing it checks.
+mnema-core = { path = "../crates/mnema-core" }
+mnema-pool = { path = "../crates/mnema-pool" }
+mnema-walk = { path = "../crates/mnema-walk" }
 tauri = { version = "2.11", features = [] }
 tauri-plugin-single-instance = "2.4"
 serde = { workspace = true }
@@ -35,6 +45,5 @@ anyhow = { workspace = true }
 # `test` brings in the mock runtime. Declared here rather than as a feature of
 # the crate so the shipped binary can never contain it.
 tauri = { version = "2.11", features = ["test"] }
-mnema-core = { path = "../crates/mnema-core" }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

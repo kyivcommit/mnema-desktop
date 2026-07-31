@@ -22,6 +22,12 @@ pub enum Error {
     },
     #[error("index: {0}")]
     Index(#[from] mnema_index::Error),
+    /// A window sent a `root_id` `watched_root` has no row for — a folder
+    /// removed by a second window, or a page that reloaded with a stale id
+    /// still in its own list. `start_walk_job` cannot walk a row number, only
+    /// the path it names.
+    #[error("no watched folder with id {0}")]
+    UnknownWatchedRoot(i64),
     /// Indexing could not continue at all — the extraction pool is broken, or
     /// the database is.
     ///

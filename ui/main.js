@@ -19,9 +19,12 @@ el("search-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const query = el("query").value;
   try {
-    const hits = await invoke("lexical_search", { query });
+    // `search` replaced `lexical_search`: the same lexical arm, but each hit
+    // is now a citation — text, where it came from — rather than a bare
+    // chunk id with nowhere for the window to take it.
+    const hits = await invoke("search", { query });
     el("search-status").textContent = hits.length
-      ? `${hits.length} chunk(s): ${hits.join(", ")}`
+      ? `${hits.length} hit(s): ${hits.map((hit) => hit.relativePath ?? "(no path)").join(", ")}`
       : "no matches";
   } catch (error) {
     el("search-status").textContent = `search failed: ${error}`;

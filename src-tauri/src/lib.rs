@@ -10,6 +10,7 @@ pub mod error;
 pub mod job;
 pub mod paths;
 pub mod state;
+pub mod walk_job;
 
 use anyhow::Context as _;
 use tauri::Manager as _;
@@ -23,10 +24,14 @@ pub fn invoke_handler<R: tauri::Runtime>()
 -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         bridge::open_index,
-        bridge::lexical_search,
+        bridge::add_watched_folder,
+        bridge::remove_watched_folder,
+        bridge::search,
+        bridge::skips,
         bridge::start_probe_job,
         bridge::cancel_job,
         bridge::job_status,
+        walk_job::start_walk_job,
     ]
 }
 
@@ -40,9 +45,16 @@ pub fn invoke_handler<R: tauri::Runtime>()
 /// LOCAL data, not roaming and not cache — see [`paths::index_path`] for why.
 /// Getting it wrong is silent: it works on the machine that wrote it and loses a
 /// user's index on theirs.
+///
+/// `paths::worker_path`'s own doc comment has what is and is not settled about
+/// the second path this resolves. `?` rather than a fallback: a
+/// `current_exe()` that fails is rare enough, and quiet enough if papered
+/// over, that surfacing it at start-up beats discovering it the first time a
+/// walk job's `Pool` cannot find its worker.
 pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let dir = app.path().app_local_data_dir()?;
-    app.manage(state::AppState::new(dir));
+    let worker = paths::worker_path()?;
+    app.manage(state::AppState::new(dir, worker));
     Ok(())
 }
 

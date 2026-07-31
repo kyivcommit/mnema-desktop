@@ -7,6 +7,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use mnema_core::Coordinate;
 use serde::Serialize;
 use tauri::State;
 use tauri::ipc::Channel;
@@ -57,8 +58,82 @@ pub fn open_index(state: State<'_, AppState>) -> Result<IndexInfo, Error> {
 
 /// Off the main thread for the reason given on [`open_index`].
 #[tauri::command(async)]
-pub fn lexical_search(state: State<'_, AppState>, query: String) -> Result<Vec<i64>, Error> {
-    state.with_index(|db| db.search_lexical(&query, SEARCH_LIMIT))
+pub fn add_watched_folder(state: State<'_, AppState>, path: String) -> Result<i64, Error> {
+    state.with_index(|db| db.insert_watched_root(&path))
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// `Db::delete_watched_root` already closes §7.1.1's cascade gap — a
+/// document whose last path went with its root goes too, vectors included —
+/// but nothing before this command could reach it from outside a Rust test.
+/// `removing_a_watched_folder_takes_its_documents_with_it`
+/// (`tests/commands.rs`) is the first thing that exercises the fix through
+/// the seam it was written for: add a folder, walk it, remove it, and check
+/// that `search` no longer answers for it.
+#[tauri::command(async)]
+pub fn remove_watched_folder(state: State<'_, AppState>, root_id: i64) -> Result<u64, Error> {
+    state.with_index(|db| db.delete_watched_root(root_id))
+}
+
+/// The window needs a citation, not a chunk id. `mnema-index` already
+/// re-exports `Citation` and it is `Serialize` (`write.rs:11`), so this
+/// crosses the seam without touching the dependency graph — the seam was
+/// simply never crossed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hit {
+    pub chunk_id: i64,
+    pub text: String,
+    pub relative_path: Option<String>,
+    pub section_title: Option<String>,
+    pub coordinate: Coordinate,
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// What a search should return, and how a dense arm is fused into it, is the
+/// search/RAG spec's decision. This is the lexical arm alone, which under D29
+/// is the only arm a private index has at all.
+#[tauri::command(async)]
+pub fn search(state: State<'_, AppState>, query: String) -> Result<Vec<Hit>, Error> {
+    state.with_index(|db| {
+        let mut hits = Vec::new();
+        for chunk_id in db.search_lexical(&query, SEARCH_LIMIT)? {
+            // A chunk that vanished between the MATCH and this read is not an
+            // error: a walk running alongside a search is the ordinary case
+            // that motivated the job holding its own connection at all (see
+            // `AppState::open_job_index`). Only `citation`'s `None` is read
+            // this way — the `?` right before it still stops the whole
+            // search on any other failure — and the price is that the window
+            // is shown fewer hits than `search_lexical` matched, with
+            // nothing saying so: a count of 20 that quietly became 18 reads
+            // as a smaller, equally true search rather than as a race it
+            // lost. Making that difference visible — a partial-result
+            // notice, a re-query, something else — is the search/RAG
+            // interface's decision to make, not a UI default for this
+            // command to invent on its own.
+            if let Some(c) = db.citation(chunk_id)? {
+                hits.push(Hit {
+                    chunk_id,
+                    text: c.text,
+                    relative_path: c.relative_path,
+                    section_title: c.section_title,
+                    coordinate: c.coordinate,
+                });
+            }
+        }
+        Ok(hits)
+    })
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+#[tauri::command(async)]
+pub fn skips(
+    state: State<'_, AppState>,
+    root_id: i64,
+) -> Result<Vec<mnema_index::SkippedFile>, Error> {
+    state.with_index(|db| db.skips_for_root(root_id))
 }
 
 /// Demonstrates the progress path end to end without doing real work.

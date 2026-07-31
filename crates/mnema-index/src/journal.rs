@@ -10,6 +10,7 @@ use std::collections::HashSet;
 
 use mnema_core::OnDisk;
 use rusqlite::{OptionalExtension, params};
+use serde::Serialize;
 
 use crate::{Db, Error, INDEX_FORMAT_VERSION};
 
@@ -244,7 +245,15 @@ impl DocumentStatus {
 }
 
 /// One row of the skip journal, read back for a watched root.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` with `camelCase`: the `skips` shell command (`src-tauri/src/
+/// bridge.rs`) returns this straight to the webview, and every other type
+/// that crosses that seam renders its fields the way the window's JavaScript
+/// reads them — the rename lives on the type that crosses, not on a
+/// bridge-local copy, because nothing about this shape needs translating
+/// first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkippedFile {
     pub relative_path: String,
     /// `None` for a whole-file skip (a worker crash, a timeout); `Some` when a

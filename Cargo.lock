@@ -2817,6 +2817,8 @@ dependencies = [
  "mnema-core",
  "mnema-index",
  "mnema-ingest",
+ "mnema-pool",
+ "mnema-walk",
  "serde",
  "serde_json",
  "tauri",

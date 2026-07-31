@@ -54,6 +54,22 @@ impl Db {
         Ok(self.conn().last_insert_rowid())
     }
 
+    /// The absolute path a watched root was added under, or `None` if no root
+    /// carries this id — a stale id sent by a window with no view onto a
+    /// removed folder, or a typo in a JSON body. The shell has to turn an id
+    /// back into a filesystem path before it has anything to hand
+    /// `mnema_ingest::walk_root`, which walks a `Path`, not a row number.
+    pub fn watched_root_path(&self, root_id: i64) -> Result<Option<String>, Error> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT absolute_path FROM watched_root WHERE id = ?1",
+                params![root_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn insert_document(
         &self,
         content_hash: &str,

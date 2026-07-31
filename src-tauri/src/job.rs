@@ -37,17 +37,44 @@ pub enum Outcome {
     },
 }
 
-/// The three ways a job stops.
+/// The ways a job stops.
 ///
 /// `Failed` is here because the guarantee below says *however* the job ended,
 /// and a panic is one of the ways. Reporting a panic as a cancellation would be
 /// telling the user they did something they did not do.
+///
+/// The four variants after `Failed` are not the probe's: they are
+/// `mnema_ingest::walk::StopReason`'s own `BrokenWorker`, `RulesNotApplied`,
+/// `RootUnavailable` and `VolumeMissing`, carried across by name rather than
+/// folded into `Failed`. A walk that stops for one of these has not
+/// malfunctioned — it made a decision `walk_root`'s own doc comments argue for
+/// at length — and reporting it as `Failed` would tell the user something
+/// broke when instead a folder is unreadable, an exclusion rule did not take,
+/// or a volume may have gone missing. `walk_job.rs` is the only writer of
+/// these four; the probe never produces them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EndReason {
     Completed,
     Cancelled,
     Failed,
+    BrokenWorker,
+    RulesNotApplied,
+    RootUnavailable,
+    VolumeMissing,
+}
+
+/// One folder reconciliation declined to touch, and why — the webview's
+/// counterpart to `mnema_ingest::walk::Frozen`, translated to a string
+/// (`walk_job::frozen_reason_text`) rather than carrying `FrozenReason`
+/// itself: `FrozenReason` has no `Serialize`, and giving it one would put a
+/// UI-facing rename on a type whose only other reader today compares it by
+/// value (`crates/mnema-ingest/tests/walk.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Frozen {
+    pub prefix: String,
+    pub why: String,
 }
 
 /// The last message on the channel, always sent, however the job ended.
@@ -55,12 +82,17 @@ pub enum EndReason {
 /// Without it a webview cannot tell a finished job from a cancelled one, or
 /// either from a job whose reports simply stopped arriving — and a page that has
 /// to guess ends up asserting what it hopes happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ended {
     pub reason: EndReason,
     pub done: u64,
     pub total: u64,
+    /// Always empty for the probe, which reconciles nothing. For a walk,
+    /// mirrors `WalkReport::frozen` — see that field's own doc comment for why
+    /// `removed == 0` alone cannot say whether anything was silently left
+    /// untouched, which is exactly the question this answers.
+    pub frozen: Vec<Frozen>,
 }
 
 impl Ended {
@@ -73,24 +105,30 @@ impl Ended {
                 reason: EndReason::Completed,
                 done: total,
                 total,
+                frozen: Vec::new(),
             },
             Outcome::Cancelled { done } => Self {
                 reason: EndReason::Cancelled,
                 done,
                 total,
+                frozen: Vec::new(),
             },
         }
     }
 
-    /// The job panicked. `done` is the last count the window was *shown*, not
-    /// the loop's internal position: those differ by whatever the throttle
-    /// dropped, and a number the user never saw is a worse answer than the one
-    /// they did.
+    /// The job panicked, or — for a walk — stopped on an error `StopReason`
+    /// has no variant for at all (`mnema_ingest::IngestError`, e.g. a broken
+    /// pool). `done` is the last count the window was *shown*, not the loop's
+    /// internal position: those differ by whatever the throttle dropped, and
+    /// a number the user never saw is a worse answer than the one they did.
+    /// `frozen` is empty because both callers reach this with no `WalkReport`
+    /// to read one from — the job stopped before producing one.
     pub fn failed(done: u64, total: u64) -> Self {
         Self {
             reason: EndReason::Failed,
             done,
             total,
+            frozen: Vec::new(),
         }
     }
 }
@@ -205,7 +243,8 @@ mod tests {
             Ended {
                 reason: EndReason::Completed,
                 done: 40,
-                total: 40
+                total: 40,
+                frozen: Vec::new(),
             }
         );
     }
@@ -217,7 +256,8 @@ mod tests {
             Ended {
                 reason: EndReason::Cancelled,
                 done: 7,
-                total: 40
+                total: 40,
+                frozen: Vec::new(),
             }
         );
     }
