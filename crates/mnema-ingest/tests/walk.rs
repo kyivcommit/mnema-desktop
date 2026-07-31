@@ -309,6 +309,45 @@ fn a_run_of_oversized_files_does_not_look_like_a_broken_worker() {
     assert_eq!(report.indexed, 0);
 }
 
+/// The other half of D44's asymmetry, against the real worker rather than
+/// the broken one below: a folder the product genuinely cannot read, file
+/// after file, must run to completion — a hundred correct "no reader for
+/// this" verdicts are not a broken machine.
+///
+/// Not an unrecognised extension: `identify_plain_text`'s default arm
+/// (`crates/mnema-extract/src/typing.rs`) treats an extension it does not
+/// know as plain text and indexes it, so a `.unknownext` file earns
+/// `indexed`, not a skip, from the real worker — measured directly before
+/// writing this test, not assumed. What the worker actually refuses with
+/// `SkipRule::Unsupported` is a format whose *magic bytes* it recognises but
+/// has no reader for: the four bytes `%PDF-` are matched ahead of the
+/// extension (`identify`, same module) and land on `Reader::Pdf`, which has
+/// no `Vec<Block>` reader in this crate yet (`crates/mnema-extract/src/bin/worker.rs`)
+/// — the file need not be a well-formed PDF beyond that signature, since the
+/// worker refuses it before parsing any further.
+///
+/// Twenty files, not the brief's fifty: `broken_after` is 8 for this
+/// fixture's default two-worker pool, so twenty clears it comfortably
+/// without paying for thirty files' worth of worker round-trips the suite
+/// does not need — this file already runs to about 18 s.
+#[test]
+fn a_run_of_unsupported_files_does_not_look_like_a_broken_worker() {
+    let f = Fixture::new();
+    for i in 0..20 {
+        f.write(
+            &format!("f{i}.pdf"),
+            "%PDF-1.4\nnot a real pdf, just the magic bytes",
+        );
+    }
+
+    let report = f.walk();
+
+    assert_eq!(report.stopped, StopReason::Completed);
+    assert_eq!(report.found, 20);
+    assert_eq!(report.skipped, 20);
+    assert_eq!(report.indexed, 0);
+}
+
 /// The counter this walk owns (D44): consecutive skips that are evidence
 /// about the environment, not about any one file's bytes, stop the walk
 /// rather than spend a worker process on every remaining file to learn the
