@@ -221,3 +221,109 @@ fn a_failed_metadata_call_is_recorded_and_marks_the_walk_incomplete() {
         );
     }
 }
+
+/// A `chmod 000` ROOT is a second way to reach "the walk could not read the
+/// root" — distinct from `a_root_that_is_a_file_marks_the_walk_incomplete`
+/// (that one never gets past `root.is_dir()`) and from
+/// `an_unreadable_directory_marks_the_walk_incomplete` (that one is a
+/// SUBdirectory, so `relative_of` strips to a real, non-empty key). Here
+/// `relative_of(root, root)` strips to nothing: `relative_string` must map
+/// the empty component list to `None`, not `Some("")` — a key that could
+/// never equal any real `Found::relative` (fix round 3, Important finding).
+#[test]
+#[cfg(unix)]
+fn an_unreadable_root_carries_no_relative_key() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("locked_root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("secret.txt"), b"x").unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let root_can_still_read = fs::read_dir(&root).is_ok();
+    if !root_can_still_read {
+        let walked = enumerate(&root, &WalkRules::none());
+
+        assert!(!walked.complete);
+        assert!(walked.found.is_empty());
+        let skip = walked
+            .skipped
+            .iter()
+            .find(|s| s.rule == PreSkipRule::Unreadable)
+            .expect("the locked root should be recorded");
+        assert_eq!(skip.relative, None);
+    }
+
+    // Restore permissions unconditionally so `tempdir`'s Drop can clean up.
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    if root_can_still_read {
+        eprintln!(
+            "skipped an_unreadable_root_carries_no_relative_key: \
+             running as root, chmod 000 has no effect"
+        );
+    }
+}
+
+/// A directory that is a symlink loses its whole subtree in one step — this
+/// is the hole `PreSkipRule::NotAFileSubtree` exists to make visible: without
+/// it, `docs/one.txt` and `docs/deep/two.txt` exist on disk under the
+/// watched root and would appear in neither `found` nor `skipped`, with
+/// `complete == true` claiming nothing was missed (fix round 3, Important
+/// finding).
+#[test]
+#[cfg(unix)]
+fn a_symlinked_directory_is_named_as_a_subtree_not_a_file() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("kept.txt"), b"x").unwrap();
+
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir(outside.path().join("deep")).unwrap();
+    fs::write(outside.path().join("one.txt"), b"x").unwrap();
+    fs::write(outside.path().join("deep/two.txt"), b"x").unwrap();
+    symlink(outside.path(), root.path().join("docs")).unwrap();
+
+    let walked = enumerate(root.path(), &WalkRules::none());
+
+    assert!(walked.complete);
+    let names: Vec<&str> = walked.found.iter().map(|f| f.relative.as_str()).collect();
+    assert_eq!(names, ["kept.txt"]);
+    let skip = walked
+        .skipped
+        .iter()
+        .find(|s| s.rule == PreSkipRule::NotAFileSubtree)
+        .expect("the symlinked directory should be recorded as a subtree skip");
+    assert_eq!(skip.relative.as_deref(), Some("docs"));
+}
+
+/// The root itself can legitimately be a symlink to a directory — this must
+/// walk exactly as if it were the real directory. The `entry.depth() == 0`
+/// check added to close the two-syscall race (`root.is_dir()`, then the
+/// walk) must not mistake this ordinary case for that race: the walker's own
+/// `metadata()` for the depth-0 entry is an lstat (`follow_links(false)`)
+/// and reports `is_dir() == false` for any symlink, root included, which
+/// would wrongly mark every symlinked root incomplete if the depth-0 check
+/// used it directly instead of following the symlink the way `root.is_dir()`
+/// already does (fix round 3, Minor finding — found while implementing it,
+/// not part of the original review).
+#[test]
+#[cfg(unix)]
+fn a_symlinked_root_is_walked_normally() {
+    use std::os::unix::fs::symlink;
+
+    let real = tempfile::tempdir().unwrap();
+    fs::write(real.path().join("a.txt"), b"x").unwrap();
+
+    let parent = tempfile::tempdir().unwrap();
+    let link = parent.path().join("link");
+    symlink(real.path(), &link).unwrap();
+
+    let walked = enumerate(&link, &WalkRules::none());
+
+    assert!(walked.complete);
+    assert_eq!(walked.found.len(), 1);
+    assert_eq!(walked.found[0].relative, "a.txt");
+    assert!(walked.skipped.is_empty());
+}

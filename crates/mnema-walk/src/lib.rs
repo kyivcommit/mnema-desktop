@@ -58,12 +58,24 @@ pub enum PreSkipRule {
     /// rather than being folded into a bare count (`Walked::unreadable`).
     /// See `Walked::complete`.
     Unreadable,
-    /// Not a regular file and not a directory: a symlink (`follow_links` is
-    /// off, so `metadata()` is an lstat and never resolves one), a FIFO, a
-    /// socket, a device. Naming it here is the whole fix — not following a
-    /// symlink is a decision, not a failure, so this does NOT clear
-    /// `Walked::complete`.
+    /// Not a regular file and not a directory, and following it once (the
+    /// one look this crate takes past an lstat) resolves to something other
+    /// than a directory: a symlink to a file, a broken/dangling symlink, a
+    /// FIFO, a socket, a device. Naming it here is the whole fix — not
+    /// following a symlink is a decision, not a failure, so this does NOT
+    /// clear `Walked::complete`.
     NotAFile,
+    /// Not a regular file and not a directory (same as `NotAFile`), but
+    /// following it once resolves to a directory: a symlink to a directory.
+    /// Distinguished from `NotAFile` because losing this one is not losing
+    /// one entry, it is losing a whole subtree in a single step — nothing
+    /// under it was ever visited, so nothing under it appears anywhere else
+    /// either. `Walked::complete` still stays true: not following a symlink
+    /// is a decision made once, in `WalkRules::builder`, not a read failure
+    /// discovered per-entry. What a later reconciliation does with a
+    /// subtree-shaped skip — treat `relative` as a prefix, or not — is that
+    /// reconciliation's call, not this crate's.
+    NotAFileSubtree,
 }
 
 #[derive(Debug)]
@@ -101,12 +113,13 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
     let mut walked = Walked::default();
 
     if !root.is_dir() {
-        // Not a directory at all: does not exist, or is a regular file (or a
-        // symlink to one). Nothing below names the root's own entry — the
-        // `entry.depth() == 0` case further down is skipped in silence on
-        // purpose — so without this check `found` comes back empty and
-        // `complete` stays true, indistinguishable from an empty, real
-        // folder.
+        // Not a directory at all, right now: does not exist, or is a regular
+        // file (or a symlink to one). This and the walk below are two
+        // separate syscalls — the `entry.depth() == 0` arm inside the loop
+        // carries the same check for the window between them — but without
+        // this one, the common case (root was never a directory to begin
+        // with) would have to build a `Walk` and iterate it just to learn
+        // that, instead of returning immediately.
         walked.unreadable += 1;
         walked.complete = false;
         walked.skipped.push(PreSkip {
@@ -144,7 +157,33 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
             }
         };
         if entry.depth() == 0 {
-            continue; // the root itself
+            // The root itself — usually just skipped. But `root.is_dir()`
+            // above and this walk are two separate syscalls: if the root
+            // stopped being a directory in between (replaced by a file,
+            // deleted), the walker yields it here as an ordinary entry, and
+            // silently `continue`-ing would reproduce the exact state the
+            // `!root.is_dir()` guard above exists to prevent — empty
+            // `found`, `complete` left true. Deliberately `std::fs::metadata`
+            // (follows symlinks), NOT `entry.metadata()` (an lstat, since
+            // `follow_links(false)`): a root that is itself a symlink to a
+            // directory is legitimate and already handled correctly (the
+            // walker still recurses into it — confirmed by probe), and
+            // `entry.metadata().is_dir()` would be `false` for it, wrongly
+            // flagging every symlinked root as unreadable. `root.is_dir()`
+            // above follows symlinks too; this matches it.
+            let is_dir = std::fs::metadata(entry.path())
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            if !is_dir {
+                walked.unreadable += 1;
+                walked.complete = false;
+                walked.skipped.push(PreSkip {
+                    relative: None,
+                    detail: entry.path().to_string_lossy().into_owned(),
+                    rule: PreSkipRule::Unreadable,
+                });
+            }
+            continue;
         }
         let meta = match entry.metadata() {
             Ok(meta) => meta,
@@ -166,11 +205,20 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
             // A symlink (`follow_links(false)` makes this an lstat, so a
             // symlink is neither `is_file` nor `is_dir` here, regardless of
             // what it points at), or a FIFO, socket, device. Named, but not
-            // a failure — see `PreSkipRule::NotAFile`.
+            // a failure. One extra, FOLLOWING stat — only reached for these
+            // rare entries — tells a symlink to a directory (a whole subtree
+            // the walk never entered) apart from everything else: a symlink
+            // to a file, a dangling symlink (the follow fails; that is not a
+            // read error, it is still `NotAFile`), a FIFO, a socket, a
+            // device.
+            let rule = match std::fs::metadata(entry.path()) {
+                Ok(followed) if followed.is_dir() => PreSkipRule::NotAFileSubtree,
+                _ => PreSkipRule::NotAFile,
+            };
             walked.skipped.push(PreSkip {
                 relative: relative_of(root, entry.path()),
                 detail: entry.path().to_string_lossy().into_owned(),
-                rule: PreSkipRule::NotAFile,
+                rule,
             });
             continue;
         }
@@ -249,7 +297,12 @@ fn relative_of(root: &Path, absolute: &Path) -> Option<String> {
     relative_string(rel)
 }
 
-/// `/`-separated and valid UTF-8, or nothing at all.
+/// `/`-separated and valid UTF-8, or nothing at all. Also `None` for an
+/// empty component list (`rel == root`): `Some("")` would be a `PreSkip`
+/// key that can never equal a real `Found::relative` — shaped like a path,
+/// naming nothing — which is worse than admitting there is no key at all
+/// (fix round 3, Important finding: this is how a `chmod 000` ROOT, as
+/// opposed to a `chmod 000` subdirectory, used to end up in the journal).
 fn relative_string(rel: &Path) -> Option<String> {
     let mut out = String::new();
     for (i, part) in rel.components().enumerate() {
@@ -259,7 +312,7 @@ fn relative_string(rel: &Path) -> Option<String> {
         }
         out.push_str(part);
     }
-    Some(out)
+    if out.is_empty() { None } else { Some(out) }
 }
 
 pub fn stat(path: &Path) -> Option<OnDisk> {
@@ -269,18 +322,71 @@ pub fn stat(path: &Path) -> Option<OnDisk> {
 fn on_disk_of(meta: &std::fs::Metadata) -> Option<OnDisk> {
     Some(OnDisk {
         size_bytes: i64::try_from(meta.len()).ok()?,
-        mtime: mtime_nanos(meta.modified().ok()?)?,
+        mtime: mtime_nanos(meta.modified().ok()?),
     })
 }
 
 /// Nanoseconds since the epoch, negative before it. Moved here from
 /// `mnema-ingest` unchanged: at second granularity a file edited twice within
 /// one second to the same length is indistinguishable from an untouched one.
-fn mtime_nanos(modified: SystemTime) -> Option<i64> {
+///
+/// SATURATES rather than refusing when a value does not fit `i64`: `i64::MAX`
+/// past roughly year 2262, `i64::MIN` symmetrically before it. This used to
+/// return `None`, which made `on_disk_of` return `None`, which made
+/// `enumerate` treat the whole file as unreadable and clear
+/// `Walked::complete` — so ONE file with a bogus far-future timestamp would
+/// permanently forbid deletion under the entire watched root, the exact
+/// hazard `PreSkipRule::NotAFile` exists to prevent, reached through another
+/// door. macOS clamps `SystemTime` internally, so this host cannot produce
+/// such a value, but ext4 (to year 2446) and Windows `FILETIME` (to year
+/// 30828) can represent one, and archive extraction or a wrong clock can
+/// write one. A file whose timestamp cannot be represented exactly is still
+/// a file that can be read and indexed; saturating only costs the cheap arm
+/// the ability to notice a LATER edit that changes nothing but an
+/// already-saturated mtime — strictly less bad than never deleting again.
+///
+/// The size arm (`on_disk_of`'s `i64::try_from(meta.len())`) is deliberately
+/// NOT changed the same way: on macOS and Linux, `off_t` — the size type
+/// behind `stat()` — is itself a signed 64-bit integer, so a size past
+/// `i64::MAX` cannot be reported in the first place (confirmed by probe; see
+/// the Task 1 report). Windows has no `off_t`; `Metadata::len()` there comes
+/// from `nFileSizeHigh`/`nFileSizeLow`, and what actually bounds it is NTFS's
+/// own maximum file size (about 8 PB) or ReFS's (about 35 PB), both still
+/// far under `i64::MAX` (about 8 EiB). On every platform this ships to, that
+/// branch is a guard against something that cannot happen, not a live path —
+/// unlike this one.
+fn mtime_nanos(modified: SystemTime) -> i64 {
     match modified.duration_since(UNIX_EPOCH) {
-        Ok(since) => i64::try_from(since.as_nanos()).ok(),
+        Ok(since) => i64::try_from(since.as_nanos()).unwrap_or(i64::MAX),
         Err(before) => i64::try_from(before.duration().as_nanos())
-            .ok()
-            .map(|nanos| -nanos),
+            .map(|nanos| -nanos)
+            .unwrap_or(i64::MIN),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A timestamp `i64` cannot represent exactly must not make the file
+    /// unreadable (see the doc comment on `mtime_nanos`) — it saturates
+    /// instead of refusing (fix round 3, Important finding).
+    #[test]
+    fn mtime_nanos_saturates_past_the_representable_range() {
+        let far_future = UNIX_EPOCH
+            .checked_add(Duration::from_secs(10_000_000_000_000))
+            .expect("constructing a far-future SystemTime for this test");
+
+        assert_eq!(mtime_nanos(far_future), i64::MAX);
+    }
+
+    #[test]
+    fn mtime_nanos_saturates_before_the_representable_range() {
+        let far_past = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(10_000_000_000_000))
+            .expect("constructing a far-past SystemTime for this test");
+
+        assert_eq!(mtime_nanos(far_past), i64::MIN);
     }
 }
