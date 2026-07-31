@@ -5,10 +5,14 @@
 //! indexing (D40), so the extra metadata pass is 0.1% of the work and buys the
 //! denominator a multi-hour job needs (spec §3).
 //!
-//! Phase 3 — reconciling `Walked::found` against what the index already holds
-//! and deleting what is genuinely gone — is not built here. `removed` on
-//! [`WalkReport`] stays `0` until it is.
+//! Phase 3 reconciles what the index already holds under the watched root
+//! against what a *complete* walk just saw, and deletes what is genuinely
+//! gone — a document only when its last path is, and its vectors with it
+//! (§7). It is the only code in this product that deletes anything, and it
+//! runs only once phase 1 and phase 2 both finished cleanly; see the gate at
+//! the top of phase 3, below, for exactly what that means.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -64,6 +68,14 @@ pub enum StopReason {
     /// about any *file* under it, so nothing is written to `skipped` for it —
     /// see the comment where this is checked, below.
     RootUnavailable,
+    /// Phase 3's own refusal, distinct from `RootUnavailable`: the root
+    /// itself was fine — phase 1 walked it and phase 2 ran every file it was
+    /// handed — but the walk named no file at all under a root the index
+    /// still holds paths for, which is indistinguishable from here from a
+    /// detached volume mounted empty at the same path (D33). Deletion is
+    /// refused rather than guessed at; the comment where this fires, in
+    /// `walk_root`, has the exact signature.
+    VolumeMissing,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +122,10 @@ pub struct WalkReport {
     /// show more than 100% before phase 2 read a single byte, which is
     /// exactly what a review probe measured here.
     pub refused: u64,
+    /// How many `path` rows phase 3 deleted because the file they named was
+    /// genuinely gone. Stays `0` whenever phase 3 refuses to run — an
+    /// incomplete walk, an early stop, or the unmount signature
+    /// (`StopReason::VolumeMissing`) — never as a sign nothing vanished.
     pub removed: u64,
     /// False if any entry under the root could not be read — an unreadable
     /// subdirectory, most commonly. From `found` alone, an unreadable
@@ -330,8 +346,163 @@ pub fn walk_root(
         });
     }
 
-    // Phase 3 lands in a later task.
+    // Phase 3. Deletions are applied only after a complete enumeration, and
+    // never during one: a walk that stopped half-way has not seen the whole
+    // folder, so what it did not see is not evidence of anything (§7).
+    //
+    // Gated on BOTH `walked.complete` and `report.stopped` — two different
+    // questions, and neither implies the other. `complete` says whether
+    // phase 1 read every entry under the root; `stopped` says whether phase 2
+    // was allowed to run to the end of what phase 1 handed it. Every early
+    // `return` above already makes `stopped == Completed` true by the time
+    // this line runs — this `match` re-derives that instead of trusting it,
+    // so a `StopReason` added later, or an early `return` moved past this
+    // point, has to be placed in this `match` rather than silently reopening
+    // deletion under a stop that does not mean "the walk finished, having
+    // seen the whole root".
+    let stopped_cleanly = match report.stopped {
+        StopReason::Completed => true,
+        StopReason::Cancelled
+        | StopReason::BrokenWorker
+        | StopReason::RulesNotApplied
+        | StopReason::RootUnavailable
+        | StopReason::VolumeMissing => false,
+    };
+    if !walked.complete || !stopped_cleanly {
+        return Ok(report);
+    }
+
+    let known = db.paths_under_root(root_id)?;
+
+    // The unmount signature (D33): a detached disk and a mass delete are
+    // indistinguishable from here, so the answer is a pause. Stated as a
+    // fact about `root` itself, not as a fraction — a fraction would be a
+    // number nothing here measured.
+    //
+    // Deliberately a RAW listing, taken with no exclusion rule applied at
+    // all, and not `walked.found` or anything else `Walked` carries.
+    // Measured directly: a rule that newly excludes the watched root's only
+    // file produces the identical `Walked` (found empty, skipped empty,
+    // complete true) as a root with genuinely nothing left on disk — an
+    // override-excluded entry is invisible to `enumerate` in exactly the
+    // same way a nonexistent one is, because the walker never descends into
+    // it either way. `a_newly_excluding_rule_removes_what_it_excludes` needs
+    // that walk to delete; `an_empty_root_deletes_nothing` needs the
+    // opposite call on the same `Walked` shape — so nothing inside `Walked`
+    // can be the fact this decision turns on, and this line exists because
+    // an earlier version of it read `walked.found.is_empty()` and failed the
+    // exclusion-rule test for exactly that reason.
+    //
+    // What differs between the two cases is what is actually sitting at
+    // `root`, read without any rule deciding what counts. A directory that
+    // legitimately holds nothing — an ejected volume's stub, a folder
+    // emptied by hand — has an empty top-level listing, full stop; a
+    // directory whose only content was just excluded still has an entry
+    // there, the walker simply declined to descend into it. A read failure
+    // counts as empty too: the conservative direction, a pause rather than a
+    // guess, for the same root that already earned `RootUnavailable` above
+    // had it vanished before phase 1 instead of during phase 3.
+    if root_is_empty(root) && !known.is_empty() {
+        report.stopped = StopReason::VolumeMissing;
+        return Ok(report);
+    }
+
+    // Presence, not absence — `PreSkipRule::NotMaterialised`'s own doc
+    // comment in `mnema-walk` states the obligation in those words.
+    // `NotMaterialised`, `NotAFile` and `NotAFileSubtree` do not clear
+    // `Walked::complete`, because declining a placeholder or a symlink is a
+    // decision, not a read failure — but the file is still there. Built from
+    // every pre-skip that carries a path, not filtered by which of the three
+    // rules produced it: entries with no path (`UnrepresentableName`, a
+    // walker error with nothing to peel) contribute nothing to a set keyed on
+    // path, so including them costs nothing, and excluding them by name would
+    // be a second place this list has to be kept in step with
+    // `mnema-walk`'s.
+    let seen: HashSet<&str> = walked
+        .found
+        .iter()
+        .map(|f| f.relative.as_str())
+        .chain(walked.skipped.iter().filter_map(|s| s.relative.as_deref()))
+        .collect();
+
+    // A symlink to a directory is a whole subtree the walk never entered —
+    // `PreSkipRule::NotAFileSubtree`'s own doc comment defers exactly this
+    // call to whoever reconciles. Its `relative` names the symlink itself,
+    // not anything beyond it, so about what used to live under that name —
+    // before it became a symlink — the walk has no evidence at all: not
+    // "absent", not "present". Treated as a path PREFIX rather than an exact
+    // path for that reason: a `known` path that predates the symlink has
+    // exactly that shape, and deleting it would be deleting on
+    // absence-of-evidence, which is precisely what §7 forbids.
+    let frozen_subtrees: Vec<&str> = walked
+        .skipped
+        .iter()
+        .filter(|s| s.rule == PreSkipRule::NotAFileSubtree)
+        .filter_map(|s| s.relative.as_deref())
+        .collect();
+
+    for relative in &known {
+        if seen.contains(relative.as_str()) || frozen_subtrees.iter().any(|p| under(relative, p)) {
+            continue;
+        }
+        let Some(entry) = db.path_entry(root_id, relative)? else {
+            continue;
+        };
+        // One path's removal, its document (when this was the last path
+        // naming it) and that document's vectors land together or not at
+        // all: a crash between them must not leave a document with zero
+        // paths, which is exactly what the randomised harness's first
+        // invariant forbids. Deliberately NOT one transaction for the whole
+        // loop — a large root would then hold the write lock for as long as
+        // the entire reconciliation takes, and `IngestError::Busy` exists
+        // because five seconds of that already measured as a problem for one
+        // ordinary write elsewhere in this crate.
+        db.transaction(|_| {
+            db.delete_path(root_id, relative)?;
+            // The document goes when its last path does, and only then. Two
+            // copies of one file are one document, so deleting a copy must
+            // leave it.
+            if db.path_count(&entry.document_id)? == 0 {
+                // vec0 cannot be the target of a foreign key (§7 item 2), so
+                // nothing cascades a document's vectors away on its own.
+                db.delete_vectors_for_document(&entry.document_id)?;
+                db.delete_document(&entry.document_id)?;
+            }
+            Ok(())
+        })?;
+        report.removed += 1;
+    }
+    // Journal rows for paths that no longer exist go with them, or the
+    // journal grows in the one dimension Task 6 did not close. Same `seen` as
+    // above, for the same reason: a pre-skip with a path is not evidence the
+    // file is gone, so its journal row must not be forgotten either.
+    db.forget_skips_not_in(root_id, &seen)?;
+
     Ok(report)
+}
+
+/// A raw top-level listing of `root`, with no exclusion rule applied at all —
+/// deliberately independent of `Walked`, which cannot tell an excluded entry
+/// apart from a nonexistent one. See the unmount-signature check in
+/// `walk_root`, this function's only caller, for why that distinction has to
+/// be made out here instead.
+///
+/// `true` on a read failure too, same as an empty directory: the
+/// conservative direction for a check whose whole job is choosing a pause
+/// over a guess.
+fn root_is_empty(root: &Path) -> bool {
+    std::fs::read_dir(root)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(true)
+}
+
+/// Whether `relative` names something inside the subtree `prefix` names —
+/// prefix-plus-separator, not a bare string prefix: `"linked_dirs/x"` must not
+/// match against `"linked_dir"`.
+fn under(relative: &str, prefix: &str) -> bool {
+    relative
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// What one call to [`ingest_with_busy_retry`] settled.

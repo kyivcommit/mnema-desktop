@@ -2,9 +2,9 @@
 //! real worker process, the real supervisor, and the real database.
 //!
 //! Phase 3 — reconciling what the walk found against what the index already
-//! holds, and deleting what is genuinely gone — is not this crate's yet
-//! (spec §6, reserved for a later task). Nothing here writes a test that
-//! needs it, and nothing here calls anything that deletes a `path` row.
+//! holds, and deleting what is genuinely gone — is exercised here too: the
+//! section below marked "reconciliation" calls `f.remove` and then walks
+//! again, which is the only way anything in this crate deletes a `path` row.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +14,7 @@ use mnema_index::{Db, open};
 use mnema_ingest::{StopReason, WalkReport, walk_root};
 use mnema_pool::{Pool, PoolConfig};
 use mnema_walk::WalkRules;
+use sha2::{Digest, Sha256};
 
 // `worker` and `wrong_worker` live here, shared with `slice.rs` — see that
 // module's own doc comment for why a second, per-file resolver is exactly
@@ -112,6 +113,31 @@ impl Fixture {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    /// Deletes a file the fixture previously wrote, the way a user deleting
+    /// it from their own disk would — nothing about this touches the index;
+    /// only the next `walk()` does.
+    fn remove(&self, relative: &str) {
+        std::fs::remove_file(self.dir().join(relative)).unwrap();
+    }
+
+    /// `document.id` is the sha256 of the file's bytes
+    /// (`crates/mnema-extract/src/bin/worker.rs`), read straight off disk
+    /// rather than out of the index — asking the index what it thinks a
+    /// document's id is would be the index marking its own work.
+    fn document_id_of(&self, relative: &str) -> String {
+        use std::fmt::Write as _;
+        let bytes = std::fs::read(self.dir().join(relative)).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        hasher
+            .finalize()
+            .iter()
+            .fold(String::with_capacity(64), |mut s, b| {
+                let _ = write!(s, "{b:02x}");
+                s
+            })
     }
 
     fn walk(&self) -> WalkReport {
@@ -751,4 +777,282 @@ fn a_missing_root_is_named_apart_from_an_empty_folder() {
         f.db.skips_for_root(f.root).unwrap().is_empty(),
         "a missing root is not a fact about any one file, so it must not be journalled as one"
     );
+}
+
+// ------------------------------------------------------------ reconciliation
+
+/// A file the user deleted stops answering. Nothing else does.
+#[test]
+fn a_vanished_file_leaves_no_path_row() {
+    let f = Fixture::new();
+    f.write("gone.txt", "gone content");
+    f.write("stays.txt", "stays content");
+    f.walk();
+
+    f.remove("gone.txt");
+    let report = f.walk();
+
+    assert_eq!(report.removed, 1);
+    assert!(f.db.path_entry(f.root, "gone.txt").unwrap().is_none());
+    assert!(f.db.path_entry(f.root, "stays.txt").unwrap().is_some());
+    assert!(f.db.search_lexical("gone", 10).unwrap().is_empty());
+    assert!(!f.db.search_lexical("stays", 10).unwrap().is_empty());
+}
+
+/// Two copies of one file are one document (content addressing). Deleting one
+/// copy must not take the document with it — the invariant the randomised
+/// harness states as "a document disappears only when its last path did".
+#[test]
+fn deleting_one_copy_keeps_the_document() {
+    let f = Fixture::new();
+    f.write("a.txt", "same bytes");
+    f.write("b.txt", "same bytes");
+    f.walk();
+
+    f.remove("a.txt");
+    f.walk();
+
+    assert_eq!(f.db.path_count(&f.document_id_of("b.txt")).unwrap(), 1);
+    assert!(!f.db.search_lexical("same", 10).unwrap().is_empty());
+}
+
+/// An unmounted volume and a mass delete look identical from here, and D33 says
+/// the answer is a pause. Zero files under a root the index holds paths for is
+/// the unmount signature — a fact, not a threshold, chosen deliberately so that
+/// no invented fraction decides whether a user loses their index.
+#[test]
+fn an_empty_root_deletes_nothing() {
+    let f = Fixture::new();
+    f.write("a.txt", "content");
+    f.write("b.txt", "content two");
+    f.walk();
+
+    f.remove("a.txt");
+    f.remove("b.txt");
+    let report = f.walk();
+
+    assert_eq!(report.removed, 0);
+    assert_eq!(report.stopped, StopReason::VolumeMissing);
+    assert_eq!(f.db.paths_under_root(f.root).unwrap().len(), 2);
+}
+
+/// A walk that was cancelled has not seen the whole folder, so its list of
+/// "files that were not there" is not evidence of anything.
+#[test]
+fn a_cancelled_walk_deletes_nothing() {
+    let f = Fixture::new();
+    for i in 0..10 {
+        f.write(&format!("f{i}.txt"), "x");
+    }
+    f.walk();
+    f.remove("f0.txt");
+
+    let cancel = AtomicBool::new(false);
+    let mut seen = 0;
+    let report = walk_root(
+        &f.pool,
+        &f.db,
+        f.root,
+        f.dir(),
+        &WalkRules::none(),
+        &cancel,
+        &mut |_| {
+            seen += 1;
+            if seen == 2 {
+                cancel.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.removed, 0);
+    assert!(f.db.path_entry(f.root, "f0.txt").unwrap().is_some());
+}
+
+/// A rule that newly excludes an indexed file removes it. Otherwise "I excluded
+/// that folder" does not mean "it is no longer findable" (§5).
+#[test]
+fn a_newly_excluding_rule_removes_what_it_excludes() {
+    let f = Fixture::new();
+    f.write("private/secret.txt", "confidential text");
+    f.walk_with(&WalkRules::none());
+    assert!(!f.db.search_lexical("confidential", 10).unwrap().is_empty());
+
+    f.walk_with(&WalkRules::new(false, false, vec!["private".into()]).unwrap());
+
+    assert!(f.db.search_lexical("confidential", 10).unwrap().is_empty());
+}
+
+/// An incomplete walk has not seen the whole folder — an unreadable
+/// subdirectory is, from `found` alone, indistinguishable from an empty one —
+/// so a file that genuinely vanished elsewhere under the same root must not
+/// be deleted on the strength of a walk that did not finish looking.
+/// `complete_is_false_when_a_subdirectory_could_not_be_read` (above) pins
+/// `WalkReport::complete` itself; this pins that phase 3 actually reads it.
+#[cfg(unix)]
+#[test]
+fn an_incomplete_walk_deletes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    f.write("gone.txt", "gone content");
+    let locked = f.dir().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("inside.txt"), "secret").unwrap();
+    f.walk();
+
+    f.remove("gone.txt");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let root_can_still_read = std::fs::read_dir(&locked).is_ok();
+    if root_can_still_read {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipped an_incomplete_walk_deletes_nothing: running as root, chmod 000 has no effect"
+        );
+        return;
+    }
+
+    let report = f.walk();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        !report.complete,
+        "the locked subdirectory must break completeness"
+    );
+    assert_eq!(
+        report.removed, 0,
+        "an incomplete walk must delete nothing, even a file it is certain vanished"
+    );
+    assert!(
+        f.db.path_entry(f.root, "gone.txt").unwrap().is_some(),
+        "gone.txt must survive an incomplete walk despite being gone from disk"
+    );
+}
+
+/// A pre-skip that carries a path is presence, not absence
+/// (`PreSkipRule::NotMaterialised`'s own doc comment in `mnema-walk` states
+/// the obligation in those words, and it binds every pre-skip rule that
+/// carries a path, not only that one). A symlink is the easiest of them to
+/// construct in a test: once a previously-indexed name is taken over by a
+/// symlink to a file, the walk still names it — as a `NotAFile` pre-skip,
+/// never as `found` — and reconciliation must read that as "still there,
+/// untouched", not as "gone".
+#[cfg(unix)]
+#[test]
+fn a_symlink_over_a_former_file_does_not_delete_it() {
+    use std::os::unix::fs::symlink;
+
+    let f = Fixture::new();
+    f.write("elsewhere.txt", "elsewhere content");
+    f.write("doc.txt", "docmarker text");
+    f.walk();
+    assert!(!f.db.search_lexical("docmarker", 10).unwrap().is_empty());
+
+    f.remove("doc.txt");
+    symlink(f.dir().join("elsewhere.txt"), f.dir().join("doc.txt")).unwrap();
+    let report = f.walk();
+
+    assert_eq!(
+        report.removed, 0,
+        "doc.txt is now a NotAFile pre-skip with a path, not an absence"
+    );
+    assert!(f.db.path_entry(f.root, "doc.txt").unwrap().is_some());
+    assert!(!f.db.search_lexical("docmarker", 10).unwrap().is_empty());
+}
+
+/// A symlink to a directory is a whole subtree the walk never enters
+/// (`PreSkipRule::NotAFileSubtree`). Its `relative` names only the symlink,
+/// so a `known` path that used to sit under a real directory of the same
+/// name — before it became this symlink — carries no evidence either way,
+/// and deleting it would be deleting on absence-of-evidence, which §7
+/// forbids. Distinct from the test above: there `seen` names the exact path;
+/// here nothing does, and only prefix treatment protects it.
+#[cfg(unix)]
+#[test]
+fn a_directory_symlink_protects_what_used_to_be_inside_it() {
+    use std::os::unix::fs::symlink;
+
+    let f = Fixture::new();
+    f.write("linked/inner.txt", "inner content");
+    f.walk();
+    assert!(!f.db.search_lexical("inner", 10).unwrap().is_empty());
+
+    std::fs::remove_dir_all(f.dir().join("linked")).unwrap();
+    let elsewhere = f.dir().join("elsewhere_dir");
+    std::fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, f.dir().join("linked")).unwrap();
+    let report = f.walk();
+
+    assert_eq!(
+        report.removed, 0,
+        "linked/inner.txt has no evidence either way, so it must not be deleted"
+    );
+    assert!(
+        f.db.path_entry(f.root, "linked/inner.txt")
+            .unwrap()
+            .is_some()
+    );
+    assert!(!f.db.search_lexical("inner", 10).unwrap().is_empty());
+}
+
+/// `vec0` cannot be the target of a foreign key (spec §7 item 2), so nothing
+/// under `document`'s `ON DELETE CASCADE` reaches a vector table — a document
+/// that reconciliation deletes must have `Db::delete_vectors_for_document`
+/// called for it explicitly, or its vectors outlive their chunks silently.
+///
+/// Nothing in the product writes a vector yet under D29 (no embedder exists),
+/// which is exactly why `delete_document` never had to reach them before this
+/// task. Executable now rather than an assertion that only turns red once an
+/// embedder exists: builds a real space, inserts a real vector against a real
+/// chunk this walk produced, deletes the file, and reads the vector table
+/// back directly.
+#[test]
+fn reconciliation_deletes_the_documents_vectors_too() {
+    let f = Fixture::new();
+    f.write("vectored.txt", "vectored content");
+    // `stays.txt` is what keeps the root from looking empty once
+    // `vectored.txt` is gone — with only one file, deleting it would trip
+    // the unmount signature (`root_is_empty`, in `src/walk.rs`) and phase 3
+    // would correctly refuse to run at all, which is a different behaviour
+    // than the one this test means to pin.
+    f.write("stays.txt", "stays content");
+    f.walk();
+
+    let document_id = f.document_id_of("vectored.txt");
+    let chunk_ids: Vec<i64> =
+        f.db.conn()
+            .prepare("SELECT id FROM chunk WHERE document_id = ?1")
+            .unwrap()
+            .query_map([document_id.as_str()], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+    assert!(
+        !chunk_ids.is_empty(),
+        "the file must have produced at least one chunk to make this test mean anything"
+    );
+
+    let cfg =
+        f.db.create_model_config("test-model", "openrouter", None, "baai/bge-m3", 4)
+            .unwrap();
+    let space = f.db.create_space(cfg, 4, "chunker-v1").unwrap();
+    for (i, chunk_id) in chunk_ids.iter().enumerate() {
+        f.db.insert_vector(space, *chunk_id, &[1.0, 0.0, 0.0, i as f32])
+            .unwrap();
+    }
+    let table = format!("vec_emb_{space}");
+    let count_before: i64 =
+        f.db.conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(count_before, chunk_ids.len() as i64);
+
+    f.remove("vectored.txt");
+    f.walk();
+
+    let count_after: i64 =
+        f.db.conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(count_after, 0, "the document's vectors must not outlive it");
 }

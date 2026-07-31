@@ -127,6 +127,21 @@ impl Db {
         )?)
     }
 
+    /// Every path the index currently holds under one watched root, sorted.
+    ///
+    /// What reconciliation (`mnema-ingest`'s phase 3) compares a completed
+    /// walk's own findings against: a relative path in this list that the
+    /// walk did not see is a candidate for deletion, never the other
+    /// direction — a path the walk found that is missing from this list is
+    /// simply new.
+    pub fn paths_under_root(&self, root: i64) -> Result<Vec<String>, Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT relative_path FROM path WHERE watched_root_id = ?1 ORDER BY relative_path",
+        )?;
+        let rows = stmt.query_map(params![root], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn document_exists(&self, document_id: &str) -> Result<bool, Error> {
         let n: i64 = self.conn().query_row(
             "SELECT count(*) FROM document WHERE id = ?1",

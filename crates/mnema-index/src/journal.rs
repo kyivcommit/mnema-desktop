@@ -6,6 +6,8 @@
 //! job can resume from. Before this file all three tables existed with no
 //! writer anywhere.
 
+use std::collections::HashSet;
+
 use mnema_core::OnDisk;
 use rusqlite::{OptionalExtension, params};
 
@@ -354,6 +356,30 @@ impl Db {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Removes skip rows under `root_id` whose path is not in `seen`, and
+    /// returns how many were removed.
+    ///
+    /// `seen` must be built the same way reconciliation builds it for `path`
+    /// (`mnema-ingest`'s `walk_root`, phase 3): `Walked::found` plus every
+    /// pre-skip that carries a path — never `found` alone. A pre-skip with a
+    /// path (`NotMaterialised`, `NotAFile`, `NotAFileSubtree`) means the file
+    /// is still there and the walk chose not to touch it, not that it is
+    /// gone. Forgetting its skip row on the strength of `found` alone would
+    /// erase the very explanation `record_skip` exists to keep — and since
+    /// the file is untouched, the very next walk offers the same file to the
+    /// journal again, so "why is this file not in my index?" would have an
+    /// answer that deletes itself and comes back on every single walk.
+    pub fn forget_skips_not_in(&self, root_id: i64, seen: &HashSet<&str>) -> Result<u64, Error> {
+        let list = serde_json::to_string(seen)?;
+        let n = self.conn().execute(
+            "DELETE FROM skipped
+              WHERE watched_root_id = ?1
+                AND relative_path NOT IN (SELECT value FROM json_each(?2))",
+            params![root_id, list],
+        )?;
+        Ok(n as u64)
     }
 
     /// Sets a document's lifecycle status.

@@ -215,6 +215,49 @@ impl Db {
         rows.collect::<Result<Vec<i64>, _>>().map_err(Error::from)
     }
 
+    /// Removes every vector — across every embedding space, not only the
+    /// current one — that belongs to one document's chunks.
+    ///
+    /// A `vec0` table cannot be the target of a foreign key (G7.0 §5.7), so
+    /// nothing about `document`'s `ON DELETE CASCADE` reaches these tables
+    /// when a document goes: without this, a vector would outlive the chunk
+    /// it embeds, silently, and nothing downstream would ever notice a
+    /// `vec_emb_<n>` row naming a `chunk_id` no chunk owns any more.
+    /// Reconciliation (`mnema-ingest`'s phase 3) is the first code path in
+    /// this product that deletes a document at all, which is why this had no
+    /// caller until now — see that crate's `walk.rs` for the one that does.
+    ///
+    /// Must run BEFORE the document (and, by cascade, its chunks) is
+    /// deleted: once they are gone there is no `chunk.document_id` left to
+    /// look their ids up by. Every space is swept, not only whichever is
+    /// "current": an older space, left behind by a retired model
+    /// configuration, can still hold vectors for chunks that were never
+    /// re-embedded into a newer one — `drop_space` is the mechanism for
+    /// retiring a whole space at once, this is the mechanism for one
+    /// document leaving every space it was ever in.
+    pub fn delete_vectors_for_document(&self, document_id: &str) -> Result<(), Error> {
+        let tables: Vec<String> = self
+            .conn()
+            .prepare("SELECT vec_table FROM embedding_space")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for table in tables {
+            // `table` is never caller text: it comes only from
+            // `embedding_space.vec_table`, which the schema's own CHECK pins
+            // to `'vec_emb_' || id` and only `create_space` ever writes —
+            // the same reasoning `knn` and `insert_vector` already rely on
+            // for interpolating a table name into SQL.
+            self.conn().execute(
+                &format!(
+                    "DELETE FROM {table}
+                      WHERE chunk_id IN (SELECT id FROM chunk WHERE document_id = ?1)"
+                ),
+                params![document_id],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Drops the space and its vector table. Dropping is the mechanism for a
     /// model change; per-row DELETE is the mechanism for an edited file. G7.0 §5.7.
     pub fn drop_space(&self, space_id: i64) -> Result<(), Error> {
