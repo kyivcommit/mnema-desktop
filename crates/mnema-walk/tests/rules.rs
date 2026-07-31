@@ -1,4 +1,4 @@
-use mnema_walk::{WalkRules, enumerate};
+use mnema_walk::{RulesError, WalkRules, enumerate};
 use std::fs;
 
 /// The trap this test exists for: `ignore`'s `require_git` defaults to TRUE, so
@@ -154,19 +154,174 @@ fn a_user_prefix_excludes_a_name_with_glob_metacharacters_literally() {
     assert_eq!(names, ["Photos 2024/b.jpg"]);
 }
 
-/// `globset::escape` escapes every glob metacharacter except a trailing
-/// backslash — itself a glob escape character — so a prefix ending in one
-/// still fails to compile even after escaping. `WalkRules::new` is where
-/// that has to be caught: it is the only place left with a human in front of
-/// it who can fix the rule (review fix round 1, Critical finding).
+/// `globset::escape` does not touch `\` at all, and the pattern engine
+/// compiles every glob with backslash-escape semantics unconditionally
+/// (`gitignore.rs`), so a `\` ANYWHERE in a prefix — not only trailing —
+/// is read as an escape character. `a\bee` used to compile to the literal
+/// `abee`: the excluded folder survived, and an unrelated `abee/` was
+/// removed in its place. Both halves: the well-formed prefix (no
+/// backslash) excludes correctly; the backslash-containing one is refused
+/// outright rather than silently compiling to a rule for a different name
+/// (review fix round 2, Critical finding).
 #[test]
-fn a_prefix_that_cannot_compile_is_refused_by_new() {
-    let result = WalkRules::new(false, false, vec!["secret\\".to_string()]);
+fn a_prefix_containing_a_backslash_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("abee")).unwrap();
+    fs::write(root.path().join("abee/f.txt"), b"x").unwrap();
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["abee".to_string()]).unwrap(),
+    );
+    assert!(
+        walked.found.is_empty(),
+        "the well-formed prefix excludes its own folder"
+    );
+
+    let result = WalkRules::new(false, false, vec!["a\\bee".to_string()]);
+    assert!(
+        matches!(result, Err(RulesError::ContainsBackslash { .. })),
+        "a backslash mid-prefix must be refused, not silently compiled into a rule for `abee`"
+    );
+}
+
+/// The pattern engine silently trims trailing whitespace off a line unless
+/// it ends in an escaped space, which nothing here ever emits — so a
+/// prefix naming a folder with a trailing space used to compile to a
+/// pattern for the SAME name without one. Both halves: the well-formed
+/// prefix excludes correctly; the one with trailing whitespace is refused
+/// (review fix round 2, Critical finding).
+#[test]
+fn a_prefix_with_trailing_whitespace_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("Photos")).unwrap();
+    fs::write(root.path().join("Photos/f.txt"), b"x").unwrap();
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["Photos".to_string()]).unwrap(),
+    );
+    assert!(
+        walked.found.is_empty(),
+        "the well-formed prefix excludes its own folder"
+    );
+
+    let result = WalkRules::new(false, false, vec!["Photos ".to_string()]);
+    assert!(
+        matches!(result, Err(RulesError::TrailingWhitespace { .. })),
+        "trailing whitespace must be refused, not silently trimmed into a rule for `Photos`"
+    );
+}
+
+/// A leading `./` is the ordinary "this directory" idiom — genuinely
+/// relative once it is dropped — so it is normalised rather than refused,
+/// unlike the other three forms in this round. Before the fix, `./private`
+/// stayed `./private` in the compiled pattern, which (since real relative
+/// paths from the walk never start with `./`) matched nothing at all: the
+/// rule silently excluded no files while `new` still returned `Ok` (review
+/// fix round 2, Critical finding).
+#[test]
+fn a_leading_dot_slash_is_normalised_not_refused() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("private")).unwrap();
+    fs::write(root.path().join("private/a.txt"), b"x").unwrap();
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["./private".to_string()]).unwrap(),
+    );
 
     assert!(
-        result.is_err(),
-        "a trailing backslash is a dangling glob escape even after `globset::escape`; \
-         `new` must refuse it rather than accept a rule that will silently fail later"
+        walked.found.is_empty(),
+        "`./private` must exclude exactly what `private` excludes, not match nothing"
+    );
+}
+
+/// An absolute filesystem path — the shape a folder picker or a path
+/// pasted from Finder produces — compiles to a pattern that can only ever
+/// match the beginning of a path relative to the watched root, which an
+/// absolute path never is. Before the fix, `WalkRules::new` trimmed only
+/// surrounding `/` characters, so `/Users/example/private` silently
+/// degraded to `Users/example/private`: a rule that excludes nothing,
+/// forever, under any real watched root, while still returning `Ok`. Both
+/// halves: the relative prefix excludes correctly; the absolute one is
+/// refused (review fix round 2, Critical finding).
+#[test]
+fn an_absolute_prefix_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("private")).unwrap();
+    fs::write(root.path().join("private/a.txt"), b"x").unwrap();
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["private".to_string()]).unwrap(),
+    );
+    assert!(
+        walked.found.is_empty(),
+        "the well-formed, relative prefix excludes its own folder"
+    );
+
+    let result = WalkRules::new(false, false, vec!["/Users/example/private".to_string()]);
+    assert!(
+        matches!(result, Err(RulesError::AbsolutePrefix { .. })),
+        "an absolute path must be refused, not silently compiled into a rule that matches nothing"
+    );
+}
+
+/// Without an explicit root anchor, the pattern engine prepends `**/` to
+/// any pattern with no `/` in it at all, matching at every depth instead of
+/// only the root — so a one-component rule `private` used to also remove
+/// `Work/deep/deeper/private/`, which is more than the user asked for and,
+/// because a removed rule deletes on the next walk, the dangerous direction
+/// to get wrong (review fix round 2, Important finding).
+#[test]
+fn a_one_component_user_prefix_is_anchored_to_the_root_only() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["private/a.txt", "Work/deep/deeper/private/b.txt"] {
+        let path = root.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"x").unwrap();
+    }
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["private".to_string()]).unwrap(),
+    );
+    let names: Vec<&str> = walked.found.iter().map(|f| f.relative.as_str()).collect();
+
+    assert!(
+        !names.contains(&"private/a.txt"),
+        "the root-level `private/` is still excluded"
+    );
+    assert!(
+        names.contains(&"Work/deep/deeper/private/b.txt"),
+        "a one-component rule must not remove `private` at other depths"
+    );
+}
+
+/// A pattern with a `/` in it was already anchored to the root before this
+/// fix — pinned here so the leading `/` `anchored_pattern` now adds to
+/// every prefix does not change that (review fix round 2, Important
+/// finding).
+#[test]
+fn a_multi_component_user_prefix_is_anchored_to_the_root_too() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["Work/private/a.txt", "Elsewhere/Work/private/b.txt"] {
+        let path = root.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"x").unwrap();
+    }
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["Work/private".to_string()]).unwrap(),
+    );
+    let names: Vec<&str> = walked.found.iter().map(|f| f.relative.as_str()).collect();
+
+    assert!(!names.contains(&"Work/private/a.txt"));
+    assert!(
+        names.contains(&"Elsewhere/Work/private/b.txt"),
+        "a multi-component rule is anchored to the root too, not matched at any depth"
     );
 }
 
@@ -211,5 +366,38 @@ fn rules_applied_is_false_when_the_combined_rule_set_is_too_large() {
     assert!(
         !walked.rules_applied,
         "the combined override set should have failed to build"
+    );
+}
+
+/// The pathological shape above (5 giant prefixes) pins that a size limit
+/// exists at all, but not where the realistic threshold is: review fix
+/// round 2 measured that the failure point depends on whether prefixes
+/// carry a glob metacharacter, not on their length, because a pure literal
+/// routes to a matching strategy with no size limit. Ordinary-shaped
+/// names — the kind an import or a sync path full of `Photos [2023]`-style
+/// folders produces — DO have one: measured against this code, the
+/// aggregate flips to `false` somewhere between 13,000 and 13,500 prefixes
+/// of about 21 characters each, one bracket pair apiece. 16,000 gives
+/// comfortable margin while staying a realistic rule-list size, not a
+/// deliberately pathological one — a change that halved the real threshold
+/// would still redden this test even though it would leave the pathological
+/// one above untouched.
+#[test]
+fn rules_applied_is_false_at_a_realistic_prefix_count() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("kept.txt"), b"x").unwrap();
+
+    let prefixes: Vec<String> = (0..16_000)
+        .map(|i| format!("folder[{i:05}]abcdefg"))
+        .collect();
+    let rules = WalkRules::new(false, false, prefixes)
+        .expect("each ordinary-shaped prefix compiles fine on its own");
+
+    let walked = enumerate(root.path(), &rules);
+
+    assert!(
+        !walked.rules_applied,
+        "an ordinary-shaped rule list of realistic length should overflow the pattern engine \
+         in aggregate too, not only a deliberately pathological one"
     );
 }

@@ -8,7 +8,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod rules;
-pub use rules::WalkRules;
+// `RulesError` has to be nameable outside this crate: `WalkRules::new`
+// returns it, and a caller with a save dialog in front of a person needs to
+// match on it or put it in a signature, not just observe that `new` failed
+// (review fix round 2, Critical finding — this line was the whole gap).
+pub use rules::{RulesError, WalkRules};
 
 // Defined in the shared-types crate, re-exported here so a caller that only
 // deals with the walk can name it without a second dependency.
