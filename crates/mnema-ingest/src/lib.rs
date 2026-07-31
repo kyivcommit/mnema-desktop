@@ -26,14 +26,13 @@
 //!   character offset, and the chunker is what produces them; nothing here
 //!   recomputes one.
 
-use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
 use mnema_core::{Block, BlockType, SourceKind};
 use mnema_index::{Db, DocumentStatus, PathEntry, SkipRule};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
+use mnema_walk::OnDisk;
 
 /// The stage `ingest_stage` records once a document's chunks are written.
 ///
@@ -145,12 +144,22 @@ impl From<mnema_index::Error> for IngestError {
 ///    that is new is where the file sits.
 /// 4. The write, one transaction per slice of pages.
 /// 5. The checkpoint, so that step 3 can answer next time.
+///
+/// `on_disk` is the walk's own stat, handed in rather than taken here. `None`
+/// means the walk could not stat the file at all, which is the same state the
+/// local `stat` used to express by returning `None`.
+///
+/// One reading, not two: between a stat taken by the walk and a stat taken
+/// here the file can change, and then the walk counted one size while this
+/// compared another. The difference never surfaces as an error — only as an
+/// index holding a previous version of a file it believes it re-read (§5).
 pub fn ingest_file(
     pool: &Pool,
     db: &Db,
     root_id: i64,
     absolute: &Path,
     relative: &str,
+    on_disk: Option<OnDisk>,
 ) -> Result<Ingested, IngestError> {
     // 1. The cheap arm. A failure to stat is not decided here: the pool names
     //    an unreadable file properly, with the rule and the reason the journal
@@ -177,7 +186,6 @@ pub fn ingest_file(
     //
     //    It costs one lookup on a `WITHOUT ROWID` primary key per unchanged
     //    file, against the worker process it is here to avoid.
-    let on_disk = stat(absolute);
     let recorded = db.path_entry(root_id, relative)?;
     if let Some(disk) = on_disk
         && let Some(recorded) = &recorded
@@ -214,16 +222,21 @@ pub fn ingest_file(
     // before it — see `repoint`.
     let displaced = recorded.as_ref().map(|entry| entry.document_id.clone());
 
-    // The worker read the file, so it was there a moment ago. Measuring it is
-    // still a separate syscall that can fail — and `document.size_bytes` is
-    // NOT NULL, so a document that cannot be measured cannot be written.
-    let Some(disk) = on_disk.or_else(|| stat(absolute)) else {
+    // The worker read the file, so it was there a moment ago — but this crate
+    // no longer stats it a second time to find out (§5, and the doc comment on
+    // `mnema_walk`). There used to be a fallback re-stat here, for the case
+    // where the walk's own stat had failed a moment before the worker's read
+    // succeeded; giving that up means such a file is now always skipped
+    // rather than sometimes recovered by a second, different-in-kind read.
+    // `document.size_bytes` is NOT NULL, so a document with no measurement at
+    // all still cannot be written.
+    let Some(disk) = on_disk else {
         let rule = SkipRule::Unreadable;
         record_skip(
             db,
             root_id,
             relative,
-            "the file was read but could not be measured, so its size and mtime are unknown",
+            "the walk could not measure this file, so its size and mtime are unknown",
             rule,
             &recorded,
             on_disk,
@@ -681,42 +694,6 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
         .collect()
 }
 
-/// What the `path` row records about a file, measured from the disk.
-#[derive(Debug, Clone, Copy)]
-struct OnDisk {
-    size_bytes: i64,
-    mtime: i64,
-}
-
-/// Measures a file, or reports nothing at all.
-///
-/// `Option`, not `Result`: nothing here decides a file's fate, and the reason
-/// a stat failed is the pool's to name.
-fn stat(path: &Path) -> Option<OnDisk> {
-    let metadata = fs::metadata(path).ok()?;
-    Some(OnDisk {
-        size_bytes: i64::try_from(metadata.len()).ok()?,
-        mtime: mtime_nanos(metadata.modified().ok()?)?,
-    })
-}
-
-/// A modification time as nanoseconds since the Unix epoch, negative before it.
-///
-/// Nanoseconds rather than whole seconds, and the difference is the whole
-/// value of the cheap arm: at second granularity a file edited twice within
-/// one second, to the same length, is indistinguishable from an untouched one
-/// and is never re-indexed. A filesystem that only keeps whole seconds (FAT,
-/// and older Linux filesystems) simply reports zeros in the low digits, which
-/// is no worse than storing seconds would have been.
-///
-/// `i64` overflows in the year 2262, which is a limit worth naming rather than
-/// hiding: `None` there, so the caller falls back to reading the file instead
-/// of comparing a truncated number.
-fn mtime_nanos(modified: SystemTime) -> Option<i64> {
-    match modified.duration_since(UNIX_EPOCH) {
-        Ok(since) => i64::try_from(since.as_nanos()).ok(),
-        Err(before) => i64::try_from(before.duration().as_nanos())
-            .ok()
-            .map(|nanos| -nanos),
-    }
-}
+// `OnDisk`, `stat` and `mtime_nanos` used to live here. Retired in favour of
+// `mnema_walk::{OnDisk, stat}` (§5): the walk is the only place that looks at
+// the disk, and this crate now only ever compares the numbers it is handed.

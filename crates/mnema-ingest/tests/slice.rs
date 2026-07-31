@@ -180,7 +180,15 @@ impl Fixture {
     /// and `ingest` is the right call.
     fn try_ingest(&self, relative: &str) -> Result<Ingested, mnema_ingest::IngestError> {
         let absolute = self.root.join(relative);
-        ingest_file(&self.pool, &self.db, self.root_id, &absolute, relative)
+        let on_disk = mnema_walk::stat(&absolute);
+        ingest_file(
+            &self.pool,
+            &self.db,
+            self.root_id,
+            &absolute,
+            relative,
+            on_disk,
+        )
     }
 
     /// The same index, walked by a pool built differently — a lowered ceiling,
@@ -198,13 +206,9 @@ impl Fixture {
         config: PoolConfig,
     ) -> Result<Ingested, mnema_ingest::IngestError> {
         let pool = Pool::new(config).unwrap();
-        ingest_file(
-            &pool,
-            &self.db,
-            self.root_id,
-            &self.root.join(relative),
-            relative,
-        )
+        let absolute = self.root.join(relative);
+        let on_disk = mnema_walk::stat(&absolute);
+        ingest_file(&pool, &self.db, self.root_id, &absolute, relative, on_disk)
     }
 
     fn ingest_under_ceiling(&self, relative: &str, max_bytes: u64) -> Ingested {

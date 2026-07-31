@@ -21,6 +21,9 @@ mnema-core = { path = "../mnema-core" }
 mnema-index = { path = "../mnema-index" }
 mnema-pool = { path = "../mnema-pool" }
 mnema-chunk = { path = "../mnema-chunk" }
+# The walk is the only thing that looks at the disk: it hands `OnDisk` in, and
+# this crate no longer stats a file it is about to read (§5).
+mnema-walk = { path = "../mnema-walk" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

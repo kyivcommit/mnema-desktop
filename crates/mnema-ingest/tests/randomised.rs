@@ -523,7 +523,18 @@ impl World {
         let before = self.paths_now();
         let hash = self.hash_on_disk(relative);
         let absolute = self.absolute(relative);
-        let outcome = ingest_file(&self.pool, &self.db, self.root_id, &absolute, relative);
+        // The harness is modelling the disk here, exactly the role the walk
+        // plays in production — so it is `mnema_walk::stat`, not a second
+        // reading of its own, that it hands to `ingest_file` (§5).
+        let on_disk = mnema_walk::stat(&absolute);
+        let outcome = ingest_file(
+            &self.pool,
+            &self.db,
+            self.root_id,
+            &absolute,
+            relative,
+            on_disk,
+        );
         self.record(relative, hash, outcome, how);
         self.check(&before);
     }
@@ -543,7 +554,8 @@ impl World {
         let before = self.paths_now();
         let hash = self.hash_on_disk(relative);
         let absolute = self.absolute(relative);
-        let outcome = ingest_file(&pool, &self.db, self.root_id, &absolute, relative);
+        let on_disk = mnema_walk::stat(&absolute);
+        let outcome = ingest_file(&pool, &self.db, self.root_id, &absolute, relative, on_disk);
         self.record(relative, hash, outcome, how);
         self.check(&before);
         self.remember_settled();
