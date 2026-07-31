@@ -79,6 +79,39 @@ pub enum StopReason {
     VolumeMissing,
 }
 
+/// Why reconciliation refused to delete a `known` path the walk did not
+/// find — always a statement that the walk has no evidence OF deletion,
+/// never a statement that the file is confirmed to still be there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrozenReason {
+    /// A symlink to a directory: the walk never entered it
+    /// (`PreSkipRule::NotAFileSubtree`), so it has no evidence at all about
+    /// what used to live under that name before it became a symlink.
+    SymlinkedSubtree,
+    /// A directory that read as holding nothing — the same ambiguity D33
+    /// names for the watched root itself (`StopReason::VolumeMissing`),
+    /// one level down: an unmounted share and a folder emptied by hand are
+    /// the same shape from here, and this product answers both by pausing
+    /// rather than guessing. Does not self-heal on its own: a folder
+    /// emptied, not deleted, reads exactly the same on every later walk
+    /// too, because nothing here re-examines a shape that never changes.
+    EmptyDirectory,
+    /// `read_dir` on the directory failed for a reason other than "it does
+    /// not exist" — most likely permission denied. Treated the same as
+    /// `EmptyDirectory`: the conservative side, chosen over guessing.
+    UnreadableDirectory,
+}
+
+/// One prefix reconciliation refused to delete anything under, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frozen {
+    /// Relative to the watched root, `/`-separated — the same form
+    /// `Found::relative` and `path.relative_path` use. Every `known` path
+    /// equal to this, or starting with it followed by `/`, was left alone.
+    pub prefix: String,
+    pub why: FrozenReason,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WalkProgress {
     pub done: u64,
@@ -95,7 +128,7 @@ pub struct WalkProgress {
     pub refused: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkReport {
     /// How many files phase 1 handed to phase 2 — the ones that became a
     /// worker request, a cheap-arm hit, or a phase-2 skip. Does **not**
@@ -128,6 +161,21 @@ pub struct WalkReport {
     /// incomplete walk, an early stop, or the unmount signature
     /// (`StopReason::VolumeMissing`) — never as a sign nothing vanished.
     pub removed: u64,
+    /// Every prefix phase 3 refused to delete under, and why — the answer
+    /// to "why does this file, gone from my disk, still show up in
+    /// search?" for exactly the case `removed` alone cannot answer,
+    /// because `removed` counts only what phase 3 DID delete. Always empty
+    /// whenever phase 3 refused to run at all (mirrors `removed`'s own
+    /// rule) — but also empty on an ordinary `Completed` walk that found
+    /// nothing ambiguous, which `removed == 0` alone cannot be told apart
+    /// from: a walk that silently freezes five hundred documents and a
+    /// walk where nothing happened both report `removed: 0, stopped:
+    /// Completed`. This field is what tells them apart, and it is the
+    /// whole reason it exists — a caller with nothing better to show a
+    /// person than that silence had already lost the one question this
+    /// product is named after answering: what can still answer with text
+    /// the file no longer contains.
+    pub frozen: Vec<Frozen>,
     /// False if any entry under the root could not be read — an unreadable
     /// subdirectory, most commonly. From `found` alone, an unreadable
     /// subdirectory is indistinguishable from an empty one, so a
@@ -141,6 +189,23 @@ pub struct WalkReport {
     pub stopped: StopReason,
 }
 
+/// Walks `root`: enumerates it, ingests what changed, reconciles what
+/// vanished.
+///
+/// The three run in that order, and the order between the last two is part
+/// of this function's contract, not an implementation detail a later edit
+/// is free to rearrange: **phase 2 (ingest) must run before phase 3
+/// (reconcile).** A rename is same bytes under a new name, and depends on
+/// it entirely — phase 2 re-ingests the new name first, content addressing
+/// hands back the SAME `document.id`, and `path_count` for it rises to 2
+/// before phase 3 ever runs; only then does phase 3 removing the old path
+/// row leave 1. Run phase 3 first and `path_count` hits 0 instead:
+/// `forget_if_unnamed` destroys the document there and then, and phase 2
+/// running second rebuilds it from nothing under a fresh set of chunk ids
+/// — every citation into it invalidated over what was only a rename.
+/// Measured directly, by moving phase 3 above phase 2:
+/// `a_rename_keeps_the_document_and_its_chunks` (`tests/walk.rs`) failed
+/// with the document rebuilt onto different chunk ids rather than kept.
 pub fn walk_root(
     pool: &Pool,
     db: &Db,
@@ -174,6 +239,7 @@ pub fn walk_root(
             skipped: 0,
             refused: 0,
             removed: 0,
+            frozen: Vec::new(),
             complete: false,
             stopped: StopReason::RootUnavailable,
         });
@@ -189,6 +255,7 @@ pub fn walk_root(
         skipped: 0,
         refused: 0,
         removed: 0,
+        frozen: Vec::new(),
         complete: walked.complete,
         stopped: StopReason::Completed,
     };
@@ -349,21 +416,10 @@ pub fn walk_root(
 
     // Phase 3. Deletions are applied only after a complete enumeration, and
     // never during one: a walk that stopped half-way has not seen the whole
-    // folder, so what it did not see is not evidence of anything (§7).
-    //
-    // Must run after phase 2, not only after phase 1, and that ordering is
-    // load-bearing rather than a matter of taste: a rename is same bytes
-    // under a new name, so phase 2 re-ingests the new name first, content
-    // addressing hands back the *same* `document.id`, and `path_count` for
-    // it rises to 2 before this phase ever runs — only then does deleting
-    // the old path row leave 1. Run this block before phase 2 instead and
-    // `path_count` hits 0 first: `forget_if_unnamed` destroys the document,
-    // and the walk that put phase 2 second rebuilds it from nothing under a
-    // fresh set of chunk ids, invalidating every citation into it over a
-    // rename — measured directly, moving this block above phase 2:
-    // `a_rename_keeps_the_document_and_its_chunks` failed with the document
-    // rebuilt onto different chunk ids (`[4]` instead of `[2]`) rather than
-    // kept.
+    // folder, so what it did not see is not evidence of anything (§7). Must
+    // run after phase 2, not only after phase 1 — see this function's own
+    // doc comment for why that ordering is a contract rather than a matter
+    // of taste, and the mutation that proves it.
     //
     // Gated on BOTH `walked.complete` and `report.stopped` — two different
     // questions, and neither implies the other. `complete` says whether
@@ -453,15 +509,19 @@ pub fn walk_root(
     // exactly that shape, and deleting it would be deleting on
     // absence-of-evidence, which is precisely what §7 forbids.
     //
-    // `frozen` grows a second kind of entry below — an unmounted NESTED
-    // subtree earns exactly the same prefix treatment as a symlinked one,
-    // for the same reason — so this starts the collection rather than
-    // standing apart from it.
-    let mut frozen: Vec<&str> = walked
+    // The first of two producers of `frozen`. The second — an unmounted
+    // NESTED subtree, below — earns exactly the same prefix treatment for
+    // the same reason, so this starts the collection rather than standing
+    // apart from it.
+    let mut frozen: Vec<Frozen> = walked
         .skipped
         .iter()
         .filter(|s| s.rule == PreSkipRule::NotAFileSubtree)
         .filter_map(|s| s.relative.as_deref())
+        .map(|prefix| Frozen {
+            prefix: prefix.to_string(),
+            why: FrozenReason::SymlinkedSubtree,
+        })
         .collect();
 
     // The root's own unmount signature, one directory down. A mounted share
@@ -488,6 +548,26 @@ pub fn walk_root(
     // treated exactly like `Ok` with zero entries. `resolve_ancestor`'s own
     // doc comment has the three states this replaces that one bool with.
     //
+    // `missing` is computed HERE — after the symlink producer above has
+    // already populated `frozen`, before the ancestor-climb producer below
+    // extends it further — and that ordering is deliberate, not incidental,
+    // for a reason that is about the QUALITY of `frozen` rather than about
+    // which paths end up deleted (`should_delete`'s own final check below
+    // re-reads the fully-populated `frozen` regardless of when `missing` was
+    // built, so the delete/keep answer cannot change). What the ordering
+    // buys: a `known` path already excused by a `NotAFileSubtree` prefix is
+    // filtered out of `missing` before `resolve_ancestor` ever runs on it,
+    // so the climb never independently re-examines what is on the far side
+    // of a symlink this walk deliberately never followed. Skipping that
+    // shadowing would not silently delete anything it should not — it would
+    // silently REPORT the wrong reason, or two contradictory ones for the
+    // same prefix: `resolve_ancestor` reads real directory entries by
+    // following the symlink (`read_dir` follows symlinks), so a symlink
+    // whose target happens to be empty would additionally freeze under
+    // `EmptyDirectory`, alongside the accurate `SymlinkedSubtree` entry
+    // already there for a reason that has nothing to do with what the
+    // symlink happens to point at today.
+    //
     // Checked per distinct PARENT DIRECTORY of a `known` path the walk did
     // not find — not for every directory under the root, and not once per
     // missing path sharing one, since `resolve_ancestor` caches every
@@ -506,29 +586,47 @@ pub fn walk_root(
     // rather than only at the root, not a new one invented here: pausing
     // on an ambiguity a person could resolve in a second is preferred over
     // guessing wrong and deleting content that is still on the disk. The
-    // cost is real and stated here rather than left to be discovered as a
-    // surprise: those files stay frozen on every future walk too, for as
-    // long as the empty directory itself remains — nothing here re-examines
-    // it once emptied, because from this code's own vantage point nothing
-    // ever changes about the shape that made it ambiguous in the first
-    // place.
+    // cost is real, and it does not self-heal: those files stay frozen on
+    // every future walk too, for as long as the empty directory itself
+    // remains, because nothing here re-examines a shape that never changes
+    // on its own — an unmounted mountpoint and an emptied folder are the
+    // same directory to `read_dir` (an unmounted mountpoint reverts to the
+    // underlying filesystem), so no cleverer rule closes this gap; a person
+    // has to. `WalkReport::frozen` is what tells that person there is an
+    // ambiguity to resolve at all, rather than leaving `removed: 0,
+    // stopped: Completed` indistinguishable from a walk where nothing
+    // happened.
     let missing: Vec<&str> = known
         .iter()
         .map(String::as_str)
-        .filter(|p| !seen.contains(p) && !frozen.iter().any(|prefix| under(p, prefix)))
+        .filter(|p| should_delete(p, &seen, &frozen))
         .collect();
-    let mut ancestor_cache: HashMap<&str, bool> = HashMap::new();
+    let mut ancestor_cache: HashMap<&str, Option<FrozenReason>> = HashMap::new();
     for relative in missing {
         let Some(parent) = relative.rfind('/').map(|i| &relative[..i]) else {
             continue;
         };
-        if resolve_ancestor(root, parent, &mut ancestor_cache) {
-            frozen.push(parent);
+        // Already covered by an entry the symlink producer wrote, or by an
+        // ancestor a previous iteration of this very loop already resolved
+        // and pushed — skip the climb (and the duplicate report entry it
+        // would otherwise produce for the same prefix) rather than pay for
+        // it and dedupe after the fact.
+        if frozen
+            .iter()
+            .any(|f| f.prefix == parent || under(parent, &f.prefix))
+        {
+            continue;
+        }
+        if let Some(why) = resolve_ancestor(root, parent, &mut ancestor_cache) {
+            frozen.push(Frozen {
+                prefix: parent.to_string(),
+                why,
+            });
         }
     }
 
     for relative in &known {
-        if seen.contains(relative.as_str()) || frozen.iter().any(|p| under(relative, p)) {
+        if !should_delete(relative, &seen, &frozen) {
             continue;
         }
         let Some(entry) = db.path_entry(root_id, relative)? else {
@@ -559,9 +657,31 @@ pub fn walk_root(
     // and `frozen` as the loop above: a pre-skip with a path, or a path
     // under a frozen prefix, is not evidence the file is gone, so its
     // journal row must not be forgotten either.
-    db.forget_skips_not_in(root_id, &seen, &frozen)?;
+    let frozen_prefixes: Vec<&str> = frozen.iter().map(|f| f.prefix.as_str()).collect();
+    db.forget_skips_not_in(root_id, &seen, &frozen_prefixes)?;
 
+    report.frozen = frozen;
     Ok(report)
+}
+
+/// The deletion rule, stated once: a `known` path is deleted if and only if
+/// it is not something the walk saw or explicitly declined to touch this
+/// pass (`seen`), and no frozen prefix covers it. Everything else that has
+/// to hold for phase 3 to reach a single path at all — the walk completed,
+/// it stopped cleanly, the root itself is not the unmount signature — is
+/// checked once, above, before `known` is even read; reaching this
+/// function at all already means those held, so this decides only the
+/// part that varies path by path.
+///
+/// Called twice with two different snapshots of `frozen` by design, not by
+/// accident: once while `frozen` holds only the symlink producer's entries
+/// (to build `missing`, the candidate list for the ancestor-climb
+/// producer), and once after both producers have run (the final
+/// delete/keep decision in the loop below). See the comment where
+/// `missing` is computed for why that first, partial call is safe — the
+/// second, complete call is always what actually decides a path's fate.
+fn should_delete(relative: &str, seen: &HashSet<&str>, frozen: &[Frozen]) -> bool {
+    !seen.contains(relative) && !frozen.iter().any(|f| under(relative, &f.prefix))
 }
 
 /// A raw top-level listing of the watched root, with no exclusion rule
@@ -588,9 +708,10 @@ fn root_is_empty(dir: &Path) -> bool {
 /// Walks up from `dir` — a candidate directory that may not exist at all —
 /// to the shallowest ancestor that does, and says whether reconciliation
 /// must freeze everything under `dir` rather than trust its absence as
-/// evidence.
+/// evidence — and, if so, why, so the caller can put an accurate reason on
+/// `WalkReport::frozen` rather than a bare bool.
 ///
-/// Three states, where an earlier version of this check had room for only
+/// Four states, where an earlier version of this check had room for only
 /// two — folding `NotFound` into "read failure, so empty, so freeze" is
 /// exactly the bug this replaces, measured directly: a subdirectory removed
 /// outright (`rm -rf`) froze its own contents forever, because `read_dir`
@@ -599,10 +720,10 @@ fn root_is_empty(dir: &Path) -> bool {
 ///
 /// - The directory exists and `read_dir` returns at least one entry: the
 ///   walk saw real content there, so a `known` path missing from `seen`
-///   under it is genuinely gone. Not frozen — `false`.
+///   under it is genuinely gone. Not frozen — `None`.
 /// - The directory exists and `read_dir` returns nothing: D33's ambiguity,
 ///   the same one `root_is_empty` names for the watched root itself, one
-///   level down. Frozen — `true`.
+///   level down. Frozen — `Some(FrozenReason::EmptyDirectory)`.
 /// - The directory does not exist (`io::ErrorKind::NotFound`): this is
 ///   evidence OF deletion, not an absence of evidence, so THIS level
 ///   answers nothing on its own — the walk continues to the parent
@@ -613,13 +734,14 @@ fn root_is_empty(dir: &Path) -> bool {
 ///   out of `/` to split on resolves to "not frozen" directly rather than
 ///   recursing into a check that would only confirm what is already known.
 /// - `read_dir` fails for any other reason (permission denied, some other
-///   IO error): frozen — the conservative side, same as the old
-///   behaviour, kept for exactly the cases that are not "not found." This
-///   arm is expected to be rare: a permission failure anywhere under the
-///   watched root would normally already have cleared `Walked::complete`
-///   during phase 1 and stopped phase 3 from running at all (the gate at
-///   the top of phase 3), so reaching it here at all means phase 1 saw the
-///   entry as readable and something changed in the moment since.
+///   IO error): frozen — `Some(FrozenReason::UnreadableDirectory)`, the
+///   conservative side, same as the old behaviour, kept for exactly the
+///   cases that are not "not found." This arm is expected to be rare: a
+///   permission failure anywhere under the watched root would normally
+///   already have cleared `Walked::complete` during phase 1 and stopped
+///   phase 3 from running at all (the gate at the top of phase 3), so
+///   reaching it here at all means phase 1 saw the entry as readable and
+///   something changed in the moment since.
 ///
 /// `cache` is populated for every directory visited along the way — not
 /// only the one finally resolved — to the SAME verdict, so a second
@@ -629,20 +751,27 @@ fn root_is_empty(dir: &Path) -> bool {
 /// what keeps the cost proportional to how many distinct directories are
 /// actually involved in what went missing, not to how deep any one of them
 /// happens to be nested.
-fn resolve_ancestor<'a>(root: &Path, dir: &'a str, cache: &mut HashMap<&'a str, bool>) -> bool {
-    if let Some(&freeze) = cache.get(dir) {
-        return freeze;
+fn resolve_ancestor<'a>(
+    root: &Path,
+    dir: &'a str,
+    cache: &mut HashMap<&'a str, Option<FrozenReason>>,
+) -> Option<FrozenReason> {
+    if let Some(&verdict) = cache.get(dir) {
+        return verdict;
     }
-    let freeze = match std::fs::read_dir(root.join(dir)) {
-        Ok(mut entries) => entries.next().is_none(),
+    let verdict = match std::fs::read_dir(root.join(dir)) {
+        Ok(mut entries) => entries
+            .next()
+            .is_none()
+            .then_some(FrozenReason::EmptyDirectory),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => match dir.rfind('/') {
             Some(i) => resolve_ancestor(root, &dir[..i], cache),
-            None => false,
+            None => None,
         },
-        Err(_) => true,
+        Err(_) => Some(FrozenReason::UnreadableDirectory),
     };
-    cache.insert(dir, freeze);
-    freeze
+    cache.insert(dir, verdict);
+    verdict
 }
 
 /// Whether `relative` names something inside the subtree `prefix` names —

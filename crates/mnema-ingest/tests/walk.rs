@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use mnema_index::{Db, open};
-use mnema_ingest::{StopReason, WalkReport, walk_root};
+use mnema_ingest::{FrozenReason, StopReason, WalkReport, walk_root};
 use mnema_pool::{Pool, PoolConfig};
 use mnema_walk::WalkRules;
 use sha2::{Digest, Sha256};
@@ -993,6 +993,12 @@ fn a_directory_symlink_protects_what_used_to_be_inside_it() {
             .is_some()
     );
     assert!(!f.db.search_lexical("inner", 10).unwrap().is_empty());
+
+    // Freezing must not be silent — `removed: 0` alone cannot be told
+    // apart from a walk where nothing happened at all.
+    assert_eq!(report.frozen.len(), 1);
+    assert_eq!(report.frozen[0].prefix, "linked");
+    assert_eq!(report.frozen[0].why, FrozenReason::SymlinkedSubtree);
 }
 
 /// `vec0` cannot be the target of a foreign key (spec §7 item 2), so nothing
@@ -1200,6 +1206,13 @@ fn an_unmounted_nested_share_deletes_nothing() {
     assert!(f.db.path_entry(f.root, "mnt/two.txt").unwrap().is_some());
     assert!(!f.db.search_lexical("one", 10).unwrap().is_empty());
     assert!(!f.db.search_lexical("two", 10).unwrap().is_empty());
+
+    // Freezing must not be silent — a caller with only `removed` to look at
+    // cannot tell "two files are frozen behind an ambiguity" apart from
+    // "nothing happened," and this is the field that tells them apart.
+    assert_eq!(report.frozen.len(), 1);
+    assert_eq!(report.frozen[0].prefix, "mnt");
+    assert_eq!(report.frozen[0].why, FrozenReason::EmptyDirectory);
 }
 
 /// The evidence points the opposite way from the test above, and telling the
@@ -1232,6 +1245,11 @@ fn a_deleted_subdirectory_removes_its_documents() {
     assert!(f.db.path_entry(f.root, "gone/two.txt").unwrap().is_none());
     assert!(f.db.search_lexical("one", 10).unwrap().is_empty());
     assert!(f.db.search_lexical("two", 10).unwrap().is_empty());
+    assert!(
+        report.frozen.is_empty(),
+        "a genuine deletion must not also report an ambiguity: {:?}",
+        report.frozen
+    );
 }
 
 /// Every chunk id a document owns, ordered — used to tell "the same rows"
