@@ -361,18 +361,17 @@ fn on_disk_of(meta: &std::fs::Metadata) -> Option<OnDisk> {
 /// file edited twice within one second to the same length is
 /// indistinguishable from an untouched one.
 ///
-/// COPIED from `mnema-ingest` (`crates/mnema-ingest/src/lib.rs:715`), not
-/// moved — and deliberately no longer identical to it. That copy still
-/// returns `Option<i64>` and still refuses (`None`) past roughly year 2262,
-/// because ITS caller falls back to re-reading the one file involved when
-/// the cheap arm has nothing to compare against — a small, per-file cost.
-/// This one cannot afford that answer: `None` here would propagate through
+/// The single implementation now. A copy of this used to live in
+/// `mnema-ingest`, deliberately disagreeing with this one: that copy returned
+/// `Option<i64>` and refused (`None`) past roughly year 2262, because its own
+/// caller could fall back to re-reading the one file involved when the cheap
+/// arm had nothing to compare against — a small, per-file cost. This one
+/// cannot afford that answer: `None` here would propagate through
 /// `on_disk_of` into `enumerate` and clear `Walked::complete` for the WHOLE
-/// watched root over a single file, not just decline to compare that one
-/// file (see the paragraph below). Task 5 of the plan retires the
-/// `mnema-ingest` copy once this walk becomes the single source of the
-/// metadata `ingest_file` compares against; until then the two versions
-/// disagree on purpose, not by drift.
+/// watched root over a single file, not just decline to compare that one file
+/// (see the paragraph below). Task 5 retired the `mnema-ingest` copy once
+/// this walk became the single source of the metadata `ingest_file`
+/// compares against, so there is only this one left, and it saturates.
 ///
 /// SATURATES rather than refusing when a value does not fit `i64`: `i64::MAX`
 /// past roughly year 2262, `i64::MIN` symmetrically before it. This used to

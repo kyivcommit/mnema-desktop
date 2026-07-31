@@ -29,10 +29,9 @@
 use std::path::Path;
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
-use mnema_core::{Block, BlockType, SourceKind};
+use mnema_core::{Block, BlockType, OnDisk, SourceKind};
 use mnema_index::{Db, DocumentStatus, PathEntry, SkipRule};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
-use mnema_walk::OnDisk;
 
 /// The stage `ingest_stage` records once a document's chunks are written.
 ///
@@ -153,6 +152,13 @@ impl From<mnema_index::Error> for IngestError {
 /// here the file can change, and then the walk counted one size while this
 /// compared another. The difference never surfaces as an error — only as an
 /// index holding a previous version of a file it believes it re-read (§5).
+///
+/// The freshness this buys is only as good as the measurement's age: `on_disk`
+/// must be taken immediately before this call and never reused across walks or
+/// cached between one call and the next. A caller handing in a stale or
+/// re-used measurement reintroduces exactly the defect this parameter exists
+/// to close, one level up — the cheap arm would then answer `Unchanged` for a
+/// file that has since changed.
 pub fn ingest_file(
     pool: &Pool,
     db: &Db,
@@ -200,6 +206,27 @@ pub fn ingest_file(
             document_id: recorded.document_id.clone(),
         });
     }
+    // `document.size_bytes` is NOT NULL, so a document with no measurement at
+    // all cannot be written regardless of what the pool finds — and unlike
+    // before this crate stopped statting for itself, there is no second,
+    // different-in-kind read left to try. Checked here, ahead of the pool,
+    // rather than after a successful extraction: the outcome does not depend
+    // on anything the pool learns, and a file this crate already knows it
+    // cannot measure does not need a worker cycle spent reading it first.
+    let Some(disk) = on_disk else {
+        let rule = SkipRule::Unreadable;
+        record_skip(
+            db,
+            root_id,
+            relative,
+            "the walk could not measure this file, so its size and mtime are unknown",
+            rule,
+            &recorded,
+            on_disk,
+        )?;
+        return Ok(Ingested::Skipped { rule });
+    };
+
     // 2. The pool.
     let document = match pool.extract(absolute)? {
         Outcome::Skipped(skip) => {
@@ -221,28 +248,6 @@ pub fn ingest_file(
     // What this path used to hold, if anything. Needed after the write, not
     // before it — see `repoint`.
     let displaced = recorded.as_ref().map(|entry| entry.document_id.clone());
-
-    // The worker read the file, so it was there a moment ago — but this crate
-    // no longer stats it a second time to find out (§5, and the doc comment on
-    // `mnema_walk`). There used to be a fallback re-stat here, for the case
-    // where the walk's own stat had failed a moment before the worker's read
-    // succeeded; giving that up means such a file is now always skipped
-    // rather than sometimes recovered by a second, different-in-kind read.
-    // `document.size_bytes` is NOT NULL, so a document with no measurement at
-    // all still cannot be written.
-    let Some(disk) = on_disk else {
-        let rule = SkipRule::Unreadable;
-        record_skip(
-            db,
-            root_id,
-            relative,
-            "the walk could not measure this file, so its size and mtime are unknown",
-            rule,
-            &recorded,
-            on_disk,
-        )?;
-        return Ok(Ingested::Skipped { rule });
-    };
 
     // 3. The content. Two copies of one file are one document (D33), so a
     //    second path to content already chunked costs one row.
@@ -694,6 +699,8 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
         .collect()
 }
 
-// `OnDisk`, `stat` and `mtime_nanos` used to live here. Retired in favour of
-// `mnema_walk::{OnDisk, stat}` (§5): the walk is the only place that looks at
-// the disk, and this crate now only ever compares the numbers it is handed.
+// `OnDisk`, `stat` and `mtime_nanos` used to live here. Retired: `OnDisk`
+// itself is `mnema_core::OnDisk` (the shared-types crate both this crate and
+// `mnema-index` already depended on, D45), and the measurement is
+// `mnema_walk::stat` — the walk is the only place that looks at the disk, and
+// this crate now only ever compares the numbers it is handed (§5).

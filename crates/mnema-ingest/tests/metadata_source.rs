@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use mnema_core::OnDisk;
 use mnema_index::{Db, open, register_vector_extension};
 use mnema_ingest::{Ingested, ingest_file};
 use mnema_pool::{Pool, PoolConfig};
@@ -146,7 +147,7 @@ fn the_handed_in_metadata_is_what_the_cheap_arm_compares() {
 
     // Second pass: the same untouched file, but the caller reports a
     // different size. The arm must believe the caller and re-read.
-    let lying = mnema_walk::OnDisk {
+    let lying = OnDisk {
         size_bytes: honest.size_bytes + 1,
         mtime: honest.mtime,
     };
@@ -162,5 +163,77 @@ fn the_handed_in_metadata_is_what_the_cheap_arm_compares() {
     assert!(
         !matches!(second, Ingested::Unchanged { .. }),
         "ingest_file is still statting for itself"
+    );
+}
+
+/// The cost of trusting the caller, pinned rather than left as prose.
+///
+/// `mnema_walk`'s `mtime_nanos` saturates at `i64::MAX` instead of refusing
+/// past roughly year 2262 (`crates/mnema-walk/src/lib.rs`), which is what
+/// makes a file with such a timestamp indexable at all — Task 5 retired the
+/// `mnema-ingest` copy that used to return `None` there and fall back to
+/// `SkipRule::Unreadable`, so this state is only reachable now. It is real on
+/// ext4 (to year 2446) and Windows `FILETIME` (to year 30828), not only in a
+/// hand-built `OnDisk`; macOS just cannot produce one to `stat` honestly,
+/// which is why this test builds the value rather than writing a file old
+/// enough to earn it.
+///
+/// The cost: once an mtime has saturated, the cheap arm can no longer tell a
+/// file that has not moved from one that has moved again beyond the ceiling.
+/// A same-length edit made after saturation is invisible for ever — silently,
+/// with nothing in the journal, indistinguishable from every other unchanged
+/// file. This is not a bug this task introduced; it is the documented price
+/// of saturating rather than refusing, made newly reachable by handing
+/// `on_disk` in rather than measuring it here. Pinned so the price is a
+/// number a future change has to notice breaking, not a claim in a comment.
+#[test]
+fn a_saturated_mtime_hides_a_same_length_edit_forever() {
+    let fixture = Fixture::new();
+    let path = fixture.write("a.txt", "hello");
+
+    let saturated = OnDisk {
+        size_bytes: 5,
+        mtime: i64::MAX,
+    };
+    let first = ingest_file(
+        &fixture.pool,
+        &fixture.db,
+        fixture.root_id,
+        &path,
+        "a.txt",
+        Some(saturated),
+    )
+    .unwrap();
+    assert!(matches!(first, Ingested::Indexed { .. }));
+    assert!(!fixture.db.search_lexical("hello", 10).unwrap().is_empty());
+
+    // Same length, different content, same (already saturated) mtime —
+    // nothing the cheap arm can see has moved.
+    std::fs::write(&path, "world").unwrap();
+    let second = ingest_file(
+        &fixture.pool,
+        &fixture.db,
+        fixture.root_id,
+        &path,
+        "a.txt",
+        Some(saturated),
+    )
+    .unwrap();
+    assert!(
+        matches!(second, Ingested::Unchanged { .. }),
+        "expected the cheap arm to stay blind to a same-length edit under an \
+         already-saturated mtime, got {second:?}"
+    );
+
+    // The index still answers with the OLD text — this is the silent cost,
+    // not a side effect to clean up.
+    assert!(
+        !fixture.db.search_lexical("hello", 10).unwrap().is_empty(),
+        "the old text should still be all the index has"
+    );
+    assert!(
+        fixture.db.search_lexical("world", 10).unwrap().is_empty(),
+        "the new text reached the index, so the file was read after all — \
+         this test's premise is wrong"
     );
 }

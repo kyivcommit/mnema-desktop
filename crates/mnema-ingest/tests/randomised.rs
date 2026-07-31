@@ -38,6 +38,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use mnema_core::OnDisk;
 use mnema_index::{Db, open, register_vector_extension};
 use mnema_ingest::{Ingested, ingest_file};
 use mnema_pool::{Pool, PoolConfig};
@@ -520,13 +521,24 @@ impl World {
     }
 
     fn ingest_labelled(&mut self, relative: &str, how: &str) {
+        // The harness is modelling the disk here, exactly the role the walk
+        // plays in production — so it is `mnema_walk::stat`, not a second
+        // reading of its own, that it hands to `ingest_file` (§5). Taken
+        // immediately before the call, which is the most forgiving shape a
+        // caller can have: `walk` below is the one that stats first and
+        // ingests afterwards, which is the window a real walk actually
+        // opens.
+        let on_disk = mnema_walk::stat(&self.absolute(relative));
+        self.ingest_measured(relative, on_disk, how);
+    }
+
+    /// The same call, with the measurement taken by the caller rather than
+    /// just before this call — see `walk`, the one caller that needs the gap
+    /// between the two to be real.
+    fn ingest_measured(&mut self, relative: &str, on_disk: Option<OnDisk>, how: &str) {
         let before = self.paths_now();
         let hash = self.hash_on_disk(relative);
         let absolute = self.absolute(relative);
-        // The harness is modelling the disk here, exactly the role the walk
-        // plays in production — so it is `mnema_walk::stat`, not a second
-        // reading of its own, that it hands to `ingest_file` (§5).
-        let on_disk = mnema_walk::stat(&absolute);
         let outcome = ingest_file(
             &self.pool,
             &self.db,
@@ -1678,12 +1690,27 @@ impl World {
         }
     }
 
-    /// What the indexing job actually does: every file in the folder, in order.
+    /// What the indexing job actually does: every file in the folder, in
+    /// order — measured first, ingested afterwards.
+    ///
+    /// That gap is the window Task 5 exists to close a defect in, and it is
+    /// deliberately real here rather than modelled away: `ingest_labelled`
+    /// (used by every other operation in this file) takes its `on_disk`
+    /// immediately before calling `ingest_file`, which is the most forgiving
+    /// caller there is and cannot open the gap at all. A real walk measures
+    /// every file in the folder into one `Walked` before a single call to
+    /// `ingest_file` is made, so a file can change between its own
+    /// measurement and the moment this loop reaches it — this is the one
+    /// operation that gives that gap a chance to matter.
     fn walk(&mut self) {
         let names: Vec<String> = self.files.keys().cloned().collect();
         self.note(format!("  walk all {} file(s)", names.len()));
-        for name in names {
-            self.ingest(&name);
+        let measured: Vec<(String, Option<OnDisk>)> = names
+            .iter()
+            .map(|name| (name.clone(), mnema_walk::stat(&self.absolute(name))))
+            .collect();
+        for (name, on_disk) in measured {
+            self.ingest_measured(&name, on_disk, "");
         }
     }
 }
