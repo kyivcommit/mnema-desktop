@@ -578,6 +578,17 @@ pub fn walk_root(
     // its own below the root to freeze, and its absence is already the
     // root-level check's business, above.
     //
+    // Excusing the `NotAFileSubtree` prefixes here is an OPTIMISATION and
+    // nothing more, which is worth stating because two readings of this
+    // filter — one per reviewer — both got it wrong in different
+    // directions before it was measured. Replacing this filter with a bare
+    // `!seen.contains(p)` changes no deletion and no report: `frozen` only
+    // ever grows, and `should_delete` is monotone in it, so probing more
+    // parents can never delete more; and the report stays identical because
+    // the duplicate-and-contradiction guard inside the loop below is what
+    // keeps `frozen` clean, not this filter. What this line buys is the
+    // climbs that guard would have thrown away anyway.
+    //
     // The cost of getting this right: a directory a user EMPTIES without
     // deleting — every file inside removed, the folder itself left behind —
     // now reads exactly like an unmounted share and is frozen the same way,
