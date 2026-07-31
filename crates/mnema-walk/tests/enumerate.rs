@@ -338,11 +338,11 @@ fn a_symlinked_directory_is_named_as_a_subtree_not_a_file() {
 /// string does not open the file on Linux, where lookup is byte-exact.
 ///
 /// The equality assertion is load-bearing, not decorative: measured on this
-/// machine (task-3-report.md), APFS lookup is normalisation-insensitive for
-/// files the same way it is for directories, so `root.join(&found.relative)`
-/// would still open the file even if `relative` had been silently
-/// normalised to NFC — the reopen checks alone do not catch that mistake
-/// here. Only comparing the string itself does.
+/// filesystem, storage keeps the bytes verbatim but lookup is
+/// normalisation-insensitive, so `root.join(&found.relative)` would still
+/// open the file even if `relative` had been silently normalised to NFC —
+/// the reopen checks alone cannot detect a normalising walk. Only comparing
+/// the string itself can.
 #[test]
 fn the_relative_path_the_walk_reports_can_reopen_the_file() {
     let root = tempfile::tempdir().unwrap();
