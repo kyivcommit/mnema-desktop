@@ -224,10 +224,12 @@ impl Db {
     /// it embeds, silently, and nothing downstream would ever notice a
     /// `vec_emb_<n>` row naming a `chunk_id` no chunk owns any more. Called
     /// from `mnema-ingest`'s `forget_if_unnamed`, the one place that decides
-    /// a document has no path left naming it — an ordinary edit that
-    /// displaces a document, a file that becomes unsupported, and
-    /// reconciliation's own phase 3 all reach `delete_document` through that
-    /// one function, so this has exactly one caller rather than one per path.
+    /// an ordinary edit or reconciliation has left a document with no path
+    /// naming it, and — via [`delete_vectors_for_document_in`] directly —
+    /// from [`Db::delete_watched_root`], which decides the same question for
+    /// a whole root at once and needs the sweep and the document's own
+    /// deletion in one transaction rather than two calls that could be
+    /// interrupted between them.
     ///
     /// Must run BEFORE the document (and, by cascade, its chunks) is
     /// deleted: once they are gone there is no `chunk.document_id` left to
@@ -238,26 +240,7 @@ impl Db {
     /// retiring a whole space at once, this is the mechanism for one
     /// document leaving every space it was ever in.
     pub fn delete_vectors_for_document(&self, document_id: &str) -> Result<(), Error> {
-        let tables: Vec<String> = self
-            .conn()
-            .prepare("SELECT vec_table FROM embedding_space")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for table in tables {
-            // `table` is never caller text: it comes only from
-            // `embedding_space.vec_table`, which the schema's own CHECK pins
-            // to `'vec_emb_' || id` and only `create_space` ever writes —
-            // the same reasoning `knn` and `insert_vector` already rely on
-            // for interpolating a table name into SQL.
-            self.conn().execute(
-                &format!(
-                    "DELETE FROM {table}
-                      WHERE chunk_id IN (SELECT id FROM chunk WHERE document_id = ?1)"
-                ),
-                params![document_id],
-            )?;
-        }
-        Ok(())
+        delete_vectors_for_document_in(self.conn(), document_id)
     }
 
     /// Drops the space and its vector table. Dropping is the mechanism for a
@@ -297,6 +280,45 @@ impl Db {
             .optional()?
             .ok_or(Error::NoSuchSpace(space_id))
     }
+}
+
+/// [`Db::delete_vectors_for_document`]'s own DELETE loop, taken out from under
+/// `&self` so it can run against either a bare connection or a transaction a
+/// caller already has open.
+///
+/// Takes `&rusqlite::Connection` rather than `&Db`, the same reason
+/// `write_search_row` in `search.rs` does: `rusqlite::Transaction` derefs to
+/// `Connection`, so a `&Transaction` coerces at the call site and this one
+/// body serves both callers. `Db::delete_vectors_for_document` passes
+/// `self.conn()` and joins whatever transaction (if any) is already open on
+/// it — mnema-ingest's `forget_if_unnamed` calls it from inside one today, and
+/// nothing here may assume it is the only writer, so it must not open a
+/// transaction of its own. `Db::delete_watched_root` passes its own open
+/// transaction directly, so the sweep and the document's deletion land or
+/// roll back together.
+pub(crate) fn delete_vectors_for_document_in(
+    conn: &rusqlite::Connection,
+    document_id: &str,
+) -> Result<(), Error> {
+    let tables: Vec<String> = conn
+        .prepare("SELECT vec_table FROM embedding_space")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for table in tables {
+        // `table` is never caller text: it comes only from
+        // `embedding_space.vec_table`, which the schema's own CHECK pins to
+        // `'vec_emb_' || id` and only `create_space` ever writes — the same
+        // reasoning `knn` and `insert_vector` already rely on for
+        // interpolating a table name into SQL.
+        conn.execute(
+            &format!(
+                "DELETE FROM {table}
+                  WHERE chunk_id IN (SELECT id FROM chunk WHERE document_id = ?1)"
+            ),
+            params![document_id],
+        )?;
+    }
+    Ok(())
 }
 
 /// What a space is, to the code that reads and writes its vectors.

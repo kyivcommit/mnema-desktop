@@ -119,6 +119,58 @@ impl Db {
         Ok(())
     }
 
+    /// Removes a watched root and every document whose last path was under it.
+    /// Returns how many documents went with it.
+    ///
+    /// The schema cannot do this on its own: `path.watched_root_id` cascades
+    /// from `watched_root` (`schema.sql:80`), but the direction is document →
+    /// path → root, never the reverse, so dropping the root row alone takes
+    /// every `path` row under it and leaves the `document` rows they named —
+    /// with zero paths left, still answering `search_lexical`, citing a folder
+    /// that no longer exists (D33's own failure mode, one level up).
+    ///
+    /// A document is doomed only if EVERY path that ever named it sat under
+    /// this root — the `NOT EXISTS` clause below excludes a document that also
+    /// has a path under some other root, the same rule a second copy of a file
+    /// already gets from [`Db::path_count`]. Read and decided inside the one
+    /// transaction this method opens, not by the caller: a check-then-delete
+    /// split across two calls could read "no other root" and then lose the
+    /// race to a path being added under a different root in between.
+    ///
+    /// Done as one transaction rather than a loop of independent statements —
+    /// a half-applied removal, root gone with some doomed documents still
+    /// standing or the reverse, is exactly the orphan this closes. Which of
+    /// the two is deleted first inside it does not matter for recovery: an
+    /// interruption before `commit` leaves nothing committed at all, root and
+    /// documents alike, because that is what one transaction means.
+    pub fn delete_watched_root(&self, root_id: i64) -> Result<u64, Error> {
+        let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Immediate)?;
+        let doomed: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT p.document_id FROM path p
+                  WHERE p.watched_root_id = ?1
+                    AND NOT EXISTS (SELECT 1 FROM path q
+                                     WHERE q.document_id = p.document_id
+                                       AND q.watched_root_id <> ?1)",
+            )?;
+            stmt.query_map(params![root_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for id in &doomed {
+            crate::space::delete_vectors_for_document_in(&tx, id)?;
+            // The document's own cascade takes its pages, blocks, chunks,
+            // search rows, ingest_stage row, and its remaining path rows
+            // (all of them under this same root, since it was doomed).
+            tx.execute("DELETE FROM document WHERE id = ?1", params![id])?;
+        }
+        // Cascades away the path rows of any document that survived — one
+        // still named from another root — and this root's tag_rule, skipped
+        // and ignore_rule rows.
+        tx.execute("DELETE FROM watched_root WHERE id = ?1", params![root_id])?;
+        tx.commit()?;
+        Ok(doomed.len() as u64)
+    }
+
     pub fn path_count(&self, document_id: &str) -> Result<i64, Error> {
         Ok(self.conn().query_row(
             "SELECT count(*) FROM path WHERE document_id = ?1",
