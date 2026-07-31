@@ -1057,6 +1057,73 @@ fn reconciliation_deletes_the_documents_vectors_too() {
     assert_eq!(count_after, 0, "the document's vectors must not outlive it");
 }
 
+/// Vector cleanup has to run wherever a document can lose its last path, and
+/// reconciliation is not the only place that happens — an ordinary edit is,
+/// by far the more common of the two. `ingest_file`'s `repoint` displaces
+/// whatever document used to sit under an edited path through the same
+/// `forget_if_unnamed` phase 3 calls; testing only phase 3's own door would
+/// leave this one — a user saving a file — uncovered, and a later change
+/// that inlined `forget_if_unnamed` back into phase 3, or added a third
+/// caller, would bring the original defect back with
+/// `reconciliation_deletes_the_documents_vectors_too` still green.
+///
+/// Measured: `repoint` is reached here through `ingest_file`'s own
+/// displacement path (`crates/mnema-ingest/src/lib.rs`), not through
+/// `walk_root`'s phase 3 — this walk never deletes a `path` row at all, it
+/// only repoints one from an old document to a new one.
+#[test]
+fn an_edit_that_displaces_a_document_deletes_its_vectors_too() {
+    let f = Fixture::new();
+    f.write("edited.txt", "original content");
+    f.walk();
+
+    let old_document_id = f.document_id_of("edited.txt");
+    let chunk_ids = chunk_ids_of(&f.db, &old_document_id);
+    assert!(
+        !chunk_ids.is_empty(),
+        "the file must have produced at least one chunk to make this test mean anything"
+    );
+
+    let cfg =
+        f.db.create_model_config("test-model", "openrouter", None, "baai/bge-m3", 4)
+            .unwrap();
+    let space = f.db.create_space(cfg, 4, "chunker-v1").unwrap();
+    for (i, chunk_id) in chunk_ids.iter().enumerate() {
+        f.db.insert_vector(space, *chunk_id, &[1.0, 0.0, 0.0, i as f32])
+            .unwrap();
+    }
+    let table = format!("vec_emb_{space}");
+    let count_before: i64 =
+        f.db.conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(count_before, chunk_ids.len() as i64);
+
+    // The edit: same path, different bytes, so a different content hash —
+    // `edited.txt`'s only path is the one it already has, so repointing it
+    // to the new document is exactly what displaces the old one.
+    f.write("edited.txt", "a completely different replacement body");
+    f.walk();
+
+    let new_document_id = f.document_id_of("edited.txt");
+    assert_ne!(
+        new_document_id, old_document_id,
+        "the edit must have actually changed the content hash, or this test proves nothing"
+    );
+    assert!(
+        !f.db.document_exists(&old_document_id).unwrap(),
+        "the old document must be gone: no path names it any more"
+    );
+    let count_after: i64 =
+        f.db.conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(
+        count_after, 0,
+        "the displaced document's vectors must not outlive it either"
+    );
+}
+
 /// The `NotAFileSubtree` prefix must protect the skip journal the same way
 /// it protects `path` — not only a row that exactly matches the symlink's
 /// own name (already covered by `seen`), but a STALE row for a file that
