@@ -1,0 +1,21 @@
+[package]
+name = "mnema-walk"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# What is under a watched root after the rules, and nothing else. It knows
+# neither the database nor the pool: the reconciliation that consumes it lives
+# in `mnema-ingest`, which is the only crate that knows the order of
+# operations (D45). Keeping the enumeration separate is what lets it be tested
+# with temporary directories in milliseconds, without SQLite and without
+# processes.
+[dependencies]
+ignore = "0.4.31"
+# `OnDisk` only. It lives in the shared-types crate because `mnema-index` and
+# `mnema-ingest` both read it, and a storage crate must not depend on a walk
+# crate to name two integers (D45).
+mnema-core = { path = "../mnema-core" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

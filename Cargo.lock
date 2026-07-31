@@ -2896,6 +2896,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnema-walk"
+version = "0.0.0"
+dependencies = [
+ "ignore",
+ "mnema-core",
+ "tempfile",
+]
+
+[[package]]
 name = "muda"
 version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
