@@ -269,7 +269,30 @@ CREATE TABLE skipped (
     page_no         INTEGER,               -- set when a single PDF page was skipped
     reason          TEXT NOT NULL,
     rule            TEXT NOT NULL,         -- which rule fired, so v2 can find the work
+    -- Set ONLY for rules that are statements about the file's bytes
+    -- (unsupported, no_text_layer, too_large): the same bytes earn the same
+    -- verdict, so the next walk must not spend a worker process re-deriving it.
+    -- NULL for environmental rules (crash, timeout, memory, unreadable), which
+    -- are statements about the machine and have to be retried. D44's asymmetry.
+    size_bytes      INTEGER,
+    mtime           INTEGER,
+    -- Which build's verdict this is. Without it, shipping a reader for a format
+    -- that was `unsupported` yesterday would never re-examine the files that
+    -- earned the verdict: they would stay unindexed for the life of the index,
+    -- and nothing would say so. Bumping INDEX_FORMAT_VERSION when the reader
+    -- set changes is therefore an obligation, not a courtesy.
+    format_version  INTEGER NOT NULL,
     at              INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+-- One current row per path, not a history.
+--
+-- COALESCE on both nullable columns, and this is not defensive style: SQLite
+-- treats NULLs as DISTINCT inside a UNIQUE index, and `page_no` is NULL for
+-- every whole-file skip. A plain UNIQUE(watched_root_id, relative_path, page_no)
+-- would therefore dedup nothing at all, and would do it silently.
+CREATE UNIQUE INDEX ux_skipped_current ON skipped(
+    COALESCE(watched_root_id, -1), relative_path, COALESCE(page_no, -1)
 );
 
 -- ------------------------------------------------------------------- vectors

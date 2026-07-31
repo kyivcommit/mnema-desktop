@@ -4,7 +4,7 @@
 //! `grep "INTO skipped"` over the crates returned nothing but the schema
 //! itself.
 
-use mnema_core::SourceKind;
+use mnema_core::{OnDisk, SourceKind};
 use mnema_index::{Db, DocumentStatus, SkipRule, open, register_vector_extension};
 
 fn fresh(dir: &tempfile::TempDir) -> Db {
@@ -55,6 +55,7 @@ fn a_skipped_file_names_the_rule_that_fired() {
         None,
         "worker died on SIGSEGV",
         SkipRule::Crash,
+        None,
     )
     .unwrap();
     let rows = db.skips_for_root(1).unwrap();
@@ -71,6 +72,7 @@ fn a_page_without_a_text_layer_is_recorded_against_that_page() {
         Some(4),
         "no text layer",
         SkipRule::NoTextLayer,
+        None,
     )
     .unwrap();
     assert_eq!(db.skips_for_root(1).unwrap()[0].page_no, Some(4));
@@ -97,7 +99,7 @@ fn every_skip_rule_is_recorded_under_its_own_string() {
         (SkipRule::TooLarge, "too_large"),
     ];
     for (i, (rule, _)) in cases.iter().enumerate() {
-        db.record_skip(1, &format!("file-{i}.pdf"), None, "reason", *rule)
+        db.record_skip(1, &format!("file-{i}.pdf"), None, "reason", *rule, None)
             .unwrap();
     }
 
@@ -105,6 +107,122 @@ fn every_skip_rule_is_recorded_under_its_own_string() {
     let got: Vec<&str> = rows.iter().map(|r| r.rule.as_str()).collect();
     let expected: Vec<&str> = cases.iter().map(|(_, s)| *s).collect();
     assert_eq!(got, expected);
+}
+
+/// The journal is a current state, not a history. Before this, `record_skip`
+/// was an unconditional INSERT: a folder of a thousand scans grew a thousand
+/// rows per walk, and every walk spent a worker process on each of them to
+/// learn the same thing again.
+#[test]
+fn a_second_skip_of_the_same_file_replaces_the_first() {
+    let db = fixture_empty();
+    let root = db.insert_watched_root("/tmp/x").unwrap();
+
+    db.record_skip(
+        root,
+        "a.pdf",
+        None,
+        "no text layer",
+        SkipRule::NoTextLayer,
+        None,
+    )
+    .unwrap();
+    db.record_skip(
+        root,
+        "a.pdf",
+        None,
+        "still none",
+        SkipRule::NoTextLayer,
+        None,
+    )
+    .unwrap();
+
+    let skips = db.skips_for_root(root).unwrap();
+    assert_eq!(skips.len(), 1);
+    assert_eq!(skips[0].reason, "still none");
+}
+
+/// The trap this test exists for: SQLite treats NULLs as DISTINCT in a UNIQUE
+/// index, and `page_no` is NULL for a whole-file skip. Without COALESCE in the
+/// index expression the dedup above simply does not happen — silently.
+#[test]
+fn page_skips_and_file_skips_do_not_collide_but_each_still_dedups() {
+    let db = fixture_empty();
+    let root = db.insert_watched_root("/tmp/x").unwrap();
+
+    db.record_skip(
+        root,
+        "a.pdf",
+        None,
+        "whole file",
+        SkipRule::NoTextLayer,
+        None,
+    )
+    .unwrap();
+    db.record_skip(
+        root,
+        "a.pdf",
+        Some(4),
+        "page four",
+        SkipRule::NoTextLayer,
+        None,
+    )
+    .unwrap();
+    db.record_skip(
+        root,
+        "a.pdf",
+        Some(4),
+        "page four again",
+        SkipRule::NoTextLayer,
+        None,
+    )
+    .unwrap();
+
+    let skips = db.skips_for_root(root).unwrap();
+    assert_eq!(skips.len(), 2);
+}
+
+/// Content rules remember the bytes; environmental rules must not. A crash is a
+/// statement about the worker, not about the file, and every file in the walk
+/// is subject to it — D44's own asymmetry, reused rather than invented twice.
+#[test]
+fn only_content_rules_remember_the_bytes() {
+    let db = fixture_empty();
+    let root = db.insert_watched_root("/tmp/x").unwrap();
+
+    db.record_skip(
+        root,
+        "a.bin",
+        None,
+        "no reader",
+        SkipRule::Unsupported,
+        Some(OnDisk {
+            size_bytes: 10,
+            mtime: 99,
+        }),
+    )
+    .unwrap();
+    db.record_skip(
+        root,
+        "b.pdf",
+        None,
+        "worker died",
+        SkipRule::Crash,
+        Some(OnDisk {
+            size_bytes: 10,
+            mtime: 99,
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.skip_entry(root, "a.bin").unwrap().unwrap().size_bytes,
+        Some(10)
+    );
+    assert_eq!(
+        db.skip_entry(root, "b.pdf").unwrap().unwrap().size_bytes,
+        None
+    );
 }
 
 #[test]

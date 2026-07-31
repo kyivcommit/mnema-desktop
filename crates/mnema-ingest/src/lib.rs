@@ -30,7 +30,7 @@ use std::path::Path;
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
 use mnema_core::{Block, BlockType, OnDisk, SourceKind};
-use mnema_index::{Db, DocumentStatus, PathEntry, SkipRule};
+use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipRule};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
 
 /// The stage `ingest_stage` records once a document's chunks are written.
@@ -208,6 +208,17 @@ pub fn ingest_file(
         return Ok(Ingested::Unchanged {
             document_id: recorded.document_id.clone(),
         });
+    }
+    // The second cheap arm: a file the worker already refused on its content.
+    // Without it, a folder of scans costs one worker process per file per walk
+    // forever, which is the debt §16 recorded on 2026-07-27.
+    if let Some(disk) = on_disk
+        && let Some(skip) = db.skip_entry(root_id, relative)?
+        && skip.format_version == INDEX_FORMAT_VERSION
+        && skip.size_bytes == Some(disk.size_bytes)
+        && skip.mtime == Some(disk.mtime)
+    {
+        return Ok(Ingested::Skipped { rule: skip.rule });
     }
     // `document.size_bytes` is NOT NULL, so a document with no measurement at
     // all cannot be written regardless of what the pool finds — and unlike
@@ -428,7 +439,7 @@ fn record_skip(
     on_disk: Option<OnDisk>,
 ) -> Result<(), mnema_index::Error> {
     db.transaction(|_| {
-        db.record_skip(root_id, relative, None, reason, rule)?;
+        db.record_skip(root_id, relative, None, reason, rule, on_disk)?;
         if let Some(recorded) = recorded
             && displaces(rule, recorded, on_disk)
         {

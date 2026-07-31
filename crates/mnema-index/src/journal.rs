@@ -6,9 +6,10 @@
 //! job can resume from. Before this file all three tables existed with no
 //! writer anywhere.
 
+use mnema_core::OnDisk;
 use rusqlite::{OptionalExtension, params};
 
-use crate::{Db, Error};
+use crate::{Db, Error, INDEX_FORMAT_VERSION};
 
 /// Which rule caused a file, or one page of it, to be skipped. The vocabulary
 /// is closed on purpose — an open `rule` column turns a writer's typo into a
@@ -78,6 +79,51 @@ impl SkipRule {
             SkipRule::TooLarge => "too_large",
         }
     }
+
+    /// Not a public `FromStr`, mirroring `DocumentStatus::parse` for the same
+    /// reason: the only source of this string is the `rule` column, and that
+    /// column carries no CHECK, so `None` here means some row was written
+    /// around every write path this crate exposes — not that the caller made
+    /// a mistake.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "crash" => SkipRule::Crash,
+            "timeout" => SkipRule::Timeout,
+            "memory" => SkipRule::Memory,
+            "unsupported" => SkipRule::Unsupported,
+            "no_text_layer" => SkipRule::NoTextLayer,
+            "unreadable" => SkipRule::Unreadable,
+            "too_large" => SkipRule::TooLarge,
+            _ => return None,
+        })
+    }
+
+    /// Whether this rule is a determination about the file's own bytes, as
+    /// opposed to something that happened to the worker or the machine.
+    ///
+    /// `record_skip` uses this to decide whether `bytes` is worth keeping: a
+    /// content rule earns the same verdict again from the same bytes, so the
+    /// next walk can answer from `stat` alone and skip the worker process
+    /// entirely (`mnema_ingest::ingest_file`'s second cheap arm). An
+    /// environmental rule says nothing about the file, so remembering its
+    /// size and mtime would make a transient condition — a busy machine, a
+    /// worker that crashed once — look permanent.
+    ///
+    /// Shares the exact split `displaces` already draws for the same reason
+    /// (D44): `Unsupported` and `NoTextLayer` are reproducible readings of the
+    /// bytes; `Crash`, `Timeout`, `Memory` and `Unreadable` are readings of the
+    /// environment that apply to every file in the walk alike. `TooLarge`
+    /// joins the content side here even though `displaces` treats it as a
+    /// special case rather than a flat `true`: the refusal itself comes from
+    /// `stat` alone, with no worker involved, so the same size and mtime will
+    /// refuse it identically next time regardless of what caused the size to
+    /// exceed the ceiling.
+    pub fn is_about_content(self) -> bool {
+        matches!(
+            self,
+            SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::TooLarge
+        )
+    }
 }
 
 /// Mirrors `document.status`'s own CHECK (`schema.sql:71-72`). Answers only
@@ -129,8 +175,26 @@ pub struct SkippedFile {
     pub rule: String,
 }
 
+/// The current verdict for one whole file, as read back by [`Db::skip_entry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipEntry {
+    pub rule: SkipRule,
+    /// The bytes the walk stat'ed when this verdict was recorded — `None` when
+    /// `rule` is environmental, since `record_skip` drops them on the floor for
+    /// exactly those rules.
+    pub size_bytes: Option<i64>,
+    pub mtime: Option<i64>,
+    pub format_version: i64,
+}
+
 impl Db {
-    /// Records that a file, or one page of it, did not make it into the index.
+    /// Records that a file, or one page of it, did not make it into the index,
+    /// replacing whatever this path last said.
+    ///
+    /// `bytes` is what the walk stat'ed. It is stored only when `rule` is a
+    /// statement about the file's content; for an environmental rule it is
+    /// dropped on the floor here rather than at the call site, so that no
+    /// caller can get the asymmetry wrong.
     pub fn record_skip(
         &self,
         root_id: i64,
@@ -138,13 +202,58 @@ impl Db {
         page_no: Option<i64>,
         reason: &str,
         rule: SkipRule,
+        bytes: Option<OnDisk>,
     ) -> Result<(), Error> {
+        let bytes = if rule.is_about_content() { bytes } else { None };
         self.conn().execute(
-            "INSERT INTO skipped (watched_root_id, relative_path, page_no, reason, rule)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![root_id, relative_path, page_no, reason, rule.as_str()],
+            "INSERT INTO skipped
+                (watched_root_id, relative_path, page_no, reason, rule,
+                 size_bytes, mtime, format_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (COALESCE(watched_root_id, -1), relative_path, COALESCE(page_no, -1))
+             DO UPDATE SET reason = excluded.reason,
+                           rule = excluded.rule,
+                           size_bytes = excluded.size_bytes,
+                           mtime = excluded.mtime,
+                           format_version = excluded.format_version,
+                           at = unixepoch()",
+            params![
+                root_id,
+                relative_path,
+                page_no,
+                reason,
+                rule.as_str(),
+                bytes.map(|b| b.size_bytes),
+                bytes.map(|b| b.mtime),
+                INDEX_FORMAT_VERSION
+            ],
         )?;
         Ok(())
+    }
+
+    /// The current verdict for a whole file, if there is one.
+    pub fn skip_entry(
+        &self,
+        root_id: i64,
+        relative_path: &str,
+    ) -> Result<Option<SkipEntry>, Error> {
+        self.conn()
+            .query_row(
+                "SELECT rule, size_bytes, mtime, format_version FROM skipped
+                  WHERE watched_root_id = ?1 AND relative_path = ?2 AND page_no IS NULL",
+                params![root_id, relative_path],
+                |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?
+            .map(|(rule, size_bytes, mtime, format_version)| {
+                Ok(SkipEntry {
+                    rule: SkipRule::parse(&rule).ok_or_else(|| Error::UnknownSkipRule(rule))?,
+                    size_bytes,
+                    mtime,
+                    format_version,
+                })
+            })
+            .transpose()
     }
 
     /// Every skip recorded under one watched root, oldest first.
