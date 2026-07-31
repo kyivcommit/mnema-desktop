@@ -86,9 +86,15 @@ pub struct WalkProgress {
 pub struct WalkReport {
     /// How many files phase 1 handed to phase 2 — the ones that became a
     /// worker request, a cheap-arm hit, or a phase-2 skip. Does **not**
-    /// include `refused`: `indexed + unchanged + skipped == found` is the
-    /// invariant a caller may rely on, and `refused` is a separate count of
-    /// files phase 1 never handed over in the first place.
+    /// include `refused`, which counts files phase 1 never handed over.
+    ///
+    /// `indexed + unchanged + skipped == found` **only when `stopped ==
+    /// Completed`.** Any early stop leaves the remainder of `found` untouched
+    /// and the three counts short of it — measured, thirty files against a
+    /// broken worker give `found: 30` with the three summing to 8. This
+    /// sentence used to state the equality with no condition on it, which is
+    /// the more dangerous half of the same trap `complete` carries: a walk
+    /// that stopped early still reports every file phase 1 saw.
     pub found: u64,
     pub indexed: u64,
     pub unchanged: u64,

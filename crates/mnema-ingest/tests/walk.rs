@@ -320,7 +320,7 @@ fn a_run_of_oversized_files_does_not_look_like_a_broken_worker() {
 /// `indexed`, not a skip, from the real worker — measured directly before
 /// writing this test, not assumed. What the worker actually refuses with
 /// `SkipRule::Unsupported` is a format whose *magic bytes* it recognises but
-/// has no reader for: the four bytes `%PDF-` are matched ahead of the
+/// has no reader for: the five bytes `%PDF-` are matched ahead of the
 /// extension (`identify`, same module) and land on `Reader::Pdf`, which has
 /// no `Vec<Block>` reader in this crate yet (`crates/mnema-extract/src/bin/worker.rs`)
 /// — the file need not be a well-formed PDF beyond that signature, since the
@@ -346,6 +346,23 @@ fn a_run_of_unsupported_files_does_not_look_like_a_broken_worker() {
     assert_eq!(report.found, 20);
     assert_eq!(report.skipped, 20);
     assert_eq!(report.indexed, 0);
+
+    // The counts alone do not say WHICH rule fired, and this test's whole
+    // claim is about one particular rule being on the harmless side of
+    // `suggests_broken_environment`. Without this the test passes just as
+    // well on `NoTextLayer` or `TooLarge`, neither of which is what the
+    // name promises to exercise.
+    let rules: std::collections::BTreeSet<String> =
+        f.db.skips_for_root(f.root)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.rule)
+            .collect();
+    assert_eq!(
+        rules,
+        ["unsupported".to_string()].into_iter().collect(),
+        "the run must be Unsupported specifically, not merely some non-environmental rule"
+    );
 }
 
 /// The counter this walk owns (D44): consecutive skips that are evidence
