@@ -416,19 +416,36 @@ mod tests {
     /// A timestamp `i64` cannot represent exactly must not make the file
     /// unreadable (see the doc comment on `mtime_nanos`) — it saturates
     /// instead of refusing (fix round 3, Important finding).
+    ///
+    /// The offset has to clear the saturation boundary (`i64::MAX` nanoseconds
+    /// is ~292 years, so ~2262) on every platform this ships to, which is a
+    /// narrower band than it looks: found by RUNNING on the Windows stand, not
+    /// by reading, where `SystemTime` is a FILETIME — 100ns ticks from 1601,
+    /// ceiling around the year 30828. The original offset (10 trillion
+    /// seconds, ~year 318,857) built fine on Unix and panicked on
+    /// `checked_add` on Windows, before the assertion ever ran. `20_000_000_000`
+    /// seconds lands around 2604: comfortably past 2262, comfortably under
+    /// 30828.
     #[test]
     fn mtime_nanos_saturates_past_the_representable_range() {
         let far_future = UNIX_EPOCH
-            .checked_add(Duration::from_secs(10_000_000_000_000))
+            .checked_add(Duration::from_secs(20_000_000_000))
             .expect("constructing a far-future SystemTime for this test");
 
         assert_eq!(mtime_nanos(far_future), i64::MAX);
     }
 
+    /// Same platform trap as above, mirrored below the epoch: the saturation
+    /// boundary is ~1678 (292 years before 1970), and FILETIME cannot go
+    /// earlier than 1601 at all. `10_000_000_000` seconds before the epoch
+    /// lands around 1653 — comfortably inside the roughly 77-year band that
+    /// is both past the `i64` boundary and representable on Windows. Going
+    /// much earlier narrows that margin toward 1601 and eventually falls out
+    /// of it entirely.
     #[test]
     fn mtime_nanos_saturates_before_the_representable_range() {
         let far_past = UNIX_EPOCH
-            .checked_sub(Duration::from_secs(10_000_000_000_000))
+            .checked_sub(Duration::from_secs(10_000_000_000))
             .expect("constructing a far-past SystemTime for this test");
 
         assert_eq!(mtime_nanos(far_past), i64::MIN);
