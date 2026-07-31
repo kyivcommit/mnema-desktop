@@ -40,19 +40,30 @@ fn materialised_from_st_flags(st_flags: u32) -> bool {
 
 /// `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` — opening the file for read blocks
 /// on a download.
+///
+/// This is the one bit that carries the whole check on Windows, and it took a
+/// run against a real placeholder to find that out. PowerShell reports that
+/// file as `0x00401620`; the same file through the API this code uses —
+/// `std::fs`, on the walk's own metadata — is `0x00400020`. `OFFLINE`,
+/// `REPARSE_POINT` and `SPARSE_FILE` are all absent from what Rust sees. A
+/// check keyed on the older `OFFLINE` bit alone, which is the obvious reading
+/// of the PowerShell word, would have called that placeholder local and read
+/// it, which downloads it (§10.1).
 #[cfg_attr(not(windows), allow(dead_code))]
 const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
 /// `FILE_ATTRIBUTE_OFFLINE` — the older bit meaning the same thing; some
-/// providers set only this one.
+/// providers are documented to set only this one.
 ///
-/// Unlike `RECALL_ON_DATA_ACCESS`, refusing on THIS bit alone is not backed
-/// by a measurement: the real OneDrive placeholder on the stand carried it
-/// together with `RECALL_ON_DATA_ACCESS` (`0x00401620`, spec §10.1), never by
-/// itself. Treating it as sufficient on its own is a judgement made in the
-/// absence of a measurement, in the direction the module doc above already
-/// calls the safer one — but the cost is real, not hypothetical: a local
-/// file some other system (an HSM, a backup tool) sets this flag on for its
-/// own reasons is never indexed by this walk, and per the obligation on
+/// Unlike `RECALL_ON_DATA_ACCESS`, refusing on THIS bit alone is backed by no
+/// measurement at all — and the measurement that exists is against it: through
+/// `std::fs` the real placeholder did not carry this bit even though the file
+/// system reports it (see above). So this half of the mask has never fired on
+/// anything observed. It stays because a bit that is set on a dehydrated file
+/// is not a bit to ignore, but that is a judgement, not a finding.
+///
+/// Its cost is real rather than hypothetical, and runs the other way: a local
+/// file that some other system (an HSM, a backup tool) sets this flag on for
+/// its own reasons is never indexed by this walk, and per the obligation on
 /// `PreSkipRule::NotMaterialised` a reconciliation must read it as present,
 /// not absent, so it is never deleted for being missing either. It simply
 /// never enters the index, silently, for as long as the flag stays set.
