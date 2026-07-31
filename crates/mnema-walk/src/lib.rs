@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod cloud;
 mod rules;
 // `RulesError` has to be nameable outside this crate: `WalkRules::new`
 // returns it, and a caller with a save dialog in front of a person needs to
@@ -52,7 +53,20 @@ pub enum PreSkipRule {
     /// that no longer opens the file (§5).
     UnrepresentableName,
     /// A cloud placeholder: present in the listing, absent from the disk, and
-    /// reading it would download it (§5).
+    /// reading it would download it (§5). A decision, not a read failure —
+    /// same shape as `NotAFile` — so this does NOT clear `Walked::complete`.
+    ///
+    /// That has a consequence a reconciliation MUST honour: a file that was
+    /// already indexed and is later evicted to the cloud stops appearing in
+    /// `found` on every walk after the eviction, under a `complete == true`
+    /// walk. A reconciliation that deletes rows for paths absent from `found`
+    /// would read that as the file having vanished and delete its document —
+    /// but the file is still on the user's disk, just not fetched. The
+    /// contents did not disappear; only the walk's willingness to touch them
+    /// did. A reconciliation must therefore read `skipped` as well as
+    /// `found`, and treat every `NotMaterialised` entry as presence, not
+    /// absence, before drawing any conclusion from what is missing from
+    /// `found`.
     NotMaterialised,
     /// The walker could not read this entry at all: permission denied, a
     /// directory that vanished mid-walk, a size that does not fit `i64`, or
@@ -249,6 +263,14 @@ pub fn enumerate(root: &Path, rules: &WalkRules) -> Walked {
             });
             continue;
         };
+        if !cloud::is_materialised(&meta) {
+            walked.skipped.push(PreSkip {
+                relative: Some(relative.clone()),
+                detail: relative,
+                rule: PreSkipRule::NotMaterialised,
+            });
+            continue;
+        }
         let Some(on_disk) = on_disk_of(&meta) else {
             walked.unreadable += 1;
             walked.complete = false;
