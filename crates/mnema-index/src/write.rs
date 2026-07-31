@@ -122,12 +122,16 @@ impl Db {
     /// Removes a watched root and every document whose last path was under it.
     /// Returns how many documents went with it.
     ///
-    /// The schema cannot do this on its own: `path.watched_root_id` cascades
-    /// from `watched_root` (`schema.sql:80`), but the direction is document →
-    /// path → root, never the reverse, so dropping the root row alone takes
-    /// every `path` row under it and leaves the `document` rows they named —
-    /// with zero paths left, still answering `search_lexical`, citing a folder
-    /// that no longer exists (D33's own failure mode, one level up).
+    /// The schema cannot do this on its own. `path.watched_root_id` does
+    /// cascade from `watched_root` (`schema.sql:80`), so dropping the root
+    /// row alone already takes every `path` row under it — but nothing
+    /// cascades onward from `path` to `document`, because `path.document_id`
+    /// is the other direction of that foreign key (`schema.sql:82`): a
+    /// document does not belong to its paths, its paths belong to it. So the
+    /// root's own cascade stops at `path`, and the `document` rows those
+    /// paths named are left behind — with zero paths left, still answering
+    /// `search_lexical`, citing a folder that no longer exists (D33's own
+    /// failure mode, one level up).
     ///
     /// A document is doomed only if EVERY path that ever named it sat under
     /// this root — the `NOT EXISTS` clause below excludes a document that also
@@ -159,8 +163,9 @@ impl Db {
         for id in &doomed {
             crate::space::delete_vectors_for_document_in(&tx, id)?;
             // The document's own cascade takes its pages, blocks, chunks,
-            // search rows, ingest_stage row, and its remaining path rows
-            // (all of them under this same root, since it was doomed).
+            // search rows, chunk_embedding_state rows, ingest_stage row,
+            // document_tag rows, and its remaining path rows (all of them
+            // under this same root, since it was doomed).
             tx.execute("DELETE FROM document WHERE id = ?1", params![id])?;
         }
         // Cascades away the path rows of any document that survived — one

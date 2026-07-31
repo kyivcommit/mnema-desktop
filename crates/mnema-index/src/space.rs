@@ -225,9 +225,10 @@ impl Db {
     /// `vec_emb_<n>` row naming a `chunk_id` no chunk owns any more. Called
     /// from `mnema-ingest`'s `forget_if_unnamed`, the one place that decides
     /// an ordinary edit or reconciliation has left a document with no path
-    /// naming it, and — via [`delete_vectors_for_document_in`] directly —
-    /// from [`Db::delete_watched_root`], which decides the same question for
-    /// a whole root at once and needs the sweep and the document's own
+    /// naming it, and — via this module's private `delete_vectors_for_document_in`,
+    /// directly against an already-open transaction — from
+    /// [`Db::delete_watched_root`], which decides the same question for a
+    /// whole root at once and needs the sweep and the document's own
     /// deletion in one transaction rather than two calls that could be
     /// interrupted between them.
     ///

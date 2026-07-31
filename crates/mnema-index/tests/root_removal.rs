@@ -144,6 +144,18 @@ fn a_document_reachable_from_another_root_survives() {
 /// the chunk it belongs to — recorded by the skeleton and unreachable until
 /// now, because nothing deleted at scale. A walk deletes at scale. With chunk
 /// ids reused on rebuild, the stale vector then points at different content.
+///
+/// This calls `delete_vectors_for_document` and `delete_document` directly,
+/// the exact pair `mnema-ingest`'s `forget_if_unnamed` calls — it is Task 9's
+/// own regression test, kept here because it belongs in this crate's suite
+/// rather than only in `mnema-ingest`'s. It does **not** exercise
+/// `delete_watched_root`'s call into the same sweep:
+/// `removing_a_root_takes_its_documents_vectors_too`, below, is the one that
+/// pins that path — this one alone left `delete_watched_root`'s own
+/// `delete_vectors_for_document_in(&tx, id)` call
+/// (`crates/mnema-index/src/write.rs`) free to be deleted with the whole
+/// workspace suite staying green, since nothing here ever calls
+/// `delete_watched_root`.
 #[test]
 fn deleting_a_document_takes_its_vectors_with_it() {
     let db = fixture_db();
@@ -157,4 +169,24 @@ fn deleting_a_document_takes_its_vectors_with_it() {
 
     assert!(db.knn(space, &[0.1; 4], 5, None).unwrap().is_empty());
     let _ = chunk;
+}
+
+/// The path `deleting_a_document_takes_its_vectors_with_it` does not reach:
+/// `delete_watched_root` sweeps a doomed document's vectors itself, inside its
+/// own transaction, rather than leaving the caller to call
+/// `delete_vectors_for_document` first. Without this test, deleting the
+/// `delete_vectors_for_document_in(&tx, id)?` call at `write.rs`'s call site
+/// left the whole workspace suite green — measured, not assumed, before this
+/// test existed.
+#[test]
+fn removing_a_root_takes_its_documents_vectors_too() {
+    let db = fixture_db();
+    let root = db.insert_watched_root("/tmp/one").unwrap();
+    let doc = insert_document_with_chunk(&db, root, "a.txt", "text");
+    let (space, _chunk) = seed_one_vector(&db, &doc);
+    assert_eq!(db.knn(space, &[0.1; 4], 5, None).unwrap().len(), 1);
+
+    db.delete_watched_root(root).unwrap();
+
+    assert!(db.knn(space, &[0.1; 4], 5, None).unwrap().is_empty());
 }
