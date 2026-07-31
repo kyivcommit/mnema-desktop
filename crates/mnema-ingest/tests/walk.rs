@@ -1056,3 +1056,153 @@ fn reconciliation_deletes_the_documents_vectors_too() {
             .unwrap();
     assert_eq!(count_after, 0, "the document's vectors must not outlive it");
 }
+
+/// The `NotAFileSubtree` prefix must protect the skip journal the same way
+/// it protects `path` — not only a row that exactly matches the symlink's
+/// own name (already covered by `seen`), but a STALE row for a file that
+/// used to live under the directory before it became a symlink. Measured:
+/// without this, replacing `linked/` with a directory symlink took a skip
+/// row for `linked/skipped.pdf` straight out of the journal on the very
+/// next walk, even though the walk never descended into `linked/` again to
+/// re-confirm it either way — and unlike an ordinarily pruned row, nothing
+/// ever re-creates it, because the walk never visits that name again.
+#[cfg(unix)]
+#[test]
+fn a_directory_symlink_protects_journal_rows_too() {
+    use std::os::unix::fs::symlink;
+
+    let f = Fixture::new();
+    // A format nothing reads earns a skip row rather than an index entry —
+    // same magic-bytes trick as
+    // `a_run_of_unsupported_files_does_not_look_like_a_broken_worker`.
+    f.write(
+        "linked/skipped.pdf",
+        "%PDF-1.4\nnot a real pdf, just the magic bytes",
+    );
+    f.walk();
+    assert_eq!(f.db.skips_for_root(f.root).unwrap().len(), 1);
+
+    std::fs::remove_dir_all(f.dir().join("linked")).unwrap();
+    let elsewhere = f.dir().join("elsewhere_dir");
+    std::fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, f.dir().join("linked")).unwrap();
+    f.walk();
+
+    let remaining: Vec<String> =
+        f.db.skips_for_root(f.root)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.relative_path)
+            .collect();
+    assert!(
+        remaining.contains(&"linked/skipped.pdf".to_string()),
+        "the stale skip row under the frozen subtree must survive: {remaining:?}"
+    );
+}
+
+/// `WalkReport::complete` and the root-level unmount signature both miss the
+/// same ambiguity one directory down: a mounted share or drive nested under
+/// the watched root (not at it) can unmount and leave a readable, empty
+/// directory in its place. `complete` stays true — the empty directory reads
+/// fine — and the root itself is not empty, because `keep.txt` is still
+/// there, so neither existing guard fires. Without a check of its own, this
+/// looked identical to two files having been deleted.
+#[test]
+fn an_unmounted_nested_share_deletes_nothing() {
+    let f = Fixture::new();
+    f.write("keep.txt", "keep content");
+    f.write("mnt/one.txt", "one content");
+    f.write("mnt/two.txt", "two content");
+    f.walk();
+    assert!(!f.db.search_lexical("one", 10).unwrap().is_empty());
+    assert!(!f.db.search_lexical("two", 10).unwrap().is_empty());
+
+    // The unmount itself: both files are gone, but `mnt/` — the mountpoint
+    // — is still there, readable, and now empty. Nothing here deletes the
+    // directory, because a real unmount does not remove the mountpoint.
+    f.remove("mnt/one.txt");
+    f.remove("mnt/two.txt");
+    let report = f.walk();
+
+    assert_eq!(report.stopped, StopReason::Completed);
+    assert_eq!(
+        report.removed, 0,
+        "an unmounted nested share must not look like two deleted files"
+    );
+    assert!(f.db.path_entry(f.root, "mnt/one.txt").unwrap().is_some());
+    assert!(f.db.path_entry(f.root, "mnt/two.txt").unwrap().is_some());
+    assert!(!f.db.search_lexical("one", 10).unwrap().is_empty());
+    assert!(!f.db.search_lexical("two", 10).unwrap().is_empty());
+}
+
+/// Every chunk id a document owns, ordered — used to tell "the same rows"
+/// apart from "a document that looks the same but was rebuilt from scratch,"
+/// which `document_id_of` alone cannot: content addressing gives a rebuild
+/// the same `document.id`, but `chunk.id` is `INTEGER PRIMARY KEY` without
+/// `AUTOINCREMENT` (`crates/mnema-index/src/schema.sql`), so a rebuild does
+/// not even keep its own old ids.
+fn chunk_ids_of(db: &Db, document_id: &str) -> Vec<i64> {
+    db.conn()
+        .prepare("SELECT id FROM chunk WHERE document_id = ?1 ORDER BY id")
+        .unwrap()
+        .query_map([document_id], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Phase 2 must run before phase 3, and nothing before this test pinned that
+/// ordering directly — a rename is the single most common action a watched
+/// folder sees, and it depends on it entirely. Same bytes, new name: phase 2
+/// re-ingests under the new name first, content addressing hands back the
+/// same `document.id`, `path_count` rises to 2 — and only then does phase 3
+/// remove the old path row, leaving 1. Reversed, `path_count` would hit 0
+/// first, phase 3 would destroy the document, and the second walk would
+/// rebuild it from nothing under a fresh set of chunk ids: every citation
+/// into it invalidated for a rename, which is not a deletion at all.
+///
+/// `first.txt` and `third.txt` bracket `old.txt` deliberately, and the test
+/// is weaker without them: `chunk.id` is `INTEGER PRIMARY KEY` **without**
+/// `AUTOINCREMENT` (`crates/mnema-index/src/schema.sql`), so on a database
+/// holding only the one renamed document a wrongly-rebuilt chunk can land
+/// back on the very id the deleted one just freed — SQLite's own "reuse the
+/// highest free rowid" rule, coincidentally matching `chunk_ids_before` for
+/// a reason that has nothing to do with this test being right. A third
+/// chunk still alive at a HIGHER id than the renamed file's own forces a
+/// genuine rebuild to land above it instead, so the comparison below fails
+/// for the actual bug rather than passing by accident (measured: this test
+/// with only `old.txt` in it stayed green under the phase-3-before-phase-2
+/// mutation described below; with the bracketing files it does not).
+#[test]
+fn a_rename_keeps_the_document_and_its_chunks() {
+    let f = Fixture::new();
+    f.write("first.txt", "first content");
+    f.walk();
+    f.write("old.txt", "rename content");
+    f.walk();
+    f.write("third.txt", "third content");
+    f.walk();
+
+    let document_id = f.document_id_of("old.txt");
+    let chunk_ids_before = chunk_ids_of(&f.db, &document_id);
+    assert!(
+        !chunk_ids_before.is_empty(),
+        "the file must have produced at least one chunk to make this test mean anything"
+    );
+
+    std::fs::rename(f.dir().join("old.txt"), f.dir().join("new.txt")).unwrap();
+    let report = f.walk();
+
+    assert_eq!(report.removed, 1, "the old path row, and only it");
+    assert!(f.db.path_entry(f.root, "old.txt").unwrap().is_none());
+    assert!(f.db.path_entry(f.root, "new.txt").unwrap().is_some());
+    assert_eq!(f.db.path_count(&document_id).unwrap(), 1);
+    assert_eq!(
+        chunk_ids_of(&f.db, &document_id),
+        chunk_ids_before,
+        "the same document must keep the same chunk rows, not be rebuilt from scratch"
+    );
+    assert!(!f.db.search_lexical("rename", 10).unwrap().is_empty());
+    assert!(!f.db.search_lexical("first", 10).unwrap().is_empty());
+    assert!(!f.db.search_lexical("third", 10).unwrap().is_empty());
+}

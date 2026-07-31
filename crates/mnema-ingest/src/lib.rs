@@ -459,13 +459,25 @@ fn record_skip(
 }
 
 /// Deletes `document` — and, by cascade, its pages, blocks, chunks and search
-/// rows — if no `path` row names it any more.
+/// rows, and its vectors explicitly — if no `path` row names it any more.
 ///
 /// The count is the whole decision. D33 makes a document live as long as some
 /// path names it, which is what stops deleting one copy of a file from
 /// dropping the document its other copy still needs.
+///
+/// The single place `Db::delete_document` is called from, and that is load-
+/// bearing rather than tidy: an edit that displaces a previous version
+/// (`repoint`), a file that becomes unsupported (`record_skip`), and
+/// reconciliation's own phase 3 (`walk.rs`) all decide "does anything still
+/// name this document?" the same way, through this one function, rather than
+/// each repeating the count-then-delete and each having to remember the
+/// vector cleanup beside it. `Db::delete_vectors_for_document`'s own doc
+/// comment has the reason that cleanup cannot be left to a cascade: a `vec0`
+/// table cannot carry a foreign key, so nothing removes a document's vectors
+/// on its own.
 fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> {
     if db.path_count(document)? == 0 {
+        db.delete_vectors_for_document(document)?;
         db.delete_document(document)?;
     }
     Ok(())

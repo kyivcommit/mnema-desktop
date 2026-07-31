@@ -8,9 +8,10 @@
 //! Phase 3 reconciles what the index already holds under the watched root
 //! against what a *complete* walk just saw, and deletes what is genuinely
 //! gone — a document only when its last path is, and its vectors with it
-//! (§7). It is the only code in this product that deletes anything, and it
-//! runs only once phase 1 and phase 2 both finished cleanly; see the gate at
-//! the top of phase 3, below, for exactly what that means.
+//! (§7), through the same `forget_if_unnamed` an ordinary edit already used
+//! before this phase existed. It runs only once phase 1 and phase 2 both
+//! finished cleanly; see the gate at the top of phase 3, below, for exactly
+//! what that means.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -350,6 +351,20 @@ pub fn walk_root(
     // never during one: a walk that stopped half-way has not seen the whole
     // folder, so what it did not see is not evidence of anything (§7).
     //
+    // Must run after phase 2, not only after phase 1, and that ordering is
+    // load-bearing rather than a matter of taste: a rename is same bytes
+    // under a new name, so phase 2 re-ingests the new name first, content
+    // addressing hands back the *same* `document.id`, and `path_count` for
+    // it rises to 2 before this phase ever runs — only then does deleting
+    // the old path row leave 1. Run this block before phase 2 instead and
+    // `path_count` hits 0 first: `forget_if_unnamed` destroys the document,
+    // and the walk that put phase 2 second rebuilds it from nothing under a
+    // fresh set of chunk ids, invalidating every citation into it over a
+    // rename — measured directly, moving this block above phase 2:
+    // `a_rename_keeps_the_document_and_its_chunks` failed with the document
+    // rebuilt onto different chunk ids (`[4]` instead of `[2]`) rather than
+    // kept.
+    //
     // Gated on BOTH `walked.complete` and `report.stopped` — two different
     // questions, and neither implies the other. `complete` says whether
     // phase 1 read every entry under the root; `stopped` says whether phase 2
@@ -377,7 +392,10 @@ pub fn walk_root(
     // The unmount signature (D33): a detached disk and a mass delete are
     // indistinguishable from here, so the answer is a pause. Stated as a
     // fact about `root` itself, not as a fraction — a fraction would be a
-    // number nothing here measured.
+    // number nothing here measured. `!known.is_empty()` is checked first
+    // because it is free and `root_is_empty` is not — one `opendir`, worth
+    // skipping when there is nothing under this root the walk could
+    // possibly disagree with anyway.
     //
     // Deliberately a RAW listing, taken with no exclusion rule applied at
     // all, and not `walked.found` or anything else `Walked` carries.
@@ -402,7 +420,7 @@ pub fn walk_root(
     // counts as empty too: the conservative direction, a pause rather than a
     // guess, for the same root that already earned `RootUnavailable` above
     // had it vanished before phase 1 instead of during phase 3.
-    if root_is_empty(root) && !known.is_empty() {
+    if !known.is_empty() && root_is_empty(root) {
         report.stopped = StopReason::VolumeMissing;
         return Ok(report);
     }
@@ -434,64 +452,105 @@ pub fn walk_root(
     // path for that reason: a `known` path that predates the symlink has
     // exactly that shape, and deleting it would be deleting on
     // absence-of-evidence, which is precisely what §7 forbids.
-    let frozen_subtrees: Vec<&str> = walked
+    //
+    // `frozen` grows a second kind of entry below — an unmounted NESTED
+    // subtree earns exactly the same prefix treatment as a symlinked one,
+    // for the same reason — so this starts the collection rather than
+    // standing apart from it.
+    let mut frozen: Vec<&str> = walked
         .skipped
         .iter()
         .filter(|s| s.rule == PreSkipRule::NotAFileSubtree)
         .filter_map(|s| s.relative.as_deref())
         .collect();
 
+    // The root's own unmount signature, one directory down. A mounted share
+    // or drive under (not at) the watched root can unmount exactly the way
+    // the root itself can, leaving a readable, empty directory behind —
+    // `Walked::complete` stays true, an empty directory reads fine, and the
+    // root-level check above stays false, because whatever else is under
+    // the root is still there. Without this, phase 3 read the emptied share
+    // as every file under it having been deleted: measured directly against
+    // that exact shape — a watched root holding `keep.txt` at the top and
+    // `mnt/one.txt`, `mnt/two.txt` under a share that then unmounted gave
+    // `removed: 2, stopped: Completed`, `keep.txt` the only path left.
+    //
+    // Checked per distinct PARENT DIRECTORY of a `known` path the walk did
+    // not find — not for every directory under the root, and not once per
+    // missing path sharing one — so the cost stays proportional to what
+    // actually went missing rather than to the size of the tree. A `known`
+    // path already excused by `seen` or by a `NotAFileSubtree` prefix needs
+    // no second look; a top-level path (no `/` in it) has no directory of
+    // its own below the root to freeze, and its absence is already the
+    // root-level check's business, above.
+    let missing: Vec<&str> = known
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !seen.contains(p) && !frozen.iter().any(|prefix| under(p, prefix)))
+        .collect();
+    let mut checked_parents: HashSet<&str> = HashSet::new();
+    for relative in missing {
+        let Some(parent) = relative.rfind('/').map(|i| &relative[..i]) else {
+            continue;
+        };
+        if !checked_parents.insert(parent) {
+            continue;
+        }
+        if root_is_empty(&root.join(parent)) {
+            frozen.push(parent);
+        }
+    }
+
     for relative in &known {
-        if seen.contains(relative.as_str()) || frozen_subtrees.iter().any(|p| under(relative, p)) {
+        if seen.contains(relative.as_str()) || frozen.iter().any(|p| under(relative, p)) {
             continue;
         }
         let Some(entry) = db.path_entry(root_id, relative)? else {
             continue;
         };
-        // One path's removal, its document (when this was the last path
-        // naming it) and that document's vectors land together or not at
-        // all: a crash between them must not leave a document with zero
-        // paths, which is exactly what the randomised harness's first
-        // invariant forbids. Deliberately NOT one transaction for the whole
-        // loop — a large root would then hold the write lock for as long as
-        // the entire reconciliation takes, and `IngestError::Busy` exists
-        // because five seconds of that already measured as a problem for one
-        // ordinary write elsewhere in this crate.
+        // The path's removal and whatever `forget_if_unnamed` decides about
+        // its document — and, through that, its vectors, see that
+        // function's own doc comment — land together or not at all: a
+        // crash between them must not leave a document with zero paths,
+        // which is exactly what the randomised harness's first invariant
+        // forbids. Deliberately NOT one transaction for the whole loop — a
+        // large root would then hold the write lock for as long as the
+        // entire reconciliation takes, and `IngestError::Busy` exists
+        // because five seconds of that already measured as a problem for
+        // one ordinary write elsewhere in this crate.
         db.transaction(|_| {
             db.delete_path(root_id, relative)?;
-            // The document goes when its last path does, and only then. Two
-            // copies of one file are one document, so deleting a copy must
-            // leave it.
-            if db.path_count(&entry.document_id)? == 0 {
-                // vec0 cannot be the target of a foreign key (§7 item 2), so
-                // nothing cascades a document's vectors away on its own.
-                db.delete_vectors_for_document(&entry.document_id)?;
-                db.delete_document(&entry.document_id)?;
-            }
-            Ok(())
+            // The document goes when its last path does, and only then —
+            // the same decision an ordinary edit's displacement already
+            // made, through the same function, so there is exactly one
+            // place that makes it rather than two that could disagree.
+            crate::forget_if_unnamed(db, &entry.document_id)
         })?;
         report.removed += 1;
     }
     // Journal rows for paths that no longer exist go with them, or the
-    // journal grows in the one dimension Task 6 did not close. Same `seen` as
-    // above, for the same reason: a pre-skip with a path is not evidence the
-    // file is gone, so its journal row must not be forgotten either.
-    db.forget_skips_not_in(root_id, &seen)?;
+    // journal grows in the one dimension Task 6 did not close. Same `seen`
+    // and `frozen` as the loop above: a pre-skip with a path, or a path
+    // under a frozen prefix, is not evidence the file is gone, so its
+    // journal row must not be forgotten either.
+    db.forget_skips_not_in(root_id, &seen, &frozen)?;
 
     Ok(report)
 }
 
-/// A raw top-level listing of `root`, with no exclusion rule applied at all —
-/// deliberately independent of `Walked`, which cannot tell an excluded entry
-/// apart from a nonexistent one. See the unmount-signature check in
-/// `walk_root`, this function's only caller, for why that distinction has to
-/// be made out here instead.
+/// A raw top-level listing of one directory, with no exclusion rule applied
+/// at all — deliberately independent of `Walked`, which cannot tell an
+/// excluded entry apart from a nonexistent one. `walk_root`, this function's
+/// only caller, uses it twice: once for the watched root itself, and once
+/// per candidate parent directory of a `known` path phase 1 did not find,
+/// which is what tells an unmounted nested share apart from a genuinely
+/// deleted one — see both call sites for the reasoning.
 ///
 /// `true` on a read failure too, same as an empty directory: the
 /// conservative direction for a check whose whole job is choosing a pause
 /// over a guess.
-fn root_is_empty(root: &Path) -> bool {
-    std::fs::read_dir(root)
+fn root_is_empty(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
         .map(|mut entries| entries.next().is_none())
         .unwrap_or(true)
 }

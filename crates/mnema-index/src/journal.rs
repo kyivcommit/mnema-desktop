@@ -358,8 +358,9 @@ impl Db {
         Ok(rows)
     }
 
-    /// Removes skip rows under `root_id` whose path is not in `seen`, and
-    /// returns how many were removed.
+    /// Removes skip rows under `root_id` whose path is not in `seen` and does
+    /// not sit under one of `frozen_prefixes`, and returns how many were
+    /// removed.
     ///
     /// `seen` must be built the same way reconciliation builds it for `path`
     /// (`mnema-ingest`'s `walk_root`, phase 3): `Walked::found` plus every
@@ -371,15 +372,59 @@ impl Db {
     /// the file is untouched, the very next walk offers the same file to the
     /// journal again, so "why is this file not in my index?" would have an
     /// answer that deletes itself and comes back on every single walk.
-    pub fn forget_skips_not_in(&self, root_id: i64, seen: &HashSet<&str>) -> Result<u64, Error> {
+    ///
+    /// `frozen_prefixes` must be the same set the `path` deletion loop uses
+    /// to skip a `known` path — a symlinked directory, or an unmounted
+    /// nested share, that the walk has no evidence about at all. `seen`
+    /// alone under-protects here: a symlink's own row is in `seen` (its
+    /// `relative` is the symlink's path, with a path), but a *stale* skip
+    /// row for something that used to live underneath it — recorded on a
+    /// walk before the symlink existed — has a `relative_path` `seen` never
+    /// names either. Measured directly: without this, replacing an indexed
+    /// directory with a symlink to a directory took a skip row for a file
+    /// inside it from `["linked/inner.pdf"]` to `["linked"]` on the very
+    /// next walk, even though the `path` row for `linked/inner.pdf` was
+    /// correctly kept — and because the walk never descends into a
+    /// `NotAFileSubtree` symlink, nothing ever re-creates that row, unlike
+    /// an ordinarily pruned one.
+    pub fn forget_skips_not_in(
+        &self,
+        root_id: i64,
+        seen: &HashSet<&str>,
+        frozen_prefixes: &[&str],
+    ) -> Result<u64, Error> {
         let list = serde_json::to_string(seen)?;
-        let n = self.conn().execute(
-            "DELETE FROM skipped
-              WHERE watched_root_id = ?1
-                AND relative_path NOT IN (SELECT value FROM json_each(?2))",
-            params![root_id, list],
-        )?;
-        Ok(n as u64)
+        // Candidates only, not the delete itself: prefix matching is not
+        // something a `NOT IN (json_each(...))` clause can express, and GLOB
+        // would need `*`, `?` and `[...]` escaped out of every prefix before
+        // it could be trusted as a literal string rather than a pattern —
+        // simpler and safer to filter the (typically tiny) candidate list in
+        // Rust with a plain string comparison, the same one the `path`
+        // deletion loop uses.
+        let candidates: Vec<String> = self
+            .conn()
+            .prepare(
+                "SELECT relative_path FROM skipped
+                  WHERE watched_root_id = ?1
+                    AND relative_path NOT IN (SELECT value FROM json_each(?2))",
+            )?
+            .query_map(params![root_id, list], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut n = 0u64;
+        for relative in candidates {
+            if frozen_prefixes
+                .iter()
+                .any(|prefix| under_prefix(&relative, prefix))
+            {
+                continue;
+            }
+            n += self.conn().execute(
+                "DELETE FROM skipped WHERE watched_root_id = ?1 AND relative_path = ?2",
+                params![root_id, relative],
+            )? as u64;
+        }
+        Ok(n)
     }
 
     /// Sets a document's lifecycle status.
@@ -452,4 +497,16 @@ impl Db {
             )
             .optional()?)
     }
+}
+
+/// Whether `relative` names something inside the subtree `prefix` names —
+/// prefix-plus-separator, not a bare string prefix: `"linked_dirs/x"` must
+/// not match against `"linked_dir"`. Mirrors `mnema-ingest`'s own `under()`
+/// (`crates/mnema-ingest/src/walk.rs`) — duplicated rather than shared,
+/// because `mnema-index` has no dependency on `mnema-ingest` to share it
+/// through; the dependency runs the other way.
+fn under_prefix(relative: &str, prefix: &str) -> bool {
+    relative
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
 }

@@ -222,10 +222,12 @@ impl Db {
     /// nothing about `document`'s `ON DELETE CASCADE` reaches these tables
     /// when a document goes: without this, a vector would outlive the chunk
     /// it embeds, silently, and nothing downstream would ever notice a
-    /// `vec_emb_<n>` row naming a `chunk_id` no chunk owns any more.
-    /// Reconciliation (`mnema-ingest`'s phase 3) is the first code path in
-    /// this product that deletes a document at all, which is why this had no
-    /// caller until now — see that crate's `walk.rs` for the one that does.
+    /// `vec_emb_<n>` row naming a `chunk_id` no chunk owns any more. Called
+    /// from `mnema-ingest`'s `forget_if_unnamed`, the one place that decides
+    /// a document has no path left naming it — an ordinary edit that
+    /// displaces a document, a file that becomes unsupported, and
+    /// reconciliation's own phase 3 all reach `delete_document` through that
+    /// one function, so this has exactly one caller rather than one per path.
     ///
     /// Must run BEFORE the document (and, by cascade, its chunks) is
     /// deleted: once they are gone there is no `chunk.document_id` left to
