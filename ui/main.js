@@ -1,9 +1,18 @@
 // The webview half of the walking skeleton. It draws what the core reports and
 // decides nothing: no state here outlives a reload, because the core owns it.
+//
+// Every sentence below is built from a field a command actually returned —
+// never from what "completed" or "failed" usually mean elsewhere. A walk that
+// ends `complete: false` has not finished, whatever `reason` says; a folder
+// `frozen` names was deliberately left untouched, not skipped by accident;
+// and `reason: "failed"` on its own says nothing a person can act on, which
+// is why it is never shown without `message`.
 
 const { invoke, Channel } = window.__TAURI__.core;
+const { open } = window.__TAURI__.dialog;
 
 const el = (id) => document.getElementById(id);
+const results = el("results");
 
 // Opening the index is the first thing that happens, and its failure is
 // something the user has to be able to read — which is why the window opens
@@ -15,43 +24,53 @@ try {
   el("index-status").textContent = `the index could not be opened: ${error}`;
 }
 
-// The id `start` needs to run a real walk. `null` until `folder-form`
-// answers with one — Start refuses to run without it rather than sending
-// `rootId: null` and letting the command reject it, which would draw the
-// same "a job is already running"-shaped error for an unrelated reason.
+// `null` until `pick` answers with a real one. Kept apart from `jobRunning`
+// below because the two gate "Index it" for different reasons — one because
+// nothing has been chosen yet, the other because something is already
+// running — and conflating them would make a reload (which loses this, but
+// not necessarily a running job) look identical to "no folder chosen" for
+// the wrong reason.
 let watchedRootId = null;
+let jobRunning = false;
 
-el("folder-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const path = el("folder-path").value;
+const syncButtons = () => {
+  el("walk").disabled = jobRunning || watchedRootId === null;
+  el("cancel").disabled = !jobRunning;
+};
+
+el("pick").addEventListener("click", async () => {
+  // The native picker, not a typed path: `dialog:allow-open`
+  // (`src-tauri/capabilities/default.json`) is what makes this reachable at
+  // all, and D48's own trap — the ACL classifies by origin, and that origin
+  // differs between Windows and macOS — is why that capability's own test
+  // lives beside every other command's, in `src-tauri/tests/commands.rs`,
+  // using the same `local_origin()` rather than a literal.
+  let path;
+  try {
+    path = await open({ directory: true });
+  } catch (error) {
+    el("folder").textContent = `could not open the folder picker: ${error}`;
+    return;
+  }
+  // `null` means the person closed the dialog without choosing anything —
+  // not an error, and not a reason to forget whatever was chosen before.
+  if (path === null) {
+    return;
+  }
+
   try {
     watchedRootId = await invoke("add_watched_folder", { path });
-    el("folder-status").textContent = `watching ${path} (root ${watchedRootId})`;
+    el("folder").textContent = path;
+    // Belongs to whichever root was walked last; a folder just chosen has no
+    // walk behind it yet, so a skip line from the previous one would be read
+    // as this one's.
+    el("skips").textContent = "";
   } catch (error) {
-    el("folder-status").textContent = `could not add ${path}: ${error}`;
+    el("folder").textContent = `could not watch ${path}: ${error}`;
+    watchedRootId = null;
   }
+  syncButtons();
 });
-
-el("search-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const query = el("query").value;
-  try {
-    // `search` replaced `lexical_search`: the same lexical arm, but each hit
-    // is now a citation — text, where it came from — rather than a bare
-    // chunk id with nowhere for the window to take it.
-    const hits = await invoke("search", { query });
-    el("search-status").textContent = hits.length
-      ? `${hits.length} hit(s): ${hits.map((hit) => hit.relativePath ?? "(no path)").join(", ")}`
-      : "no matches";
-  } catch (error) {
-    el("search-status").textContent = `search failed: ${error}`;
-  }
-});
-
-const setRunning = (running) => {
-  el("start").disabled = running;
-  el("cancel").disabled = !running;
-};
 
 // Whether the channel has already said how the job ended, and said it better
 // than the poller below could.
@@ -64,48 +83,107 @@ let endingDescribed = false;
 // no channel at all — the ending goes to the page that started the job, which no
 // longer exists. And even on the page that did start it, the ending can arrive
 // before `invoke` resolves, which no amount of ordering inside the handler
-// fixes: a job over 40 quarter-seconds cannot do that, a job over an empty
-// folder finishes in less than one IPC round trip.
+// fixes: a job over many files cannot do that, a job over an empty folder
+// finishes in less than one IPC round trip.
 const followUntilIdle = async () => {
   while ((await invoke("job_status")).running) {
     await new Promise((wake) => setTimeout(wake, 500));
   }
-  setRunning(false);
+  jobRunning = false;
+  syncButtons();
   if (!endingDescribed) {
     // `job_status` is a bool, not an `Ended` — this path has no channel to
-    // read `reason`, `complete` or `frozen` from at all (a page reloaded
-    // mid-job, or one that opened after the job it is polling started). "the
-    // job has finished" was true and said nothing else, which reads as
-    // "finished cleanly" to anyone who does not already know the difference
-    // — the one thing this page can actually say is that it does not know.
+    // read `reason`, `complete`, `indexed`, `unchanged` or `frozen` from at
+    // all (a page reloaded mid-job, or one that opened after the job it is
+    // polling started). "the job has finished" was true and said nothing
+    // else, which reads as "finished cleanly" to anyone who does not already
+    // know the difference — the one thing this page can actually say is that
+    // it does not know.
     el("job-status").textContent =
       "the job is no longer running, but this page has no channel to it and does not " +
       "know how it ended — whether it finished cleanly, or something was left unreconciled";
   }
 };
 
-// Never leaves the buttons disabled. If the core cannot be reached, Start is
-// enabled and a click is answered either by starting or by "a job is already
-// running" — both recoverable, unlike a window with nothing left to press.
+// Never leaves the buttons disabled. If the core cannot be reached, Cancel is
+// simply left disabled (nothing is known to be running) rather than the page
+// having nothing left to press.
 const follow = () =>
   followUntilIdle().catch((error) => {
-    setRunning(false);
+    jobRunning = false;
+    syncButtons();
     el("job-status").textContent = `lost track of the job: ${error}`;
   });
 
 try {
   const { running } = await invoke("job_status");
-  setRunning(running);
+  jobRunning = running;
+  syncButtons();
   if (running) {
     el("job-status").textContent = "a job started before this page loaded is still running";
     follow();
   }
 } catch (error) {
-  setRunning(false);
+  jobRunning = false;
+  syncButtons();
   el("job-status").textContent = `${error}`;
 }
 
-el("start").addEventListener("click", async () => {
+// One sentence per `FrozenReason` — owned here, not in the core, which
+// deliberately has no `Display` for it (`src-tauri/src/job.rs::FrozenReason`).
+// `emptyDirectory` is a question, not a statement: nothing on either side of
+// the seam — not `st_dev`, not this window — can tell "you emptied this
+// folder on purpose" from "the share it lives on went offline", and stating
+// either as fact would be answering a question nobody asked this window.
+const FROZEN_REASON_TEXT = {
+  symlinkedSubtree: (prefix) =>
+    `${prefix} is a symlink to a directory, which the walk does not follow — it has no ` +
+    "evidence about what used to be there before it became one.",
+  emptyDirectory: (prefix) =>
+    `${prefix} now looks empty — did you empty it on purpose, or could the drive it lives on ` +
+    "have gone offline? Either way, nothing under it was removed from the index this run; " +
+    "check it by hand.",
+  unreadableDirectory: (prefix) => `${prefix} could not be read, most likely a permissions problem.`,
+};
+
+// A `reason` this page does not know is still a folder reconciliation left
+// alone — the same principle `ENDING_TEXT`'s own fallback below follows for
+// an unknown `EndReason`.
+const frozenSentence = (f) =>
+  (FROZEN_REASON_TEXT[f.reason] ?? ((prefix) => `${prefix}: left untouched by cleanup`))(f.prefix);
+
+// One sentence per `EndReason`. `rulesNotApplied`, `rootUnavailable`,
+// `brokenWorker`, `volumeMissing` and `cancelled` read as five different
+// things because they are five different things — collapsing any pair of
+// them back into one shared sentence would be the same mistake `reason:
+// "failed"` used to make about a missing worker, a broken pool and a panic.
+//
+// `rulesNotApplied` in particular is worded as a guarantee, not an apology:
+// under D29 indexing sends document text to a third-party provider, so a
+// walk that refuses to start because it could not apply its own exclusion
+// rules is refusing to send anything that might have been excluded — that is
+// what "nothing … was opened or sent" below is claiming, and it is true
+// precisely because `walk_root` returns before phase 1 runs at all for this
+// `StopReason`.
+const ENDING_TEXT = {
+  completed: ({ indexed, unchanged, total }) =>
+    `finished: ${indexed} added, ${unchanged} unchanged (${total} total)`,
+  cancelled: ({ done, total }) => `stopped after ${done} of ${total}, at your request`,
+  failed: ({ done, total, message }) =>
+    message ? `failed after ${done} of ${total}: ${message}` : `failed after ${done} of ${total}`,
+  brokenWorker: ({ done, total }) =>
+    `stopped after ${done} of ${total} — the extraction worker looked broken and could not ` +
+    "be trusted to continue",
+  rulesNotApplied: () =>
+    "stopped before reading a single file: the exclusion rules could not be applied, so " +
+    "nothing in this folder was opened or sent to the extraction service",
+  rootUnavailable: () => "the folder could not be reached at all, before the walk saw a single file",
+  volumeMissing: ({ done, total }) =>
+    `finished ${done} of ${total}, but the folder may have been unmounted partway through — ` +
+    "reconnect it and run again to be sure everything was seen",
+};
+
+el("walk").addEventListener("click", async () => {
   // A channel, not an event listener: events are documented as unsuited to
   // throughput and may arrive out of order, and a bar that jumps backwards
   // reads as a broken application. Within one channel Tauri guarantees the
@@ -127,57 +205,61 @@ el("start").addEventListener("click", async () => {
     // as fact something it had not been told.
     //
     // This arrives however the job ended, a panic included, which is what keeps
-    // Start from being disabled forever.
-    const { reason, done, total, skipped, complete, frozen } = data;
-    el("bar").max = total;
-    el("bar").value = done;
-    let text =
-      {
-        completed: `finished ${total} of ${total}`,
-        cancelled: `stopped after ${done} of ${total}`,
-        failed: `failed after ${done} of ${total}`,
-        brokenWorker: `stopped after ${done} of ${total} — the extraction worker looked broken`,
-        rulesNotApplied: `stopped before reading anything — the exclusion rules did not apply`,
-        rootUnavailable: `the folder could not be reached at all`,
-        volumeMissing: `finished ${done} of ${total}, but the folder may have been unmounted`,
-        // A reason this page does not know is still an ending. Rendering the
+    // "Index it" from being disabled forever.
+    const ending = data;
+    el("bar").max = ending.total;
+    el("bar").value = ending.done;
+
+    const say = ENDING_TEXT[ending.reason];
+    let text = say
+      ? say(ending)
+      : // A reason this page does not know is still an ending. Rendering the
         // literal `undefined` would be the page inventing a word.
-      }[reason] ?? `ended (${reason}) after ${done} of ${total}`;
-    // The progress handler above shows `skipped` throughout the walk; this
-    // is the line that overwrites it once the walk ends, and without reading
-    // `skipped` here too the final state the user is left looking at would
-    // silently drop the one count that line had been tracking all along.
-    if (skipped) {
-      text += `, ${skipped} skipped`;
+        `ended (${ending.reason}) after ${ending.done} of ${ending.total}`;
+
+    // `completed` already reads `skipped` as 0 vs. non-zero would need its own
+    // clause; every other reason's sentence above says nothing about it, so
+    // this is the one place it is added for all of them.
+    if (ending.skipped) {
+      text += `, ${ending.skipped} skipped`;
     }
-    // `complete` is the one field a `completed` reason does not itself
-    // imply `true` for — a folder with an unreadable subdirectory finishes
-    // looking identical to a clean walk except here. Worth saying even in
-    // this placeholder, because the alternative is silence indistinguishable
-    // from nothing having gone wrong.
-    if (!complete) {
-      text += " (some folders could not be fully read, so nothing was removed from the index this run)";
+    // `complete` is the one field a `completed` reason does not itself imply
+    // `true` for — a folder with an unreadable subdirectory finishes looking
+    // identical to a clean walk except here. A walk that ends this way has
+    // not reconciled: files deleted from the folder are still in the index
+    // and still answer searches, which is worth saying even though nothing
+    // about `reason` hints at it.
+    if (!ending.complete) {
+      text +=
+        " (some folders could not be fully read, so nothing was removed from the index this run)";
     }
-    if (frozen && frozen.length) {
-      text += ` — ${frozen.length} folder(s) left untouched by cleanup`;
+    if (ending.frozen && ending.frozen.length) {
+      text += " " + ending.frozen.map(frozenSentence).join(" ");
     }
+
     el("job-status").textContent = text;
     endingDescribed = true;
-    setRunning(false);
+    jobRunning = false;
+    syncButtons();
+
+    if (watchedRootId !== null) {
+      renderSkips(watchedRootId);
+    }
   };
 
   if (watchedRootId === null) {
-    el("job-status").textContent = "add a folder above before starting a walk";
+    el("job-status").textContent = "choose a folder above before indexing";
     return;
   }
 
   try {
     endingDescribed = false;
     await invoke("start_walk_job", { rootId: watchedRootId, onProgress });
-    setRunning(true);
-    // Even here, where this page owns the channel. `setRunning(true)` runs after
-    // the await, so an ending that arrived first has already been overwritten by
-    // the line above, and only the core can put it right.
+    jobRunning = true;
+    // Even here, where this page owns the channel. `syncButtons()` runs after
+    // the await, so an ending that arrived first has already been overwritten
+    // by the line above, and only the core can put it right.
+    syncButtons();
     follow();
   } catch (error) {
     // Refused — most likely because a job is already running. Nothing started,
@@ -187,9 +269,62 @@ el("start").addEventListener("click", async () => {
 });
 
 el("cancel").addEventListener("click", async () => {
-  // Only the button is disabled here. Start comes back when the job says it has
-  // ended, not when the user asks it to.
+  // Only the button is disabled here. "Index it" comes back when the job says
+  // it has ended, not when the user asks it to.
   el("cancel").disabled = true;
   el("job-status").textContent = "stopping…";
   await invoke("cancel_job");
+});
+
+/// Reads the skip journal for `rootId` and renders it next to the job status.
+///
+/// Called after every ending, not only a clean one: a job that failed or was
+/// cancelled partway through may still have skipped files before it stopped,
+/// and those are as real as any other run's.
+async function renderSkips(rootId) {
+  try {
+    const skips = await invoke("skips", { rootId });
+    el("skips").textContent = skips.length
+      ? skips
+          .map((s) => {
+            // `pageNo` is `null` for a whole-file skip and set for one page
+            // inside an otherwise readable document — two different shapes a
+            // single sentence has to say apart.
+            const where = s.pageNo === null ? s.relativePath : `${s.relativePath} (page ${s.pageNo})`;
+            return `${where}: ${s.reason}`;
+          })
+          .join("; ")
+      : "";
+  } catch (error) {
+    el("skips").textContent = `could not read the skip log: ${error}`;
+  }
+}
+
+// The window draws; it does not decide. Every number here came from a command.
+async function search(query) {
+  const hits = await invoke("search", { query });
+  results.replaceChildren(...hits.map((h) => {
+    const li = document.createElement("li");
+    const where = document.createElement("p");
+    where.className = "muted";
+    // `relativePath` is null for a document whose last copy on disk is gone —
+    // that is a state, not an empty string, and it must not render as one.
+    where.textContent = h.relativePath ?? "(no path on disk)";
+    const text = document.createElement("p");
+    text.textContent = h.text;
+    li.append(where, text);
+    return li;
+  }));
+}
+
+el("search-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = el("query").value;
+  try {
+    await search(query);
+  } catch (error) {
+    const li = document.createElement("li");
+    li.textContent = `search failed: ${error}`;
+    results.replaceChildren(li);
+  }
 });

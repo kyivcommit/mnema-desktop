@@ -7,6 +7,7 @@
 
 mod support;
 
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -470,6 +471,14 @@ fn a_job_that_panics_still_tells_the_window_it_ended() {
         ending["data"]["done"],
         json!(0),
         "the ending counted a report the window never received: {ending}"
+    );
+    // Gap 1 from the task-12 review: `reason: "failed"` alone cannot tell a
+    // missing worker binary from a broken pool from a panic. This is the
+    // panic's own text, carried across rather than dropped.
+    assert_eq!(
+        ending["data"]["message"],
+        json!("deliberate panic: this test forces the job to fail"),
+        "the panic's own message did not reach the window: {ending}"
     );
 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1027,4 +1036,127 @@ fn a_second_walk_can_start_the_instant_the_first_says_it_ended() {
     let (second_channel, _second_events) = job_channel();
     walk_job::start_walk_job(state.clone(), root, second_channel)
         .expect("a second walk was refused the instant the first said it ended");
+}
+
+/// Gap 1 from the task-12 review, exercised through a real walk rather than
+/// only through `Ended::failed` itself: `paths::worker_path` is provisional —
+/// no `externalBin` is wired yet — so a worker binary missing at the path
+/// `AppState` was given is the **known, current state of any packaged
+/// build**, not a contrived one. Before `Ended.message` existed, this
+/// reached the window as the single word `"failed"`, indistinguishable from
+/// a broken pool or a panic.
+#[test]
+fn a_missing_worker_binary_reports_why_in_the_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = mock_builder()
+        .manage(AppState::new(
+            dir.path().to_path_buf(),
+            PathBuf::from("/nonexistent/mnema-extract-worker"),
+        ))
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application");
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+
+    let fixture = fixture_dir();
+    let root = state
+        .with_index(|db| db.insert_watched_root(&fixture.path().display().to_string()))
+        .expect("insert_watched_root failed");
+
+    let (channel, events) = job_channel();
+    walk_job::start_walk_job(state.clone(), root, channel).expect("the walk would not start");
+
+    let ending = loop {
+        match events.recv_timeout(Duration::from_secs(20)) {
+            Ok(event) if event["event"] == json!("ended") => break event["data"].clone(),
+            Ok(_) => continue,
+            Err(_) => panic!("the walk never told the window it ended"),
+        }
+    };
+
+    assert_eq!(
+        ending["reason"],
+        json!("failed"),
+        "a missing worker binary must stop the walk, not be treated as a per-file skip: {ending}"
+    );
+    let message = ending["message"]
+        .as_str()
+        .expect("a failed walk must carry a message the window can render");
+    assert!(
+        message.contains("nonexistent/mnema-extract-worker"),
+        "the message does not name the worker path that could not be started: {message}"
+    );
+}
+
+/// The capability granting `dialog:allow-open` (`src-tauri/capabilities/
+/// default.json`), exercised at the ACL layer rather than by actually
+/// opening a dialog: a real `open` call blocks on user interaction, which a
+/// test must never do. `mock_context(noop_assets())` cannot answer this
+/// question — it hands every app `Resolved::default()`, an empty ACL,
+/// regardless of what capability files exist on disk (see that function's
+/// own source). `tauri::generate_context!()` is what actually reads
+/// `tauri.conf.json` and `capabilities/*.json`, the way `lib.rs::run()`
+/// does, so this is the one place in this file that uses it — the pairing
+/// with `mock_builder()` below is `tauri::test::mock_builder`'s own
+/// documented example, not a novel combination.
+fn app_with_real_capabilities() -> tauri::App<MockRuntime> {
+    mock_builder()
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .plugin(tauri_plugin_dialog::init())
+        .build(tauri::generate_context!())
+        .expect("failed to build the mock application")
+}
+
+/// A payload the ACL must let through before it fails for an unrelated
+/// reason. `directory` is a `bool` on `OpenDialogOptions`
+/// (`tauri-plugin-dialog`'s own `src/commands.rs`), so a string here fails to
+/// deserialize. If the capability did not grant `dialog:allow-open`, this
+/// call would be refused before argument parsing ever ran, with a message
+/// naming the plugin rather than the field — which is exactly the
+/// distinction the two tests below turn on, and why neither one has to
+/// actually open a dialog to prove its point.
+fn malformed_open_dialog_args() -> Value {
+    json!({ "options": { "directory": "not a boolean" } })
+}
+
+/// D48: the ACL classifies a request by its origin, and Windows serves the
+/// webview from a different one than macOS does — `local_origin()`'s own doc
+/// comment has the measured history of what hardcoding the wrong constant
+/// broke last time. `call()` already routes through it for every command in
+/// this file; this test is not exempt just because the command it reaches
+/// belongs to a plugin rather than to this crate.
+#[test]
+fn the_main_window_may_reach_the_folder_picker() {
+    let app = app_with_real_capabilities();
+    let webview = main_webview(&app);
+
+    let error = call(&webview, "plugin:dialog|open", malformed_open_dialog_args())
+        .expect_err("a non-boolean `directory` must not deserialize into `OpenDialogOptions`");
+    let message = error.as_str().unwrap_or_default();
+    assert!(
+        !message.contains("not allowed"),
+        "the `main` window was refused by the ACL rather than reaching argument parsing: {message}"
+    );
+}
+
+/// The counterweight to the test above: without it, a capability that
+/// granted `dialog:allow-open` to every window regardless of `windows: [
+/// "main"]` would pass the positive test for the same reason a capability
+/// scoped correctly would, and nothing here would tell the two apart.
+#[test]
+fn a_window_the_capability_does_not_name_may_not_reach_the_folder_picker() {
+    let app = app_with_real_capabilities();
+    let webview = WebviewWindowBuilder::new(&app, "other", Default::default())
+        .build()
+        .expect("failed to build the second mock webview");
+
+    let error = call(&webview, "plugin:dialog|open", malformed_open_dialog_args())
+        .expect_err("a window outside the capability's `windows` list reached the dialog plugin");
+    let message = error.as_str().unwrap_or_default();
+    assert!(
+        message.contains("not allowed"),
+        "a window the capability does not name should be refused by the ACL, not by argument \
+         parsing: {message}"
+    );
 }

@@ -37,6 +37,7 @@ mnema-pool = { path = "../crates/mnema-pool" }
 mnema-walk = { path = "../crates/mnema-walk" }
 tauri = { version = "2.11", features = [] }
 tauri-plugin-single-instance = "2.4"
+tauri-plugin-dialog = "2"
 serde = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

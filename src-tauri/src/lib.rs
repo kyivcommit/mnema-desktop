@@ -81,6 +81,12 @@ pub fn run() -> anyhow::Result<()> {
                 let _ = window.set_focus();
             }
         }))
+        // Native folder picking, gated by `dialog:allow-open` in
+        // `capabilities/default.json` rather than the text field
+        // `ui/index.html` used before this: a path typed by hand was enough
+        // to exercise `add_watched_folder`, but not something the interface
+        // spec would keep.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             manage_state(app.handle())?;
             Ok(())

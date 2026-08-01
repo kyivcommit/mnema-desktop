@@ -170,14 +170,22 @@ pub fn start_walk_job(
             // at all — so both fall back to the same "last count the window
             // was shown" `Ended::failed` already gives a panic, which is what
             // an unexplained stop **is** from the window's side regardless of
-            // which of the two produced it.
-            Ok(Err(_ingest_error)) => job::Ended::failed(
+            // which of the two produced it. Each still has its own text,
+            // though: `IngestError`'s `Display` for the one that returned an
+            // error, and the caught payload — via `job::panic_message` — for
+            // the one that unwound. Without either, `reason: "failed"` is all
+            // a window can say, which is the gap task 12's review named
+            // first: a missing worker binary, a broken pool and a panic all
+            // arriving as the same bare word.
+            Ok(Err(ingest_error)) => job::Ended::failed(
                 reported.load(Ordering::Relaxed),
                 last_total.load(Ordering::Relaxed),
+                ingest_error.to_string(),
             ),
-            Err(_panic) => job::Ended::failed(
+            Err(panic) => job::Ended::failed(
                 reported.load(Ordering::Relaxed),
                 last_total.load(Ordering::Relaxed),
+                job::panic_message(&*panic),
             ),
         };
         // Dropped **before** the send, not left to the end of this closure:
@@ -231,6 +239,19 @@ pub fn start_walk_job(
 /// a clean walk. A review round found this field read from `WalkReport` and
 /// never written to `Ended` at all; the unit tests below pin every field
 /// this function reads, not only the ones a first pass happened to wire up.
+///
+/// `report.indexed` and `report.unchanged` cross the same way, separately
+/// from each other and from `done`: `done` merges them with `skipped` and
+/// `refused` (the total count a bar advances by), which is the right number
+/// for a bar and the wrong one for the sentence "added 12 documents, 30
+/// unchanged" — a sentence `done` alone cannot produce no matter how it is
+/// worded, because the two counts it merges are already gone by the time it
+/// is computed.
+///
+/// `message` is always `None` here: this function only ever runs on
+/// `Ok(Ok(report))`, the one outcome where the walk itself decided the
+/// ending rather than failing unexplained, so there is no failure text to
+/// carry — see `Ended::message`'s own doc comment for where one comes from.
 fn ended_from_report(report: &WalkReport) -> Ended {
     let total = report.found + report.refused;
     let done = report.indexed + report.unchanged + report.skipped + report.refused;
@@ -247,7 +268,7 @@ fn ended_from_report(report: &WalkReport) -> Ended {
         .iter()
         .map(|f| Frozen {
             prefix: f.prefix.clone(),
-            why: frozen_reason_text(f.why).to_string(),
+            reason: frozen_reason(f.why),
         })
         .collect();
     Ended {
@@ -259,26 +280,22 @@ fn ended_from_report(report: &WalkReport) -> Ended {
         skipped: report.skipped + report.refused,
         complete: report.complete,
         frozen,
+        indexed: report.indexed,
+        unchanged: report.unchanged,
+        message: None,
     }
 }
 
-/// A sentence for each `FrozenReason`. `FrozenReason` itself has no
-/// `Serialize` — see [`crate::job::Frozen`]'s own doc comment for why — so
-/// this is where the closed vocabulary becomes the free text `Ended.frozen`
-/// actually carries to the window.
-fn frozen_reason_text(why: FrozenReason) -> &'static str {
+/// Maps `mnema_ingest`'s own `FrozenReason` onto [`job::FrozenReason`] — the
+/// closed vocabulary crosses; the sentence a person reads about it does not.
+/// See [`job::FrozenReason`]'s own doc comment for why the words moved to
+/// the window rather than staying here as `Ended.frozen[_].why`, which is
+/// what this function replaced.
+fn frozen_reason(why: FrozenReason) -> job::FrozenReason {
     match why {
-        FrozenReason::SymlinkedSubtree => {
-            "a symlink to a directory; the walk does not follow it, so it has no evidence \
-             about what used to be there before it became a symlink"
-        }
-        FrozenReason::EmptyDirectory => {
-            "this folder now reads as empty, and an unmounted share looks exactly like a \
-             folder emptied by hand from here — resolve it by hand"
-        }
-        FrozenReason::UnreadableDirectory => {
-            "this folder could not be read, most likely a permissions problem"
-        }
+        FrozenReason::SymlinkedSubtree => job::FrozenReason::SymlinkedSubtree,
+        FrozenReason::EmptyDirectory => job::FrozenReason::EmptyDirectory,
+        FrozenReason::UnreadableDirectory => job::FrozenReason::UnreadableDirectory,
     }
 }
 
@@ -348,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_prefixes_cross_the_seam_with_a_reason_a_person_can_read() {
+    fn frozen_prefixes_cross_the_seam_with_a_discriminant_the_window_can_translate() {
         let mut walked = report(StopReason::Completed);
         walked.frozen = vec![mnema_ingest::Frozen {
             prefix: "mnt/share".to_string(),
@@ -358,40 +375,61 @@ mod tests {
         let ended = ended_from_report(&walked);
         assert_eq!(ended.frozen.len(), 1);
         assert_eq!(ended.frozen[0].prefix, "mnt/share");
-        // The exact text, not merely non-empty: `each_frozen_reason_gets_
-        // its_own_sentence` below is what pins `frozen_reason_text` itself,
+        // The exact variant, not merely `Some`: `each_frozen_reason_maps_to_
+        // its_own_discriminant` below is what pins `frozen_reason` itself,
         // but this is what proves `ended_from_report` actually calls it with
-        // the RIGHT `FrozenReason` for this entry — an `is_empty()` check
-        // here passed even when a review round swapped `SymlinkedSubtree`'s
-        // and `EmptyDirectory`'s own sentences at the source.
+        // the RIGHT `FrozenReason` for this entry — a weaker check here
+        // would pass even if a review round swapped `SymlinkedSubtree`'s and
+        // `EmptyDirectory`'s own mappings at the source.
         assert_eq!(
-            ended.frozen[0].why,
-            frozen_reason_text(FrozenReason::EmptyDirectory)
+            ended.frozen[0].reason,
+            frozen_reason(FrozenReason::EmptyDirectory)
         );
     }
 
-    /// The mapping itself: `is_empty()` alone let a swap between
-    /// `SymlinkedSubtree`'s sentence and `EmptyDirectory`'s pass every test
-    /// in this file, which would send a person with a symlinked subtree
-    /// looking for an unmounted share. Literal strings, not substrings —
-    /// the two sentences share several words ("this folder", "resolve it by
-    /// hand" does not appear in the symlink one, but a looser match could
-    /// still miss a swap between the other two).
+    /// The mapping itself, pinned pairwise: three arms that all mapped to the
+    /// same `job::FrozenReason` would pass a test that only checked "some
+    /// variant came back," which would send a person with a symlinked
+    /// subtree looking for an unmounted share exactly the way the free-text
+    /// version of this bug (fixed alongside this change) could have.
     #[test]
-    fn each_frozen_reason_gets_its_own_sentence() {
+    fn each_frozen_reason_maps_to_its_own_discriminant() {
+        let symlink = frozen_reason(FrozenReason::SymlinkedSubtree);
+        let empty = frozen_reason(FrozenReason::EmptyDirectory);
+        let unreadable = frozen_reason(FrozenReason::UnreadableDirectory);
+
+        assert_eq!(symlink, job::FrozenReason::SymlinkedSubtree);
+        assert_eq!(empty, job::FrozenReason::EmptyDirectory);
+        assert_eq!(unreadable, job::FrozenReason::UnreadableDirectory);
+        assert_ne!(symlink, empty);
+        assert_ne!(symlink, unreadable);
+        assert_ne!(empty, unreadable);
+    }
+
+    /// Gap 2 from the task-12 review: `done` merges `indexed` and `unchanged`
+    /// with `skipped` and `refused`, so a window that only had `done` could
+    /// not write "added 12, 30 unchanged" — it had nothing to derive either
+    /// number from. This is what proves both cross separately, with values
+    /// distinct enough from `done` and from each other that a dropped or
+    /// swapped field would show up here rather than in `done` alone.
+    #[test]
+    fn indexed_and_unchanged_cross_the_seam_separately_from_done() {
+        let ended = ended_from_report(&report(StopReason::Completed));
+        assert_eq!(ended.indexed, 5);
+        assert_eq!(ended.unchanged, 1);
+        assert_ne!(ended.indexed, ended.done);
+        assert_ne!(ended.unchanged, ended.done);
+    }
+
+    /// `message` is the field `ended_from_report` never sets — it belongs to
+    /// the two `Ended::failed` call sites in `start_walk_job`, which have
+    /// actual failure text to give it. A walk the core itself decided the
+    /// ending for has none to invent.
+    #[test]
+    fn a_walk_reported_by_ended_from_report_carries_no_failure_message() {
         assert_eq!(
-            frozen_reason_text(FrozenReason::SymlinkedSubtree),
-            "a symlink to a directory; the walk does not follow it, so it has no evidence \
-             about what used to be there before it became a symlink"
-        );
-        assert_eq!(
-            frozen_reason_text(FrozenReason::EmptyDirectory),
-            "this folder now reads as empty, and an unmounted share looks exactly like a \
-             folder emptied by hand from here — resolve it by hand"
-        );
-        assert_eq!(
-            frozen_reason_text(FrozenReason::UnreadableDirectory),
-            "this folder could not be read, most likely a permissions problem"
+            ended_from_report(&report(StopReason::Completed)).message,
+            None
         );
     }
 

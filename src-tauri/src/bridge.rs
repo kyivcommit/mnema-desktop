@@ -204,7 +204,16 @@ pub fn start_probe_job(
 
         let ending = match caught {
             Ok(outcome) => job::Ended::of(outcome, job::PROBE_UNITS),
-            Err(_) => job::Ended::failed(reported.load(Ordering::Relaxed), job::PROBE_UNITS),
+            // The probe cannot panic (see the doc comment on `caught` above),
+            // but the type still has to account for the possibility —
+            // `job::panic_message` reads whatever text the payload carries
+            // the same way `walk_job.rs`'s own panic arm does, rather than
+            // leaving this one `Ended` variant without one.
+            Err(panic) => job::Ended::failed(
+                reported.load(Ordering::Relaxed),
+                job::PROBE_UNITS,
+                job::panic_message(&*panic),
+            ),
         };
         let _ = on_progress.send(JobEvent::Ended(ending));
         // `slot` is dropped here and the job slot is free again, whether the loop

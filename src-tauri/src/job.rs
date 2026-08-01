@@ -65,16 +65,36 @@ pub enum EndReason {
 }
 
 /// One folder reconciliation declined to touch, and why — the webview's
-/// counterpart to `mnema_ingest::walk::Frozen`, translated to a string
-/// (`walk_job::frozen_reason_text`) rather than carrying `FrozenReason`
-/// itself: `FrozenReason` has no `Serialize`, and giving it one would put a
-/// UI-facing rename on a type whose only other reader today compares it by
-/// value (`crates/mnema-ingest/tests/walk.rs`).
+/// counterpart to `mnema_ingest::walk::Frozen`. `reason` carries
+/// [`FrozenReason`], not `mnema_ingest::walk::FrozenReason` itself — see
+/// that type's own doc comment for why a second enum exists — so
+/// `walk_job::frozen_reason` is where the core's vocabulary is translated
+/// into this one's, and `crates/mnema-ingest/tests/walk.rs`'s comparisons
+/// against the core enum are untouched by anything here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Frozen {
     pub prefix: String,
-    pub why: String,
+    pub reason: FrozenReason,
+}
+
+/// The webview's counterpart to `mnema_ingest::walk::FrozenReason` — a
+/// second enum, not a `Serialize` impl on the core one, and for the same
+/// reason the sentences used to live in `walk_job::frozen_reason_text`
+/// rather than in `mnema_ingest`: the core crate decides *that* a folder is
+/// frozen, not the words a person reads about it. Before this type existed,
+/// the words crossed instead of the decision — `walk_job.rs` built the
+/// sentence and `Frozen.why` carried it as free English, which left a window
+/// with nothing to group or translate by except string-matching that
+/// sentence. A discriminant is a value every reader can switch on; a
+/// sentence is a value only one reader — the one who already knows what
+/// English to expect — can use for anything but printing verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FrozenReason {
+    SymlinkedSubtree,
+    EmptyDirectory,
+    UnreadableDirectory,
 }
 
 /// The last message on the channel, always sent, however the job ended.
@@ -114,6 +134,34 @@ pub struct Ended {
     /// `removed == 0` alone cannot say whether anything was silently left
     /// untouched, which is exactly the question this answers.
     pub frozen: Vec<Frozen>,
+    /// Always `0` for the probe, which indexes nothing real. For a walk,
+    /// mirrors `WalkReport::indexed` — kept apart from `unchanged` because a
+    /// run that wrote a hundred new documents and a run that found a hundred
+    /// documents already there are not the same run, and `done` (which merges
+    /// both of these with `skipped` and `refused`, for the reason given on
+    /// `walk_job::ended_from_report`'s own doc comment) cannot answer which
+    /// one happened.
+    pub indexed: u64,
+    /// Always `0` for the probe. For a walk, mirrors `WalkReport::unchanged` —
+    /// see [`Ended::indexed`]'s own doc comment for why this does not fold
+    /// into it.
+    pub unchanged: u64,
+    /// Set only when `reason` is `Failed` — the text a broken pool, a missing
+    /// worker binary, or a panic each leave behind. `None` for every other
+    /// `reason`, which already has a sentence a window can write without one:
+    /// `Completed`, `Cancelled`, and the four `StopReason` variants
+    /// `walk_job.rs` carries across all say what happened on their own.
+    ///
+    /// Before this field existed, all three of `Failed`'s causes reached the
+    /// window as the single word `"failed"` — indistinguishable from each
+    /// other, and indistinguishable in particular from the shape that is the
+    /// **known, current state of any packaged build**: no `externalBin` is
+    /// wired yet (`paths::worker_path`'s own doc comment says so), so a
+    /// shipped application has no worker binary at the path it looks for one,
+    /// and every walk over it fails this way. A window that could only say
+    /// "failed after N of M" had nothing to tell a person about the one
+    /// failure they were most likely to see.
+    pub message: Option<String>,
 }
 
 impl Ended {
@@ -129,6 +177,9 @@ impl Ended {
                 skipped: 0,
                 complete: true,
                 frozen: Vec::new(),
+                indexed: 0,
+                unchanged: 0,
+                message: None,
             },
             Outcome::Cancelled { done } => Self {
                 reason: EndReason::Cancelled,
@@ -137,6 +188,9 @@ impl Ended {
                 skipped: 0,
                 complete: true,
                 frozen: Vec::new(),
+                indexed: 0,
+                unchanged: 0,
+                message: None,
             },
         }
     }
@@ -146,12 +200,19 @@ impl Ended {
     /// pool). `done` is the last count the window was *shown*, not the loop's
     /// internal position: those differ by whatever the throttle dropped, and
     /// a number the user never saw is a worse answer than the one they did.
-    /// `frozen` is empty and `complete` is `false` because both callers reach
-    /// this with no `WalkReport` to read either from — the job stopped before
-    /// producing one, and `false` is the side that costs nothing to be wrong
-    /// about: it can only make a page more cautious about trusting what it
-    /// saw, never less.
-    pub fn failed(done: u64, total: u64) -> Self {
+    /// `frozen`, `indexed` and `unchanged` are empty or zero and `complete`
+    /// is `false` because both callers reach this with no `WalkReport` to
+    /// read any of them from — the job stopped before producing one, and
+    /// `false` is the side that costs nothing to be wrong about: it can only
+    /// make a page more cautious about trusting what it saw, never less.
+    ///
+    /// `message` is not optional here the way it is on [`Ended`] itself:
+    /// every caller of this constructor is on the `Failed` path, so every
+    /// caller has *something* to say — `mnema_ingest::IngestError`'s own
+    /// `Display`, or [`panic_message`] — and a blank field on the one
+    /// `reason` this crosses for is a worse answer than making the caller
+    /// supply it.
+    pub fn failed(done: u64, total: u64, message: impl Into<String>) -> Self {
         Self {
             reason: EndReason::Failed,
             done,
@@ -159,7 +220,30 @@ impl Ended {
             skipped: 0,
             complete: false,
             frozen: Vec::new(),
+            indexed: 0,
+            unchanged: 0,
+            message: Some(message.into()),
         }
+    }
+}
+
+/// Turns a caught panic's payload into the text [`Ended::failed`] carries to
+/// the window.
+///
+/// `catch_unwind` hands back `Box<dyn Any + Send>`. A bare `panic!("...")`
+/// payload downcasts to `&str`; one built with `format!`-style arguments —
+/// which is what `.unwrap()`, `.expect(...)` and every assertion macro
+/// produce — downcasts to `String`. Between the two is every panic this
+/// codebase or an ordinary dependency raises. Anything else — `panic_any`
+/// with a caller-defined payload type — has no text to extract, so this says
+/// that plainly rather than fabricating a sentence a panic never wrote.
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "the job panicked with no text message".to_string()
     }
 }
 
@@ -298,6 +382,9 @@ mod tests {
                 skipped: 0,
                 complete: true,
                 frozen: Vec::new(),
+                indexed: 0,
+                unchanged: 0,
+                message: None,
             }
         );
     }
@@ -313,6 +400,9 @@ mod tests {
                 skipped: 0,
                 complete: true,
                 frozen: Vec::new(),
+                indexed: 0,
+                unchanged: 0,
+                message: None,
             }
         );
     }
@@ -321,12 +411,65 @@ mod tests {
     fn a_failure_is_not_reported_as_a_cancellation() {
         // The distinction the `reason` field exists for. A user who is told
         // their job was cancelled looks for what they did wrong.
-        let failed = Ended::failed(7, 40);
+        let failed = Ended::failed(7, 40, "the extraction pool cannot continue");
         assert_eq!(failed.reason, EndReason::Failed);
         assert_eq!(failed.done, 7);
         assert_ne!(
             failed.reason,
             Ended::of(Outcome::Cancelled { done: 7 }, 40).reason
+        );
+    }
+
+    /// Gap 1 from the task-12 review: a missing worker binary, a broken pool
+    /// and a panic used to arrive as the same bare word, `"failed"`. This is
+    /// what carries the difference — pinned here on the constructor itself,
+    /// since `walk_job.rs`'s two call sites only ever pass through what they
+    /// are given.
+    #[test]
+    fn a_failed_job_carries_the_message_it_is_given() {
+        let failed = Ended::failed(3, 10, "could not start the extraction worker");
+        assert_eq!(
+            failed.message.as_deref(),
+            Some("could not start the extraction worker")
+        );
+    }
+
+    /// The one field `Ended::failed` does not leave to its caller: a job that
+    /// stopped for an unexplained reason has not earned the claim that it saw
+    /// everything, and `complete: true` is the value that reads as "trust
+    /// what this run reconciled."
+    #[test]
+    fn a_failed_job_never_claims_completeness() {
+        assert!(!Ended::failed(0, 0, "boom").complete);
+    }
+
+    #[test]
+    fn a_bare_panic_string_is_read_back_verbatim() {
+        // `panic!("literal")` boxes a `&'static str`, never a `String` — this
+        // is the shape that would fail to downcast against the wrong branch.
+        let payload: Box<dyn std::any::Any + Send> = Box::new("deliberate panic: literal");
+        assert_eq!(panic_message(&*payload), "deliberate panic: literal");
+    }
+
+    #[test]
+    fn a_formatted_panic_message_is_read_back_verbatim() {
+        // `.expect(...)`, `.unwrap()` and `assert_eq!` all box a `String`, not
+        // a `&str` — the shape `panic!("{}", "formatted")`, `format!(...)`
+        // arguments, or an interpolated `panic!` also produce.
+        let payload: Box<dyn std::any::Any + Send> =
+            Box::new(format!("deliberate panic: {}", "formatted"));
+        assert_eq!(panic_message(&*payload), "deliberate panic: formatted");
+    }
+
+    #[test]
+    fn a_non_string_panic_payload_gets_an_honest_fallback() {
+        // `std::panic::panic_any(42)` is the shape neither branch matches —
+        // this is what a window sees instead of an empty string or a debug
+        // dump of an opaque `Any`.
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        assert_eq!(
+            panic_message(&*payload),
+            "the job panicked with no text message"
         );
     }
 
