@@ -963,6 +963,15 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
         json!("completed"),
         "the walk over thirty files did not complete: {ending}"
     );
+    // Both directions, because the upper bound alone is satisfied by zero and
+    // a review measured exactly that: made to send nothing at all, this test
+    // passed — `len() < 15` held and the exactness check below skipped itself
+    // through its own `if let`. A bar that never moves is not a throttle
+    // working well, it is a progress channel that is broken.
+    assert!(
+        !progress_events.is_empty(),
+        "thirty files produced no progress events at all — the bar would never move"
+    );
     assert!(
         progress_events.len() < 15,
         "thirty files produced {} progress events — throttling did not \
@@ -971,16 +980,16 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
     );
     // The exception `job::progress_is_due` always makes: the report that
     // reaches `total` is sent regardless of timing, because a bar that
-    // stops one file short of the end looks like a hang. If any progress
-    // event arrived at all, the last one must already show the true final
-    // count — not a stale one the throttle happened to let through earlier
-    // and then withheld the correction for.
-    if let Some(last) = progress_events.last() {
-        assert_eq!(
-            last["done"], ending["done"],
-            "the last progress event before Ended did not show the true count: {last}"
-        );
-    }
+    // stops one file short of the end looks like a hang. The last event must
+    // already show the true final count — not a stale one the throttle
+    // happened to let through earlier and then withheld the correction for.
+    let last = progress_events
+        .last()
+        .expect("the emptiness assertion above already established there is one");
+    assert_eq!(
+        last["done"], ending["done"],
+        "the last progress event before Ended did not show the true count: {last}"
+    );
 }
 
 /// `JobSlot::drop` clears `AppState::running`, and `ui/main.js` re-enables
