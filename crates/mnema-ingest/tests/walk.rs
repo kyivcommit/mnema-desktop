@@ -140,6 +140,29 @@ impl Fixture {
             })
     }
 
+    /// Spawns the pool's worker processes before the caller does anything
+    /// timing-sensitive, and returns once they have answered.
+    ///
+    /// The three write-contention tests below race a lock held for a fixed
+    /// number of seconds against the walk reaching its first write. Everything
+    /// between those two points is meant to be the retry budget under test —
+    /// but a pool that has never run pays a first-execution cost there too,
+    /// and on a fresh macOS CI runner that cost is large: the worker binary
+    /// was just built, is unsigned, and the system checks it on its first
+    /// exec. Measured on `macos-14`, that pushed the walk past an 18-second
+    /// window and inverted all three assertions at once — the contended file
+    /// was simply reached after the lock had already been released, so it
+    /// behaved like any other file.
+    ///
+    /// `extract` on a path that does not exist is the cheapest way to pay it:
+    /// a worker starts, answers `Unreadable`, and nothing is written to the
+    /// index. Doing this **before** the lock is taken puts the variance
+    /// outside the window instead of inside it, which is what makes the
+    /// number under test the retry budget rather than the runner's mood.
+    fn warm_pool(&self) {
+        let _ = self.pool.extract(&self.dir().join("no-such-file-warmup"));
+    }
+
     fn walk(&self) -> WalkReport {
         self.walk_with(&WalkRules::none())
     }
@@ -485,6 +508,7 @@ fn a_busy_exhausted_file_does_not_count_toward_the_broken_worker_threshold() {
         f.write(&format!("b{i}.txt"), "x");
     }
 
+    f.warm_pool();
     let window = open(&f.index_path).unwrap();
     window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
     window.insert_watched_root("/Volumes/Second").unwrap();
@@ -532,6 +556,7 @@ fn a_file_still_busy_after_every_retry_is_skipped_not_lost() {
     // `a_walk_that_meets_the_window_holding_the_write_lock_is_told_to_retry`
     // in `tests/slice.rs`, held for long enough to exhaust every retry
     // instead of just the first one).
+    f.warm_pool();
     let window = open(&f.index_path).unwrap();
     window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
     window.insert_watched_root("/Volumes/Second").unwrap();
@@ -583,6 +608,7 @@ fn cancellation_is_checked_between_busy_retries_not_only_between_files() {
     let f = Fixture::new();
     f.write("contract.txt", "hello");
 
+    f.warm_pool();
     let window = open(&f.index_path).unwrap();
     window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
     window.insert_watched_root("/Volumes/Second").unwrap();
