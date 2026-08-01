@@ -145,9 +145,12 @@ impl Db {
     ///
     /// The vector is checked before vec0 sees it, because vec0 accepts a
     /// degenerate one without complaint and the damage only shows up as a
-    /// confident wrong answer at query time. Under D29 every embedding is a JSON
-    /// response from a third party, so a truncated or failed one arriving as
-    /// zeros is ordinary rather than hypothetical.
+    /// confident wrong answer at query time. This function has no caller
+    /// outside tests yet, and the check is here rather than at the caller for
+    /// that reason: under D29 v1 ships no local models, so every embedding
+    /// that ever reaches it will be a JSON response from a third party, and a
+    /// truncated or failed one arriving as zeros will be ordinary rather than
+    /// hypothetical.
     pub fn insert_vector(&self, space_id: i64, chunk_id: i64, v: &[f32]) -> Result<(), Error> {
         let space = self.space(space_id)?;
         check_rankable(v, &space.metric, VectorRole::Stored(chunk_id))?;

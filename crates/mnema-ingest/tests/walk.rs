@@ -265,14 +265,17 @@ fn cancellation_stops_the_walk_between_files() {
 
 /// `walk_root` must never enter phase 2 when the exclusion rules failed to
 /// combine into a working pattern set (`Walked::rules_applied`, in
-/// `mnema-walk`). Under D29 there are no local models in this product, so
-/// indexing a file means sending it to a third-party embedding provider — an
-/// exclusion rule is the user's only way to keep a file away from that, and
-/// `rules_applied == false` means the rules may have silently stopped
-/// applying for this one walk. Indexing under that condition would be sending
-/// files the user explicitly excluded to a third party, which is why this
-/// refuses rather than proceeding on the assumption that nothing was excluded
-/// anyway.
+/// `mnema-walk`). `rules_applied == false` means the rules may have silently
+/// stopped applying for this one walk, so `found` may hold files the user
+/// asked to exclude.
+///
+/// Nothing indexed **today** leaves this machine — there is no embedding call
+/// site anywhere yet. The guard is here for the version this is being built
+/// toward: D29 ships v1 with no local models, so once the embedding stage
+/// lands, indexing a file means sending it to a third-party provider, and an
+/// exclusion rule is the user's only way to keep a file away from that.
+/// Retrofitting this onto code already written to assume it is safe is the
+/// expensive order to do it in.
 ///
 /// The recipe that flips `rules_applied` to `false` is `mnema-walk`'s own
 /// (`rules_applied_is_false_when_the_combined_rule_set_is_too_large`,

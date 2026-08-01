@@ -63,13 +63,13 @@ export const frozenSentence = (f) =>
 // them back into one shared sentence would be the same mistake `reason:
 // "failed"` used to make about a missing worker, a broken pool and a panic.
 //
-// `rulesNotApplied` in particular is worded as a guarantee, not an apology:
-// under D29 indexing sends document text to a third-party provider, so a
-// walk that refuses to start because it could not apply its own exclusion
-// rules is refusing to send anything that might have been excluded — that is
-// what "nothing … was opened or sent" below is claiming, and it is true
-// precisely because `walk_root` returns before phase 1 runs at all for this
-// `StopReason`.
+// `rulesNotApplied` in particular is worded as a guarantee, not an apology.
+// Nothing indexed today leaves the machine — there is no embedding call site
+// yet — so the claim below is about reading, and it is true precisely because
+// `walk_root` returns before phase 1 runs at all for this `StopReason`. It
+// will mean more than that later: D29 ships v1 with no local models, so once
+// embeddings exist, a walk that refuses to start because it could not apply
+// its own exclusion rules is also refusing to send them anywhere.
 export const ENDING_TEXT = {
   // `removed` always shows, the same way `indexed` and `unchanged` always
   // do: `WalkReport::removed` (`crates/mnema-ingest/src/walk.rs`) stays `0`

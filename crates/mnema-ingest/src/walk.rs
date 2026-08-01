@@ -53,14 +53,28 @@ pub enum StopReason {
     BrokenWorker,
     /// The exclusion rules failed to combine into a working pattern set for
     /// this walk (`Walked::rules_applied` in `mnema-walk`), which means
-    /// `Walked::found` may hold files the user asked to exclude. Under D29
-    /// there are no local models in this product, so indexing a file sends it
-    /// to a third-party embedding provider — an exclusion rule is the user's
-    /// only mechanism for keeping a file away from that. Proceeding on the
-    /// hope that the rules did not matter for this particular folder would be
-    /// exactly the silent failure `Walked::rules_applied` exists to name, so
-    /// phase 2 never starts: nothing is read, nothing is sent anywhere. Not
-    /// excessive caution — the alternative is a setting that fails open.
+    /// `Walked::found` may hold files the user asked to exclude.
+    ///
+    /// **Nothing indexed today leaves this machine**, and that is worth
+    /// stating precisely, because an earlier version of this comment claimed
+    /// the opposite in the present tense. There is no embedding call site
+    /// anywhere in this crate or in the shell; `insert_vector` and
+    /// `create_space` have no callers outside tests; and the only crate in
+    /// the workspace carrying an HTTP client is `mnema-deps-probe`, which
+    /// nothing depends on. The pipeline currently ends at chunks and the
+    /// full-text index.
+    ///
+    /// The refusal is still the right answer, for what D29 makes of the
+    /// version this is being built toward: v1 ships no local models, so once
+    /// the embedding stage lands, everything indexed is sent to a
+    /// third-party provider, and an exclusion rule is the user's only
+    /// mechanism for keeping a file away from that. A guard that arrives with
+    /// the thing it guards has to be retrofitted onto code already written to
+    /// assume it is safe; this one is here first. Proceeding on the hope that
+    /// the rules did not matter for this particular folder would in any case
+    /// be exactly the silent failure `Walked::rules_applied` exists to name,
+    /// so phase 2 never starts and nothing is read at all. Not excessive
+    /// caution — the alternative is a setting that fails open.
     RulesNotApplied,
     /// The root itself could not be entered at all — an ejected external
     /// drive, a deleted folder. Named apart from an ordinary empty folder

@@ -43,9 +43,10 @@ pub struct WalkRules {
 /// that shape, rather than blacklisting specific ways to be wrong. Every
 /// one of these still shares the same failure it was always about: `new`
 /// used to return `Ok`, the named folder was not excluded, and nothing
-/// anywhere said so — which, since D29 sends every document to a
-/// third-party embedding provider, means the folder the user excluded got
-/// sent anyway.
+/// anywhere said so. Today that costs an index holding what the user asked
+/// it not to; once the embedding stage exists it costs more, because D29
+/// ships v1 with no local models and every indexed document will then go to
+/// a third-party provider.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RulesError {
     #[error("exclusion rule {prefix:?} could not be compiled: {reason}")]
