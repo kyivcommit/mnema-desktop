@@ -145,7 +145,13 @@ test("rulesNotApplied does not append a skipped count, even when refused > 0", (
     frozen: [],
     message: null,
   };
-  assert.doesNotMatch(endingSentence(ended), /skipped/);
+  // Both directions. `doesNotMatch` alone is satisfied by a function that
+  // returns the empty string, and this branch has now produced six tests that
+  // passed for exactly that kind of reason — including, before this line, one
+  // inside the harness written to catch them.
+  const sentence = endingSentence(ended);
+  assert.match(sentence, /before reading a single file/);
+  assert.doesNotMatch(sentence, /skipped/);
 });
 
 test("every other reason still appends the skipped count", () => {
