@@ -388,3 +388,239 @@ fn a_symlinked_root_is_walked_normally() {
     assert_eq!(walked.found[0].relative, "a.txt");
     assert!(walked.skipped.is_empty());
 }
+
+// -------------------------------------------------------- filesystem stand
+//
+// The three tests below need to run on more than one filesystem to say
+// anything: a case-sensitive volume and a case-insensitive one behave
+// differently by design, not by bug, and Windows enforces a legacy path
+// length limit no Unix filesystem has. Each test measures which regime it is
+// actually running under — rather than assuming one — and prints what it saw
+// (`cargo test -- --nocapture`), so the same source runs meaningfully on
+// every machine instead of only being honest on one of them.
+
+/// `path.relative_path` is compared as text, and the filesystem may or may
+/// not agree that two spellings are one file. On a case-insensitive volume
+/// `Notes.txt` and `notes.txt` are one file the walk must not report twice;
+/// on a case-sensitive one they are two documents and must both be found.
+///
+/// Which regime applies is measured directly off the filesystem
+/// (`fs::read_dir`'s own entry count) rather than inferred from whether the
+/// second `fs::write` succeeded — it succeeds either way: on a
+/// case-insensitive volume it overwrites the first file instead of failing,
+/// so success alone cannot tell the two regimes apart. The two branches below
+/// each assert a property real enough to fail on a real bug, instead of
+/// collapsing behind one guard that asserts nothing on one of the two
+/// regimes: on a case-sensitive volume, a bug that reported only one of the
+/// two names fails an unconditional `names.len() == 2`; on a
+/// case-insensitive one, a bug that kept a stale read of the file before it
+/// was overwritten fails the content check.
+#[test]
+fn case_only_neighbours_are_reported_consistently() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("notes.txt"), b"lower").unwrap();
+    fs::write(root.path().join("Notes.txt"), b"upper").unwrap();
+
+    // Two directory entries mean two distinct on-disk files; one means the
+    // second write overwrote the first. This is the fact under test, read
+    // straight off the filesystem rather than through `enumerate`.
+    let case_sensitive = fs::read_dir(root.path()).unwrap().count() == 2;
+
+    let walked = enumerate(root.path(), &WalkRules::none());
+    let names: Vec<&str> = walked.found.iter().map(|f| f.relative.as_str()).collect();
+
+    // Whatever the volume decided, the walk must report each distinct
+    // relative path exactly once — never the same one twice.
+    assert_eq!(
+        names.len(),
+        walked
+            .found
+            .iter()
+            .map(|f| &f.relative)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        "the walk reported the same relative path more than once: {names:?}"
+    );
+
+    if case_sensitive {
+        eprintln!(
+            "case_only_neighbours_are_reported_consistently: CASE-SENSITIVE volume at {:?} \
+             — expecting both spellings",
+            root.path()
+        );
+        assert_eq!(
+            names.len(),
+            2,
+            "a case-sensitive volume must report both notes.txt and Notes.txt: {names:?}"
+        );
+        assert!(names.contains(&"notes.txt") && names.contains(&"Notes.txt"));
+    } else {
+        eprintln!(
+            "case_only_neighbours_are_reported_consistently: CASE-INSENSITIVE volume at {:?} \
+             — expecting one file, freshly overwritten",
+            root.path()
+        );
+        assert_eq!(
+            names.len(),
+            1,
+            "a case-insensitive volume holds one file under two spellings: {names:?}"
+        );
+        assert_eq!(
+            fs::read(&walked.found[0].absolute).unwrap(),
+            b"upper",
+            "the walk's one entry must reflect the second write, not a stale read of the first"
+        );
+    }
+}
+
+/// Windows enforces a legacy 260-character `MAX_PATH` on Win32 calls unless a
+/// caller opts in to long paths. `std::fs` dodges this itself by prefixing
+/// `\\?\` internally, but `enumerate` walks through the `ignore` crate, a
+/// different caller `std::fs`'s workaround does not automatically cover — so
+/// this pins `enumerate` directly rather than assuming std's own behaviour
+/// extends to it.
+///
+/// The property under test is not "does it enumerate" — that answer is
+/// allowed to differ by platform and configuration — it is that a file
+/// genuinely on disk must land in exactly one of `found` or `skipped`, never
+/// neither. A silent third outcome — present on disk, absent from both —
+/// is the one defect no counter anywhere would catch: nothing downstream
+/// would know the file was ever there. macOS and Linux have no such limit at
+/// any length this test can practically construct, so on those platforms the
+/// test is still honest: it runs the same three-way check and always lands
+/// in the "enumerated" arm, which it says so via `eprintln!` rather than
+/// silently short-circuiting.
+#[test]
+fn a_long_path_is_enumerated_or_refused_with_a_reason_never_silently_dropped() {
+    const NAME: &str = "a_long_path_is_enumerated_or_refused_with_a_reason_never_silently_dropped";
+
+    let root = tempfile::tempdir().unwrap();
+    // Six 50-character segments plus separators and the file name clear 260
+    // characters on their own (305 + "/f.txt"), before the platform's own
+    // temp-directory prefix adds any more.
+    let segment = "a".repeat(50);
+    let mut dir = root.path().to_path_buf();
+    let mut relative_parts: Vec<&str> = Vec::new();
+    for _ in 0..6 {
+        dir = dir.join(&segment);
+        relative_parts.push(segment.as_str());
+    }
+    fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("f.txt");
+    let relative = format!("{}/f.txt", relative_parts.join("/"));
+
+    let total_len = file_path.to_string_lossy().len();
+    assert!(
+        total_len > 260,
+        "the constructed path is only {total_len} characters wide; the test does not clear \
+         the 260-character boundary it exists to probe"
+    );
+
+    if let Err(err) = fs::write(&file_path, b"x") {
+        eprintln!(
+            "{NAME}: fs::write itself refused the {total_len}-character path ({err}); \
+             enumerate was not exercised"
+        );
+        return;
+    }
+
+    let walked = enumerate(root.path(), &WalkRules::none());
+    let found = walked.found.iter().find(|f| f.relative == relative);
+    let skip = walked
+        .skipped
+        .iter()
+        .find(|s| s.relative.as_deref() == Some(relative.as_str()));
+
+    match (found, skip) {
+        (Some(_), None) => eprintln!("{NAME}: ENUMERATED at {total_len} characters"),
+        (None, Some(s)) => eprintln!(
+            "{NAME}: REFUSED at {total_len} characters — rule {:?}, detail {:?}",
+            s.rule, s.detail
+        ),
+        (Some(_), Some(_)) => panic!(
+            "the {total_len}-character path appears in BOTH found and skipped at once, \
+             which is its own defect"
+        ),
+        (None, None) => panic!(
+            "a {total_len}-character path that was just written to disk is absent from BOTH \
+             `found` and `skipped` — a silent skip, which is the defect this test exists to \
+             catch"
+        ),
+    }
+}
+
+/// `bad\xffname.txt` is a filename Linux allows (any byte but NUL and `/`)
+/// that Rust's `&str` cannot represent, and storing it lossily would store a
+/// string that no longer opens the file — the whole reason
+/// `PreSkipRule::UnrepresentableName` exists. APFS refuses to create the name
+/// at all, enforcing valid UTF-8 at the filesystem level, so this test can
+/// stay green on macOS for a reason that has nothing to do with
+/// `enumerate`'s own `UnrepresentableName` branch: if `fs::write` never
+/// created the file, the walk had nothing to skip, and an assertion that
+/// only checked `names == ["good.txt"]` would stay green even if
+/// `UnrepresentableName` were deleted outright.
+///
+/// So this reports both facts a reader needs to tell the two cases apart —
+/// whether the write succeeded, and whether the rule actually fired — via
+/// `eprintln!` (`cargo test -- --nocapture`), and asserts a real property on
+/// each of the two branches rather than only on the one this machine
+/// happens to take.
+#[cfg(unix)]
+#[test]
+fn a_name_that_is_not_utf8_is_skipped_rather_than_mangled() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let root = tempfile::tempdir().unwrap();
+    // 0xFF is not valid UTF-8 in any position.
+    let bad = root.path().join(OsStr::from_bytes(b"bad\xffname.txt"));
+    let write_result = fs::write(&bad, b"x");
+    fs::write(root.path().join("good.txt"), b"x").unwrap();
+
+    let walked = enumerate(root.path(), &WalkRules::none());
+    let names: Vec<&str> = walked.found.iter().map(|f| f.relative.as_str()).collect();
+    let unrepresentable_fired = walked
+        .skipped
+        .iter()
+        .any(|s| s.rule == PreSkipRule::UnrepresentableName);
+
+    eprintln!(
+        "a_name_that_is_not_utf8_is_skipped_rather_than_mangled: fs::write of the invalid \
+         name {}; UnrepresentableName fired: {unrepresentable_fired}",
+        if write_result.is_ok() {
+            "SUCCEEDED"
+        } else {
+            "FAILED"
+        }
+    );
+
+    match write_result {
+        Ok(()) => {
+            // The interesting case: the file exists on disk under a name
+            // Rust cannot represent as a `String`, and `enumerate` must not
+            // mangle it into one — it must be a `PreSkip`, not a `Found`.
+            assert_eq!(names, ["good.txt"]);
+            assert_eq!(walked.skipped.len(), 1);
+            assert!(
+                unrepresentable_fired,
+                "the invalid name was created but UnrepresentableName never fired: {:?}",
+                walked.skipped
+            );
+        }
+        Err(_) => {
+            // The filesystem itself refused the name (measured: APFS does
+            // this) — nothing is left on disk for `enumerate` to see, so
+            // this branch proves nothing about `UnrepresentableName` either
+            // way beyond "it did not fire for a name that was never
+            // created." The `eprintln!` above is what a reader must check
+            // instead of this branch's assertions.
+            assert_eq!(names, ["good.txt"]);
+            assert!(
+                !unrepresentable_fired,
+                "UnrepresentableName fired for a name that was never created — nothing on \
+                 disk could have produced this skip: {:?}",
+                walked.skipped
+            );
+        }
+    }
+}
