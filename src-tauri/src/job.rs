@@ -616,4 +616,75 @@ mod tests {
         assert_eq!(outcome, Outcome::Cancelled { done: 3 });
         assert_eq!(seen.into_inner().unwrap(), vec![1, 2, 3]);
     }
+
+    /// The canonical list of `EndReason` discriminants, in the exact
+    /// camelCase spelling `#[serde(rename_all = "camelCase")]` produces —
+    /// pinned identically, by hand, in `ui/render.test.js`'s own `END_
+    /// REASONS`. Neither side can see the other's source, so nothing forces
+    /// them to agree; what this test forces is narrower and still real: the
+    /// `match` below has no wildcard arm, so a variant added to `EndReason`
+    /// without a matching line here fails to **compile**, which is what
+    /// makes a maintainer look at this list at all rather than letting it go
+    /// silently stale. Whoever touches it is the one who has to remember the
+    /// JS copy — this test cannot do that part, but it makes the Rust half
+    /// of "cannot drift apart silently" true rather than aspirational.
+    ///
+    /// `serde_json::to_value` alongside the hand-written match, not instead
+    /// of it: the match is a second, independently typed opinion about the
+    /// spelling, so a `#[serde(rename = "...")]` typo on one variant that
+    /// happened to also be typo'd the same way here would still be caught —
+    /// the two have to agree with each other, not just with themselves.
+    #[test]
+    fn every_end_reason_has_its_camel_case_spelling_pinned() {
+        let discriminant = |reason: EndReason| -> &'static str {
+            match reason {
+                EndReason::Completed => "completed",
+                EndReason::Cancelled => "cancelled",
+                EndReason::Failed => "failed",
+                EndReason::BrokenWorker => "brokenWorker",
+                EndReason::RulesNotApplied => "rulesNotApplied",
+                EndReason::RootUnavailable => "rootUnavailable",
+                EndReason::VolumeMissing => "volumeMissing",
+            }
+        };
+        for reason in [
+            EndReason::Completed,
+            EndReason::Cancelled,
+            EndReason::Failed,
+            EndReason::BrokenWorker,
+            EndReason::RulesNotApplied,
+            EndReason::RootUnavailable,
+            EndReason::VolumeMissing,
+        ] {
+            assert_eq!(
+                serde_json::to_value(reason).unwrap().as_str().unwrap(),
+                discriminant(reason),
+                "{reason:?} serialized differently than this test's own spelling of it"
+            );
+        }
+    }
+
+    /// Same pairing as the test above, for `FrozenReason` — mirrored in
+    /// `ui/render.test.js`'s `FROZEN_REASONS`.
+    #[test]
+    fn every_frozen_reason_has_its_camel_case_spelling_pinned() {
+        let discriminant = |reason: FrozenReason| -> &'static str {
+            match reason {
+                FrozenReason::SymlinkedSubtree => "symlinkedSubtree",
+                FrozenReason::EmptyDirectory => "emptyDirectory",
+                FrozenReason::UnreadableDirectory => "unreadableDirectory",
+            }
+        };
+        for reason in [
+            FrozenReason::SymlinkedSubtree,
+            FrozenReason::EmptyDirectory,
+            FrozenReason::UnreadableDirectory,
+        ] {
+            assert_eq!(
+                serde_json::to_value(reason).unwrap().as_str().unwrap(),
+                discriminant(reason),
+                "{reason:?} serialized differently than this test's own spelling of it"
+            );
+        }
+    }
 }

@@ -1,18 +1,10 @@
-// The webview half of the walking skeleton. It draws what the core reports and
-// decides nothing: no state here outlives a reload, because the core owns it.
-//
-// Every sentence below is built from a field a command actually returned —
-// never from what "completed" or "failed" usually mean elsewhere. Whether
-// reconciliation ran is `reason === "completed" && complete` — BOTH, not
-// `complete` alone: the core gates phase 3 on `walked.complete` AND
-// `report.stopped == Completed` together (`mnema-ingest/src/walk.rs`'s own
-// comment above that gate calls them "two different questions, and neither
-// implies the other"), so a walk cancelled after phase 1 had already read
-// the whole tree still has `complete: true` with `reason: "cancelled"`, and
-// reconciliation did not run for it either. A folder `frozen` names was
-// deliberately left untouched, not skipped by accident; and `reason:
-// "failed"` on its own says nothing a person can act on, which is why it is
-// never shown without `message`.
+// The webview half of the walking skeleton. It draws what the core reports
+// and decides nothing: no state here outlives a reload, because the core
+// owns it. `render.js` is where every sentence is actually built — pure
+// functions, importable and tested (`render.test.js`) without a browser —
+// and everything below is DOM: elements, listeners, `invoke`.
+
+import { endingSentence, searchResultItems } from "./render.js";
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
@@ -135,67 +127,6 @@ try {
   el("job-status").textContent = `${error}`;
 }
 
-// One sentence per `FrozenReason` — owned here, not in the core, which
-// deliberately has no `Display` for it (`src-tauri/src/job.rs::FrozenReason`).
-// `emptyDirectory` is a question, not a statement: nothing on either side of
-// the seam — not `st_dev`, not this window — can tell "you emptied this
-// folder on purpose" from "the share it lives on went offline", and stating
-// either as fact would be answering a question nobody asked this window.
-const FROZEN_REASON_TEXT = {
-  symlinkedSubtree: (prefix) =>
-    `${prefix} is a symlink to a directory, which the walk does not follow — it has no ` +
-    "evidence about what used to be there before it became one.",
-  emptyDirectory: (prefix) =>
-    `${prefix} now looks empty — did you empty it on purpose, or could the drive it lives on ` +
-    "have gone offline? Either way, nothing under it was removed from the index this run; " +
-    "check it by hand.",
-  unreadableDirectory: (prefix) => `${prefix} could not be read, most likely a permissions problem.`,
-};
-
-// A `reason` this page does not know is still a folder reconciliation left
-// alone — the same principle `ENDING_TEXT`'s own fallback below follows for
-// an unknown `EndReason`.
-const frozenSentence = (f) =>
-  (FROZEN_REASON_TEXT[f.reason] ?? ((prefix) => `${prefix}: left untouched by cleanup`))(f.prefix);
-
-// One sentence per `EndReason`. `rulesNotApplied`, `rootUnavailable`,
-// `brokenWorker`, `volumeMissing` and `cancelled` read as five different
-// things because they are five different things — collapsing any pair of
-// them back into one shared sentence would be the same mistake `reason:
-// "failed"` used to make about a missing worker, a broken pool and a panic.
-//
-// `rulesNotApplied` in particular is worded as a guarantee, not an apology:
-// under D29 indexing sends document text to a third-party provider, so a
-// walk that refuses to start because it could not apply its own exclusion
-// rules is refusing to send anything that might have been excluded — that is
-// what "nothing … was opened or sent" below is claiming, and it is true
-// precisely because `walk_root` returns before phase 1 runs at all for this
-// `StopReason`.
-const ENDING_TEXT = {
-  completed: ({ indexed, unchanged, total }) =>
-    `finished: ${indexed} added, ${unchanged} unchanged (${total} total)`,
-  cancelled: ({ done, total }) => `stopped after ${done} of ${total}, at your request`,
-  failed: ({ done, total, message }) =>
-    message ? `failed after ${done} of ${total}: ${message}` : `failed after ${done} of ${total}`,
-  brokenWorker: ({ done, total }) =>
-    `stopped after ${done} of ${total} — the extraction worker looked broken and could not ` +
-    "be trusted to continue",
-  rulesNotApplied: () =>
-    "stopped before reading a single file: the exclusion rules could not be applied, so " +
-    "nothing in this folder was opened or sent to the extraction service",
-  rootUnavailable: () => "the folder could not be reached at all, before the walk saw a single file",
-  // A question, not a statement, for the same reason `FROZEN_REASON_TEXT.
-  // emptyDirectory` is one: `mnema-ingest/src/walk.rs` names this exact
-  // ambiguity — a folder that genuinely shrank to `done` files and one whose
-  // volume went offline partway through look identical from here — in the
-  // same words it uses for an emptied directory. "finished" would say more
-  // than is known; "stopped" does not.
-  volumeMissing: ({ done, total }) =>
-    `stopped after ${done} of ${total} — did the folder genuinely have only that many files ` +
-    "left, or could it have been unmounted partway through? Nothing on this side can tell the " +
-    "two apart.",
-};
-
 el("walk").addEventListener("click", async () => {
   // A channel, not an event listener: events are documented as unsuited to
   // throughput and may arrive out of order, and a bar that jumps backwards
@@ -223,46 +154,7 @@ el("walk").addEventListener("click", async () => {
     el("bar").max = ending.total;
     el("bar").value = ending.done;
 
-    const say = ENDING_TEXT[ending.reason];
-    let text = say
-      ? say(ending)
-      : // A reason this page does not know is still an ending. Rendering the
-        // literal `undefined` would be the page inventing a word.
-        `ended (${ending.reason}) after ${ending.done} of ${ending.total}`;
-
-    // Every reason's sentence above says nothing about `skipped`, so this is
-    // the one place it is added for all of them — except `rulesNotApplied`,
-    // whose own sentence already says "before reading a single file": a
-    // count appended after that would contradict it. What `skipped` can
-    // still be non-zero from there is `refused`, phase 1's own pre-skip
-    // journal (`crates/mnema-ingest/src/walk.rs`'s loop above the
-    // `rules_applied` gate) — real rows, but about entries the walker itself
-    // could not represent, not about anything the exclusion rules decided,
-    // and not the kind of "skipped" this sentence is about.
-    if (ending.skipped && ending.reason !== "rulesNotApplied") {
-      text += `, ${ending.skipped} skipped`;
-    }
-    // Whether reconciliation ran — see this file's own header comment for
-    // why that is `reason === "completed" && complete`, not `complete`
-    // alone. A walk that ends any other way has not reconciled: files
-    // deleted from the folder are still in the index and still answer
-    // searches. Deliberately silent about *why* reconciliation did not run —
-    // "some folders could not be fully read" was true for the one case this
-    // clause was first written for (an unreadable subdirectory) and false
-    // for every other reason that reaches here (a cancelled walk read
-    // nothing unreadable; a missing worker binary never got the chance to
-    // read anything at all), so the clause states only the one thing that is
-    // true regardless of which reason brought it here.
-    if (ending.reason !== "completed" || !ending.complete) {
-      text +=
-        " (reconciliation did not run this time, so nothing was removed from the index — a " +
-        "file deleted from the folder could still answer a search)";
-    }
-    if (ending.frozen && ending.frozen.length) {
-      text += " " + ending.frozen.map(frozenSentence).join(" ");
-    }
-
-    el("job-status").textContent = text;
+    el("job-status").textContent = endingSentence(ending);
     endingDescribed = true;
     jobRunning = false;
     syncButtons();
@@ -335,29 +227,23 @@ async function renderSkips(rootId) {
   }
 }
 
-// The window draws; it does not decide. Every number here came from a command.
+// The window draws; it does not decide. Every number here came from a
+// command — `searchResultItems` and `hitLocation` (`render.js`) decide what
+// the list is made of, this only turns that into elements.
 async function search(query) {
   const hits = await invoke("search", { query });
-  // `replaceChildren()` with nothing appended reads as indistinguishable
-  // from the button having done nothing at all — on the manual acceptance
-  // path itself, which is the one place this window has no test behind it.
-  // Zero hits is an answer, and has to look like one.
-  if (hits.length === 0) {
+  results.replaceChildren(...searchResultItems(hits).map((item) => {
     const li = document.createElement("li");
-    li.className = "muted";
-    li.textContent = "no matches";
-    results.replaceChildren(li);
-    return;
-  }
-  results.replaceChildren(...hits.map((h) => {
-    const li = document.createElement("li");
+    if (item.kind === "empty") {
+      li.className = "muted";
+      li.textContent = item.text;
+      return li;
+    }
     const where = document.createElement("p");
     where.className = "muted";
-    // `relativePath` is null for a document whose last copy on disk is gone —
-    // that is a state, not an empty string, and it must not render as one.
-    where.textContent = h.relativePath ?? "(no path on disk)";
+    where.textContent = item.where;
     const text = document.createElement("p");
-    text.textContent = h.text;
+    text.textContent = item.text;
     li.append(where, text);
     return li;
   }));

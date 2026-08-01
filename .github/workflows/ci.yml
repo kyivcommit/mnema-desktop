@@ -87,6 +87,32 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `ui/` has its own test suite (`ui/render.test.js`, pure functions with
+      # no browser and no mocked `window.__TAURI__`) — added after a fix round
+      # found a Critical here that nothing before it would have caught on a
+      # regression. Gated to one leg of the matrix: it is plain JS with
+      # nothing OS-specific in it, so running it on both platforms would only
+      # double the cost for the same answer, the same reasoning the keychain
+      # step below applies the other way (macOS only, because the binding
+      # under test is macOS-only).
+      #
+      # A runner image ships a `node` already, but which version is exactly
+      # the kind of drift `rust-toolchain.toml` and this file's own pinned
+      # actions exist to avoid — so it is provisioned explicitly here rather
+      # than left to whatever happens to be on the image. `lts/*` tracks
+      # whichever LTS line is current instead of a number that goes stale on
+      # its own.
+      - name: Node.js, for ui/'s own test suite
+        if: runner.os == 'Linux'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 'lts/*'
+      - name: ui/'s own tests
+        if: runner.os == 'Linux'
+        run: |
+          node --check ui/main.js
+          node --check ui/render.js
+          node --test ui/render.test.js
       # mnema-extract binds to a prebuilt Pdfium library, which is not committed:
       # it is 7.7 MB and reproducible from a pinned, checksum-verified release.
       # It has to be here — before the tests, which fail on a missing library
