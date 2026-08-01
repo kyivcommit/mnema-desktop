@@ -163,6 +163,34 @@ impl Fixture {
         let _ = self.pool.extract(&self.dir().join("no-such-file-warmup"));
     }
 
+    /// Proves the precondition all three write-contention tests rest on and
+    /// none of them used to state: that a second connection really is refused
+    /// the write lock right now.
+    ///
+    /// Every one of those tests asserts a *consequence* of contention — a walk
+    /// that gave up, a skip that was journalled, a cancellation noticed
+    /// between retries — while assuming contention happened at all. When
+    /// `macos-14` failed all three at once, the values said the assumption was
+    /// what broke: a cancelled walk came back `Completed` and the write that
+    /// was meant to be blocked landed, both of which mean the walk was never
+    /// refused anything. An assertion about a consequence, with the premise
+    /// unchecked, is the same shape as an assertion satisfied by zero.
+    ///
+    /// `BEGIN IMMEDIATE` is what the walk's own writers take, so this asks the
+    /// exact question the walk will ask, on the exact connection it will use,
+    /// and it answers within the index's busy timeout rather than hanging.
+    fn assert_write_lock_is_contended(&self) {
+        let refused = self.db.conn().execute_batch("BEGIN IMMEDIATE").is_err();
+        if !refused {
+            let _ = self.db.conn().execute_batch("ROLLBACK");
+        }
+        assert!(
+            refused,
+            "the window's BEGIN IMMEDIATE did not lock out the walk's own connection, \
+             so nothing in this test is measuring contention"
+        );
+    }
+
     fn walk(&self) -> WalkReport {
         self.walk_with(&WalkRules::none())
     }
@@ -512,8 +540,12 @@ fn a_busy_exhausted_file_does_not_count_toward_the_broken_worker_threshold() {
     let window = open(&f.index_path).unwrap();
     window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
     window.insert_watched_root("/Volumes/Second").unwrap();
+    // Before the hold begins, not inside it: the probe waits out a full
+    // busy-timeout window of its own, and spending that from the margin is
+    // what reproduced the CI failure here.
+    f.assert_write_lock_is_contended();
     let holder = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(18));
+        std::thread::sleep(HOLD);
         window.conn().execute_batch("COMMIT").unwrap();
     });
 
@@ -529,6 +561,29 @@ fn a_busy_exhausted_file_does_not_count_toward_the_broken_worker_threshold() {
 }
 
 // --------------------------------------------------------------- write contention
+
+/// How long the window holds the write lock in the contention tests below.
+///
+/// **This number sits in a corridor with a wall on each side, and only one of
+/// them was written down before `macos-14` found the other.** The walk retries
+/// `BUSY_RETRIES` (3) times, each waiting out the index's own five-second
+/// `busy_timeout`, so the hold must outlast about fifteen seconds or the
+/// retries never exhaust. It must also end *before* twenty, because the walk's
+/// next act is to journal the skip — itself a write — and that write gets one
+/// five-second wait of its own. Too short and the file is simply indexed; too
+/// long and the walk returns `Err(Busy)` instead of a report. Eighteen is the
+/// middle of a five-second corridor, not a value with slack in it.
+///
+/// Which is why nothing slow may sit between the lock being taken and the
+/// walk's first write. That is what `macos-14` had and this machine did not:
+/// a pool whose worker processes had never run, paying a first-execution cost
+/// inside the corridor. Reproduced here by spending one busy-timeout window on
+/// something else before the walk — the retries then finish after the hold,
+/// the lock is free by the third one, and the write the test expects to be
+/// refused succeeds, inverting all three assertions exactly as CI showed.
+/// `Fixture::warm_pool` and running the contention probe before the hold
+/// begins are what keep the corridor empty.
+const HOLD: Duration = Duration::from_secs(18);
 
 /// `IngestError::Busy` means "come back to this file," not "drop it" — its
 /// own doc comment in `mnema-ingest/src/lib.rs` leaves that decision to
@@ -560,8 +615,12 @@ fn a_file_still_busy_after_every_retry_is_skipped_not_lost() {
     let window = open(&f.index_path).unwrap();
     window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
     window.insert_watched_root("/Volumes/Second").unwrap();
+    // Before the hold begins, not inside it: the probe waits out a full
+    // busy-timeout window of its own, and spending that from the margin is
+    // what reproduced the CI failure here.
+    f.assert_write_lock_is_contended();
     let holder = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(18));
+        std::thread::sleep(HOLD);
         window.conn().execute_batch("COMMIT").unwrap();
     });
 
@@ -620,7 +679,7 @@ fn cancellation_is_checked_between_busy_retries_not_only_between_files() {
     // assertions below for what each half of that window is for.
     let elapsed = std::thread::scope(|scope| {
         scope.spawn(move || {
-            std::thread::sleep(Duration::from_secs(8));
+            std::thread::sleep(HOLD);
             window.conn().execute_batch("COMMIT").unwrap();
         });
         scope.spawn(|| {
