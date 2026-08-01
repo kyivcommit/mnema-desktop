@@ -21,8 +21,8 @@ case_ "startup: the index goes to the LOCAL data directory, not the cache" \
 
 case_ "startup: the state is actually managed" \
   src-tauri/src/lib.rs \
-  's{    app\.manage\(state::AppState::new\(dir\)\);\n}{    let _ = dir;\n}' \
-  'let _ = dir;' \
+  's{    app\.manage\(state::AppState::new\(dir, worker\)\);\n}{    let _ = (dir, worker);\n}' \
+  'let _ = (dir, worker);' \
   mnema-desktop 'the_application_puts_the_index_in_the_local_data_directory' --test commands
 
 case_ "job: nothing measured yet means no estimate" \
@@ -45,14 +45,18 @@ case_ "job: a finished job has nothing left" \
 
 case_ "job: every unit is reported when the interval is zero" \
   src-tauri/src/job.rs \
-  's{if due \|\| done == total \{}{if done == total \{}' \
-  'if done == total {' \
+  's{done == total \|\| last\.is_none_or\(\|last\| now\.duration_since\(last\) >= interval\)}{done == total}' \
+  ') -> bool {
+    done == total
+}' \
   mnema-desktop 'job::tests::every_unit_is_reported_when_the_interval_is_zero' --lib
 
 case_ "job: progress is throttled" \
   src-tauri/src/job.rs \
-  's{let due = last_report\.is_none_or\(\|last\| now\.duration_since\(last\) >= report_interval\);}{let due = true;}' \
-  'let due = true;' \
+  's{done == total \|\| last\.is_none_or\(\|last\| now\.duration_since\(last\) >= interval\)}{true}' \
+  ') -> bool {
+    true
+}' \
   mnema-desktop 'job::tests::progress_is_throttled_to_the_report_interval' --lib
 
 case_ "job: cancellation is checked before the unit, not after" \
@@ -99,7 +103,7 @@ case_ "commands: open_index is registered" \
   src-tauri/src/lib.rs \
   's{        bridge::open_index,\n}{}' \
   'generate_handler![
-        bridge::lexical_search,' \
+        bridge::add_watched_folder,' \
   mnema-desktop 'opening_the_index_creates_it_in_the_data_directory_and_reports_its_version' --test commands
 
 case_ "commands: searching before open says which reason" \
@@ -121,11 +125,11 @@ case_ "commands: open_index leaves the main thread" \
 pub fn open_index' \
   mnema-desktop 'the_commands_that_touch_the_database_leave_the_main_thread' --test commands
 
-case_ "commands: lexical_search leaves the main thread" \
+case_ "commands: search leaves the main thread" \
   src-tauri/src/bridge.rs \
-  's{#\[tauri::command\(async\)\]\npub fn lexical_search}{#[tauri::command]\npub fn lexical_search}' \
+  's{#\[tauri::command\(async\)\]\npub fn search}{#[tauri::command]\npub fn search}' \
   '#[tauri::command]
-pub fn lexical_search' \
+pub fn search' \
   mnema-desktop 'the_commands_that_touch_the_database_leave_the_main_thread' --test commands
 
 case_ "commands: cancelling stops the stream" \
@@ -203,7 +207,7 @@ case_ "commands: job_status is registered" \
   src-tauri/src/lib.rs \
   's{        bridge::job_status,\n}{}' \
   'bridge::cancel_job,
-    ]' \
+        walk_job::start_walk_job,' \
   mnema-desktop 'the_window_can_ask_whether_a_job_is_running' --test commands
 
 case_ "commands: a new job does not inherit the last cancellation" \
@@ -221,7 +225,7 @@ case_ "commands: only one job at a time" \
 case_ "commands: start_probe_job is registered" \
   src-tauri/src/lib.rs \
   's{        bridge::start_probe_job,\n}{}' \
-  'bridge::lexical_search,
+  'bridge::skips,
         bridge::cancel_job,' \
   mnema-desktop 'the_probe_job_is_reachable_through_the_ipc' --test commands
 

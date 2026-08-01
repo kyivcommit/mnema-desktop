@@ -107,7 +107,22 @@ pub enum FrozenReason {
 pub struct Frozen {
     /// Relative to the watched root, `/`-separated — the same form
     /// `Found::relative` and `path.relative_path` use. Every `known` path
-    /// equal to this, or starting with it followed by `/`, was left alone.
+    /// starting with this prefix followed by `/` was left alone
+    /// (`should_delete`'s own `under` check, below).
+    ///
+    /// Deliberately NOT "or equal to this": a `known` path is always a
+    /// FILE — one row in the `path` table — while every `prefix` here names
+    /// something `resolve_ancestor` (or the symlink producer) found
+    /// currently readable as a directory or a non-file entry. A `known`
+    /// path cannot be both at once *this walk*: whatever currently exists
+    /// at a given relative path, in any representable form, is exactly what
+    /// `seen` is built from, and `seen` is `should_delete`'s first,
+    /// short-circuiting check — so a path this exact string could ever
+    /// equal is already excluded before the `frozen` comparison runs at
+    /// all. This used to be claimed here without being true of
+    /// `should_delete`, which checks `under` only; the randomised harness's
+    /// own invariant 3b (`tests/randomised.rs`) now asserts the equality
+    /// case never arises, rather than silently tolerating it.
     pub prefix: String,
     pub why: FrozenReason,
 }
@@ -612,7 +627,7 @@ pub fn walk_root(
         .map(String::as_str)
         .filter(|p| should_delete(p, &seen, &frozen))
         .collect();
-    let mut ancestor_cache: HashMap<&str, Option<FrozenReason>> = HashMap::new();
+    let mut ancestor_cache: HashMap<&str, Option<(&str, FrozenReason)>> = HashMap::new();
     for relative in missing {
         let Some(parent) = relative.rfind('/').map(|i| &relative[..i]) else {
             continue;
@@ -628,9 +643,13 @@ pub fn walk_root(
         {
             continue;
         }
-        if let Some(why) = resolve_ancestor(root, parent, &mut ancestor_cache) {
+        // `prefix` here is `resolve_ancestor`'s own answer, not `parent` —
+        // when `parent` does not exist on disk, they are two different
+        // directories, and `parent` is the one that is NOT there. See that
+        // function's own doc comment for the measured case this fixes.
+        if let Some((prefix, why)) = resolve_ancestor(root, parent, &mut ancestor_cache) {
             frozen.push(Frozen {
-                prefix: parent.to_string(),
+                prefix: prefix.to_string(),
                 why,
             });
         }
@@ -719,8 +738,10 @@ fn root_is_empty(dir: &Path) -> bool {
 /// Walks up from `dir` — a candidate directory that may not exist at all —
 /// to the shallowest ancestor that does, and says whether reconciliation
 /// must freeze everything under `dir` rather than trust its absence as
-/// evidence — and, if so, why, so the caller can put an accurate reason on
-/// `WalkReport::frozen` rather than a bare bool.
+/// evidence — and, if so, WHICH directory the evidence actually belongs to
+/// and why, so the caller can put an accurate prefix and reason on
+/// `WalkReport::frozen` rather than a bare bool, or worse, `dir` itself —
+/// the returned directory is not always `dir`; see the `NotFound` arm below.
 ///
 /// Four states, where an earlier version of this check had room for only
 /// two — folding `NotFound` into "read failure, so empty, so freeze" is
@@ -734,19 +755,27 @@ fn root_is_empty(dir: &Path) -> bool {
 ///   under it is genuinely gone. Not frozen — `None`.
 /// - The directory exists and `read_dir` returns nothing: D33's ambiguity,
 ///   the same one `root_is_empty` names for the watched root itself, one
-///   level down. Frozen — `Some(FrozenReason::EmptyDirectory)`.
+///   level down. Frozen — `Some((dir, FrozenReason::EmptyDirectory))`: `dir`
+///   itself is the evidence here, since it is the one that read empty.
 /// - The directory does not exist (`io::ErrorKind::NotFound`): this is
 ///   evidence OF deletion, not an absence of evidence, so THIS level
 ///   answers nothing on its own — the walk continues to the parent
-///   directory one level up. The recursion always terminates: the watched
-///   root is the last possible ancestor, and by the time phase 3 reaches
-///   this code it is already known to exist and read non-empty (the
-///   whole-root unmount check above returned early otherwise), so running
-///   out of `/` to split on resolves to "not frozen" directly rather than
-///   recursing into a check that would only confirm what is already known.
+///   directory one level up, and returns THAT call's verdict verbatim,
+///   `&str` and all. A caller that freezes `dir` on this arm's answer would
+///   name a directory that may not exist on disk at all — measured, probing
+///   `mnt/share/2024` for a share unmounted at `mnt` climbed two `NotFound`s
+///   to find `mnt` empty, and a version of this function that returned only
+///   the `FrozenReason` left the caller with no way to say anything but
+///   `mnt/share/2024`, a path nobody could go check by hand. The recursion
+///   always terminates: the watched root is the last possible ancestor, and
+///   by the time phase 3 reaches this code it is already known to exist and
+///   read non-empty (the whole-root unmount check above returned early
+///   otherwise), so running out of `/` to split on resolves to "not frozen"
+///   directly rather than recursing into a check that would only confirm
+///   what is already known.
 /// - `read_dir` fails for any other reason (permission denied, some other
-///   IO error): frozen — `Some(FrozenReason::UnreadableDirectory)`, the
-///   conservative side, same as the old behaviour, kept for exactly the
+///   IO error): frozen — `Some((dir, FrozenReason::UnreadableDirectory))`,
+///   the conservative side, same as the old behaviour, kept for exactly the
 ///   cases that are not "not found." This arm is expected to be rare: a
 ///   permission failure anywhere under the watched root would normally
 ///   already have cleared `Walked::complete` during phase 1 and stopped
@@ -761,12 +790,16 @@ fn root_is_empty(dir: &Path) -> bool {
 /// tree) resolves from the cache without a second `read_dir` call. This is
 /// what keeps the cost proportional to how many distinct directories are
 /// actually involved in what went missing, not to how deep any one of them
-/// happens to be nested.
+/// happens to be nested. The cache key is still the directory ASKED about,
+/// even though the verdict's own `&str` may name a shallower ancestor —
+/// that mismatch is exactly the point: a second candidate under the same
+/// nonexistent `mnt/share/2024` hits the cache under that key and gets back
+/// `mnt`, without climbing again.
 fn resolve_ancestor<'a>(
     root: &Path,
     dir: &'a str,
-    cache: &mut HashMap<&'a str, Option<FrozenReason>>,
-) -> Option<FrozenReason> {
+    cache: &mut HashMap<&'a str, Option<(&'a str, FrozenReason)>>,
+) -> Option<(&'a str, FrozenReason)> {
     if let Some(&verdict) = cache.get(dir) {
         return verdict;
     }
@@ -774,12 +807,12 @@ fn resolve_ancestor<'a>(
         Ok(mut entries) => entries
             .next()
             .is_none()
-            .then_some(FrozenReason::EmptyDirectory),
+            .then_some((dir, FrozenReason::EmptyDirectory)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => match dir.rfind('/') {
             Some(i) => resolve_ancestor(root, &dir[..i], cache),
             None => None,
         },
-        Err(_) => Some(FrozenReason::UnreadableDirectory),
+        Err(_) => Some((dir, FrozenReason::UnreadableDirectory)),
     };
     cache.insert(dir, verdict);
     verdict

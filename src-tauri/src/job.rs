@@ -146,6 +146,17 @@ pub struct Ended {
     /// see [`Ended::indexed`]'s own doc comment for why this does not fold
     /// into it.
     pub unchanged: u64,
+    /// Always `0` for the probe, which reconciles nothing. For a walk,
+    /// mirrors `WalkReport::removed` — how many `path` rows phase 3 actually
+    /// deleted, as opposed to `frozen`, which is every prefix it refused to.
+    /// `removed == 0` alone cannot say whether phase 3 ran and found nothing
+    /// gone, or never ran at all — [`Ended::complete`] and `reason` are what
+    /// answer that, the same way they already do for `frozen`. Before this
+    /// field existed, `WalkReport::removed` was computed and then dropped at
+    /// this exact seam: a person who moved four hundred files out of a
+    /// watched folder read "12 unchanged" and nothing else, with no way to
+    /// tell four hundred deletions from a walk that touched nothing.
+    pub removed: u64,
     /// Set only when `reason` is `Failed` — the text a broken pool, a missing
     /// worker binary, or a panic each leave behind. `None` for every other
     /// `reason`, which already has a sentence a window can write without one:
@@ -179,6 +190,7 @@ impl Ended {
                 frozen: Vec::new(),
                 indexed: 0,
                 unchanged: 0,
+                removed: 0,
                 message: None,
             },
             Outcome::Cancelled { done } => Self {
@@ -190,6 +202,7 @@ impl Ended {
                 frozen: Vec::new(),
                 indexed: 0,
                 unchanged: 0,
+                removed: 0,
                 message: None,
             },
         }
@@ -200,9 +213,10 @@ impl Ended {
     /// pool). `done` is the last count the window was *shown*, not the loop's
     /// internal position: those differ by whatever the throttle dropped, and
     /// a number the user never saw is a worse answer than the one they did.
-    /// `frozen`, `indexed` and `unchanged` are empty or zero and `complete`
-    /// is `false` because both callers reach this with no `WalkReport` to
-    /// read any of them from — the job stopped before producing one, and
+    /// `frozen`, `indexed`, `unchanged` and `removed` are empty or zero and
+    /// `complete` is `false` because both callers reach this with no
+    /// `WalkReport` to read any of them from — the job stopped before
+    /// producing one, and
     /// `false` is the side that costs nothing to be wrong about: it can only
     /// make a page more cautious about trusting what it saw, never less.
     ///
@@ -222,6 +236,7 @@ impl Ended {
             frozen: Vec::new(),
             indexed: 0,
             unchanged: 0,
+            removed: 0,
             message: Some(message.into()),
         }
     }
@@ -384,6 +399,7 @@ mod tests {
                 frozen: Vec::new(),
                 indexed: 0,
                 unchanged: 0,
+                removed: 0,
                 message: None,
             }
         );
@@ -402,6 +418,7 @@ mod tests {
                 frozen: Vec::new(),
                 indexed: 0,
                 unchanged: 0,
+                removed: 0,
                 message: None,
             }
         );

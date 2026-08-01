@@ -413,8 +413,12 @@ fn a_symlinked_root_is_walked_normally() {
 /// collapsing behind one guard that asserts nothing on one of the two
 /// regimes: on a case-sensitive volume, a bug that reported only one of the
 /// two names fails an unconditional `names.len() == 2`; on a
-/// case-insensitive one, a bug that kept a stale read of the file before it
-/// was overwritten fails the content check.
+/// case-insensitive one, a bug that double-counted the pair as two entries —
+/// rather than the one file the volume actually holds — fails
+/// `names.len() == 1`. `enumerate` only stats; it never reads a byte of
+/// content, so nothing in this function can pin anything about *which*
+/// write's bytes survived — that part is `fs::write`'s contract, already
+/// enforced by its own `.unwrap()`, not this test's to repeat.
 #[test]
 fn case_only_neighbours_are_reported_consistently() {
     let root = tempfile::tempdir().unwrap();
@@ -465,11 +469,13 @@ fn case_only_neighbours_are_reported_consistently() {
             1,
             "a case-insensitive volume holds one file under two spellings: {names:?}"
         );
-        assert_eq!(
-            fs::read(&walked.found[0].absolute).unwrap(),
-            b"upper",
-            "the walk's one entry must reflect the second write, not a stale read of the first"
-        );
+        // No content check here on purpose: `enumerate` only stats a path,
+        // it never opens or reads one, so `fs::read(&walked.found[0].
+        // absolute)` would re-read whatever the volume currently resolves
+        // that spelling to — always `b"upper"`, on a case-insensitive
+        // volume, regardless of anything `enumerate` did or did not do. A
+        // version of this test that asserted that content was pinning
+        // `fs::write`'s own overwrite guarantee, not `enumerate`'s.
     }
 }
 

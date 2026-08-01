@@ -282,6 +282,7 @@ fn ended_from_report(report: &WalkReport) -> Ended {
         frozen,
         indexed: report.indexed,
         unchanged: report.unchanged,
+        removed: report.removed,
         message: None,
     }
 }
@@ -313,7 +314,7 @@ mod tests {
             unchanged: 1,
             skipped: 2,
             refused: 3,
-            removed: 0,
+            removed: 4,
             frozen: Vec::new(),
             complete: true,
             stopped,
@@ -419,6 +420,19 @@ mod tests {
         assert_eq!(ended.unchanged, 1);
         assert_ne!(ended.indexed, ended.done);
         assert_ne!(ended.unchanged, ended.done);
+    }
+
+    /// `WalkReport::removed` used to be computed by phase 3 and then dropped
+    /// at exactly this seam: `Ended` had no field for it, so a walk that
+    /// deleted four hundred `path` rows and a walk that deleted none reached
+    /// the window identically. This is what proves `removed` crosses like
+    /// `indexed` and `unchanged` do, with a value distinct from every other
+    /// field on `report(..)` so a swap — not only a drop — would fail here.
+    #[test]
+    fn removed_crosses_the_seam_separately_from_done() {
+        let ended = ended_from_report(&report(StopReason::Completed));
+        assert_eq!(ended.removed, 4);
+        assert_ne!(ended.removed, ended.done);
     }
 
     /// `message` is the field `ended_from_report` never sets — it belongs to

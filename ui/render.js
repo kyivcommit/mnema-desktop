@@ -71,8 +71,15 @@ export const frozenSentence = (f) =>
 // precisely because `walk_root` returns before phase 1 runs at all for this
 // `StopReason`.
 export const ENDING_TEXT = {
-  completed: ({ indexed, unchanged, total }) =>
-    `finished: ${indexed} added, ${unchanged} unchanged (${total} total)`,
+  // `removed` always shows, the same way `indexed` and `unchanged` always
+  // do: `WalkReport::removed` (`crates/mnema-ingest/src/walk.rs`) stays `0`
+  // whenever phase 3 refused to run, so it is never misleading to print,
+  // and it is the only count in this sentence that answers "where did my
+  // file go?" A window that dropped it at this seam left "finished: 0
+  // added, 12 unchanged (12 total)" as the whole story for a walk that had
+  // just deleted four hundred `path` rows.
+  completed: ({ indexed, unchanged, removed, total }) =>
+    `finished: ${indexed} added, ${unchanged} unchanged, ${removed} removed (${total} total)`,
   cancelled: ({ done, total }) => `stopped after ${done} of ${total}, at your request`,
   failed: ({ done, total, message }) =>
     message ? `failed after ${done} of ${total}: ${message}` : `failed after ${done} of ${total}`,

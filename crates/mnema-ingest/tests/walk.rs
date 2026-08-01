@@ -1215,6 +1215,65 @@ fn an_unmounted_nested_share_deletes_nothing() {
     assert_eq!(report.frozen[0].why, FrozenReason::EmptyDirectory);
 }
 
+/// The test above is the SHALLOW case: the missing files' own parent (`mnt`)
+/// is the directory that unmounted, so the probed directory and the one
+/// `resolve_ancestor` finds empty are the same string. This is the DEEP
+/// case, where they are not: the missing files live two levels under the
+/// mountpoint, so the directory `resolve_ancestor` is asked about
+/// (`mnt/share/2024`) does not exist on disk at all — only `mnt`, the
+/// ancestor it climbs to past two `NotFound`s, does. Measured directly
+/// (compiling `walk_root` verbatim and running it against this exact tree):
+/// the report named `mnt/share/2024` as the frozen prefix while only `mnt`
+/// existed on disk, which sent a person checking the file manager to a path
+/// that was never there.
+#[test]
+fn an_unmounted_share_freezes_the_ancestor_that_actually_exists() {
+    let f = Fixture::new();
+    f.write("keep.txt", "keep content");
+    f.write("mnt/share/2024/one.txt", "one content");
+    f.write("mnt/share/2024/two.txt", "two content");
+    f.walk();
+    assert!(!f.db.search_lexical("one", 10).unwrap().is_empty());
+    assert!(!f.db.search_lexical("two", 10).unwrap().is_empty());
+
+    // The unmount: the whole `mnt/share/2024` subtree is gone from disk —
+    // not merely emptied — and the mountpoint reverts to a fresh, empty
+    // directory at `mnt`. This is what a real unmount looks like one level
+    // deeper than the shallow test above: `mnt/share` and `mnt/share/2024`
+    // do not exist at all; only `mnt` does.
+    std::fs::remove_dir_all(f.dir().join("mnt")).unwrap();
+    std::fs::create_dir(f.dir().join("mnt")).unwrap();
+    let report = f.walk();
+
+    assert_eq!(report.stopped, StopReason::Completed);
+    assert_eq!(
+        report.removed, 0,
+        "an unmounted nested share must not look like two deleted files"
+    );
+    assert!(
+        f.db.path_entry(f.root, "mnt/share/2024/one.txt")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        f.db.path_entry(f.root, "mnt/share/2024/two.txt")
+            .unwrap()
+            .is_some()
+    );
+
+    // The protection itself covers the right files either way — this is
+    // the reporting half. `report.frozen[0].prefix` must name the directory
+    // the evidence actually belongs to (`mnt`, still present and readable),
+    // not the probed-but-nonexistent `mnt/share/2024`.
+    assert_eq!(report.frozen.len(), 1);
+    assert_eq!(report.frozen[0].prefix, "mnt");
+    assert!(
+        f.dir().join(&report.frozen[0].prefix).is_dir(),
+        "the reported prefix must name a directory that exists on disk"
+    );
+    assert_eq!(report.frozen[0].why, FrozenReason::EmptyDirectory);
+}
+
 /// The evidence points the opposite way from the test above, and telling the
 /// two apart is the whole of `resolve_ancestor`'s job. An unmounted share
 /// leaves its mountpoint PRESENT and empty; a directory removed outright is

@@ -88,6 +88,7 @@ test("a cancelled walk with complete: true still gets the reconciliation warning
     skipped: 0,
     indexed: 0,
     unchanged: 0,
+    removed: 0,
     frozen: [],
     message: null,
   };
@@ -104,12 +105,34 @@ test("a clean, completed walk carries no reconciliation warning", () => {
     skipped: 0,
     indexed: 5,
     unchanged: 3,
+    removed: 2,
     frozen: [],
     message: null,
   };
   const sentence = endingSentence(ended);
   assert.doesNotMatch(sentence, /reconciliation did not/);
-  assert.equal(sentence, "finished: 5 added, 3 unchanged (8 total)");
+  assert.equal(sentence, "finished: 5 added, 3 unchanged, 2 removed (8 total)");
+});
+
+// The branch review's own scenario: four hundred files moved out of the
+// watched folder. Phase 3 correctly deletes the four hundred `path` rows,
+// but before this test the window had no field to read that back from —
+// `finished: 0 added, 12 unchanged (12 total)` said nothing about it, making
+// four hundred deletions indistinguishable from a walk that touched nothing.
+test("a completed walk that deleted paths says how many, not just added and unchanged", () => {
+  const ended = {
+    reason: "completed",
+    done: 12,
+    total: 12,
+    complete: true,
+    skipped: 0,
+    indexed: 0,
+    unchanged: 12,
+    removed: 400,
+    frozen: [],
+    message: null,
+  };
+  assert.equal(endingSentence(ended), "finished: 0 added, 12 unchanged, 400 removed (12 total)");
 });
 
 // Fix round 2's own finding: phase 3 deletes one path per transaction, so a
@@ -125,6 +148,7 @@ test("a failed walk says reconciliation did not finish, not that nothing was rem
     skipped: 0,
     indexed: 0,
     unchanged: 0,
+    removed: 0,
     frozen: [],
     message: "the extraction pool cannot continue: boom",
   };
@@ -142,6 +166,7 @@ test("rulesNotApplied does not append a skipped count, even when refused > 0", (
     skipped: 3,
     indexed: 0,
     unchanged: 0,
+    removed: 0,
     frozen: [],
     message: null,
   };
@@ -163,6 +188,7 @@ test("every other reason still appends the skipped count", () => {
     skipped: 4,
     indexed: 0,
     unchanged: 0,
+    removed: 0,
     frozen: [],
     message: null,
   };

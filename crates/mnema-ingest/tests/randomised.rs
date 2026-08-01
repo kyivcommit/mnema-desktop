@@ -1108,11 +1108,31 @@ impl World {
             if !gone_from_disk && !newly_excluded {
                 continue;
             }
-            if report
-                .frozen
-                .iter()
-                .any(|f| relative == &f.prefix || under(relative, &f.prefix))
-            {
+            // `should_delete` (`crates/mnema-ingest/src/walk.rs`) protects a
+            // path only by `under` — nesting inside a frozen prefix — never
+            // by exact equality to one, and `Frozen::prefix`'s own doc
+            // comment now explains why that is safe: a `before` key here is
+            // always a FILE this harness once ingested, while every
+            // `report.frozen[_].prefix` names something phase 3 found
+            // currently reading as a directory or non-file entry — the two
+            // cannot be the same string for the same walk. This asserts
+            // that reasoning rather than assuming it, so a generator change
+            // or a producer change that broke it would fail a run instead
+            // of passing silently under the OLD version of this check,
+            // which treated equality the same as `under` and so could never
+            // have caught this either way.
+            if report.frozen.iter().any(|f| relative == &f.prefix) {
+                self.fail(format!(
+                    "invariant 3b's own assumption — {relative} is exactly equal to a \
+                     frozen prefix ({:?}), which `should_delete` does not protect against \
+                     by equality, only by nesting. Either that function needs an equality \
+                     check too, or this generator just found a way to make a known file \
+                     double as a frozen directory prefix — either way the doc comment on \
+                     `Frozen::prefix` is now wrong and needs a second look",
+                    report.frozen,
+                ));
+            }
+            if report.frozen.iter().any(|f| under(relative, &f.prefix)) {
                 continue;
             }
             if after.contains_key(relative) {
