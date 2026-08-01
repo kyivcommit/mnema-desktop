@@ -6,9 +6,13 @@
 //! job can resume from. Before this file all three tables existed with no
 //! writer anywhere.
 
-use rusqlite::{OptionalExtension, params};
+use std::collections::HashSet;
 
-use crate::{Db, Error};
+use mnema_core::OnDisk;
+use rusqlite::{OptionalExtension, params};
+use serde::Serialize;
+
+use crate::{Db, Error, INDEX_FORMAT_VERSION};
 
 /// Which rule caused a file, or one page of it, to be skipped. The vocabulary
 /// is closed on purpose — an open `rule` column turns a writer's typo into a
@@ -78,6 +82,128 @@ impl SkipRule {
             SkipRule::TooLarge => "too_large",
         }
     }
+
+    /// Not a public `FromStr`, mirroring `DocumentStatus::parse` for the same
+    /// reason: the only source of this string is the `rule` column, and that
+    /// column carries no CHECK, so `None` here means some row was written
+    /// around every write path this crate exposes — not that the caller made
+    /// a mistake.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "crash" => SkipRule::Crash,
+            "timeout" => SkipRule::Timeout,
+            "memory" => SkipRule::Memory,
+            "unsupported" => SkipRule::Unsupported,
+            "no_text_layer" => SkipRule::NoTextLayer,
+            "unreadable" => SkipRule::Unreadable,
+            "too_large" => SkipRule::TooLarge,
+            _ => return None,
+        })
+    }
+
+    /// Whether this rule is a **reproducible** determination about the file's
+    /// own bytes: the same bytes will earn the same verdict from the worker
+    /// again, with nothing outside the file able to change the answer.
+    ///
+    /// `record_skip` uses this to decide whether `bytes` is worth keeping: a
+    /// content rule earns the same verdict again from the same bytes, so the
+    /// next walk can answer from `stat` alone and skip the worker process
+    /// entirely (`mnema_ingest::ingest_file`'s second cheap arm). Getting this
+    /// wrong in the content direction is the expensive mistake — it makes a
+    /// verdict that *can* change look permanent, and the file is never looked
+    /// at again for the life of the index.
+    ///
+    /// Only `Unsupported` and `NoTextLayer` qualify. `Crash`, `Timeout` and
+    /// `Memory` are readings of the environment that apply to every file in
+    /// the walk alike — `displaces` draws the same line for the same reason
+    /// (D44) — and `Unreadable` is a fact about the disk, not the bytes, that
+    /// may well be transient (a file moved mid-scan, a permission fixed
+    /// afterwards).
+    ///
+    /// **`TooLarge` looks like it belongs here, and does not.** The refusal
+    /// does come from `stat` alone, and `displaces` does treat it as
+    /// reproducible enough to compare against `path.size_bytes` — which is
+    /// exactly the reasoning that put it on this side once, until a branch
+    /// review measured the case it breaks. The verdict is not a fact about
+    /// the bytes; it is a fact about `PoolConfig::max_bytes`, a setting the
+    /// user can change, and `INDEX_FORMAT_VERSION` does not move when a
+    /// slider does. Measured directly: a file refused under a low ceiling
+    /// stayed `Skipped { TooLarge }` after the ceiling was raised well past
+    /// its size, because the second cheap arm kept answering from the
+    /// journal and the pool was never asked again —
+    /// `a_raised_ceiling_re_examines_a_file_it_used_to_refuse` in
+    /// `mnema-ingest/tests/slice.rs` pins it.
+    ///
+    /// Keeping it off this side has a price, and it is the one this function
+    /// exists to avoid paying: every file over the ceiling costs a full worker
+    /// round-trip on every walk, because the ceiling is checked *inside* the
+    /// worker (`crates/mnema-extract/src/bin/worker.rs`), not before it is
+    /// asked. A folder of large archives therefore pays per walk what a folder
+    /// of scans used to. That is the honest cost of the ceiling being a live
+    /// setting; the alternative was a file the user can never make the product
+    /// look at again.
+    ///
+    /// An exhaustive `match` rather than a `matches!`, for the reason
+    /// `displaces` spells out at greater length: a variant added to the enum
+    /// without a decision here would otherwise fall to `false` silently. That
+    /// direction is the safe one — never remembering the bytes only costs a
+    /// worker round-trip — but "safe by accident" is not what the test named
+    /// after this function claims to guarantee, and it was measured claiming
+    /// it falsely: a new variant added with no line here left the whole
+    /// journal suite green.
+    pub fn is_about_content(self) -> bool {
+        match self {
+            SkipRule::Unsupported | SkipRule::NoTextLayer => true,
+            SkipRule::Crash
+            | SkipRule::Timeout
+            | SkipRule::Memory
+            | SkipRule::Unreadable
+            | SkipRule::TooLarge => false,
+        }
+    }
+
+    /// Whether this rule's *recurrence* — many of these in a row — says
+    /// something is wrong with the worker, the machine or the volume, rather
+    /// than with the files it keeps naming.
+    ///
+    /// A DIFFERENT question from [`is_about_content`](Self::is_about_content),
+    /// not a variant of it. `is_about_content` asks whether the same bytes
+    /// earn the same verdict again, which decides whether the skip journal is
+    /// worth trusting on its own, without spending a worker on the file a
+    /// second time. This asks whether a run of them means a walker should
+    /// stop asking a worker to do more work at all. The two questions split
+    /// the same seven variants differently, and `TooLarge` is the case that
+    /// proves it has to: it answers **no** to both. It is not a fact about
+    /// the bytes (`is_about_content` — a setting can move the ceiling out
+    /// from under a file that never changed), and it is not a fact about the
+    /// environment either — a folder that happens to hold several large
+    /// archives in a row is not a broken machine, it is an ordinary folder.
+    /// Counting it here would be the mistake `is_about_content`'s own doc
+    /// comment records as measured (a folder of large archives paying a
+    /// worker round-trip per walk was accepted as the honest cost of a
+    /// *live* ceiling), made a second time one level up: a few consecutive
+    /// large files would read as a dying worker and end a walk that has done
+    /// nothing wrong.
+    ///
+    /// Only `Crash`, `Timeout`, `Memory` and `Unreadable` qualify — the same
+    /// four `displaces` (`mnema_ingest`) keeps content for, and for the same
+    /// reason spelled out there at length: each is a reading of the
+    /// environment, not of one file, so a run of them in a row is evidence
+    /// about what is *outside* the files rather than a coincidence of which
+    /// files happened to be next in the walk.
+    ///
+    /// An exhaustive `match`, matching `is_about_content`'s own reasoning for
+    /// being one: a variant added to the enum with no line here would
+    /// otherwise answer silently, and neither default is safe to assume —
+    /// "not broken" lets a genuinely dying worker run to the end of a
+    /// multi-hour walk, and "broken" stops a walk over an ordinary folder
+    /// that has nothing wrong with it.
+    pub fn suggests_broken_environment(self) -> bool {
+        match self {
+            SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => true,
+            SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::TooLarge => false,
+        }
+    }
 }
 
 /// Mirrors `document.status`'s own CHECK (`schema.sql:71-72`). Answers only
@@ -119,7 +245,15 @@ impl DocumentStatus {
 }
 
 /// One row of the skip journal, read back for a watched root.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` with `camelCase`: the `skips` shell command (`src-tauri/src/
+/// bridge.rs`) returns this straight to the webview, and every other type
+/// that crosses that seam renders its fields the way the window's JavaScript
+/// reads them — the rename lives on the type that crosses, not on a
+/// bridge-local copy, because nothing about this shape needs translating
+/// first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkippedFile {
     pub relative_path: String,
     /// `None` for a whole-file skip (a worker crash, a timeout); `Some` when a
@@ -129,8 +263,30 @@ pub struct SkippedFile {
     pub rule: String,
 }
 
+/// The current verdict for one whole file, as read back by [`Db::skip_entry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipEntry {
+    pub rule: SkipRule,
+    /// The bytes the walk stat'ed when this verdict was recorded. `None`
+    /// whenever `rule.is_about_content()` is false, since `record_skip` drops
+    /// them on the floor for those rules regardless of what the caller passed
+    /// — but also `None`, for any rule, when the caller had no measurement to
+    /// hand `record_skip` in the first place (`bytes: None`, e.g. a file the
+    /// walk could not stat at all). A bare `None` here does not by itself say
+    /// which of the two happened.
+    pub size_bytes: Option<i64>,
+    pub mtime: Option<i64>,
+    pub format_version: i64,
+}
+
 impl Db {
-    /// Records that a file, or one page of it, did not make it into the index.
+    /// Records that a file, or one page of it, did not make it into the index,
+    /// replacing whatever this path last said.
+    ///
+    /// `bytes` is what the walk stat'ed. It is stored only when `rule` is a
+    /// statement about the file's content; for an environmental rule it is
+    /// dropped on the floor here rather than at the call site, so that no
+    /// caller can get the asymmetry wrong.
     pub fn record_skip(
         &self,
         root_id: i64,
@@ -138,13 +294,58 @@ impl Db {
         page_no: Option<i64>,
         reason: &str,
         rule: SkipRule,
+        bytes: Option<OnDisk>,
     ) -> Result<(), Error> {
+        let bytes = if rule.is_about_content() { bytes } else { None };
         self.conn().execute(
-            "INSERT INTO skipped (watched_root_id, relative_path, page_no, reason, rule)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![root_id, relative_path, page_no, reason, rule.as_str()],
+            "INSERT INTO skipped
+                (watched_root_id, relative_path, page_no, reason, rule,
+                 size_bytes, mtime, format_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (COALESCE(watched_root_id, -1), relative_path, COALESCE(page_no, -1))
+             DO UPDATE SET reason = excluded.reason,
+                           rule = excluded.rule,
+                           size_bytes = excluded.size_bytes,
+                           mtime = excluded.mtime,
+                           format_version = excluded.format_version,
+                           at = unixepoch()",
+            params![
+                root_id,
+                relative_path,
+                page_no,
+                reason,
+                rule.as_str(),
+                bytes.map(|b| b.size_bytes),
+                bytes.map(|b| b.mtime),
+                INDEX_FORMAT_VERSION
+            ],
         )?;
         Ok(())
+    }
+
+    /// The current verdict for a whole file, if there is one.
+    pub fn skip_entry(
+        &self,
+        root_id: i64,
+        relative_path: &str,
+    ) -> Result<Option<SkipEntry>, Error> {
+        self.conn()
+            .query_row(
+                "SELECT rule, size_bytes, mtime, format_version FROM skipped
+                  WHERE watched_root_id = ?1 AND relative_path = ?2 AND page_no IS NULL",
+                params![root_id, relative_path],
+                |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?
+            .map(|(rule, size_bytes, mtime, format_version)| {
+                Ok(SkipEntry {
+                    rule: SkipRule::parse(&rule).ok_or_else(|| Error::UnknownSkipRule(rule))?,
+                    size_bytes,
+                    mtime,
+                    format_version,
+                })
+            })
+            .transpose()
     }
 
     /// Every skip recorded under one watched root, oldest first.
@@ -164,6 +365,75 @@ impl Db {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Removes skip rows under `root_id` whose path is not in `seen` and does
+    /// not sit under one of `frozen_prefixes`, and returns how many were
+    /// removed.
+    ///
+    /// `seen` must be built the same way reconciliation builds it for `path`
+    /// (`mnema-ingest`'s `walk_root`, phase 3): `Walked::found` plus every
+    /// pre-skip that carries a path — never `found` alone. A pre-skip with a
+    /// path (`NotMaterialised`, `NotAFile`, `NotAFileSubtree`) means the file
+    /// is still there and the walk chose not to touch it, not that it is
+    /// gone. Forgetting its skip row on the strength of `found` alone would
+    /// erase the very explanation `record_skip` exists to keep — and since
+    /// the file is untouched, the very next walk offers the same file to the
+    /// journal again, so "why is this file not in my index?" would have an
+    /// answer that deletes itself and comes back on every single walk.
+    ///
+    /// `frozen_prefixes` must be the same set the `path` deletion loop uses
+    /// to skip a `known` path — a symlinked directory, or an unmounted
+    /// nested share, that the walk has no evidence about at all. `seen`
+    /// alone under-protects here: a symlink's own row is in `seen` (its
+    /// `relative` is the symlink's path, with a path), but a *stale* skip
+    /// row for something that used to live underneath it — recorded on a
+    /// walk before the symlink existed — has a `relative_path` `seen` never
+    /// names either. Measured directly: without this, replacing an indexed
+    /// directory with a symlink to a directory took a skip row for a file
+    /// inside it from `["linked/inner.pdf"]` to `["linked"]` on the very
+    /// next walk, even though the `path` row for `linked/inner.pdf` was
+    /// correctly kept — and because the walk never descends into a
+    /// `NotAFileSubtree` symlink, nothing ever re-creates that row, unlike
+    /// an ordinarily pruned one.
+    pub fn forget_skips_not_in(
+        &self,
+        root_id: i64,
+        seen: &HashSet<&str>,
+        frozen_prefixes: &[&str],
+    ) -> Result<u64, Error> {
+        let list = serde_json::to_string(seen)?;
+        // Candidates only, not the delete itself: prefix matching is not
+        // something a `NOT IN (json_each(...))` clause can express, and GLOB
+        // would need `*`, `?` and `[...]` escaped out of every prefix before
+        // it could be trusted as a literal string rather than a pattern —
+        // simpler and safer to filter the (typically tiny) candidate list in
+        // Rust with a plain string comparison, the same one the `path`
+        // deletion loop uses.
+        let candidates: Vec<String> = self
+            .conn()
+            .prepare(
+                "SELECT relative_path FROM skipped
+                  WHERE watched_root_id = ?1
+                    AND relative_path NOT IN (SELECT value FROM json_each(?2))",
+            )?
+            .query_map(params![root_id, list], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut n = 0u64;
+        for relative in candidates {
+            if frozen_prefixes
+                .iter()
+                .any(|prefix| under_prefix(&relative, prefix))
+            {
+                continue;
+            }
+            n += self.conn().execute(
+                "DELETE FROM skipped WHERE watched_root_id = ?1 AND relative_path = ?2",
+                params![root_id, relative],
+            )? as u64;
+        }
+        Ok(n)
     }
 
     /// Sets a document's lifecycle status.
@@ -236,4 +506,16 @@ impl Db {
             )
             .optional()?)
     }
+}
+
+/// Whether `relative` names something inside the subtree `prefix` names —
+/// prefix-plus-separator, not a bare string prefix: `"linked_dirs/x"` must
+/// not match against `"linked_dir"`. Mirrors `mnema-ingest`'s own `under()`
+/// (`crates/mnema-ingest/src/walk.rs`) — duplicated rather than shared,
+/// because `mnema-index` has no dependency on `mnema-ingest` to share it
+/// through; the dependency runs the other way.
+fn under_prefix(relative: &str, prefix: &str) -> bool {
+    relative
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
 }

@@ -26,14 +26,15 @@
 //!   character offset, and the chunker is what produces them; nothing here
 //!   recomputes one.
 
-use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
-use mnema_core::{Block, BlockType, SourceKind};
-use mnema_index::{Db, DocumentStatus, PathEntry, SkipRule};
+use mnema_core::{Block, BlockType, OnDisk, SourceKind};
+use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipRule};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
+
+mod walk;
+pub use walk::{Frozen, FrozenReason, StopReason, WalkProgress, WalkReport, walk_root};
 
 /// The stage `ingest_stage` records once a document's chunks are written.
 ///
@@ -145,12 +146,32 @@ impl From<mnema_index::Error> for IngestError {
 ///    that is new is where the file sits.
 /// 4. The write, one transaction per slice of pages.
 /// 5. The checkpoint, so that step 3 can answer next time.
+///
+/// `on_disk` is the walk's own stat, handed in rather than taken here. `None`
+/// means the walk could not stat the file at all, which is the same state the
+/// local `stat` used to express by returning `None`.
+///
+/// One reading, not two: between a stat taken by the walk and a stat taken
+/// here the file can change, and then the walk counted one size while this
+/// compared another. The difference never surfaces as an error — only as an
+/// index holding a previous version of a file it believes it re-read (§5).
+///
+/// The freshness this buys is only as good as the measurement's age: `on_disk`
+/// must come from the walk pass this call belongs to, and must never be carried
+/// across passes or cached between one pass and the next. The enumeration
+/// measures a whole root before anything is ingested from it, so "immediately
+/// before" is not the rule and never was — the rule is one pass, one
+/// measurement. A caller handing in a measurement from an earlier pass
+/// reintroduces exactly the defect this parameter exists to close, one level
+/// up: the cheap arm answers `Unchanged` for a file that has since changed, and
+/// the index keeps text the file no longer contains, with nothing logged.
 pub fn ingest_file(
     pool: &Pool,
     db: &Db,
     root_id: i64,
     absolute: &Path,
     relative: &str,
+    on_disk: Option<OnDisk>,
 ) -> Result<Ingested, IngestError> {
     // 1. The cheap arm. A failure to stat is not decided here: the pool names
     //    an unreadable file properly, with the rule and the reason the journal
@@ -177,7 +198,6 @@ pub fn ingest_file(
     //
     //    It costs one lookup on a `WITHOUT ROWID` primary key per unchanged
     //    file, against the worker process it is here to avoid.
-    let on_disk = stat(absolute);
     let recorded = db.path_entry(root_id, relative)?;
     if let Some(disk) = on_disk
         && let Some(recorded) = &recorded
@@ -192,6 +212,43 @@ pub fn ingest_file(
             document_id: recorded.document_id.clone(),
         });
     }
+    // The second cheap arm: the journal's remembered verdict, when it is
+    // still current. `skip_entry` only ever carries bytes to compare for a
+    // rule where `SkipRule::is_about_content()` is true — a reproducible
+    // reading of the file itself, not of the machine or of a setting that can
+    // change underneath it (its docstring has the case that taught this the
+    // hard way: `TooLarge` looks like a content fact and is not one). Without
+    // this arm, a folder of scans costs one worker process per file per walk
+    // forever, which is the debt §16 recorded on 2026-07-27.
+    if let Some(disk) = on_disk
+        && let Some(skip) = db.skip_entry(root_id, relative)?
+        && skip.format_version == INDEX_FORMAT_VERSION
+        && skip.size_bytes == Some(disk.size_bytes)
+        && skip.mtime == Some(disk.mtime)
+    {
+        return Ok(Ingested::Skipped { rule: skip.rule });
+    }
+    // `document.size_bytes` is NOT NULL, so a document with no measurement at
+    // all cannot be written regardless of what the pool finds — and unlike
+    // before this crate stopped statting for itself, there is no second,
+    // different-in-kind read left to try. Checked here, ahead of the pool,
+    // rather than after a successful extraction: the outcome does not depend
+    // on anything the pool learns, and a file this crate already knows it
+    // cannot measure does not need a worker cycle spent reading it first.
+    let Some(disk) = on_disk else {
+        let rule = SkipRule::Unreadable;
+        record_skip(
+            db,
+            root_id,
+            relative,
+            "the walk could not measure this file, so its size and mtime are unknown",
+            rule,
+            &recorded,
+            on_disk,
+        )?;
+        return Ok(Ingested::Skipped { rule });
+    };
+
     // 2. The pool.
     let document = match pool.extract(absolute)? {
         Outcome::Skipped(skip) => {
@@ -213,23 +270,6 @@ pub fn ingest_file(
     // What this path used to hold, if anything. Needed after the write, not
     // before it — see `repoint`.
     let displaced = recorded.as_ref().map(|entry| entry.document_id.clone());
-
-    // The worker read the file, so it was there a moment ago. Measuring it is
-    // still a separate syscall that can fail — and `document.size_bytes` is
-    // NOT NULL, so a document that cannot be measured cannot be written.
-    let Some(disk) = on_disk.or_else(|| stat(absolute)) else {
-        let rule = SkipRule::Unreadable;
-        record_skip(
-            db,
-            root_id,
-            relative,
-            "the file was read but could not be measured, so its size and mtime are unknown",
-            rule,
-            &recorded,
-            on_disk,
-        )?;
-        return Ok(Ingested::Skipped { rule });
-    };
 
     // 3. The content. Two copies of one file are one document (D33), so a
     //    second path to content already chunked costs one row.
@@ -407,7 +447,7 @@ fn record_skip(
     on_disk: Option<OnDisk>,
 ) -> Result<(), mnema_index::Error> {
     db.transaction(|_| {
-        db.record_skip(root_id, relative, None, reason, rule)?;
+        db.record_skip(root_id, relative, None, reason, rule, on_disk)?;
         if let Some(recorded) = recorded
             && displaces(rule, recorded, on_disk)
         {
@@ -419,13 +459,25 @@ fn record_skip(
 }
 
 /// Deletes `document` — and, by cascade, its pages, blocks, chunks and search
-/// rows — if no `path` row names it any more.
+/// rows, and its vectors explicitly — if no `path` row names it any more.
 ///
 /// The count is the whole decision. D33 makes a document live as long as some
 /// path names it, which is what stops deleting one copy of a file from
 /// dropping the document its other copy still needs.
+///
+/// The single place `Db::delete_document` is called from, and that is load-
+/// bearing rather than tidy: an edit that displaces a previous version
+/// (`repoint`), a file that becomes unsupported (`record_skip`), and
+/// reconciliation's own phase 3 (`walk.rs`) all decide "does anything still
+/// name this document?" the same way, through this one function, rather than
+/// each repeating the count-then-delete and each having to remember the
+/// vector cleanup beside it. `Db::delete_vectors_for_document`'s own doc
+/// comment has the reason that cleanup cannot be left to a cascade: a `vec0`
+/// table cannot carry a foreign key, so nothing removes a document's vectors
+/// on its own.
 fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> {
     if db.path_count(document)? == 0 {
+        db.delete_vectors_for_document(document)?;
         db.delete_document(document)?;
     }
     Ok(())
@@ -681,42 +733,8 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
         .collect()
 }
 
-/// What the `path` row records about a file, measured from the disk.
-#[derive(Debug, Clone, Copy)]
-struct OnDisk {
-    size_bytes: i64,
-    mtime: i64,
-}
-
-/// Measures a file, or reports nothing at all.
-///
-/// `Option`, not `Result`: nothing here decides a file's fate, and the reason
-/// a stat failed is the pool's to name.
-fn stat(path: &Path) -> Option<OnDisk> {
-    let metadata = fs::metadata(path).ok()?;
-    Some(OnDisk {
-        size_bytes: i64::try_from(metadata.len()).ok()?,
-        mtime: mtime_nanos(metadata.modified().ok()?)?,
-    })
-}
-
-/// A modification time as nanoseconds since the Unix epoch, negative before it.
-///
-/// Nanoseconds rather than whole seconds, and the difference is the whole
-/// value of the cheap arm: at second granularity a file edited twice within
-/// one second, to the same length, is indistinguishable from an untouched one
-/// and is never re-indexed. A filesystem that only keeps whole seconds (FAT,
-/// and older Linux filesystems) simply reports zeros in the low digits, which
-/// is no worse than storing seconds would have been.
-///
-/// `i64` overflows in the year 2262, which is a limit worth naming rather than
-/// hiding: `None` there, so the caller falls back to reading the file instead
-/// of comparing a truncated number.
-fn mtime_nanos(modified: SystemTime) -> Option<i64> {
-    match modified.duration_since(UNIX_EPOCH) {
-        Ok(since) => i64::try_from(since.as_nanos()).ok(),
-        Err(before) => i64::try_from(before.duration().as_nanos())
-            .ok()
-            .map(|nanos| -nanos),
-    }
-}
+// `OnDisk`, `stat` and `mtime_nanos` used to live here. Retired: `OnDisk`
+// itself is `mnema_core::OnDisk` (the shared-types crate both this crate and
+// `mnema-index` already depended on, D45), and the measurement is
+// `mnema_walk::stat` — the walk is the only place that looks at the disk, and
+// this crate now only ever compares the numbers it is handed (§5).

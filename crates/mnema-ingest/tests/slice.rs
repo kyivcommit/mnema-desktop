@@ -10,8 +10,6 @@
 //! nobody.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,81 +18,11 @@ use mnema_index::{Db, SkipRule, open, register_vector_extension};
 use mnema_ingest::{Ingested, ingest_file};
 use mnema_pool::{Pool, PoolConfig};
 
-// ------------------------------------------------------------ the real worker
-
-/// The extraction worker binary.
-///
-/// `crates/mnema-pool/tests/` names its stand-in with
-/// `env!("CARGO_BIN_EXE_mnema-pool-test-worker")`, and that mechanism is not
-/// available here: cargo sets `CARGO_BIN_EXE_*` only for binaries of the
-/// package being tested, and this package has none — the worker belongs to
-/// `mnema-extract`, which this crate must never depend on. Nor does declaring
-/// a dev-dependency help; cargo builds a dependency's library, not its
-/// binaries.
-///
-/// So the path is derived from where this test binary itself was put, and the
-/// worker is built before it is named — otherwise `cargo test -p mnema-ingest`
-/// on a clean tree would either fail or, worse, silently use a stale binary
-/// from a previous build. Running cargo from inside a test is already how
-/// `src-tauri/tests/dependency_boundary.rs` asks its question.
-fn worker() -> &'static Path {
-    static WORKER: OnceLock<PathBuf> = OnceLock::new();
-    WORKER.get_or_init(|| {
-        let exe = std::env::current_exe().expect("a test binary knows its own path");
-        // …/target/<profile>/deps/slice-<hash>
-        let profile_dir = exe
-            .parent()
-            .and_then(Path::parent)
-            .expect("a test binary sits in <target>/<profile>/deps");
-        let target_dir = profile_dir
-            .parent()
-            .expect("<target>/<profile> sits inside <target>");
-        let profile = profile_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("the profile directory is named");
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .expect("crates/mnema-ingest sits two levels below the workspace root");
-
-        let mut cargo = Command::new(env!("CARGO"));
-        cargo
-            .args([
-                "build",
-                "-p",
-                "mnema-extract",
-                "--bin",
-                "mnema-extract-worker",
-            ])
-            .arg("--manifest-path")
-            .arg(workspace.join("Cargo.toml"))
-            .arg("--target-dir")
-            .arg(target_dir);
-        // `debug` is what the dev profile is called on disk, and naming it
-        // explicitly is an error; every other profile is passed through.
-        if profile != "debug" {
-            cargo.args(["--profile", profile]);
-        }
-        let status = cargo.status().expect("cargo runs");
-        assert!(
-            status.success(),
-            "the extraction worker did not build, so this whole file is unanswered \
-             rather than passing"
-        );
-
-        let path = profile_dir.join(format!(
-            "mnema-extract-worker{}",
-            std::env::consts::EXE_SUFFIX
-        ));
-        assert!(
-            path.exists(),
-            "cargo reported success but {} is not there",
-            path.display()
-        );
-        path
-    })
-}
+// `worker` and `wrong_worker` live in `tests/support/mod.rs` now, shared with
+// `walk.rs`: two integration-test binaries asking "where is the worker built"
+// used to mean two answers that could drift apart, which is exactly the
+// divergence that module's own doc comment is written to prevent.
+mod support;
 
 // -------------------------------------------------------------------- fixture
 
@@ -135,7 +63,7 @@ impl Fixture {
             // better than one that waits.
             timeout: Duration::from_secs(10),
             max_bytes,
-            ..PoolConfig::new(worker())
+            ..PoolConfig::new(support::worker())
         })
         .unwrap();
         Fixture {
@@ -180,7 +108,15 @@ impl Fixture {
     /// and `ingest` is the right call.
     fn try_ingest(&self, relative: &str) -> Result<Ingested, mnema_ingest::IngestError> {
         let absolute = self.root.join(relative);
-        ingest_file(&self.pool, &self.db, self.root_id, &absolute, relative)
+        let on_disk = mnema_walk::stat(&absolute);
+        ingest_file(
+            &self.pool,
+            &self.db,
+            self.root_id,
+            &absolute,
+            relative,
+            on_disk,
+        )
     }
 
     /// The same index, walked by a pool built differently — a lowered ceiling,
@@ -198,13 +134,9 @@ impl Fixture {
         config: PoolConfig,
     ) -> Result<Ingested, mnema_ingest::IngestError> {
         let pool = Pool::new(config).unwrap();
-        ingest_file(
-            &pool,
-            &self.db,
-            self.root_id,
-            &self.root.join(relative),
-            relative,
-        )
+        let absolute = self.root.join(relative);
+        let on_disk = mnema_walk::stat(&absolute);
+        ingest_file(&pool, &self.db, self.root_id, &absolute, relative, on_disk)
     }
 
     fn ingest_under_ceiling(&self, relative: &str, max_bytes: u64) -> Ingested {
@@ -245,7 +177,7 @@ impl Fixture {
             workers: 1,
             batch: 100,
             timeout: Duration::from_secs(10),
-            ..PoolConfig::new(worker())
+            ..PoolConfig::new(support::worker())
         }
     }
 
@@ -1369,6 +1301,86 @@ fn a_lowered_ceiling_keeps_what_it_merely_excludes() {
     );
 }
 
+/// The Critical the branch review found: `TooLarge` is a statement about the
+/// *setting* `PoolConfig::max_bytes`, not about the file, so a rule fired
+/// against it must not survive that setting changing. `Unsupported` and
+/// `NoTextLayer` earn the same verdict again from the same bytes forever —
+/// that is what makes the second cheap arm (`ingest_file`, right after the
+/// `path_entry` check) safe for them. `TooLarge` does not: the very same
+/// bytes belong in the index the moment the ceiling is raised past them.
+///
+/// Measured before the fix, with this exact shape: a file refused under a low
+/// ceiling stayed `Skipped { TooLarge }` after the ceiling was raised to
+/// comfortably above the file's size, because the second cheap arm answered
+/// from the journal without ever asking the pool again.
+#[test]
+fn a_raised_ceiling_re_examines_a_file_it_used_to_refuse() {
+    let fx = Fixture::with_max_bytes(tempfile::tempdir().unwrap(), 100);
+    fx.place_at("contracts/ravella.txt", CONTRACT.as_bytes(), mtime());
+    assert!(
+        CONTRACT.len() > 100,
+        "the fixture must start over the ceiling, or the first pass proves nothing"
+    );
+
+    assert_eq!(
+        fx.ingest("contracts/ravella.txt"),
+        Ingested::Skipped {
+            rule: SkipRule::TooLarge
+        }
+    );
+
+    // Nothing about the file moved, only the setting: same bytes, same
+    // mtime — the second cheap arm's exact premise, and the one `TooLarge`
+    // must refuse to answer from once the ceiling no longer excludes it.
+    let raised = fx.ingest_under_ceiling("contracts/ravella.txt", 1 << 20);
+    assert!(
+        matches!(raised, Ingested::Indexed { .. }),
+        "a raised ceiling did not re-examine a file only the old ceiling had \
+         excluded: {raised:?}"
+    );
+    assert!(!fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
+}
+
+// ------------------- a remembered content verdict must not ask the pool
+
+/// The second cheap arm exists to save a worker process on a file whose
+/// content verdict is already known — pinned here by starving it. The file is
+/// skipped once by the real worker as `Unsupported`, then ingested again,
+/// unchanged, with a sidecar that is not the worker standing in for the pool.
+/// If the second cheap arm answers from the journal, the sidecar is never
+/// asked and the rule stays `Unsupported`. Cut the arm and the walk reaches
+/// the pool instead, where the sidecar answers every request with bytes that
+/// are not valid UTF-8 and the rule becomes `Crash`
+/// (`a_worker_that_is_not_the_worker_does_not_empty_the_index` below is the
+/// test that first pinned that translation).
+#[cfg(unix)]
+#[test]
+fn a_remembered_content_skip_is_answered_without_asking_the_pool() {
+    let fx = Fixture::new();
+    fx.place_at(
+        "scans/tender.pdf",
+        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
+        mtime(),
+    );
+    assert_eq!(
+        fx.ingest("scans/tender.pdf"),
+        Ingested::Skipped {
+            rule: SkipRule::Unsupported
+        }
+    );
+
+    let broken = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
+    assert_eq!(
+        fx.ingest_with_worker("scans/tender.pdf", &broken),
+        Ingested::Skipped {
+            rule: SkipRule::Unsupported
+        },
+        "the rule changed, so the pool was asked — a second cheap arm that \
+         answers from the journal would never reach a worker at all, wrong or \
+         not"
+    );
+}
+
 // ------------------------------------------------- markdown, and its pages
 
 /// An invented handbook: content before the first heading, two sections, and a
@@ -1678,29 +1690,9 @@ fn ord_rises_across_pages() {
 }
 
 // ------------------- a broken worker must not take the index with it
-
-/// Writes an executable stand-in worker that answers every request with
-/// `body`, and returns where it is.
-///
-/// A shell script rather than a Rust binary, and not
-/// `crates/mnema-pool/src/bin/test_worker.rs` either. That one selects its
-/// behaviour from a prefix on the requested path, which cannot survive being
-/// joined to a temporary directory, and it is task 8's scaffolding besides.
-/// What these tests need is simpler and closer to the thing being modelled: a
-/// sidecar that is not the worker this parent speaks to — a half-finished
-/// install, a mismatched release — which is a file, not a mock.
-#[cfg(unix)]
-fn wrong_worker(dir: &Path, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("wrong-worker");
-    std::fs::write(
-        &path,
-        format!("#!/bin/sh\nwhile read -r _line; do\n{body}\ndone\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
-}
+//
+// `wrong_worker` itself now lives in `tests/support/mod.rs`, shared with
+// `walk.rs` (see the `mod support;` note near the top of this file).
 
 /// The whole index must survive a worker that is not the worker.
 ///
@@ -1730,7 +1722,7 @@ fn a_worker_that_is_not_the_worker_does_not_empty_the_index() {
 
     // The sidecar is replaced by something that is not it. Every file is
     // touched, so the cheap arm cannot answer for any of them.
-    let broken = wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
+    let broken = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
     for name in ["a.txt", "b.txt", "c.txt"] {
         set_mtime(&fx.root.join(name), mtime_just_after());
         assert_eq!(
@@ -1808,7 +1800,7 @@ fn a_worker_from_another_release_stops_the_job_and_leaves_the_index_alone() {
         panic!("expected the file to index")
     };
 
-    let broken = wrong_worker(
+    let broken = support::wrong_worker(
         fx.root.parent().unwrap(),
         r#"printf '{"frame":"refused","rule":"encrypted","reason":"password"}\n'"#,
     );
@@ -1914,7 +1906,7 @@ fn a_document_with_no_pages_is_still_written() {
 
     // A worker that reports a document of nought pages: a header, then a
     // summary, and nothing between them.
-    let empty = wrong_worker(
+    let empty = support::wrong_worker(
         fx.root.parent().unwrap(),
         &format!(
             "printf '{}\\n{}\\n'",

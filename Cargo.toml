@@ -11,6 +11,7 @@ members = [
     "crates/mnema-ingest",
     "crates/mnema-pool",
     "crates/mnema-secrets",
+    "crates/mnema-walk",
     "src-tauri",
 ]
 

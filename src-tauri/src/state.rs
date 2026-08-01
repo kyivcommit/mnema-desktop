@@ -14,6 +14,10 @@ pub struct AppState {
     /// Which directory holds the index is a decision, and a decision taken in
     /// four places is four decisions.
     data_dir: PathBuf,
+    /// Where a walk job's `Pool` finds the extraction worker. Resolved once
+    /// for the same reason `data_dir` is — see [`crate::paths::worker_path`]
+    /// for what this path is good for today and what it is not.
+    worker: PathBuf,
     /// `None` until the first `open_index`. The window opens before the database
     /// does, because a failure to open must be something the user can read
     /// rather than a process that never draws.
@@ -25,9 +29,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub fn new(data_dir: PathBuf, worker: PathBuf) -> Self {
         Self {
             data_dir,
+            worker,
             db: Mutex::new(None),
             running: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -36,6 +41,10 @@ impl AppState {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    pub fn worker_path(&self) -> &Path {
+        &self.worker
     }
 
     /// Opens the index, creating the directory and the database if needed, and

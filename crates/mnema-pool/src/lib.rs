@@ -576,6 +576,19 @@ impl Pool {
         self.live.load(Ordering::SeqCst)
     }
 
+    /// The `workers` this pool was configured with — fixed for the pool's
+    /// whole lifetime, unlike [`live_workers`](Self::live_workers), which is
+    /// zero until the first file asks for a process and stays below the
+    /// configured count the rest of the time whenever fewer files are in
+    /// flight than there are slots. A caller that wants to reason about the
+    /// pool's *capacity* — how many processes a genuinely broken batch could
+    /// touch — needs this one; `live_workers` answers a different question
+    /// ("how many processes exist at this instant") that happens to be 0 at
+    /// the moment a caller has not yet extracted anything.
+    pub fn configured_workers(&self) -> usize {
+        self.config.workers
+    }
+
     fn poisoned(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Skip>> {
         self.poisoned
             .lock()

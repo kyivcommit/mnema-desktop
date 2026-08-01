@@ -54,6 +54,22 @@ impl Db {
         Ok(self.conn().last_insert_rowid())
     }
 
+    /// The absolute path a watched root was added under, or `None` if no root
+    /// carries this id — a stale id sent by a window with no view onto a
+    /// removed folder, or a typo in a JSON body. The shell has to turn an id
+    /// back into a filesystem path before it has anything to hand
+    /// `mnema_ingest::walk_root`, which walks a `Path`, not a row number.
+    pub fn watched_root_path(&self, root_id: i64) -> Result<Option<String>, Error> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT absolute_path FROM watched_root WHERE id = ?1",
+                params![root_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn insert_document(
         &self,
         content_hash: &str,
@@ -119,12 +135,84 @@ impl Db {
         Ok(())
     }
 
+    /// Removes a watched root and every document whose last path was under it.
+    /// Returns how many documents went with it.
+    ///
+    /// The schema cannot do this on its own. `path.watched_root_id` does
+    /// cascade from `watched_root` (`schema.sql:80`), so dropping the root
+    /// row alone already takes every `path` row under it — but nothing
+    /// cascades onward from `path` to `document`, because `path.document_id`
+    /// is the other direction of that foreign key (`schema.sql:82`): a
+    /// document does not belong to its paths, its paths belong to it. So the
+    /// root's own cascade stops at `path`, and the `document` rows those
+    /// paths named are left behind — with zero paths left, still answering
+    /// `search_lexical`, citing a folder that no longer exists (D33's own
+    /// failure mode, one level up).
+    ///
+    /// A document is doomed only if EVERY path that ever named it sat under
+    /// this root — the `NOT EXISTS` clause below excludes a document that also
+    /// has a path under some other root, the same rule a second copy of a file
+    /// already gets from [`Db::path_count`]. Read and decided inside the one
+    /// transaction this method opens, not by the caller: a check-then-delete
+    /// split across two calls could read "no other root" and then lose the
+    /// race to a path being added under a different root in between.
+    ///
+    /// Done as one transaction rather than a loop of independent statements —
+    /// a half-applied removal, root gone with some doomed documents still
+    /// standing or the reverse, is exactly the orphan this closes. Which of
+    /// the two is deleted first inside it does not matter for recovery: an
+    /// interruption before `commit` leaves nothing committed at all, root and
+    /// documents alike, because that is what one transaction means.
+    pub fn delete_watched_root(&self, root_id: i64) -> Result<u64, Error> {
+        let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Immediate)?;
+        let doomed: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT p.document_id FROM path p
+                  WHERE p.watched_root_id = ?1
+                    AND NOT EXISTS (SELECT 1 FROM path q
+                                     WHERE q.document_id = p.document_id
+                                       AND q.watched_root_id <> ?1)",
+            )?;
+            stmt.query_map(params![root_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for id in &doomed {
+            crate::space::delete_vectors_for_document_in(&tx, id)?;
+            // The document's own cascade takes its pages, blocks, chunks,
+            // search rows, chunk_embedding_state rows, ingest_stage row,
+            // document_tag rows, and its remaining path rows (all of them
+            // under this same root, since it was doomed).
+            tx.execute("DELETE FROM document WHERE id = ?1", params![id])?;
+        }
+        // Cascades away the path rows of any document that survived — one
+        // still named from another root — and this root's tag_rule, skipped
+        // and ignore_rule rows.
+        tx.execute("DELETE FROM watched_root WHERE id = ?1", params![root_id])?;
+        tx.commit()?;
+        Ok(doomed.len() as u64)
+    }
+
     pub fn path_count(&self, document_id: &str) -> Result<i64, Error> {
         Ok(self.conn().query_row(
             "SELECT count(*) FROM path WHERE document_id = ?1",
             params![document_id],
             |r| r.get(0),
         )?)
+    }
+
+    /// Every path the index currently holds under one watched root, sorted.
+    ///
+    /// What reconciliation (`mnema-ingest`'s phase 3) compares a completed
+    /// walk's own findings against: a relative path in this list that the
+    /// walk did not see is a candidate for deletion, never the other
+    /// direction — a path the walk found that is missing from this list is
+    /// simply new.
+    pub fn paths_under_root(&self, root: i64) -> Result<Vec<String>, Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT relative_path FROM path WHERE watched_root_id = ?1 ORDER BY relative_path",
+        )?;
+        let rows = stmt.query_map(params![root], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn document_exists(&self, document_id: &str) -> Result<bool, Error> {

@@ -145,9 +145,12 @@ impl Db {
     ///
     /// The vector is checked before vec0 sees it, because vec0 accepts a
     /// degenerate one without complaint and the damage only shows up as a
-    /// confident wrong answer at query time. Under D29 every embedding is a JSON
-    /// response from a third party, so a truncated or failed one arriving as
-    /// zeros is ordinary rather than hypothetical.
+    /// confident wrong answer at query time. This function has no caller
+    /// outside tests yet, and the check is here rather than at the caller for
+    /// that reason: under D29 v1 ships no local models, so every embedding
+    /// that ever reaches it will be a JSON response from a third party, and a
+    /// truncated or failed one arriving as zeros will be ordinary rather than
+    /// hypothetical.
     pub fn insert_vector(&self, space_id: i64, chunk_id: i64, v: &[f32]) -> Result<(), Error> {
         let space = self.space(space_id)?;
         check_rankable(v, &space.metric, VectorRole::Stored(chunk_id))?;
@@ -215,6 +218,35 @@ impl Db {
         rows.collect::<Result<Vec<i64>, _>>().map_err(Error::from)
     }
 
+    /// Removes every vector — across every embedding space, not only the
+    /// current one — that belongs to one document's chunks.
+    ///
+    /// A `vec0` table cannot be the target of a foreign key (G7.0 §5.7), so
+    /// nothing about `document`'s `ON DELETE CASCADE` reaches these tables
+    /// when a document goes: without this, a vector would outlive the chunk
+    /// it embeds, silently, and nothing downstream would ever notice a
+    /// `vec_emb_<n>` row naming a `chunk_id` no chunk owns any more. Called
+    /// from `mnema-ingest`'s `forget_if_unnamed`, the one place that decides
+    /// an ordinary edit or reconciliation has left a document with no path
+    /// naming it, and — via this module's private `delete_vectors_for_document_in`,
+    /// directly against an already-open transaction — from
+    /// [`Db::delete_watched_root`], which decides the same question for a
+    /// whole root at once and needs the sweep and the document's own
+    /// deletion in one transaction rather than two calls that could be
+    /// interrupted between them.
+    ///
+    /// Must run BEFORE the document (and, by cascade, its chunks) is
+    /// deleted: once they are gone there is no `chunk.document_id` left to
+    /// look their ids up by. Every space is swept, not only whichever is
+    /// "current": an older space, left behind by a retired model
+    /// configuration, can still hold vectors for chunks that were never
+    /// re-embedded into a newer one — `drop_space` is the mechanism for
+    /// retiring a whole space at once, this is the mechanism for one
+    /// document leaving every space it was ever in.
+    pub fn delete_vectors_for_document(&self, document_id: &str) -> Result<(), Error> {
+        delete_vectors_for_document_in(self.conn(), document_id)
+    }
+
     /// Drops the space and its vector table. Dropping is the mechanism for a
     /// model change; per-row DELETE is the mechanism for an edited file. G7.0 §5.7.
     pub fn drop_space(&self, space_id: i64) -> Result<(), Error> {
@@ -252,6 +284,45 @@ impl Db {
             .optional()?
             .ok_or(Error::NoSuchSpace(space_id))
     }
+}
+
+/// [`Db::delete_vectors_for_document`]'s own DELETE loop, taken out from under
+/// `&self` so it can run against either a bare connection or a transaction a
+/// caller already has open.
+///
+/// Takes `&rusqlite::Connection` rather than `&Db`, the same reason
+/// `write_search_row` in `search.rs` does: `rusqlite::Transaction` derefs to
+/// `Connection`, so a `&Transaction` coerces at the call site and this one
+/// body serves both callers. `Db::delete_vectors_for_document` passes
+/// `self.conn()` and joins whatever transaction (if any) is already open on
+/// it — mnema-ingest's `forget_if_unnamed` calls it from inside one today, and
+/// nothing here may assume it is the only writer, so it must not open a
+/// transaction of its own. `Db::delete_watched_root` passes its own open
+/// transaction directly, so the sweep and the document's deletion land or
+/// roll back together.
+pub(crate) fn delete_vectors_for_document_in(
+    conn: &rusqlite::Connection,
+    document_id: &str,
+) -> Result<(), Error> {
+    let tables: Vec<String> = conn
+        .prepare("SELECT vec_table FROM embedding_space")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for table in tables {
+        // `table` is never caller text: it comes only from
+        // `embedding_space.vec_table`, which the schema's own CHECK pins to
+        // `'vec_emb_' || id` and only `create_space` ever writes — the same
+        // reasoning `knn` and `insert_vector` already rely on for
+        // interpolating a table name into SQL.
+        conn.execute(
+            &format!(
+                "DELETE FROM {table}
+                  WHERE chunk_id IN (SELECT id FROM chunk WHERE document_id = ?1)"
+            ),
+            params![document_id],
+        )?;
+    }
+    Ok(())
 }
 
 /// What a space is, to the code that reads and writes its vectors.

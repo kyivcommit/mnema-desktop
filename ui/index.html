@@ -4,9 +4,10 @@
     <meta charset="utf-8" />
     <title>Mnema</title>
     <!--
-      A placeholder, and the walking skeleton's far end: it touches all four
-      commands so the whole path can be walked by hand. The interface ported
-      from the server repository replaces it.
+      The walking skeleton's far end, reached by hand: open the index, pick a
+      real folder through the OS's own dialog, watch a real walk run over it,
+      and read back a cited hit. The interface ported from the server
+      repository replaces this file rather than growing it further.
 
       Script and styles are separate files rather than inline. The CSP is
       `default-src 'self'`, under which an external file is unambiguously
@@ -21,20 +22,23 @@
       <p id="index-status" class="muted">opening the index…</p>
 
       <section>
-        <h2>Lexical search</h2>
+        <h2>Watched folder</h2>
+        <button id="pick">Choose a folder…</button>
+        <p id="folder" class="muted">no folder chosen</p>
+        <button id="walk" disabled>Index it</button>
+        <button id="cancel" disabled>Cancel</button>
+        <progress id="bar" value="0" max="1"></progress>
+        <p id="job-status" class="muted">idle</p>
+        <p id="skips" class="muted"></p>
+      </section>
+
+      <section>
+        <h2>Search</h2>
         <form id="search-form">
           <input id="query" type="search" placeholder="query" autocomplete="off" />
           <button type="submit">Search</button>
         </form>
-        <p id="search-status" class="muted">nothing searched yet</p>
-      </section>
-
-      <section>
-        <h2>Probe job</h2>
-        <button id="start">Start</button>
-        <button id="cancel" disabled>Cancel</button>
-        <progress id="bar" value="0" max="1"></progress>
-        <p id="job-status" class="muted">idle</p>
+        <ol id="results"></ol>
       </section>
     </main>
     <script type="module" src="/main.js"></script>

@@ -5,6 +5,9 @@
 //! whether they are registered, whether their arguments survive the camelCase
 //! rename, or what an error looks like on the other side.
 
+mod support;
+
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -12,6 +15,7 @@ use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_desktop::bridge;
 use mnema_desktop::job::JobEvent;
 use mnema_desktop::state::AppState;
+use mnema_desktop::walk_job;
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, Channel, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, mock_builder, mock_context, noop_assets};
@@ -26,10 +30,63 @@ use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
 /// start-up and held in state rather than derived inside each command.
 fn app_in(dir: &std::path::Path) -> tauri::App<MockRuntime> {
     mock_builder()
-        .manage(AppState::new(dir.to_path_buf()))
+        .manage(AppState::new(
+            dir.to_path_buf(),
+            support::worker().to_path_buf(),
+        ))
         .invoke_handler(mnema_desktop::invoke_handler())
         .build(mock_context(noop_assets()))
         .expect("failed to build the mock application")
+}
+
+/// A watched folder with one file a search can find. `TempDir` is returned,
+/// not its path alone: dropping it deletes the directory, and a caller has to
+/// keep it alive for exactly as long as the folder needs to exist, the same
+/// discipline `tempfile::tempdir()` itself already asks of every other test
+/// here.
+fn fixture_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the fixture folder");
+    std::fs::write(
+        dir.path().join("animals.txt"),
+        "the quick brown fox jumps over the lazy dog",
+    )
+    .expect("writing the fixture file");
+    dir
+}
+
+/// Starts a real walk over `root_id` and blocks until the window would have
+/// heard `Ended`, returning its payload for the caller to inspect.
+///
+/// Calls `walk_job::start_walk_job` directly on `state` rather than through
+/// `call`, the same choice `a_started_job_reports_progress_and_a_cancelled_
+/// one_stops` already makes for the probe: the argument is a real
+/// `tauri::ipc::Channel`, built from a callback this test can read, and the
+/// raw-IPC path (`"__CHANNEL__:N"`) has nothing on the other end for that
+/// callback to be. IPC *reachability* is a separate question, asked by
+/// `the_walk_job_is_reachable_through_the_ipc` below.
+fn run_walk_and_capture_ending(app: &tauri::App<MockRuntime>, root_id: i64) -> Value {
+    let state = app.state::<AppState>();
+    let (channel, events) = job_channel();
+    walk_job::start_walk_job(state.clone(), root_id, channel).expect("the walk would not start");
+
+    loop {
+        match events.recv_timeout(Duration::from_secs(20)) {
+            Ok(event) if event["event"] == json!("ended") => return event["data"].clone(),
+            Ok(_) => continue,
+            Err(_) => panic!("the walk never told the window it ended"),
+        }
+    }
+}
+
+/// The common case: a walk over a fixture with nothing ambiguous in it must
+/// simply finish.
+fn run_walk_to_completion(app: &tauri::App<MockRuntime>, root_id: i64) {
+    let ending = run_walk_and_capture_ending(app, root_id);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the walk over the fixture folder did not complete: {ending}"
+    );
 }
 
 fn main_webview(app: &tauri::App<MockRuntime>) -> WebviewWindow<MockRuntime> {
@@ -144,7 +201,14 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     let webview = main_webview(&app);
     let here = std::thread::current().id();
 
-    for cmd in ["open_index", "lexical_search"] {
+    // `start_walk_job` joins this list rather than the blocking one below:
+    // unlike `start_probe_job`, it reads the root's path through
+    // `with_index` before it ever spawns a thread. The body below is
+    // `{"query": ""}` for every command in this loop, which is not
+    // `start_walk_job`'s shape (`rootId`, `onProgress`) — the point here is
+    // only which thread answers, and a rejection for missing arguments
+    // answers from the same place a success would.
+    for cmd in ["open_index", "search", "start_walk_job"] {
         assert_ne!(
             responding_thread(&webview, cmd),
             here,
@@ -191,7 +255,7 @@ fn searching_before_the_index_is_open_says_so() {
     let app = app_in(dir.path());
     let webview = main_webview(&app);
 
-    let error = call(&webview, "lexical_search", json!({ "query": "договір" }))
+    let error = call(&webview, "search", json!({ "query": "договір" }))
         .expect_err("a search with no index behind it must not succeed");
 
     assert_eq!(error, json!("the index is not open"));
@@ -248,14 +312,21 @@ fn a_search_through_the_ipc_finds_what_another_connection_wrote() {
             .unwrap()
     };
 
-    let hits = call(&webview, "lexical_search", json!({ "query": "звірки" }))
-        .expect("lexical_search was rejected");
+    let hits = call(&webview, "search", json!({ "query": "звірки" })).expect("search was rejected");
+    let hits = hits.as_array().expect("search did not return an array");
 
     assert_eq!(
-        hits,
-        json!([chunk_id]),
-        "the search connection did not see the row the other connection wrote"
+        hits.len(),
+        1,
+        "the search connection did not see the row the other connection wrote: {hits:?}"
     );
+    assert_eq!(hits[0]["chunkId"], json!(chunk_id));
+    assert!(hits[0]["text"].as_str().unwrap().contains("звірки"));
+    // No `path` row was ever written for this chunk's document — only
+    // `document`, `page`, `block` and `chunk` — so `citation` has nothing to
+    // join a relative path from, and `None` must cross as `null`, not `""`
+    // or an absent key.
+    assert_eq!(hits[0]["relativePath"], json!(null));
 }
 
 #[test]
@@ -401,6 +472,14 @@ fn a_job_that_panics_still_tells_the_window_it_ended() {
         json!(0),
         "the ending counted a report the window never received: {ending}"
     );
+    // Gap 1 from the task-12 review: `reason: "failed"` alone cannot tell a
+    // missing worker binary from a broken pool from a panic. This is the
+    // panic's own text, carried across rather than dropped.
+    assert_eq!(
+        ending["data"]["message"],
+        json!("deliberate panic: this test forces the job to fail"),
+        "the panic's own message did not reach the window: {ending}"
+    );
 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while state.job_is_running() && std::time::Instant::now() < deadline {
@@ -543,7 +622,7 @@ fn the_probe_job_is_reachable_through_the_ipc() {
 #[test]
 fn the_indexing_job_is_given_its_own_connection_not_the_windows() {
     let dir = tempfile::tempdir().unwrap();
-    let state = AppState::new(dir.path().to_path_buf());
+    let state = AppState::new(dir.path().to_path_buf(), support::worker().to_path_buf());
     state.open_index().expect("the index opens");
 
     let job = state.open_job_index().expect("the job gets a connection");
@@ -586,5 +665,508 @@ fn the_indexing_job_is_given_its_own_connection_not_the_windows() {
         roots, 1,
         "the job's committed row never reached the window, so the two are not \
          connections to one index"
+    );
+}
+
+/// The window needs a citation, not a chunk id. `mnema-index` already
+/// re-exports `Citation` and it is `Serialize` (`write.rs:11`), so this
+/// crosses the seam without touching the dependency graph — the seam was
+/// simply never crossed.
+#[test]
+fn search_returns_citations_not_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+
+    let hits = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    let hits = hits.as_array().expect("search did not return an array");
+
+    assert!(!hits.is_empty());
+    assert!(hits[0]["text"].as_str().unwrap().contains("fox"));
+    assert!(hits[0]["relativePath"].is_string());
+}
+
+/// The channel a real webview passes is a string of this shape. Nothing
+/// receives the messages here — `run_walk_to_completion` above is what
+/// proves the walk itself works, by calling the command function directly so
+/// its `Channel` has a real callback behind it. What this proves is narrower
+/// and just as necessary: that `start_walk_job` is in `invoke_handler!` at
+/// all, and that its arguments arrive under the name the JavaScript side
+/// sends them by. Neither is implied by the function existing and working
+/// when called directly, the same reason `the_probe_job_is_reachable_
+/// through_the_ipc` exists alongside the tests that call `start_probe_job`
+/// straight from Rust.
+#[test]
+fn the_walk_job_is_reachable_through_the_ipc() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "start_walk_job",
+        json!({ "rootId": root, "onProgress": "__CHANNEL__:9" }),
+    )
+    .expect("start_walk_job was rejected");
+
+    let error = call(
+        &webview,
+        "start_walk_job",
+        json!({ "root_id": root, "on_progress": "__CHANNEL__:10" }),
+    )
+    .expect_err("the snake_case argument names were accepted");
+    assert!(
+        error.as_str().unwrap_or_default().contains("rootId"),
+        "the rejection should name the missing argument; it was {error}"
+    );
+
+    // The job started above is real and running over a real (tiny) fixture.
+    // Letting it finish before `app` and the temp dirs drop keeps this test
+    // from racing its own teardown.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while app.state::<AppState>().job_is_running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !app.state::<AppState>().job_is_running(),
+        "the walk job never released the slot"
+    );
+}
+
+/// `remove_watched_folder` is not on this task's list for completeness: it
+/// is the first thing that reaches `Db::delete_watched_root` from outside a
+/// Rust test, over the full seam — add, walk, remove, search — rather than
+/// against a database built by hand. §7.1.1 named the gap that function
+/// closes: `path` rows fall away with their root through the schema's own
+/// foreign key, but nothing cascaded onward to `document` on its own, which
+/// would otherwise keep answering `search` for a folder that no longer
+/// exists.
+#[test]
+fn removing_a_watched_folder_takes_its_documents_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    let before = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    assert!(
+        !before.as_array().unwrap().is_empty(),
+        "the fixture was never indexed, so removing it proves nothing"
+    );
+
+    let removed = call(&webview, "remove_watched_folder", json!({ "rootId": root }))
+        .expect("remove_watched_folder was rejected");
+    assert_eq!(
+        removed,
+        json!(1),
+        "the fixture's one document was not removed with the only root that named it"
+    );
+
+    let after = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    assert_eq!(
+        after,
+        json!([]),
+        "a document survived the folder that owned it being removed"
+    );
+}
+
+/// A dangling symlink is exactly the shape `PreSkipRule::NotAFile` names —
+/// `crates/mnema-ingest/src/walk.rs`'s own match arm for it says so in
+/// words: "a symlink, a dangling symlink, a FIFO, a socket or a device." It
+/// is journalled and the walk continues, which this test leans on twice:
+/// once for `skips` to have a row to return, and once for
+/// `run_walk_to_completion`'s own assertion that the walk still completes.
+#[cfg(unix)]
+#[test]
+fn skips_reports_what_the_walk_could_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(
+        fixture.path().join("nowhere"),
+        fixture.path().join("broken"),
+    )
+    .expect("creating the dangling symlink");
+
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+
+    let skips = call(&webview, "skips", json!({ "rootId": root })).expect("skips was rejected");
+    let skips = skips.as_array().expect("skips did not return an array");
+    assert_eq!(
+        skips.len(),
+        1,
+        "the dangling symlink was not journalled: {skips:?}"
+    );
+    assert_eq!(skips[0]["relativePath"], json!("broken"));
+}
+
+/// The critical case a review round found: `stopped == Completed` does not
+/// mean phase 3 ran. An unreadable subdirectory leaves the walk `Completed`
+/// — phase 2 finished everything phase 1 could hand it — but
+/// `WalkReport::complete` is `false`, and reconciliation refuses to run on
+/// an incomplete walk (`mnema-ingest/src/walk.rs`'s own gate, pinned there by
+/// `an_incomplete_walk_deletes_nothing`). Before this round `ended_from_
+/// report` never read `complete` at all, so this exact shape reached the
+/// window as `{reason: "completed", ...}` — byte-identical to a walk that
+/// saw everything, with no way to tell the two apart.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_subdirectory_tells_the_window_reconciliation_did_not_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("kept.txt"), "kept").unwrap();
+    let locked = fixture.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("inside.txt"), "secret").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("locking the subdirectory");
+
+    // Root reads through any permission bits — the same guard
+    // `crates/mnema-ingest/tests/walk.rs::complete_is_false_when_a_
+    // subdirectory_could_not_be_read` uses for the identical shape, so this
+    // test does not fail for a different reason in a container that runs as
+    // root.
+    if std::fs::read_dir(&locked).is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!(
+            "skipped an_unreadable_subdirectory_tells_the_window_reconciliation_did_not_run: \
+             running as root, chmod 000 has no effect"
+        );
+        return;
+    }
+
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("unlocking the subdirectory so the temp dir can be cleaned up");
+
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the walk did not even stop cleanly, so this proves nothing about `complete`: {ending}"
+    );
+    assert_eq!(
+        ending["complete"],
+        json!(false),
+        "an unreadable subdirectory must not report as a walk that saw everything: {ending}"
+    );
+}
+
+/// The seam the throttle has to survive, not only the predicate that
+/// decides it: `job::progress_is_due` is unit-tested directly in `job.rs`,
+/// but nothing before this test proved a *real* walk actually consults it
+/// rather than forwarding every `WalkProgress` `walk_root` hands it. A
+/// one-file fixture cannot see the difference — throttled or not, one file
+/// produces at most two events. Thirty can: an unthrottled walk sends one
+/// progress event per file handled in phase 2 (plus one before the loop, for
+/// phase-1 refusals), so thirty files with none refused make thirty-one:
+/// `job::REPORT_INTERVAL`'s own doc comment names exactly this shape. A
+/// throttled walk instead sends however many 250 ms windows the whole walk
+/// actually spans — bounded by wall-clock time, not by file count, so it
+/// stays small on this machine regardless of how many files there are.
+#[test]
+fn progress_events_are_throttled_and_the_last_one_is_exact() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    for i in 0..30 {
+        std::fs::write(
+            fixture.path().join(format!("file-{i}.txt")),
+            format!("file number {i}"),
+        )
+        .expect("writing a fixture file");
+    }
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let state = app.state::<AppState>();
+    let (channel, events) = job_channel();
+    walk_job::start_walk_job(state.clone(), root, channel).expect("the walk would not start");
+
+    let mut progress_events = Vec::new();
+    let ending = loop {
+        match events.recv_timeout(Duration::from_secs(30)) {
+            Ok(event) if event["event"] == json!("progress") => {
+                progress_events.push(event["data"].clone());
+            }
+            Ok(event) if event["event"] == json!("ended") => break event["data"].clone(),
+            Ok(_) => continue,
+            Err(_) => panic!("the walk never told the window it ended"),
+        }
+    };
+
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the walk over thirty files did not complete: {ending}"
+    );
+    // Both directions, because the upper bound alone is satisfied by zero and
+    // a review measured exactly that: made to send nothing at all, this test
+    // passed — `len() < 15` held and the exactness check below skipped itself
+    // through its own `if let`. A bar that never moves is not a throttle
+    // working well, it is a progress channel that is broken.
+    assert!(
+        !progress_events.is_empty(),
+        "thirty files produced no progress events at all — the bar would never move"
+    );
+    assert!(
+        progress_events.len() < 15,
+        "thirty files produced {} progress events — throttling did not \
+         meaningfully reduce anything: {progress_events:?}",
+        progress_events.len()
+    );
+    // The exception `job::progress_is_due` always makes: the report that
+    // reaches `total` is sent regardless of timing, because a bar that
+    // stops one file short of the end looks like a hang. The last event must
+    // already show the true final count — not a stale one the throttle
+    // happened to let through earlier and then withheld the correction for.
+    let last = progress_events
+        .last()
+        .expect("the emptiness assertion above already established there is one");
+    assert_eq!(
+        last["done"], ending["done"],
+        "the last progress event before Ended did not show the true count: {last}"
+    );
+}
+
+/// `JobSlot::drop` clears `AppState::running`, and `ui/main.js` re-enables
+/// Start inside the handler that receives `Ended` — so the window's own
+/// contract is that a second walk can start the instant the first says it
+/// is over. Before the slot was dropped ahead of the send, this raced: the
+/// slot was still held for however long remained of the spawned thread's
+/// body, and a second `start_walk_job` issued in that gap was refused with
+/// `a job is already running`, even though the first walk had just been
+/// reported finished.
+#[test]
+fn a_second_walk_can_start_the_instant_the_first_says_it_ended() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+
+    let fixture = fixture_dir();
+    let root = state
+        .with_index(|db| db.insert_watched_root(&fixture.path().display().to_string()))
+        .expect("insert_watched_root failed");
+
+    let (first_channel, first_events) = job_channel();
+    walk_job::start_walk_job(state.clone(), root, first_channel)
+        .expect("the first walk would not start");
+
+    loop {
+        match first_events.recv_timeout(Duration::from_secs(20)) {
+            Ok(event) if event["event"] == json!("ended") => break,
+            Ok(_) => continue,
+            Err(_) => panic!("the first walk never told the window it ended"),
+        }
+    }
+
+    let (second_channel, _second_events) = job_channel();
+    walk_job::start_walk_job(state.clone(), root, second_channel)
+        .expect("a second walk was refused the instant the first said it ended");
+}
+
+/// Gap 1 from the task-12 review, exercised through a real walk rather than
+/// only through `Ended::failed` itself: `paths::worker_path` is provisional —
+/// no `externalBin` is wired yet — so a worker binary missing at the path
+/// `AppState` was given is the **known, current state of any packaged
+/// build**, not a contrived one. Before `Ended.message` existed, this
+/// reached the window as the single word `"failed"`, indistinguishable from
+/// a broken pool or a panic.
+#[test]
+fn a_missing_worker_binary_reports_why_in_the_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = mock_builder()
+        .manage(AppState::new(
+            dir.path().to_path_buf(),
+            PathBuf::from("/nonexistent/mnema-extract-worker"),
+        ))
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application");
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+
+    let fixture = fixture_dir();
+    let root = state
+        .with_index(|db| db.insert_watched_root(&fixture.path().display().to_string()))
+        .expect("insert_watched_root failed");
+
+    let (channel, events) = job_channel();
+    walk_job::start_walk_job(state.clone(), root, channel).expect("the walk would not start");
+
+    let ending = loop {
+        match events.recv_timeout(Duration::from_secs(20)) {
+            Ok(event) if event["event"] == json!("ended") => break event["data"].clone(),
+            Ok(_) => continue,
+            Err(_) => panic!("the walk never told the window it ended"),
+        }
+    };
+
+    assert_eq!(
+        ending["reason"],
+        json!("failed"),
+        "a missing worker binary must stop the walk, not be treated as a per-file skip: {ending}"
+    );
+    let message = ending["message"]
+        .as_str()
+        .expect("a failed walk must carry a message the window can render");
+    assert!(
+        message.contains("nonexistent/mnema-extract-worker"),
+        "the message does not name the worker path that could not be started: {message}"
+    );
+}
+
+/// The capability granting `dialog:allow-open` (`src-tauri/capabilities/
+/// default.json`), exercised at the ACL layer rather than by actually
+/// opening a dialog: a real `open` call blocks on user interaction, which a
+/// test must never do. `mock_context(noop_assets())` cannot answer this
+/// question — it hands every app `Resolved::default()`, an empty ACL,
+/// regardless of what capability files exist on disk (see that function's
+/// own source). `tauri::generate_context!()` is what actually reads
+/// `tauri.conf.json` and `capabilities/*.json`, the way `lib.rs::run()`
+/// does, so this is the one place in this file that uses it — the pairing
+/// with `mock_builder()` below is `tauri::test::mock_builder`'s own
+/// documented example, not a novel combination.
+fn app_with_real_capabilities() -> tauri::App<MockRuntime> {
+    mock_builder()
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .plugin(tauri_plugin_dialog::init())
+        .build(tauri::generate_context!())
+        .expect("failed to build the mock application")
+}
+
+/// A payload the ACL must let through before it fails for an unrelated
+/// reason. `directory` is a `bool` on `OpenDialogOptions`
+/// (`tauri-plugin-dialog`'s own `src/commands.rs`), so a string here fails to
+/// deserialize. If the capability did not grant `dialog:allow-open`, this
+/// call would be refused before argument parsing ever ran, with a message
+/// naming the plugin rather than the field — which is exactly the
+/// distinction the two tests below turn on, and why neither one has to
+/// actually open a dialog to prove its point.
+fn malformed_open_dialog_args() -> Value {
+    json!({ "options": { "directory": "not a boolean" } })
+}
+
+/// D48: the ACL classifies a request by its origin, and Windows serves the
+/// webview from a different one than macOS does — `local_origin()`'s own doc
+/// comment has the measured history of what hardcoding the wrong constant
+/// broke last time. `call()` already routes through it for every command in
+/// this file; this test is not exempt just because the command it reaches
+/// belongs to a plugin rather than to this crate.
+#[test]
+fn the_main_window_may_reach_the_folder_picker() {
+    let app = app_with_real_capabilities();
+    let webview = main_webview(&app);
+
+    let error = call(&webview, "plugin:dialog|open", malformed_open_dialog_args())
+        .expect_err("a non-boolean `directory` must not deserialize into `OpenDialogOptions`");
+    let message = error.as_str().unwrap_or_default();
+    // `!message.contains("not allowed")` is not enough: measured directly,
+    // removing `.plugin(tauri_plugin_dialog::init())` from
+    // `app_with_real_capabilities` changes the message to a "no such plugin"
+    // shape that also happens not to contain "not allowed" — so that weaker
+    // assertion passed for a picker that was not reachable at all.
+    // `invalid type … expected a boolean` is the one shape that can only be
+    // produced by `OpenDialogOptions::deserialize` actually running, which
+    // only happens once the ACL has let the call through *and* the plugin is
+    // registered to handle it.
+    assert!(
+        message.contains("invalid type") && message.contains("expected a boolean"),
+        "the `main` window did not reach `OpenDialogOptions` deserialization — either the ACL \
+         refused it, or the dialog plugin was never registered to answer it: {message}"
+    );
+}
+
+/// The counterweight to the test above: without it, a capability that
+/// granted `dialog:allow-open` to every window regardless of `windows: [
+/// "main"]` would pass the positive test for the same reason a capability
+/// scoped correctly would, and nothing here would tell the two apart.
+#[test]
+fn a_window_the_capability_does_not_name_may_not_reach_the_folder_picker() {
+    let app = app_with_real_capabilities();
+    let webview = WebviewWindowBuilder::new(&app, "other", Default::default())
+        .build()
+        .expect("failed to build the second mock webview");
+
+    let error = call(&webview, "plugin:dialog|open", malformed_open_dialog_args())
+        .expect_err("a window outside the capability's `windows` list reached the dialog plugin");
+    let message = error.as_str().unwrap_or_default();
+    assert!(
+        message.contains("not allowed"),
+        "a window the capability does not name should be refused by the ACL, not by argument \
+         parsing: {message}"
     );
 }

@@ -21,6 +21,13 @@ mnema-core = { path = "../mnema-core" }
 mnema-index = { path = "../mnema-index" }
 mnema-pool = { path = "../mnema-pool" }
 mnema-chunk = { path = "../mnema-chunk" }
+# `walk.rs`'s `enumerate`, `WalkRules`, `Found`, `PreSkipRule` — this crate is
+# the only one that knows the order phases run in (see the module doc above),
+# and joining a walk to `ingest_file` is that order, one level up. Used to be
+# a `[dev-dependencies]`-only entry (`mnema_walk::stat`, for `tests/` to model
+# the walk's own measurement); it moved here rather than staying duplicated in
+# both sections once `src/walk.rs` needed it too.
+mnema-walk = { path = "../mnema-walk" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -6,7 +6,7 @@ mod space;
 mod text_prep;
 mod write;
 
-pub use journal::{DocumentStatus, SkipRule, SkippedFile};
+pub use journal::{DocumentStatus, SkipEntry, SkipRule, SkippedFile};
 pub use migrations::SCHEMA_VERSION;
 pub use open::{Db, open, register_vector_extension};
 pub use space::VectorRole;
@@ -69,6 +69,11 @@ pub enum Error {
     /// job, and one bad row must not take the whole run down with it.
     #[error("document.status holds {0:?}, which is outside pending/indexed/failed/skipped")]
     UnknownDocumentStatus(String),
+    /// Mirrors `UnknownDocumentStatus` for the same reason: `skipped.rule` has
+    /// no CHECK, so reaching this means a row was written around every write
+    /// path this crate exposes.
+    #[error("skipped.rule holds {0:?}, which is not a known SkipRule")]
+    UnknownSkipRule(String),
     /// Both widths are in the message because the interesting question is which
     /// of the two is wrong, and the caller passed only one of them.
     #[error(
