@@ -1134,9 +1134,19 @@ fn the_main_window_may_reach_the_folder_picker() {
     let error = call(&webview, "plugin:dialog|open", malformed_open_dialog_args())
         .expect_err("a non-boolean `directory` must not deserialize into `OpenDialogOptions`");
     let message = error.as_str().unwrap_or_default();
+    // `!message.contains("not allowed")` is not enough: measured directly,
+    // removing `.plugin(tauri_plugin_dialog::init())` from
+    // `app_with_real_capabilities` changes the message to a "no such plugin"
+    // shape that also happens not to contain "not allowed" — so that weaker
+    // assertion passed for a picker that was not reachable at all.
+    // `invalid type … expected a boolean` is the one shape that can only be
+    // produced by `OpenDialogOptions::deserialize` actually running, which
+    // only happens once the ACL has let the call through *and* the plugin is
+    // registered to handle it.
     assert!(
-        !message.contains("not allowed"),
-        "the `main` window was refused by the ACL rather than reaching argument parsing: {message}"
+        message.contains("invalid type") && message.contains("expected a boolean"),
+        "the `main` window did not reach `OpenDialogOptions` deserialization — either the ACL \
+         refused it, or the dialog plugin was never registered to answer it: {message}"
     );
 }
 

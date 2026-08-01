@@ -2,11 +2,17 @@
 // decides nothing: no state here outlives a reload, because the core owns it.
 //
 // Every sentence below is built from a field a command actually returned —
-// never from what "completed" or "failed" usually mean elsewhere. A walk that
-// ends `complete: false` has not finished, whatever `reason` says; a folder
-// `frozen` names was deliberately left untouched, not skipped by accident;
-// and `reason: "failed"` on its own says nothing a person can act on, which
-// is why it is never shown without `message`.
+// never from what "completed" or "failed" usually mean elsewhere. Whether
+// reconciliation ran is `reason === "completed" && complete` — BOTH, not
+// `complete` alone: the core gates phase 3 on `walked.complete` AND
+// `report.stopped == Completed` together (`mnema-ingest/src/walk.rs`'s own
+// comment above that gate calls them "two different questions, and neither
+// implies the other"), so a walk cancelled after phase 1 had already read
+// the whole tree still has `complete: true` with `reason: "cancelled"`, and
+// reconciliation did not run for it either. A folder `frozen` names was
+// deliberately left untouched, not skipped by accident; and `reason:
+// "failed"` on its own says nothing a person can act on, which is why it is
+// never shown without `message`.
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
@@ -178,9 +184,16 @@ const ENDING_TEXT = {
     "stopped before reading a single file: the exclusion rules could not be applied, so " +
     "nothing in this folder was opened or sent to the extraction service",
   rootUnavailable: () => "the folder could not be reached at all, before the walk saw a single file",
+  // A question, not a statement, for the same reason `FROZEN_REASON_TEXT.
+  // emptyDirectory` is one: `mnema-ingest/src/walk.rs` names this exact
+  // ambiguity — a folder that genuinely shrank to `done` files and one whose
+  // volume went offline partway through look identical from here — in the
+  // same words it uses for an emptied directory. "finished" would say more
+  // than is known; "stopped" does not.
   volumeMissing: ({ done, total }) =>
-    `finished ${done} of ${total}, but the folder may have been unmounted partway through — ` +
-    "reconnect it and run again to be sure everything was seen",
+    `stopped after ${done} of ${total} — did the folder genuinely have only that many files ` +
+    "left, or could it have been unmounted partway through? Nothing on this side can tell the " +
+    "two apart.",
 };
 
 el("walk").addEventListener("click", async () => {
@@ -217,21 +230,33 @@ el("walk").addEventListener("click", async () => {
         // literal `undefined` would be the page inventing a word.
         `ended (${ending.reason}) after ${ending.done} of ${ending.total}`;
 
-    // `completed` already reads `skipped` as 0 vs. non-zero would need its own
-    // clause; every other reason's sentence above says nothing about it, so
-    // this is the one place it is added for all of them.
-    if (ending.skipped) {
+    // Every reason's sentence above says nothing about `skipped`, so this is
+    // the one place it is added for all of them — except `rulesNotApplied`,
+    // whose own sentence already says "before reading a single file": a
+    // count appended after that would contradict it. What `skipped` can
+    // still be non-zero from there is `refused`, phase 1's own pre-skip
+    // journal (`crates/mnema-ingest/src/walk.rs`'s loop above the
+    // `rules_applied` gate) — real rows, but about entries the walker itself
+    // could not represent, not about anything the exclusion rules decided,
+    // and not the kind of "skipped" this sentence is about.
+    if (ending.skipped && ending.reason !== "rulesNotApplied") {
       text += `, ${ending.skipped} skipped`;
     }
-    // `complete` is the one field a `completed` reason does not itself imply
-    // `true` for — a folder with an unreadable subdirectory finishes looking
-    // identical to a clean walk except here. A walk that ends this way has
-    // not reconciled: files deleted from the folder are still in the index
-    // and still answer searches, which is worth saying even though nothing
-    // about `reason` hints at it.
-    if (!ending.complete) {
+    // Whether reconciliation ran — see this file's own header comment for
+    // why that is `reason === "completed" && complete`, not `complete`
+    // alone. A walk that ends any other way has not reconciled: files
+    // deleted from the folder are still in the index and still answer
+    // searches. Deliberately silent about *why* reconciliation did not run —
+    // "some folders could not be fully read" was true for the one case this
+    // clause was first written for (an unreadable subdirectory) and false
+    // for every other reason that reaches here (a cancelled walk read
+    // nothing unreadable; a missing worker binary never got the chance to
+    // read anything at all), so the clause states only the one thing that is
+    // true regardless of which reason brought it here.
+    if (ending.reason !== "completed" || !ending.complete) {
       text +=
-        " (some folders could not be fully read, so nothing was removed from the index this run)";
+        " (reconciliation did not run this time, so nothing was removed from the index — a " +
+        "file deleted from the folder could still answer a search)";
     }
     if (ending.frozen && ending.frozen.length) {
       text += " " + ending.frozen.map(frozenSentence).join(" ");
@@ -273,7 +298,17 @@ el("cancel").addEventListener("click", async () => {
   // it has ended, not when the user asks it to.
   el("cancel").disabled = true;
   el("job-status").textContent = "stopping…";
-  await invoke("cancel_job");
+  try {
+    await invoke("cancel_job");
+  } catch (error) {
+    // The request never reached the core, so whatever is running is still
+    // running. Left disabled forever, and silent about it, "stopping…"
+    // would read as true when it is not — this is the honest alternative:
+    // the job is presumably still going, and the button is worth pressing
+    // again.
+    el("job-status").textContent = `could not ask the job to stop: ${error}`;
+    el("cancel").disabled = false;
+  }
 });
 
 /// Reads the skip journal for `rootId` and renders it next to the job status.
@@ -303,6 +338,17 @@ async function renderSkips(rootId) {
 // The window draws; it does not decide. Every number here came from a command.
 async function search(query) {
   const hits = await invoke("search", { query });
+  // `replaceChildren()` with nothing appended reads as indistinguishable
+  // from the button having done nothing at all — on the manual acceptance
+  // path itself, which is the one place this window has no test behind it.
+  // Zero hits is an answer, and has to look like one.
+  if (hits.length === 0) {
+    const li = document.createElement("li");
+    li.className = "muted";
+    li.textContent = "no matches";
+    results.replaceChildren(li);
+    return;
+  }
   results.replaceChildren(...hits.map((h) => {
     const li = document.createElement("li");
     const where = document.createElement("p");
