@@ -310,6 +310,16 @@ struct World {
     /// (`crates/mnema-walk/src/rules.rs`'s own `anchored_pattern`), so a
     /// leaf path is a well-formed rule in its own right.
     excluded: BTreeSet<String>,
+    /// True only for the `check(...)` call that immediately follows a
+    /// `walk_root` call inside `run_walk`/`simulate_ejected_volume`, false
+    /// everywhere else. Invariant 3 reads it to excuse a row phase 3 itself
+    /// just removed for an excluded path — see that invariant's own doc
+    /// comment (Task 13, fix round 1) for why the exception has to be this
+    /// narrow: outside a walk, nothing may remove an excluded path's row at
+    /// all (§5 — exclusion takes effect on the *next* walk, not before), so
+    /// widening this to every step would forgive a cascade this invariant
+    /// exists to catch.
+    walking: bool,
 }
 
 impl World {
@@ -341,6 +351,7 @@ impl World {
             settled_before: BTreeSet::new(),
             rules: WalkRules::none(),
             excluded: BTreeSet::new(),
+            walking: false,
         }
     }
 
@@ -757,7 +768,6 @@ impl World {
 
         self.check_referential_integrity();
         self.check_no_orphan_documents(&after, &documents);
-        self.check_documents_have_positive_path_count(&documents);
         self.check_no_stale_answers(&after);
         self.check_nothing_settled_went_missing(&after, &documents);
         self.check_nothing_removed_that_the_disk_still_holds(before, &after);
@@ -793,6 +803,24 @@ impl World {
     /// document nothing can cite: `citation()` joins to `path` with a `LEFT
     /// JOIN`, so it renders with no filename at all while still answering
     /// searches.
+    ///
+    /// **Task 13, fix round 1: a second, database-driven version of this
+    /// check (`db.path_count(id) == 0`, "invariant 1b") was added and then
+    /// removed.** It never once fired on its own: `World` inserts exactly one
+    /// watched root (`World::new`'s single `insert_watched_root`), `after`
+    /// (this function's `BTreeMap` of every `path` row) is already scoped to
+    /// that one root, and `path_count` counts globally — over one root, the
+    /// two counts are the same rows read two different ways only in the
+    /// sense that they are always equal, never in the sense that one can
+    /// disagree while the other does not. Confirmed directly: a mutation
+    /// that breaks `forget_if_unnamed` turns *this* invariant red and never
+    /// 1b. A genuine second witness would need a second watched root in the
+    /// world, which is a real, separate piece of modelling (every operation
+    /// would need to pick which root it acts on, `paths_now`/`documents_now`
+    /// would need to stay root-scoped rather than silently mixing them) —
+    /// worth doing on its own, not as a two-line addition riding on this
+    /// task's back, so it was left out rather than kept as a witness that
+    /// cannot see anything the first one does not.
     fn check_no_orphan_documents(
         &self,
         after: &BTreeMap<String, String>,
@@ -809,32 +837,6 @@ impl World {
                  cited with no filename: {orphans:?}",
                 orphans.len()
             ));
-        }
-    }
-
-    /// **1b. The same claim, asked of the database's own count rather than of
-    /// the `path` snapshot invariant 1 already took.**
-    ///
-    /// `path_count` is `forget_if_unnamed`'s own arbiter for deleting a
-    /// document (`crates/mnema-ingest/src/lib.rs`) — the function reconciliation
-    /// calls, through phase 3, to decide whether a document it just orphaned
-    /// must go. Asking it directly here, rather than re-deriving the same
-    /// answer from `after`, is a second SQL query against `path` catching
-    /// what the first one might not: invariant 1 and this one agree by
-    /// counting the same rows two different ways, not by sharing one count.
-    fn check_documents_have_positive_path_count(
-        &self,
-        documents: &BTreeMap<String, (String, Option<String>)>,
-    ) {
-        for document_id in documents.keys() {
-            let count = self.db.path_count(document_id).unwrap();
-            if count == 0 {
-                self.fail(format!(
-                    "invariant 1b — document {document_id} exists but path_count reports \
-                     {count}: nothing names it, the same fact invariant 1 checks from the \
-                     other side"
-                ));
-            }
         }
     }
 
@@ -899,19 +901,19 @@ impl World {
     /// Without this half, an implementation that deleted everything it touched
     /// would satisfy invariant 2 perfectly.
     ///
-    /// **Amended for Task 13, same reasoning as invariant 3's own amendment,
-    /// and it exists for the same measured reason rather than by analogy
-    /// alone:** `toggle_exclusion` marks a freshly-excluded path `Skipped` in
-    /// `self.last` the moment it is drawn, precisely so this loop would never
-    /// see it here with a stale `Settled` — but `ingest_file` itself has no
-    /// notion of `WalkRules` at all (only phase 1 of `walk_root` does), so an
-    /// ordinary operation that picks an excluded path with [`World::a_file`]
-    /// and calls `self.ingest` on it directly re-settles it in full, exactly
-    /// as it would for any other file. A later `RunWalk` then reconciles that
-    /// path away — correctly, per §5 — and this loop, unamended, read the
-    /// same shape invariant 3 did: a settled answer whose file had not
-    /// changed, gone from the index. `self.excluded` is what tells that
-    /// reconciliation apart from data loss.
+    /// **Task 13, fix round 1: this carried an exception for `self.excluded`
+    /// through its first review, and it was the wrong fix.** The state it
+    /// was covering for — a settled path, unchanged, gone with no path row —
+    /// only ever arose here because an ordinary operation picked an excluded
+    /// path with [`World::a_file`] and called `self.ingest` on it directly,
+    /// which no real walk can do (`ingest_file` has exactly one non-test
+    /// caller, inside phase 2 of `walk_root`, always downstream of phase 1's
+    /// rule filtering). That is a generator artefact, not a legitimate state
+    /// this invariant has to make room for — `settle()` already skipped
+    /// excluded names for exactly this reason in the same change that added
+    /// the exception here. `maybe_ingest`, `reingest` and the two recovery
+    /// offers in `database_refuses_a_write` now skip an excluded path too, so
+    /// this loop no longer needs to know `excluded` exists at all.
     fn check_nothing_settled_went_missing(
         &self,
         after: &BTreeMap<String, String>,
@@ -919,9 +921,6 @@ impl World {
     ) {
         for (relative, last) in &self.last {
             if last.verdict != Verdict::Settled {
-                continue;
-            }
-            if self.excluded.contains(relative) {
                 continue;
             }
             let Some(hash) = self.hash_on_disk(relative) else {
@@ -970,19 +969,31 @@ impl World {
     /// The `Unreadable` half of that is covered by invariant 2b instead.
     ///
     /// **Amended for Task 13, and only once measured, not on suspicion:**
-    /// a path currently named by `excluded` is excused too. Every invariant
-    /// above this one was written before `RunWalk` existed, in a world where
-    /// nothing ever removed a path row for a file whose bytes had not moved —
-    /// `WalkRules` gives phase 3 a second, legitimate reason to (§5, "I
-    /// excluded that folder" has to mean it), and the very first run of this
-    /// harness after `toggle_exclusion` was added found it: seed 1592590336,
-    /// `backup/copy-17.txt`, excluded at step 15 and reconciled away three
-    /// steps later inside `settle`, failed here with `it now holds: None`
-    /// before this exception existed. The claim this invariant states —
-    /// content vanishes only when the file itself stopped holding it — is
-    /// unchanged; what changed is that "the file itself" now includes
-    /// whether a rule says the walk may look at it at all, which the file's
-    /// bytes alone never could.
+    /// a path currently named by `excluded` is excused too, but **only**
+    /// while `self.walking` is set — the narrow window right after a
+    /// `walk_root` call that could legitimately be the one removing it.
+    /// Every invariant above this one was written before `RunWalk` existed,
+    /// in a world where nothing ever removed a path row for a file whose
+    /// bytes had not moved — `WalkRules` gives phase 3 a second, legitimate
+    /// reason to (§5, "I excluded that folder" has to mean it), and the very
+    /// first run of this harness after `toggle_exclusion` was added found it:
+    /// seed 1592590336, `backup/copy-17.txt`, excluded at step 15 and
+    /// reconciled away three steps later inside `settle`, failed here with
+    /// `it now holds: None` before this exception existed.
+    ///
+    /// **Fix round 1 narrowed the exception to `self.walking` only**, after
+    /// review found the un-narrowed form tolerated a state correct code never
+    /// produces: excluding a path does not take effect until the *next*
+    /// walk (§5's own words again), so a path row disappearing on an
+    /// ordinary, non-walk step — through the very `ON DELETE CASCADE` this
+    /// invariant's own first paragraph names as its quarry — must still be
+    /// caught, exclusion or not. The narrowed form was run for 400 seeds
+    /// (release, bases 0 and 1000000) with no change in outcome, so it costs
+    /// nothing where the wide form was needed and closes where it was not.
+    /// The claim this invariant states — content vanishes only when the file
+    /// itself stopped holding it — is unchanged; what changed is that "the
+    /// file itself" now includes whether a rule says *this walk* may look at
+    /// it, which the file's bytes alone never could.
     fn check_nothing_removed_that_the_disk_still_holds(
         &self,
         before: &BTreeMap<String, String>,
@@ -992,7 +1003,7 @@ impl World {
             if after.get(relative) == Some(document) {
                 continue;
             }
-            if self.excluded.contains(relative) {
+            if self.walking && self.excluded.contains(relative) {
                 continue;
             }
             if self.hash_on_disk(relative).as_ref() == Some(document) {
@@ -1412,7 +1423,19 @@ impl World {
     /// With four chances in five the walk reaches this file straight away; with
     /// the fifth it does not, and the index is left legitimately behind — which
     /// is the state invariant 2 has to tell apart from a stale answer.
+    ///
+    /// Checks `excluded` first, ahead of the chance draw: `ingest_file` has no
+    /// notion of `WalkRules` at all (only phase 1 of `walk_root` does — its
+    /// one non-test caller is `crates/mnema-ingest/src/walk.rs:851`, inside
+    /// phase 2), so a rule excluding this path means no real walk ever offers
+    /// it, and this generator must not either. Fix round 1: this used to
+    /// offer it anyway and paper over the result with an exception carved
+    /// into invariant 2b; the invariant is unamended now, and this is why.
     fn maybe_ingest(&mut self, relative: &str) {
+        if self.excluded.contains(relative) {
+            self.note(format!("    (excluded, not offered: {relative})"));
+            return;
+        }
         if self.rng.chance(80) {
             self.ingest(relative);
         } else {
@@ -1688,6 +1711,12 @@ impl World {
 
     fn reingest(&mut self) {
         let relative = self.a_file();
+        if self.excluded.contains(&relative) {
+            // Same reasoning as `maybe_ingest`: a real re-walk never offers
+            // an excluded path, so this generator must not either.
+            self.note(format!("  re-walk {relative}, excluded — not offered"));
+            return;
+        }
         self.note(format!("  re-walk {relative}, unchanged"));
         self.ingest(&relative);
     }
@@ -1763,6 +1792,25 @@ impl World {
     /// slice 0 back along with everything else.
     fn database_refuses_a_write(&mut self) {
         let relative = self.a_file();
+        if self.excluded.contains(&relative) {
+            // Fix round 1: this function's own comment two paragraphs down
+            // already said a trigger can silently not fire — `WHEN` matching
+            // no row is not a fault, it is an ordinary successful walk, and
+            // `repoint`'s `delete_path` matches zero rows for a path that has
+            // no row at all, which is exactly the shape of an excluded path
+            // whose previous row phase 3 already reconciled away. That
+            // silently settles an excluded path exactly like an unguarded
+            // `maybe_ingest` would — measured directly: seed 17 at 30 steps,
+            // `backup/copy-6.txt`, a `DELETE path` trigger that matched
+            // nothing because the row was already gone. Skip the whole
+            // operation rather than pick apart which of its several calls
+            // can settle something; every one of them can.
+            self.note(format!(
+                "  walk {relative} against a database that refuses a write — excluded, not \
+                 offered"
+            ));
+            return;
+        }
 
         // The content comes first, because which faults can even fire depends
         // on the document about to be written, and drawing them independently
@@ -1858,8 +1906,15 @@ impl World {
         //   through a foreign key that cascades. A harness that always repaired
         //   first can never build that state, which is what the first version
         //   of this file did.
+        //
+        // Every direct `self.ingest(&relative)` below is guarded by
+        // `maybe_ingest`'s own reasoning: an excluded path is never offered,
+        // because a real recovery walk goes through `walk_root`'s phase 1
+        // first and would never reach it either. `self.ingest(&copy)` needs
+        // no guard — `copy_of` always writes a fresh path, which cannot be a
+        // name this run has ever excluded.
         match self.rng.below(10) {
-            0..=3 => self.ingest(&relative),
+            0..=3 => self.maybe_offer(&relative),
             4..=8 => {
                 let copy = self.copy_of(&relative);
                 if let Some(copy) = copy {
@@ -1868,12 +1923,25 @@ impl World {
                     if self.rng.chance(50) {
                         self.ingest(&copy);
                     } else {
-                        self.ingest(&relative);
+                        self.maybe_offer(&relative);
                     }
                 }
             }
             _ => {}
         }
+    }
+
+    /// Offers `relative` to `ingest_file` unless a rule currently excludes
+    /// it. The unconditional twin of `maybe_ingest` — no chance draw, always
+    /// offered when it is offered at all — for the two call sites where a
+    /// direct recovery walk is exactly what is being tested and the only
+    /// thing standing between it and an unrealistic call is exclusion.
+    fn maybe_offer(&mut self, relative: &str) {
+        if self.excluded.contains(relative) {
+            self.note(format!("    (excluded, not offered: {relative})"));
+            return;
+        }
+        self.ingest(relative);
     }
 
     /// RunWalk: `walk_root` itself, over the real folder and the real rules —
@@ -1918,8 +1986,13 @@ impl World {
             self.record_settlement_from_walk();
         }
         let after = self.paths_now();
+        // `walking` brackets only this check — see its own doc comment on
+        // `World` for why invariant 3's exclusion exception must not outlive
+        // it.
+        self.walking = true;
         self.check(&before);
         self.check_walk_removed_what_it_could(&before, &after, &report);
+        self.walking = false;
         self.remember_settled();
     }
 
@@ -2029,6 +2102,14 @@ impl World {
     /// (now restored) still holds is exactly the shape invariant 3 already
     /// exists to catch, so this operation only has to put the harness back
     /// into a state that invariant can see, not repeat what it checks.
+    ///
+    /// Does not call `check_walk_removed_what_it_could` (invariant 3b) the
+    /// way `run_walk` does, and that is not an oversight: by the time
+    /// `self.check` below runs, `before` and the restored disk agree on
+    /// every path again, so nothing in `before` reads as "gone from disk" —
+    /// invariant 3b would have nothing to say. This operation's own claim is
+    /// the over-deletion direction (invariant 3), never the under-deletion
+    /// one 3b is for.
     fn simulate_ejected_volume(&mut self) {
         let before = self.paths_now();
         let parked = self.dir.path().join("parked");
@@ -2055,7 +2136,9 @@ impl World {
             "  reconnect it: walk_root answered removed {} stopped {:?}",
             report.removed, report.stopped
         ));
+        self.walking = true;
         self.check(&before);
+        self.walking = false;
     }
 }
 
@@ -2104,13 +2187,16 @@ impl World {
         let documents = self.documents_now();
         for name in &names {
             if self.excluded.contains(name) {
-                if let Some(hash) = self.hash_on_disk(name)
-                    && after.get(name) == Some(&hash)
-                {
+                // `contains_key`, not a match against the current hash: a
+                // stale row still pointing at some OLD document would pass
+                // the hash comparison (fix round 1, Minor) and hide behind
+                // invariant 3b, which already backstops this exact claim —
+                // this check should not depend on it to be right.
+                if after.contains_key(name) {
                     self.fail(format!(
-                        "after settling — {name} is excluded by a rule and still answers to \
-                         a path row over exactly the bytes on disk: three clean walks did not \
-                         remove what the rule says must not be findable"
+                        "after settling — {name} is excluded by a rule and still has a path \
+                         row: three clean walks did not remove what the rule says must not be \
+                         findable"
                     ));
                 }
                 continue;
