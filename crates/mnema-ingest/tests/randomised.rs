@@ -584,7 +584,31 @@ impl World {
     /// The same call, with the measurement taken by the caller rather than
     /// just before this call — see `walk`, the one caller that needs the gap
     /// between the two to be real.
+    ///
+    /// **The first of the two narrow points every individual-file offer in
+    /// this file funnels through** (`ingest_with`, below, is the other).
+    /// `ingest_file` has exactly one non-test caller in the product
+    /// (`crates/mnema-ingest/src/walk.rs:851`, inside phase 2 of
+    /// `walk_root`, always downstream of phase 1's rule filtering), so an
+    /// excluded path is never offered to it by anything real — and guarding
+    /// it here, once, is what makes that true of every caller in this file
+    /// too, present and future, rather than of whichever caller happened to
+    /// be patched last (Task 13, fix round 2: four call sites carried this
+    /// check individually after round 1; a systematic probe over 400 seeds
+    /// found four more that did not — 22 unrealistic calls from `rename`'s
+    /// offer of its own old name, 201 from the three fault-injecting
+    /// operations that go through `ingest_with` instead of this function.
+    /// None were measured harmful — a second probe over 2000 seeds × 40
+    /// steps found zero excluded paths reaching a `Settled` verdict — but
+    /// that is a fact about which operations happen to be drawn today, and
+    /// the harmless subspecies would not have stayed harmless past the next
+    /// reweighting of `draw`'s odds. Two guards close the whole class rather
+    /// than the four instances of it anyone had gone looking for.)
     fn ingest_measured(&mut self, relative: &str, on_disk: Option<OnDisk>, how: &str) {
+        if self.excluded.contains(relative) {
+            self.note(format!("    (excluded, not offered: {relative}{how})"));
+            return;
+        }
         let before = self.paths_now();
         let hash = self.hash_on_disk(relative);
         let absolute = self.absolute(relative);
@@ -610,7 +634,17 @@ impl World {
     /// (`crates/mnema-pool/src/lib.rs:466-468,549`), and a timeout injected
     /// here must not make the ordinary pool answer from a cached skip for the
     /// rest of the run.
+    ///
+    /// **The second of the two narrow points** — see `ingest_measured`'s own
+    /// doc comment. This one builds its own `Pool` and calls `ingest_file`
+    /// directly rather than going through `ingest_measured`, which is
+    /// exactly why the guard there could not see it and needs its own copy
+    /// here.
     fn ingest_with(&mut self, relative: &str, config: PoolConfig, how: &str) {
+        if self.excluded.contains(relative) {
+            self.note(format!("    (excluded, not offered: {relative}{how})"));
+            return;
+        }
         let pool = Pool::new(config).unwrap();
         let before = self.paths_now();
         let hash = self.hash_on_disk(relative);
@@ -820,7 +854,12 @@ impl World {
     /// would need to stay root-scoped rather than silently mixing them) —
     /// worth doing on its own, not as a two-line addition riding on this
     /// task's back, so it was left out rather than kept as a witness that
-    /// cannot see anything the first one does not.
+    /// cannot see anything the first one does not. It would not be idle
+    /// modelling, either: a second root is also the only way this file could
+    /// exercise `Db::delete_watched_root`'s own `NOT EXISTS` clause
+    /// (`crates/mnema-index/src/write.rs:172`, the query that decides
+    /// whether a document survives deleting the *other* root — it only ever
+    /// has one to compare against here), which nothing random touches today.
     fn check_no_orphan_documents(
         &self,
         after: &BTreeMap<String, String>,
@@ -1424,18 +1463,12 @@ impl World {
     /// the fifth it does not, and the index is left legitimately behind — which
     /// is the state invariant 2 has to tell apart from a stale answer.
     ///
-    /// Checks `excluded` first, ahead of the chance draw: `ingest_file` has no
-    /// notion of `WalkRules` at all (only phase 1 of `walk_root` does — its
-    /// one non-test caller is `crates/mnema-ingest/src/walk.rs:851`, inside
-    /// phase 2), so a rule excluding this path means no real walk ever offers
-    /// it, and this generator must not either. Fix round 1: this used to
-    /// offer it anyway and paper over the result with an exception carved
-    /// into invariant 2b; the invariant is unamended now, and this is why.
+    /// No exclusion check here — Task 13, fix round 2 moved it down into
+    /// `ingest_measured`, the one place every caller in this file (this one
+    /// included) actually reaches `ingest_file` through, rather than
+    /// repeating it at each of the eight call sites a systematic probe
+    /// found. See that function's own doc comment.
     fn maybe_ingest(&mut self, relative: &str) {
-        if self.excluded.contains(relative) {
-            self.note(format!("    (excluded, not offered: {relative})"));
-            return;
-        }
         if self.rng.chance(80) {
             self.ingest(relative);
         } else {
@@ -1711,12 +1744,6 @@ impl World {
 
     fn reingest(&mut self) {
         let relative = self.a_file();
-        if self.excluded.contains(&relative) {
-            // Same reasoning as `maybe_ingest`: a real re-walk never offers
-            // an excluded path, so this generator must not either.
-            self.note(format!("  re-walk {relative}, excluded — not offered"));
-            return;
-        }
         self.note(format!("  re-walk {relative}, unchanged"));
         self.ingest(&relative);
     }
@@ -1792,25 +1819,6 @@ impl World {
     /// slice 0 back along with everything else.
     fn database_refuses_a_write(&mut self) {
         let relative = self.a_file();
-        if self.excluded.contains(&relative) {
-            // Fix round 1: this function's own comment two paragraphs down
-            // already said a trigger can silently not fire — `WHEN` matching
-            // no row is not a fault, it is an ordinary successful walk, and
-            // `repoint`'s `delete_path` matches zero rows for a path that has
-            // no row at all, which is exactly the shape of an excluded path
-            // whose previous row phase 3 already reconciled away. That
-            // silently settles an excluded path exactly like an unguarded
-            // `maybe_ingest` would — measured directly: seed 17 at 30 steps,
-            // `backup/copy-6.txt`, a `DELETE path` trigger that matched
-            // nothing because the row was already gone. Skip the whole
-            // operation rather than pick apart which of its several calls
-            // can settle something; every one of them can.
-            self.note(format!(
-                "  walk {relative} against a database that refuses a write — excluded, not \
-                 offered"
-            ));
-            return;
-        }
 
         // The content comes first, because which faults can even fire depends
         // on the document about to be written, and drawing them independently
@@ -1907,14 +1915,8 @@ impl World {
         //   first can never build that state, which is what the first version
         //   of this file did.
         //
-        // Every direct `self.ingest(&relative)` below is guarded by
-        // `maybe_ingest`'s own reasoning: an excluded path is never offered,
-        // because a real recovery walk goes through `walk_root`'s phase 1
-        // first and would never reach it either. `self.ingest(&copy)` needs
-        // no guard — `copy_of` always writes a fresh path, which cannot be a
-        // name this run has ever excluded.
         match self.rng.below(10) {
-            0..=3 => self.maybe_offer(&relative),
+            0..=3 => self.ingest(&relative),
             4..=8 => {
                 let copy = self.copy_of(&relative);
                 if let Some(copy) = copy {
@@ -1923,25 +1925,12 @@ impl World {
                     if self.rng.chance(50) {
                         self.ingest(&copy);
                     } else {
-                        self.maybe_offer(&relative);
+                        self.ingest(&relative);
                     }
                 }
             }
             _ => {}
         }
-    }
-
-    /// Offers `relative` to `ingest_file` unless a rule currently excludes
-    /// it. The unconditional twin of `maybe_ingest` — no chance draw, always
-    /// offered when it is offered at all — for the two call sites where a
-    /// direct recovery walk is exactly what is being tested and the only
-    /// thing standing between it and an unrealistic call is exclusion.
-    fn maybe_offer(&mut self, relative: &str) {
-        if self.excluded.contains(relative) {
-            self.note(format!("    (excluded, not offered: {relative})"));
-            return;
-        }
-        self.ingest(relative);
     }
 
     /// RunWalk: `walk_root` itself, over the real folder and the real rules —
