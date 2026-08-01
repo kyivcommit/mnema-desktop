@@ -905,3 +905,117 @@ fn an_unreadable_subdirectory_tells_the_window_reconciliation_did_not_run() {
         "an unreadable subdirectory must not report as a walk that saw everything: {ending}"
     );
 }
+
+/// The seam the throttle has to survive, not only the predicate that
+/// decides it: `job::progress_is_due` is unit-tested directly in `job.rs`,
+/// but nothing before this test proved a *real* walk actually consults it
+/// rather than forwarding every `WalkProgress` `walk_root` hands it. A
+/// one-file fixture cannot see the difference — throttled or not, one file
+/// produces at most two events. Thirty can: an unthrottled walk sends one
+/// progress event per file handled in phase 2 (plus one before the loop, for
+/// phase-1 refusals), so thirty files with none refused make thirty-one:
+/// `job::REPORT_INTERVAL`'s own doc comment names exactly this shape. A
+/// throttled walk instead sends however many 250 ms windows the whole walk
+/// actually spans — bounded by wall-clock time, not by file count, so it
+/// stays small on this machine regardless of how many files there are.
+#[test]
+fn progress_events_are_throttled_and_the_last_one_is_exact() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    for i in 0..30 {
+        std::fs::write(
+            fixture.path().join(format!("file-{i}.txt")),
+            format!("file number {i}"),
+        )
+        .expect("writing a fixture file");
+    }
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let state = app.state::<AppState>();
+    let (channel, events) = job_channel();
+    walk_job::start_walk_job(state.clone(), root, channel).expect("the walk would not start");
+
+    let mut progress_events = Vec::new();
+    let ending = loop {
+        match events.recv_timeout(Duration::from_secs(30)) {
+            Ok(event) if event["event"] == json!("progress") => {
+                progress_events.push(event["data"].clone());
+            }
+            Ok(event) if event["event"] == json!("ended") => break event["data"].clone(),
+            Ok(_) => continue,
+            Err(_) => panic!("the walk never told the window it ended"),
+        }
+    };
+
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the walk over thirty files did not complete: {ending}"
+    );
+    assert!(
+        progress_events.len() < 15,
+        "thirty files produced {} progress events — throttling did not \
+         meaningfully reduce anything: {progress_events:?}",
+        progress_events.len()
+    );
+    // The exception `job::progress_is_due` always makes: the report that
+    // reaches `total` is sent regardless of timing, because a bar that
+    // stops one file short of the end looks like a hang. If any progress
+    // event arrived at all, the last one must already show the true final
+    // count — not a stale one the throttle happened to let through earlier
+    // and then withheld the correction for.
+    if let Some(last) = progress_events.last() {
+        assert_eq!(
+            last["done"], ending["done"],
+            "the last progress event before Ended did not show the true count: {last}"
+        );
+    }
+}
+
+/// `JobSlot::drop` clears `AppState::running`, and `ui/main.js` re-enables
+/// Start inside the handler that receives `Ended` — so the window's own
+/// contract is that a second walk can start the instant the first says it
+/// is over. Before the slot was dropped ahead of the send, this raced: the
+/// slot was still held for however long remained of the spawned thread's
+/// body, and a second `start_walk_job` issued in that gap was refused with
+/// `a job is already running`, even though the first walk had just been
+/// reported finished.
+#[test]
+fn a_second_walk_can_start_the_instant_the_first_says_it_ended() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+
+    let fixture = fixture_dir();
+    let root = state
+        .with_index(|db| db.insert_watched_root(&fixture.path().display().to_string()))
+        .expect("insert_watched_root failed");
+
+    let (first_channel, first_events) = job_channel();
+    walk_job::start_walk_job(state.clone(), root, first_channel)
+        .expect("the first walk would not start");
+
+    loop {
+        match first_events.recv_timeout(Duration::from_secs(20)) {
+            Ok(event) if event["event"] == json!("ended") => break,
+            Ok(_) => continue,
+            Err(_) => panic!("the first walk never told the window it ended"),
+        }
+    }
+
+    let (second_channel, _second_events) = job_channel();
+    walk_job::start_walk_job(state.clone(), root, second_channel)
+        .expect("a second walk was refused the instant the first said it ended");
+}

@@ -72,7 +72,15 @@ const followUntilIdle = async () => {
   }
   setRunning(false);
   if (!endingDescribed) {
-    el("job-status").textContent = "the job has finished";
+    // `job_status` is a bool, not an `Ended` — this path has no channel to
+    // read `reason`, `complete` or `frozen` from at all (a page reloaded
+    // mid-job, or one that opened after the job it is polling started). "the
+    // job has finished" was true and said nothing else, which reads as
+    // "finished cleanly" to anyone who does not already know the difference
+    // — the one thing this page can actually say is that it does not know.
+    el("job-status").textContent =
+      "the job is no longer running, but this page has no channel to it and does not " +
+      "know how it ended — whether it finished cleanly, or something was left unreconciled";
   }
 };
 
@@ -120,7 +128,7 @@ el("start").addEventListener("click", async () => {
     //
     // This arrives however the job ended, a panic included, which is what keeps
     // Start from being disabled forever.
-    const { reason, done, total, complete, frozen } = data;
+    const { reason, done, total, skipped, complete, frozen } = data;
     el("bar").max = total;
     el("bar").value = done;
     let text =
@@ -135,6 +143,13 @@ el("start").addEventListener("click", async () => {
         // A reason this page does not know is still an ending. Rendering the
         // literal `undefined` would be the page inventing a word.
       }[reason] ?? `ended (${reason}) after ${done} of ${total}`;
+    // The progress handler above shows `skipped` throughout the walk; this
+    // is the line that overwrites it once the walk ends, and without reading
+    // `skipped` here too the final state the user is left looking at would
+    // silently drop the one count that line had been tracking all along.
+    if (skipped) {
+      text += `, ${skipped} skipped`;
+    }
     // `complete` is the one field a `completed` reason does not itself
     // imply `true` for — a folder with an unreadable subdirectory finishes
     // looking identical to a clean walk except here. Worth saying even in

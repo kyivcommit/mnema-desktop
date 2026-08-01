@@ -180,10 +180,27 @@ pub fn start_walk_job(
                 last_total.load(Ordering::Relaxed),
             ),
         };
+        // Dropped **before** the send, not left to the end of this closure:
+        // `JobSlot::drop` is what clears `AppState::running`, and
+        // `ui/main.js` re-enables Start inside the very handler that
+        // receives this `Ended` message. A click landing in the gap between
+        // the send and an implicit end-of-scope drop races a slot this
+        // thread still holds. Measured directly before this line existed: a
+        // second `start_walk_job` issued the instant the first `Ended`
+        // arrived was refused with `a job is already running`, even though
+        // the window had just been told the first one was over. The
+        // ordering is enough on its own — `on_progress.send` happens after
+        // `slot`'s drop in this same thread's program order, and the
+        // receiving thread's `recv` synchronises with that send, so
+        // whatever this thread observes about `running` by the time it
+        // drops `slot` is what the receiving thread sees too.
+        drop(slot);
         let _ = on_progress.send(JobEvent::Ended(ending));
-        // `slot`, `pool` and `job_db` are dropped here: the job slot frees,
-        // the pool's workers are asked to exit, and the job's own connection
-        // closes — whether the walk finished, was cancelled, or panicked.
+        // `pool` and `job_db` are dropped here, at the end of the closure:
+        // the pool's workers are asked to exit and the job's own connection
+        // closes. Neither gates a second job's ability to start — only the
+        // slot does — so there is no reason to hurry them the way `slot`
+        // was hurried above.
     });
 
     Ok(())
@@ -341,9 +358,40 @@ mod tests {
         let ended = ended_from_report(&walked);
         assert_eq!(ended.frozen.len(), 1);
         assert_eq!(ended.frozen[0].prefix, "mnt/share");
-        assert!(
-            !ended.frozen[0].why.is_empty(),
-            "a frozen prefix crossed with nothing saying why"
+        // The exact text, not merely non-empty: `each_frozen_reason_gets_
+        // its_own_sentence` below is what pins `frozen_reason_text` itself,
+        // but this is what proves `ended_from_report` actually calls it with
+        // the RIGHT `FrozenReason` for this entry — an `is_empty()` check
+        // here passed even when a review round swapped `SymlinkedSubtree`'s
+        // and `EmptyDirectory`'s own sentences at the source.
+        assert_eq!(
+            ended.frozen[0].why,
+            frozen_reason_text(FrozenReason::EmptyDirectory)
+        );
+    }
+
+    /// The mapping itself: `is_empty()` alone let a swap between
+    /// `SymlinkedSubtree`'s sentence and `EmptyDirectory`'s pass every test
+    /// in this file, which would send a person with a symlinked subtree
+    /// looking for an unmounted share. Literal strings, not substrings —
+    /// the two sentences share several words ("this folder", "resolve it by
+    /// hand" does not appear in the symlink one, but a looser match could
+    /// still miss a swap between the other two).
+    #[test]
+    fn each_frozen_reason_gets_its_own_sentence() {
+        assert_eq!(
+            frozen_reason_text(FrozenReason::SymlinkedSubtree),
+            "a symlink to a directory; the walk does not follow it, so it has no evidence \
+             about what used to be there before it became a symlink"
+        );
+        assert_eq!(
+            frozen_reason_text(FrozenReason::EmptyDirectory),
+            "this folder now reads as empty, and an unmounted share looks exactly like a \
+             folder emptied by hand from here — resolve it by hand"
+        );
+        assert_eq!(
+            frozen_reason_text(FrozenReason::UnreadableDirectory),
+            "this folder could not be read, most likely a permissions problem"
         );
     }
 
