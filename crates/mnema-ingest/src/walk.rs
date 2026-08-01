@@ -110,19 +110,26 @@ pub struct Frozen {
     /// starting with this prefix followed by `/` was left alone
     /// (`should_delete`'s own `under` check, below).
     ///
-    /// Deliberately NOT "or equal to this": a `known` path is always a
-    /// FILE — one row in the `path` table — while every `prefix` here names
-    /// something `resolve_ancestor` (or the symlink producer) found
-    /// currently readable as a directory or a non-file entry. A `known`
-    /// path cannot be both at once *this walk*: whatever currently exists
-    /// at a given relative path, in any representable form, is exactly what
-    /// `seen` is built from, and `seen` is `should_delete`'s first,
-    /// short-circuiting check — so a path this exact string could ever
-    /// equal is already excluded before the `frozen` comparison runs at
-    /// all. This used to be claimed here without being true of
-    /// `should_delete`, which checks `under` only; the randomised harness's
-    /// own invariant 3b (`tests/randomised.rs`) now asserts the equality
-    /// case never arises, rather than silently tolerating it.
+    /// Deliberately NOT "or equal to this", and the reason is not that the
+    /// equality cannot happen — a branch review measured that it can.
+    /// `enumerate` skips directories, so a path that currently exists **as a
+    /// directory** goes into neither `found` nor `skipped` and is therefore
+    /// never in `seen`, while every prefix an ancestor climb produces is by
+    /// construction a directory that exists. A file indexed under
+    /// `mnt/share`, later replaced by a directory, is exactly that: a `known`
+    /// row, an existing directory, absent from `seen`, and equal to this
+    /// string.
+    ///
+    /// Phase 3 then deletes that row, and **that is the right answer** — the
+    /// file the row named really is gone, and nothing under the new directory
+    /// is touched, because those paths are protected by `under` as usual. The
+    /// prefix names where the walk stopped looking, not a promise about what
+    /// the index holds at that exact string.
+    ///
+    /// Two earlier versions of this comment claimed the opposite, each for a
+    /// different wrong reason — first that `should_delete` checked equality
+    /// (it never did), then that a `known` path is always a file (true of the
+    /// `path` table, false of the disk, and that gap is the case).
     pub prefix: String,
     pub why: FrozenReason,
 }
