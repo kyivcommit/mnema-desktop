@@ -145,6 +145,50 @@ impl SkipRule {
         })
     }
 
+    /// The variant declared after this one, or `None` for the last.
+    ///
+    /// Exists only to make [`every`](Self::every) complete by construction, and
+    /// it is an exhaustive `match` for the reason this file is full of them: a
+    /// variant added to the enum must not be able to slip past a test that
+    /// claims to cover every variant.
+    ///
+    /// That is not hypothetical. Measured twice, independently, before this
+    /// existed: deleting `NotText` from all three `every_skip_rule_*` lists in
+    /// `tests/journal.rs` left every test in the file green. The lists caught a
+    /// wrong *value* in a row they already had — renaming the string did fail
+    /// two tests — and caught nothing at all about a row that was simply
+    /// missing. An array of pairs can only ever assert about its own elements,
+    /// so "every variant" was a claim in a doc comment and nowhere in the code.
+    fn after(self) -> Option<Self> {
+        Some(match self {
+            SkipRule::Crash => SkipRule::Timeout,
+            SkipRule::Timeout => SkipRule::Memory,
+            SkipRule::Memory => SkipRule::Unsupported,
+            SkipRule::Unsupported => SkipRule::NoTextLayer,
+            SkipRule::NoTextLayer => SkipRule::Unreadable,
+            SkipRule::Unreadable => SkipRule::TooLarge,
+            SkipRule::TooLarge => SkipRule::NotText,
+            SkipRule::NotText => SkipRule::BinaryTail,
+            SkipRule::BinaryTail => return None,
+        })
+    }
+
+    /// Every variant, in declaration order.
+    ///
+    /// A test that means "every rule" iterates this instead of writing its own
+    /// list, so that adding a variant cannot leave one of them quietly covering
+    /// eight rules out of nine.
+    ///
+    /// `pub` rather than `pub(crate)` or `#[cfg(test)]` because the tests that
+    /// need it are integration tests, which link this crate the way any other
+    /// caller does and see neither. The surface is small and honest — a closed
+    /// vocabulary that can be enumerated is a reasonable thing for a journal to
+    /// expose, and a window listing "which rules can appear here" wants exactly
+    /// this.
+    pub fn every() -> impl Iterator<Item = Self> {
+        std::iter::successors(Some(SkipRule::Crash), |rule| rule.after())
+    }
+
     /// Whether this rule is a **reproducible** determination about the file's
     /// own bytes: the same bytes will earn the same verdict from the worker
     /// again, with nothing outside the file able to change the answer.

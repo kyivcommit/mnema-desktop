@@ -78,6 +78,122 @@ fn a_page_without_a_text_layer_is_recorded_against_that_page() {
     assert_eq!(db.skips_for_root(1).unwrap()[0].page_no, Some(4));
 }
 
+// ------------------------------------------------- what every rule answers
+
+/// What this file expects of one rule: the string it is stored under, and its
+/// side of each of the two classifications.
+struct Expected {
+    string: &'static str,
+    about_content: bool,
+    broken_environment: bool,
+}
+
+/// The one place this file writes down what a rule answers, and an exhaustive
+/// `match` rather than the array of pairs the three tests below used to carry
+/// one each.
+///
+/// **The arrays could not fail the way they claimed to.** Measured twice,
+/// independently: deleting `SkipRule::NotText` from all three of them left all
+/// fifteen tests in this file green. An array asserts about its own elements
+/// and can say nothing about an element that is not there — so "every variant"
+/// was a promise made in a doc comment and kept nowhere, which is the shape of
+/// an `assert_ne!` satisfied by anything, one level up. What the arrays *did*
+/// catch was a wrong value in a row they already had: renaming `not_text` to
+/// `nottext` failed two tests, including the one that goes through SQLite.
+///
+/// Two things had to change together, and neither is sufficient alone:
+///
+/// * this `match` is exhaustive, so a variant added to `SkipRule` stops this
+///   file **compiling** until someone writes down what the new rule answers —
+///   the decision cannot be deferred, and it cannot be made silently;
+/// * the tests iterate [`SkipRule::every`], so the new variant is actually
+///   *run* through all three assertions. Without that half, an arm could be
+///   added here and the rule still never tested.
+fn expected(rule: SkipRule) -> Expected {
+    match rule {
+        SkipRule::Crash => Expected {
+            string: "crash",
+            about_content: false,
+            broken_environment: true,
+        },
+        SkipRule::Timeout => Expected {
+            string: "timeout",
+            about_content: false,
+            broken_environment: true,
+        },
+        SkipRule::Memory => Expected {
+            string: "memory",
+            about_content: false,
+            broken_environment: true,
+        },
+        SkipRule::Unsupported => Expected {
+            string: "unsupported",
+            about_content: true,
+            broken_environment: false,
+        },
+        SkipRule::NoTextLayer => Expected {
+            string: "no_text_layer",
+            about_content: true,
+            broken_environment: false,
+        },
+        SkipRule::Unreadable => Expected {
+            string: "unreadable",
+            about_content: false,
+            broken_environment: true,
+        },
+        // Neither: not a fact about the bytes (a setting can move the ceiling
+        // out from under a file that never changed), and not a broken machine
+        // either (a folder with a few large archives is an ordinary folder).
+        SkipRule::TooLarge => Expected {
+            string: "too_large",
+            about_content: false,
+            broken_environment: false,
+        },
+        SkipRule::NotText => Expected {
+            string: "not_text",
+            about_content: true,
+            broken_environment: false,
+        },
+        // A determination about the bytes, like `NotText`. The two part company
+        // one level up, in `mnema_ingest`'s `displaces`, not here.
+        SkipRule::BinaryTail => Expected {
+            string: "binary_tail",
+            about_content: true,
+            broken_environment: false,
+        },
+    }
+}
+
+/// `SkipRule::every` is what makes the three tests below mean "every rule", so
+/// what it yields is worth an assertion of its own.
+///
+/// The exhaustive `match` behind it forces every variant to *appear*; it does
+/// not force the chain to *reach* every variant. A hand-written `after` that
+/// skipped one, or looped two together, would still compile — and a short
+/// enumeration is exactly the silent under-coverage this whole change exists
+/// to remove, arriving by a different door.
+#[test]
+fn the_variant_chain_reaches_every_rule_exactly_once() {
+    // Bounded rather than `collect()`: a chain that loops would otherwise hang
+    // the test run instead of failing it.
+    let all: Vec<SkipRule> = SkipRule::every().take(64).collect();
+
+    let mut seen = std::collections::HashSet::new();
+    for rule in &all {
+        assert!(
+            seen.insert(expected(*rule).string),
+            "{rule:?} appears twice — the chain loops back on itself"
+        );
+    }
+    assert!(all.len() < 64, "the chain never ends");
+    assert_eq!(
+        all.len(),
+        9,
+        "the chain is a different length than the enum: a variant was added \
+         and `after` was pointed past it, or one was removed"
+    );
+}
+
 /// The two tests above between them pin only `Crash` and `NoTextLayer`, and
 /// only through `page_no`/one literal — neither ever checks `Timeout`,
 /// `Memory` or `Unsupported`, and neither compares `rows[0].rule` against
@@ -89,26 +205,19 @@ fn a_page_without_a_text_layer_is_recorded_against_that_page() {
 #[test]
 fn every_skip_rule_is_recorded_under_its_own_string() {
     let db = fixture_empty();
-    let cases = [
-        (SkipRule::Crash, "crash"),
-        (SkipRule::Timeout, "timeout"),
-        (SkipRule::Memory, "memory"),
-        (SkipRule::Unsupported, "unsupported"),
-        (SkipRule::NoTextLayer, "no_text_layer"),
-        (SkipRule::Unreadable, "unreadable"),
-        (SkipRule::TooLarge, "too_large"),
-        (SkipRule::NotText, "not_text"),
-        (SkipRule::BinaryTail, "binary_tail"),
-    ];
-    for (i, (rule, _)) in cases.iter().enumerate() {
+    let rules: Vec<SkipRule> = SkipRule::every().collect();
+    for (i, rule) in rules.iter().enumerate() {
         db.record_skip(1, &format!("file-{i}.pdf"), None, "reason", *rule, None)
             .unwrap();
     }
 
+    // Round-tripped through SQLite, not just through `as_str`: this is the one
+    // test that proves the string a rule is written under is the string it
+    // comes back as.
     let rows = db.skips_for_root(1).unwrap();
     let got: Vec<&str> = rows.iter().map(|r| r.rule.as_str()).collect();
-    let expected: Vec<&str> = cases.iter().map(|(_, s)| *s).collect();
-    assert_eq!(got, expected);
+    let want: Vec<&str> = rules.iter().map(|r| expected(*r).string).collect();
+    assert_eq!(got, want);
 }
 
 /// Every `SkipRule` variant, sorted onto its side of `is_about_content`
@@ -127,23 +236,10 @@ fn every_skip_rule_is_recorded_under_its_own_string() {
 /// place, where a wrong answer is legible.
 #[test]
 fn every_skip_rule_is_sorted_onto_its_side_of_is_about_content() {
-    let cases = [
-        (SkipRule::Crash, false),
-        (SkipRule::Timeout, false),
-        (SkipRule::Memory, false),
-        (SkipRule::Unsupported, true),
-        (SkipRule::NoTextLayer, true),
-        (SkipRule::Unreadable, false),
-        (SkipRule::TooLarge, false),
-        (SkipRule::NotText, true),
-        // A determination about the bytes, like `NotText` — the two part
-        // company one level up, in `displaces`, not here.
-        (SkipRule::BinaryTail, true),
-    ];
-    for (rule, expected) in cases {
+    for rule in SkipRule::every() {
         assert_eq!(
             rule.is_about_content(),
-            expected,
+            expected(rule).about_content,
             "{rule:?} is on the wrong side of is_about_content"
         );
     }
@@ -160,23 +256,10 @@ fn every_skip_rule_is_sorted_onto_its_side_of_is_about_content() {
 /// comment records for `is_about_content`, one predicate over.
 #[test]
 fn every_skip_rule_is_sorted_onto_its_side_of_suggests_broken_environment() {
-    let cases = [
-        (SkipRule::Crash, true),
-        (SkipRule::Timeout, true),
-        (SkipRule::Memory, true),
-        (SkipRule::Unsupported, false),
-        (SkipRule::NoTextLayer, false),
-        (SkipRule::Unreadable, true),
-        (SkipRule::TooLarge, false),
-        (SkipRule::NotText, false),
-        // A folder holding several truncated files in a row says something
-        // happened to those files, not that the worker reading them is dying.
-        (SkipRule::BinaryTail, false),
-    ];
-    for (rule, expected) in cases {
+    for rule in SkipRule::every() {
         assert_eq!(
             rule.suggests_broken_environment(),
-            expected,
+            expected(rule).broken_environment,
             "{rule:?} is on the wrong side of suggests_broken_environment"
         );
     }
