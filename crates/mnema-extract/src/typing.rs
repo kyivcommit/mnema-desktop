@@ -361,6 +361,60 @@ mod tests {
         assert_eq!(classify("звичайний текст\n".as_bytes()), Verdict::Text);
     }
 
+    /// Where exactly the head window ends, and that 512 is the number.
+    ///
+    /// Two assertions doing two different jobs, and neither covers the other's
+    /// case. That is the reason they sit together rather than one being enough.
+    ///
+    /// The **boundary** pair is written through `HEAD_BYTES`, so it survives a
+    /// deliberate change of the threshold and pins the comparison instead: the
+    /// window is exclusive at `HEAD_BYTES`, so the last byte *inside* it is
+    /// binary and the first byte *past* it is a tail. An off-by-one in
+    /// `classify` — `<=` where `<` is written — flips the second of these and
+    /// nothing else in the suite notices.
+    ///
+    /// The **value** assertion is what the boundary pair cannot do. Written
+    /// through the constant, that pair follows the constant wherever it goes:
+    /// measured, moving `HEAD_BYTES` from 512 to 4096 left the whole workspace
+    /// green, 51 test binaries and no failure. So the number itself is pinned
+    /// here, deliberately as a literal.
+    ///
+    /// 512 is measured, not chosen: every binary sample carries its first NUL
+    /// at offset 0, 4, 5, 8, 15 or 254, and the furthest of those is cleared
+    /// twice over. Moving it is a decision that needs a new measurement behind
+    /// it — this assertion exists so that it cannot be made in passing.
+    #[test]
+    fn the_head_window_ends_where_the_constant_says_and_the_constant_is_512() {
+        // One shape, two positions for the single NUL: every other byte is
+        // ordinary text and both slices are the same length, so nothing but
+        // the offset can move the verdict.
+        let with_nul_at = |offset: usize| {
+            let mut bytes = vec![b'a'; HEAD_BYTES + 64];
+            bytes[offset] = 0;
+            bytes
+        };
+
+        assert_eq!(
+            classify(&with_nul_at(HEAD_BYTES - 1)),
+            Verdict::NotText,
+            "the last byte inside the head window is still binary-from-the-start"
+        );
+        assert_eq!(
+            classify(&with_nul_at(HEAD_BYTES)),
+            Verdict::BinaryTail,
+            "the first byte past the head window is already a tail"
+        );
+
+        assert_eq!(
+            HEAD_BYTES, 512,
+            "512 is a measurement, not a round number: every binary sample \
+             carries its first NUL at offset 0, 4, 5, 8, 15 or 254. Moving \
+             this threshold needs a new measurement, not a new opinion — and \
+             it moves silently otherwise, because every other assertion about \
+             it is written through the constant"
+        );
+    }
+
     /// D51. The whole point of this function, in both directions: a real
     /// binary is refused, and every legitimate text encoding is not.
     ///
