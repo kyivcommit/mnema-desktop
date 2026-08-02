@@ -191,7 +191,15 @@ fn handle_request(line: &str) -> Vec<Frame> {
         // links without deciding what a page's text *is* (its own doc
         // comment). Reporting all five alike as "unsupported" is honestly
         // what is true today: this worker can read text and nothing else.
-        Reader::Pdf | Reader::Docx | Reader::Xlsx | Reader::Epub | Reader::Unrecognized => {
+        Reader::Pdf
+        | Reader::Docx
+        | Reader::Xlsx
+        | Reader::Epub
+        | Reader::Unrecognized
+        // Temporary, and separated in task 5: this branch already refuses the
+        // file, so the leak is closed from here on — but under the wrong rule.
+        // `unsupported` promises a reader that will never come for a photo.
+        | Reader::NotText => {
             vec![Frame::Refused {
                 rule: "unsupported".to_string(),
                 reason: format!(

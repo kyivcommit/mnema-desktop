@@ -48,6 +48,13 @@ pub enum Reader {
     /// zip-based format this crate does not yet know. Not an error — this
     /// function never fails — but there is no reader for it either.
     Unrecognized,
+    /// Not text at all: a photo, a video, a database, an executable. Decided
+    /// by `looks_like_text` over the file's own bytes (D51).
+    ///
+    /// Separate from `Unrecognized`, which means "a zip whose required member
+    /// is missing" — a format this crate may yet learn. This one never will:
+    /// there is no future release in which a JPEG is read as prose.
+    NotText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,16 +96,6 @@ const ZIP_EMPTY_MAGIC: &[u8] = b"PK\x05\x06";
 /// SHA-256 `worker.rs` has already computed over the same `Vec<u8>` (0.69 µs
 /// against 1.03 on 2.4 KB of text; on a 6.6 MB photo it is 0.00 against
 /// 2789, because the first NUL sits in the first bytes).
-///
-/// `identify` does not call this yet — that arrives with the `Reader::NotText`
-/// branch — so outside `mod tests` nothing reaches it today. `expect` rather
-/// than `allow`, and gated to non-test builds because `mod tests` already
-/// uses it there: once the next task's branch lands, the attribute itself
-/// starts failing the non-test build, which is the reminder to delete it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into identify by the next task")
-)]
 pub(crate) fn looks_like_text(bytes: &[u8]) -> bool {
     if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
         return true;
@@ -119,6 +116,17 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> FileType {
 
     if bytes.starts_with(ZIP_LOCAL_FILE_MAGIC) || bytes.starts_with(ZIP_EMPTY_MAGIC) {
         return identify_zip(bytes);
+    }
+
+    // After the magic branches, never before: a PDF and every zip-based
+    // format carry NUL bytes, so this check placed first would refuse exactly
+    // the documents the product exists to read.
+    if !looks_like_text(bytes) {
+        return FileType {
+            mime: "application/octet-stream",
+            source_kind: SourceKind::Document,
+            reader: Reader::NotText,
+        };
     }
 
     identify_plain_text(extension)
