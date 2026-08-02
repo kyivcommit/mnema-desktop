@@ -1478,6 +1478,38 @@ fn a_text_file_overwritten_by_a_photo_stops_answering() {
     );
 }
 
+/// D51 §5. The other side of the line that test draws: a note whose append was
+/// interrupted must not lose the prose it still has. Its tail is zeroed, so the
+/// file is refused — but the earlier document stays searchable, because the
+/// text on disk is still mostly the text the index holds.
+#[test]
+fn an_interrupted_append_does_not_delete_what_the_note_still_says() {
+    let fx = Fixture::new();
+    let prose = "Нотатка про засідання: ухвалили перенести терміни.\n".repeat(200);
+    fx.place_at("notes/meeting.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("notes/meeting.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(!fx.db.search_lexical("ухвалили", 10).unwrap().is_empty());
+
+    let mut damaged = prose.into_bytes();
+    damaged.extend_from_slice(&[0u8; 4096]);
+    fx.place_at("notes/meeting.txt", &damaged, mtime_just_after());
+    assert_eq!(
+        fx.ingest("notes/meeting.txt"),
+        Ingested::Skipped {
+            rule: SkipRule::BinaryTail
+        }
+    );
+
+    assert!(
+        !fx.db.search_lexical("ухвалили", 10).unwrap().is_empty(),
+        "the note's prose is still on disk, and deleting it would lose text \
+         that is readable nowhere else"
+    );
+}
+
 // ------------------------------------------------- markdown, and its pages
 
 /// An invented handbook: content before the first heading, two sections, and a

@@ -185,6 +185,42 @@ fn a_correctly_named_photo_is_not_plain_text() {
     assert_eq!(identify(png, Some("txt")).reader, Reader::NotText);
 }
 
+/// D51. A file that opens as text and stops being one gets its own reader, and
+/// `identify` is where the two refusals become visible to everything
+/// downstream: the worker's rule, the journal's rule, and the decision about
+/// whether the index keeps what it already holds.
+///
+/// Both directions, because one alone is satisfied by a mistake. A verdict
+/// that answered `BinaryTail` for everything binary would delete nothing ever,
+/// which loses the photo case that `a_correctly_named_photo_is_not_plain_text`
+/// pins; a verdict that never answered it deletes the interrupted note. So the
+/// photo and the damaged note are asserted here against each other.
+#[test]
+fn a_file_that_starts_as_text_and_stops_is_not_the_same_as_a_photo() {
+    let mut damaged = "нотатка, дописування якої обірвалось\n"
+        .repeat(200)
+        .into_bytes();
+    damaged.extend_from_slice(&[0u8; 4096]);
+
+    let t = identify(&damaged, Some("txt"));
+    assert_eq!(t.reader, Reader::BinaryTail);
+    assert_eq!(t.mime, "application/octet-stream");
+    assert_eq!(t.source_kind, SourceKind::Document);
+
+    // The extension does not decide it here either, in either direction.
+    assert_eq!(identify(&damaged, None).reader, Reader::BinaryTail);
+    assert_eq!(identify(&damaged, Some("png")).reader, Reader::BinaryTail);
+
+    // And the photo does not drift onto this side: it is binary from its
+    // eighth byte, so it stays the verdict that is allowed to displace.
+    assert_eq!(
+        identify(include_bytes!("fixtures/solid.png"), Some("txt")).reader,
+        Reader::NotText
+    );
+    // Nor does the note reach a reader: it is refused, just not deleted.
+    assert_ne!(identify(&damaged, Some("txt")).reader, Reader::PlainText);
+}
+
 /// The check sits *after* the magic branches, and this is why: both a PDF
 /// and every zip-based format carry NUL bytes, so a check placed first
 /// would refuse every document the product can actually read.

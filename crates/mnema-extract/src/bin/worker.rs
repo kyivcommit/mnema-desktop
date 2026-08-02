@@ -196,6 +196,21 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     .to_string(),
             }]
         }
+        // Also refused, and deliberately under a rule of its own: the parent
+        // removes what the index holds under a path when a worker read a file
+        // and declined its content, and this is the one refusal by content
+        // that must not trigger it. The file opened as text and stopped, which
+        // is what an interrupted append leaves behind — the prose is still on
+        // disk, and the document under this path is still mostly that prose
+        // (D51). `SkipRule::BinaryTail` carries the rest.
+        Reader::BinaryTail => {
+            vec![Frame::Refused {
+                rule: "binary_tail".to_string(),
+                reason: "this file starts as text and then stops being one: it may be truncated \
+                         or damaged"
+                    .to_string(),
+            }]
+        }
         // None of these five formats has a `Vec<Block>` reader in this crate
         // yet — task 6 shipped only plain text, and `pdfium_probe` proves the
         // binding links without deciding what a page's text *is* (its own

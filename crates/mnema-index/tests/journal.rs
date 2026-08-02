@@ -98,6 +98,7 @@ fn every_skip_rule_is_recorded_under_its_own_string() {
         (SkipRule::Unreadable, "unreadable"),
         (SkipRule::TooLarge, "too_large"),
         (SkipRule::NotText, "not_text"),
+        (SkipRule::BinaryTail, "binary_tail"),
     ];
     for (i, (rule, _)) in cases.iter().enumerate() {
         db.record_skip(1, &format!("file-{i}.pdf"), None, "reason", *rule, None)
@@ -135,6 +136,9 @@ fn every_skip_rule_is_sorted_onto_its_side_of_is_about_content() {
         (SkipRule::Unreadable, false),
         (SkipRule::TooLarge, false),
         (SkipRule::NotText, true),
+        // A determination about the bytes, like `NotText` — the two part
+        // company one level up, in `displaces`, not here.
+        (SkipRule::BinaryTail, true),
     ];
     for (rule, expected) in cases {
         assert_eq!(
@@ -165,6 +169,9 @@ fn every_skip_rule_is_sorted_onto_its_side_of_suggests_broken_environment() {
         (SkipRule::Unreadable, true),
         (SkipRule::TooLarge, false),
         (SkipRule::NotText, false),
+        // A folder holding several truncated files in a row says something
+        // happened to those files, not that the worker reading them is dying.
+        (SkipRule::BinaryTail, false),
     ];
     for (rule, expected) in cases {
         assert_eq!(

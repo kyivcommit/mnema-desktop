@@ -514,8 +514,9 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// index holds is a previous version of a file that has since become
 /// unindexable.
 ///
-/// **Keep** — `Crash`, `Timeout`, `Memory`, `Unreadable`. None of these is a
-/// statement about the file:
+/// **Keep** — `Crash`, `Timeout`, `Memory`, `Unreadable`, and `BinaryTail`.
+/// The first four are not statements about the file at all; the fifth is one,
+/// and keeps anyway, which is why it has a section of its own below.
 ///
 /// * `Crash` — the worker died, or produced output that was not text. That is
 ///   *usually* a parser faulting on this file's bytes, which is why this rule
@@ -561,6 +562,30 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// implemented here. It belongs to whoever owns the walk; this function sees
 /// one file at a time and cannot count.
 ///
+/// **`BinaryTail` — a determination about the bytes that keeps anyway.** The
+/// only rule on the keep side that the paragraph above does not cover, and the
+/// exception is deliberate: "reproducible determination about the content" is
+/// necessary for displacing, and this is where it turns out not to be
+/// sufficient.
+///
+/// The worker read the file, found it text for its first bytes and binary
+/// afterwards, and will say the same thing again on the same bytes. Every part
+/// of the displacing argument holds — except its conclusion. That conclusion
+/// runs "so what the index holds is a previous version of a file that has since
+/// become unindexable", and here the file has *not* been replaced: it is the
+/// same note, still opening with the same prose, with zeros appended where an
+/// append was interrupted. Deleting the document does not remove a stale
+/// citation, it removes text that is still on disk in front of the damage and
+/// is readable nowhere else — a real class for this product's owner, not a
+/// hypothetical one, and one that does not repair itself, because the verdict
+/// is reproducible and the next walk answers from the journal.
+///
+/// The stale-citation risk this trades against is bounded by where the split
+/// sits: `HEAD_BYTES` (`mnema_extract::typing`) is 512 bytes, so a file earning
+/// this rule was text for at least that long, and the document under the path
+/// is that text. What is lost is whatever the interrupted append had written
+/// after it — text that was never indexed either way.
+///
 /// **`TooLarge` — decided on the size, not on the rule.** This is the one that
 /// cannot be answered from the rule alone, and the reason is worth spelling
 /// out because the wrong answer is the plausible one.
@@ -601,6 +626,9 @@ fn displaces(rule: SkipRule, recorded: &PathEntry, on_disk: Option<OnDisk>) -> b
         SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::NotText => true,
         // Something that happened, and that happens to every file alike.
         SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => false,
+        // The one refusal by content that keeps: the file still opens with the
+        // prose the index holds, and that prose is readable nowhere else.
+        SkipRule::BinaryTail => false,
         SkipRule::TooLarge => on_disk.is_some_and(|disk| disk.size_bytes != recorded.size_bytes),
     }
 }

@@ -49,12 +49,24 @@ pub enum Reader {
     /// function never fails — but there is no reader for it either.
     Unrecognized,
     /// Not text at all: a photo, a video, a database, an executable. Decided
-    /// by `looks_like_text` over the file's own bytes (D51).
+    /// by `classify` over the file's own bytes (D51).
     ///
     /// Separate from `Unrecognized`, which means "a zip whose required member
     /// is missing" — a format this crate may yet learn. This one never will:
     /// there is no future release in which a JPEG is read as prose.
     NotText,
+    /// Text for its first `HEAD_BYTES` and binary after that: a file that
+    /// *began* as text and stopped being one. An interrupted append is the
+    /// case this exists for.
+    ///
+    /// Separate from `NotText` although both are refused and both carry
+    /// `application/octet-stream`, because the two say different things about
+    /// what the index should still hold under the path. `NotText` says the
+    /// file is a photo and whatever text the index has under that name is a
+    /// previous file; this says the prose the index has is probably still the
+    /// first 84% of the file on disk, so deleting it would lose text readable
+    /// nowhere else.
+    BinaryTail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,8 +85,28 @@ const ZIP_LOCAL_FILE_MAGIC: &[u8] = b"PK\x03\x04";
 /// header to match the signature above.
 const ZIP_EMPTY_MAGIC: &[u8] = b"PK\x05\x06";
 
-/// Whether these bytes are text at all — decided by content, never by name
-/// (D51).
+/// How far into a file a NUL still means "this whole thing is binary".
+///
+/// 512 rather than a round guess: measured, every binary sample carries its
+/// first NUL at offset 0, 4, 5, 8, 15 or 254, so this clears the furthest of
+/// them twice over. A NUL past this point means the file was text up to here.
+pub(crate) const HEAD_BYTES: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    Text,
+    /// Binary from the start — a photo, a database, an executable.
+    NotText,
+    /// Text for at least the first `HEAD_BYTES`, then a NUL. What an
+    /// interrupted append leaves behind; also what a UTF-16 file without a
+    /// mark looks like past its first page. Refused all the same, but it must
+    /// not displace what the path already held: the prose it opens with is
+    /// probably still on disk, and deleting the earlier document would lose
+    /// text no longer readable anywhere.
+    BinaryTail,
+}
+
+/// What these bytes are — decided by content, never by name (D51).
 ///
 /// Two steps, and the order is the whole design.
 ///
@@ -97,7 +129,20 @@ const ZIP_EMPTY_MAGIC: &[u8] = b"PK\x05\x06";
 /// SHA-256 `worker.rs` has already computed over the same `Vec<u8>` (0.69 µs
 /// against 1.03 on 2.4 KB of text; on a 6.6 MB photo it is 0.00 against
 /// 2789, because the first NUL sits in the first bytes).
-pub(crate) fn looks_like_text(bytes: &[u8]) -> bool {
+///
+/// **Where the NUL sits is a second question, and it used to go unasked.**
+/// This returned a bool, and every refusal displaced whatever the path already
+/// held — which deletes a note whose append was interrupted, because the power
+/// went out and the tail came back zeroed while the prose stayed on disk.
+/// `HEAD_BYTES` splits the two: binary from the start is [`Verdict::NotText`],
+/// text that stops being text is [`Verdict::BinaryTail`]. Both are refused;
+/// only the first is allowed to delete.
+///
+/// A known consequence, recorded rather than worked around: a list produced by
+/// `find -print0` carries its first NUL at byte 23, so it lands in the head and
+/// is refused with displacement. It is genuine text, and it is rare in a folder
+/// of documents.
+pub(crate) fn classify(bytes: &[u8]) -> Verdict {
     if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
         // A mark says the NUL *bytes* that follow are half of a code unit —
         // it does not say the file is text. What decides that is the same
@@ -107,9 +152,21 @@ pub(crate) fn looks_like_text(bytes: &[u8]) -> bool {
         // refuses a UTF-32LE mark, whose first code unit after `FF FE` is
         // `0000` — which matters because `encoding_rs` has no UTF-32 decoder
         // and would otherwise read the file as something it is not.
-        return !bytes[2..].chunks_exact(2).any(|pair| pair == [0, 0]);
+        //
+        // `position`, not `any`: behind a mark the offset that matters is
+        // measured in code units, so it is converted back to bytes before it
+        // meets `HEAD_BYTES`, which counts bytes.
+        return match bytes[2..].chunks_exact(2).position(|pair| pair == [0, 0]) {
+            None => Verdict::Text,
+            Some(units) if units * 2 < HEAD_BYTES => Verdict::NotText,
+            Some(_) => Verdict::BinaryTail,
+        };
     }
-    !bytes.contains(&0)
+    match bytes.iter().position(|b| *b == 0) {
+        None => Verdict::Text,
+        Some(at) if at < HEAD_BYTES => Verdict::NotText,
+        Some(_) => Verdict::BinaryTail,
+    }
 }
 
 /// Decides what `bytes` are: magic first, where magic exists; the extension
@@ -130,15 +187,23 @@ pub fn identify(bytes: &[u8], extension: Option<&str>) -> FileType {
     // After the magic branches, never before: a PDF and every zip-based
     // format carry NUL bytes, so this check placed first would refuse exactly
     // the documents the product exists to read.
-    if !looks_like_text(bytes) {
-        return FileType {
+    match classify(bytes) {
+        Verdict::Text => identify_plain_text(extension),
+        // The same mime for both refusals: neither is a format this product
+        // reads, and `octet-stream` is what "bytes, not prose" is called. What
+        // separates them is the reader, which is what the journal and
+        // `displaces` end up asking about.
+        Verdict::NotText => FileType {
             mime: "application/octet-stream",
             source_kind: SourceKind::Document,
             reader: Reader::NotText,
-        };
+        },
+        Verdict::BinaryTail => FileType {
+            mime: "application/octet-stream",
+            source_kind: SourceKind::Document,
+            reader: Reader::BinaryTail,
+        },
     }
-
-    identify_plain_text(extension)
 }
 
 /// A zip signature is not sufficient on its own: docx, xlsx and epub are all
@@ -271,6 +336,31 @@ fn is_source_extension(ext: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// D51. A NUL in the first bytes says the whole file is binary; a NUL only
+    /// far in says the file *began* as text and stopped being one. The two
+    /// deserve different answers, because the second is what a note looks like
+    /// after the power went out mid-append — prose intact on disk, tail zeroed.
+    ///
+    /// Measured: every binary sample carries its first NUL at offset 0, 4, 5,
+    /// 8, 15 or 254; the interrupted note carries it at 84.7% of the file.
+    #[test]
+    fn a_nul_in_the_tail_is_not_the_same_verdict_as_a_nul_in_the_head() {
+        let mut interrupted = "нотатка про засідання\n".repeat(200).into_bytes();
+        assert!(
+            interrupted.len() > HEAD_BYTES,
+            "the prose must outrun the head window"
+        );
+        interrupted.extend_from_slice(&[0u8; 4096]);
+        assert_eq!(classify(&interrupted), Verdict::BinaryTail);
+
+        assert_eq!(
+            classify(include_bytes!("../tests/fixtures/solid.png")),
+            Verdict::NotText
+        );
+        assert_eq!(classify(b"\x00 at the very front"), Verdict::NotText);
+        assert_eq!(classify("звичайний текст\n".as_bytes()), Verdict::Text);
+    }
+
     /// D51. The whole point of this function, in both directions: a real
     /// binary is refused, and every legitimate text encoding is not.
     ///
@@ -281,28 +371,38 @@ mod tests {
     #[test]
     fn content_decides_what_is_text() {
         // Refused: a real PNG, invented outright by `tests/fixtures/make_fixtures.py`.
-        assert!(!looks_like_text(include_bytes!(
-            "../tests/fixtures/solid.png"
-        )));
+        assert_eq!(
+            classify(include_bytes!("../tests/fixtures/solid.png")),
+            Verdict::NotText
+        );
         // Refused: the openings of formats a folder of photos is full of.
         let mut jpeg = vec![
             0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00,
         ];
         jpeg.extend_from_slice(&[0x01, 0x02, 0x03]);
-        assert!(!looks_like_text(&jpeg));
-        assert!(!looks_like_text(b"SQLite format 3\x00"));
-        // Refused: a NUL anywhere is the signal, wherever it sits.
-        assert!(!looks_like_text(b"\x00"));
-        assert!(!looks_like_text("текст, а далі нуль\0".as_bytes()));
+        assert_eq!(classify(&jpeg), Verdict::NotText);
+        assert_eq!(classify(b"SQLite format 3\x00"), Verdict::NotText);
+        // Refused: a NUL anywhere is the signal, wherever it sits. Where it
+        // sits decides which refusal — both of these are inside the head, so
+        // both are `NotText`; the tail case is
+        // `a_nul_in_the_tail_is_not_the_same_verdict_as_a_nul_in_the_head`.
+        assert_eq!(classify(b"\x00"), Verdict::NotText);
+        assert_eq!(
+            classify("текст, а далі нуль\0".as_bytes()),
+            Verdict::NotText
+        );
 
         // Accepted: text in every encoding the product meets.
-        assert!(looks_like_text("звичайний текст\n".as_bytes()));
-        assert!(looks_like_text(b"plain ascii\n"));
-        assert!(looks_like_text(&[0xEF, 0xBB, 0xBF, b'o', b'k'])); // UTF-8 BOM
-        assert!(looks_like_text(b"\x1b[31mERROR\x1b[0m a coloured log\n"));
+        assert_eq!(classify("звичайний текст\n".as_bytes()), Verdict::Text);
+        assert_eq!(classify(b"plain ascii\n"), Verdict::Text);
+        assert_eq!(classify(&[0xEF, 0xBB, 0xBF, b'o', b'k']), Verdict::Text); // UTF-8 BOM
+        assert_eq!(
+            classify(b"\x1b[31mERROR\x1b[0m a coloured log\n"),
+            Verdict::Text
+        );
         // Accepted: an empty file has no evidence either way and is not binary.
-        assert!(looks_like_text(b""));
-        assert!(looks_like_text(b"ok\n"));
+        assert_eq!(classify(b""), Verdict::Text);
+        assert_eq!(classify(b"ok\n"), Verdict::Text);
     }
 
     /// UTF-16 is the one text encoding whose NUL bytes are legitimate, and the
@@ -318,16 +418,16 @@ mod tests {
     fn a_utf16_byte_order_mark_is_text_despite_its_nul_bytes() {
         let mut le = vec![0xFF, 0xFE];
         le.extend_from_slice(&[0x54, 0x00, 0x65, 0x00]); // "Te" in UTF-16LE
-        assert!(looks_like_text(&le));
+        assert_eq!(classify(&le), Verdict::Text);
 
         let mut be = vec![0xFE, 0xFF];
         be.extend_from_slice(&[0x00, 0x54, 0x00, 0x65]); // "Te" in UTF-16BE
-        assert!(looks_like_text(&be));
+        assert_eq!(classify(&be), Verdict::Text);
 
         // The same text without a mark is refused, and that cost is accepted
         // deliberately (spec §4): it is mojibake today, and a refusal with a
         // journal row is the better of the two.
-        assert!(!looks_like_text(&[0x54, 0x00, 0x65, 0x00]));
+        assert_eq!(classify(&[0x54, 0x00, 0x65, 0x00]), Verdict::NotText);
 
         // Long enough that a fix which only inspects a few bytes cannot pass
         // by accident, and every code unit is real text.
@@ -338,8 +438,9 @@ mod tests {
         {
             long.extend_from_slice(&ch.to_le_bytes());
         }
-        assert!(
-            looks_like_text(&long),
+        assert_eq!(
+            classify(&long),
+            Verdict::Text,
             "genuine UTF-16 text must still pass"
         );
     }
@@ -354,26 +455,34 @@ mod tests {
     fn a_mark_does_not_carry_arbitrary_bytes_past_the_check() {
         let mut disguised = vec![0xFF, 0xFE];
         disguised.extend_from_slice(include_bytes!("../tests/fixtures/solid.png"));
-        assert!(
-            !looks_like_text(&disguised),
+        assert_eq!(
+            classify(&disguised),
+            Verdict::NotText,
             "a photo rode in behind a mark"
         );
 
         // UTF-32LE's mark starts with UTF-16LE's. `encoding_rs` has no UTF-32
         // decoder, so accepting this reads the file as something it is not.
-        assert!(!looks_like_text(&[
-            0xFF, 0xFE, 0x00, 0x00, 0x54, 0x00, 0x00, 0x00
-        ]));
+        assert_eq!(
+            classify(&[0xFF, 0xFE, 0x00, 0x00, 0x54, 0x00, 0x00, 0x00]),
+            Verdict::NotText
+        );
 
         // An MPEG-1 Layer I frame sync happens to open with the same two bytes.
-        assert!(!looks_like_text(&[
-            0xFF, 0xFE, 0x18, 0xC4, 0x00, 0x00, 0x00, 0x00
-        ]));
+        assert_eq!(
+            classify(&[0xFF, 0xFE, 0x18, 0xC4, 0x00, 0x00, 0x00, 0x00]),
+            Verdict::NotText
+        );
     }
 
     /// The scan covers the whole slice, not a prefix. A file that is text for
     /// a long stretch and binary afterwards — a SQL dump carrying binary
     /// columns, for instance — is the case a prefix check would pass.
+    ///
+    /// `HEAD_BYTES` is not that prefix, and this is the test that says so. It
+    /// decides *which* refusal a NUL earns, never whether the bytes past it are
+    /// looked at: a check that stopped at 512 would answer `Text` here, and the
+    /// verdict below is what distinguishes the two.
     ///
     /// Measured: scanning a whole file for a NUL costs less than the SHA-256
     /// the same slice already pays for (0.69 µs against 1.03 on 2.4 KB), so
@@ -387,8 +496,12 @@ mod tests {
             bytes.len() > 16_384,
             "the tail must sit past any plausible prefix"
         );
-        assert!(looks_like_text(&bytes));
+        assert_eq!(classify(&bytes), Verdict::Text);
         bytes.push(0);
-        assert!(!looks_like_text(&bytes));
+        assert_eq!(
+            classify(&bytes),
+            Verdict::BinaryTail,
+            "the NUL past the head window must be seen, and seen as a tail"
+        );
     }
 }

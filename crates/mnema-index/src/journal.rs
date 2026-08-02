@@ -83,10 +83,31 @@ pub enum SkipRule {
     /// `INDEX_FORMAT_VERSION` (`mnema_ingest::ingest_file`, the second cheap
     /// arm). A file skipped `NotText` is never looked at again for the life
     /// of the index unless that version moves — so any future loosening of
-    /// `looks_like_text` (the first candidate: UTF-16 without a byte-order
+    /// `classify` (the first candidate: UTF-16 without a byte-order
     /// mark) must bump it, or the files it would now accept stay refused
     /// forever.
     NotText,
+    /// The file is text for its first bytes and binary after that — it *began*
+    /// as text and stopped being one (D51). Decided by its own bytes, like
+    /// `NotText`, and refused like it.
+    ///
+    /// Its own rule rather than `NotText` for one reason, and that reason is
+    /// the whole of why it exists: **this one must not displace.** `NotText`
+    /// says the path now holds a photo, so whatever text the index has under
+    /// that name belongs to a file that is gone. This says the path holds a
+    /// note whose append was interrupted — the power went out, the tail came
+    /// back zeroed, and the prose the index holds is still, byte for byte, the
+    /// opening of the file on disk. Deleting it loses text that is readable
+    /// nowhere else. `mnema_ingest`'s `displaces` is where that lands.
+    ///
+    /// It shares `NotText`'s other half: the verdict is reproducible on the
+    /// same bytes, so `is_about_content` is true and the next walk answers from
+    /// `stat` without spending a worker. The consequence above is the same one
+    /// too — a file refused here is not looked at again until
+    /// `INDEX_FORMAT_VERSION` moves — and it costs less here, because what the
+    /// user still has under that path is the document they had before rather
+    /// than an absence.
+    BinaryTail,
 }
 
 impl SkipRule {
@@ -100,6 +121,7 @@ impl SkipRule {
             SkipRule::Unreadable => "unreadable",
             SkipRule::TooLarge => "too_large",
             SkipRule::NotText => "not_text",
+            SkipRule::BinaryTail => "binary_tail",
         }
     }
 
@@ -118,6 +140,7 @@ impl SkipRule {
             "unreadable" => SkipRule::Unreadable,
             "too_large" => SkipRule::TooLarge,
             "not_text" => SkipRule::NotText,
+            "binary_tail" => SkipRule::BinaryTail,
             _ => return None,
         })
     }
@@ -134,12 +157,19 @@ impl SkipRule {
     /// verdict that *can* change look permanent, and the file is never looked
     /// at again for the life of the index.
     ///
-    /// Only `Unsupported`, `NoTextLayer` and `NotText` qualify. `Crash`,
-    /// `Timeout` and `Memory` are readings of the environment that apply to every file in
-    /// the walk alike — `displaces` draws the same line for the same reason
-    /// (D44) — and `Unreadable` is a fact about the disk, not the bytes, that
-    /// may well be transient (a file moved mid-scan, a permission fixed
-    /// afterwards).
+    /// Only `Unsupported`, `NoTextLayer`, `NotText` and `BinaryTail` qualify.
+    /// `Crash`, `Timeout` and `Memory` are readings of the environment that
+    /// apply to every file in the walk alike — `displaces` draws the same line
+    /// for the same reason (D44) — and `Unreadable` is a fact about the disk,
+    /// not the bytes, that may well be transient (a file moved mid-scan, a
+    /// permission fixed afterwards).
+    ///
+    /// `BinaryTail` is the one variant where this predicate and `displaces` no
+    /// longer answer alike, and that is not a slip. The verdict *is* about the
+    /// bytes and is reproducible on them, so it belongs here; what `displaces`
+    /// asks is a different question — whether the text the index already holds
+    /// under that path has stopped being what the file says — and for an
+    /// interrupted append the answer is no.
     ///
     /// **`TooLarge` looks like it belongs here, and does not.** The refusal
     /// does come from `stat` alone, and `displaces` does treat it as
@@ -174,7 +204,10 @@ impl SkipRule {
     /// journal suite green.
     pub fn is_about_content(self) -> bool {
         match self {
-            SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::NotText => true,
+            SkipRule::Unsupported
+            | SkipRule::NoTextLayer
+            | SkipRule::NotText
+            | SkipRule::BinaryTail => true,
             SkipRule::Crash
             | SkipRule::Timeout
             | SkipRule::Memory
@@ -193,7 +226,7 @@ impl SkipRule {
     /// worth trusting on its own, without spending a worker on the file a
     /// second time. This asks whether a run of them means a walker should
     /// stop asking a worker to do more work at all. The two questions split
-    /// the same eight variants differently, and `TooLarge` is the case that
+    /// the same nine variants differently, and `TooLarge` is the case that
     /// proves it has to: it answers **no** to both. It is not a fact about
     /// the bytes (`is_about_content` — a setting can move the ceiling out
     /// from under a file that never changed), and it is not a fact about the
@@ -206,12 +239,20 @@ impl SkipRule {
     /// large files would read as a dying worker and end a walk that has done
     /// nothing wrong.
     ///
-    /// Only `Crash`, `Timeout`, `Memory` and `Unreadable` qualify — the same
-    /// four `displaces` (`mnema_ingest`) keeps content for, and for the same
+    /// Only `Crash`, `Timeout`, `Memory` and `Unreadable` qualify — four of the
+    /// five `displaces` (`mnema_ingest`) keeps content for, and for the same
     /// reason spelled out there at length: each is a reading of the
     /// environment, not of one file, so a run of them in a row is evidence
     /// about what is *outside* the files rather than a coincidence of which
     /// files happened to be next in the walk.
+    ///
+    /// The fifth is `BinaryTail`, and it is the second variant after `TooLarge`
+    /// to show that these predicates cannot be derived from one another. It is
+    /// kept by `displaces` and answers **no** here: a folder holding several
+    /// interrupted or truncated files in a row says something happened to those
+    /// files — a power cut, a copy that stopped — not that the worker reading
+    /// them is dying, and ending the walk would leave the rest of the folder
+    /// unindexed over it.
     ///
     /// An exhaustive `match`, matching `is_about_content`'s own reasoning for
     /// being one: a variant added to the enum with no line here would
@@ -225,7 +266,8 @@ impl SkipRule {
             SkipRule::Unsupported
             | SkipRule::NoTextLayer
             | SkipRule::TooLarge
-            | SkipRule::NotText => false,
+            | SkipRule::NotText
+            | SkipRule::BinaryTail => false,
         }
     }
 }

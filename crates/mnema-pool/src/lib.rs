@@ -16,6 +16,7 @@
 //! | answered `Refused` (no reader)         | [`Failure::Unsupported`] |
 //! | answered `Refused` (over the ceiling)  | [`Failure::TooLarge`]    |
 //! | answered `Refused` (not text)          | [`Failure::NotText`]     |
+//! | answered `Refused` (text, then not)    | [`Failure::BinaryTail`]  |
 //! | answered `Failed` (I/O)                | [`Failure::Unreadable`]  |
 //! | said nothing before the deadline        | [`Failure::Timeout`]     |
 //! | died on a signal                       | [`Failure::Crash`]       |
@@ -114,6 +115,18 @@ pub enum Failure {
     /// The worker looked at the bytes and they are not text (D51):
     /// `Frame::Refused { rule: "not_text" }`.
     NotText,
+    /// The worker looked at the bytes and they are text at first and binary
+    /// after that (D51): `Frame::Refused { rule: "binary_tail" }`.
+    ///
+    /// Not folded into [`Failure::NotText`], for the reason that split
+    /// [`Failure::TooLarge`] off [`Failure::Unsupported`]: the parent decides
+    /// whether to remove what the index holds under the path, and these two
+    /// want opposite answers. A photo replacing a note means the note's text is
+    /// gone; a note whose append was interrupted still holds its prose, and
+    /// deleting the document would lose it.
+    /// [`SkipRule::BinaryTail`](mnema_index::SkipRule::BinaryTail) carries the
+    /// rest.
+    BinaryTail,
 }
 
 impl From<Failure> for SkipRule {
@@ -126,6 +139,7 @@ impl From<Failure> for SkipRule {
             Failure::Unreadable => SkipRule::Unreadable,
             Failure::TooLarge => SkipRule::TooLarge,
             Failure::NotText => SkipRule::NotText,
+            Failure::BinaryTail => SkipRule::BinaryTail,
         }
     }
 }
@@ -1007,6 +1021,7 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 let failure = match rule.as_str() {
                     "unsupported" => Failure::Unsupported,
                     "not_text" => Failure::NotText,
+                    "binary_tail" => Failure::BinaryTail,
                     "unreadable" => Failure::Unreadable,
                     "too_large" => Failure::TooLarge,
                     // Strict on purpose. A rule this pool does not know means
