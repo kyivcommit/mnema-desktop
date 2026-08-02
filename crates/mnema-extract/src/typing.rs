@@ -66,6 +66,46 @@ const ZIP_LOCAL_FILE_MAGIC: &[u8] = b"PK\x03\x04";
 /// header to match the signature above.
 const ZIP_EMPTY_MAGIC: &[u8] = b"PK\x05\x06";
 
+/// Whether these bytes are text at all — decided by content, never by name
+/// (D51).
+///
+/// Two steps, and the order is the whole design.
+///
+/// A **UTF-16 byte-order mark** says the NUL bytes that follow are part of
+/// correctly encoded text, so it exits early. Only UTF-16's two marks do
+/// this: in UTF-8 a NUL is never legitimate, so a file carrying `EF BB BF`
+/// and a NUL is corrupt, and refusing it is right. Widening this to "any
+/// mark" would let three prepended bytes carry anything past the check.
+///
+/// Otherwise a **NUL anywhere in the slice** refuses the file. This is the
+/// signal the criterion D51 originally wrote down does not have: chardetng
+/// guesses windows-1252 for binary input, that encoding maps all 256 bytes,
+/// and so a decode of a JPEG produces no replacement characters at all —
+/// measured as 0.00% on JPEG, PNG, HEIC, SQLite, Mach-O and random bytes
+/// alike, with `had_errors` false in every one.
+///
+/// The scan covers the whole slice rather than a prefix, and that is
+/// affordable rather than generous: a whole-file scan costs less than the
+/// SHA-256 `worker.rs` has already computed over the same `Vec<u8>` (0.69 µs
+/// against 1.03 on 2.4 KB of text; on a 6.6 MB photo it is 0.00 against
+/// 2789, because the first NUL sits in the first bytes).
+///
+/// `identify` does not call this yet — that arrives with the `Reader::NotText`
+/// branch — so outside `mod tests` nothing reaches it today. `expect` rather
+/// than `allow`, and gated to non-test builds because `mod tests` already
+/// uses it there: once the next task's branch lands, the attribute itself
+/// starts failing the non-test build, which is the reminder to delete it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired into identify by the next task")
+)]
+pub(crate) fn looks_like_text(bytes: &[u8]) -> bool {
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        return true;
+    }
+    !bytes.contains(&0)
+}
+
 /// Decides what `bytes` are: magic first, where magic exists; the extension
 /// only when the bytes are plain text, or when no magic recognises them.
 pub fn identify(bytes: &[u8], extension: Option<&str>) -> FileType {
@@ -208,4 +248,89 @@ fn is_source_extension(ext: &str) -> bool {
             | "r"
             | "sql"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D51. The whole point of this function, in both directions: a real
+    /// binary is refused, and every legitimate text encoding is not.
+    ///
+    /// Both directions in one test on purpose. An assertion that only
+    /// constrains the refusal side is satisfied by a function that refuses
+    /// everything, and that shape went unnoticed nine times in the previous
+    /// branch.
+    #[test]
+    fn content_decides_what_is_text() {
+        // Refused: a real PNG, invented outright by `tests/fixtures/make_fixtures.py`.
+        assert!(!looks_like_text(include_bytes!(
+            "../tests/fixtures/solid.png"
+        )));
+        // Refused: the openings of formats a folder of photos is full of.
+        let mut jpeg = vec![
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00,
+        ];
+        jpeg.extend_from_slice(&[0x01, 0x02, 0x03]);
+        assert!(!looks_like_text(&jpeg));
+        assert!(!looks_like_text(b"SQLite format 3\x00"));
+        // Refused: a NUL anywhere is the signal, wherever it sits.
+        assert!(!looks_like_text(b"\x00"));
+        assert!(!looks_like_text("текст, а далі нуль\0".as_bytes()));
+
+        // Accepted: text in every encoding the product meets.
+        assert!(looks_like_text("звичайний текст\n".as_bytes()));
+        assert!(looks_like_text(b"plain ascii\n"));
+        assert!(looks_like_text(&[0xEF, 0xBB, 0xBF, b'o', b'k'])); // UTF-8 BOM
+        assert!(looks_like_text(b"\x1b[31mERROR\x1b[0m a coloured log\n"));
+        // Accepted: an empty file has no evidence either way and is not binary.
+        assert!(looks_like_text(b""));
+        assert!(looks_like_text(b"ok\n"));
+    }
+
+    /// UTF-16 is the one text encoding whose NUL bytes are legitimate, and the
+    /// byte-order mark is what says so. Without this branch the check would
+    /// refuse a file the product reads correctly today — and, through
+    /// `displaces`, delete it from the index.
+    ///
+    /// Measured before this was written: `encoding_rs::decode` does its own
+    /// BOM sniffing and overrides chardetng's guess, so a UTF-16LE file with a
+    /// mark decodes to 0.00% control characters while the same text without
+    /// one comes back as windows-1250 at 51.52%.
+    #[test]
+    fn a_utf16_byte_order_mark_is_text_despite_its_nul_bytes() {
+        let mut le = vec![0xFF, 0xFE];
+        le.extend_from_slice(&[0x54, 0x00, 0x65, 0x00]); // "Te" in UTF-16LE
+        assert!(looks_like_text(&le));
+
+        let mut be = vec![0xFE, 0xFF];
+        be.extend_from_slice(&[0x00, 0x54, 0x00, 0x65]); // "Te" in UTF-16BE
+        assert!(looks_like_text(&be));
+
+        // The same text without a mark is refused, and that cost is accepted
+        // deliberately (spec §4): it is mojibake today, and a refusal with a
+        // journal row is the better of the two.
+        assert!(!looks_like_text(&[0x54, 0x00, 0x65, 0x00]));
+    }
+
+    /// The scan covers the whole slice, not a prefix. A file that is text for
+    /// a long stretch and binary afterwards — a SQL dump carrying binary
+    /// columns, for instance — is the case a prefix check would pass.
+    ///
+    /// Measured: scanning a whole file for a NUL costs less than the SHA-256
+    /// the same slice already pays for (0.69 µs against 1.03 on 2.4 KB), so
+    /// there is nothing bought by stopping early.
+    #[test]
+    fn the_scan_does_not_stop_at_a_prefix() {
+        let mut bytes = "текст, який довго лишається текстом\n"
+            .repeat(1000)
+            .into_bytes();
+        assert!(
+            bytes.len() > 16_384,
+            "the tail must sit past any plausible prefix"
+        );
+        assert!(looks_like_text(&bytes));
+        bytes.push(0);
+        assert!(!looks_like_text(&bytes));
+    }
 }
