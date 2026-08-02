@@ -97,6 +97,7 @@ fn every_skip_rule_is_recorded_under_its_own_string() {
         (SkipRule::NoTextLayer, "no_text_layer"),
         (SkipRule::Unreadable, "unreadable"),
         (SkipRule::TooLarge, "too_large"),
+        (SkipRule::NotText, "not_text"),
     ];
     for (i, (rule, _)) in cases.iter().enumerate() {
         db.record_skip(1, &format!("file-{i}.pdf"), None, "reason", *rule, None)
@@ -133,6 +134,7 @@ fn every_skip_rule_is_sorted_onto_its_side_of_is_about_content() {
         (SkipRule::NoTextLayer, true),
         (SkipRule::Unreadable, false),
         (SkipRule::TooLarge, false),
+        (SkipRule::NotText, true),
     ];
     for (rule, expected) in cases {
         assert_eq!(
@@ -162,6 +164,7 @@ fn every_skip_rule_is_sorted_onto_its_side_of_suggests_broken_environment() {
         (SkipRule::NoTextLayer, false),
         (SkipRule::Unreadable, true),
         (SkipRule::TooLarge, false),
+        (SkipRule::NotText, false),
     ];
     for (rule, expected) in cases {
         assert_eq!(

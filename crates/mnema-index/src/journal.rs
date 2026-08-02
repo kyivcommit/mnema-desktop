@@ -77,6 +77,15 @@ pub enum SkipRule {
     /// file is not the kind of thing this product reads, and no release will
     /// change that. Someone asking "why is my file not found?" needs the two
     /// apart.
+    ///
+    /// Unlike `TooLarge`, whose lever back to re-examination is a *setting*
+    /// (`PoolConfig::max_bytes`), this rule's only lever is a constant:
+    /// `INDEX_FORMAT_VERSION` (`mnema_ingest::ingest_file`, the second cheap
+    /// arm). A file skipped `NotText` is never looked at again for the life
+    /// of the index unless that version moves — so any future loosening of
+    /// `looks_like_text` (the first candidate: UTF-16 without a byte-order
+    /// mark) must bump it, or the files it would now accept stay refused
+    /// forever.
     NotText,
 }
 
@@ -125,8 +134,8 @@ impl SkipRule {
     /// verdict that *can* change look permanent, and the file is never looked
     /// at again for the life of the index.
     ///
-    /// Only `Unsupported` and `NoTextLayer` qualify. `Crash`, `Timeout` and
-    /// `Memory` are readings of the environment that apply to every file in
+    /// Only `Unsupported`, `NoTextLayer` and `NotText` qualify. `Crash`,
+    /// `Timeout` and `Memory` are readings of the environment that apply to every file in
     /// the walk alike — `displaces` draws the same line for the same reason
     /// (D44) — and `Unreadable` is a fact about the disk, not the bytes, that
     /// may well be transient (a file moved mid-scan, a permission fixed
@@ -184,7 +193,7 @@ impl SkipRule {
     /// worth trusting on its own, without spending a worker on the file a
     /// second time. This asks whether a run of them means a walker should
     /// stop asking a worker to do more work at all. The two questions split
-    /// the same seven variants differently, and `TooLarge` is the case that
+    /// the same eight variants differently, and `TooLarge` is the case that
     /// proves it has to: it answers **no** to both. It is not a fact about
     /// the bytes (`is_about_content` — a setting can move the ceiling out
     /// from under a file that never changed), and it is not a fact about the

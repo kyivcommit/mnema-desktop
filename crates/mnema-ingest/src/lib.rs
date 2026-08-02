@@ -507,11 +507,12 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// silently, while the progress bar advances: a worker binary that does not
 /// match its parent answers the same way for all forty thousand of them.
 ///
-/// **Displace** — `Unsupported`, `NoTextLayer`. The worker read the bytes and
-/// determined something about them: there is no reader for this format, or
-/// this page carries no text layer. Run it again on the same bytes and it says
-/// the same thing. So what the index holds is a previous version of a file
-/// that has since become unindexable.
+/// **Displace** — `Unsupported`, `NoTextLayer`, `NotText`. The worker read the
+/// bytes and determined something about them: there is no reader for this
+/// format, this page carries no text layer, or the bytes are not text at all.
+/// Run it again on the same bytes and it says the same thing. So what the
+/// index holds is a previous version of a file that has since become
+/// unindexable.
 ///
 /// **Keep** — `Crash`, `Timeout`, `Memory`, `Unreadable`. None of these is a
 /// statement about the file:
