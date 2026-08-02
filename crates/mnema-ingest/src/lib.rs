@@ -597,7 +597,7 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 fn displaces(rule: SkipRule, recorded: &PathEntry, on_disk: Option<OnDisk>) -> bool {
     match rule {
         // A determination about the bytes, reproducible on the same bytes.
-        SkipRule::Unsupported | SkipRule::NoTextLayer => true,
+        SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::NotText => true,
         // Something that happened, and that happens to every file alike.
         SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => false,
         SkipRule::TooLarge => on_disk.is_some_and(|disk| disk.size_bytes != recorded.size_bytes),

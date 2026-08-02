@@ -68,6 +68,16 @@ pub enum SkipRule {
     /// the ceiling moved, and a different size means the file was rewritten.
     /// `mnema_ingest`'s `displaces` carries the argument in full.
     TooLarge,
+    /// The file is not text at all — a photo, a video, a database — decided
+    /// by its own bytes rather than its name (D51).
+    ///
+    /// Its own rule rather than `Unsupported` for the reason `TooLarge` got
+    /// one: the two answer the user differently. `Unsupported` says this
+    /// product has no reader *yet* and the file waits for one; this says the
+    /// file is not the kind of thing this product reads, and no release will
+    /// change that. Someone asking "why is my file not found?" needs the two
+    /// apart.
+    NotText,
 }
 
 impl SkipRule {
@@ -80,6 +90,7 @@ impl SkipRule {
             SkipRule::NoTextLayer => "no_text_layer",
             SkipRule::Unreadable => "unreadable",
             SkipRule::TooLarge => "too_large",
+            SkipRule::NotText => "not_text",
         }
     }
 
@@ -97,6 +108,7 @@ impl SkipRule {
             "no_text_layer" => SkipRule::NoTextLayer,
             "unreadable" => SkipRule::Unreadable,
             "too_large" => SkipRule::TooLarge,
+            "not_text" => SkipRule::NotText,
             _ => return None,
         })
     }
@@ -153,7 +165,7 @@ impl SkipRule {
     /// journal suite green.
     pub fn is_about_content(self) -> bool {
         match self {
-            SkipRule::Unsupported | SkipRule::NoTextLayer => true,
+            SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::NotText => true,
             SkipRule::Crash
             | SkipRule::Timeout
             | SkipRule::Memory
@@ -201,7 +213,10 @@ impl SkipRule {
     pub fn suggests_broken_environment(self) -> bool {
         match self {
             SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => true,
-            SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::TooLarge => false,
+            SkipRule::Unsupported
+            | SkipRule::NoTextLayer
+            | SkipRule::TooLarge
+            | SkipRule::NotText => false,
         }
     }
 }

@@ -172,6 +172,20 @@ fn every_skip_rule_is_sorted_onto_its_side_of_suggests_broken_environment() {
     }
 }
 
+/// D51. A refusal by content is not the same promise as "no reader yet".
+#[test]
+fn not_text_round_trips_and_is_classified_on_both_sides() {
+    assert_eq!(SkipRule::NotText.as_str(), "not_text");
+    assert_eq!(SkipRule::parse("not_text"), Some(SkipRule::NotText));
+
+    // A determination about the bytes: the same bytes earn it again, so
+    // the next walk may answer from `stat` alone.
+    assert!(SkipRule::NotText.is_about_content());
+    // And it says nothing about the machine: a folder of photos is not a
+    // broken worker.
+    assert!(!SkipRule::NotText.suggests_broken_environment());
+}
+
 /// The journal is a current state, not a history. Before this, `record_skip`
 /// was an unconditional INSERT: a folder of a thousand scans grew a thousand
 /// rows per walk, and every walk spent a worker process on each of them to
