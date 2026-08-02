@@ -1431,6 +1431,47 @@ fn a_stale_format_version_is_not_honoured_by_the_second_cheap_arm() {
     );
 }
 
+/// D51 §5. A `.txt` overwritten by a photo must stop answering searches with
+/// text the file no longer contains — the question this project asks of
+/// everything that writes to the index.
+#[test]
+fn a_text_file_overwritten_by_a_photo_stops_answering() {
+    let fx = Fixture::new();
+    // `place_at`, not `place`: this test's outcome depends on the mtime moving
+    // between the two writes, and the file's own comment (`slice.rs:89-95`)
+    // says taking the wall clock there makes the assertion a coin toss.
+    fx.place_at(
+        "notes/kropyva.txt",
+        "кропива росте попід тином\n".as_bytes(),
+        mtime(),
+    );
+    assert!(matches!(
+        fx.ingest("notes/kropyva.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("кропива", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    fx.place_at(
+        "notes/kropyva.txt",
+        include_bytes!("../../mnema-extract/tests/fixtures/solid.png"),
+        mtime_just_after(),
+    );
+    assert_eq!(
+        fx.ingest("notes/kropyva.txt"),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        }
+    );
+
+    assert!(
+        fx.db.search_lexical("кропива", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+}
+
 // ------------------------------------------------- markdown, and its pages
 
 /// An invented handbook: content before the first heading, two sections, and a
