@@ -272,6 +272,29 @@ fn a_refusal_and_an_unreadable_file_are_named_apart() {
     assert_eq!(failed.failure, Failure::Unreadable);
 }
 
+/// D51. `every_failure_maps_onto_its_own_skip_rule` proves the *type*
+/// `Failure::NotText` maps onto `SkipRule::NotText`; it says nothing about
+/// whether the wire string `"not_text"` that a real worker sends is ever
+/// parsed into that type in the first place. Frame parsing is strict on
+/// purpose (an unknown rule is a protocol error), so a worker that speaks
+/// `"not_text"` against a pool that does not recognise the string would fail
+/// every such file loudly rather than skip it — this drives a fake worker
+/// that actually sends the frame, the same way `a_refusal_under_an_unknown_rule_stops_the_job`
+/// drives one that sends a rule nobody knows.
+#[test]
+fn a_refusal_by_content_crosses_the_wire() {
+    let _watchdog = Watchdog::new("not_text refusal", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let skipped = skip(extract(&pool, "notext:ransom.note").unwrap());
+    assert_eq!(skipped.failure, Failure::NotText);
+    assert!(
+        skipped.reason.contains("ransom.note"),
+        "the worker's own reason must survive into the journal: {}",
+        skipped.reason
+    );
+}
+
 /// Both refusals arrive as `Frame::Refused`, and the parent has to tell them
 /// apart from the rule string alone — `mnema-extract` may not depend on
 /// `mnema-index`, so the wire carries a name and this crate does the mapping.
