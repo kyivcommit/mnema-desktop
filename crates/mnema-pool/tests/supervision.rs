@@ -333,6 +333,7 @@ fn every_failure_maps_onto_its_own_skip_rule() {
         (Failure::Unsupported, SkipRule::Unsupported),
         (Failure::Unreadable, SkipRule::Unreadable),
         (Failure::TooLarge, SkipRule::TooLarge),
+        (Failure::NotText, SkipRule::NotText),
     ];
     let mut seen: Vec<&'static str> = Vec::new();
     for (failure, expected) in cases {

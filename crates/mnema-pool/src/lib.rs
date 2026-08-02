@@ -110,6 +110,9 @@ pub enum Failure {
     /// The file could not be read at all: missing, not a regular file, refused
     /// by permissions, or a path this protocol cannot carry.
     Unreadable,
+    /// The worker looked at the bytes and they are not text (D51):
+    /// `Frame::Refused { rule: "not_text" }`.
+    NotText,
 }
 
 impl From<Failure> for SkipRule {
@@ -121,6 +124,7 @@ impl From<Failure> for SkipRule {
             Failure::Unsupported => SkipRule::Unsupported,
             Failure::Unreadable => SkipRule::Unreadable,
             Failure::TooLarge => SkipRule::TooLarge,
+            Failure::NotText => SkipRule::NotText,
         }
     }
 }
@@ -1001,6 +1005,7 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 }
                 let failure = match rule.as_str() {
                     "unsupported" => Failure::Unsupported,
+                    "not_text" => Failure::NotText,
                     "unreadable" => Failure::Unreadable,
                     "too_large" => Failure::TooLarge,
                     // Strict on purpose. A rule this pool does not know means
