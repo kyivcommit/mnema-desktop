@@ -143,16 +143,6 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 reason: format!("no reader for {rest}"),
             },
         ),
-        // The refusal added for D51: the worker opened the file, read the
-        // bytes, and they are not text. A rule the pool has to carry across
-        // the wire under its own name rather than fold into `"unsupported"`.
-        "notext" => write_frame(
-            stdout,
-            &Frame::Refused {
-                rule: "not_text".to_string(),
-                reason: format!("{rest} is not text"),
-            },
-        ),
         // The other producer of `Frame::Refused`, and the reason the two need
         // separate rules: the real worker takes this branch from `stat`,
         // without opening the file, so the parent must not treat it as "read
@@ -162,6 +152,16 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
             &Frame::Refused {
                 rule: "too_large".to_string(),
                 reason: format!("{rest} is over the ceiling"),
+            },
+        ),
+        // The refusal added for D51: the worker opened the file, read the
+        // bytes, and they are not text. A rule the pool has to carry across
+        // the wire under its own name rather than fold into `"unsupported"`.
+        "notext" => write_frame(
+            stdout,
+            &Frame::Refused {
+                rule: "not_text".to_string(),
+                reason: format!("{rest} is not text"),
             },
         ),
         // A refusal under a rule this pool has never heard of, which is what a

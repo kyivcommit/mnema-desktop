@@ -15,6 +15,7 @@
 //! |----------------------------------------|-------------------------|
 //! | answered `Refused` (no reader)         | [`Failure::Unsupported`] |
 //! | answered `Refused` (over the ceiling)  | [`Failure::TooLarge`]    |
+//! | answered `Refused` (not text)          | [`Failure::NotText`]     |
 //! | answered `Failed` (I/O)                | [`Failure::Unreadable`]  |
 //! | said nothing before the deadline        | [`Failure::Timeout`]     |
 //! | died on a signal                       | [`Failure::Crash`]       |

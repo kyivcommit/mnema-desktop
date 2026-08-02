@@ -293,6 +293,15 @@ fn a_refusal_by_content_crosses_the_wire() {
         "the worker's own reason must survive into the journal: {}",
         skipped.reason
     );
+    // The path alone would pass even if the pool fabricated a reason from the
+    // request it sent itself — "is not text" is the worker's own wording,
+    // absent from the request, so its presence proves the answer came back
+    // over the wire rather than being invented locally.
+    assert!(
+        skipped.reason.contains("is not text"),
+        "the worker's own words must survive into the journal: {}",
+        skipped.reason
+    );
 }
 
 /// Both refusals arrive as `Frame::Refused`, and the parent has to tell them
@@ -776,7 +785,9 @@ fn this_macos_still_refuses_an_address_space_rlimit() {
 /// The strictness is load-bearing far outside this crate, which its own
 /// comment understates. Every rule this pool *does* know maps onto a
 /// `SkipRule`, and `mnema-ingest` removes what the index holds under a path
-/// for two of them. So a worker from another release refusing under, say,
+/// for three of them — unconditionally for `Unsupported` and `NotText`,
+/// conditionally for `TooLarge` (only when the size on disk changed). So a
+/// worker from another release refusing under, say,
 /// `"encrypted"` would — if this arm guessed `Unsupported` — delete the
 /// indexed content of every file it named, returning `Ok` each time and
 /// stopping nothing. `crates/mnema-ingest/tests/slice.rs` asserts the other
