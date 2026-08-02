@@ -1413,10 +1413,16 @@ fn a_stale_format_version_is_not_honoured_by_the_second_cheap_arm() {
     );
 
     // Nothing about the file moved — only the remembered version, by hand,
-    // to stand in for a walk that ran before today's build.
+    // to stand in for a walk that ran before today's build. Scoped to this
+    // path so a second fixture added to this test later would not go stale
+    // along with it, silently.
     fx.db
         .conn()
-        .execute("UPDATE skipped SET format_version = format_version - 1", [])
+        .execute(
+            "UPDATE skipped SET format_version = format_version - 1
+              WHERE watched_root_id = ?1 AND relative_path = ?2",
+            (fx.root_id, "photos/scan.png"),
+        )
         .unwrap();
 
     let broken = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
@@ -1425,9 +1431,9 @@ fn a_stale_format_version_is_not_honoured_by_the_second_cheap_arm() {
         Ingested::Skipped {
             rule: SkipRule::Crash
         },
-        "the rule changed, so the pool was asked — a second cheap arm that \
-         trusts a stale format_version would never reach a worker at all, \
-         wrong or not"
+        "the rule did not change, so the journal answered — a second cheap \
+         arm that trusts a stale format_version never reaches a worker at \
+         all"
     );
 }
 
