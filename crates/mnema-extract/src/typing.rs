@@ -78,11 +78,12 @@ const ZIP_EMPTY_MAGIC: &[u8] = b"PK\x05\x06";
 ///
 /// Two steps, and the order is the whole design.
 ///
-/// A **UTF-16 byte-order mark** says the NUL bytes that follow are part of
-/// correctly encoded text, so it exits early. Only UTF-16's two marks do
-/// this: in UTF-8 a NUL is never legitimate, so a file carrying `EF BB BF`
-/// and a NUL is corrupt, and refusing it is right. Widening this to "any
-/// mark" would let three prepended bytes carry anything past the check.
+/// A **UTF-16 byte-order mark** says the NUL bytes that follow are half of a
+/// code unit rather than corruption. It changes *how* the question is asked,
+/// not whether it is asked: behind a mark the same criterion runs over code
+/// units instead of bytes. Only UTF-16's two marks do this: in UTF-8 a NUL is
+/// never legitimate, so a file carrying `EF BB BF` and a NUL is corrupt, and
+/// refusing it is right.
 ///
 /// Otherwise a **NUL anywhere in the slice** refuses the file. This is the
 /// signal the criterion D51 originally wrote down does not have: chardetng
@@ -98,7 +99,15 @@ const ZIP_EMPTY_MAGIC: &[u8] = b"PK\x05\x06";
 /// 2789, because the first NUL sits in the first bytes).
 pub(crate) fn looks_like_text(bytes: &[u8]) -> bool {
     if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
-        return true;
+        // A mark says the NUL *bytes* that follow are half of a code unit —
+        // it does not say the file is text. What decides that is the same
+        // question one level up: a `U+0000` code unit does not occur in
+        // correct UTF-16, exactly as a NUL byte does not occur in correct
+        // UTF-8. Reading pairs answers it without a decoder, and it also
+        // refuses a UTF-32LE mark, whose first code unit after `FF FE` is
+        // `0000` — which matters because `encoding_rs` has no UTF-32 decoder
+        // and would otherwise read the file as something it is not.
+        return !bytes[2..].chunks_exact(2).any(|pair| pair == [0, 0]);
     }
     !bytes.contains(&0)
 }
@@ -319,6 +328,47 @@ mod tests {
         // deliberately (spec §4): it is mojibake today, and a refusal with a
         // journal row is the better of the two.
         assert!(!looks_like_text(&[0x54, 0x00, 0x65, 0x00]));
+
+        // Long enough that a fix which only inspects a few bytes cannot pass
+        // by accident, and every code unit is real text.
+        let mut long = vec![0xFF, 0xFE];
+        for ch in "кропива росте попід тином і нікого не питає\n"
+            .repeat(50)
+            .encode_utf16()
+        {
+            long.extend_from_slice(&ch.to_le_bytes());
+        }
+        assert!(
+            looks_like_text(&long),
+            "genuine UTF-16 text must still pass"
+        );
+    }
+
+    /// D51. The mark branch used to be an unconditional `return true` on a
+    /// two-byte prefix, so anything at all could ride behind it. Measured
+    /// before this fix, through this same function: a real PNG with `FF FE`
+    /// prepended came back `true`, as did a UTF-32LE mark and an MPEG-1
+    /// Layer I frame sync — the last two are byte sequences that occur
+    /// without anyone intending them.
+    #[test]
+    fn a_mark_does_not_carry_arbitrary_bytes_past_the_check() {
+        let mut disguised = vec![0xFF, 0xFE];
+        disguised.extend_from_slice(include_bytes!("../tests/fixtures/solid.png"));
+        assert!(
+            !looks_like_text(&disguised),
+            "a photo rode in behind a mark"
+        );
+
+        // UTF-32LE's mark starts with UTF-16LE's. `encoding_rs` has no UTF-32
+        // decoder, so accepting this reads the file as something it is not.
+        assert!(!looks_like_text(&[
+            0xFF, 0xFE, 0x00, 0x00, 0x54, 0x00, 0x00, 0x00
+        ]));
+
+        // An MPEG-1 Layer I frame sync happens to open with the same two bytes.
+        assert!(!looks_like_text(&[
+            0xFF, 0xFE, 0x18, 0xC4, 0x00, 0x00, 0x00, 0x00
+        ]));
     }
 
     /// The scan covers the whole slice, not a prefix. A file that is text for
