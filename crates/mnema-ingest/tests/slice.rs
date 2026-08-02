@@ -1381,6 +1381,56 @@ fn a_remembered_content_skip_is_answered_without_asking_the_pool() {
     );
 }
 
+/// The other half of the second cheap arm's premise: a remembered verdict is
+/// only good while `format_version` still matches. Bumping
+/// `INDEX_FORMAT_VERSION` is how a shipped fix (D51: a photo stopped being
+/// `unsupported` and became its own `not_text` rule) reaches files a walk
+/// already gave up on — but only if the arm actually checks the version
+/// rather than the bytes alone, which nothing here had tested before this.
+///
+/// Same shape as the test above: starve the pool with a sidecar that is not
+/// the worker. The file is skipped once by the real worker as `NotText`, then
+/// its journal row is pushed one version behind by hand — same bytes, same
+/// mtime, only the format version lags — and ingested again. If the second
+/// cheap arm honoured a stale version, the sidecar would never be asked and
+/// the rule would stay `NotText`. Cut the check and the walk reaches the pool
+/// instead, where the sidecar answers with bytes that are not valid UTF-8 and
+/// the rule becomes `Crash`.
+#[cfg(unix)]
+#[test]
+fn a_stale_format_version_is_not_honoured_by_the_second_cheap_arm() {
+    let fx = Fixture::new();
+    fx.place_at(
+        "photos/scan.png",
+        include_bytes!("../../mnema-extract/tests/fixtures/solid.png"),
+        mtime(),
+    );
+    assert_eq!(
+        fx.ingest("photos/scan.png"),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        }
+    );
+
+    // Nothing about the file moved — only the remembered version, by hand,
+    // to stand in for a walk that ran before today's build.
+    fx.db
+        .conn()
+        .execute("UPDATE skipped SET format_version = format_version - 1", [])
+        .unwrap();
+
+    let broken = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
+    assert_eq!(
+        fx.ingest_with_worker("photos/scan.png", &broken),
+        Ingested::Skipped {
+            rule: SkipRule::Crash
+        },
+        "the rule changed, so the pool was asked — a second cheap arm that \
+         trusts a stale format_version would never reach a worker at all, \
+         wrong or not"
+    );
+}
+
 // ------------------------------------------------- markdown, and its pages
 
 /// An invented handbook: content before the first heading, two sections, and a
