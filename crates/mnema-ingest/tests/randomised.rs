@@ -50,7 +50,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mnema_core::OnDisk;
-use mnema_index::{Db, open, register_vector_extension};
+use mnema_index::{Db, SkipRule, open, register_vector_extension};
 use mnema_ingest::{Ingested, StopReason, WalkReport, ingest_file, walk_root};
 use mnema_pool::{Pool, PoolConfig};
 use mnema_walk::WalkRules;
@@ -230,6 +230,20 @@ enum Shape {
     Markdown(usize),
     /// Bytes no reader can take — a PDF header, since there is no PDF reader.
     Opaque,
+    /// Not text at all: a photo. Refused as `SkipRule::NotText`, and the one
+    /// refusal in this file that **removes** what the path used to hold — the
+    /// text the index has under this name belongs to a file that is gone.
+    ///
+    /// Separate from `Opaque` although both are refused and neither is ever
+    /// indexed. `Opaque` is a PDF header: a format with no reader *yet*, which
+    /// leaves the earlier document alone. This one says the file stopped being
+    /// prose, and the earlier document has to go with it (D51).
+    NotText,
+    /// Prose followed by a zeroed tail — what an interrupted append leaves
+    /// behind. Refused as `SkipRule::BinaryTail`, and the refusal that must
+    /// **not** remove anything: the prose is still on disk in front of the
+    /// damage, and it is readable nowhere else.
+    BinaryTail,
 }
 
 /// Bytes and the words that must be findable in them once they are indexed.
@@ -265,10 +279,27 @@ enum Verdict {
     /// `Indexed`, `Unchanged` or `AlreadyIndexed` — the index accepted this
     /// path and says it is up to date with it.
     Settled,
-    /// Journalled and stepped over.
-    Skipped,
+    /// Journalled and stepped over, under the rule that fired.
+    ///
+    /// The rule is carried because two of them owe the index opposite answers
+    /// about what it may keep, and without it every invariant here reads
+    /// "refused" as blanket permission for the index to be behind — which is
+    /// true for `Crash` and false for `NotText`. Invariant 3c is the one that
+    /// needs to tell them apart.
+    Skipped(SkipRule),
     /// The database refused a write and the job would have stopped.
     Failed,
+    /// No call to `ingest_file` produced this — the harness wrote it down
+    /// itself, to say "this path's freshness is not something I assert".
+    ///
+    /// Two sites need it, and both used to write `Skipped`, which was
+    /// harmless only while `Skipped` carried nothing: settling records what the
+    /// index ended up holding without offering the file again, and
+    /// `toggle_exclusion` marks a newly excluded path so that invariant 2b does
+    /// not read a rule's own removal as data loss. Neither is a rule firing,
+    /// and invariant 3c must not treat either as one — a synthesised rule there
+    /// would be the harness asserting a fact it invented.
+    Unoffered,
 }
 
 // ----------------------------------------------------------------- the world
@@ -493,6 +524,47 @@ impl World {
         }
     }
 
+    /// A photo — the same synthetic solid-colour PNG the deterministic tests
+    /// use, invented outright by `make_fixtures.py`. Its first NUL sits at
+    /// offset 8, well inside the head window, so it is binary from the start.
+    ///
+    /// No markers: nothing here is ever indexed, and that is the point.
+    fn not_text_body(&self) -> Content {
+        Content {
+            bytes: include_bytes!("../../mnema-extract/tests/fixtures/solid.png").to_vec(),
+            markers: Vec::new(),
+            shape: Shape::NotText,
+        }
+    }
+
+    /// Prose long enough to outrun the head window, then zeros: a note whose
+    /// append the power cut short.
+    ///
+    /// The prose is deliberately the file's **existing** text where there is
+    /// any, because that is what makes the case what it is — the index's copy
+    /// is still the opening of the file on disk, and deleting it would lose
+    /// text the disk still has.
+    ///
+    /// No markers, for the same reason as `not_text_body` and with a sharper
+    /// edge: the words in this file are not newly findable, so claiming them
+    /// would make a refused file look indexed. Whatever the earlier document
+    /// already made findable stays findable through its own path row, which is
+    /// exactly the property this shape exists to test.
+    fn interrupted_append_body(&mut self, keeping: Option<Vec<u8>>) -> Content {
+        let mut bytes = match keeping {
+            Some(prose) if prose.len() > 512 => prose,
+            // Nothing usable under the path (it was a photo, or too short to
+            // clear the head window), so the shape has to bring its own prose.
+            _ => self.text_body(6).bytes,
+        };
+        bytes.extend_from_slice(&[0u8; 4096]);
+        Content {
+            bytes,
+            markers: Vec::new(),
+            shape: Shape::BinaryTail,
+        }
+    }
+
     /// Fresh readable content of the kind the extension implies, of a given
     /// size in pages or paragraphs.
     fn body_for(&mut self, relative: &str, units: usize) -> Content {
@@ -550,7 +622,7 @@ impl World {
                 | Ingested::Unchanged { .. }
                 | Ingested::AlreadyIndexed { .. },
             ) => Verdict::Settled,
-            Ok(Ingested::Skipped { .. }) => Verdict::Skipped,
+            Ok(Ingested::Skipped { rule }) => Verdict::Skipped(*rule),
             Err(_) => Verdict::Failed,
         };
         let rendered = match &outcome {
@@ -805,6 +877,7 @@ impl World {
         self.check_no_stale_answers(&after);
         self.check_nothing_settled_went_missing(&after, &documents);
         self.check_nothing_removed_that_the_disk_still_holds(before, &after);
+        self.check_a_refusal_by_content_did_what_its_rule_says(before, &after);
         self.check_stored_is_findable(&after, &documents);
         self.check_chunks_are_searchable();
         self.check_ord_is_dense();
@@ -1053,6 +1126,94 @@ impl World {
                      that was not a change to the file.\n  it now holds: {:?}",
                     after.get(relative)
                 ));
+            }
+        }
+    }
+
+    /// **3c. A refusal decided on the file's own bytes did what its rule says
+    /// about the document already under that path.**
+    ///
+    /// This exists because none of the invariants above can see the defect it
+    /// is written for, and the reason is structural rather than an oversight.
+    /// [`LastCall`]'s own doc comment states the rule they all share: the index
+    /// is allowed to be behind the disk when the offer was **refused**. So a
+    /// skip — any skip, under any rule — is blanket permission, and invariant 2
+    /// steps over the path, invariant 2b excuses it because the file changed,
+    /// and invariant 3 excuses it because the bytes on disk no longer hash to
+    /// what the index holds. Both directions of the D51 defect therefore land
+    /// in the gap between them:
+    ///
+    /// * a photo replacing a note, where the index goes on answering with text
+    ///   the file no longer contains — the worst citation this product can
+    ///   produce;
+    /// * a note whose append was interrupted, where the index **deletes** prose
+    ///   that is still on disk in front of the damage and readable nowhere
+    ///   else.
+    ///
+    /// Measured, and this is why it is worth a whole invariant: with the two
+    /// operations added and this check absent, moving `SkipRule::BinaryTail`
+    /// onto the displacing side of `displaces` left every seed of this harness
+    /// green.
+    ///
+    /// Only the two content rules are named, and deliberately not `TooLarge`,
+    /// whose answer is conditional on a size comparison rather than on the rule
+    /// — restating that here would re-derive `displaces` inside the tool meant
+    /// to check it. `Crash`, `Timeout`, `Memory` and `Unreadable` are readings
+    /// of the environment and keep, which invariant 3 already covers whenever
+    /// the bytes did not move.
+    ///
+    /// Scoped to the path this call was about: a step may legitimately do
+    /// several things, and `before` here is the table as it stood immediately
+    /// before this one `ingest_file`.
+    fn check_a_refusal_by_content_did_what_its_rule_says(
+        &self,
+        before: &BTreeMap<String, String>,
+        after: &BTreeMap<String, String>,
+    ) {
+        for (relative, last) in &self.last {
+            let Verdict::Skipped(rule) = last.verdict else {
+                continue;
+            };
+            let Some(held) = before.get(relative) else {
+                // Nothing was under the path, so there is nothing either rule
+                // could have displaced or kept.
+                continue;
+            };
+            match rule {
+                // Unconditionally true in `displaces`: the worker read the
+                // bytes, they are not prose, and what the index holds under
+                // this name belongs to a file that is gone.
+                SkipRule::NotText => {
+                    if after.get(relative) == Some(held) {
+                        self.fail(format!(
+                            "invariant 3c — {relative} was refused as not text, and the \
+                             index still answers for it with {held}. Those bytes are a \
+                             photo now, so every citation of that document names a file \
+                             whose text it no longer contains"
+                        ));
+                    }
+                }
+                // Unconditionally false in `displaces`, and the whole of why
+                // the rule is separate from `NotText`.
+                SkipRule::BinaryTail => {
+                    if after.get(relative) != Some(held) {
+                        self.fail(format!(
+                            "invariant 3c — {relative} was refused as a binary tail and \
+                             the index stopped holding {held} under it. The file opened \
+                             as text and stopped; the prose the index had is still on \
+                             disk in front of the damage, and deleting it loses text \
+                             that is readable nowhere else.\n  it now holds: {:?}",
+                            after.get(relative)
+                        ));
+                    }
+                }
+                SkipRule::Crash
+                | SkipRule::Timeout
+                | SkipRule::Memory
+                | SkipRule::Unsupported
+                | SkipRule::NoTextLayer
+                | SkipRule::Unreadable
+                | SkipRule::TooLarge => {}
             }
         }
     }
@@ -1440,7 +1601,7 @@ impl World {
         let choice = if self.files.is_empty() {
             0
         } else {
-            self.rng.below(20)
+            self.rng.below(22)
         };
         match choice {
             0 => self.create(),
@@ -1466,6 +1627,11 @@ impl World {
             15 | 16 => self.database_refuses_a_write(),
             17 => self.toggle_exclusion(),
             18 => self.simulate_ejected_volume(),
+            // The two refusals by content, one slot each. They are the only
+            // operations here that make `displaces` answer differently for two
+            // files that are both refused on their own bytes.
+            19 => self.overwrite_with_a_photo(),
+            20 => self.interrupt_an_append(),
             _ => self.run_walk(),
         }
     }
@@ -1534,8 +1700,10 @@ impl World {
         let units = match self.files[&relative].shape {
             Shape::Text(n) | Shape::Markdown(n) => n,
             // A file that is currently unreadable bytes has no unit count to
-            // preserve; rewriting it is a different operation.
-            Shape::Opaque => return self.rewrite_small(),
+            // preserve; rewriting it is a different operation. A photo and a
+            // zeroed tail are the same case for the same reason — neither has
+            // paragraphs or sections to keep the length of.
+            Shape::Opaque | Shape::NotText | Shape::BinaryTail => return self.rewrite_small(),
         };
         let was = self.on_disk(&relative).map(|b| b.len());
         let content = self.body_for(&relative, units);
@@ -1719,6 +1887,41 @@ impl World {
         let at = self.next_tick();
         self.note(format!(
             "  replace {relative} with bytes no reader can take"
+        ));
+        self.write_at(&relative, content, at);
+        self.maybe_ingest(&relative);
+    }
+
+    /// A text file replaced by a photo — the refusal that **removes**.
+    ///
+    /// Distinct from `make_opaque`, which writes a PDF header and earns
+    /// `Unsupported`: that rule leaves the earlier document alone, so until
+    /// this operation existed nothing in this harness ever drove a file down
+    /// the branch of `record_skip` that deletes a path row and can orphan the
+    /// document behind it.
+    fn overwrite_with_a_photo(&mut self) {
+        let relative = self.a_file();
+        let content = self.not_text_body();
+        let at = self.next_tick();
+        self.note(format!("  replace {relative} with a photo"));
+        self.write_at(&relative, content, at);
+        self.maybe_ingest(&relative);
+    }
+
+    /// The power goes out while a note is being appended to: the prose that was
+    /// already on disk stays, the tail comes back zeroed.
+    ///
+    /// The other side of `overwrite_with_a_photo`, and the reason the two are
+    /// separate operations rather than one: both are refusals decided on the
+    /// file's own bytes, and they owe the index opposite answers.
+    fn interrupt_an_append(&mut self) {
+        let relative = self.a_file();
+        let keeping = self.on_disk(&relative);
+        let content = self.interrupted_append_body(keeping);
+        let at = self.next_tick();
+        self.note(format!(
+            "  interrupt an append to {relative}: {} bytes, tail zeroed",
+            content.bytes.len()
         ));
         self.write_at(&relative, content, at);
         self.maybe_ingest(&relative);
@@ -2027,7 +2230,7 @@ impl World {
                 Some(document) if document == &hash && self.is_settled(&documents, document) => {
                     Verdict::Settled
                 }
-                _ => Verdict::Skipped,
+                _ => Verdict::Unoffered,
             };
             self.last.insert(
                 relative,
@@ -2069,7 +2272,7 @@ impl World {
                     relative.clone(),
                     LastCall {
                         hash: Some(hash),
-                        verdict: Verdict::Skipped,
+                        verdict: Verdict::Unoffered,
                     },
                 );
             }
@@ -2206,18 +2409,29 @@ impl World {
             };
             let size = self.on_disk(name).map(|b| b.len()).unwrap_or(0) as u64;
             let state = &self.files[name];
-            // Two kinds of file are legitimately not in the index at the end: one
-            // no reader can take, and one over the ceiling. Both are journalled.
-            if state.shape == Shape::Opaque || size > CEILING {
+            // Four kinds of file are legitimately not in the index at the end:
+            // one no reader can take, a photo, a note whose append was
+            // interrupted, and one over the ceiling. All four are journalled.
+            //
+            // `== Some(&hash)` and not `is_some()`, and the difference is the
+            // whole reason `Shape::BinaryTail` can be in this list: that file's
+            // path row legitimately still names the document it named *before*
+            // the damage. What must not happen is the index holding the
+            // damaged bytes themselves as a document, which is what comparing
+            // against `hash` says. Invariant 3c is what checks the other half
+            // — that the earlier document is still there.
+            let refused = match state.shape {
+                Shape::Opaque => Some("bytes no reader can take"),
+                Shape::NotText => Some("a photo"),
+                Shape::BinaryTail => Some("text that stops being text partway through"),
+                Shape::Text(_) | Shape::Markdown(_) => None,
+            };
+            if refused.is_some() || size > CEILING {
                 if after.get(name) == Some(&hash) {
                     self.fail(format!(
                         "after settling — {name} is in the index although it is \
                          {} and must have been journalled instead",
-                        if state.shape == Shape::Opaque {
-                            "bytes no reader can take"
-                        } else {
-                            "over the size ceiling"
-                        }
+                        refused.unwrap_or("over the size ceiling")
                     ));
                 }
                 continue;
