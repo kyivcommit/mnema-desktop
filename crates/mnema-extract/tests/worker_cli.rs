@@ -76,6 +76,44 @@ fn a_file_over_the_ceiling_is_refused_without_being_read() {
     }
 }
 
+/// D51, end to end through the real binary — the same way the defect was
+/// found rather than read. Before this, a genuine photo came back as
+/// `mime: text/plain`, `source_kind: document`, one block holding the file's
+/// bytes as Latin-1 mojibake: no skip, no journal row, no refusal.
+#[test]
+fn a_photo_is_refused_by_the_real_worker() {
+    let out = run_worker(&["{\"path\":\"tests/fixtures/solid.png\",\"max_bytes\":1048576}"]);
+    let frames = frames_of(&out);
+
+    assert_eq!(frames.len(), 1, "a refusal is the whole answer: {frames:?}");
+    match &frames[0] {
+        Frame::Refused { rule, reason } => {
+            assert_eq!(rule, "not_text");
+            assert!(
+                reason.contains("not text"),
+                "the reason is what the window shows a person: {reason:?}"
+            );
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// The other direction, in the same shape: a text file still comes back with
+/// a header and blocks. Without this, a worker that refused everything would
+/// pass the test above — the shape that went unnoticed nine times in the
+/// previous branch.
+#[test]
+fn a_text_file_is_still_read_by_the_real_worker() {
+    let out = run_worker(&["{\"path\":\"tests/fixtures/simple.txt\",\"max_bytes\":1048576}"]);
+    let frames = frames_of(&out);
+
+    assert!(
+        matches!(frames.first(), Some(Frame::Header { .. })),
+        "expected a header, got {frames:?}"
+    );
+    assert!(!frames.iter().any(|f| matches!(f, Frame::Refused { .. })));
+}
+
 // --- Supplementary: the edges the brief asks to reason through ---
 
 #[test]

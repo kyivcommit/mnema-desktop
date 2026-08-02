@@ -186,23 +186,22 @@ fn handle_request(line: &str) -> Vec<Frame> {
             });
             frames
         }
+        // Not "no reader yet" — the answer this branch gives for the other
+        // five. These bytes are not text at all, and no release adds a reader
+        // that makes them prose (D51).
+        Reader::NotText => {
+            vec![Frame::Refused {
+                rule: "not_text".to_string(),
+                reason: "this file is not text: its bytes are not something this product reads"
+                    .to_string(),
+            }]
+        }
         // None of these five formats has a `Vec<Block>` reader in this crate
         // yet — task 6 shipped only plain text, and `pdfium_probe` proves the
         // binding links without deciding what a page's text *is* (its own
         // doc comment). Reporting them alike as "unsupported" is honestly
         // what is true today: this worker can read text and nothing else.
-        Reader::Pdf
-        | Reader::Docx
-        | Reader::Xlsx
-        | Reader::Epub
-        | Reader::Unrecognized
-        // Temporary, and separated in task 5: unlike the five above,
-        // `Reader::NotText` never gets a reader — a photo is not a format
-        // this crate might one day learn (its own doc comment says so). It
-        // is borrowing this arm only because the arm already refuses the
-        // file, which closes the leak now rather than waiting for one of
-        // its own.
-        | Reader::NotText => {
+        Reader::Pdf | Reader::Docx | Reader::Xlsx | Reader::Epub | Reader::Unrecognized => {
             vec![Frame::Refused {
                 rule: "unsupported".to_string(),
                 reason: format!(
