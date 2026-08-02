@@ -176,7 +176,8 @@ fn a_correctly_named_photo_is_not_plain_text() {
     let png = include_bytes!("fixtures/solid.png");
     let t = identify(png, Some("png"));
     assert_eq!(t.reader, Reader::NotText);
-    assert_ne!(t.mime, "text/plain");
+    assert_eq!(t.mime, "application/octet-stream");
+    assert_eq!(t.source_kind, SourceKind::Document);
 
     // The extension is not what decides it, in either direction: the same
     // bytes are refused named `png`, named `txt`, and named nothing.
@@ -194,10 +195,12 @@ fn the_formats_with_readers_still_reach_their_readers() {
     assert_eq!(identify(&pdf, Some("pdf")).reader, Reader::Pdf);
 
     // A zip signature with NUL bytes behind it: still routed by the zip
-    // branch, not refused as binary.
+    // branch, not refused as binary. It has no `word/document.xml`, so the
+    // zip branch itself answers `Unrecognized` — the point here is that it
+    // never reaches `NotText`, not what it lands on instead.
     let mut zip = b"PK\x03\x04".to_vec();
     zip.extend_from_slice(&[0x00; 32]);
-    assert_ne!(identify(&zip, Some("docx")).reader, Reader::NotText);
+    assert_eq!(identify(&zip, Some("docx")).reader, Reader::Unrecognized);
 }
 
 /// Text keeps its reader, and keeps the extension deciding *which* one.

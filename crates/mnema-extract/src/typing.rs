@@ -104,7 +104,7 @@ pub(crate) fn looks_like_text(bytes: &[u8]) -> bool {
 }
 
 /// Decides what `bytes` are: magic first, where magic exists; the extension
-/// only when the bytes are plain text, or when no magic recognises them.
+/// only when the bytes are plain text.
 pub fn identify(bytes: &[u8], extension: Option<&str>) -> FileType {
     if bytes.starts_with(PDF_MAGIC) {
         return FileType {
