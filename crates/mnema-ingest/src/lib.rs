@@ -663,6 +663,25 @@ fn displaces(
         // and deleting the document would lose text that is still on disk.
         // `TooLarge` is conditional for the same reason against a different
         // measure (its own doc comment has the case that taught it).
+        //
+        // `is_none_or`, and deliberately the opposite default to `TooLarge`'s
+        // `is_some_and` below, because the two unknowns are not the same
+        // unknown. There, a missing size is this crate's own `stat` failing
+        // under a worker whose `stat` succeeded — an environment fault, and
+        // nothing is removed on those. Here, a missing digest can only be a
+        // worker that predates the field, which is what `#[serde(default)]` on
+        // `Frame::Refused` exists for; behaving as the release that worker came
+        // from behaved is what its refusal meant, and that release displaced.
+        // No in-tree path reaches here with `None`: every skip synthesised
+        // without a worker carries `Unreadable`, `Crash`, `Timeout` or
+        // `Memory`, and the ceiling carries `TooLarge`.
+        //
+        // It also keeps a lost digest loud rather than quiet. Two mutation
+        // cases catch the pool dropping the field precisely because `None`
+        // still displaces; under `is_some_and` both would pass while the
+        // migration of an already-poisoned index silently stopped working —
+        // and a photo that keeps answering under a note's name is the defect
+        // this whole rule was added to end.
         SkipRule::NotText => content.is_none_or(|sha| sha != recorded.document_id),
         SkipRule::Unsupported | SkipRule::NoTextLayer => true,
         // Something that happened, and that happens to every file alike.
