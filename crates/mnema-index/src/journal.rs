@@ -98,11 +98,14 @@ declare_skip_rules! {
     /// content — a `.txt` overwritten by a PDF must stop answering under its
     /// own name. This branch never opens the file; it decides from `stat`
     /// alone, so the refusal itself says nothing about whether the content
-    /// changed. That is settled there by comparing the size on disk against
-    /// `path.size_bytes`, which is exact: a document exists under a path only
-    /// because the file was once under the ceiling, so the same size now means
-    /// the ceiling moved, and a different size means the file was rewritten.
-    /// `mnema_ingest`'s `displaces` carries the argument in full.
+    /// changed. That is settled there against what the walk measured — the size
+    /// **and** the modification time the `path` row recorded — and settled
+    /// against nothing else, because a refusal made without opening the file
+    /// leaves no reading of the content to compare. The size alone is not
+    /// enough, and the argument that it was refuted itself: it excluded a
+    /// same-length rewrite by assuming the ceiling had not moved, inside the one
+    /// rule that exists because it can. `mnema_ingest`'s `displaces` carries it
+    /// in full, along with what is left over and why it cannot be closed there.
     TooLarge,
     /// The file is not text at all — a photo, a video, a database — decided
     /// by its own bytes rather than its name (D51).
@@ -487,6 +490,37 @@ impl Db {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Forgets the whole-file verdict recorded against one path, if there is
+    /// one.
+    ///
+    /// The counterpart of [`record_skip`](Db::record_skip), and it exists
+    /// because until it did there was exactly one `DELETE FROM skipped` in the
+    /// tree — [`forget_skips_not_in`](Db::forget_skips_not_in), reconciliation's
+    /// own, which fires only for paths a complete walk did **not** see. A file
+    /// refused once and then indexed successfully therefore kept its refusal for
+    /// the life of the index, and that row is not inert. It is what the window
+    /// answering "why is this file not in my index?" reads, so that list named
+    /// files that are in it; and it is what `mnema_ingest::ingest_file`'s second
+    /// cheap arm answers from, which compares `(size, mtime, format_version)`
+    /// and never asks whether the verdict was reached on *these* bytes. Put a
+    /// previous version back with its own modification time — `cp -p`, `tar
+    /// -xp`, a cloud client's "restore previous version" — and the stale row
+    /// matched again and answered for a file nobody had looked at.
+    ///
+    /// Only whole-file rows (`page_no IS NULL`), matching what `skip_entry`
+    /// reads and what `ingest_file` writes for a file. A per-page row belongs to
+    /// one page of one document and is not this path's verdict; the reader that
+    /// will produce those does not exist yet, and folding them in here would
+    /// silently erase them the moment it does.
+    pub fn forget_skip(&self, root_id: i64, relative_path: &str) -> Result<(), Error> {
+        self.conn().execute(
+            "DELETE FROM skipped
+              WHERE watched_root_id = ?1 AND relative_path = ?2 AND page_no IS NULL",
+            params![root_id, relative_path],
+        )?;
+        Ok(())
     }
 
     /// Removes skip rows under `root_id` whose path is not in `seen` and does

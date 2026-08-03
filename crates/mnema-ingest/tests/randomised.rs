@@ -286,6 +286,38 @@ struct Content {
     shape: Shape,
 }
 
+/// One version of one file, kept so that it can be put back exactly as it was
+/// — bytes **and** the modification time that went with them.
+///
+/// The modification time is the whole reason this type exists. Every other
+/// operation in this file writes with [`World::next_tick`], a clock that only
+/// ever goes forward, so no sequence it can draw ever returns a path to a
+/// `(size, mtime)` pair the index or the journal has already seen. That pair is
+/// exactly what `ingest_file`'s two cheap arms key on, so a whole region of the
+/// product's behaviour was unreachable by construction rather than by
+/// coincidence — see [`World::restore_a_previous_version`].
+#[derive(Clone)]
+struct Version {
+    bytes: Vec<u8>,
+    markers: Vec<String>,
+    shape: Shape,
+    mtime: SystemTime,
+    /// [`FileState::refused_by_content`] as it stood for **this** version.
+    ///
+    /// It travels with the version because the journal row it describes is
+    /// keyed on the version's own `(size, mtime)`: put those bytes back at that
+    /// time and the row matches again, so the flag is true again. Restoring
+    /// without it left `settle` expecting the index to hold a file the second
+    /// cheap arm will refuse for the life of the index — a real, documented
+    /// price of D51 reported as a defect.
+    ///
+    /// Conservative in one direction on purpose: a successful index of this
+    /// path since then removes the row (`repoint`), and this flag does not
+    /// learn that. The cost is `settle` declining to check a path it could
+    /// have; the opposite error would be a failure the product did not cause.
+    refused_by_content: bool,
+}
+
 /// What the harness believes is at a path, which is only what the product
 /// cannot know: the shape it wrote, the words it put there, and the
 /// modification time it chose.
@@ -293,6 +325,15 @@ struct FileState {
     shape: Shape,
     markers: Vec<String>,
     mtime: SystemTime,
+    /// What this path held before its current content, if anything — kept so
+    /// that a restore can put it back with its own modification time.
+    ///
+    /// One version deep, which is what "restore the previous version" means and
+    /// is enough for the sequences that matter: a refusal, an edit over it, and
+    /// the refusal put back. Restoring twice toggles between the two, because
+    /// the restore itself is an ordinary write and files the version it
+    /// replaced.
+    previous: Option<Box<Version>>,
     /// A content rule refused this path, and the journal still remembers it
     /// against the file's current size and mtime.
     ///
@@ -485,6 +526,18 @@ impl World {
     }
 
     fn write_at(&mut self, relative: &str, content: Content, at: SystemTime) {
+        // What is being written over, read off the disk rather than off the
+        // model, so a restore puts back bytes that were really there.
+        let previous = self.on_disk(relative).and_then(|bytes| {
+            let state = self.files.get(relative)?;
+            Some(Box::new(Version {
+                bytes,
+                markers: state.markers.clone(),
+                shape: state.shape,
+                mtime: state.mtime,
+                refused_by_content: state.refused_by_content,
+            }))
+        });
         let path = self.absolute(relative);
         std::fs::write(&path, &content.bytes).unwrap();
         std::fs::File::options()
@@ -499,8 +552,13 @@ impl World {
                 shape: content.shape,
                 markers: content.markers,
                 mtime: at,
-                // New bytes at a new time: whatever the journal remembers about
-                // this path no longer matches what a walk will stat.
+                previous,
+                // Whatever the journal remembers about this path was recorded
+                // against some `(size, mtime)` pair, and the question is only
+                // ever whether *this* write lands back on it. Every caller but
+                // one writes at a tick nothing has used before, so the answer
+                // is no; `restore_a_previous_version` is the exception and sets
+                // this itself, from the version it put back.
                 refused_by_content: false,
             },
         );
@@ -1179,6 +1237,28 @@ impl World {
     /// itself stopped holding it — is unchanged; what changed is that "the
     /// file itself" now includes whether a rule says *this walk* may look at
     /// it, which the file's bytes alone never could.
+    ///
+    /// **Fix round 2 added the second exception, and it is the same amendment
+    /// as the first one rather than a new kind.** A refusal by the size ceiling
+    /// is made from `stat`, without the file being opened, so a call that gets
+    /// one has read nothing: from there a file merely touched and a file
+    /// rewritten in place at the same length are the same two numbers, and
+    /// `displaces` takes the loss over the stale citation (its own section on
+    /// `TooLarge` has the trade and what is left over). This invariant's claim
+    /// still holds as stated — content vanishes only when the file stopped
+    /// holding it, *or when a setting forbade this call to find out*, which is
+    /// exactly what excluding a folder already meant here.
+    ///
+    /// It is scoped to the one path the call in flight was about, and to a
+    /// verdict of `TooLarge`, so it excuses nothing else: no other rule reaches
+    /// it, and a collateral removal elsewhere in the same call is still caught.
+    /// It does cost this invariant the only witness it had for that rule
+    /// keeping a document — `a_lowered_ceiling_keeps_what_it_still_recognises`
+    /// (`tests/slice.rs`) is where that direction is asserted now, on the one
+    /// state where keeping is still required — and invariant 3c gained a
+    /// `TooLarge` arm in the same change, which is the direction that was
+    /// missing here before either of them: nothing at all forbade the index to
+    /// go on answering for an oversized file whose bytes had moved.
     fn check_nothing_removed_that_the_disk_still_holds(
         &self,
         before: &BTreeMap<String, String>,
@@ -1189,6 +1269,14 @@ impl World {
                 continue;
             }
             if self.walking && self.excluded.contains(relative) {
+                continue;
+            }
+            if self.calling.as_deref() == Some(relative.as_str())
+                && matches!(
+                    self.last.get(relative).map(|last| last.verdict),
+                    Some(Verdict::Skipped(SkipRule::TooLarge))
+                )
+            {
                 continue;
             }
             if self.hash_on_disk(relative).as_ref() == Some(document) {
@@ -1228,12 +1316,34 @@ impl World {
     /// onto the displacing side of `displaces` left every seed of this harness
     /// green.
     ///
-    /// Only the two content rules are named, and deliberately not `TooLarge`,
-    /// whose answer is conditional on a size comparison rather than on the rule
-    /// — restating that here would re-derive `displaces` inside the tool meant
-    /// to check it. `Crash`, `Timeout`, `Memory` and `Unreadable` are readings
-    /// of the environment and keep, which invariant 3 already covers whenever
-    /// the bytes did not move.
+    /// `Crash`, `Timeout`, `Memory` and `Unreadable` are readings of the
+    /// environment and keep, which invariant 3 already covers whenever the
+    /// bytes did not move.
+    ///
+    /// **`TooLarge` was left out of this check, and that was the structural
+    /// hole fix round 2 closed.** The reasoning for leaving it out was that its
+    /// answer turns on a size comparison rather than on the rule, so restating
+    /// it here would re-derive `displaces` inside the tool built to check it —
+    /// which is right about `displaces` and wrong about what this invariant
+    /// asks. The three checks around it left a gap shaped exactly like that
+    /// rule: invariant 2 excuses any path whose last answer was a refusal, this
+    /// one had `TooLarge` among its empty arms, and invariant 3 only ever fires
+    /// on a removal. So nothing anywhere forbade the index to go on answering,
+    /// under a name that exists, with a document built from bytes that file no
+    /// longer holds — for as long as it stayed over the ceiling, which is
+    /// forever, since the worker keeps refusing it from `stat`.
+    ///
+    /// The arm added below does **not** restate `displaces`. It asserts what
+    /// this harness knows and the product cannot: the digest of the bytes the
+    /// call was made on. When those bytes are not the document still standing
+    /// under that path, the index is answering with text the file does not
+    /// contain, whatever evidence `displaces` had to reach that with. The
+    /// keeping direction is deliberately not asserted here — a refusal made
+    /// without opening the file cannot tell an untouched file from a
+    /// same-length rewrite, so demanding a keep would be demanding a
+    /// distinction that does not exist. It is asserted deterministically
+    /// instead, in `a_lowered_ceiling_keeps_what_it_still_recognises`
+    /// (`tests/slice.rs`), on the one state where it is still owed.
     ///
     /// Scoped to the path this call was about: a step may legitimately do
     /// several things, and `before` here is the table as it stood immediately
@@ -1281,13 +1391,25 @@ impl World {
                 // was 3, not 3c. What this arm adds is the *displace* side,
                 // which no other invariant states, and a message that names the
                 // rule rather than the deletion.
-                SkipRule::NotText => match last.hash.as_deref() {
+                //
+                // `Unsupported` is judged by the same two lines and not left in
+                // an empty arm beside them, which is where it sat until fix
+                // round 2. `displaces` gives the two rules the identical
+                // condition, and `make_opaque` — a PDF header saved over a note
+                // — reaches this one on every run, so the arm was silent about
+                // a verdict the generator produces rather than about one it
+                // cannot. Its keep side stays unreachable here for a reason
+                // worth naming rather than hiding: it needs a build that *lost*
+                // a reader, and no sidecar in this file models one. The
+                // deterministic pair does
+                // (`a_file_no_reader_can_take_keeps_its_document_when_only_the_rule_changed`).
+                SkipRule::NotText | SkipRule::Unsupported => match last.hash.as_deref() {
                     // The worker saw exactly the bytes the index was built
                     // from. The rule changed, the file did not.
                     Some(sha) if sha == held => {
                         if after.get(relative) != Some(held) {
                             self.fail(format!(
-                                "invariant 3c — {relative} was refused as not text and lost \
+                                "invariant 3c — {relative} was refused as {rule:?} and lost \
                                  {held}, but its bytes are byte-identical to what that \
                                  document was built from. Nothing about the file changed, \
                                  so a release that classifies it differently has deleted \
@@ -1301,10 +1423,10 @@ impl World {
                     // gone.
                     Some(_) if after.get(relative) == Some(held) => {
                         self.fail(format!(
-                            "invariant 3c — {relative} was refused as not text, and the \
-                             index still answers for it with {held}. Those bytes are a \
-                             photo now, so every citation of that document names a file \
-                             whose text it no longer contains"
+                            "invariant 3c — {relative} was refused as {rule:?}, and the \
+                             index still answers for it with {held}. Those bytes are \
+                             something else now, so every citation of that document names \
+                             a file whose text it no longer contains"
                         ));
                     }
                     Some(_) => {}
@@ -1327,13 +1449,28 @@ impl World {
                         ));
                     }
                 }
+                // Refused from `stat`, without the file being opened — so the
+                // product has no reading of the content and this harness does.
+                // One direction only, and the doc comment above says why the
+                // other one is owed elsewhere.
+                SkipRule::TooLarge => {
+                    if last.hash.as_deref().is_some_and(|sha| sha != held)
+                        && after.get(relative) == Some(held)
+                    {
+                        self.fail(format!(
+                            "invariant 3c — {relative} was refused for being over the size \
+                             ceiling, and the index still answers for it with {held}. The \
+                             file no longer holds those bytes, and it will be refused from \
+                             `stat` on every later walk too, so nothing is coming to \
+                             correct it"
+                        ));
+                    }
+                }
                 SkipRule::Crash
                 | SkipRule::Timeout
                 | SkipRule::Memory
-                | SkipRule::Unsupported
                 | SkipRule::NoTextLayer
-                | SkipRule::Unreadable
-                | SkipRule::TooLarge => {}
+                | SkipRule::Unreadable => {}
             }
         }
     }
@@ -1724,7 +1861,7 @@ impl World {
         let choice = if self.files.is_empty() {
             0
         } else {
-            self.rng.below(23)
+            self.rng.below(25)
         };
         match choice {
             0 => self.create(),
@@ -1756,6 +1893,14 @@ impl World {
             19 => self.overwrite_with_a_photo(),
             20 => self.interrupt_an_append(),
             21 => self.stricter_rule_over_an_unchanged_folder(),
+            // The two the clock made unreachable. Everything above writes at a
+            // tick nothing has used before, so no sequence drawn from this
+            // table could return a file to a `(size, mtime)` pair the index or
+            // the journal already knew, and no sequence could rewrite a file in
+            // place under a ceiling that had moved. Both are ordinary things to
+            // do to a folder, and both were invisible here by construction.
+            22 => self.restore_a_previous_version(),
+            23 => self.rewrite_in_place_under_a_lowered_ceiling(),
             _ => self.run_walk(),
         }
     }
@@ -1978,6 +2123,12 @@ impl World {
         // Measured on 3 paths of 200 seeds, each one a renamed file the settle
         // loop then declined to check.
         state.refused_by_content = false;
+        // And neither does the copy of it an earlier version carries, for the
+        // same reason: restoring that version under the *new* name meets a
+        // journal keyed on a path that has no row at all.
+        if let Some(previous) = state.previous.as_mut() {
+            previous.refused_by_content = false;
+        }
         self.files.insert(renamed.clone(), state);
         self.note(format!("  rename {relative} -> {renamed}"));
         self.maybe_ingest(&renamed);
@@ -2112,11 +2263,108 @@ impl World {
         self.ingest(&relative);
     }
 
-    /// A ceiling lowered under a file that did not change.
+    /// A previous version of a file put back **with its own modification
+    /// time** — `cp -p`, `rsync -a`, `tar -xp`, `unzip`, Time Machine, and a
+    /// cloud client's "restore previous version".
     ///
-    /// The size on disk is what tells this apart from a file that *grew* past a
-    /// fixed ceiling, and only one of the two may lose what the index holds. The
-    /// touch is what stops the cheap arm answering before the pool is asked.
+    /// The one operation here that moves a file's clock backwards, and that is
+    /// the whole of what it is for. [`World::next_tick`] is strictly monotonic,
+    /// so before this every sequence this file could draw left each path on a
+    /// `(size, mtime)` pair nothing had ever seen before. Both of
+    /// `ingest_file`'s cheap arms key on exactly that pair — the first against
+    /// the `path` row, the second against the skip journal — so the states
+    /// where a *remembered* answer meets bytes it was not reached on were
+    /// unreachable by construction, in the same way as task 8's UTF-16 tail.
+    /// D47: the generator was the thing that was wrong, not the invariants.
+    ///
+    /// What it reaches, in three steps a person does without thinking: a file
+    /// is refused on its content, something else is saved over that name and
+    /// indexed, and then the refused version is restored from a backup that
+    /// kept its timestamp. The journal's row matches the disk again, and what
+    /// the index answers with under that name is a document built from bytes
+    /// that are no longer there.
+    fn restore_a_previous_version(&mut self) {
+        let relative = self.a_file();
+        let Some(previous) = self.files[&relative].previous.clone() else {
+            self.note(format!("  (no earlier version of {relative} to restore)"));
+            return;
+        };
+        self.note(format!(
+            "  restore the previous version of {relative} ({} bytes) with its own \
+             modification time",
+            previous.bytes.len()
+        ));
+        let content = Content {
+            bytes: previous.bytes,
+            markers: previous.markers,
+            shape: previous.shape,
+        };
+        self.write_at(&relative, content, previous.mtime);
+        // Restored bytes at their restored time: whatever the journal recorded
+        // against that pair applies again, so the flag comes back with them.
+        if let Some(state) = self.files.get_mut(&relative) {
+            state.refused_by_content = previous.refused_by_content;
+        }
+        self.maybe_ingest(&relative);
+    }
+
+    /// A file rewritten in place, keeping its exact length, under a ceiling
+    /// that has moved below it.
+    ///
+    /// The size on disk is what `displaces` had to decide the ceiling's case
+    /// on, and this is the sequence that size alone cannot answer: the file is
+    /// the length the index recorded, because it is the same document rewritten
+    /// rather than a longer one, and it is over the ceiling now only because
+    /// the setting moved. Neither `grow_past_the_ceiling` (a different length)
+    /// nor `lower_the_ceiling` (the same bytes) produces it, and between them
+    /// they were the whole of what this file could say about the ceiling.
+    fn rewrite_in_place_under_a_lowered_ceiling(&mut self) {
+        let relative = self.a_file();
+        let units = match self.files[&relative].shape {
+            // The same restriction `edit_keeping_length` carries, for the same
+            // reason: only prose and markdown have a unit count whose length
+            // can be reproduced.
+            Shape::Text(n) | Shape::Markdown(n) => n,
+            Shape::Opaque | Shape::NotText | Shape::BinaryTail => return,
+        };
+        let Some(was) = self.on_disk(&relative).map(|b| b.len()) else {
+            return;
+        };
+        if was == 0 {
+            return;
+        }
+        let content = self.body_for(&relative, units);
+        assert_eq!(
+            was,
+            content.bytes.len(),
+            "the fixture generator must produce the same length for the same shape, or \
+             this operation is silently a file that grew"
+        );
+        let at = self.next_tick();
+        self.note(format!(
+            "  rewrite {relative} in place, same {was} bytes, then walk it under a \
+             ceiling of {}",
+            was - 1
+        ));
+        self.write_at(&relative, content, at);
+        let config = PoolConfig {
+            max_bytes: (was - 1) as u64,
+            ..Self::config()
+        };
+        self.ingest_with(&relative, config, " [lowered ceiling]");
+    }
+
+    /// A ceiling lowered under a file whose bytes did not change — but whose
+    /// modification time did, because that is the only way to reach the pool at
+    /// all.
+    ///
+    /// The touch is what stops the cheap arm answering first, and since fix
+    /// round 2 it is also what the answer turns on: from a refusal made without
+    /// opening the file, a touch and a same-length rewrite in place are the same
+    /// two numbers, so this operation now legitimately loses the document.
+    /// Invariant 3 carries the narrow exception that says so, and
+    /// `rewrite_in_place_under_a_lowered_ceiling` below is the case it is losing
+    /// it for.
     fn lower_the_ceiling(&mut self) {
         let relative = self.a_file();
         let Some(size) = self.on_disk(&relative).map(|b| b.len() as u64) else {
@@ -2706,7 +2954,7 @@ fn run(seed: u64, steps: usize) {
 /// **What the default run covers.** Twelve seeds of twenty-four steps each,
 /// from a fixed base, so the default is the same corpus on every machine and in
 /// CI rather than a lottery that is green until it is not. Each step draws one
-/// of the nineteen operations, applies it, walks whatever it touched — or, for
+/// of the twenty-four operations, applies it, walks whatever it touched — or, for
 /// `RunWalk` and `SimulateEjectedVolume`, runs a real `walk_root` over the
 /// whole folder — and checks every invariant in this file after **each call**,
 /// not merely at the end of the step. About three hundred steps and rather

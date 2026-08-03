@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use mnema_index::{Db, open};
 use mnema_ingest::{FrozenReason, StopReason, WalkReport, walk_root};
@@ -225,13 +225,50 @@ impl Fixture {
         timeout.mul_f64(3.5)
     }
 
+    /// Writes raw bytes at `relative` with a chosen modification time.
+    ///
+    /// Both halves matter to the tests that use it. `write` takes a `&str`, and
+    /// a photo is not one; and the modification time has to be *chosen* rather
+    /// than taken from the clock, because putting a file back at a time it
+    /// already had is the whole shape of a restore.
+    fn write_bytes_at(&self, relative: &str, bytes: &[u8], at: SystemTime) {
+        let path = self.dir().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    /// A sidecar standing in for the worker, written into the index's own
+    /// scratch directory rather than the watched root — `enumerate` would list
+    /// the script itself as a found file if it lived there.
+    #[cfg(unix)]
+    fn wrong_worker(&self, script: &str) -> PathBuf {
+        support::wrong_worker(self._index.path(), script)
+    }
+
     fn walk(&self) -> WalkReport {
         self.walk_with(&WalkRules::none())
     }
 
     fn walk_with(&self, rules: &WalkRules) -> WalkReport {
+        self.walk_all(&self.pool, rules)
+    }
+
+    /// The same walk over the same index, driven by a pool the caller built —
+    /// for the one test that needs the pool to be unable to answer.
+    #[cfg(unix)]
+    fn walk_with_pool(&self, pool: &Pool) -> WalkReport {
+        self.walk_all(pool, &WalkRules::none())
+    }
+
+    fn walk_all(&self, pool: &Pool, rules: &WalkRules) -> WalkReport {
         walk_root(
-            &self.pool,
+            pool,
             &self.db,
             self.root,
             self.dir(),
@@ -344,6 +381,137 @@ fn cancellation_stops_the_walk_between_files() {
 
     assert_eq!(report.stopped, StopReason::Cancelled);
     assert!(report.indexed < 20);
+}
+
+// -------------------------------------------- a refusal the walk remembers
+
+/// Three walks over one name, and the third is the one nothing caught.
+///
+/// A photo is refused on its content. Something else is saved over that name
+/// and indexed. Then the photo is restored **with its own modification time**
+/// — `cp -p`, `tar -xp`, `unzip`, Time Machine, a cloud client's "restore
+/// previous version" — and the pair the skip journal remembers matches the
+/// disk again.
+///
+/// Measured at this level before the fix, and the numbers are why it is a walk
+/// test rather than a call test: the third walk answered
+/// `{ found: 1, indexed: 0, skipped: 1, removed: 0, stopped: Completed }`,
+/// which is what a correct walk over a refused file looks like. Nothing in
+/// `WalkReport` distinguished it. Underneath, the `path` row still named the
+/// note, one lexical hit still came back for text that was no longer in the
+/// file, and the journal beside it said `not_text` — the exact state the
+/// displacement exists to prevent, now with a journal entry asserting it had
+/// been dealt with.
+///
+/// Two things had to hold for that, and both are fixed: the second cheap arm
+/// answered from the journal before anything decided whether the document had
+/// to go, and the successful walk in the middle left the refusal standing for
+/// a path it had just indexed.
+#[test]
+fn a_photo_restored_with_its_own_time_stops_the_note_answering() {
+    let photo = include_bytes!("../../mnema-extract/tests/fixtures/solid.png");
+    let f = Fixture::new();
+
+    // Walk 1 — the name holds a photo, and the walk refuses it on its bytes.
+    let refused_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    f.write_bytes_at("notes/a.txt", photo, refused_at);
+    let first = f.walk();
+    assert_eq!((first.found, first.indexed, first.skipped), (1, 0, 1));
+
+    // Walk 2 — a note is saved over that name.
+    f.write_bytes_at(
+        "notes/a.txt",
+        "Нотатка про засідання: ухвалили перенести терміни.\n"
+            .repeat(20)
+            .as_bytes(),
+        refused_at + Duration::from_secs(60),
+    );
+    let second = f.walk();
+    assert_eq!((second.found, second.indexed, second.skipped), (1, 1, 0));
+    assert!(
+        !f.db.search_lexical("перенести", 10).unwrap().is_empty(),
+        "the premise fails if the note was never searchable"
+    );
+
+    // Walk 3 — the photo comes back, carrying the time it had before.
+    f.write_bytes_at("notes/a.txt", photo, refused_at);
+    let third = f.walk();
+    assert_eq!((third.found, third.indexed, third.skipped), (1, 0, 1));
+    assert_eq!(third.stopped, StopReason::Completed);
+
+    assert!(
+        f.db.search_lexical("перенести", 10).unwrap().is_empty(),
+        "the index still answers under this name with a note the file no longer \
+         holds, and no counter on the report says so"
+    );
+    assert_eq!(
+        f.db.paths_under_root(f.root).unwrap(),
+        Vec::<String>::new(),
+        "the path row is what the citation is rendered from, so it has to go with \
+         the document"
+    );
+    let skips = f.db.skips_for_root(f.root).unwrap();
+    assert_eq!(
+        skips.iter().map(|s| s.rule.as_str()).collect::<Vec<_>>(),
+        vec!["not_text"],
+        "and it is journalled once, under the rule that fired — a removal with no \
+         record is the other half of the same defect"
+    );
+}
+
+/// The half of the same fix that must **not** change, measured on the counter
+/// the fix is paid for in.
+///
+/// The second cheap arm exists so that a folder of refused files does not cost
+/// a worker process per file per walk. Falling through to the pool whenever the
+/// remembered rule would displace keeps that saving where it matters — a
+/// refused file that never had a `path` row, which is every scan in a folder of
+/// scans — and this is the other side: an interrupted note, which does have a
+/// `path` row and whose rule keeps it, must still be answered from the journal
+/// without a process.
+///
+/// `indexed + unchanged + skipped` cannot see the difference, so the pool is
+/// starved instead: the last walk runs against a sidecar that answers every
+/// request with bytes that are not UTF-8, which the pool turns into `Crash`.
+/// A walk that reaches it comes back with a different rule; a walk that
+/// answers from the journal never notices the sidecar is there.
+#[cfg(unix)]
+#[test]
+fn a_second_walk_over_an_interrupted_note_asks_no_worker() {
+    let f = Fixture::new();
+    let mut note = "Нотатка про засідання: ухвалили перенести терміни.\n"
+        .repeat(20)
+        .into_bytes();
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    f.write_bytes_at("notes/a.txt", &note, at);
+    assert_eq!(f.walk().indexed, 1);
+
+    // The power goes out mid-append: the prose stays, the tail comes back
+    // zeroed. The document the index already holds is still the opening of
+    // this file, so the rule keeps it.
+    note.extend(std::iter::repeat_n(0u8, 2048));
+    f.write_bytes_at("notes/a.txt", &note, at + Duration::from_secs(60));
+    let second = f.walk();
+    assert_eq!((second.found, second.skipped), (1, 1));
+    assert!(
+        !f.db.search_lexical("перенести", 10).unwrap().is_empty(),
+        "the prose is still on disk in front of the damage and readable nowhere else"
+    );
+
+    // A third walk, against a sidecar that is not the worker. Reaching it at
+    // all turns this file's rule into `crash`; answering from the journal
+    // leaves it exactly as it was.
+    let sidecar = Pool::new(PoolConfig::new(f.wrong_worker(r"printf '\377\376\n'"))).unwrap();
+    let third = f.walk_with_pool(&sidecar);
+    assert_eq!((third.found, third.skipped), (1, 1));
+    let skips = f.db.skips_for_root(f.root).unwrap();
+    assert_eq!(
+        skips.iter().map(|s| s.rule.as_str()).collect::<Vec<_>>(),
+        vec!["binary_tail"],
+        "a rule that keeps must still short-circuit, or a folder of interrupted \
+         files pays a worker process each, on every walk, forever"
+    );
+    assert!(!f.db.search_lexical("перенести", 10).unwrap().is_empty());
 }
 
 // ------------------------------------------------ rules that failed to apply
