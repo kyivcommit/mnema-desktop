@@ -39,7 +39,16 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUNDLE="${REPO}/target/release/bundle"
 LAB="$(mktemp -d "${TMPDIR:-/tmp}/mnema-controls.XXXXXX")"
-trap 'chmod -R u+w "$LAB" 2>/dev/null; rm -rf "$LAB"' EXIT
+# The third clause is control 13b's, not $LAB's: that control stages a second
+# file directly in the real, git-ignored src-tauri/binaries/ (there is no copy
+# to mutate instead — see the comment at its call site), and a signal between
+# the `cp` and its own `rm -f` would otherwise leave the file behind, where
+# nothing prunes it and every later run of this suite and of verify-bundle.sh
+# itself reddens on "files matching … in …" for a reason that has nothing to do
+# with what it is actually testing. The path is a constant, so it costs nothing
+# on the normal exit, where 13b has already removed it and this `rm -f` is a
+# no-op.
+trap 'chmod -R u+w "$LAB" 2>/dev/null; rm -rf "$LAB"; rm -f "${REPO}/src-tauri/binaries/mnema-extract-worker-second-triple"' EXIT
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "verify-bundle-controls: macOS only." >&2
@@ -91,6 +100,15 @@ expect_red() {
     # which is not a wrong reason, only a long path. Measured on control 12 before
     # this split existed — its correct message was reported WRONG REASON only
     # because the path ate the columns the fragment needed.
+    #
+    # That "line" is `grep 'verify-bundle:' | tail -1`, and only a `fail` message's
+    # first physical line carries that prefix — `fail`'s own messages are
+    # multi-line, and continuation lines do not. So a fragment must sit on the
+    # first line of the `fail` it names. Re-wrapping that first line — an edit
+    # that looks purely cosmetic — pushes the fragment onto a continuation `full`
+    # never sees, and turns a correct control into a WRONG REASON accusation.
+    # Whoever reflows a `fail` message should check what fragment, if any, points
+    # at its first line before doing it.
     full="$(printf '%s' "$out" | grep 'verify-bundle:' | tail -1)"
     msg="$(printf '%s' "$full" | cut -c1-140)"
     if [ -n "${expect}" ] && ! printf '%s' "${full}" | grep -qF -- "${expect}"; then
