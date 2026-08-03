@@ -542,6 +542,28 @@ if must copy_app_out "${LAB}/pdf-reader" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/pdf-reader-img"
 fi
 
+echo "### 16e. the image is older than the worker this checkout built"
+# Control 13's prelude turned to the opposite purpose. That control makes the staged
+# file DIFFER from the built one; this one makes them the same bytes copied twice, so
+# the sha comparison passes and the timestamp is the only thing left that can redden.
+# `touch` is what separates those two facts: it moves mtime and leaves content alone,
+# which is exactly the state the check names — a sidecar that is perfectly fresh inside
+# an image written before it. The guard below asserts that state was produced, rather
+# than trusting that `cp` gave the copies a current mtime.
+if must copy_repo "${LAB}/stale-image" \
+  && must mkdir -p "${LAB}/stale-image/target/release" \
+  && must cp "${REPO}/target/release/mnema-extract-worker" \
+       "${LAB}/stale-image/target/release/mnema-extract-worker" \
+  && must mkdir -p "${LAB}/stale-image/src-tauri/binaries" \
+  && must cp "${REPO}/target/release/mnema-extract-worker" \
+       "${LAB}/stale-image/src-tauri/binaries/mnema-extract-worker-aarch64-apple-darwin" \
+  && must touch "${LAB}/stale-image/target/release/mnema-extract-worker" \
+  && must [ "${LAB}/stale-image/target/release/mnema-extract-worker" -nt "${GOOD}" ]; then
+  expect_red -m "is older than the worker this checkout built" \
+    "an image written before the worker it is supposed to contain" \
+    "${LAB}/stale-image/scripts/verify-bundle.sh" "${BUNDLE}"
+fi
+
 echo
 echo "### and the real bundle, which must pass"
 if bash "${REPO}/scripts/verify-bundle.sh" >/dev/null 2>&1; then

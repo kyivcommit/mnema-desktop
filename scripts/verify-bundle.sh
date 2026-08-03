@@ -183,9 +183,10 @@ built_sha="$(shasum -a 256 "${built_worker}" | cut -d' ' -f1)"
 # out an image written before the worker it is supposed to contain.
 [ "${dmg}" -nt "${built_worker}" ] \
   || fail "${dmg} is older than the worker this checkout built, so it cannot be carrying
-  it. Something was rebuilt after the image was written, and nothing else here would
-  notice: the staged file still matches the built one, and the worker inside the image
-  still runs. Re-run cargo tauri build."
+  that worker. This is NOT the staged sidecar going stale, and it does not duplicate the
+  check above: that one just proved the staged file is the built one, and it can be
+  perfectly fresh while this image predates both. What is stale here is the image —
+  something was rebuilt after it was written. Re-run cargo tauri build."
 
 # --- the signature ------------------------------------------------------------
 #
