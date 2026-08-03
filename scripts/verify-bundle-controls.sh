@@ -72,10 +72,10 @@ broken=0
 # the informational one naming the image, and the last is the failure message,
 # which is the only thing that says whether the control reddened for the reason
 # it claims. Two controls that asked the dependency graph about Pdfium once
-# forced this — each had more than one possible red exit and was
-# indistinguishable from the other without it. Both are gone now, replaced by
-# the worker-verdict controls below (15 and 16), but the rule they forced
-# stayed: any two controls can still collide the same way.
+# forced this — they had two possible red exits between them and were
+# indistinguishable without it. Both are gone now, replaced by the
+# worker-verdict controls below, but the rule they forced stayed: any two
+# controls can still collide the same way.
 #
 # An optional `-m FRAGMENT` before the label asserts that fragment is present in
 # that line — mechanizing the "own reason" rule instead of leaving it to a human
@@ -299,8 +299,8 @@ if must copy_repo "${LAB}/stale" \
 fi
 
 echo "### 13b. two staged sidecars for the same triple"
-# Mutates the real src-tauri/binaries/, not a copy. Control 13 gets to stage a
-# second file into a fake src-tauri/binaries/ because it runs a relocated copy
+# Mutates the real src-tauri/binaries/, not a copy. Control 13 gets to stage
+# into a fake src-tauri/binaries/ because it runs a relocated copy
 # of verify-bundle.sh, whose own repo_root resolves to that copy; this control
 # has no such lever, because src-tauri/binaries/ is not an argument
 # verify-bundle.sh takes — repo_root always resolves to the one real

@@ -8,9 +8,10 @@ date of its own was run on 2026-07-26 on macOS 26.5.2, arm64, with the toolchain
 `rust-toolchain.toml` names (1.97.1) and `tauri-cli` 2.11.4; the Linux figures come
 from an `ubuntu:24.04` container, arm64, glibc 2.39.
 
-Where a claim has not been observed, it says so. `.github/workflows/ci.yml` has never
-run — this repository has no workflow run at all — so every statement about the runners
-is a prediction until the first push.
+Where a claim has not been observed, it says so. `.github/workflows/ci.yml` has run on
+`main`, `refuse-by-content` and `watched-folder` since 2026-07-30, with failures among
+them. `packaging-and-delivery` has never been pushed and has no runs of its own, so
+every statement about the runners is still a prediction until this branch's first push.
 
 ## The version pair
 
@@ -94,8 +95,8 @@ three controls building a package out of a directory that was never created. All
 went red — on "no .dmg", which is a different control's reason — and the run still
 reported the full count.
 
-One of the controls is worth naming on its own, because what it checks is not the
-image at all, and because it used to work differently:
+The Pdfium check is worth naming on its own, because what it checks is not the image
+at all, and because it used to work differently:
 
 - **The verdict comes from the worker, not from a dependency graph.** This check used
   to ask `cargo tree -p mnema-desktop`, and that answered a question about the wrong
@@ -105,12 +106,12 @@ image at all, and because it used to work differently:
   quiet rather than turned red. `scripts/verify-bundle.sh` now feeds the bundled
   worker, run from inside the mounted image, one PDF and reads its verdict.
   `refused`/`unsupported` means the library must **not** be in the bundle — present
-  anyway is 7.7 MB of dead weight, a defect rather than a spare part. `blocks` means
-  the library must be present and must load from inside the image, and that branch
-  fails on purpose today: no reader is implemented for any format but text, so a
-  worker that answers a PDF with blocks proves the check itself has gone stale, which
-  is the day the check is meant to turn red rather than the day packaging broke. Any
-  other answer is unanswered, and unanswered reads as red, not as a pass.
+  anyway is dead weight, a defect rather than a spare part. `blocks` means the library
+  must be present and must load from inside the image, and that branch fails on
+  purpose today: no reader is implemented for any format but text, so a worker that
+  answers a PDF with blocks proves the check itself has gone stale, which is the day
+  the check is meant to turn red rather than the day packaging broke. Any other
+  answer is unanswered, and unanswered reads as red, not as a pass.
 
 ## The acceptance run
 
@@ -321,6 +322,12 @@ both slices:
 | universal | 7,597,603 B | 23.2 MiB | 24,303,184 B |
 | ratio | ×2.05 | ×2.02 | ×2.03 |
 
+Measured 2026-07-26, before `bundle.externalBin` put a worker in the bundle — both rows
+and the ratio belong to that build. The current arm64 figures, worker included, are in
+"What the build produces" above; there is no current universal counterpart to compare
+them to, since producing one compiles the dependency tree twice and nobody has run that
+since the worker landed.
+
 So the universal image is a little over twice the size of the one a given user can run,
 and every user downloads a slice for a machine they do not own. Packages are therefore
 built per architecture. Two further consequences worth knowing before anyone reaches
@@ -336,12 +343,13 @@ Nothing in the shipped application **loads** Pdfium today, but something inside 
 bundle **links** the crate that would: `mnema-extract-worker`, not `mnema-desktop`,
 depends on `mnema-extract`, which depends on `pdfium-render` — `cargo tree -p
 mnema-desktop -e normal` names no such thing, and `cargo tree -p mnema-extract -e
-normal` does. That gap between "linked" and "loaded" is why a check that asked the
-shell's own dependency graph answered the wrong question once a sidecar existed (see
-above); `scripts/verify-bundle.sh` now asks the bundled worker directly, by feeding it
-a PDF, and today's answer is `unsupported` — no reader calls into Pdfium yet, so
-nothing loads the library and the 7.7 MB binary would be dead weight if it shipped.
-That changes the day a PDF reader lands, which is the day the following matters.
+normal` does (run 2026-08-03). That gap between "linked" and "loaded" is why a check
+that asked the shell's own dependency graph answered the wrong question once a
+sidecar existed (see above); `scripts/verify-bundle.sh` now asks the bundled worker
+directly, by feeding it a PDF, and today's answer is `unsupported` — no reader calls
+into Pdfium yet, so nothing loads the library and the 7.7 MB binary would be dead
+weight if it shipped. That changes the day a PDF reader lands, which is the day the
+following matters.
 
 Both placements were measured on this repository:
 
