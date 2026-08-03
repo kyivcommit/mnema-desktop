@@ -2994,7 +2994,20 @@ fn run(seed: u64, steps: usize) {
 /// and the modification times are all drawn from it.
 #[test]
 fn random_sequences_do_not_lose_data() {
-    let steps = setting("MNEMA_FUZZ_STEPS", 24);
+    // **40, and the number was measured rather than chosen.** It stood at 24
+    // until the two worst defects of the refuse-by-content cycle were found by
+    // a reviewer instead of by this harness, and a re-review then measured why:
+    // with both of their guards removed, 12 seeds × 24 steps is **green**, and
+    // 12 × 40 is red on seed 1592590339. The states in question need a file to
+    // be refused, re-indexed, and then handed back its earlier size and mtime —
+    // a history too long to appear inside 24 steps. So the gate that runs on
+    // every `cargo test` could not have caught either one.
+    //
+    // The cost of closing that is 2.2 seconds: 2.40 s at 24 steps against
+    // 4.63 s at 40. Depth is what this dimension buys — `MNEMA_FUZZ_RUNS`
+    // widens the corpus and finds different things, and neither substitutes for
+    // the other.
+    let steps = setting("MNEMA_FUZZ_STEPS", 40);
     if let Ok(seed) = std::env::var("MNEMA_FUZZ_SEED") {
         let seed = seed.parse().expect("MNEMA_FUZZ_SEED is a number");
         eprintln!("replaying seed {seed} for {steps} steps");
