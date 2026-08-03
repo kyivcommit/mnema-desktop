@@ -5,10 +5,12 @@
 //! request and the read — see the report for why), a size exactly at the
 //! ceiling, and a recognised-but-unimplemented reader.
 
+use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 use mnema_extract::wire::Frame;
+use sha2::{Digest, Sha256};
 
 /// Runs the compiled worker binary against `lines`, one request per line on
 /// its stdin, and returns everything it wrote to stdout. Asserts the process
@@ -68,12 +70,178 @@ fn a_file_over_the_ceiling_is_refused_without_being_read() {
     // `mnema-extract` may not depend on `mnema-index` — so it is asserted here
     // rather than left to the parent's mapping.
     match frames_of(&out).as_slice() {
-        [Frame::Refused { rule, reason }] => {
+        [
+            Frame::Refused {
+                rule,
+                reason,
+                sha256,
+            },
+        ] => {
             assert_eq!(rule, "too_large", "a size ceiling must have its own rule");
             assert!(reason.contains("ceiling"), "{reason}");
+            // "Refused without being read" is the name of this test and a real
+            // property of the branch, and this is what pins it: a digest here
+            // could only have come from reading the file the ceiling exists to
+            // avoid reading.
+            assert_eq!(
+                *sha256, None,
+                "the ceiling decides from stat, so there is nothing it could have hashed"
+            );
         }
         other => panic!("expected exactly one refusal, got {other:?}"),
     }
+}
+
+/// D51, end to end through the real binary — the same way the defect was
+/// found rather than read. Before this, a genuine photo came back as
+/// `mime: text/plain`, `source_kind: document`, one block holding the file's
+/// bytes as Latin-1 mojibake: no skip, no journal row, no refusal.
+#[test]
+fn a_photo_is_refused_by_the_real_worker() {
+    let out = run_worker(&["{\"path\":\"tests/fixtures/solid.png\",\"max_bytes\":1048576}"]);
+    let frames = frames_of(&out);
+
+    assert_eq!(frames.len(), 1, "a refusal is the whole answer: {frames:?}");
+    match &frames[0] {
+        Frame::Refused {
+            rule,
+            reason,
+            sha256,
+        } => {
+            assert_eq!(rule, "not_text");
+            assert!(
+                reason.contains("not text"),
+                "the reason is what the window shows a person: {reason:?}"
+            );
+            // The digest of the bytes this verdict was reached on, and the
+            // parent cannot do without it: it is the only thing that tells a
+            // file which *became* unindexable from a file that never changed
+            // while the rule under it did. The second of those loses a
+            // document if this field is missing, because a parent that cannot
+            // see the bytes assumes they moved.
+            //
+            // Asserted against the fixture's own digest rather than merely
+            // `is_some()`: a worker that sent a constant, or the digest of the
+            // wrong buffer, would satisfy the weaker check.
+            let mut hasher = Sha256::new();
+            hasher.update(std::fs::read("tests/fixtures/solid.png").unwrap());
+            let want = hasher
+                .finalize()
+                .iter()
+                .fold(String::with_capacity(64), |mut s, b| {
+                    let _ = write!(s, "{b:02x}");
+                    s
+                });
+            assert_eq!(sha256.as_deref(), Some(want.as_str()));
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// Every refusal this worker reaches **by reading the file** carries the digest
+/// of what it read — all three of them, not the one that happened to get a test.
+///
+/// The digest was pinned on the `not_text` branch alone, and the blindness that
+/// left behind is structural rather than an oversight. Both of the parent's
+/// deterministic witnesses for it (`crates/mnema-ingest/tests/slice.rs`, the two
+/// tests that stage a rule change) put a shell script where the worker goes and
+/// have it print a digest they chose. They prove `displaces` **consumes** the
+/// field correctly; not one of them proves anything **produces** it. Measured:
+/// dropping `sha256` from the `unsupported` branch left the whole workspace
+/// green — 0 failed, `--no-fail-fast`.
+///
+/// What that costs if it is ever dropped is the defect the branch before this
+/// one was written to close, arriving from the other end. `displaces` reads a
+/// missing digest as "the bytes are unknown, so displace", so a folder of PDFs
+/// indexed by a build that has the reader and walked by a build that does not
+/// would lose a document per file, with the bytes never having moved.
+///
+/// `too_large` is deliberately not in this table and has the opposite assertion
+/// of its own, above: that branch answers from `stat` without opening the file,
+/// so a digest there could only have come from reading what the ceiling exists
+/// not to read.
+///
+/// The table is written out by hand, which is the one thing this test cannot
+/// fix: a seventh `Reader` variant refusing under a new rule has to be added
+/// here by whoever adds it. What it does close is that no branch reachable
+/// today is judged by nothing.
+#[test]
+fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
+    let dir = tempfile::tempdir().unwrap();
+    // An interrupted append: prose well past `HEAD_BYTES`, then a zeroed tail.
+    // Built here rather than checked in — it is derived from a rule this
+    // repository already states, and a blob in `tests/fixtures` would be one
+    // more thing that has to be believed.
+    let interrupted = dir.path().join("note.txt");
+    let mut bytes = "Нотатка про засідання: ухвалили перенести терміни.\n"
+        .repeat(20)
+        .into_bytes();
+    assert!(bytes.len() > 512, "the prose must outlast the head window");
+    bytes.extend(std::iter::repeat_n(0u8, 64));
+    std::fs::write(&interrupted, &bytes).unwrap();
+
+    for (path, want_rule) in [
+        ("tests/fixtures/solid.png", "not_text"),
+        ("tests/fixtures/one-page-text.pdf", "unsupported"),
+        (
+            interrupted.to_str().expect("a temp path is UTF-8"),
+            "binary_tail",
+        ),
+    ] {
+        let request = serde_json::json!({ "path": path, "max_bytes": 1_048_576 });
+        let out = run_worker(&[&request.to_string()]);
+        match frames_of(&out).as_slice() {
+            [
+                Frame::Refused {
+                    rule,
+                    sha256,
+                    reason: _,
+                },
+            ] => {
+                assert_eq!(rule, want_rule, "wrong rule for {path}");
+                // Against the file's own digest, not `is_some()`: a worker
+                // sending a constant, or the digest of some other buffer, would
+                // satisfy the weaker check and lose exactly the documents this
+                // field exists to keep.
+                assert_eq!(
+                    sha256.as_deref(),
+                    Some(digest_of(path).as_str()),
+                    "{path} was refused as {want_rule} without the digest it was refused on"
+                );
+            }
+            other => panic!("expected exactly one refusal for {path}, got {other:?}"),
+        }
+    }
+}
+
+/// Lower-case hex of a file's sha256 — what `document.id` is, read off the disk
+/// rather than out of anything the worker said.
+fn digest_of(path: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(std::fs::read(path).unwrap());
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// The other direction, in the same shape: a text file still comes back with
+/// a header and blocks. Without this, a worker that refused everything would
+/// pass the test above — the shape that went unnoticed nine times in the
+/// previous branch.
+#[test]
+fn a_text_file_is_still_read_by_the_real_worker() {
+    let out = run_worker(&["{\"path\":\"tests/fixtures/simple.txt\",\"max_bytes\":1048576}"]);
+    let frames = frames_of(&out);
+
+    assert!(
+        matches!(frames.first(), Some(Frame::Header { .. })),
+        "expected a header, got {frames:?}"
+    );
+    assert!(!frames.iter().any(|f| matches!(f, Frame::Refused { .. })));
 }
 
 // --- Supplementary: the edges the brief asks to reason through ---

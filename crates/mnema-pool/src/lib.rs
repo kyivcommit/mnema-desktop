@@ -8,17 +8,19 @@
 //! frames it parses live in `mnema_core::wire`, so the crate that binds Pdfium
 //! stays out of the application's dependency graph entirely.
 //!
-//! A worker's life ends in one of five ways, and the supervisor owes a different
-//! answer to each:
+//! A worker's life ends in one of eight ways, and the supervisor owes a
+//! different answer to each:
 //!
-//! | how it ended                           | what the file gets      |
-//! |----------------------------------------|-------------------------|
-//! | answered `Refused` (no reader)         | [`Failure::Unsupported`] |
-//! | answered `Refused` (over the ceiling)  | [`Failure::TooLarge`]    |
-//! | answered `Failed` (I/O)                | [`Failure::Unreadable`]  |
-//! | said nothing before the deadline        | [`Failure::Timeout`]     |
-//! | died on a signal                       | [`Failure::Crash`]       |
-//! | killed by the out-of-memory killer     | [`Failure::Memory`]      |
+//! | how it ended                          | what the file gets       |
+//! |---------------------------------------|--------------------------|
+//! | answered `Refused` (no reader)        | [`Failure::Unsupported`] |
+//! | answered `Refused` (over the ceiling) | [`Failure::TooLarge`]    |
+//! | answered `Refused` (not text)         | [`Failure::NotText`]     |
+//! | answered `Refused` (text, then not)   | [`Failure::BinaryTail`]  |
+//! | answered `Failed` (I/O)               | [`Failure::Unreadable`]  |
+//! | said nothing before the deadline      | [`Failure::Timeout`]     |
+//! | died on a signal                      | [`Failure::Crash`]       |
+//! | killed by the out-of-memory killer    | [`Failure::Memory`]      |
 //!
 //! Three properties of this design were measured before it was written, and they
 //! are the reasons it has the shape it has rather than a simpler one:
@@ -66,24 +68,70 @@ const READ_AHEAD: usize = 64;
 
 // ---------------------------------------------------------------- what fails
 
-/// Why a file did not make it into the index. Maps onto
-/// [`SkipRule`](mnema_index::SkipRule), the vocabulary the journal
-/// records, but is a smaller set: it names only the ways a *whole document* can
-/// fail, where `SkipRule` also covers a single PDF page with no text layer.
+/// Declares [`Failure`] and, from the same list, the slice
+/// [`Failure::every`] hands out — the form `declare_skip_rules` uses in
+/// `mnema-index` for `SkipRule`, and here for the same measured reason.
 ///
-/// **The mapping lives in this crate**, as `impl From<Failure> for SkipRule`,
-/// for three reasons. The pool is the only code that observes all five outcomes
-/// — a worker that dies on a signal reports nothing itself, so no other crate
-/// could name that case. `mnema-extract` may not depend on `mnema-index` at all
-/// (a worker that links the database library it is forbidden from opening would
-/// undo the boundary it exists to draw, D26/D40), which is why the worker reports
-/// its rule as a plain string and something has to translate. And this crate
-/// already runs inside the application, where the database library is linked
-/// anyway, so the dependency costs nothing that was not already paid. The
-/// direction matters: a journal's vocabulary must not depend on the supervisor
-/// that happens to feed it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Failure {
+/// `every_failure_maps_onto_its_own_skip_rule` in `tests/supervision.rs` used
+/// to carry its own list of variants, with a comment saying it was "written out
+/// rather than derived, so that a future variant added to either enum has to
+/// face this list". The first variant added after that comment was
+/// [`Failure::BinaryTail`], and it did not face the list: the list stayed seven
+/// long, and mapping `BinaryTail` to the wrong rule left the whole of this
+/// crate green — the only test that reddened was in `mnema-ingest`, a crate
+/// away from the line that owns the mapping.
+///
+/// A list written beside an enum cannot say anything about a variant that is
+/// not in it. Generating it from the declaration is what makes the promise in
+/// that comment true.
+macro_rules! declare_failures {
+    ($($(#[$attr:meta])* $variant:ident,)+) => {
+        /// Why a file did not make it into the index. Maps onto
+        /// [`SkipRule`](mnema_index::SkipRule), the vocabulary the journal
+        /// records, but is a smaller set: it names only the ways a *whole
+        /// document* can fail, where `SkipRule` also covers a single PDF page
+        /// with no text layer.
+        ///
+        /// **The mapping lives in this crate**, as `impl From<Failure> for
+        /// SkipRule`, for three reasons. The pool is the only code that
+        /// observes all eight outcomes — a worker that dies on a signal reports
+        /// nothing itself, so no other crate could name that case.
+        /// `mnema-extract` may not depend on `mnema-index` at all (a worker
+        /// that links the database library it is forbidden from opening would
+        /// undo the boundary it exists to draw, D26/D40), which is why the
+        /// worker reports its rule as a plain string and something has to
+        /// translate. And this crate already runs inside the application, where
+        /// the database library is linked anyway, so the dependency costs
+        /// nothing that was not already paid. The direction matters: a
+        /// journal's vocabulary must not depend on the supervisor that happens
+        /// to feed it.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum Failure {
+            $($(#[$attr])* $variant,)+
+        }
+
+        impl Failure {
+            /// Every variant, in declaration order, generated from the list
+            /// that declares them. Read [`every`](Failure::every) instead.
+            const ALL: &[Failure] = &[$(Failure::$variant,)+];
+        }
+    };
+}
+
+impl Failure {
+    /// Every variant, in declaration order.
+    ///
+    /// `pub` for the reason [`mnema_index::SkipRule::every`] is: the test that
+    /// needs it is an integration test, which links this crate the way any
+    /// other caller does and cannot see a `pub(crate)` or a `#[cfg(test)]`
+    /// item. What it buys is that "every failure" in a test means every
+    /// failure, including the one added tomorrow.
+    pub fn every() -> impl Iterator<Item = Self> {
+        Failure::ALL.iter().copied()
+    }
+}
+
+declare_failures! {
     /// The worker died on a signal without answering — a parser fault.
     Crash,
     /// The worker said nothing within the deadline and was killed.
@@ -103,13 +151,39 @@ pub enum Failure {
     /// Not folded into [`Failure::Unsupported`], although both arrive as
     /// `Frame::Refused`: `mnema-ingest` removes what the index holds under a
     /// path when a worker **read** a file and declined its content, and this
-    /// branch never read a byte. Lowering a setting must not delete indexed
-    /// content. [`SkipRule::TooLarge`](mnema_index::SkipRule::TooLarge) carries
-    /// the rest of the reasoning.
+    /// branch never read a byte, so the refusal itself says nothing at all
+    /// about whether the content changed.
+    ///
+    /// That is the distinction this variant exists for, and it is **not** the
+    /// stronger claim this comment used to make. "Lowering a setting must not
+    /// delete indexed content" was true of the rule as it then stood and is no
+    /// longer true as written. What holds is narrower: lowering the ceiling does
+    /// not, *on its own*, delete anything — an untouched file matches on size,
+    /// mtime and stage, so the cheap arm answers `Unchanged` and no worker is
+    /// ever started. Once either of those numbers has moved, the parent has only
+    /// them to go on, and it displaces. The whole of that, including what it
+    /// costs and what is left over,
+    /// is [`SkipRule::TooLarge`](mnema_index::SkipRule::TooLarge) and
+    /// `mnema_ingest`'s `displaces`.
     TooLarge,
     /// The file could not be read at all: missing, not a regular file, refused
     /// by permissions, or a path this protocol cannot carry.
     Unreadable,
+    /// The worker looked at the bytes and they are not text (D51):
+    /// `Frame::Refused { rule: "not_text" }`.
+    NotText,
+    /// The worker looked at the bytes and they are text at first and binary
+    /// after that (D51): `Frame::Refused { rule: "binary_tail" }`.
+    ///
+    /// Not folded into [`Failure::NotText`], for the reason that split
+    /// [`Failure::TooLarge`] off [`Failure::Unsupported`]: the parent decides
+    /// whether to remove what the index holds under the path, and these two
+    /// want opposite answers. A photo replacing a note means the note's text is
+    /// gone; a note whose append was interrupted still holds its prose, and
+    /// deleting the document would lose it.
+    /// [`SkipRule::BinaryTail`](mnema_index::SkipRule::BinaryTail) carries the
+    /// rest.
+    BinaryTail,
 }
 
 impl From<Failure> for SkipRule {
@@ -121,6 +195,8 @@ impl From<Failure> for SkipRule {
             Failure::Unsupported => SkipRule::Unsupported,
             Failure::Unreadable => SkipRule::Unreadable,
             Failure::TooLarge => SkipRule::TooLarge,
+            Failure::NotText => SkipRule::NotText,
+            Failure::BinaryTail => SkipRule::BinaryTail,
         }
     }
 }
@@ -131,6 +207,17 @@ impl From<Failure> for SkipRule {
 pub struct Skip {
     pub failure: Failure,
     pub reason: String,
+    /// The sha256 of the bytes this verdict was reached on, when the worker
+    /// had them.
+    ///
+    /// `None` for every outcome the worker did not decide by reading: the size
+    /// ceiling (refused from `stat`), a crash, a timeout, an out-of-memory
+    /// kill, an unreadable path, and any answer this pool synthesised without
+    /// a worker at all. The parent uses it to tell a file that *changed* into
+    /// something unindexable from a file that did not change while the rule
+    /// under it did — see `mnema_ingest`'s `displaces`, which is where the
+    /// difference costs a document.
+    pub sha256: Option<String>,
 }
 
 /// One page of an extracted document: what its [`Frame::Page`] announced, and
@@ -396,6 +483,34 @@ pub struct Pool {
     free: Condvar,
     /// Files that killed a worker, and what they were recorded as. Never handed
     /// to a second process.
+    ///
+    /// **Keyed on the path and nothing else, which is strictly weaker than the
+    /// skip journal one level up, and is safe only because of who builds a
+    /// `Pool`.** The journal at least compares `(size, mtime,
+    /// format_version)` before it trusts a remembered verdict
+    /// (`mnema_ingest::ingest_file`'s second cheap arm); this map is read at the
+    /// top of `extract`, before anything has looked at the file, so it carries
+    /// no size, no modification time, no digest and no expiry. Replace the file
+    /// entirely and this still answers for it.
+    ///
+    /// What makes that harmless today is a fact about the caller, not about this
+    /// type: `src-tauri/src/walk_job.rs` builds a **new** `Pool` for every walk
+    /// job, and phase 2 offers each path to it once. So an entry can never
+    /// outlive the pass that made it. Measured on two pools over one index: the
+    /// poisoned one answers `Skipped { Crash }` without asking a worker and the
+    /// old prose stays findable, while a pool without the entry reads the file,
+    /// says `NotText` and displaces.
+    ///
+    /// That is a **contract**, and this comment is the only place it is written
+    /// down — `walk_root` takes `&Pool` and `Pool` is public, so a live watcher
+    /// that re-walks on change against one long-lived pool would make it a
+    /// defect rather than a note. Whoever builds that has to key this map on
+    /// something the file can change, or drop entries when a walk ends.
+    ///
+    /// One mitigation is real and worth having: a refusal **by content** never
+    /// poisons. Only `Answer::Ended` does (below), which is the worker dying —
+    /// so the rules that displace a document are not the ones this map can
+    /// answer for.
     poisoned: Mutex<HashMap<PathBuf, Skip>>,
     spawned: AtomicUsize,
     live: Arc<AtomicUsize>,
@@ -460,6 +575,8 @@ impl Pool {
                     "{} is not valid UTF-8, and the extraction request cannot carry it",
                     path.display()
                 ),
+                // No worker ran, so nothing read the bytes.
+                sha256: None,
             }));
         };
 
@@ -531,9 +648,17 @@ impl Pool {
                 // one process per refused file — 4 ms — which a folder of
                 // unsupported formats pays in full, and which is the deliberate
                 // side of this trade rather than an oversight.
-                Ok(Answer::Skipped { failure, reason }) => {
+                Ok(Answer::Skipped {
+                    failure,
+                    reason,
+                    sha256,
+                }) => {
                     lease.retire();
-                    return Ok(Outcome::Skipped(Skip { failure, reason }));
+                    return Ok(Outcome::Skipped(Skip {
+                        failure,
+                        reason,
+                        sha256,
+                    }));
                 }
                 Ok(Answer::Ended { ending, note }) => {
                     lease.retire();
@@ -543,7 +668,15 @@ impl Pool {
                         self.config.timeout,
                         note.as_deref(),
                     );
-                    let skip = Skip { failure, reason };
+                    // A worker that died, timed out or was killed never
+                    // reported a digest — and must not be given one here: the
+                    // whole point of the poison record is that these bytes were
+                    // never successfully read.
+                    let skip = Skip {
+                        failure,
+                        reason,
+                        sha256: None,
+                    };
                     // This is the rule that keeps a multi-hour job moving: the
                     // file that killed a worker is remembered, not requeued.
                     self.poisoned().insert(path.to_path_buf(), skip.clone());
@@ -836,6 +969,7 @@ enum Answer {
     Skipped {
         failure: Failure,
         reason: String,
+        sha256: Option<String>,
     },
     /// The worker produced no answer: it died, or it was killed. `note` carries
     /// anything the wait status cannot express — today, that its output was not
@@ -995,12 +1129,18 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
             // A refusal or an I/O failure is the whole answer, so one arriving
             // after a header means the two binaries disagree about the
             // protocol.
-            Frame::Refused { rule, reason } => {
+            Frame::Refused {
+                rule,
+                reason,
+                sha256,
+            } => {
                 if header.is_some() {
                     return Err(protocol(&line, "a refusal after a header"));
                 }
                 let failure = match rule.as_str() {
                     "unsupported" => Failure::Unsupported,
+                    "not_text" => Failure::NotText,
+                    "binary_tail" => Failure::BinaryTail,
                     "unreadable" => Failure::Unreadable,
                     "too_large" => Failure::TooLarge,
                     // Strict on purpose. A rule this pool does not know means
@@ -1013,7 +1153,11 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                         ));
                     }
                 };
-                return Ok(Answer::Skipped { failure, reason });
+                return Ok(Answer::Skipped {
+                    failure,
+                    reason,
+                    sha256,
+                });
             }
             Frame::Failed { message } => {
                 if header.is_some() {
@@ -1022,6 +1166,9 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 return Ok(Answer::Skipped {
                     failure: Failure::Unreadable,
                     reason: message,
+                    // `Failed` means the worker could not obtain the bytes at
+                    // all, so there is nothing to have hashed.
+                    sha256: None,
                 });
             }
         }

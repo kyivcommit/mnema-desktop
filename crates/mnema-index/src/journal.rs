@@ -14,12 +14,48 @@ use serde::Serialize;
 
 use crate::{Db, Error, INDEX_FORMAT_VERSION};
 
-/// Which rule caused a file, or one page of it, to be skipped. The vocabulary
-/// is closed on purpose — an open `rule` column turns a writer's typo into a
-/// row `skips_for_root` can still list but a future query grouping by rule can
-/// never match again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkipRule {
+/// Declares [`SkipRule`] and, from that same list of variants, the slice
+/// [`SkipRule::every`] hands out. One list, two products: a variant cannot
+/// exist without being enumerated, because the enumeration is generated from
+/// the declaration rather than written beside it.
+///
+/// A macro for a nine-variant enum is a heavy instrument, and it is here
+/// because the lighter ones were measured failing. The list was first an array
+/// of pairs in the tests, then a hand-written `after()` chain here that
+/// `every()` walked. Both looked like coverage:
+///
+/// * deleting a variant from the three arrays in `tests/journal.rs` left every
+///   test in that file green;
+/// * a variant added to the enum with `Fictitious => return None` in `after()`
+///   compiled, ended the chain early, and left the suite green at sixteen
+///   passed — including the test whose whole job was to assert the chain
+///   reaches every rule. The exhaustive `match` forced the new variant to
+///   *appear*; nothing forced the chain to *reach* it, and the only guard was
+///   a length assertion that the truncated chain still satisfied.
+///
+/// Neither failure is a mistake anyone made twice on purpose. Both are the same
+/// shape: a list that promises to grow with the enum and has no way to.
+macro_rules! declare_skip_rules {
+    ($($(#[$attr:meta])* $variant:ident,)+) => {
+        /// Which rule caused a file, or one page of it, to be skipped. The
+        /// vocabulary is closed on purpose — an open `rule` column turns a
+        /// writer's typo into a row `skips_for_root` can still list but a
+        /// future query grouping by rule can never match again.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum SkipRule {
+            $($(#[$attr])* $variant,)+
+        }
+
+        impl SkipRule {
+            /// Every variant, in declaration order, generated from the list
+            /// that declares them. Read [`every`](SkipRule::every) instead —
+            /// this exists so that there is nothing to keep in step.
+            const ALL: &[SkipRule] = &[$(SkipRule::$variant,)+];
+        }
+    };
+}
+
+declare_skip_rules! {
     Crash,
     Timeout,
     Memory,
@@ -62,12 +98,55 @@ pub enum SkipRule {
     /// content — a `.txt` overwritten by a PDF must stop answering under its
     /// own name. This branch never opens the file; it decides from `stat`
     /// alone, so the refusal itself says nothing about whether the content
-    /// changed. That is settled there by comparing the size on disk against
-    /// `path.size_bytes`, which is exact: a document exists under a path only
-    /// because the file was once under the ceiling, so the same size now means
-    /// the ceiling moved, and a different size means the file was rewritten.
-    /// `mnema_ingest`'s `displaces` carries the argument in full.
+    /// changed. That is settled there against what the walk measured — the size
+    /// **and** the modification time the `path` row recorded — and settled
+    /// against nothing else, because a refusal made without opening the file
+    /// leaves no reading of the content to compare. The size alone is not
+    /// enough, and the argument that it was refuted itself: it excluded a
+    /// same-length rewrite by assuming the ceiling had not moved, inside the one
+    /// rule that exists because it can. `mnema_ingest`'s `displaces` carries it
+    /// in full, along with what is left over and why it cannot be closed there.
     TooLarge,
+    /// The file is not text at all — a photo, a video, a database — decided
+    /// by its own bytes rather than its name (D51).
+    ///
+    /// Its own rule rather than `Unsupported` for the reason `TooLarge` got
+    /// one: the two answer the user differently. `Unsupported` says this
+    /// product has no reader *yet* and the file waits for one; this says the
+    /// file is not the kind of thing this product reads, and no release will
+    /// change that. Someone asking "why is my file not found?" needs the two
+    /// apart.
+    ///
+    /// Unlike `TooLarge`, whose lever back to re-examination is a *setting*
+    /// (`PoolConfig::max_bytes`), this rule's only lever is a constant:
+    /// `INDEX_FORMAT_VERSION` (`mnema_ingest::ingest_file`, the second cheap
+    /// arm). A file skipped `NotText` is never looked at again for the life
+    /// of the index unless that version moves — so any future loosening of
+    /// `classify` (the first candidate: UTF-16 without a byte-order
+    /// mark) must bump it, or the files it would now accept stay refused
+    /// forever.
+    NotText,
+    /// The file is text for its first bytes and binary after that — it *began*
+    /// as text and stopped being one (D51). Decided by its own bytes, like
+    /// `NotText`, and refused like it.
+    ///
+    /// Its own rule rather than `NotText` for one reason, and that reason is
+    /// the whole of why it exists: **this one must not displace.** `NotText`
+    /// says the path now holds a photo, so whatever text the index has under
+    /// that name belongs to a file that is gone. This says the path holds a
+    /// note whose append was interrupted — the power went out, the tail came
+    /// back zeroed, and the prose the index holds is still, byte for byte, the
+    /// opening of the file on disk. Deleting it loses text that is readable
+    /// nowhere else. `mnema_ingest`'s `displaces` is where that lands.
+    ///
+    /// It shares `NotText`'s other half: the verdict is reproducible on the
+    /// same bytes, so `is_about_content` is true and the next walk answers from
+    /// `stat` without spending a worker. The consequence above is the same one
+    /// too — a file refused here is not looked at again until
+    /// `INDEX_FORMAT_VERSION` moves — and it costs less here, because what the
+    /// user still has under that path is the document they had before rather
+    /// than an absence.
+    BinaryTail,
 }
 
 impl SkipRule {
@@ -80,6 +159,8 @@ impl SkipRule {
             SkipRule::NoTextLayer => "no_text_layer",
             SkipRule::Unreadable => "unreadable",
             SkipRule::TooLarge => "too_large",
+            SkipRule::NotText => "not_text",
+            SkipRule::BinaryTail => "binary_tail",
         }
     }
 
@@ -97,8 +178,30 @@ impl SkipRule {
             "no_text_layer" => SkipRule::NoTextLayer,
             "unreadable" => SkipRule::Unreadable,
             "too_large" => SkipRule::TooLarge,
+            "not_text" => SkipRule::NotText,
+            "binary_tail" => SkipRule::BinaryTail,
             _ => return None,
         })
+    }
+
+    /// Every variant, in declaration order.
+    ///
+    /// A test that means "every rule" iterates this instead of writing its own
+    /// list, so that adding a variant cannot leave one of them quietly covering
+    /// eight rules out of nine. What makes that true is not this function but
+    /// [`declare_skip_rules`]: the slice it reads is generated from the same
+    /// list that declares the variants, so there is no step at which a variant
+    /// can be declared and left out. The chain of `after()` links this replaced
+    /// could be — and was, when measured.
+    ///
+    /// `pub` rather than `pub(crate)` or `#[cfg(test)]` because the tests that
+    /// need it are integration tests, which link this crate the way any other
+    /// caller does and see neither. The surface is small and honest — a closed
+    /// vocabulary that can be enumerated is a reasonable thing for a journal to
+    /// expose, and a window listing "which rules can appear here" wants exactly
+    /// this.
+    pub fn every() -> impl Iterator<Item = Self> {
+        SkipRule::ALL.iter().copied()
     }
 
     /// Whether this rule is a **reproducible** determination about the file's
@@ -113,12 +216,19 @@ impl SkipRule {
     /// verdict that *can* change look permanent, and the file is never looked
     /// at again for the life of the index.
     ///
-    /// Only `Unsupported` and `NoTextLayer` qualify. `Crash`, `Timeout` and
-    /// `Memory` are readings of the environment that apply to every file in
-    /// the walk alike — `displaces` draws the same line for the same reason
-    /// (D44) — and `Unreadable` is a fact about the disk, not the bytes, that
-    /// may well be transient (a file moved mid-scan, a permission fixed
-    /// afterwards).
+    /// Only `Unsupported`, `NoTextLayer`, `NotText` and `BinaryTail` qualify.
+    /// `Crash`, `Timeout` and `Memory` are readings of the environment that
+    /// apply to every file in the walk alike — `displaces` draws the same line
+    /// for the same reason (D44) — and `Unreadable` is a fact about the disk,
+    /// not the bytes, that may well be transient (a file moved mid-scan, a
+    /// permission fixed afterwards).
+    ///
+    /// `BinaryTail` is the one variant where this predicate and `displaces` no
+    /// longer answer alike, and that is not a slip. The verdict *is* about the
+    /// bytes and is reproducible on them, so it belongs here; what `displaces`
+    /// asks is a different question — whether the text the index already holds
+    /// under that path has stopped being what the file says — and for an
+    /// interrupted append the answer is no.
     ///
     /// **`TooLarge` looks like it belongs here, and does not.** The refusal
     /// does come from `stat` alone, and `displaces` does treat it as
@@ -153,7 +263,10 @@ impl SkipRule {
     /// journal suite green.
     pub fn is_about_content(self) -> bool {
         match self {
-            SkipRule::Unsupported | SkipRule::NoTextLayer => true,
+            SkipRule::Unsupported
+            | SkipRule::NoTextLayer
+            | SkipRule::NotText
+            | SkipRule::BinaryTail => true,
             SkipRule::Crash
             | SkipRule::Timeout
             | SkipRule::Memory
@@ -172,7 +285,7 @@ impl SkipRule {
     /// worth trusting on its own, without spending a worker on the file a
     /// second time. This asks whether a run of them means a walker should
     /// stop asking a worker to do more work at all. The two questions split
-    /// the same seven variants differently, and `TooLarge` is the case that
+    /// the same nine variants differently, and `TooLarge` is the case that
     /// proves it has to: it answers **no** to both. It is not a fact about
     /// the bytes (`is_about_content` — a setting can move the ceiling out
     /// from under a file that never changed), and it is not a fact about the
@@ -185,12 +298,20 @@ impl SkipRule {
     /// large files would read as a dying worker and end a walk that has done
     /// nothing wrong.
     ///
-    /// Only `Crash`, `Timeout`, `Memory` and `Unreadable` qualify — the same
-    /// four `displaces` (`mnema_ingest`) keeps content for, and for the same
+    /// Only `Crash`, `Timeout`, `Memory` and `Unreadable` qualify — four of the
+    /// five `displaces` (`mnema_ingest`) keeps content for, and for the same
     /// reason spelled out there at length: each is a reading of the
     /// environment, not of one file, so a run of them in a row is evidence
     /// about what is *outside* the files rather than a coincidence of which
     /// files happened to be next in the walk.
+    ///
+    /// The fifth is `BinaryTail`, and it is the second variant after `TooLarge`
+    /// to show that these predicates cannot be derived from one another. It is
+    /// kept by `displaces` and answers **no** here: a folder holding several
+    /// interrupted or truncated files in a row says something happened to those
+    /// files — a power cut, a copy that stopped — not that the worker reading
+    /// them is dying, and ending the walk would leave the rest of the folder
+    /// unindexed over it.
     ///
     /// An exhaustive `match`, matching `is_about_content`'s own reasoning for
     /// being one: a variant added to the enum with no line here would
@@ -201,7 +322,11 @@ impl SkipRule {
     pub fn suggests_broken_environment(self) -> bool {
         match self {
             SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => true,
-            SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::TooLarge => false,
+            SkipRule::Unsupported
+            | SkipRule::NoTextLayer
+            | SkipRule::TooLarge
+            | SkipRule::NotText
+            | SkipRule::BinaryTail => false,
         }
     }
 }
@@ -365,6 +490,37 @@ impl Db {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Forgets the whole-file verdict recorded against one path, if there is
+    /// one.
+    ///
+    /// The counterpart of [`record_skip`](Db::record_skip), and it exists
+    /// because until it did there was exactly one `DELETE FROM skipped` in the
+    /// tree — [`forget_skips_not_in`](Db::forget_skips_not_in), reconciliation's
+    /// own, which fires only for paths a complete walk did **not** see. A file
+    /// refused once and then indexed successfully therefore kept its refusal for
+    /// the life of the index, and that row is not inert. It is what the window
+    /// answering "why is this file not in my index?" reads, so that list named
+    /// files that are in it; and it is what `mnema_ingest::ingest_file`'s second
+    /// cheap arm answers from, which compares `(size, mtime, format_version)`
+    /// and never asks whether the verdict was reached on *these* bytes. Put a
+    /// previous version back with its own modification time — `cp -p`, `tar
+    /// -xp`, a cloud client's "restore previous version" — and the stale row
+    /// matched again and answered for a file nobody had looked at.
+    ///
+    /// Only whole-file rows (`page_no IS NULL`), matching what `skip_entry`
+    /// reads and what `ingest_file` writes for a file. A per-page row belongs to
+    /// one page of one document and is not this path's verdict; the reader that
+    /// will produce those does not exist yet, and folding them in here would
+    /// silently erase them the moment it does.
+    pub fn forget_skip(&self, root_id: i64, relative_path: &str) -> Result<(), Error> {
+        self.conn().execute(
+            "DELETE FROM skipped
+              WHERE watched_root_id = ?1 AND relative_path = ?2 AND page_no IS NULL",
+            params![root_id, relative_path],
+        )?;
+        Ok(())
     }
 
     /// Removes skip rows under `root_id` whose path is not in `seen` and does

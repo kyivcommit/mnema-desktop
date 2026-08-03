@@ -80,7 +80,7 @@ pub enum Ingested {
     /// When the skip means what the index held under this name is a previous
     /// version of a file that has since become unreadable, it is removed with
     /// it — see `displaces`, which decides that per rule and, for the size
-    /// ceiling, on whether the file's size changed.
+    /// ceiling, on whether the size or the modification time moved.
     Skipped { rule: SkipRule },
 }
 
@@ -220,11 +220,37 @@ pub fn ingest_file(
     // hard way: `TooLarge` looks like a content fact and is not one). Without
     // this arm, a folder of scans costs one worker process per file per walk
     // forever, which is the debt §16 recorded on 2026-07-27.
+    //
+    // **And it may only answer when there is nothing left to decide.** This
+    // `return` used to stand ahead of `record_skip` and `displaces` both, so a
+    // remembered refusal never displaced anything: the removal was reached only
+    // when a worker had actually been asked. Restore a photo over a note's name
+    // with its own modification time and this arm matched the journal, the pool
+    // was never asked, and the index went on answering under that name with
+    // prose the file no longer contains — with nothing in `WalkReport` saying
+    // so. Measured at `walk_root`'s own level, over three full walks:
+    // `{ found: 1, indexed: 0, skipped: 1, removed: 0, stopped: Completed }`,
+    // one lexical hit, the `path` row still naming the note.
+    //
+    // `displaces` with **no digest** is the question this arm has to ask,
+    // rather than a predicate of its own: nothing here read the file, so
+    // `None` is the truth about what is known, and `None` is exactly the input
+    // that makes `displaces` answer "would this rule take the document away if
+    // the bytes could not be identified?". Yes means fall through and let a
+    // worker settle it properly; the rules that keep — `BinaryTail` above all,
+    // whose whole point is that it must not displace — still short-circuit and
+    // still cost no process. Self-limiting, too: once a fall-through displaces,
+    // there is no `path` row left and the next walk short-circuits again. The
+    // folder of scans this arm was built for has no `path` rows at all, so it
+    // pays nothing.
     if let Some(disk) = on_disk
         && let Some(skip) = db.skip_entry(root_id, relative)?
         && skip.format_version == INDEX_FORMAT_VERSION
         && skip.size_bytes == Some(disk.size_bytes)
         && skip.mtime == Some(disk.mtime)
+        && !recorded
+            .as_ref()
+            .is_some_and(|entry| displaces(skip.rule, entry, on_disk, None))
     {
         return Ok(Ingested::Skipped { rule: skip.rule });
     }
@@ -241,8 +267,13 @@ pub fn ingest_file(
             db,
             root_id,
             relative,
-            "the walk could not measure this file, so its size and mtime are unknown",
-            rule,
+            Refusal {
+                rule,
+                reason: "the walk could not measure this file, so its size and mtime are unknown",
+                // Nothing read the file — this arm is reached because the walk
+                // could not even stat it.
+                content: None,
+            },
             &recorded,
             on_disk,
         )?;
@@ -257,8 +288,11 @@ pub fn ingest_file(
                 db,
                 root_id,
                 relative,
-                &skip.reason,
-                rule,
+                Refusal {
+                    rule,
+                    reason: &skip.reason,
+                    content: skip.sha256.as_deref(),
+                },
                 &recorded,
                 on_disk,
             )?;
@@ -400,6 +434,23 @@ pub fn ingest_file(
 /// Only the document this path itself displaced is considered. A document with
 /// no path row that was never named by one — one indexed from inside an
 /// archive — is not this function's business and is not touched.
+///
+/// **The third thing it does is forget the journal's refusal of this path**,
+/// and it is here rather than beside the two calls that reach it because both
+/// of them are already inside the transaction the write happens in — the whole
+/// argument `record_skip` makes for its own pair, in the other direction. A
+/// document written and a refusal still standing for the same name are not two
+/// facts that may disagree; they are one fact, and it either holds or it does
+/// not.
+///
+/// Left out, the row was not merely untidy. It is what the window answering
+/// "why is this file not in my index?" lists, so that list named files that
+/// **are** in it. And it stayed a live verdict for `ingest_file`'s second cheap
+/// arm, which compares `(size, mtime, format_version)` and never asks whether
+/// the verdict was reached on these bytes: restore a previous version with its
+/// own modification time and the stale row matched the disk again, answering
+/// for a file no worker had looked at since — under a `path` row now naming
+/// something else entirely.
 fn repoint(
     db: &Db,
     root_id: i64,
@@ -410,6 +461,7 @@ fn repoint(
 ) -> Result<(), mnema_index::Error> {
     db.delete_path(root_id, relative)?;
     db.insert_path(root_id, relative, id, disk.size_bytes, disk.mtime)?;
+    db.forget_skip(root_id, relative)?;
     if let Some(displaced) = displaced {
         // No `displaced != id` guard, and it is not an omission: the insert
         // above has just written a row naming `id`, so when the two are the
@@ -419,6 +471,24 @@ fn repoint(
         forget_if_unnamed(db, displaced)?;
     }
     Ok(())
+}
+
+/// One file's refusal, as [`record_skip`] needs it: the rule that fired, a
+/// sentence a person can read, and the digest of the bytes the verdict was
+/// reached on.
+///
+/// A struct rather than three more parameters because the three always travel
+/// together and arrive from the same place — `mnema_pool::Skip` — and because
+/// `content` is the one whose absence changes what happens to a document.
+/// Passed loose, it is a bare `Option<&str>` in eighth position, which is
+/// exactly the shape a caller gets wrong.
+struct Refusal<'a> {
+    rule: SkipRule,
+    reason: &'a str,
+    /// The sha256 of what the worker read. `None` when nothing read the file:
+    /// the size ceiling refused it from `stat`, the worker died, or this crate
+    /// answered without a worker at all.
+    content: Option<&'a str>,
 }
 
 /// Journals one file's skip and, when [`displaces`] says so, removes what the
@@ -441,15 +511,19 @@ fn record_skip(
     db: &Db,
     root_id: i64,
     relative: &str,
-    reason: &str,
-    rule: SkipRule,
+    refusal: Refusal<'_>,
     recorded: &Option<PathEntry>,
     on_disk: Option<OnDisk>,
 ) -> Result<(), mnema_index::Error> {
+    let Refusal {
+        rule,
+        reason,
+        content,
+    } = refusal;
     db.transaction(|_| {
         db.record_skip(root_id, relative, None, reason, rule, on_disk)?;
         if let Some(recorded) = recorded
-            && displaces(rule, recorded, on_disk)
+            && displaces(rule, recorded, on_disk, content)
         {
             db.delete_path(root_id, relative)?;
             forget_if_unnamed(db, &recorded.document_id)?;
@@ -507,14 +581,23 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// silently, while the progress bar advances: a worker binary that does not
 /// match its parent answers the same way for all forty thousand of them.
 ///
-/// **Displace** — `Unsupported`, `NoTextLayer`. The worker read the bytes and
-/// determined something about them: there is no reader for this format, or
-/// this page carries no text layer. Run it again on the same bytes and it says
-/// the same thing. So what the index holds is a previous version of a file
-/// that has since become unindexable.
+/// **Displace, but only when the bytes moved** — `NotText` and `Unsupported`.
+/// The worker read the file and determined something about its bytes: they are
+/// not text at all, or no reader in this product can take that format. Run it
+/// again on the same bytes and it says the same thing, so what the index holds
+/// is a previous version of a file that has since become unindexable — *if*
+/// the bytes are not the ones the index was built from. When they are, the rule
+/// changed and the file did not, and deleting the document loses text that is
+/// still on disk. The digest the worker refused on is what tells the two apart;
+/// the arms below carry the reasoning, and D51 the measurement.
 ///
-/// **Keep** — `Crash`, `Timeout`, `Memory`, `Unreadable`. None of these is a
-/// statement about the file:
+/// **Displace outright** — `NoTextLayer`. A rule about one page rather than a
+/// file, which no reader in this product can produce yet. Its arm below says
+/// why it is not folded in with the two above.
+///
+/// **Keep** — `Crash`, `Timeout`, `Memory`, `Unreadable`, and `BinaryTail`.
+/// The first four are not statements about the file at all; the fifth is one,
+/// and keeps anyway, which is why it has a section of its own below.
 ///
 /// * `Crash` — the worker died, or produced output that was not text. That is
 ///   *usually* a parser faulting on this file's bytes, which is why this rule
@@ -560,47 +643,205 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// implemented here. It belongs to whoever owns the walk; this function sees
 /// one file at a time and cannot count.
 ///
-/// **`TooLarge` — decided on the size, not on the rule.** This is the one that
-/// cannot be answered from the rule alone, and the reason is worth spelling
-/// out because the wrong answer is the plausible one.
+/// **`BinaryTail` — a determination about the bytes that keeps anyway.** The
+/// only rule on the keep side that the paragraph above does not cover, and the
+/// exception is deliberate: "reproducible determination about the content" is
+/// necessary for displacing, and this is where it turns out not to be
+/// sufficient.
+///
+/// The worker read the file, found it text for its first bytes and binary
+/// afterwards, and will say the same thing again on the same bytes. Every part
+/// of the displacing argument holds — except its conclusion. That conclusion
+/// runs "so what the index holds is a previous version of a file that has since
+/// become unindexable", and here the file has *not* been replaced: it is the
+/// same note, still opening with the same prose, with zeros appended where an
+/// append was interrupted. Deleting the document does not remove a stale
+/// citation, it removes text that is still on disk in front of the damage and
+/// is readable nowhere else — a real class for this product's owner, not a
+/// hypothetical one, and one that does not repair itself, because the verdict
+/// is reproducible and the next walk answers from the journal.
+///
+/// **What this trades against is a residual risk, not a bounded one, and the
+/// boundary this paragraph used to claim is not one.** `HEAD_BYTES`
+/// (`mnema_extract::typing`) is 512 bytes, so a file earning this rule opened
+/// with 512 bytes of something without a NUL in it. That is all it says. This
+/// arm is a constant: it reads neither `recorded` nor `on_disk` nor a digest,
+/// so nothing here ties the file now on disk to the document that stays. A
+/// `.txt` **overwritten** by high-entropy bytes — an encrypted or compressed
+/// blob — earns `BinaryTail` whenever its first NUL happens to fall past 512,
+/// and then the index goes on citing text the file no longer contains.
+///
+/// Measured, because "how often" is the whole question:
+///
+/// * uniformly random bytes: **13.46%** (26,917 of 200,000) have their first
+///   NUL at or past 512, against `(255/256)^512` = 13.48% analytically;
+/// * files through `openssl enc -aes-256-cbc`: **2 of 8**;
+/// * real binaries with a header — `/usr/lib`, `/usr/bin`, `/opt/homebrew`,
+///   system fonts, with the magic-number formats excluded: **0 of 2,571**.
+///
+/// So the risk is concentrated on content that is high-entropy from its first
+/// byte and carries no recognisable header, and there it is roughly one in
+/// seven. It does not repair itself: `SkipRule::BinaryTail.is_about_content()`
+/// is true, so the second cheap arm answers from the journal until the file's
+/// size or mtime moves.
+///
+/// This is the same kind of known consequence as the one `classify` records
+/// against the other side of the split — a `find -print0` list, genuine text,
+/// refused *with* displacement because its first NUL is at byte 23. The two
+/// bound the split from either end, and both are accepted rather than fixed.
+///
+/// A digest does not settle it and adding one here would be a false comfort:
+/// an interrupted append and an overwriting blob **both** change the file's
+/// bytes, so the condition `NotText` uses cannot separate them. What would
+/// separate them is a stored digest of the file's *head*, which is a new
+/// column and a decision of its own, not a line in this function.
+///
+/// **`TooLarge` — decided on what the walk measured, not on the rule.** This is
+/// the one that cannot be answered from the rule alone, and the reason is worth
+/// spelling out because the wrong answer is the plausible one.
 ///
 /// The worker refuses from `stat` without opening the file
-/// (`crates/mnema-extract/src/bin/worker.rs`, the `max_bytes` branch), so
-/// "did the content change?" is not something the refusal can say. It follows
-/// from arithmetic instead. **A document only exists under this path because
-/// the file was once under the ceiling.** So:
+/// (`crates/mnema-extract/src/bin/worker.rs`, the `max_bytes` branch), so "did
+/// the content change?" is not something the refusal can say, and **there is no
+/// digest to compare — not by omission but by construction.** What is left is
+/// the same pair the cheap arm above trusts for exactly this question:
 ///
-/// * the size on disk **differs** from `path.size_bytes` → the file was
-///   rewritten, and what the index holds is the old text. Displace.
-/// * the size is **equal** → the file is byte-for-byte the size it was when it
-///   was indexed, and it is over the ceiling now, so the *ceiling* moved.
-///   Nothing about the file changed. Keep.
+/// * the size on disk **differs** from `path.size_bytes` → different length,
+///   so certainly different bytes. The index holds the old text. Displace.
+/// * the size is equal and the **modification time differs** → the file was
+///   written to since it was indexed, or it was not; from here those two are
+///   the same observation. Displace, because the two errors are not the same
+///   size — see below.
+/// * size **and** modification time both match → this is the pair `ingest_file`
+///   itself takes as "nothing happened to this file", so taking it as anything
+///   else here would be the same product disagreeing with itself one screen
+///   apart. Keep. It is reached only when the cheap arm missed on the *stage*
+///   instead — an interrupted job — and `a_lowered_ceiling_keeps_what_it_still_
+///   recognises` (`tests/slice.rs`) is the test that stands on it.
+/// * the size on disk is **unknown** — `stat` failed here while the worker's
+///   own succeeded — nothing is removed, which is the side that loses nothing.
 ///
-/// There is no grey zone between those. A same-length replacement cannot fool
-/// it: a file of that length that is over the ceiling now was over the ceiling
-/// then, and could never have been indexed. And when the size on disk is
-/// unknown — `stat` failed here while the worker's own succeeded — the
-/// comparison cannot be made and nothing is removed, which is the side that
-/// loses nothing.
+/// **An earlier version of this compared the size alone, and argued there was
+/// no grey zone: "a same-length replacement cannot fool it — a file of that
+/// length that is over the ceiling now was over the ceiling then, and could
+/// never have been indexed." That argument refutes itself,** and one branch
+/// review measured it doing so. It excludes the grey zone by assuming the
+/// ceiling never moved, in the middle of a rule whose whole purpose is the case
+/// where it did: `max_bytes` is a setting. Lower it under an indexed file, then
+/// rewrite that file in place without changing its length, and every clause
+/// lines up — the cheap arm misses on the modification time, the pool answers
+/// `TooLarge` from `stat`, the size matches `path.size_bytes` — and the
+/// document stays. Measured: the old text goes on being found, the new text
+/// never is, and every later pass repeats it.
 ///
-/// An earlier version of this decided on the rule and kept everything
-/// `TooLarge`, to protect a user who lowers `max_bytes` under an indexed file.
-/// That user never reaches this code: nothing about their file changed, so the
+/// **What is left over is named rather than hidden.** A replacement of the same
+/// length carrying the *same* modification time — one `cp -p` from a file of
+/// that size — still passes, and nothing in this function can catch it: the
+/// refusal never opened the file, so there is no reading of the content to
+/// compare, and both halves of the evidence say "unchanged". That is the size
+/// ceiling's own residual risk, of the same kind as `BinaryTail`'s above and
+/// bounded by the same thing — a stored digest of the file's head, which is a
+/// column and a decision of its own.
+///
+/// **And the price of the middle case is real, so it is stated too.** A file
+/// merely *touched* — a `touch`, a restore that rewrites the timestamp, a sync
+/// client — under a ceiling that has since dropped below it now loses its
+/// document, although its bytes never moved. That is a loss this rule chooses,
+/// against a stale citation it refuses, and the choice is not close. Both are
+/// undone by the same event, the ceiling moving back up, so neither is
+/// permanent; but for as long as they last, the loss is a file missing from the
+/// index with a `too_large` row in the journal saying exactly why, and the
+/// stale citation is this product answering a question with text that is not in
+/// the file, over a highlight into characters that are gone. It is also the
+/// same default `NotText` already takes one arm up, for the same stated reason:
+/// where the bytes cannot be identified, displace, and keep a lost measurement
+/// loud rather than quiet.
+///
+/// The user who lowers `max_bytes` under a file they have not touched is not
+/// the one paying it, and never was: nothing about their file changed, so the
 /// cheap arm matches size, mtime and stage and answers `Unchanged` before a
-/// worker is ever started. What does reach it is a file that **grew** past the
-/// ceiling — and keeping that one is the stale citation above. The size test
-/// serves both.
+/// worker is ever started. That premise is asserted directly, in the first half
+/// of `a_lowered_ceiling_is_not_even_asked_about_an_untouched_file`.
 ///
 /// Written as an exhaustive `match` rather than `matches!`, so that a rule
 /// added to `SkipRule` has to be placed on one of these sides by whoever adds
 /// it.
-fn displaces(rule: SkipRule, recorded: &PathEntry, on_disk: Option<OnDisk>) -> bool {
+fn displaces(
+    rule: SkipRule,
+    recorded: &PathEntry,
+    on_disk: Option<OnDisk>,
+    content: Option<&str>,
+) -> bool {
     match rule {
-        // A determination about the bytes, reproducible on the same bytes.
-        SkipRule::Unsupported | SkipRule::NoTextLayer => true,
+        // A determination about the bytes — but only about *these* bytes. A
+        // file whose content is byte-identical to what the index was built
+        // from has nothing to displace: the rule changed, the file did not,
+        // and deleting the document would lose text that is still on disk.
+        // `TooLarge` is conditional for the same reason against a different
+        // measure (its own doc comment has the case that taught it).
+        //
+        // `is_none_or`, and deliberately the opposite default to `TooLarge`'s
+        // `is_some_and` below, because the two unknowns are not the same
+        // unknown. There, a missing size is this crate's own `stat` failing
+        // under a worker whose `stat` succeeded — an environment fault, and
+        // nothing is removed on those. Here, a missing digest can only be a
+        // worker that predates the field, which is what `#[serde(default)]` on
+        // `Frame::Refused` exists for; behaving as the release that worker came
+        // from behaved is what its refusal meant, and that release displaced.
+        // No in-tree path reaches here with `None`: every skip synthesised
+        // without a worker carries `Unreadable`, `Crash`, `Timeout` or
+        // `Memory`, and the ceiling carries `TooLarge`.
+        //
+        // It also keeps a lost digest loud rather than quiet. Two mutation
+        // cases catch the pool dropping the field precisely because `None`
+        // still displaces; under `is_some_and` both would pass while the
+        // migration of an already-poisoned index silently stopped working —
+        // and a photo that keeps answering under a note's name is the defect
+        // this whole rule was added to end.
+        SkipRule::NotText => content.is_none_or(|sha| sha != recorded.document_id),
+        // The same condition, on its own line rather than folded in with the
+        // one above, because the two rules are refused by different branches of
+        // the worker and each is worth being able to break on its own.
+        //
+        // It arrived later than `NotText`'s and that order was an inversion:
+        // the *stable* rule was made conditional first while the *unstable* one
+        // stayed unconditional. `NotText` promises "no release adds a reader
+        // that makes them prose" (`crates/mnema-extract/src/bin/worker.rs`);
+        // this one says "no reader implemented yet" in the same file, which is
+        // the thing a release exists to change. A folder of PDFs indexed
+        // through a future reader, walked once by a build that has it and once
+        // by one that does not, is a document lost per file — with the bytes
+        // never having moved.
+        SkipRule::Unsupported => content.is_none_or(|sha| sha != recorded.document_id),
+        // Unconditional, and deliberately not folded into the arm above even
+        // though the two would behave alike today.
+        //
+        // Nothing in this product produces this rule: no wire string maps to
+        // it, and the only reader that could earn it — a PDF reader that opens
+        // a scanned page and finds no text layer — is not built. It is
+        // dormant, so it has no digest to compare against and `is_none_or`
+        // would displace on every one of them anyway.
+        //
+        // What the separate branch buys is that whoever builds that reader has
+        // to decide this rather than inherit it. And the decision is not the
+        // same one: this rule is about a *page*, not a file, so "the bytes did
+        // not change" would not even mean what it means above — a document
+        // whose pages are readable except one is not a file that stopped being
+        // indexable.
+        SkipRule::NoTextLayer => true,
         // Something that happened, and that happens to every file alike.
         SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => false,
-        SkipRule::TooLarge => on_disk.is_some_and(|disk| disk.size_bytes != recorded.size_bytes),
+        // The one refusal by content that keeps: the file still opens with the
+        // prose the index holds, and that prose is readable nowhere else.
+        SkipRule::BinaryTail => false,
+        // Both halves of the pair, not the size alone: a same-length rewrite in
+        // place is invisible to the size and plain to the modification time,
+        // and the size alone kept the old text for it on every later pass. See
+        // the section on this rule above for what the remaining gap is and why
+        // it cannot be closed here.
+        SkipRule::TooLarge => on_disk.is_some_and(|disk| {
+            disk.size_bytes != recorded.size_bytes || disk.mtime != recorded.mtime
+        }),
     }
 }
 

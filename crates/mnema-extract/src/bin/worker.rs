@@ -108,6 +108,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 "{} is {size} bytes, over the {}-byte ceiling",
                 request.path, request.max_bytes
             ),
+            // The one refusal with no digest, and it cannot have one: this
+            // branch decided from `stat` and never opened the file. Hashing it
+            // here to fill the field in would read exactly the bytes the
+            // ceiling exists to avoid reading.
+            sha256: None,
         }];
     }
 
@@ -186,10 +191,40 @@ fn handle_request(line: &str) -> Vec<Frame> {
             });
             frames
         }
-        // None of these has a `Vec<Block>` reader in this crate yet — task 6
-        // shipped only plain text, and `pdfium_probe` proves the binding
-        // links without deciding what a page's text *is* (its own doc
-        // comment). Reporting all five alike as "unsupported" is honestly
+        // Not "no reader yet" — the answer this branch gives for the other
+        // five. These bytes are not text at all, and no release adds a reader
+        // that makes them prose (D51).
+        Reader::NotText => {
+            vec![Frame::Refused {
+                rule: "not_text".to_string(),
+                reason: "this file is not text: its bytes are not something this product reads"
+                    .to_string(),
+                // The digest of the bytes this verdict was reached on, taken
+                // above, before `identify` ran. It is what tells the parent
+                // whether the file changed or only the rule did.
+                sha256: Some(sha256),
+            }]
+        }
+        // Also refused, and deliberately under a rule of its own: the parent
+        // removes what the index holds under a path when a worker read a file
+        // and declined its content, and this is the one refusal by content
+        // that must not trigger it. The file opened as text and stopped, which
+        // is what an interrupted append leaves behind — the prose is still on
+        // disk, and the document under this path is still mostly that prose
+        // (D51). `SkipRule::BinaryTail` carries the rest.
+        Reader::BinaryTail => {
+            vec![Frame::Refused {
+                rule: "binary_tail".to_string(),
+                reason: "this file starts as text and then stops being one: it may be truncated \
+                         or damaged"
+                    .to_string(),
+                sha256: Some(sha256),
+            }]
+        }
+        // None of these five formats has a `Vec<Block>` reader in this crate
+        // yet — task 6 shipped only plain text, and `pdfium_probe` proves the
+        // binding links without deciding what a page's text *is* (its own
+        // doc comment). Reporting them alike as "unsupported" is honestly
         // what is true today: this worker can read text and nothing else.
         Reader::Pdf | Reader::Docx | Reader::Xlsx | Reader::Epub | Reader::Unrecognized => {
             vec![Frame::Refused {
@@ -198,6 +233,7 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     "no reader implemented yet for {} ({:?})",
                     file_type.mime, file_type.reader
                 ),
+                sha256: Some(sha256),
             }]
         }
     }

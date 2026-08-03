@@ -94,9 +94,34 @@ def write(name: str, pages: list[list[str]]) -> None:
     print(f"{name}: {len(data)} bytes, non-whitespace chars per page {counts}")
 
 
+def write_solid_png() -> None:
+    """An 8x8 solid-colour PNG: a genuine binary file, invented outright.
+
+    Used by typing.rs to check that content decides what is text. Assembled by
+    hand for the same reason the PDFs are — small enough to read in a diff, and
+    reproducible on any machine with a Python interpreter.
+    """
+    import struct
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    w = h = 8
+    raw = b"".join(b"\x00" + bytes([40, 80, 160]) * w for _ in range(h))
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    (HERE / "solid.png").write_bytes(png)
+
+
 if __name__ == "__main__":
     write("one-page-text.pdf", [[BODY_TEXT, BODY_TEXT_2]])
     # Page order is load-bearing here: the test asserts that the page carrying the
     # text arrives first and the stamp page second, which is what proves the probe
     # reports document order rather than whatever order pdfium happens to yield.
     write("text-then-stamp.pdf", [[BODY_TEXT, BODY_TEXT_2], [STAMP_TEXT]])
+    write_solid_png()

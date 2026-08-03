@@ -5,8 +5,12 @@ use serde::Serialize;
 use crate::{Db, Error};
 
 /// Bumped whenever text preparation or the chunking constants change, so a
-/// database holding two formats can tell them apart. D14.
-pub const INDEX_FORMAT_VERSION: i64 = 1;
+/// database holding two formats can tell them apart. D14. Bumped to 2: which
+/// files count as text at all is part of the text a document contributes —
+/// before this, a photo refused under `unsupported` left a journal row that
+/// `ingest_file`'s second cheap arm would keep honouring after the worker
+/// learned to refuse it as `not_text` instead (D51).
+pub const INDEX_FORMAT_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Citation {

@@ -9,6 +9,7 @@
 //! Every fixture is invented — names, places and numbers that belong to
 //! nobody.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,6 +18,7 @@ use mnema_core::Coordinate;
 use mnema_index::{Db, SkipRule, open, register_vector_extension};
 use mnema_ingest::{Ingested, ingest_file};
 use mnema_pool::{Pool, PoolConfig};
+use sha2::{Digest, Sha256};
 
 // `worker` and `wrong_worker` live in `tests/support/mod.rs` now, shared with
 // `walk.rs`: two integration-test binaries asking "where is the worker built"
@@ -1196,20 +1198,34 @@ fn a_skip_that_could_not_displace_is_not_journalled_either() {
     assert!(fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
 }
 
-// ------------------------------------- a setting must not delete indexed content
+// ------------------------------- what the ceiling decides from the two numbers it has
+//
+// It used to say "a setting must not delete indexed content", and the tests below
+// now falsify that as written: lowering the ceiling deletes nothing by itself, but
+// after it, anything that moves the file's mtime does — `a_touch_under_a_lowered_
+// ceiling_gives_up_the_document` is that price, taken deliberately. The refusal is
+// made from `stat` without opening the file, so "touched" and "rewritten in place at
+// the same length" are the same two numbers, and one of the two answers has to be
+// wrong. The side chosen is the one that leaves no citation pointing at text the file
+// no longer holds.
 
 /// A file that **grew** past the ceiling loses what the index held for it.
 ///
-/// This is the case the ceiling branch actually meets on a previously indexed
-/// file, and it took two rulings to find. The obvious worry — someone lowers
-/// `max_bytes` under a file that has not changed — cannot reach here at all:
-/// nothing about that file moved, so the cheap arm matches size, mtime and
-/// stage and answers `Unchanged` before a worker starts. What does reach here
-/// is a file rewritten to something bigger, and keeping the old text for that
-/// one is the stale citation the displacement exists to prevent.
+/// This was once the only case the ceiling branch was thought to meet on a
+/// previously indexed file, and it took two rulings to find. The obvious worry
+/// — someone lowers `max_bytes` under a file that has not changed — cannot
+/// reach here at all: nothing about that file moved, so the cheap arm matches
+/// size, mtime and stage and answers `Unchanged` before a worker starts. What
+/// does reach here is a file rewritten to something bigger, and keeping the old
+/// text for that one is the stale citation the displacement exists to prevent.
 ///
-/// The refusal itself cannot tell the two apart: it is made from `stat`,
-/// without opening the file. The size does — see `displaces`.
+/// Two more cases reach it, and they have their own tests below: a file
+/// rewritten in place at the **same** length under a lowered ceiling, and a
+/// bare `touch` under one. The refusal cannot tell any of them apart — it is
+/// made from `stat`, without opening the file — so the decision is made from
+/// the two numbers there are: `displaces` displaces when the size **or** the
+/// mtime moved, and only a file matching on both is treated as one the ceiling
+/// merely excludes.
 #[test]
 fn a_file_grown_past_the_ceiling_loses_what_the_index_held() {
     let fx = Fixture::with_max_bytes(tempfile::tempdir().unwrap(), 400);
@@ -1246,53 +1262,231 @@ fn a_file_grown_past_the_ceiling_loses_what_the_index_held() {
     );
 }
 
-/// …and the case a lowered ceiling produces, which must keep everything.
+/// The premise the whole ceiling rule rests on: the user who lowers
+/// `max_bytes` under a file they have not touched never reaches `displaces` at
+/// all.
 ///
-/// The file is byte-for-byte what it was; only its modification time moved,
-/// which is what a restore or a `touch` does — and it is what makes this reach
-/// the pool at all rather than stopping at the cheap arm. A setting excluded
-/// it, so the setting must not delete it.
-///
-/// The two tests differ in exactly one thing, the size on disk, which is what
-/// `displaces` decides on.
+/// Size, mtime and stage all still match, so the cheap arm answers and no
+/// worker is started, however low the ceiling goes. It is asserted on its own
+/// rather than as the first half of another test because everything
+/// `displaces` says about this rule is written on top of it: if this ever stops
+/// holding, that reasoning needs revisiting and not just its code.
 #[test]
-fn a_lowered_ceiling_keeps_what_it_merely_excludes() {
+fn a_lowered_ceiling_is_not_even_asked_about_an_untouched_file() {
+    let fx = Fixture::new();
+    fx.place_at("contracts/ravella.txt", CONTRACT.as_bytes(), mtime());
+    let Ingested::Indexed { document_id, .. } = fx.ingest("contracts/ravella.txt") else {
+        panic!("expected the file to index under the default ceiling")
+    };
+
+    assert_eq!(
+        fx.ingest_under_ceiling("contracts/ravella.txt", (CONTRACT.len() - 1) as u64),
+        Ingested::Unchanged {
+            document_id: document_id.clone()
+        },
+        "a lowered ceiling under an untouched file must not even be asked about"
+    );
+    assert!(!fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
+    assert_eq!(fx.db.path_count(&document_id).unwrap(), 1);
+}
+
+/// A file rewritten in place, keeping its length, under a ceiling that has
+/// dropped below it — the Critical a whole-branch review found, and the case
+/// the size comparison alone was argued to make impossible.
+///
+/// The argument ran: a same-length replacement cannot fool the size test,
+/// because a file of that length that is over the ceiling now was over the
+/// ceiling then and could never have been indexed. It refutes itself, and the
+/// sequence below is what that looks like: the ceiling is what moved, so the
+/// file's own length says nothing at all. Every clause lines up — the cheap arm
+/// misses on the modification time, the pool refuses from `stat`, the size
+/// matches `path.size_bytes` — and before this test the document stayed.
+///
+/// Measured against the size-only rule: the old text was still found, the new
+/// text never was, and each further pass repeated it, because the worker keeps
+/// answering `TooLarge` and the journal is not consulted for it.
+#[test]
+fn a_file_rewritten_in_place_under_a_lowered_ceiling_stops_answering() {
     let fx = Fixture::new();
     let path = fx.place_at("contracts/ravella.txt", CONTRACT.as_bytes(), mtime());
     let Ingested::Indexed { document_id, .. } = fx.ingest("contracts/ravella.txt") else {
         panic!("expected the file to index under the default ceiling")
     };
 
-    let ceiling = (CONTRACT.len() - 1) as u64;
-
-    // First, the premise the whole rule rests on: a file nothing touched does
-    // not reach the ceiling branch at all, however low the ceiling goes. Size,
-    // mtime and stage all still match, so the cheap arm answers and no worker
-    // is started. If this ever stops holding, the reasoning in `displaces`
-    // needs revisiting, not just its code.
+    // Different words, deliberately the same number of bytes: the size column
+    // is blind to this edit by construction, which is the whole point.
+    let rewritten: String = CONTRACT
+        .chars()
+        .map(|c| if c == 'а' { 'о' } else { c })
+        .collect();
     assert_eq!(
-        fx.ingest_under_ceiling("contracts/ravella.txt", ceiling),
-        Ingested::Unchanged {
-            document_id: document_id.clone()
-        },
-        "a lowered ceiling under an untouched file must not even be asked about"
+        rewritten.len(),
+        CONTRACT.len(),
+        "the rewrite must keep the file's length, or this is the grown-file test"
     );
+    assert_ne!(rewritten, CONTRACT);
+    set_bytes_and_mtime(&path, rewritten.as_bytes(), mtime_just_after());
 
-    // Same bytes, later mtime — so the cheap arm cannot answer and the pool is
-    // asked, now under a ceiling below the file's size.
-    set_mtime(&path, mtime_just_after());
     assert_eq!(
-        fx.ingest_under_ceiling("contracts/ravella.txt", ceiling),
+        fx.ingest_under_ceiling("contracts/ravella.txt", (CONTRACT.len() - 1) as u64),
         Ingested::Skipped {
             rule: SkipRule::TooLarge
         }
     );
-
     assert!(
-        !fx.db.search_lexical("Равелла", 10).unwrap().is_empty(),
-        "a setting deleted indexed content: the file never changed, only the ceiling did"
+        fx.db.search_lexical("Равелла", 10).unwrap().is_empty(),
+        "the index still answers under this name with text the file no longer contains"
     );
+    assert_eq!(fx.db.path_count(&document_id).unwrap(), 0);
+    assert_eq!(fx.count("SELECT count(*) FROM document"), 0);
+    assert_eq!(
+        fx.db.skips_for_root(fx.root_id).unwrap()[0].rule,
+        "too_large",
+        "and it is journalled, so 'why is this file not in my index?' has an answer"
+    );
+}
+
+/// The other half of the pair, on its own, so that neither half of the
+/// comparison can be deleted without something going red: a replacement of a
+/// **different** length carrying the **old** modification time.
+///
+/// `cp -p`, `rsync -a` and every archive restore do exactly this, and the
+/// modification time is blind to them by construction. Without this the size
+/// half of the condition was unpinned — the grown-file test above writes a
+/// later time as well, so it stays green on the modification time alone.
+#[test]
+fn a_replacement_of_a_different_length_carrying_the_old_time_stops_answering() {
+    let fx = Fixture::new();
+    let path = fx.place_at("contracts/ravella.txt", CONTRACT.as_bytes(), mtime());
+    let Ingested::Indexed { document_id, .. } = fx.ingest("contracts/ravella.txt") else {
+        panic!("expected the file to index under the default ceiling")
+    };
+
+    let other = format!("{CONTRACT}{}", "Додаток про кошторис. ".repeat(20));
+    assert!(other.len() > CONTRACT.len());
+    // The same modification time the index recorded, which is the whole point.
+    set_bytes_and_mtime(&path, other.as_bytes(), mtime());
+
+    assert_eq!(
+        fx.ingest_under_ceiling("contracts/ravella.txt", (CONTRACT.len() - 1) as u64),
+        Ingested::Skipped {
+            rule: SkipRule::TooLarge
+        }
+    );
+    assert_eq!(
+        fx.db.path_count(&document_id).unwrap(),
+        0,
+        "a different length is a proof the bytes moved, whatever the clock says"
+    );
+    assert!(fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
+}
+
+/// The price the test above is bought with, asserted rather than left implied:
+/// a file whose bytes never moved, only its modification time, loses its
+/// document under a ceiling that has dropped below it.
+///
+/// From here a `touch` and a same-length rewrite in place are the same two
+/// numbers. The refusal came from `stat` without the file being opened, so
+/// there is no reading of the content to tell them apart — not by omission,
+/// by construction — and the rule displaces, taking the loss over the stale
+/// citation. Both are undone by the ceiling moving back up, so neither is
+/// permanent; while they last, this one is a file missing from the index with a
+/// `too_large` row saying why, and the other is a search result quoting text
+/// that is not in the file.
+///
+/// It is written as its own test, with its own name, because it is a decision
+/// and not a consequence: whoever reverses it has to delete an assertion that
+/// says what reversing it costs.
+#[test]
+fn a_touch_under_a_lowered_ceiling_gives_up_the_document() {
+    let fx = Fixture::new();
+    let path = fx.place_at("contracts/ravella.txt", CONTRACT.as_bytes(), mtime());
+    let Ingested::Indexed { document_id, .. } = fx.ingest("contracts/ravella.txt") else {
+        panic!("expected the file to index under the default ceiling")
+    };
+
+    // Byte for byte what it was; only the modification time moved, which is
+    // what a `touch`, a restore or a sync client does — and it is what makes
+    // this reach the pool at all rather than stopping at the cheap arm.
+    set_mtime(&path, mtime_just_after());
+    assert_eq!(
+        fx.ingest_under_ceiling("contracts/ravella.txt", (CONTRACT.len() - 1) as u64),
+        Ingested::Skipped {
+            rule: SkipRule::TooLarge
+        }
+    );
+    assert_eq!(
+        fx.db.path_count(&document_id).unwrap(),
+        0,
+        "the pair the product itself reads as 'this file changed' has to mean that here too"
+    );
+    assert_eq!(
+        fx.db.skips_for_root(fx.root_id).unwrap()[0].rule,
+        "too_large",
+        "and the journal is what makes the loss visible rather than silent"
+    );
+
+    // Not permanent, and that is half of why the trade is the way round it is:
+    // the same setting moving back brings the document straight back.
+    let raised = fx.ingest_under_ceiling("contracts/ravella.txt", 1 << 20);
+    assert!(
+        matches!(raised, Ingested::Indexed { .. }),
+        "raising the ceiling again must bring the file back: {raised:?}"
+    );
+    assert!(!fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
+}
+
+/// The other side of the same line, and the only state in which `displaces`
+/// keeps a `TooLarge`: the size **and** the modification time both still match
+/// what the `path` row recorded.
+///
+/// That is the very pair the cheap arm above treats as "nothing happened to
+/// this file", so treating it as anything else here would be the same product
+/// disagreeing with itself one screen apart. Reaching it takes the third
+/// member of the cheap arm's question: an interrupted job leaves a `path` row
+/// matching the disk exactly over a document whose chunking nothing recorded as
+/// finished, so the arm misses on the *stage* while both numbers agree.
+///
+/// Without this the keep side would be unasserted, and a rule that displaced
+/// every `TooLarge` outright would pass the whole suite — which is the shape
+/// this branch has already been caught in nine times: an assertion that binds
+/// one direction only is satisfied by zero and looks like coverage.
+#[test]
+fn a_lowered_ceiling_keeps_what_it_still_recognises() {
+    let fx = Fixture::new();
+    fx.place_at("contracts/ravella.txt", CONTRACT.as_bytes(), mtime());
+
+    // The checkpoint is what fails, so the rows below it are committed and the
+    // document is left without a finished stage — the state a job killed
+    // between the last slice and its checkpoint leaves behind.
+    fx.break_writes_to("INSERT", "ingest_stage");
+    let interrupted = fx.try_ingest("contracts/ravella.txt");
+    assert!(
+        matches!(interrupted, Err(mnema_ingest::IngestError::Index(_))),
+        "expected the checkpoint to fail, got {interrupted:?}"
+    );
+    fx.unbreak_writes();
+    let document_id: String = fx
+        .db
+        .conn()
+        .query_row("SELECT id FROM document", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(fx.db.path_count(&document_id).unwrap(), 1);
+
+    // Nothing on disk moved at all. The stage is the only thing that misses,
+    // so the pool is asked under a ceiling now below the file's size.
+    assert_eq!(
+        fx.ingest_under_ceiling("contracts/ravella.txt", (CONTRACT.len() - 1) as u64),
+        Ingested::Skipped {
+            rule: SkipRule::TooLarge
+        }
+    );
+    assert_eq!(
+        fx.db.path_count(&document_id).unwrap(),
+        1,
+        "a setting deleted indexed content: neither of the two numbers the product \
+         reads moved, only the ceiling did"
+    );
     assert_eq!(fx.count("SELECT count(*) FROM document"), 1);
     assert_eq!(
         fx.db.skips_for_root(fx.root_id).unwrap()[0].rule,
@@ -1343,6 +1537,148 @@ fn a_raised_ceiling_re_examines_a_file_it_used_to_refuse() {
 
 // ------------------- a remembered content verdict must not ask the pool
 
+/// A refusal the journal remembers must not answer for a `path` row it would
+/// have taken away.
+///
+/// This is the half of the defect that survives the journal being cleaned up
+/// after a successful index, and it needs no stale row at all: the row below is
+/// current, correct, and about bytes that are no longer the ones on disk. The
+/// sequence is a stricter release refusing a note it still recognises — which
+/// keeps the document, since the bytes match what the index was built from —
+/// followed by a `cp -p` of a **different** file of the same length carrying
+/// that same modification time.
+///
+/// The `path` row's own pair is older, so the first cheap arm misses; the
+/// journal's pair matches the disk exactly, so the second one answered. The
+/// worker was never asked, `displaces` was never reached, and the note went on
+/// answering under a name whose file says something else entirely. What breaks
+/// it is asking `displaces` with no digest — the truth about what this arm
+/// knows — before trusting a remembered verdict.
+#[cfg(unix)]
+#[test]
+fn a_remembered_refusal_does_not_answer_for_a_document_it_would_remove() {
+    let fx = Fixture::new();
+    let first = "Нотатка перша, про терміни постачання.\n".repeat(40);
+    let path = fx.place_at("notes/a.txt", first.as_bytes(), mtime());
+    let Ingested::Indexed { document_id, .. } = fx.ingest("notes/a.txt") else {
+        panic!("expected the note to index")
+    };
+
+    // A stricter release refuses these very bytes. The digest matches what the
+    // index holds, so the document stays and the journal records the refusal
+    // against the file's *current* size and modification time — while the
+    // `path` row keeps the older one it was written with.
+    set_mtime(&path, mtime_just_after());
+    let stricter = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"not_text","reason":"the threshold moved","sha256":"{document_id}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("notes/a.txt", &stricter),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        }
+    );
+    assert!(
+        !fx.db.search_lexical("постачання", 10).unwrap().is_empty(),
+        "the premise fails if the rule change already deleted the document"
+    );
+
+    // `cp -p` from a different note of exactly the same length: the size cannot
+    // see it, and the modification time it carries is the one the journal
+    // remembers.
+    let second = "Нотатка друга, про витрати кошторисів.\n".repeat(40);
+    assert_eq!(
+        second.len(),
+        first.len(),
+        "the two notes must be the same length, or the first cheap arm decides this"
+    );
+    set_bytes_and_mtime(&path, second.as_bytes(), mtime_just_after());
+
+    let outcome = fx.ingest("notes/a.txt");
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "a remembered refusal answered for bytes it was never reached on: {outcome:?}"
+    );
+    assert!(
+        fx.db.search_lexical("постачання", 10).unwrap().is_empty(),
+        "the index still answers under this name with a note the file no longer holds"
+    );
+    assert!(
+        !fx.db.search_lexical("кошторисів", 10).unwrap().is_empty(),
+        "and the note that IS there has to be findable, or this passes by deleting \
+         everything"
+    );
+}
+
+/// The journal's row goes when the file it refused is indexed — in the write's
+/// own transaction, so the two cannot disagree.
+///
+/// Both directions, because either alone is satisfied by doing nothing: a
+/// refusal has to leave a row, and a successful index has to take it away. Left
+/// standing, that row is not inert in either of the two places it is read. The
+/// window answering "why is this file not in my index?" listed files that are
+/// in it; and `ingest_file`'s second cheap arm went on treating it as a live
+/// verdict about a path whose content had been replaced twice over.
+#[test]
+fn indexing_a_file_forgets_the_refusal_that_kept_it_out() {
+    let fx = Fixture::new();
+    let path = fx.place_at(
+        "scans/tender.pdf",
+        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
+        mtime(),
+    );
+    assert_eq!(
+        fx.ingest("scans/tender.pdf"),
+        Ingested::Skipped {
+            rule: SkipRule::Unsupported
+        }
+    );
+    assert_eq!(
+        fx.db
+            .skips_for_root(fx.root_id)
+            .unwrap()
+            .iter()
+            .map(|s| s.relative_path.clone())
+            .collect::<Vec<_>>(),
+        vec!["scans/tender.pdf".to_string()],
+        "a refusal that records nothing leaves the user with no answer at all"
+    );
+
+    set_bytes_and_mtime(&path, CONTRACT.as_bytes(), mtime_just_after());
+    assert!(matches!(
+        fx.ingest("scans/tender.pdf"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
+        "the file is in the index and the journal still says why it is not"
+    );
+
+    // The same for the branch that writes no document of its own: a second path
+    // onto content already chunked repoints and nothing else, and that is
+    // exactly where a refusal for the new name would otherwise survive.
+    let other = fx.place_at("scans/copy.pdf", b"%PDF-1.7\n<<>>\nendobj\n", mtime());
+    assert_eq!(
+        fx.ingest("scans/copy.pdf"),
+        Ingested::Skipped {
+            rule: SkipRule::Unsupported
+        }
+    );
+    set_bytes_and_mtime(&other, CONTRACT.as_bytes(), mtime_just_after());
+    assert!(matches!(
+        fx.ingest("scans/copy.pdf"),
+        Ingested::AlreadyIndexed { .. }
+    ));
+    assert!(
+        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
+        "`AlreadyIndexed` writes a path row like any other and owes the journal the \
+         same tidy-up"
+    );
+}
+
 /// The second cheap arm exists to save a worker process on a file whose
 /// content verdict is already known — pinned here by starving it. The file is
 /// skipped once by the real worker as `Unsupported`, then ingested again,
@@ -1378,6 +1714,356 @@ fn a_remembered_content_skip_is_answered_without_asking_the_pool() {
         "the rule changed, so the pool was asked — a second cheap arm that \
          answers from the journal would never reach a worker at all, wrong or \
          not"
+    );
+}
+
+/// The other half of the second cheap arm's premise: a remembered verdict is
+/// only good while `format_version` still matches. Bumping
+/// `INDEX_FORMAT_VERSION` is how a shipped fix (D51: a photo stopped being
+/// `unsupported` and became its own `not_text` rule) reaches files a walk
+/// already gave up on — but only if the arm actually checks the version
+/// rather than the bytes alone, which nothing here had tested before this.
+///
+/// Same shape as the test above: starve the pool with a sidecar that is not
+/// the worker. The file is skipped once by the real worker as `NotText`, then
+/// its journal row is pushed one version behind by hand — same bytes, same
+/// mtime, only the format version lags — and ingested again. If the second
+/// cheap arm honoured a stale version, the sidecar would never be asked and
+/// the rule would stay `NotText`. Cut the check and the walk reaches the pool
+/// instead, where the sidecar answers with bytes that are not valid UTF-8 and
+/// the rule becomes `Crash`.
+#[cfg(unix)]
+#[test]
+fn a_stale_format_version_is_not_honoured_by_the_second_cheap_arm() {
+    let fx = Fixture::new();
+    fx.place_at(
+        "photos/scan.png",
+        include_bytes!("../../mnema-extract/tests/fixtures/solid.png"),
+        mtime(),
+    );
+    assert_eq!(
+        fx.ingest("photos/scan.png"),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        }
+    );
+
+    // Nothing about the file moved — only the remembered version, by hand,
+    // to stand in for a walk that ran before today's build. Scoped to this
+    // path so a second fixture added to this test later would not go stale
+    // along with it, silently.
+    fx.db
+        .conn()
+        .execute(
+            "UPDATE skipped SET format_version = format_version - 1
+              WHERE watched_root_id = ?1 AND relative_path = ?2",
+            (fx.root_id, "photos/scan.png"),
+        )
+        .unwrap();
+
+    let broken = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
+    assert_eq!(
+        fx.ingest_with_worker("photos/scan.png", &broken),
+        Ingested::Skipped {
+            rule: SkipRule::Crash
+        },
+        "the rule did not change, so the journal answered — a second cheap \
+         arm that trusts a stale format_version never reaches a worker at \
+         all"
+    );
+}
+
+/// D51 §5. A `.txt` overwritten by a photo must stop answering searches with
+/// text the file no longer contains — the question this project asks of
+/// everything that writes to the index.
+#[test]
+fn a_text_file_overwritten_by_a_photo_stops_answering() {
+    let fx = Fixture::new();
+    // `place_at`, not `place`: this test's outcome depends on the mtime moving
+    // between the two writes, and the file's own comment (`slice.rs:89-95`)
+    // says taking the wall clock there makes the assertion a coin toss.
+    fx.place_at(
+        "notes/kropyva.txt",
+        "кропива росте попід тином\n".as_bytes(),
+        mtime(),
+    );
+    assert!(matches!(
+        fx.ingest("notes/kropyva.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("кропива", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    fx.place_at(
+        "notes/kropyva.txt",
+        include_bytes!("../../mnema-extract/tests/fixtures/solid.png"),
+        mtime_just_after(),
+    );
+    assert_eq!(
+        fx.ingest("notes/kropyva.txt"),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        }
+    );
+
+    assert!(
+        fx.db.search_lexical("кропива", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+}
+
+/// D51. A file whose bytes never changed must not lose its document because a
+/// later release classifies it differently. Measured by the data-loss harness
+/// before this fix: touching the mtime — `touch`, `cp -p`, a restore from
+/// backup, a sync client — is enough, because the first cheap arm compares
+/// mtime and hands the file to a worker that now answers differently.
+///
+/// The sidecar carries the file's real sha256, and that is not a convenience:
+/// a worker whose rule changed still *read* the bytes and still hashed them
+/// before classifying (`worker.rs`, where the digest is taken before
+/// `identify`). A stand-in that omitted it would be modelling a different
+/// failure — an older worker — which this test is not about.
+#[test]
+fn a_file_whose_bytes_did_not_change_keeps_its_document() {
+    let fx = Fixture::new();
+    let prose = "Нотатка, яку ніхто не редагував.\n".repeat(50);
+    fx.place_at("notes/untouched.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("notes/untouched.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("редагував", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    // The same bytes, a later mtime — and a worker whose rule now refuses them.
+    fx.place_at("notes/untouched.txt", prose.as_bytes(), mtime_just_after());
+    let mut hasher = Sha256::new();
+    hasher.update(prose.as_bytes());
+    let sha256 = hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+    let stricter = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"not_text","reason":"the threshold moved","sha256":"{sha256}"}}\n'"#
+        ),
+    );
+    let outcome = fx.ingest_with_worker("notes/untouched.txt", &stricter);
+
+    assert!(
+        matches!(outcome, Ingested::Skipped { .. }),
+        "the file is refused under the new rule: {outcome:?}"
+    );
+    assert!(
+        !fx.db.search_lexical("редагував", 10).unwrap().is_empty(),
+        "the bytes are identical to what the index was built from, so the \
+         document must survive a rule that changed under it"
+    );
+}
+
+/// D51 §5. The other side of the line that test draws: a note whose append was
+/// interrupted must not lose the prose it still has. Its tail is zeroed, so the
+/// file is refused — but the earlier document stays searchable, because the
+/// text on disk is still mostly the text the index holds.
+#[test]
+fn an_interrupted_append_does_not_delete_what_the_note_still_says() {
+    let fx = Fixture::new();
+    let prose = "Нотатка про засідання: ухвалили перенести терміни.\n".repeat(200);
+    fx.place_at("notes/meeting.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("notes/meeting.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(!fx.db.search_lexical("ухвалили", 10).unwrap().is_empty());
+
+    let mut damaged = prose.into_bytes();
+    damaged.extend_from_slice(&[0u8; 4096]);
+    fx.place_at("notes/meeting.txt", &damaged, mtime_just_after());
+    assert_eq!(
+        fx.ingest("notes/meeting.txt"),
+        Ingested::Skipped {
+            rule: SkipRule::BinaryTail
+        }
+    );
+
+    assert!(
+        !fx.db.search_lexical("ухвалили", 10).unwrap().is_empty(),
+        "the note's prose is still on disk, and deleting it would lose text \
+         that is readable nowhere else"
+    );
+}
+
+/// D51 §5, in the encoding the randomised harness cannot produce.
+///
+/// `an_interrupted_append_does_not_delete_what_the_note_still_says` covers a
+/// UTF-8 note, and so does the harness — `interrupted_append_body` writes UTF-8
+/// prose and nothing else. A UTF-16 note takes a different branch of `classify`
+/// altogether, the one behind the byte-order mark, and the whole output of that
+/// branch's tail arm was covered by nothing: a reviewer replaced it with
+/// `Verdict::NotText` and every test in the workspace stayed green.
+///
+/// What that costs is a document, and it is the loss this cycle exists to
+/// prevent: `NotText` on changed bytes displaces, so a UTF-16 note whose append
+/// was interrupted loses the prose that is still on disk in front of the
+/// damage.
+#[test]
+fn an_interrupted_utf16_note_does_not_delete_what_it_still_says() {
+    let fx = Fixture::new();
+
+    // A UTF-16LE note with a mark, invented outright: the mark is what tells
+    // `classify` that the NUL bytes of every ASCII-range unit are half a code
+    // unit rather than corruption.
+    let mut note = vec![0xFF, 0xFE];
+    for unit in "Протокол наради: розглянуто подання.\n"
+        .repeat(60)
+        .encode_utf16()
+    {
+        note.extend_from_slice(&unit.to_le_bytes());
+    }
+    fx.place_at("notes/utf16.txt", &note, mtime());
+    assert!(matches!(
+        fx.ingest("notes/utf16.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("розглянуто", 10).unwrap().is_empty(),
+        "the premise fails if UTF-16 prose was never searchable"
+    );
+
+    // The power goes out mid-append and the tail comes back zeroed.
+    let mut damaged = note.clone();
+    damaged.extend_from_slice(&[0u8; 4096]);
+    fx.place_at("notes/utf16.txt", &damaged, mtime_just_after());
+    assert_eq!(
+        fx.ingest("notes/utf16.txt"),
+        Ingested::Skipped {
+            rule: SkipRule::BinaryTail
+        },
+        "a UTF-16 note that stops being text is a tail, not a photo"
+    );
+
+    assert!(
+        !fx.db.search_lexical("розглянуто", 10).unwrap().is_empty(),
+        "the note's prose is still on disk, and deleting it would lose text \
+         that is readable nowhere else"
+    );
+}
+
+/// The same question as `a_text_file_overwritten_by_a_photo_stops_answering`,
+/// one rule over: a `.txt` overwritten by a format this product has no reader
+/// for must also stop answering under its own name. The bytes are not the ones
+/// the index was built from, so what it holds is a file that is gone.
+///
+/// This direction was never in doubt — `Unsupported` displaced
+/// unconditionally. It is here because the condition added beside it has to be
+/// pinned from both sides, and a one-sided assertion is satisfied by a rule
+/// that never displaces at all.
+#[test]
+fn a_text_file_overwritten_by_a_format_with_no_reader_stops_answering() {
+    let fx = Fixture::new();
+    fx.place_at(
+        "notes/protokol.txt",
+        "засідання ухвалило перенести розгляд\n".as_bytes(),
+        mtime(),
+    );
+    assert!(matches!(
+        fx.ingest("notes/protokol.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("розгляд", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    // A PDF header with nothing readable behind it. `identify` answers
+    // `Reader::Pdf` on the magic alone, and no reader for that format is built
+    // — task 6 shipped plain text and markdown — so the worker refuses the
+    // file as `unsupported` after reading and hashing its bytes.
+    fx.place_at(
+        "notes/protokol.txt",
+        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
+        mtime_just_after(),
+    );
+    assert_eq!(
+        fx.ingest("notes/protokol.txt"),
+        Ingested::Skipped {
+            rule: SkipRule::Unsupported
+        }
+    );
+
+    assert!(
+        fx.db.search_lexical("розгляд", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+}
+
+/// The other side of that line, and the inversion it corrects.
+///
+/// `Unsupported` is the *least* stable verdict this product gives: the worker's
+/// own words for it are "no reader implemented yet"
+/// (`crates/mnema-extract/src/bin/worker.rs`), which is exactly what a release
+/// changes — where `NotText` promises the opposite, that "no release adds a
+/// reader that makes them prose". Task 10 made the stable rule conditional on
+/// the digest and left the unstable one deleting outright.
+///
+/// What that costs is one document per file, silently: a folder indexed by a
+/// build that has a reader, walked once by a build that does not — a rollback,
+/// a second machine, a partial install — loses every document in it, with the
+/// bytes never having moved. The sidecar stands in for the build without the
+/// reader, and carries the file's real digest because a worker that declines a
+/// format still read and hashed the bytes before deciding.
+#[test]
+fn a_file_no_reader_can_take_keeps_its_document_when_only_the_rule_changed() {
+    let fx = Fixture::new();
+    let prose = "Довідка про стан робіт, підписана комісією.\n".repeat(50);
+    fx.place_at("notes/dovidka.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("notes/dovidka.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("комісією", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    // The same bytes, a later mtime — and a build that has no reader for them.
+    fx.place_at("notes/dovidka.txt", prose.as_bytes(), mtime_just_after());
+    let mut hasher = Sha256::new();
+    hasher.update(prose.as_bytes());
+    let sha256 = hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+    let without_the_reader = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"unsupported","reason":"no reader implemented yet","sha256":"{sha256}"}}\n'"#
+        ),
+    );
+    let outcome = fx.ingest_with_worker("notes/dovidka.txt", &without_the_reader);
+
+    assert_eq!(
+        outcome,
+        Ingested::Skipped {
+            rule: SkipRule::Unsupported
+        },
+        "the premise fails unless this build refuses the file for want of a reader"
+    );
+    assert!(
+        !fx.db.search_lexical("комісією", 10).unwrap().is_empty(),
+        "the bytes are identical to what the index was built from, so the \
+         document must survive a build that lost the reader"
     );
 }
 
