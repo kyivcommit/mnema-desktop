@@ -168,11 +168,17 @@ the worker inside it works. The failure a person meets says the application is d
 which is false, and it is the one step of this list that fails for a reason having
 nothing to do with what was packaged.
 
-Two limits of that measurement, so nobody re-derives them: the browser case was
-reproduced by writing the attribute LaunchServices writes, not by clicking a download,
-so the Gatekeeper behaviour is measured and the exact attribute a given browser writes
-is not; and the launch itself was not performed — the block is inferred from the
-quarantine mechanism rather than observed.
+One half of this is now observed rather than inferred. The acceptance run was performed
+on 2026-08-03 with an artefact fetched by `gh run download`, and the application launched
+from `/Applications` with **no Gatekeeper prompt at all** — so the left column is measured
+end to end, and the tool named in step 1 is a measured instruction rather than a cautious
+one.
+
+Two limits remain, so nobody re-derives them: the browser case was reproduced by writing
+the attribute LaunchServices writes, not by clicking a download, so the Gatekeeper
+behaviour and the propagation are measured while the exact attribute a given browser
+writes is not; and no launch was attempted from that path, so the block itself is still
+inferred from the quarantine mechanism rather than seen.
 
 Closing this properly needs a Developer ID certificate and notarization, which is a
 purchase and an account decision, not a build change.
