@@ -55,9 +55,10 @@ cargo install tauri-cli --version "^2" --locked
 
 # Once per clone, before anything else. Nothing about `src-tauri` compiles until
 # this file exists, in any profile — `cargo build`, `cargo clippy` and `cargo test`
-# have no hooks that would create it, and the two `tauri` commands run their hooks
-# without waiting for them to finish. See "A fresh checkout cannot build the shell"
-# below for what it says when it stops, and for why the hooks are not a substitute.
+# have no hooks that would create it, and `cargo tauri dev` runs its hook without
+# waiting for it to finish. (`cargo tauri build` does wait; only the dev hook is
+# unawaited.) See "A fresh checkout cannot build the shell" below for what it says
+# when it stops, and for why the dev hook is not a substitute.
 scripts/stage-sidecar.sh debug     # or release; either satisfies the declaration
 
 # The package.
@@ -171,18 +172,28 @@ four seconds, at the path `worker_path()` resolves to. That closes the gap `path
 described, where development worked only after somebody had run a `cargo build` by hand and
 nothing enforced it. Two things qualify it, both measured.
 
-*The hook is not awaited.* In every `cargo tauri dev` log on this repository,
+*The dev hook is not awaited.* In every `cargo tauri dev` log on this repository,
 `Running DevCommand` is the line immediately after `Running BeforeDevCommand`, and the hook's
 own output arrives later, interleaved with the dev build — sometimes behind
-`Blocking waiting for file lock on build directory`. Tauri spawns the hook and does not wait,
+`Blocking waiting for file lock on build directory`. Tauri spawns that hook and does not wait,
 which is right for a dev server and wrong for a staging step whose output the build needs. So
 on a clone with no `src-tauri/binaries/` at all, `cargo tauri dev` is a race between the
-hook's copy and `tauri-build`'s validation of the same path. Observed **eight times: seven
-launched, one failed** on `resource path … doesn't exist` — the run where the dev build's
-cargo took the build-directory lock first, leaving the hook still compiling when the build
-script asked for the file. **The hook is therefore a convenience, not the mechanism.** Run
-`scripts/stage-sidecar.sh` once yourself after cloning; that is what makes it dependable, and
-what the CI `check` job does as an explicit step rather than relying on a hook.
+hook's copy and `tauri-build`'s validation of the same path: **one failure in ten runs**, on
+`resource path … doesn't exist`, in the run where the dev build's cargo took the
+build-directory lock first and left the hook still compiling when the build script asked for
+the file.
+
+That rate is worth exactly its conditions, so here they are: every run was on this machine
+with a **warm** `target/` and `src-tauri/binaries/` deleted beforehand, three of them also
+with the worker unlinked and three of those also with `src-tauri/src/lib.rs` and
+`crates/mnema-extract/src/lib.rs` touched so the shell itself recompiled. A genuinely cold
+clone compiles for minutes on both sides and shifts the contention this measures; nobody has
+run that. **Since the staged file survives `cargo clean`, the coin is flipped once per clone
+and never again** — which is why one hand-run command retires it.
+
+**The dev hook is therefore a convenience, not the mechanism.** Run `scripts/stage-sidecar.sh`
+once yourself after cloning; that is what makes it dependable, and what the CI `check` job
+does as an explicit step rather than relying on a hook.
 
 *`tauri-build` writes to the same path.* Its build script declares `rerun-if-changed` on
 `tauri.conf.json`, and when it re-runs it copies whatever is in `src-tauri/binaries/` over
@@ -216,13 +227,16 @@ The job therefore stages explicitly, before `fmt`, `clippy` and `test`.
 The two `tauri` commands are **not** equivalent to that step, and the difference is not
 symmetry:
 
-- `cargo tauri build` is safe. From the same absent-directory state it prints
-  `Running beforeBuildCommand` and completes, exit 0 — checked, not assumed. The `bundle` job
-  needs no staging step and does not have one.
-- `cargo tauri dev` is not. Tauri does not wait for `beforeDevCommand`, so on a clone with
-  nothing staged the hook races `tauri-build`'s validation of the file it is still writing —
-  one failure in eight observed runs, on the same `resource path … doesn't exist`. The hook
-  removes the *certain* failure, not the *possible* one.
+- `cargo tauri build` is safe, and the evidence is the log ordering rather than the exit
+  status: from an absent-directory state it prints `Running beforeBuildCommand`, then the
+  hook's own `stage-sidecar: …/src-tauri/binaries/…` line, and only then the build output.
+  `beforeBuildCommand` is awaited. (Two green runs would not have shown that; they cannot
+  separate "awaited" from "won the race" — which is exactly what went wrong with the dev hook
+  above.) So the `bundle` job needs no staging step and does not have one.
+- `cargo tauri dev` is not, because `beforeDevCommand` is *not* awaited. On a clone with
+  nothing staged the hook races `tauri-build`'s validation of the file it is still writing.
+  The hook removes the *certain* failure, not the *possible* one; the rate and the conditions
+  it was measured under are in the section above, and are not repeated here.
 
 Hence the once-per-clone line in *The commands* above. **The requirement belongs to
 `externalBin`, not to the staging script:** `tauri-build` validates the declared path while

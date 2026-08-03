@@ -78,7 +78,19 @@ triple="$(rustc -vV | sed -n 's/^host: //p')"
 dest_dir="${repo_root}/src-tauri/binaries"
 mkdir -p "${dest_dir}"
 # Always overwrite. The whole point is that a stale copy cannot survive a build.
-cp -f "${built}" "${dest_dir}/${name}-${triple}"
-chmod +x "${dest_dir}/${name}-${triple}"
+#
+# Written to a temporary name and moved into place, rather than copied over the
+# destination: `mv` within one directory is atomic, `cp` is not. This matters
+# because tauri-build READS this path while the debug profile may be writing it —
+# Tauri does not wait for beforeDevCommand, so a `cargo tauri dev` has both
+# running at once. A half-copied file still satisfies an existence check, and
+# cargo would not rebuild the copy tauri-build then makes at
+# target/debug/mnema-extract-worker, because its fingerprint cannot see a file
+# overwritten from outside; a truncated worker would survive until a source
+# change. Not observed — derived from the interleaving that was.
+tmp="${dest_dir}/.${name}-${triple}.tmp"
+cp -f "${built}" "${tmp}"
+chmod +x "${tmp}"
+mv -f "${tmp}" "${dest_dir}/${name}-${triple}"
 
 echo "stage-sidecar: ${dest_dir}/${name}-${triple}"

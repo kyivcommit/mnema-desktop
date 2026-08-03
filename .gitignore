@@ -39,8 +39,12 @@ __pycache__/
 # Nothing checks that today: `cargo clean` does not touch this directory, so a
 # sidecar built from since-deleted source survives here indefinitely, and
 # verify-bundle.sh says nothing about the worker at all. The freshness check
-# arrives with the bundle verification, and until it does, being ignored is the
-# only thing keeping a stale copy out of a package.
+# arrives with the bundle verification.
+#
+# What this line does and does not buy: it keeps a stale copy out of the
+# REPOSITORY. What keeps one out of a PACKAGE is beforeBuildCommand, which
+# re-stages release before `cargo tauri build` bundles anything —
+# scripts/stage-sidecar.sh's header has that argument in full.
 /src-tauri/binaries/
 
 # --- model artefacts and run output ---
