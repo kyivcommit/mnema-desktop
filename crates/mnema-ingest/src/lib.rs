@@ -29,6 +29,7 @@
 use std::path::Path;
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
+use mnema_core::manifest::Manifest;
 use mnema_core::{Block, BlockType, OnDisk, SourceKind};
 use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipRule};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
@@ -137,7 +138,8 @@ impl From<mnema_index::Error> for IngestError {
 /// step before it is expensive:
 ///
 /// 1. The `path` row, on `(root_id, relative)`. Size and mtime both matching
-///    the file on disk, **and** its document's chunking recorded as finished,
+///    the file on disk, the reader that made it still the one `manifest` gives
+///    its extension, **and** its document's chunking recorded as finished,
 ///    means the file was not touched and no worker process is started at all.
 /// 2. The pool. A skip is recorded and returned; only a broken pool is an
 ///    `Err`.
@@ -165,6 +167,14 @@ impl From<mnema_index::Error> for IngestError {
 /// reintroduces exactly the defect this parameter exists to close, one level
 /// up: the cheap arm answers `Unchanged` for a file that has since changed, and
 /// the index keeps text the file no longer contains, with nothing logged.
+///
+/// `manifest` is what the *worker binary* says its readers are, not a constant
+/// this crate could link — D40 forbids depending on `mnema-extract`, which is
+/// the whole reason the answer arrives as data. It must come from the same
+/// executable the `pool` sends files to (`Pool::manifest` asks that one), and
+/// it must be one answer for the whole pass: a caller that re-asked between
+/// files would let the parent disagree with itself about which build it is
+/// running. Step 1 has what it decides and what it cannot.
 pub fn ingest_file(
     pool: &Pool,
     db: &Db,
@@ -172,6 +182,7 @@ pub fn ingest_file(
     absolute: &Path,
     relative: &str,
     on_disk: Option<OnDisk>,
+    manifest: &Manifest,
 ) -> Result<Ingested, IngestError> {
     // 1. The cheap arm. A failure to stat is not decided here: the pool names
     //    an unreadable file properly, with the rule and the reason the journal
@@ -198,11 +209,73 @@ pub fn ingest_file(
     //
     //    It costs one lookup on a `WITHOUT ROWID` primary key per unchanged
     //    file, against the worker process it is here to avoid.
+    //
+    //    The fourth condition is the one that is not about the file at all.
+    //    The other three ask whether the bytes moved; this asks whether the
+    //    code that read them did. Without it, a document made by a reader this
+    //    build no longer has — or by the default arm, before its format got a
+    //    reader of its own — answers `Unchanged` for the life of the index. The
+    //    case it was built for is `.html`: it is read by the text reader today,
+    //    because `identify_plain_text` has no arm for it, so a manifest of
+    //    reader *versions* would compare `text@1` against `text@1` and never
+    //    re-read a single already-indexed page on the day an html reader
+    //    arrives. That is why the manifest is keyed on the extension.
+    //
+    //    It is checked before the stage, which costs a query, and after the two
+    //    numbers, which are already in hand.
+    //
+    //    **Its first pass over an existing index re-reads every `.md` once.**
+    //    Migration 3 credits every row it finds to `text@1` — it cannot do
+    //    better, because nothing was recorded about who made them — while the
+    //    markdown reader shipped in `fb3a924`, so every markdown row disagrees
+    //    with the manifest exactly once and then agrees for ever. That is the
+    //    migration's cost, not a fault in this condition, and lowering the
+    //    condition to hide it would give up the whole mechanism.
+    //
+    //    **What it cannot do is tell "the prediction changed" from "the
+    //    prediction was never right for this file", and that is a residual with
+    //    a name.** `manifest.for_extension` predicts from the extension, while
+    //    the row records what actually ran; for a file whose content
+    //    contradicts its extension those are two different readers, and the
+    //    condition then misses on every walk — the file is handed to a worker,
+    //    the worker reports the same reader again, and the next walk asks the
+    //    same question. No logic here separates the two cases: the row holds
+    //    the truth, and the prediction it should be compared against was never
+    //    stored.
+    //
+    //    Unreachable in this build, and not by luck: every reader `identify`
+    //    picks by magic bytes is refused by the worker today (`Unsupported`,
+    //    `NotText`, `BinaryTail`), and a refusal writes no `path` row at all —
+    //    so every row that exists was made by the extension-deciding branch,
+    //    which is exactly what the manifest predicts. The two branches of the
+    //    worker are held to agreeing by
+    //    `the_manifest_names_the_reader_that_identify_actually_picks`
+    //    (`crates/mnema-extract/tests/manifest.rs`), and a sidecar that is not
+    //    this worker answers `--manifest` for its own readers, so even a
+    //    mismatched binary agrees with itself.
+    //
+    //    It becomes reachable with the first reader chosen by content — a PDF
+    //    under the name `report.md` is then indexed by the pdf reader while the
+    //    manifest predicts markdown for it. What that costs is one worker
+    //    process and one path-row rewrite per walk, and nothing else: the
+    //    document is content-addressed, so the re-read lands on `AlreadyIndexed`
+    //    with no rebuild, no chunk id moved and nothing journalled
+    //    (`a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that`
+    //    in `tests/slice.rs` is that bill, measured). It is not silent either —
+    //    such a file counts as `indexed` in every `WalkReport`, on a folder
+    //    where nothing changed. What would close it is a fact stored per path
+    //    saying what the prediction was when the row was written, or a manifest
+    //    that can say "this reader is chosen by content, not by extension":
+    //    a column or a wire field, and a decision of its own rather than a line
+    //    in this arm.
     let recorded = db.path_entry(root_id, relative)?;
+    let expected = manifest.for_extension(extension_of(relative));
     if let Some(disk) = on_disk
         && let Some(recorded) = &recorded
         && recorded.size_bytes == disk.size_bytes
         && recorded.mtime == disk.mtime
+        && recorded.reader == expected.reader
+        && recorded.reader_version == i64::from(expected.version)
         && db
             .stage_status(&recorded.document_id, STAGE_CHUNK)?
             .as_deref()
@@ -957,6 +1030,23 @@ fn slices<'p, 'a>(pages: &'p [PageOf<'a>]) -> impl Iterator<Item = &'p [PageOf<'
     let mut chunks = pages.chunks(PAGES_PER_TRANSACTION);
     let first = chunks.next().unwrap_or(&[]);
     std::iter::once(first).chain(chunks)
+}
+
+/// The extension the manifest is keyed on.
+///
+/// Taken from `relative`, although the worker takes its own from the absolute
+/// path it was handed: `absolute` is the root joined to `relative`, so the two
+/// share a last component, and `relative` is the string the row itself is keyed
+/// on. `Path::extension` on both sides rather than a hand-rolled split, so a
+/// name with no dot, a dotfile, and a name ending in a dot are answered here
+/// exactly as the worker answers them.
+///
+/// `Option`, and the `None` is not a gap: `Manifest::for_extension` sends it to
+/// the same default arm an unlisted extension goes to, mirroring
+/// `identify_plain_text`, where a file with no extension and a file with an
+/// unrecognised one fall to one `_ =>`.
+fn extension_of(relative: &str) -> Option<&str> {
+    Path::new(relative).extension().and_then(|ext| ext.to_str())
 }
 
 /// One page's worth of what the writer needs: the blocks on it, and what the

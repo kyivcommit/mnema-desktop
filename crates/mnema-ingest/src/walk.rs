@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use mnema_core::manifest::Manifest;
 use mnema_index::{Db, SkipRule};
 use mnema_pool::Pool;
 use mnema_walk::{Found, PreSkipRule, WalkRules, enumerate};
@@ -377,6 +378,21 @@ pub fn walk_root(
     }
 
     // Phase 2.
+    //
+    // What this build's readers are, asked once for the whole walk. Here rather
+    // than at the top of the function for the same reason the `rules_applied`
+    // gate sits where it does: this starts a process, and the two stops above —
+    // a root that is not there, exclusion rules that did not combine — must
+    // reach their answer without starting one. Once per walk rather than once
+    // per file because it costs a process and cannot change under a walk: a
+    // worker binary replaced mid-walk would already be answering for a
+    // different build, and re-asking would only make the parent disagree with
+    // itself between one file and the next.
+    //
+    // An `Err` ends the walk. Every file's freshness is decided against this
+    // answer, so a binary that cannot state its readers is not a file's problem
+    // — it is the whole pass having nothing to compare against.
+    let manifest = pool.manifest()?;
     let mut consecutive_environmental = 0usize;
     // Derived from the CONFIGURED worker count, not `live_workers()`: the
     // live count is 0 until the first file asks for a process, so reading it
@@ -409,7 +425,7 @@ pub fn walk_root(
             return Ok(report);
         }
 
-        match ingest_with_busy_retry(pool, db, root_id, found, cancel)? {
+        match ingest_with_busy_retry(pool, db, root_id, found, cancel, &manifest)? {
             Retried::Cancelled => {
                 report.stopped = StopReason::Cancelled;
                 return Ok(report);
@@ -908,6 +924,7 @@ fn ingest_with_busy_retry(
     root_id: i64,
     found: &Found,
     cancel: &AtomicBool,
+    manifest: &Manifest,
 ) -> Result<Retried, IngestError> {
     let mut last_busy = None;
     for attempt in 1..=BUSY_RETRIES {
@@ -918,6 +935,7 @@ fn ingest_with_busy_retry(
             &found.absolute,
             &found.relative,
             Some(found.on_disk),
+            manifest,
         ) {
             Ok(ingested) => return Ok(Retried::Settled(ingested)),
             Err(IngestError::Busy(err)) => {

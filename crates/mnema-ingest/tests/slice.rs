@@ -15,6 +15,7 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mnema_core::Coordinate;
+use mnema_core::manifest::{Manifest, ReaderId};
 use mnema_index::{Db, SkipRule, open, register_vector_extension};
 use mnema_ingest::{Ingested, ingest_file};
 use mnema_pool::{Pool, PoolConfig};
@@ -35,6 +36,16 @@ struct Fixture {
     root_id: i64,
     root: PathBuf,
     index_path: PathBuf,
+    /// What the real worker says its readers are, asked once here rather than
+    /// per call: it costs a process, and every test in this file that does not
+    /// name a manifest of its own means "the manifest of the binary that is
+    /// about to read the file".
+    ///
+    /// Taken from `pool` — the real worker — even for the calls that hand a
+    /// *different* executable to `ingest_with`. That is the shape those tests
+    /// already model: a parent that knows what the product's readers are, and a
+    /// sidecar answering in their place.
+    manifest: Manifest,
     _dir: tempfile::TempDir,
 }
 
@@ -68,12 +79,14 @@ impl Fixture {
             ..PoolConfig::new(support::worker())
         })
         .unwrap();
+        let manifest = pool.manifest().unwrap();
         Fixture {
             db,
             pool,
             root_id,
             root,
             index_path,
+            manifest,
             _dir: dir,
         }
     }
@@ -109,6 +122,16 @@ impl Fixture {
     /// a write — everywhere else, an `Err` is a failure of the test's premise
     /// and `ingest` is the right call.
     fn try_ingest(&self, relative: &str) -> Result<Ingested, mnema_ingest::IngestError> {
+        self.try_ingest_against(relative, &self.manifest)
+    }
+
+    /// The same, against a manifest the caller names — a build with a reader
+    /// this one does not have, or without one it does.
+    fn try_ingest_against(
+        &self,
+        relative: &str,
+        manifest: &Manifest,
+    ) -> Result<Ingested, mnema_ingest::IngestError> {
         let absolute = self.root.join(relative);
         let on_disk = mnema_walk::stat(&absolute);
         ingest_file(
@@ -118,7 +141,13 @@ impl Fixture {
             &absolute,
             relative,
             on_disk,
+            manifest,
         )
+    }
+
+    fn ingest_against(&self, relative: &str, manifest: &Manifest) -> Ingested {
+        self.try_ingest_against(relative, manifest)
+            .expect("a per-file problem must never stop the job")
     }
 
     /// The same index, walked by a pool built differently — a lowered ceiling,
@@ -138,7 +167,15 @@ impl Fixture {
         let pool = Pool::new(config).unwrap();
         let absolute = self.root.join(relative);
         let on_disk = mnema_walk::stat(&absolute);
-        ingest_file(&pool, &self.db, self.root_id, &absolute, relative, on_disk)
+        ingest_file(
+            &pool,
+            &self.db,
+            self.root_id,
+            &absolute,
+            relative,
+            on_disk,
+            &self.manifest,
+        )
     }
 
     fn ingest_under_ceiling(&self, relative: &str, max_bytes: u64) -> Ingested {
@@ -185,6 +222,22 @@ impl Fixture {
 
     fn count(&self, sql: &str) -> i64 {
         self.db.conn().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// Every chunk of one document, in `ord` order.
+    ///
+    /// The ids rather than the count: a document cleared and written again has
+    /// the same number of chunks and different ids, and it is the ids that
+    /// every citation and every embedding row points at.
+    fn chunk_ids(&self, document_id: &str) -> Vec<i64> {
+        self.db
+            .conn()
+            .prepare("SELECT id FROM chunk WHERE document_id = ?1 ORDER BY ord")
+            .unwrap()
+            .query_map([document_id], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     }
 
     /// Makes the next write to `table` fail, once the trigger is in place.
@@ -531,6 +584,274 @@ fn a_path_row_credits_the_reader_the_worker_actually_ran() {
          than inherit the text reader's name"
     );
     assert_eq!(markdown.reader_version, 1);
+}
+
+/// `before`, plus the entry a build that had grown an html reader would carry.
+///
+/// Built from a measured manifest rather than written out whole, so that the
+/// two differ by exactly the one thing the test is about. A pair of literals
+/// would also differ in whatever the product changed since they were written,
+/// and the assertion would then be about the literals.
+fn with_html_reader(before: &Manifest) -> Manifest {
+    let mut after = before.clone();
+    after
+        .by_extension
+        .insert("html".to_string(), ReaderId::new("html", 1));
+    after
+}
+
+/// `before`, with the reader that takes `.md` moved one version on — what
+/// bumping `MARKDOWN_READER_VERSION` produces, and nothing else.
+fn with_markdown_one_version_on(before: &Manifest) -> Manifest {
+    let mut after = before.clone();
+    let current = after
+        .by_extension
+        .get("md")
+        .expect("this build gives .md a reader of its own")
+        .clone();
+    after.by_extension.insert(
+        "md".to_string(),
+        ReaderId::new(&current.reader, current.version + 1),
+    );
+    after
+}
+
+/// The version half of the comparison, which the name half cannot stand in
+/// for.
+///
+/// A reader whose output changes without its name changing is the ordinary way
+/// this moves: the markdown reader learning tables produces different blocks
+/// from the same bytes, and every document it already made is a reading no
+/// build performs any more. `MARKDOWN_READER_VERSION` is what says so, and a
+/// condition that compared only the name would leave every such document
+/// exactly as it was — silently, and for the life of the index.
+///
+/// Both directions, against manifests differing in one integer: this build's
+/// own leaves the file alone, and the bumped one does not.
+#[test]
+fn a_bumped_reader_version_is_a_reader_that_changed_too() {
+    let fx = Fixture::new();
+    fx.place_at(
+        "notes.md",
+        "# Заголовок\n\nОдин абзац.\n".as_bytes(),
+        mtime(),
+    );
+    let first = fx.ingest("notes.md");
+    assert!(matches!(first, Ingested::Indexed { .. }), "{first:?}");
+
+    let again = fx.ingest("notes.md");
+    assert!(
+        matches!(again, Ingested::Unchanged { .. }),
+        "the reader that made this file is the one this build has: {again:?}"
+    );
+
+    let bumped = with_markdown_one_version_on(&fx.manifest);
+    let outcome = fx.ingest_against("notes.md", &bumped);
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the same reader at a new version reads the same bytes differently, so \
+         the document it already made is worth replacing: {outcome:?}"
+    );
+}
+
+/// A file is read again when the reader that takes its extension changes hands
+/// — and is not, when nothing changed hands.
+///
+/// `.html` is the case the whole mechanism was built for, and the only one
+/// available before a second reader exists. It is indexed today by the text
+/// reader, because `identify_plain_text` has no arm for it, so its `path` row
+/// says `text@1`. A manifest of reader *versions* alone would compare `text@1`
+/// against `text@1` for ever: the day an html reader arrives, not one
+/// already-indexed page would be read again, and the index would go on
+/// answering out of a reading no part of the build performs any more. Keying
+/// the manifest on the extension is what makes that visible, and this is where
+/// it is asserted.
+///
+/// **Both directions, and neither alone is worth anything.** Without the
+/// unchanged direction the test is satisfied by an arm that re-reads every file
+/// on every walk; without the other, by an arm that never re-reads anything.
+/// The two manifests differ by exactly one entry, and the first of them is the
+/// real worker's own — measured, not written out here — so the unchanged
+/// direction is a claim about this build rather than about a literal that
+/// happens to match it.
+///
+/// The second manifest describes a build this repository does not have yet
+/// (task 10 is what produces one), so the re-read it forces is answered by a
+/// worker that still reads the file as text. That is all this test needs — its
+/// subject is whether the file reaches a worker at all — and what the two
+/// disagreeing costs is pinned by the test below.
+#[test]
+fn a_file_is_reread_when_its_extension_changed_hands() {
+    let fx = Fixture::new();
+    fx.place_at("notes.html", "<p>Кошторис</p>\n".as_bytes(), mtime());
+
+    // The build that indexed it: no html reader, so the default took the file.
+    let before = fx.manifest.clone();
+    let first = fx.ingest_against("notes.html", &before);
+    assert!(matches!(first, Ingested::Indexed { .. }), "{first:?}");
+    let row = fx
+        .db
+        .path_entry(fx.root_id, "notes.html")
+        .unwrap()
+        .expect("the file is indexed, so it has a path row");
+    assert_eq!(
+        (row.reader.as_str(), row.reader_version),
+        ("text", 1),
+        "the premise of this test is that html is read by the default reader"
+    );
+
+    // Nothing moved: not the file, not the manifest.
+    let again = fx.ingest_against("notes.html", &before);
+    assert!(
+        matches!(again, Ingested::Unchanged { .. }),
+        "an unchanged file under an unchanged manifest must not cost a worker: {again:?}"
+    );
+
+    // The same file, against the manifest of a build that has an html reader.
+    let after = with_html_reader(&before);
+    let outcome = fx.ingest_against("notes.html", &after);
+    assert!(
+        !matches!(outcome, Ingested::Unchanged { .. }),
+        "an html reader arriving must make the file worth re-reading: {outcome:?}"
+    );
+    // And a re-read is what it was, rather than some other way of not being
+    // `Unchanged`: only the arms past the cheap one can answer `AlreadyIndexed`,
+    // and reaching them means the file was handed to a worker.
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the bytes never moved, so a re-read lands back on the document the \
+         index already holds: {outcome:?}"
+    );
+}
+
+/// What a `path` row that neither the manifest nor the worker will ever agree
+/// with costs — per walk, for ever.
+///
+/// The condition compares a stored fact, which reader made this row, against a
+/// prediction keyed on the extension. Where the two cannot converge the file is
+/// handed to a worker on every walk and the row is rewritten to the value it
+/// already had. That is not a loop inside one call; it is one process and one
+/// path row per walk, for as long as the disagreement lasts.
+///
+/// Pinned here rather than left as prose in a comment, so that a change which
+/// makes it worse — a document rebuilt, chunk ids moved out from under every
+/// citation into them, a skip journalled, the path lost — goes red instead of
+/// disappearing into "that file is read a lot". `ingest_file`'s own comment on
+/// the condition has why no such row can arise in this build, and what makes
+/// one arise later.
+#[test]
+fn a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that() {
+    let fx = Fixture::new();
+    fx.place_at("notes.html", "<p>Кошторис</p>\n".as_bytes(), mtime());
+
+    // A manifest this pool's worker will never satisfy: it promises an html
+    // reader, and the binary behind the pool has none.
+    let disagreeing = with_html_reader(&fx.manifest);
+    let Ingested::Indexed {
+        document_id,
+        chunks,
+    } = fx.ingest_against("notes.html", &disagreeing)
+    else {
+        panic!("expected the first pass to index the file")
+    };
+    let ids = fx.chunk_ids(&document_id);
+    assert_eq!(ids.len(), chunks, "every chunk written has a row");
+
+    for pass in 1..=3 {
+        let outcome = fx.ingest_against("notes.html", &disagreeing);
+        let Ingested::AlreadyIndexed { document_id: again } = &outcome else {
+            panic!("pass {pass}: expected the file to be read again, got {outcome:?}")
+        };
+        assert_eq!(
+            again, &document_id,
+            "pass {pass}: the bytes never moved, so it is the same document"
+        );
+    }
+
+    // …and that is the whole bill. Nothing was rebuilt, nothing was journalled,
+    // and the path still names the document every citation into it names.
+    assert_eq!(fx.count("SELECT count(*) FROM document"), 1);
+    assert_eq!(
+        fx.chunk_ids(&document_id),
+        ids,
+        "the document was rebuilt under new chunk ids, which invalidates every \
+         citation into it"
+    );
+    assert_eq!(
+        fx.db.skips_for_root(fx.root_id).unwrap().len(),
+        0,
+        "a file that was read successfully is not a skip"
+    );
+    assert_eq!(
+        fx.db
+            .path_entry(fx.root_id, "notes.html")
+            .unwrap()
+            .expect("the path row survives being rewritten")
+            .document_id,
+        document_id
+    );
+}
+
+/// The one-off this condition costs the first index it meets, and the proof
+/// that it is a one-off.
+///
+/// Migration 3 credits every `path` row already on disk to `text@1`. It could
+/// not do better — nothing was recorded about who made them — but the markdown
+/// reader shipped in `fb3a924`, so on the first walk after the upgrade every
+/// markdown row disagrees with the manifest and is handed to a worker. That is
+/// the migration's bill, it is paid once, and this is where "once" is asserted
+/// rather than assumed: a mistake that made the reader condition compare
+/// something derived instead of something stored would re-read the same file on
+/// every walk from then on, and only the third pass here would notice.
+///
+/// The row is rewritten to what the migration leaves behind rather than an
+/// upgrade being staged, because the shape is the whole content of the case —
+/// a real document, made by the markdown reader, under a row that credits the
+/// text one.
+#[test]
+fn a_row_the_migration_credited_to_text_is_read_again_once_and_then_settles() {
+    let fx = Fixture::new();
+    fx.place_at(
+        "notes.md",
+        "# Заголовок\n\nОдин абзац.\n".as_bytes(),
+        mtime(),
+    );
+    let first = fx.ingest("notes.md");
+    assert!(matches!(first, Ingested::Indexed { .. }), "{first:?}");
+
+    // What an index migrated from before Task 3 looks like: every row credited
+    // to the text reader, because the column had nothing else to be filled with.
+    fx.db
+        .conn()
+        .execute("UPDATE path SET reader = 'text', reader_version = 1", [])
+        .unwrap();
+
+    let second = fx.ingest("notes.md");
+    assert!(
+        matches!(second, Ingested::AlreadyIndexed { .. }),
+        "a row crediting a reader the manifest does not give .md must be read \
+         again: {second:?}"
+    );
+    let row = fx
+        .db
+        .path_entry(fx.root_id, "notes.md")
+        .unwrap()
+        .expect("the path row survives the re-read");
+    assert_eq!(
+        (row.reader.as_str(), row.reader_version),
+        ("markdown", 1),
+        "the re-read is what repairs the row, and it must write the reader that \
+         actually ran"
+    );
+
+    // And once, not on every walk: nothing about the file or the manifest has
+    // moved since, so the third pass must cost nothing.
+    let third = fx.ingest("notes.md");
+    assert!(
+        matches!(third, Ingested::Unchanged { .. }),
+        "the migration's re-read is a one-off, not a state the index stays in: \
+         {third:?}"
+    );
 }
 
 /// **Every modification time here is set explicitly**, in both directions, and

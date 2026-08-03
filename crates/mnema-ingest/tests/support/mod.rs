@@ -111,15 +111,66 @@ pub fn worker() -> &'static Path {
 /// `dir` should never be a watched root: `enumerate` would then list the
 /// script itself as a found file, and every caller of this function passes a
 /// scratch directory that is not walked for exactly that reason.
+///
+/// **It states the real worker's readers, and only its reading is wrong.**
+/// `--manifest` is delegated to the binary `worker()` names rather than
+/// answered from a literal here, for two reasons. The narrow one: a literal
+/// would be a second copy of the product's manifest, green until the day a
+/// reader is added and then wrong in a file nobody would think to look in.
+/// The load-bearing one: a parent asks its worker for the manifest before it
+/// sends a single file (`Pool::manifest`), so a stand-in that cannot answer
+/// stops the walk *there* — and every test whose subject is what happens to
+/// files afterwards would be measuring the handshake instead. The shape this
+/// models is the one D44 was written for and is the commoner one anyway: the
+/// binary is the right binary, and the library it loads is not.
+///
+/// Use [`worker_that_states_no_readers`] for the other shape — a sidecar that
+/// is not this parent's worker at all.
 #[cfg(unix)]
 pub fn wrong_worker(dir: &Path, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("wrong-worker");
-    std::fs::write(
-        &path,
-        format!("#!/bin/sh\nwhile read -r _line; do\n{body}\ndone\n"),
+    // Quoted, not interpolated bare: a target directory can hold a space. It
+    // cannot hold a double quote or a `$` in any environment this repository
+    // builds in, which is the assumption `sh` leaves standing here.
+    let manifest = format!(
+        "if [ \"$1\" = \"--manifest\" ]; then\n  exec \"{}\" --manifest\nfi\n",
+        worker().display()
+    );
+    write_script(
+        dir,
+        "wrong-worker",
+        &format!("{manifest}while read -r _line; do\n{body}\ndone\n"),
     )
-    .unwrap();
+}
+
+/// A stand-in that answers `--manifest` with nothing at all: an executable
+/// that is not this parent's worker — an older release from before the
+/// manifest existed, or another program entirely at the configured path.
+///
+/// Kept apart from [`wrong_worker`] rather than folded into it as a flag,
+/// because the two model different faults and only one of them is allowed to
+/// reach a file: this one is the fault the parent must find *before* it sends
+/// anything, and a test that could not name it separately could not assert
+/// that.
+///
+/// `dead_code` is allowed because this module is compiled into **every** test
+/// binary that declares `mod support;`, and only `walk.rs` has a use for this
+/// one — the same shape that would make any fixture added here for one file
+/// warn in the others.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn worker_that_states_no_readers(dir: &Path) -> PathBuf {
+    write_script(
+        dir,
+        "worker-without-a-manifest",
+        "while read -r _line; do\n  printf 'not a frame\\n'\ndone\n",
+    )
+}
+
+#[cfg(unix)]
+fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
 }

@@ -52,6 +52,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use mnema_core::manifest::Manifest;
 use mnema_core::wire::{Frame, Request, from_line, to_request_line};
 use mnema_core::{Block, SourceKind};
 use mnema_index::SkipRule;
@@ -728,6 +729,67 @@ impl Pool {
     /// the moment a caller has not yet extracted anything.
     pub fn configured_workers(&self) -> usize {
         self.config.workers
+    }
+
+    /// What this pool's worker says its readers are: which reader takes which
+    /// extension, and at what version.
+    ///
+    /// A process rather than a constant, and that is D40 rather than a
+    /// preference: the parent may not link `mnema-extract`, so the only way to
+    /// learn what this build reads is to ask the binary. It is asked of
+    /// `config.worker` — the same executable every file goes to — which is the
+    /// property the parent's freshness check rests on: the manifest and the
+    /// headers come from one binary, or from neither.
+    ///
+    /// Outside the NDJSON protocol and outside the slots entirely. `--manifest`
+    /// prints one line and exits, so there is no worker to lease, no batch to
+    /// count against and nothing to poison; a caller asks once per walk, before
+    /// deciding which files to send. Not cached here either: a `Pool` may
+    /// outlive the walk that built it (see `poisoned`), and a cached manifest
+    /// would be a second thing that could then answer for a binary that has
+    /// since been replaced.
+    ///
+    /// The pipe this one *does* use is safe where the ones in `spawn` are not:
+    /// `Command::output` drains stdout and stderr concurrently, so the
+    /// 65,536-byte deadlock the module doc describes has nothing to fill. The
+    /// worker's own stderr is folded into the error below rather than sent to
+    /// the diagnostics file, because a binary that cannot state its readers is
+    /// a fault the caller is about to be told about and its complaint belongs
+    /// in that sentence.
+    ///
+    /// An `Err` stops the job, and it is the same class as a `Protocol` error
+    /// on a frame: a binary that cannot state its readers is not the one this
+    /// parent speaks to. There is deliberately no fallback — an empty manifest,
+    /// or the parent's own idea of what the defaults are, would decide the
+    /// freshness of every file in the index from a value nothing measured, and
+    /// it would do it silently.
+    pub fn manifest(&self) -> Result<Manifest, PoolError> {
+        let out = Command::new(&self.config.worker)
+            .arg("--manifest")
+            // Nothing is written to this child: it answers an argument, not a
+            // request. Null rather than inherited, so a worker built to read
+            // stdin cannot sit waiting on the parent's own terminal.
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|source| PoolError::Spawn {
+                worker: self.config.worker.clone(),
+                source,
+            })?;
+        if !out.status.success() {
+            return Err(protocol(
+                &String::from_utf8_lossy(&out.stderr),
+                &format!(
+                    "{:?} --manifest ended with {} instead of stating this build's readers",
+                    self.config.worker, out.status
+                ),
+            ));
+        }
+        serde_json::from_slice(&out.stdout).map_err(|source| {
+            protocol(
+                &String::from_utf8_lossy(&out.stdout),
+                &format!("--manifest did not answer with a reader manifest: {source}"),
+            )
+        })
     }
 
     fn poisoned(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Skip>> {

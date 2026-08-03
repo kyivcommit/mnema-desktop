@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use mnema_index::{Db, open};
-use mnema_ingest::{FrozenReason, StopReason, WalkReport, walk_root};
+use mnema_ingest::{FrozenReason, IngestError, StopReason, WalkReport, walk_root};
 use mnema_pool::{Pool, PoolConfig};
 use mnema_walk::WalkRules;
 use sha2::{Digest, Sha256};
@@ -267,6 +267,17 @@ impl Fixture {
     }
 
     fn walk_all(&self, pool: &Pool, rules: &WalkRules) -> WalkReport {
+        self.try_walk_all(pool, rules).unwrap()
+    }
+
+    /// For the one test whose subject is a walk that cannot start — everywhere
+    /// else an `Err` is a failure of the test's premise and `walk` is right.
+    #[cfg(unix)]
+    fn try_walk_with_pool(&self, pool: &Pool) -> Result<WalkReport, IngestError> {
+        self.try_walk_all(pool, &WalkRules::none())
+    }
+
+    fn try_walk_all(&self, pool: &Pool, rules: &WalkRules) -> Result<WalkReport, IngestError> {
         walk_root(
             pool,
             &self.db,
@@ -276,7 +287,13 @@ impl Fixture {
             &AtomicBool::new(false),
             &mut |_| {},
         )
-        .unwrap()
+    }
+
+    fn count(&self, table: &str) -> i64 {
+        self.db
+            .conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
     }
 }
 
@@ -559,6 +576,61 @@ fn rules_not_applied_stops_before_any_file_is_read() {
         before,
         "a worker was started even though the exclusion rules may not have applied"
     );
+}
+
+/// A binary that cannot state its readers stops the walk **before** a file is
+/// opened, rather than being found out one crashed document at a time.
+///
+/// Every file's freshness is decided against the manifest, so a worker that
+/// cannot state one leaves nothing to compare against. The two ways of
+/// answering anyway are both silent and both wrong in bulk: an empty manifest
+/// re-reads the whole index, and the parent's own idea of the defaults declares
+/// it all current — either way from a value nothing measured. This is also the
+/// cheapest possible detection of the mismatched install `StopReason::
+/// BrokenWorker` otherwise finds out about eight crashed files later.
+///
+/// **Three directions, and each rules out a different wrong implementation.**
+/// The same folder walked by the real worker indexes both files, so what
+/// stopped this walk is the binary and not the folder. The stop is before
+/// phase 2 rather than part-way through it: `document`, `path` and the skip
+/// journal are all empty, where a walk that had handed files over and then
+/// failed would leave rows in all three — and a walk that journalled the
+/// mismatch per file would be recording forty thousand files as damaged over
+/// one half-finished install, which is the distinction `PoolError` exists to
+/// make.
+#[cfg(unix)]
+#[test]
+fn a_worker_that_cannot_state_its_readers_stops_the_walk_before_any_file() {
+    let f = Fixture::new();
+    f.write("docs/kosto.txt", "Кошторис на ремонт даху.");
+    f.write("docs/notes.md", "# Заголовок\n\nОдин абзац.\n");
+
+    let sidecar = Pool::new(PoolConfig::new(support::worker_that_states_no_readers(
+        f._index.path(),
+    )))
+    .unwrap();
+    let outcome = f.try_walk_with_pool(&sidecar);
+    assert!(
+        matches!(
+            outcome,
+            Err(IngestError::Pool(mnema_pool::PoolError::Protocol { .. }))
+        ),
+        "a binary that cannot state its readers is not the one this parent \
+         speaks to, and that must stop the job: {outcome:?}"
+    );
+
+    assert_eq!(f.count("document"), 0);
+    assert_eq!(f.count("path"), 0);
+    assert_eq!(
+        f.db.skips_for_root(f.root).unwrap().len(),
+        0,
+        "a binary that does not match is not a fact about any one file, and \
+         must not be journalled as one"
+    );
+
+    // The folder was always fine; it was the binary that was not.
+    let report = f.walk();
+    assert_eq!((report.found, report.indexed), (2, 2));
 }
 
 // ----------------------------------------------------- the broken-worker counter

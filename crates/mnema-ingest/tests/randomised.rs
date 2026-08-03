@@ -50,6 +50,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mnema_core::OnDisk;
+use mnema_core::manifest::Manifest;
 use mnema_index::{Db, SkipRule, open, register_vector_extension};
 use mnema_ingest::{Ingested, StopReason, WalkReport, ingest_file, walk_root};
 use mnema_pool::{Pool, PoolConfig};
@@ -406,6 +407,14 @@ enum Verdict {
 struct World {
     db: Db,
     pool: Pool,
+    /// What the real worker says its readers are, asked once for the run.
+    ///
+    /// The same manifest for every call, including the ones that go through a
+    /// second pool built over a sidecar: the parent's idea of this build's
+    /// readers comes from the product's own binary, and a harness that handed
+    /// each pool its own manifest would quietly make the two agree in exactly
+    /// the case where they must not.
+    manifest: Manifest,
     root_id: i64,
     root: PathBuf,
     dir: tempfile::TempDir,
@@ -474,9 +483,11 @@ impl World {
             .insert_watched_root(root.to_str().expect("a temp path is UTF-8"))
             .unwrap();
         let pool = Pool::new(Self::config()).unwrap();
+        let manifest = pool.manifest().unwrap();
         World {
             db,
             pool,
+            manifest,
             root_id,
             root,
             dir,
@@ -828,6 +839,7 @@ impl World {
             &absolute,
             relative,
             on_disk,
+            &self.manifest,
         );
         self.record(relative, hash, outcome, how);
         self.check(&before);
@@ -863,7 +875,15 @@ impl World {
         let hash = self.hash_on_disk(relative);
         let absolute = self.absolute(relative);
         let on_disk = mnema_walk::stat(&absolute);
-        let outcome = ingest_file(&pool, &self.db, self.root_id, &absolute, relative, on_disk);
+        let outcome = ingest_file(
+            &pool,
+            &self.db,
+            self.root_id,
+            &absolute,
+            relative,
+            on_disk,
+            &self.manifest,
+        );
         let verdict = self.record(relative, hash, outcome, how);
         self.check(&before);
         self.remember_settled();
