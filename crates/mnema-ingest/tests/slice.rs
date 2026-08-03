@@ -483,6 +483,56 @@ fn a_word_is_found_whichever_way_its_accent_is_spelled() {
 /// modification time is set to a value this test chose, so a pass that read the
 /// file could not fail to be noticed.
 ///
+/// The `path` row credits the reader that really ran, not a constant.
+///
+/// This is the only place in the workspace where that claim is reachable.
+/// `mnema-index`'s tests hand `insert_path` whatever literals they like, so a
+/// `repoint` that wrote `"text"` and `1` for every document — the cheapest way
+/// to make the two new columns compile — leaves every one of those tests green
+/// while the index credits the text reader for work the markdown reader did.
+/// The column then matches the manifest for ever, and the file it names is
+/// never re-read no matter which reader takes it later. Nothing logs any of it.
+///
+/// **Two files, not one, and that is the whole design of the test.** An
+/// implementation that always answers `"text"` satisfies the first half; one
+/// that always answers `"markdown"` satisfies the second; only asserting both
+/// rules out both. A single file constrains neither direction.
+///
+/// The versions are asserted as literals rather than read from
+/// `mnema-extract`'s constants, which this crate does not depend on and must
+/// not start depending on. A reader version bumped later turns this red, and
+/// that is correct: the migration's `DEFAULT 1` is a claim about the same
+/// number, and the two going out of step silently is the failure.
+#[test]
+fn a_path_row_credits_the_reader_the_worker_actually_ran() {
+    let fx = Fixture::new();
+    fx.place("plain.txt", "Кошторис на ремонт даху.".as_bytes());
+    fx.place("notes.md", "# Заголовок\n\nОдин абзац.\n".as_bytes());
+
+    fx.ingest("plain.txt");
+    fx.ingest("notes.md");
+
+    let text = fx
+        .db
+        .path_entry(fx.root_id, "plain.txt")
+        .unwrap()
+        .expect("the txt file is indexed, so it has a path row");
+    assert_eq!(text.reader, "text");
+    assert_eq!(text.reader_version, 1);
+
+    let markdown = fx
+        .db
+        .path_entry(fx.root_id, "notes.md")
+        .unwrap()
+        .expect("the md file is indexed, so it has a path row");
+    assert_eq!(
+        markdown.reader, "markdown",
+        "the markdown branch of the worker ran, so the row must say so rather \
+         than inherit the text reader's name"
+    );
+    assert_eq!(markdown.reader_version, 1);
+}
+
 /// **Every modification time here is set explicitly**, in both directions, and
 /// that is what makes the phases mean anything. Left to the wall clock, phase 3
 /// distinguishes a nanosecond mtime from a whole-second one only when a second

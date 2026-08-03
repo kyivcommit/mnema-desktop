@@ -1,4 +1,4 @@
-use mnema_core::{Block, Coordinate, Locator, Segment, SourceKind};
+use mnema_core::{Block, Coordinate, Locator, OnDisk, Segment, SourceKind};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 
@@ -47,6 +47,23 @@ pub struct PathEntry {
     pub document_id: String,
     pub size_bytes: i64,
     pub mtime: i64,
+    /// Which reader made this document, and which version of it — the worker's
+    /// own words, carried through `mnema_pool::Document` unchanged.
+    ///
+    /// Here so the cheap arm can ask a question `size_bytes` and `mtime` cannot
+    /// answer: not "did the file move?" but "did the code that read it move?".
+    /// See `ADD_PATH_READER` in `migrations.rs` for what goes wrong without it.
+    ///
+    /// **Neither field is guaranteed non-empty by the schema.** `NOT NULL` is
+    /// satisfied by `""` and by `0`; what keeps a nameless reader out is
+    /// `mnema-pool`'s refusal of a header that names none
+    /// (`crates/mnema-pool/src/lib.rs:1080`). A row that got here another way
+    /// would match no manifest and re-read its file on every walk for ever.
+    pub reader: String,
+    /// `i64` rather than the `u32` the wire carries, because that is what
+    /// SQLite stores and reads back; the comparison against a manifest widens
+    /// the manifest's `u32` rather than narrowing this.
+    pub reader_version: i64,
 }
 
 impl Db {
@@ -88,18 +105,43 @@ impl Db {
         Ok(content_hash.to_string())
     }
 
+    /// `reader` and `reader_version` are what the worker said produced this
+    /// document, and are not defaulted here on purpose: the migration's
+    /// `DEFAULT 'text'` describes rows that predate the columns, and letting a
+    /// *new* row take it would credit the text reader for work it did not do —
+    /// which reads as "unchanged" against a manifest for ever.
+    ///
+    /// The size and the modification time arrive as one [`OnDisk`] rather than
+    /// as two `i64`s. Loose, they sat between `root` and `reader_version` in a
+    /// run of four bare integers that the compiler cannot tell apart, so
+    /// transposing them was a silent wrong row rather than an error — and it is
+    /// the pair the cheap arm compares, so the wrong way round it answers
+    /// "changed" for every file on every walk. `OnDisk`'s own doc comment
+    /// already calls it "the two numbers `path` records", and [`Db::record_skip`]
+    /// takes the same type for the same two columns on `skipped`.
     pub fn insert_path(
         &self,
         root: i64,
         relative_path: &str,
         document_id: &str,
-        size_bytes: i64,
-        mtime: i64,
+        disk: OnDisk,
+        reader: &str,
+        reader_version: i64,
     ) -> Result<(), Error> {
         self.conn().execute(
-            "INSERT INTO path (watched_root_id, relative_path, document_id, size_bytes, mtime)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![root, relative_path, document_id, size_bytes, mtime],
+            "INSERT INTO path
+                (watched_root_id, relative_path, document_id, size_bytes, mtime,
+                 reader, reader_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                root,
+                relative_path,
+                document_id,
+                disk.size_bytes,
+                disk.mtime,
+                reader,
+                reader_version
+            ],
         )?;
         Ok(())
     }
@@ -113,11 +155,18 @@ impl Db {
     /// a reader the two columns were written and never consulted, which makes
     /// them decoration on a table whose comment (`schema.sql:83`) calls them
     /// "cheap reconciliation without hashing".
+    ///
+    /// `reader` and `reader_version` come back beside them because those two
+    /// columns answer the half of "has anything changed?" that the disk cannot:
+    /// the file is untouched, and the code that read it is not the code that
+    /// would read it now. Selected here rather than through a call of its own so
+    /// that the arm asking the question gets all four facts from the one lookup
+    /// it already pays for.
     pub fn path_entry(&self, root: i64, relative_path: &str) -> Result<Option<PathEntry>, Error> {
         Ok(self
             .conn()
             .query_row(
-                "SELECT document_id, size_bytes, mtime FROM path
+                "SELECT document_id, size_bytes, mtime, reader, reader_version FROM path
                   WHERE watched_root_id = ?1 AND relative_path = ?2",
                 params![root, relative_path],
                 |r| {
@@ -125,6 +174,8 @@ impl Db {
                         document_id: r.get(0)?,
                         size_bytes: r.get(1)?,
                         mtime: r.get(2)?,
+                        reader: r.get(3)?,
+                        reader_version: r.get(4)?,
                     })
                 },
             )

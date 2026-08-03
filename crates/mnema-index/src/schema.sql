@@ -76,7 +76,7 @@ CREATE TABLE document (
 -- Several paths may point at one document: content addressing means two copies
 -- are one document. A single path column would drop the document when the
 -- recorded copy is deleted while the other survives. Requirements §8, D33.
-CREATE TABLE path (
+CREATE TABLE path (   -- ⚠️ two more columns arrive from migration 2; migrations.rs says why
     watched_root_id INTEGER NOT NULL REFERENCES watched_root(id) ON DELETE CASCADE,
     relative_path   TEXT NOT NULL,
     document_id     TEXT NOT NULL REFERENCES document(id) ON DELETE CASCADE,

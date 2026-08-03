@@ -1,4 +1,4 @@
-use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
+use mnema_core::{Block, BlockType, Coordinate, Locator, OnDisk, Segment, SourceKind};
 use mnema_index::{Citation, Db, INDEX_FORMAT_VERSION, open, register_vector_extension};
 
 fn fresh(dir: &tempfile::TempDir) -> Db {
@@ -35,8 +35,18 @@ fn a_citation_reads_from_all_four_levels() {
             SourceKind::Document,
         )
         .unwrap();
-    db.insert_path(root, "contracts/q3.pdf", &doc, 1024, 1_700_000_000)
-        .unwrap();
+    db.insert_path(
+        root,
+        "contracts/q3.pdf",
+        &doc,
+        OnDisk {
+            size_bytes: 1024,
+            mtime: 1_700_000_000,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
     let page = db
         .insert_page(&doc, 12, "native:pdf", Some("Розділ 3. Умови постачання"))
         .unwrap();
@@ -208,8 +218,30 @@ fn one_document_can_live_at_several_paths() {
             SourceKind::Document,
         )
         .unwrap();
-    db.insert_path(root, "a/note.txt", &doc, 10, 1).unwrap();
-    db.insert_path(root, "b/note.txt", &doc, 10, 1).unwrap();
+    db.insert_path(
+        root,
+        "a/note.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 10,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+    db.insert_path(
+        root,
+        "b/note.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 10,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
 
     // Deleting the recorded copy must not remove a document that still exists
     // on disk under another path — the failure a single path column would cause.
@@ -732,12 +764,26 @@ fn a_path_row_reads_back_under_its_own_root_and_name() {
         archive,
         "notes/kosto.txt",
         &doc,
-        40,
-        1_700_000_000_123_456_789,
+        OnDisk {
+            size_bytes: 40,
+            mtime: 1_700_000_000_123_456_789,
+        },
+        "text",
+        1,
     )
     .unwrap();
-    db.insert_path(desktop, "notes/kosto.txt", &doc, 41, 7)
-        .unwrap();
+    db.insert_path(
+        desktop,
+        "notes/kosto.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 41,
+            mtime: 7,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
 
     assert_eq!(
         db.path_entry(archive, "notes/kosto.txt").unwrap(),
@@ -745,6 +791,8 @@ fn a_path_row_reads_back_under_its_own_root_and_name() {
             document_id: doc.clone(),
             size_bytes: 40,
             mtime: 1_700_000_000_123_456_789,
+            reader: "text".to_string(),
+            reader_version: 1,
         }),
         "a nanosecond mtime must survive the round trip intact, not be truncated"
     );
@@ -780,8 +828,30 @@ fn clearing_a_documents_content_empties_the_lexical_index_but_keeps_its_paths() 
     let doc = db
         .insert_document(&"j".repeat(64), "text/plain", 40, SourceKind::Document)
         .unwrap();
-    db.insert_path(root, "a/kosto.txt", &doc, 40, 1).unwrap();
-    db.insert_path(root, "b/kosto.txt", &doc, 40, 1).unwrap();
+    db.insert_path(
+        root,
+        "a/kosto.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 40,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+    db.insert_path(
+        root,
+        "b/kosto.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 40,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
     let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
     let block = db
         .insert_block(page, &paragraph(0, "кошторис на ремонт", Some(1), Some(1)))
@@ -848,8 +918,30 @@ fn deleting_a_document_takes_every_path_that_names_it() {
     let doc = db
         .insert_document(&"k".repeat(64), "text/plain", 40, SourceKind::Document)
         .unwrap();
-    db.insert_path(root, "a/kosto.txt", &doc, 40, 1).unwrap();
-    db.insert_path(root, "b/kosto.txt", &doc, 40, 1).unwrap();
+    db.insert_path(
+        root,
+        "a/kosto.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 40,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+    db.insert_path(
+        root,
+        "b/kosto.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 40,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
 
     db.delete_document(&doc).unwrap();
 

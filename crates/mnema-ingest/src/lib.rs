@@ -314,7 +314,9 @@ pub fn ingest_file(
     let mut rebuild = false;
     if db.document_exists(&id)? {
         if db.stage_status(&id, STAGE_CHUNK)?.as_deref() == Some(STATUS_DONE) {
-            db.transaction(|_| repoint(db, root_id, relative, &id, disk, displaced.as_deref()))?;
+            db.transaction(|_| {
+                repoint(db, root_id, relative, &document, disk, displaced.as_deref())
+            })?;
             return Ok(Ingested::AlreadyIndexed { document_id: id });
         }
         rebuild = true;
@@ -348,7 +350,7 @@ pub fn ingest_file(
                 } else {
                     db.insert_document(&id, &document.mime, disk.size_bytes, document.source_kind)?;
                 }
-                repoint(db, root_id, relative, &id, disk, displaced.as_deref())?;
+                repoint(db, root_id, relative, &document, disk, displaced.as_deref())?;
             }
             let mut written = 0usize;
             for page in slice {
@@ -451,16 +453,35 @@ pub fn ingest_file(
 /// own modification time and the stale row matched the disk again, answering
 /// for a file no worker had looked at since — under a `path` row now naming
 /// something else entirely.
+/// **The fourth thing it writes is which reader made this document**, and it
+/// takes the whole [`Document`] rather than a content hash so that the reader
+/// and the hash cannot come from two different extractions. Spread out as
+/// arguments they are three strings in a row that a caller is free to pair
+/// wrongly, and nothing downstream would notice: the row would name a real
+/// document and credit a reader that never touched it, which reads as
+/// "unchanged" against a manifest for ever. It is the argument
+/// `Db::insert_block` already makes for taking a `Block`, one level up.
 fn repoint(
     db: &Db,
     root_id: i64,
     relative: &str,
-    id: &str,
+    document: &Document,
     disk: OnDisk,
     displaced: Option<&str>,
 ) -> Result<(), mnema_index::Error> {
     db.delete_path(root_id, relative)?;
-    db.insert_path(root_id, relative, id, disk.size_bytes, disk.mtime)?;
+    db.insert_path(
+        root_id,
+        relative,
+        &document.sha256,
+        disk,
+        // What the worker said, never a value derived here. `mnema-pool`
+        // has already refused a header naming no reader, so this is the one
+        // place the column's meaning is established — the `NOT NULL` on it
+        // is satisfied by `""` and would establish nothing.
+        &document.reader,
+        i64::from(document.reader_version),
+    )?;
     db.forget_skip(root_id, relative)?;
     if let Some(displaced) = displaced {
         // No `displaced != id` guard, and it is not an omission: the insert

@@ -3,7 +3,7 @@
 //! `path` rows and leaves the documents — named by nothing, still answering
 //! searches, quoting a folder the user disconnected.
 
-use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
+use mnema_core::{Block, BlockType, Coordinate, Locator, OnDisk, Segment, SourceKind};
 use mnema_index::{Db, open, register_vector_extension};
 use rusqlite::params;
 
@@ -50,8 +50,18 @@ fn insert_document_with_chunk(db: &Db, root: i64, relative_path: &str, text: &st
 
     db.insert_document(&doc, "text/plain", text.len() as i64, SourceKind::Document)
         .unwrap();
-    db.insert_path(root, relative_path, &doc, text.len() as i64, 1)
-        .unwrap();
+    db.insert_path(
+        root,
+        relative_path,
+        &doc,
+        OnDisk {
+            size_bytes: text.len() as i64,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
     let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
     let block = db
         .insert_block(
@@ -132,7 +142,18 @@ fn a_document_reachable_from_another_root_survives() {
     let one = db.insert_watched_root("/tmp/one").unwrap();
     let two = db.insert_watched_root("/tmp/two").unwrap();
     let doc = insert_document_with_chunk(&db, one, "a.txt", "shared text");
-    db.insert_path(two, "copy.txt", &doc, 11, 42).unwrap();
+    db.insert_path(
+        two,
+        "copy.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 11,
+            mtime: 42,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
 
     db.delete_watched_root(one).unwrap();
 
