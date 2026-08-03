@@ -283,15 +283,18 @@ fn verify_build(library_dir: &Path) -> Result<(), Error> {
         library_dir.join("VERSION"),
         library_dir.join("..").join("VERSION"),
     ];
-    let manifest = candidates.iter().find(|p| p.is_file()).ok_or_else(|| Error::Library {
-        stage: Stage::VerifyBuild,
-        message: format!(
-            "no VERSION manifest beside {}. The build of Pdfium cannot be \
+    let manifest = candidates
+        .iter()
+        .find(|p| p.is_file())
+        .ok_or_else(|| Error::Library {
+            stage: Stage::VerifyBuild,
+            message: format!(
+                "no VERSION manifest beside {}. The build of Pdfium cannot be \
              confirmed, and an unconfirmed build is the failure this check exists \
              for. Run scripts/fetch-pdfium.sh.",
-            library_dir.display()
-        ),
-    })?;
+                library_dir.display()
+            ),
+        })?;
 
     let contents = std::fs::read_to_string(manifest).map_err(|e| Error::Library {
         stage: Stage::VerifyBuild,
