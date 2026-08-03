@@ -1271,8 +1271,16 @@ impl World {
                 // whose bytes had never moved lost its document the first time
                 // anything pushed its mtime past the cheap arm and the rule
                 // under it had changed. What follows is the corrected
-                // contract, not a relaxed one; the keep side is a new claim
-                // that nothing asserted before.
+                // contract, not a relaxed one.
+                //
+                // The keep side is **not** a claim nothing asserted before,
+                // which this comment used to say: invariant 3 already forbids
+                // the index to stop holding a document whose bytes are still on
+                // disk, and the report of the run that added this arm shows it
+                // — with `NotText => true` restored, the invariant that went red
+                // was 3, not 3c. What this arm adds is the *displace* side,
+                // which no other invariant states, and a message that names the
+                // rule rather than the deletion.
                 SkipRule::NotText => match last.hash.as_deref() {
                     // The worker saw exactly the bytes the index was built
                     // from. The rule changed, the file did not.
@@ -2028,10 +2036,19 @@ impl World {
     /// A text file replaced by a photo — the refusal that **removes**.
     ///
     /// Distinct from `make_opaque`, which writes a PDF header and earns
-    /// `Unsupported`: that rule leaves the earlier document alone, so until
-    /// this operation existed nothing in this harness ever drove a file down
-    /// the branch of `record_skip` that deletes a path row and can orphan the
-    /// document behind it.
+    /// `Unsupported`, but not for the reason this comment used to give. It said
+    /// that rule "leaves the earlier document alone", so that until this
+    /// operation existed "nothing in this harness ever drove a file down the
+    /// branch of `record_skip` that deletes a path row". Wrong twice, and one
+    /// `grep` apart: the row is deleted by `db.delete_path` under the condition
+    /// `displaces`, which is not a branch of `record_skip` at all — and
+    /// `Unsupported` answers that condition, unconditionally when this was
+    /// written and on changed bytes now. `make_opaque` writes different bytes,
+    /// so it had been exercising that deletion all along.
+    ///
+    /// What is new here is the rule that reaches it: `NotText`, decided on the
+    /// file's own bytes rather than on a format nobody has written a reader
+    /// for.
     fn overwrite_with_a_photo(&mut self) {
         let relative = self.a_file();
         let content = self.not_text_body();

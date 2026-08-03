@@ -54,6 +54,28 @@ case_ "typing: the head window's edge is exclusive, not inclusive" \
   'Some(at) if at <= HEAD_BYTES' \
   mnema-extract 'typing::tests::the_head_window_ends_where_the_constant_says_and_the_constant_is_512' --lib
 
+# The tail arm behind the byte-order mark — the whole output of one branch,
+# which nothing reached. Measured before the test named below existed: this
+# mutation left all eight targets of mnema-extract green, `mnema-ingest --test
+# slice` at 35 passed, and mnema-pool green. The randomised harness cannot find
+# it either: `interrupted_append_body` writes UTF-8 prose only.
+case_ "typing: a UTF-16 note that stops being text is a tail, not a photo" \
+  crates/mnema-extract/src/typing.rs \
+  's{            Some\(_\) => Verdict::BinaryTail,\n        \};}{            Some(_) => Verdict::NotText,\n        \};}' \
+  'Some(_) => Verdict::NotText,
+        };' \
+  mnema-extract 'typing::tests::an_interrupted_utf16_note_is_a_tail_and_not_a_photo' --lib
+
+# The same mutation named against what it costs, rather than against what it
+# classifies: `NotText` on changed bytes displaces, so the note's prose — still
+# on disk in front of the damage — is deleted from the index.
+case_ "displaces: an interrupted UTF-16 note keeps the prose it still has" \
+  crates/mnema-extract/src/typing.rs \
+  's{            Some\(_\) => Verdict::BinaryTail,\n        \};}{            Some(_) => Verdict::NotText,\n        \};}' \
+  'Some(_) => Verdict::NotText,
+        };' \
+  mnema-ingest 'an_interrupted_utf16_note_does_not_delete_what_it_still_says' --test slice
+
 # --------------------------------------------- the rule name crossing the wire
 
 # The worker reports its rule as a plain string because `mnema-extract` may not
@@ -126,6 +148,25 @@ case_ "displaces: a refusal on unchanged bytes deletes nothing" \
   's{SkipRule::NotText => content\.is_none_or\(\|sha\| sha != recorded\.document_id\),}{SkipRule::NotText => true,}' \
   'SkipRule::NotText => true,' \
   mnema-ingest 'a_file_whose_bytes_did_not_change_keeps_its_document' --test slice
+
+# The same pair for `Unsupported`, which kept displacing unconditionally for a
+# release after `NotText` stopped. The inversion is worth naming: the rule made
+# conditional first was the STABLE one — `not_text` promises no release will
+# read those bytes as prose — while `unsupported` says "no reader implemented
+# yet", which is what a release changes by definition. A folder of PDFs indexed
+# by a build that has the reader and walked by one that does not lost a document
+# per file, with the bytes never having moved.
+case_ "displaces: a format with no reader replacing a note removes what the note said" \
+  crates/mnema-ingest/src/lib.rs \
+  's{SkipRule::Unsupported => content\.is_none_or\(\|sha\| sha != recorded\.document_id\),}{SkipRule::Unsupported => false,}' \
+  'SkipRule::Unsupported => false,' \
+  mnema-ingest 'a_text_file_overwritten_by_a_format_with_no_reader_stops_answering' --test slice
+
+case_ "displaces: a build that lost a reader deletes nothing" \
+  crates/mnema-ingest/src/lib.rs \
+  's{SkipRule::Unsupported => content\.is_none_or\(\|sha\| sha != recorded\.document_id\),}{SkipRule::Unsupported => true,}' \
+  'SkipRule::Unsupported => true,' \
+  mnema-ingest 'a_file_no_reader_can_take_keeps_its_document_when_only_the_rule_changed' --test slice
 
 # The comparison's direction. Inverted, it keeps exactly the documents it must
 # remove and removes exactly those it must keep — and one test alone would not

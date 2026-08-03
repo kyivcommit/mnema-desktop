@@ -1567,6 +1567,172 @@ fn an_interrupted_append_does_not_delete_what_the_note_still_says() {
     );
 }
 
+/// D51 §5, in the encoding the randomised harness cannot produce.
+///
+/// `an_interrupted_append_does_not_delete_what_the_note_still_says` covers a
+/// UTF-8 note, and so does the harness — `interrupted_append_body` writes UTF-8
+/// prose and nothing else. A UTF-16 note takes a different branch of `classify`
+/// altogether, the one behind the byte-order mark, and the whole output of that
+/// branch's tail arm was covered by nothing: a reviewer replaced it with
+/// `Verdict::NotText` and every test in the workspace stayed green.
+///
+/// What that costs is a document, and it is the loss this cycle exists to
+/// prevent: `NotText` on changed bytes displaces, so a UTF-16 note whose append
+/// was interrupted loses the prose that is still on disk in front of the
+/// damage.
+#[test]
+fn an_interrupted_utf16_note_does_not_delete_what_it_still_says() {
+    let fx = Fixture::new();
+
+    // A UTF-16LE note with a mark, invented outright: the mark is what tells
+    // `classify` that the NUL bytes of every ASCII-range unit are half a code
+    // unit rather than corruption.
+    let mut note = vec![0xFF, 0xFE];
+    for unit in "Протокол наради: розглянуто подання.\n"
+        .repeat(60)
+        .encode_utf16()
+    {
+        note.extend_from_slice(&unit.to_le_bytes());
+    }
+    fx.place_at("notes/utf16.txt", &note, mtime());
+    assert!(matches!(
+        fx.ingest("notes/utf16.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("розглянуто", 10).unwrap().is_empty(),
+        "the premise fails if UTF-16 prose was never searchable"
+    );
+
+    // The power goes out mid-append and the tail comes back zeroed.
+    let mut damaged = note.clone();
+    damaged.extend_from_slice(&[0u8; 4096]);
+    fx.place_at("notes/utf16.txt", &damaged, mtime_just_after());
+    assert_eq!(
+        fx.ingest("notes/utf16.txt"),
+        Ingested::Skipped {
+            rule: SkipRule::BinaryTail
+        },
+        "a UTF-16 note that stops being text is a tail, not a photo"
+    );
+
+    assert!(
+        !fx.db.search_lexical("розглянуто", 10).unwrap().is_empty(),
+        "the note's prose is still on disk, and deleting it would lose text \
+         that is readable nowhere else"
+    );
+}
+
+/// The same question as `a_text_file_overwritten_by_a_photo_stops_answering`,
+/// one rule over: a `.txt` overwritten by a format this product has no reader
+/// for must also stop answering under its own name. The bytes are not the ones
+/// the index was built from, so what it holds is a file that is gone.
+///
+/// This direction was never in doubt — `Unsupported` displaced
+/// unconditionally. It is here because the condition added beside it has to be
+/// pinned from both sides, and a one-sided assertion is satisfied by a rule
+/// that never displaces at all.
+#[test]
+fn a_text_file_overwritten_by_a_format_with_no_reader_stops_answering() {
+    let fx = Fixture::new();
+    fx.place_at(
+        "notes/protokol.txt",
+        "засідання ухвалило перенести розгляд\n".as_bytes(),
+        mtime(),
+    );
+    assert!(matches!(
+        fx.ingest("notes/protokol.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("розгляд", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    // A PDF header with nothing readable behind it. `identify` answers
+    // `Reader::Pdf` on the magic alone, and no reader for that format is built
+    // — task 6 shipped plain text and markdown — so the worker refuses the
+    // file as `unsupported` after reading and hashing its bytes.
+    fx.place_at(
+        "notes/protokol.txt",
+        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
+        mtime_just_after(),
+    );
+    assert_eq!(
+        fx.ingest("notes/protokol.txt"),
+        Ingested::Skipped {
+            rule: SkipRule::Unsupported
+        }
+    );
+
+    assert!(
+        fx.db.search_lexical("розгляд", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+}
+
+/// The other side of that line, and the inversion it corrects.
+///
+/// `Unsupported` is the *least* stable verdict this product gives: the worker's
+/// own words for it are "no reader implemented yet"
+/// (`crates/mnema-extract/src/bin/worker.rs`), which is exactly what a release
+/// changes — where `NotText` promises the opposite, that "no release adds a
+/// reader that makes them prose". Task 10 made the stable rule conditional on
+/// the digest and left the unstable one deleting outright.
+///
+/// What that costs is one document per file, silently: a folder indexed by a
+/// build that has a reader, walked once by a build that does not — a rollback,
+/// a second machine, a partial install — loses every document in it, with the
+/// bytes never having moved. The sidecar stands in for the build without the
+/// reader, and carries the file's real digest because a worker that declines a
+/// format still read and hashed the bytes before deciding.
+#[test]
+fn a_file_no_reader_can_take_keeps_its_document_when_only_the_rule_changed() {
+    let fx = Fixture::new();
+    let prose = "Довідка про стан робіт, підписана комісією.\n".repeat(50);
+    fx.place_at("notes/dovidka.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("notes/dovidka.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("комісією", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    // The same bytes, a later mtime — and a build that has no reader for them.
+    fx.place_at("notes/dovidka.txt", prose.as_bytes(), mtime_just_after());
+    let mut hasher = Sha256::new();
+    hasher.update(prose.as_bytes());
+    let sha256 = hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+    let without_the_reader = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"unsupported","reason":"no reader implemented yet","sha256":"{sha256}"}}\n'"#
+        ),
+    );
+    let outcome = fx.ingest_with_worker("notes/dovidka.txt", &without_the_reader);
+
+    assert_eq!(
+        outcome,
+        Ingested::Skipped {
+            rule: SkipRule::Unsupported
+        },
+        "the premise fails unless this build refuses the file for want of a reader"
+    );
+    assert!(
+        !fx.db.search_lexical("комісією", 10).unwrap().is_empty(),
+        "the bytes are identical to what the index was built from, so the \
+         document must survive a build that lost the reader"
+    );
+}
+
 // ------------------------------------------------- markdown, and its pages
 
 /// An invented handbook: content before the first heading, two sections, and a

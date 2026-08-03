@@ -537,12 +537,19 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// silently, while the progress bar advances: a worker binary that does not
 /// match its parent answers the same way for all forty thousand of them.
 ///
-/// **Displace** — `Unsupported`, `NoTextLayer`, `NotText`. The worker read the
-/// bytes and determined something about them: there is no reader for this
-/// format, this page carries no text layer, or the bytes are not text at all.
-/// Run it again on the same bytes and it says the same thing. So what the
-/// index holds is a previous version of a file that has since become
-/// unindexable.
+/// **Displace, but only when the bytes moved** — `NotText` and `Unsupported`.
+/// The worker read the file and determined something about its bytes: they are
+/// not text at all, or no reader in this product can take that format. Run it
+/// again on the same bytes and it says the same thing, so what the index holds
+/// is a previous version of a file that has since become unindexable — *if*
+/// the bytes are not the ones the index was built from. When they are, the rule
+/// changed and the file did not, and deleting the document loses text that is
+/// still on disk. The digest the worker refused on is what tells the two apart;
+/// the arms below carry the reasoning, and D51 the measurement.
+///
+/// **Displace outright** — `NoTextLayer`. A rule about one page rather than a
+/// file, which no reader in this product can produce yet. Its arm below says
+/// why it is not folded in with the two above.
 ///
 /// **Keep** — `Crash`, `Timeout`, `Memory`, `Unreadable`, and `BinaryTail`.
 /// The first four are not statements about the file at all; the fifth is one,
@@ -610,11 +617,40 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// hypothetical one, and one that does not repair itself, because the verdict
 /// is reproducible and the next walk answers from the journal.
 ///
-/// The stale-citation risk this trades against is bounded by where the split
-/// sits: `HEAD_BYTES` (`mnema_extract::typing`) is 512 bytes, so a file earning
-/// this rule was text for at least that long, and the document under the path
-/// is that text. What is lost is whatever the interrupted append had written
-/// after it — text that was never indexed either way.
+/// **What this trades against is a residual risk, not a bounded one, and the
+/// boundary this paragraph used to claim is not one.** `HEAD_BYTES`
+/// (`mnema_extract::typing`) is 512 bytes, so a file earning this rule opened
+/// with 512 bytes of something without a NUL in it. That is all it says. This
+/// arm is a constant: it reads neither `recorded` nor `on_disk` nor a digest,
+/// so nothing here ties the file now on disk to the document that stays. A
+/// `.txt` **overwritten** by high-entropy bytes — an encrypted or compressed
+/// blob — earns `BinaryTail` whenever its first NUL happens to fall past 512,
+/// and then the index goes on citing text the file no longer contains.
+///
+/// Measured, because "how often" is the whole question:
+///
+/// * uniformly random bytes: **13.46%** (26,917 of 200,000) have their first
+///   NUL at or past 512, against `(255/256)^512` = 13.48% analytically;
+/// * files through `openssl enc -aes-256-cbc`: **2 of 8**;
+/// * real binaries with a header — `/usr/lib`, `/usr/bin`, `/opt/homebrew`,
+///   system fonts, with the magic-number formats excluded: **0 of 2,571**.
+///
+/// So the risk is concentrated on content that is high-entropy from its first
+/// byte and carries no recognisable header, and there it is roughly one in
+/// seven. It does not repair itself: `SkipRule::BinaryTail.is_about_content()`
+/// is true, so the second cheap arm answers from the journal until the file's
+/// size or mtime moves.
+///
+/// This is the same kind of known consequence as the one `classify` records
+/// against the other side of the split — a `find -print0` list, genuine text,
+/// refused *with* displacement because its first NUL is at byte 23. The two
+/// bound the split from either end, and both are accepted rather than fixed.
+///
+/// A digest does not settle it and adding one here would be a false comfort:
+/// an interrupted append and an overwriting blob **both** change the file's
+/// bytes, so the condition `NotText` uses cannot separate them. What would
+/// separate them is a stored digest of the file's *head*, which is a new
+/// column and a decision of its own, not a line in this function.
 ///
 /// **`TooLarge` — decided on the size, not on the rule.** This is the one that
 /// cannot be answered from the rule alone, and the reason is worth spelling
@@ -683,7 +719,36 @@ fn displaces(
         // and a photo that keeps answering under a note's name is the defect
         // this whole rule was added to end.
         SkipRule::NotText => content.is_none_or(|sha| sha != recorded.document_id),
-        SkipRule::Unsupported | SkipRule::NoTextLayer => true,
+        // The same condition, on its own line rather than folded in with the
+        // one above, because the two rules are refused by different branches of
+        // the worker and each is worth being able to break on its own.
+        //
+        // It arrived later than `NotText`'s and that order was an inversion:
+        // the *stable* rule was made conditional first while the *unstable* one
+        // stayed unconditional. `NotText` promises "no release adds a reader
+        // that makes them prose" (`crates/mnema-extract/src/bin/worker.rs`);
+        // this one says "no reader implemented yet" in the same file, which is
+        // the thing a release exists to change. A folder of PDFs indexed
+        // through a future reader, walked once by a build that has it and once
+        // by one that does not, is a document lost per file — with the bytes
+        // never having moved.
+        SkipRule::Unsupported => content.is_none_or(|sha| sha != recorded.document_id),
+        // Unconditional, and deliberately not folded into the arm above even
+        // though the two would behave alike today.
+        //
+        // Nothing in this product produces this rule: no wire string maps to
+        // it, and the only reader that could earn it — a PDF reader that opens
+        // a scanned page and finds no text layer — is not built. It is
+        // dormant, so it has no digest to compare against and `is_none_or`
+        // would displace on every one of them anyway.
+        //
+        // What the separate branch buys is that whoever builds that reader has
+        // to decide this rather than inherit it. And the decision is not the
+        // same one: this rule is about a *page*, not a file, so "the bytes did
+        // not change" would not even mean what it means above — a document
+        // whose pages are readable except one is not a file that stopped being
+        // indexable.
+        SkipRule::NoTextLayer => true,
         // Something that happened, and that happens to every file alike.
         SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => false,
         // The one refusal by content that keeps: the file still opens with the
