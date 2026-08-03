@@ -64,6 +64,29 @@ case_ "header: the version reported is the constant the manifest publishes" \
   'pub const TEXT_READER_VERSION: u32 = 2;' \
   mnema-extract 'a_header_names_the_reader_that_produced_it' --test manifest
 
+# Fix round 1. The review found the markdown branch of `handle_request` held by
+# nothing at all: `reader: "text"` written into it left `cargo test --workspace`
+# at 478 passed, 0 failed — measured, not supposed. Every other reader of a
+# header looks past the field (`worker_cli.rs:323` destructures
+# `Frame::Header { pages, mime, .. }`), and the two branches build their headers
+# independently. `.md` is the single extension this whole design is arranged
+# around, which is what made taking it on trust expensive.
+case_ "header: the markdown branch names its own reader, not the text one" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's~                reader: "markdown"\.to_string\(\),~                reader: "text".to_string(),~' \
+  '                reader: "text".to_string(),
+                reader_version: manifest::MARKDOWN_READER_VERSION,' \
+  mnema-extract 'a_markdown_header_names_the_markdown_reader' --test manifest
+
+# The mirror of the case above, and the more expensive direction: with the
+# version wrong under a correct name, a bump to MARKDOWN_READER_VERSION would
+# re-read nothing at all — a rebuild that silently does not happen.
+case_ "header: the markdown version reported is the constant published" \
+  crates/mnema-extract/src/manifest.rs \
+  's~pub const MARKDOWN_READER_VERSION: u32 = 1;~pub const MARKDOWN_READER_VERSION: u32 = 2;~' \
+  'pub const MARKDOWN_READER_VERSION: u32 = 2;' \
+  mnema-extract 'a_markdown_header_names_the_markdown_reader' --test manifest
+
 # `for_extension`, all three ways it can be wrong. The first two are the
 # one-sided-assertion trap in implementation form: an implementation that always
 # answers the default passes every miss case, and one that ignores the argument
@@ -112,3 +135,24 @@ case_ "wire: a header with no reader must not parse as a default" \
   '        #[serde(default)]
         reader: String,' \
   mnema-core 'wire::tests::a_header_from_a_worker_that_predates_the_reader_field_is_a_protocol_error' --lib
+
+# Fix round 1, second finding. The required field stops a header that OMITS
+# `reader`; it does nothing about `""`, which parses as a valid String and rode
+# all the way into `Document` unexamined — the very placeholder the required
+# field was chosen to prevent, arriving by another road. `NOT NULL` on the
+# column that will store it does not catch an empty string either.
+#
+# Both directions, and they need two cases because one mutation cannot show
+# both: a guard that never fires lets the nameless header through, and a guard
+# that fires too widely rejects the ordinary one.
+case_ "pool: a header naming no reader is refused" \
+  crates/mnema-pool/src/lib.rs \
+  's~                if reader\.trim\(\)\.is_empty\(\) \{~                if reader.trim().is_empty() \&\& reader == "impossible" {~' \
+  'if reader.trim().is_empty() && reader == "impossible" {' \
+  mnema-pool 'a_header_that_names_no_reader_stops_the_job_and_a_named_one_does_not' --test supervision
+
+case_ "pool: a header that DOES name a reader is not refused" \
+  crates/mnema-pool/src/lib.rs \
+  's~                if reader\.trim\(\)\.is_empty\(\) \{~                if reader.trim().is_empty() || reader == "text" {~' \
+  'if reader.trim().is_empty() || reader == "text" {' \
+  mnema-pool 'a_header_that_names_no_reader_stops_the_job_and_a_named_one_does_not' --test supervision

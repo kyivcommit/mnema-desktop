@@ -231,7 +231,7 @@ write_header_only_worker() {
   cat > "$dest" <<'SCRIPT' || return 1
 #!/bin/sh
 IFS= read -r _request
-printf '{"frame":"header","sha256":"fake-header-only-worker","mime":"text/plain","source_kind":"document","pages":1}\n'
+printf '{"frame":"header","sha256":"fake-header-only-worker","mime":"text/plain","source_kind":"document","reader":"text","reader_version":1,"pages":1}\n'
 SCRIPT
   chmod +x "$dest"
 }

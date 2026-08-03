@@ -7,7 +7,7 @@
 while IFS= read -r line; do
   case "${line}" in
     *.pdf*) printf '{"frame":"summary","skipped_pages":0,"text_source":"native:pdf"}\n' ;;
-    *) printf '{"frame":"header","sha256":"0","mime":"text/plain","source_kind":"document","pages":1}\n'
+    *) printf '{"frame":"header","sha256":"0","mime":"text/plain","source_kind":"document","reader":"text","reader_version":1,"pages":1}\n'
        printf '{"frame":"page","page_no":1,"section_title":null}\n'
        printf '{"frame":"block","block_type":"paragraph","reading_order":0,"language":null,"text":"x","line_start":1,"line_end":1}\n' ;;
   esac

@@ -223,6 +223,39 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 },
             );
         }
+        // A header whose reader has no name. Not a hypothetical shape: `""` is
+        // what `#[serde(default)]` on that field would hand the parent, and it
+        // is what any producer writing the frame by hand leaves behind — the
+        // four worker stubs under scripts/ did exactly that until this field
+        // existed. The frame is otherwise complete and parses cleanly, which is
+        // the whole difficulty: nothing downstream would notice.
+        "nameless-reader" => {
+            write_frame(
+                stdout,
+                &Frame::Header {
+                    sha256: "0".repeat(64),
+                    mime: "text/plain".to_string(),
+                    source_kind: SourceKind::Document,
+                    reader: String::new(),
+                    reader_version: 0,
+                    pages: 1,
+                },
+            );
+            write_frame(
+                stdout,
+                &Frame::Page {
+                    page_no: 1,
+                    section_title: None,
+                },
+            );
+            write_frame(
+                stdout,
+                &Frame::Summary {
+                    skipped_pages: 0,
+                    text_source: "native:txt".to_string(),
+                },
+            );
+        }
         // A block with no page open before it: a worker that skipped the page
         // marker altogether, which is the older protocol still speaking.
         "pageless" => {

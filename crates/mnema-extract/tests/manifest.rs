@@ -55,6 +55,55 @@ fn a_header_names_the_reader_that_produced_it() {
     assert_eq!(v["reader_version"], serde_json::json!(1));
 }
 
+/// The markdown branch names itself too — and it needs its own test, because
+/// the two branches in `handle_request` build their headers independently and
+/// nothing makes them agree.
+///
+/// Measured before this existed: writing `reader: "text"` into the markdown
+/// branch left `cargo test --workspace` at **478 passed, 0 failed**. Every
+/// other place a header is read looks past the field — `worker_cli.rs`'s
+/// markdown test destructures `Frame::Header { pages, mime, .. }`, and the
+/// rest of the workspace uses synthetic headers. The two costs of that gap are
+/// opposite and both silent: with the wrong name every `.md` mismatches the
+/// manifest and is re-read on every run for ever, and after a
+/// `MARKDOWN_READER_VERSION` bump under the wrong name no `.md` is re-read at
+/// all. `.md` is the one extension the whole design is arranged around, so it
+/// is the last one that should have been taken on trust.
+///
+/// This test and the one above are the two directions of the same claim: swap
+/// the names between the branches and both go red, not one.
+#[test]
+fn a_markdown_header_names_the_markdown_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("звіт.md");
+    std::fs::write(&path, "вступ\n\n# Розділ перший\n\nтекст\n").unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            writeln!(c.stdin.as_mut().unwrap(), "{request}")?;
+            c.wait_with_output()
+        })
+        .expect("the worker runs");
+    let first = String::from_utf8(out.stdout).unwrap();
+    let first = first.lines().next().expect("a header").to_string();
+    let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+
+    assert_eq!(v["reader"], serde_json::json!("markdown"));
+    assert_eq!(v["reader_version"], serde_json::json!(1));
+    // Proof that the markdown branch is what ran, independent of the name it
+    // reported: the text branch answers 1 page for anything (D37), and this
+    // file has prose before its first heading and one heading after it.
+    assert_eq!(v["pages"], serde_json::json!(2));
+}
+
 /// The manifest is a *claim about* `typing::identify`, and nothing in the type
 /// system holds it to that claim: adding a reader and forgetting its entry
 /// leaves a manifest that answers "text" for a file the worker now reads

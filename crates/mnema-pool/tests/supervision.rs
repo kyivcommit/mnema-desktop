@@ -497,6 +497,42 @@ fn a_page_count_that_disagrees_with_the_frames_stops_the_job() {
     );
 }
 
+/// A header whose reader has no name stops the job, and one that names a
+/// reader goes through.
+///
+/// Both halves in one test, because either alone is satisfied by a mistake: a
+/// pool that rejected every header would pass the first, and the pool as it
+/// stood — which checked nothing — passed the second.
+///
+/// The gap this closes is narrow and was reachable. Making `reader` a required
+/// field on the wire stops a header that *omits* it; it does nothing about
+/// `""`, which parses as a valid `String` and travelled all the way into
+/// `Document` unexamined. That is the same placeholder the required field was
+/// chosen to prevent, arriving by another road — and the column that will hold
+/// it is `NOT NULL`, which an empty string satisfies. Its cost is not a bad
+/// name in a row: no manifest names the empty reader, so every document from
+/// such a worker mismatches for ever and is re-extracted on every run.
+#[test]
+fn a_header_that_names_no_reader_stops_the_job_and_a_named_one_does_not() {
+    let _watchdog = Watchdog::new("nameless reader", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let error = extract(&pool, "nameless-reader:x").unwrap_err();
+    let PoolError::Protocol { detail, .. } = &error else {
+        panic!("expected a protocol error, got {error:?}");
+    };
+    assert!(
+        detail.contains("reader"),
+        "the detail must name what was missing: {detail}"
+    );
+
+    // The other direction, through the same pool: an ordinary header still
+    // produces a document, and the name it carried is the one that arrives.
+    let document = document(extract(&pool, "x").unwrap());
+    assert_eq!(document.reader, "text");
+    assert_eq!(document.reader_version, 1);
+}
+
 /// A block with no page open before it is the older protocol still speaking,
 /// and it must not be filed under an invented page 1 — that is precisely the
 /// state `IngestError::Unpaginated` used to refuse, now impossible to reach

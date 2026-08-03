@@ -1057,9 +1057,28 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
         })?;
 
         match frame {
-            Frame::Header { .. } => {
+            Frame::Header { ref reader, .. } => {
                 if header.is_some() {
                     return Err(protocol(&line, "a second header inside one document"));
+                }
+                // `reader` being a required field stops a header that omits it,
+                // and stops nothing else: `""` is a perfectly good `String` and
+                // parses without complaint. That leaves the placeholder the
+                // required field exists to prevent reachable by another road —
+                // and `NOT NULL` on the column that stores it will not catch an
+                // empty string either.
+                //
+                // What it would cost is not a bad name in a row. The parent
+                // compares this value against a worker's manifest to decide
+                // whether a file must be read again; no manifest ever names the
+                // empty reader, so every document from such a worker mismatches
+                // for ever and is re-extracted on every run — a job that never
+                // settles, over a folder nobody is watching. Refused here,
+                // where the other "this worker does not speak our protocol"
+                // checks live, rather than deeper in, so that no document is
+                // built from it at all.
+                if reader.trim().is_empty() {
+                    return Err(protocol(&line, "a header naming no reader"));
                 }
                 header = Some(frame);
             }

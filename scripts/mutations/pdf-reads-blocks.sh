@@ -9,7 +9,7 @@
 # The branch must turn red that day rather than stay quietly green. Control 16d is what
 # has seen it do so.
 while IFS= read -r _request; do
-  printf '{"frame":"header","sha256":"0","mime":"application/octet-stream","source_kind":"document","pages":1}\n'
+  printf '{"frame":"header","sha256":"0","mime":"application/octet-stream","source_kind":"document","reader":"text","reader_version":1,"pages":1}\n'
   printf '{"frame":"page","page_no":1,"section_title":null}\n'
   printf '{"frame":"block","block_type":"paragraph","reading_order":0,"language":null,"text":"x","line_start":1,"line_end":1}\n'
 done
