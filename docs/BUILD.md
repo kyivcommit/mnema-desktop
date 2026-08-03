@@ -133,7 +133,8 @@ Run once per packaging change, by a person. It is the only part of the criterion
 no script covers, and that is deliberate: driving the window automatically is
 expensive and brittle, and this is the one link a human checks anyway.
 
-1. Download the `mnema-macos-arm64` artefact from a green CI run.
+1. Download the `mnema-macos-arm64` artefact from a green CI run — **with `gh run download`,
+   not through a browser.** How you fetch it decides whether step 3 works at all; see below.
 2. Mount the image; drag `Mnema.app` into `/Applications`; eject the image.
 3. Launch it from `/Applications`, not from the mounted volume.
 4. Add a folder holding several `.txt` and `.md` files.
@@ -144,6 +145,37 @@ expensive and brittle, and this is the one link a human checks anyway.
 `.pdf` is not on this list. No reader is implemented for it — D53 — so a PDF in
 that folder comes back refused as unsupported, which is the correct behaviour and
 not a failure of the packaging.
+
+### Why step 1 names the tool
+
+The image is ad-hoc signed and unnotarized on purpose, and `spctl` rejects it either way
+— that verdict is not new and is measured above. What changes with the download is
+whether the system **acts** on the verdict, and Gatekeeper acts only on a file carrying
+`com.apple.quarantine`.
+
+Measured on both paths, same artefact:
+
+| | `gh run download` | downloaded through a browser |
+|---|---|---|
+| `com.apple.quarantine` on the `.dmg` | absent | `0081;…;<agent>;<UUID>` |
+| propagates to the app copied out of the image | — | yes, as `0281;…` |
+| `spctl -a -t exec` | rejected | rejected |
+| `codesign --verify --deep --strict` | valid | valid |
+| the bundled worker reads a file | yes | yes |
+
+So the browser path blocks at launch while the bundle is intact — the seal verifies and
+the worker inside it works. The failure a person meets says the application is damaged,
+which is false, and it is the one step of this list that fails for a reason having
+nothing to do with what was packaged.
+
+Two limits of that measurement, so nobody re-derives them: the browser case was
+reproduced by writing the attribute LaunchServices writes, not by clicking a download,
+so the Gatekeeper behaviour is measured and the exact attribute a given browser writes
+is not; and the launch itself was not performed — the block is inferred from the
+quarantine mechanism rather than observed.
+
+Closing this properly needs a Developer ID certificate and notarization, which is a
+purchase and an account decision, not a build change.
 
 ## What the build produces
 
