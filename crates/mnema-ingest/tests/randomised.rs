@@ -670,13 +670,18 @@ impl World {
 
     /// Files away what one call answered: the verdict the invariants reason
     /// about, and a line of trace a failure can be read back from.
+    ///
+    /// Returns that verdict, because an operation that wants to record
+    /// something about its own call must read what the call answered rather
+    /// than assume it — see `stricter_rule_over_an_unchanged_folder`, where
+    /// assuming it disabled a check on 29 paths out of 200 seeds.
     fn record(
         &mut self,
         relative: &str,
         hash: Option<String>,
         outcome: Result<Ingested, mnema_ingest::IngestError>,
         how: &str,
-    ) {
+    ) -> Verdict {
         let verdict = match &outcome {
             Ok(
                 Ingested::Indexed { .. }
@@ -697,6 +702,7 @@ impl World {
         self.calling = Some(relative.to_string());
         self.last
             .insert(relative.to_string(), LastCall { hash, verdict });
+        verdict
     }
 
     fn ingest(&mut self, relative: &str) {
@@ -774,10 +780,14 @@ impl World {
     /// directly rather than going through `ingest_measured`, which is
     /// exactly why the guard there could not see it and needs its own copy
     /// here.
-    fn ingest_with(&mut self, relative: &str, config: PoolConfig, how: &str) {
+    /// Returns what this call answered, or `None` when the guard above
+    /// declined to make it — a caller that records something about its own
+    /// offer must be able to tell "refused by content" from "never offered",
+    /// and from any of the cheap arms that answer without a worker.
+    fn ingest_with(&mut self, relative: &str, config: PoolConfig, how: &str) -> Option<Verdict> {
         if self.excluded.contains(relative) {
             self.note(format!("    (excluded, not offered: {relative}{how})"));
-            return;
+            return None;
         }
         let pool = Pool::new(config).unwrap();
         let before = self.paths_now();
@@ -785,9 +795,10 @@ impl World {
         let absolute = self.absolute(relative);
         let on_disk = mnema_walk::stat(&absolute);
         let outcome = ingest_file(&pool, &self.db, self.root_id, &absolute, relative, on_disk);
-        self.record(relative, hash, outcome, how);
+        let verdict = self.record(relative, hash, outcome, how);
         self.check(&before);
         self.remember_settled();
+        Some(verdict)
     }
 
     /// Runs `relative` past a database that refuses one write.
@@ -1894,7 +1905,14 @@ impl World {
         let path = self.absolute(&relative);
         if let Ok(file) = std::fs::File::options().write(true).open(&path) {
             file.set_modified(at).unwrap();
-            self.files.get_mut(&relative).unwrap().mtime = at;
+            let state = self.files.get_mut(&relative).unwrap();
+            state.mtime = at;
+            // Exactly what `retouch` does one screen up, and it was missing
+            // here — measured on 2 paths of 200 seeds: a file refused by a
+            // content rule, then touched, went on carrying a flag that says
+            // "the journal still matches", while the journal row it names is
+            // keyed on the mtime this line just moved.
+            state.refused_by_content = false;
         }
         self.note(format!("  touch {relative}"));
         self.maybe_ingest(&relative);
@@ -1945,7 +1963,13 @@ impl World {
         if std::fs::rename(self.absolute(&relative), self.absolute(&renamed)).is_err() {
             return;
         }
-        let state = self.files.remove(&relative).unwrap();
+        let mut state = self.files.remove(&relative).unwrap();
+        // The flag does not travel. It says "the skip journal still refuses
+        // this path", and the journal is keyed on the path: the new name has
+        // no row at all, so a walk offers it to a worker like any other file.
+        // Measured on 3 paths of 200 seeds, each one a renamed file the settle
+        // loop then declined to check.
+        state.refused_by_content = false;
         self.files.insert(renamed.clone(), state);
         self.note(format!("  rename {relative} -> {renamed}"));
         self.maybe_ingest(&renamed);
@@ -2122,13 +2146,26 @@ impl World {
             let relative = self.a_file();
             let stricter = stricter_worker(self.dir.path());
             self.note(format!("  walk {relative} past a STRICTER content rule"));
-            self.ingest_with(&relative, PoolConfig::new(&stricter), " [stricter rule]");
+            let verdict =
+                self.ingest_with(&relative, PoolConfig::new(&stricter), " [stricter rule]");
             // The refusal is journalled against this file's current size and
             // mtime, and `SkipRule::NotText.is_about_content()` is true — so
             // every later walk answers from the journal without asking a
             // worker, and no number of clean passes brings this path back.
             // Recorded so that `settle` does not expect it to.
-            if !self.excluded.contains(&relative)
+            //
+            // **On the verdict this call returned, not on the condition that
+            // it was offered.** The stricter worker is only reached when the
+            // walk gets that far, and `ingest_file` answers most of these
+            // offers from a cheap arm first: measured over 200 seeds, of 186
+            // calls here only 72 were a refusal by content — 77 were
+            // `Unchanged`, 15 were answered from an older journal row, 22 were
+            // excluded. The flag was being set on all of them, and `settle`
+            // steps over every path carrying it, so the settling check was
+            // switched off on 29 paths that had never been refused at all —
+            // ordinary indexed text files among them, which is the case this
+            // harness exists to check.
+            if verdict == Some(Verdict::Skipped(SkipRule::NotText))
                 && let Some(state) = self.files.get_mut(&relative)
             {
                 state.refused_by_content = true;
