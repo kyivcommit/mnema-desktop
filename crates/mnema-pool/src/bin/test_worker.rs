@@ -136,11 +136,19 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 .expect("the pool keeps reading stdout");
             std::thread::sleep(SELF_DESTRUCT);
         }
+        // `sha256: None` in all four refusals below. This stand-in never reads
+        // the file it is asked about — it answers from a prefix on the path —
+        // so it has no digest to report, and inventing one would make the
+        // parent's "did the bytes change?" question answerable by a worker that
+        // never looked. The journey of a real digest across this wire is
+        // covered end to end by `a_file_whose_bytes_did_not_change_keeps_its_document`
+        // in `mnema-ingest/tests/slice.rs`, through the real pool.
         "refuse" => write_frame(
             stdout,
             &Frame::Refused {
                 rule: "unsupported".to_string(),
                 reason: format!("no reader for {rest}"),
+                sha256: None,
             },
         ),
         // The other producer of `Frame::Refused`, and the reason the two need
@@ -152,6 +160,7 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
             &Frame::Refused {
                 rule: "too_large".to_string(),
                 reason: format!("{rest} is over the ceiling"),
+                sha256: None,
             },
         ),
         // The refusal added for D51: the worker opened the file, read the
@@ -162,6 +171,7 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
             &Frame::Refused {
                 rule: "not_text".to_string(),
                 reason: format!("{rest} is not text"),
+                sha256: None,
             },
         ),
         // A refusal under a rule this pool has never heard of, which is what a
@@ -171,6 +181,7 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
             &Frame::Refused {
                 rule: "encrypted".to_string(),
                 reason: format!("{rest} is password-protected"),
+                sha256: None,
             },
         ),
         "fail" => write_frame(

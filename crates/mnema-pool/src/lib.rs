@@ -150,6 +150,17 @@ impl From<Failure> for SkipRule {
 pub struct Skip {
     pub failure: Failure,
     pub reason: String,
+    /// The sha256 of the bytes this verdict was reached on, when the worker
+    /// had them.
+    ///
+    /// `None` for every outcome the worker did not decide by reading: the size
+    /// ceiling (refused from `stat`), a crash, a timeout, an out-of-memory
+    /// kill, an unreadable path, and any answer this pool synthesised without
+    /// a worker at all. The parent uses it to tell a file that *changed* into
+    /// something unindexable from a file that did not change while the rule
+    /// under it did — see `mnema_ingest`'s `displaces`, which is where the
+    /// difference costs a document.
+    pub sha256: Option<String>,
 }
 
 /// One page of an extracted document: what its [`Frame::Page`] announced, and
@@ -479,6 +490,8 @@ impl Pool {
                     "{} is not valid UTF-8, and the extraction request cannot carry it",
                     path.display()
                 ),
+                // No worker ran, so nothing read the bytes.
+                sha256: None,
             }));
         };
 
@@ -550,9 +563,17 @@ impl Pool {
                 // one process per refused file — 4 ms — which a folder of
                 // unsupported formats pays in full, and which is the deliberate
                 // side of this trade rather than an oversight.
-                Ok(Answer::Skipped { failure, reason }) => {
+                Ok(Answer::Skipped {
+                    failure,
+                    reason,
+                    sha256,
+                }) => {
                     lease.retire();
-                    return Ok(Outcome::Skipped(Skip { failure, reason }));
+                    return Ok(Outcome::Skipped(Skip {
+                        failure,
+                        reason,
+                        sha256,
+                    }));
                 }
                 Ok(Answer::Ended { ending, note }) => {
                     lease.retire();
@@ -562,7 +583,15 @@ impl Pool {
                         self.config.timeout,
                         note.as_deref(),
                     );
-                    let skip = Skip { failure, reason };
+                    // A worker that died, timed out or was killed never
+                    // reported a digest — and must not be given one here: the
+                    // whole point of the poison record is that these bytes were
+                    // never successfully read.
+                    let skip = Skip {
+                        failure,
+                        reason,
+                        sha256: None,
+                    };
                     // This is the rule that keeps a multi-hour job moving: the
                     // file that killed a worker is remembered, not requeued.
                     self.poisoned().insert(path.to_path_buf(), skip.clone());
@@ -855,6 +884,7 @@ enum Answer {
     Skipped {
         failure: Failure,
         reason: String,
+        sha256: Option<String>,
     },
     /// The worker produced no answer: it died, or it was killed. `note` carries
     /// anything the wait status cannot express — today, that its output was not
@@ -1014,7 +1044,11 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
             // A refusal or an I/O failure is the whole answer, so one arriving
             // after a header means the two binaries disagree about the
             // protocol.
-            Frame::Refused { rule, reason } => {
+            Frame::Refused {
+                rule,
+                reason,
+                sha256,
+            } => {
                 if header.is_some() {
                     return Err(protocol(&line, "a refusal after a header"));
                 }
@@ -1034,7 +1068,11 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                         ));
                     }
                 };
-                return Ok(Answer::Skipped { failure, reason });
+                return Ok(Answer::Skipped {
+                    failure,
+                    reason,
+                    sha256,
+                });
             }
             Frame::Failed { message } => {
                 if header.is_some() {
@@ -1043,6 +1081,9 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 return Ok(Answer::Skipped {
                     failure: Failure::Unreadable,
                     reason: message,
+                    // `Failed` means the worker could not obtain the bytes at
+                    // all, so there is nothing to have hashed.
+                    sha256: None,
                 });
             }
         }

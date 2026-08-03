@@ -120,7 +120,29 @@ pub enum Frame {
     /// worker read a file and declined its content, and the ceiling branch
     /// decides from `stat` without opening anything. `mnema_index::SkipRule`
     /// carries the rest of the reasoning.
-    Refused { rule: String, reason: String },
+    /// `sha256` is the digest of the bytes the refusal was decided on, and it
+    /// is what lets the parent tell "this file changed and became unindexable"
+    /// from "this file did not change and the rule did". Without it the parent
+    /// deletes on both, and the second is a document lost over a release
+    /// upgrade — measured by the data-loss harness, which found a file whose
+    /// bytes never moved disappearing from the index after any event that
+    /// touched its modification time.
+    ///
+    /// `Option`, and not out of caution: the size ceiling refuses a file from
+    /// `stat` **before a byte is read**, so there is no digest to send and
+    /// there cannot be one. That is the same asymmetry that already makes
+    /// `SkipRule::TooLarge` conditional on the size rather than on the rule.
+    ///
+    /// `#[serde(default)]` so that a worker from an older release — one that
+    /// does not send this field at all — still parses. What the parent then
+    /// does with `None` is its own decision and is written down at
+    /// `mnema_ingest`'s `displaces`.
+    Refused {
+        rule: String,
+        reason: String,
+        #[serde(default)]
+        sha256: Option<String>,
+    },
     /// The worker could not even obtain the file's bytes to classify: the
     /// path does not exist, is not a regular file (a directory, say), could
     /// not be read for permissions, or — the request line itself — was not
@@ -237,6 +259,11 @@ mod tests {
         Frame::Refused {
             rule: "too_large".to_string(),
             reason: "invented.zip is 4096 bytes, over the 1024-byte ceiling".to_string(),
+            // The ceiling decides from `stat` and never opens the file, so this
+            // fixture is also the one refusal that legitimately carries no
+            // digest — and round-tripping `None` is worth having in the
+            // fixture others copy.
+            sha256: None,
         }
     }
 
@@ -261,6 +288,39 @@ mod tests {
             assert_eq!(line.matches('\n').count(), 1);
             assert_eq!(from_line(&line).unwrap(), frame);
         }
+    }
+
+    /// A refusal from a worker that predates the digest still parses, and one
+    /// that carries it keeps it. Both directions, because either alone is
+    /// satisfied by a mistake: a field that is always dropped would pass the
+    /// first, and a field that is required would pass the second.
+    ///
+    /// The `#[serde(default)]` on `sha256` exists for exactly the first line
+    /// here and for nothing else. Without this test the attribute is a claim
+    /// with nothing behind it — and the failure it prevents is not a parse
+    /// error but a whole walk answered as protocol failures by a parent that
+    /// met a sidecar one release behind.
+    #[test]
+    fn a_refusal_without_a_digest_still_parses_and_one_with_it_keeps_it() {
+        let old = r#"{"frame":"refused","rule":"not_text","reason":"not text"}"#;
+        assert_eq!(
+            from_line(old).unwrap(),
+            Frame::Refused {
+                rule: "not_text".to_string(),
+                reason: "not text".to_string(),
+                sha256: None,
+            }
+        );
+
+        let new = r#"{"frame":"refused","rule":"not_text","reason":"not text","sha256":"abc123"}"#;
+        assert_eq!(
+            from_line(new).unwrap(),
+            Frame::Refused {
+                rule: "not_text".to_string(),
+                reason: "not text".to_string(),
+                sha256: Some("abc123".to_string()),
+            }
+        );
     }
 
     #[test]

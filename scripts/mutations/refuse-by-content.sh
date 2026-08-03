@@ -97,9 +97,61 @@ case_ "wire: the pool knows the string binary_tail" \
 # contains, under a filename that still exists.
 case_ "displaces: a photo replacing a note removes what the note used to say" \
   crates/mnema-ingest/src/lib.rs \
-  's{SkipRule::Unsupported \| SkipRule::NoTextLayer \| SkipRule::NotText => true,}{SkipRule::Unsupported | SkipRule::NoTextLayer => true,\n        SkipRule::NotText => false,}' \
+  's{SkipRule::NotText => content\.is_none_or\(\|sha\| sha != recorded\.document_id\),}{SkipRule::NotText => false,}' \
   'SkipRule::NotText => false,' \
   mnema-ingest 'a_text_file_overwritten_by_a_photo_stops_answering' --test slice
+
+# The condition itself, which task 10 added after the data-loss harness found
+# what its absence costs: a file whose bytes never moved losing its document
+# because a later release classifies those same bytes differently. The rule
+# changed, the file did not, and the text is still on disk.
+case_ "displaces: a refusal on unchanged bytes deletes nothing" \
+  crates/mnema-ingest/src/lib.rs \
+  's{SkipRule::NotText => content\.is_none_or\(\|sha\| sha != recorded\.document_id\),}{SkipRule::NotText => true,}' \
+  'SkipRule::NotText => true,' \
+  mnema-ingest 'a_file_whose_bytes_did_not_change_keeps_its_document' --test slice
+
+# The comparison's direction. Inverted, it keeps exactly the documents it must
+# remove and removes exactly those it must keep — and one test alone would not
+# say which way round the condition is written.
+case_ "displaces: the digest comparison is not inverted" \
+  crates/mnema-ingest/src/lib.rs \
+  's{sha != recorded\.document_id}{sha == recorded.document_id}' \
+  'sha == recorded.document_id' \
+  mnema-ingest 'a_text_file_overwritten_by_a_photo_stops_answering' --test slice
+
+# The real worker's own end of it. Asserted at the worker's boundary rather
+# than through `displaces`, because within one release a file that classifies
+# as not-text was never indexed as text — the case the digest exists for needs
+# two classifier versions, which no test in one binary can stage.
+case_ "wire: the worker sends the digest it refused on" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's{// whether the file changed or only the rule did\.\n                sha256: Some\(sha256\),}{// whether the file changed or only the rule did.\n                sha256: None,}' \
+  'only the rule did.
+                sha256: None,' \
+  mnema-extract 'a_photo_is_refused_by_the_real_worker' --test worker_cli
+
+# The digest has to survive two hops inside the pool, and each is a separate
+# field that can be dropped on its own. Dropping either is a silent reversion
+# to deleting on every refusal — `is_none_or` reads a missing digest as "the
+# bytes are unknown, so displace".
+#
+# Both cases name the same test, and that is the point: it is the only one that
+# reaches `displaces` with a digest that MATCHES what the index holds, so it is
+# the only one either hop can be seen from.
+case_ "wire: the pool carries the digest out of the frame" \
+  crates/mnema-pool/src/lib.rs \
+  's{                return Ok\(Answer::Skipped \{\n                    failure,\n                    reason,\n                    sha256,\n                \}\);}{                return Ok(Answer::Skipped \{\n                    failure,\n                    reason,\n                    sha256: None,\n                \});}' \
+  'reason,
+                    sha256: None,' \
+  mnema-ingest 'a_file_whose_bytes_did_not_change_keeps_its_document' --test slice
+
+case_ "wire: the pool carries the digest into the Skip it returns" \
+  crates/mnema-pool/src/lib.rs \
+  's{                    return Ok\(Outcome::Skipped\(Skip \{\n                        failure,\n                        reason,\n                        sha256,\n                    \}\)\);}{                    return Ok(Outcome::Skipped(Skip \{\n                        failure,\n                        reason,\n                        sha256: None,\n                    \}));}' \
+  'reason,
+                        sha256: None,' \
+  mnema-ingest 'a_file_whose_bytes_did_not_change_keeps_its_document' --test slice
 
 # And the other side of that same line, which is the whole of task 9: a note
 # whose append was interrupted comes back with a zeroed tail and is refused,

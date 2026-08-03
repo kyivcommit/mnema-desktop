@@ -241,8 +241,13 @@ pub fn ingest_file(
             db,
             root_id,
             relative,
-            "the walk could not measure this file, so its size and mtime are unknown",
-            rule,
+            Refusal {
+                rule,
+                reason: "the walk could not measure this file, so its size and mtime are unknown",
+                // Nothing read the file — this arm is reached because the walk
+                // could not even stat it.
+                content: None,
+            },
             &recorded,
             on_disk,
         )?;
@@ -257,8 +262,11 @@ pub fn ingest_file(
                 db,
                 root_id,
                 relative,
-                &skip.reason,
-                rule,
+                Refusal {
+                    rule,
+                    reason: &skip.reason,
+                    content: skip.sha256.as_deref(),
+                },
                 &recorded,
                 on_disk,
             )?;
@@ -421,6 +429,24 @@ fn repoint(
     Ok(())
 }
 
+/// One file's refusal, as [`record_skip`] needs it: the rule that fired, a
+/// sentence a person can read, and the digest of the bytes the verdict was
+/// reached on.
+///
+/// A struct rather than three more parameters because the three always travel
+/// together and arrive from the same place — `mnema_pool::Skip` — and because
+/// `content` is the one whose absence changes what happens to a document.
+/// Passed loose, it is a bare `Option<&str>` in eighth position, which is
+/// exactly the shape a caller gets wrong.
+struct Refusal<'a> {
+    rule: SkipRule,
+    reason: &'a str,
+    /// The sha256 of what the worker read. `None` when nothing read the file:
+    /// the size ceiling refused it from `stat`, the worker died, or this crate
+    /// answered without a worker at all.
+    content: Option<&'a str>,
+}
+
 /// Journals one file's skip and, when [`displaces`] says so, removes what the
 /// index still holds under that path — **as one transaction**.
 ///
@@ -441,15 +467,19 @@ fn record_skip(
     db: &Db,
     root_id: i64,
     relative: &str,
-    reason: &str,
-    rule: SkipRule,
+    refusal: Refusal<'_>,
     recorded: &Option<PathEntry>,
     on_disk: Option<OnDisk>,
 ) -> Result<(), mnema_index::Error> {
+    let Refusal {
+        rule,
+        reason,
+        content,
+    } = refusal;
     db.transaction(|_| {
         db.record_skip(root_id, relative, None, reason, rule, on_disk)?;
         if let Some(recorded) = recorded
-            && displaces(rule, recorded, on_disk)
+            && displaces(rule, recorded, on_disk, content)
         {
             db.delete_path(root_id, relative)?;
             forget_if_unnamed(db, &recorded.document_id)?;
@@ -620,10 +650,21 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// Written as an exhaustive `match` rather than `matches!`, so that a rule
 /// added to `SkipRule` has to be placed on one of these sides by whoever adds
 /// it.
-fn displaces(rule: SkipRule, recorded: &PathEntry, on_disk: Option<OnDisk>) -> bool {
+fn displaces(
+    rule: SkipRule,
+    recorded: &PathEntry,
+    on_disk: Option<OnDisk>,
+    content: Option<&str>,
+) -> bool {
     match rule {
-        // A determination about the bytes, reproducible on the same bytes.
-        SkipRule::Unsupported | SkipRule::NoTextLayer | SkipRule::NotText => true,
+        // A determination about the bytes — but only about *these* bytes. A
+        // file whose content is byte-identical to what the index was built
+        // from has nothing to displace: the rule changed, the file did not,
+        // and deleting the document would lose text that is still on disk.
+        // `TooLarge` is conditional for the same reason against a different
+        // measure (its own doc comment has the case that taught it).
+        SkipRule::NotText => content.is_none_or(|sha| sha != recorded.document_id),
+        SkipRule::Unsupported | SkipRule::NoTextLayer => true,
         // Something that happened, and that happens to every file alike.
         SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => false,
         // The one refusal by content that keeps: the file still opens with the

@@ -5,10 +5,12 @@
 //! request and the read — see the report for why), a size exactly at the
 //! ceiling, and a recognised-but-unimplemented reader.
 
+use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 use mnema_extract::wire::Frame;
+use sha2::{Digest, Sha256};
 
 /// Runs the compiled worker binary against `lines`, one request per line on
 /// its stdin, and returns everything it wrote to stdout. Asserts the process
@@ -68,9 +70,23 @@ fn a_file_over_the_ceiling_is_refused_without_being_read() {
     // `mnema-extract` may not depend on `mnema-index` — so it is asserted here
     // rather than left to the parent's mapping.
     match frames_of(&out).as_slice() {
-        [Frame::Refused { rule, reason }] => {
+        [
+            Frame::Refused {
+                rule,
+                reason,
+                sha256,
+            },
+        ] => {
             assert_eq!(rule, "too_large", "a size ceiling must have its own rule");
             assert!(reason.contains("ceiling"), "{reason}");
+            // "Refused without being read" is the name of this test and a real
+            // property of the branch, and this is what pins it: a digest here
+            // could only have come from reading the file the ceiling exists to
+            // avoid reading.
+            assert_eq!(
+                *sha256, None,
+                "the ceiling decides from stat, so there is nothing it could have hashed"
+            );
         }
         other => panic!("expected exactly one refusal, got {other:?}"),
     }
@@ -87,12 +103,36 @@ fn a_photo_is_refused_by_the_real_worker() {
 
     assert_eq!(frames.len(), 1, "a refusal is the whole answer: {frames:?}");
     match &frames[0] {
-        Frame::Refused { rule, reason } => {
+        Frame::Refused {
+            rule,
+            reason,
+            sha256,
+        } => {
             assert_eq!(rule, "not_text");
             assert!(
                 reason.contains("not text"),
                 "the reason is what the window shows a person: {reason:?}"
             );
+            // The digest of the bytes this verdict was reached on, and the
+            // parent cannot do without it: it is the only thing that tells a
+            // file which *became* unindexable from a file that never changed
+            // while the rule under it did. The second of those loses a
+            // document if this field is missing, because a parent that cannot
+            // see the bytes assumes they moved.
+            //
+            // Asserted against the fixture's own digest rather than merely
+            // `is_some()`: a worker that sent a constant, or the digest of the
+            // wrong buffer, would satisfy the weaker check.
+            let mut hasher = Sha256::new();
+            hasher.update(std::fs::read("tests/fixtures/solid.png").unwrap());
+            let want = hasher
+                .finalize()
+                .iter()
+                .fold(String::with_capacity(64), |mut s, b| {
+                    let _ = write!(s, "{b:02x}");
+                    s
+                });
+            assert_eq!(sha256.as_deref(), Some(want.as_str()));
         }
         other => panic!("expected a refusal, got {other:?}"),
     }

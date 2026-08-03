@@ -9,6 +9,7 @@
 //! Every fixture is invented — names, places and numbers that belong to
 //! nobody.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,6 +18,7 @@ use mnema_core::Coordinate;
 use mnema_index::{Db, SkipRule, open, register_vector_extension};
 use mnema_ingest::{Ingested, ingest_file};
 use mnema_pool::{Pool, PoolConfig};
+use sha2::{Digest, Sha256};
 
 // `worker` and `wrong_worker` live in `tests/support/mod.rs` now, shared with
 // `walk.rs`: two integration-test binaries asking "where is the worker built"
@@ -1475,6 +1477,61 @@ fn a_text_file_overwritten_by_a_photo_stops_answering() {
     assert!(
         fx.db.search_lexical("кропива", 10).unwrap().is_empty(),
         "the old text still answers for a file that no longer contains it"
+    );
+}
+
+/// D51. A file whose bytes never changed must not lose its document because a
+/// later release classifies it differently. Measured by the data-loss harness
+/// before this fix: touching the mtime — `touch`, `cp -p`, a restore from
+/// backup, a sync client — is enough, because the first cheap arm compares
+/// mtime and hands the file to a worker that now answers differently.
+///
+/// The sidecar carries the file's real sha256, and that is not a convenience:
+/// a worker whose rule changed still *read* the bytes and still hashed them
+/// before classifying (`worker.rs`, where the digest is taken before
+/// `identify`). A stand-in that omitted it would be modelling a different
+/// failure — an older worker — which this test is not about.
+#[test]
+fn a_file_whose_bytes_did_not_change_keeps_its_document() {
+    let fx = Fixture::new();
+    let prose = "Нотатка, яку ніхто не редагував.\n".repeat(50);
+    fx.place_at("notes/untouched.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("notes/untouched.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("редагував", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    // The same bytes, a later mtime — and a worker whose rule now refuses them.
+    fx.place_at("notes/untouched.txt", prose.as_bytes(), mtime_just_after());
+    let mut hasher = Sha256::new();
+    hasher.update(prose.as_bytes());
+    let sha256 = hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+    let stricter = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"not_text","reason":"the threshold moved","sha256":"{sha256}"}}\n'"#
+        ),
+    );
+    let outcome = fx.ingest_with_worker("notes/untouched.txt", &stricter);
+
+    assert!(
+        matches!(outcome, Ingested::Skipped { .. }),
+        "the file is refused under the new rule: {outcome:?}"
+    );
+    assert!(
+        !fx.db.search_lexical("редагував", 10).unwrap().is_empty(),
+        "the bytes are identical to what the index was built from, so the \
+         document must survive a rule that changed under it"
     );
 }
 

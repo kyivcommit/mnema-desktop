@@ -139,6 +139,39 @@ fn babbling_worker(dir: &Path) -> PathBuf {
     path
 }
 
+/// A worker whose content rule got stricter between releases: it calls every
+/// file not text, whatever the bytes are.
+///
+/// It reports the file's **real** digest, and that is the whole fidelity of
+/// this stand-in. A worker whose classifier changed still reads the bytes and
+/// still hashes them before deciding (`worker.rs` takes the digest before
+/// `identify`), so a sidecar that omitted it would be modelling an *older*
+/// worker instead — a different failure, and one that would let this operation
+/// pass for the wrong reason.
+///
+/// `$1` is not available: the pool sends a JSON request line, not an argument,
+/// so the script reads the path out of the line with `sed` and hashes the file
+/// itself. `shasum -a 256` is on every macOS and Linux runner this repository
+/// targets; `sha256sum` is not on macOS.
+#[cfg(unix)]
+fn stricter_worker(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("stricter-worker");
+    std::fs::write(
+        &path,
+        r#"#!/bin/sh
+while read -r line; do
+  file=$(printf '%s' "$line" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')
+  sha=$(shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1)
+  printf '{"frame":"refused","rule":"not_text","reason":"the threshold moved","sha256":"%s"}\n' "$sha"
+done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 // ------------------------------------------------------------------ the dice
 
 /// splitmix64 — three lines, no dependency, and identical on every platform.
@@ -260,6 +293,20 @@ struct FileState {
     shape: Shape,
     markers: Vec<String>,
     mtime: SystemTime,
+    /// A content rule refused this path, and the journal still remembers it
+    /// against the file's current size and mtime.
+    ///
+    /// While that is true the file cannot come back to the index no matter how
+    /// many clean walks run over it: `ingest_file`'s **second** cheap arm
+    /// answers from the skip journal for any rule where
+    /// `SkipRule::is_about_content()` holds, so no worker is ever asked again.
+    /// That is D51's accepted price, written down — the only lever that clears
+    /// such a verdict is `INDEX_FORMAT_VERSION`, and a walk does not move it.
+    ///
+    /// Cleared by anything that moves the file's size or modification time,
+    /// because the journal row is keyed on those: once they differ, the cheap
+    /// arm misses and the file is offered to a worker again.
+    refused_by_content: bool,
 }
 
 /// What the last call to `ingest_file` for a path answered, and what the file
@@ -321,6 +368,16 @@ struct World {
     tick: u64,
     files: BTreeMap<String, FileState>,
     last: BTreeMap<String, LastCall>,
+    /// The path the most recent call to `ingest_file` was about.
+    ///
+    /// Invariant 3c needs it and no other check does. `last` remembers every
+    /// path this run has ever offered, and judging a rule's contract against
+    /// all of them re-judges verdicts recorded many steps ago, against a
+    /// `before`/`after` pair belonging to some unrelated call. Measured on seed
+    /// 1592590556: a file refused as `binary_tail` at step 17 was legitimately
+    /// removed by phase 3 at step 24, and invariant 3c read that as the
+    /// refusal having deleted it.
+    calling: Option<String>,
     log: Vec<String>,
     trace: bool,
     /// Every content hash this run has ever seen finished — kept so that a
@@ -377,6 +434,7 @@ impl World {
             tick: 0,
             files: BTreeMap::new(),
             last: BTreeMap::new(),
+            calling: None,
             log: Vec::new(),
             trace: std::env::var("MNEMA_FUZZ_TRACE").is_ok(),
             settled_before: BTreeSet::new(),
@@ -441,6 +499,9 @@ impl World {
                 shape: content.shape,
                 markers: content.markers,
                 mtime: at,
+                // New bytes at a new time: whatever the journal remembers about
+                // this path no longer matches what a walk will stat.
+                refused_by_content: false,
             },
         );
     }
@@ -633,6 +694,7 @@ impl World {
             Err(e) => format!("Err({e})"),
         };
         self.note(format!("    ingest{how} {relative} -> {rendered}"));
+        self.calling = Some(relative.to_string());
         self.last
             .insert(relative.to_string(), LastCall { hash, verdict });
     }
@@ -1170,21 +1232,55 @@ impl World {
         before: &BTreeMap<String, String>,
         after: &BTreeMap<String, String>,
     ) {
-        for (relative, last) in &self.last {
+        // The call that just happened, and only it. Iterating `self.last`
+        // instead re-judges every verdict this run ever recorded against a
+        // `before`/`after` pair that belongs to someone else's call — which is
+        // how a `binary_tail` refusal at step 17 was read as having deleted a
+        // path that phase 3 legitimately reaped at step 24.
+        let Some(relative) = self.calling.as_deref() else {
+            return;
+        };
+        if let Some(last) = self.last.get(relative) {
             let Verdict::Skipped(rule) = last.verdict else {
-                continue;
+                return;
             };
             let Some(held) = before.get(relative) else {
                 // Nothing was under the path, so there is nothing either rule
                 // could have displaced or kept.
-                continue;
+                return;
             };
             match rule {
-                // Unconditionally true in `displaces`: the worker read the
-                // bytes, they are not prose, and what the index holds under
-                // this name belongs to a file that is gone.
-                SkipRule::NotText => {
-                    if after.get(relative) == Some(held) {
+                // Conditional on the digest since task 10, and both branches
+                // are asserted here because each one is a document lost or a
+                // citation left lying.
+                //
+                // This arm used to demand displacement unconditionally, which
+                // was a faithful statement of `displaces` as it then stood —
+                // and this harness is what proved that contract wrong: a file
+                // whose bytes had never moved lost its document the first time
+                // anything pushed its mtime past the cheap arm and the rule
+                // under it had changed. What follows is the corrected
+                // contract, not a relaxed one; the keep side is a new claim
+                // that nothing asserted before.
+                SkipRule::NotText => match last.hash.as_deref() {
+                    // The worker saw exactly the bytes the index was built
+                    // from. The rule changed, the file did not.
+                    Some(sha) if sha == held => {
+                        if after.get(relative) != Some(held) {
+                            self.fail(format!(
+                                "invariant 3c — {relative} was refused as not text and lost \
+                                 {held}, but its bytes are byte-identical to what that \
+                                 document was built from. Nothing about the file changed, \
+                                 so a release that classifies it differently has deleted \
+                                 text that is still on disk.\n  it now holds: {:?}",
+                                after.get(relative)
+                            ));
+                        }
+                    }
+                    // Different bytes: the path holds something else now, and
+                    // what the index answers with belongs to a file that is
+                    // gone.
+                    Some(_) if after.get(relative) == Some(held) => {
                         self.fail(format!(
                             "invariant 3c — {relative} was refused as not text, and the \
                              index still answers for it with {held}. Those bytes are a \
@@ -1192,7 +1288,12 @@ impl World {
                              whose text it no longer contains"
                         ));
                     }
-                }
+                    Some(_) => {}
+                    // The harness could not hash the file at the moment of the
+                    // call, so it cannot say which of the two cases this was
+                    // and asserts neither.
+                    None => {}
+                },
                 // Unconditionally false in `displaces`, and the whole of why
                 // the rule is separate from `NotText`.
                 SkipRule::BinaryTail => {
@@ -1577,6 +1678,9 @@ impl World {
     /// follows it.
     fn step(&mut self, n: usize) {
         self.note(format!("step {n}:"));
+        // Nothing has been called yet in this step, so invariant 3c has no
+        // verdict of its own to judge until something makes one.
+        self.calling = None;
         self.draw();
         // Every invariant again at the end of the step, including for a step
         // that never called `ingest_file` at all.
@@ -1601,7 +1705,7 @@ impl World {
         let choice = if self.files.is_empty() {
             0
         } else {
-            self.rng.below(22)
+            self.rng.below(23)
         };
         match choice {
             0 => self.create(),
@@ -1632,6 +1736,7 @@ impl World {
             // files that are both refused on their own bytes.
             19 => self.overwrite_with_a_photo(),
             20 => self.interrupt_an_append(),
+            21 => self.stricter_rule_over_an_unchanged_folder(),
             _ => self.run_walk(),
         }
     }
@@ -1673,6 +1778,10 @@ impl World {
             file.set_modified(at).unwrap();
             if let Some(state) = self.files.get_mut(relative) {
                 state.mtime = at;
+                // The journal's row is keyed on size and mtime, so moving the
+                // mtime is enough to make the second cheap arm miss and offer
+                // the file to a worker again.
+                state.refused_by_content = false;
             }
         }
     }
@@ -1994,6 +2103,41 @@ impl World {
     /// The failure this models is environmental and applies to every file in
     /// the walk alike, which is why it is drawn against files that are
     /// otherwise perfectly readable.
+    /// A release whose content rule got stricter, walking a folder that did
+    /// not change. **Deliberately no `retouch`** — that is the whole question,
+    /// and it is the one operation here for which touching the file first
+    /// would destroy the case rather than enable it.
+    ///
+    /// This was measured with a throwaway probe during task 7 and left
+    /// uncommitted, because it made this harness red against the code as it
+    /// then stood: `displaces` answered `true` for `NotText` unconditionally,
+    /// so a file whose bytes had never moved lost its document the first time
+    /// anything — a `touch`, a `cp -p`, a restore, a sync client — pushed its
+    /// mtime past the cheap arm. Invariant 3 caught it. Task 10 made the rule
+    /// conditional on the digest, and this operation is that fix's standing
+    /// witness.
+    fn stricter_rule_over_an_unchanged_folder(&mut self) {
+        #[cfg(unix)]
+        {
+            let relative = self.a_file();
+            let stricter = stricter_worker(self.dir.path());
+            self.note(format!("  walk {relative} past a STRICTER content rule"));
+            self.ingest_with(&relative, PoolConfig::new(&stricter), " [stricter rule]");
+            // The refusal is journalled against this file's current size and
+            // mtime, and `SkipRule::NotText.is_about_content()` is true — so
+            // every later walk answers from the journal without asking a
+            // worker, and no number of clean passes brings this path back.
+            // Recorded so that `settle` does not expect it to.
+            if !self.excluded.contains(&relative)
+                && let Some(state) = self.files.get_mut(&relative)
+            {
+                state.refused_by_content = true;
+            }
+        }
+        #[cfg(not(unix))]
+        self.reingest();
+    }
+
     fn babbling_sidecar(&mut self) {
         #[cfg(unix)]
         {
@@ -2409,6 +2553,18 @@ impl World {
             };
             let size = self.on_disk(name).map(|b| b.len()).unwrap_or(0) as u64;
             let state = &self.files[name];
+            // A path carrying a content refusal the journal still matches is
+            // outside this loop's question in **both** directions, so nothing
+            // is asserted about it here rather than a weaker thing being
+            // asserted. It may legitimately be absent — the second cheap arm
+            // answers from the journal and no walk asks a worker again — and
+            // it may legitimately be present, because since task 10 a refusal
+            // on unchanged bytes keeps the document it already had. What
+            // happened at the moment the rule fired is invariant 3c's
+            // business, and that ran then, with the digest in hand.
+            if state.refused_by_content {
+                continue;
+            }
             // Four kinds of file are legitimately not in the index at the end:
             // one no reader can take, a photo, a note whose append was
             // interrupted, and one over the ceiling. All four are journalled.

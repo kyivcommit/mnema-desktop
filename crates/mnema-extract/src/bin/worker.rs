@@ -108,6 +108,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 "{} is {size} bytes, over the {}-byte ceiling",
                 request.path, request.max_bytes
             ),
+            // The one refusal with no digest, and it cannot have one: this
+            // branch decided from `stat` and never opened the file. Hashing it
+            // here to fill the field in would read exactly the bytes the
+            // ceiling exists to avoid reading.
+            sha256: None,
         }];
     }
 
@@ -194,6 +199,10 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 rule: "not_text".to_string(),
                 reason: "this file is not text: its bytes are not something this product reads"
                     .to_string(),
+                // The digest of the bytes this verdict was reached on, taken
+                // above, before `identify` ran. It is what tells the parent
+                // whether the file changed or only the rule did.
+                sha256: Some(sha256),
             }]
         }
         // Also refused, and deliberately under a rule of its own: the parent
@@ -209,6 +218,7 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 reason: "this file starts as text and then stops being one: it may be truncated \
                          or damaged"
                     .to_string(),
+                sha256: Some(sha256),
             }]
         }
         // None of these five formats has a `Vec<Block>` reader in this crate
@@ -223,6 +233,7 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     "no reader implemented yet for {} ({:?})",
                     file_type.mime, file_type.reader
                 ),
+                sha256: Some(sha256),
             }]
         }
     }
