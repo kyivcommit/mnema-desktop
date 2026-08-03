@@ -151,9 +151,20 @@ declare_failures! {
     /// Not folded into [`Failure::Unsupported`], although both arrive as
     /// `Frame::Refused`: `mnema-ingest` removes what the index holds under a
     /// path when a worker **read** a file and declined its content, and this
-    /// branch never read a byte. Lowering a setting must not delete indexed
-    /// content. [`SkipRule::TooLarge`](mnema_index::SkipRule::TooLarge) carries
-    /// the rest of the reasoning.
+    /// branch never read a byte, so the refusal itself says nothing at all
+    /// about whether the content changed.
+    ///
+    /// That is the distinction this variant exists for, and it is **not** the
+    /// stronger claim this comment used to make. "Lowering a setting must not
+    /// delete indexed content" was true of the rule as it then stood and is no
+    /// longer true as written. What holds is narrower: lowering the ceiling does
+    /// not, *on its own*, delete anything — an untouched file matches on size,
+    /// mtime and stage, so the cheap arm answers `Unchanged` and no worker is
+    /// ever started. Once either of those numbers has moved, the parent has only
+    /// them to go on, and it displaces. The whole of that, including what it
+    /// costs and what is left over,
+    /// is [`SkipRule::TooLarge`](mnema_index::SkipRule::TooLarge) and
+    /// `mnema_ingest`'s `displaces`.
     TooLarge,
     /// The file could not be read at all: missing, not a regular file, refused
     /// by permissions, or a path this protocol cannot carry.
