@@ -219,6 +219,46 @@ case_ "displaces: an interrupted append does NOT remove what the note still says
   'SkipRule::BinaryTail => true,' \
   mnema-ingest 'an_interrupted_append_does_not_delete_what_the_note_still_says' --test slice
 
+# ------------------------------------------------ the size ceiling's own arm
+
+# The ceiling's arm had two cases named in prose and one of them measured. This
+# pair states both, and the pair matters because either mutation alone looks
+# like a plausible simplification of the other.
+case_ "displaces: a file that grew past the ceiling stops answering" \
+  crates/mnema-ingest/src/lib.rs \
+  's{SkipRule::TooLarge => on_disk\.is_some_and\(\|disk\| \{\n            disk\.size_bytes != recorded\.size_bytes \|\| disk\.mtime != recorded\.mtime\n        \}\),}{SkipRule::TooLarge => false,}' \
+  'SkipRule::TooLarge => false,' \
+  mnema-ingest 'a_file_grown_past_the_ceiling_loses_what_the_index_held' --test slice
+
+case_ "displaces: the ceiling does not delete a file it still recognises" \
+  crates/mnema-ingest/src/lib.rs \
+  's{SkipRule::TooLarge => on_disk\.is_some_and\(\|disk\| \{\n            disk\.size_bytes != recorded\.size_bytes \|\| disk\.mtime != recorded\.mtime\n        \}\),}{SkipRule::TooLarge => true,}' \
+  'SkipRule::TooLarge => true,' \
+  mnema-ingest 'a_lowered_ceiling_keeps_what_it_still_recognises' --test slice
+
+# The Critical this arm was widened for. The size alone cannot see a file
+# rewritten in place at the same length, and the argument that it could —
+# "a file of that length that is over the ceiling now was over the ceiling
+# then" — assumed the ceiling had not moved, inside the one rule that exists
+# because it can.
+case_ "displaces: the ceiling reads the modification time, not the size alone" \
+  crates/mnema-ingest/src/lib.rs \
+  's{ \|\| disk\.mtime != recorded\.mtime\n}{\n}' \
+  'disk.size_bytes != recorded.size_bytes
+        }),' \
+  mnema-ingest 'a_file_rewritten_in_place_under_a_lowered_ceiling_stops_answering' --test slice
+
+# And the other half of the same condition, which a `cp -p` of a different file
+# is blind to the clock for. Without its own case the size comparison could be
+# deleted outright and every ceiling test would stay green, because each of the
+# others moves the modification time as well.
+case_ "displaces: the ceiling reads the size, not the modification time alone" \
+  crates/mnema-ingest/src/lib.rs \
+  's{disk\.size_bytes != recorded\.size_bytes \|\| }{}' \
+  'disk.mtime != recorded.mtime
+        }),' \
+  mnema-ingest 'a_replacement_of_a_different_length_carrying_the_old_time_stops_answering' --test slice
+
 # ------------------------------------------------ when the journal may be trusted
 
 # The second cheap arm answers from the journal without spending a worker, and
@@ -231,3 +271,54 @@ case_ "journal: a verdict from an older format version is not honoured" \
   '&& let Some(skip) = db.skip_entry(root_id, relative)?
         && skip.size_bytes == Some(disk.size_bytes)' \
   mnema-ingest 'a_stale_format_version_is_not_honoured_by_the_second_cheap_arm' --test slice
+
+# The arm answered before anything decided whether the document under that path
+# had to go, so a remembered refusal never displaced anything at all. Measured
+# at `walk_root`'s own level: three walks, and the third came back
+# `{ found: 1, indexed: 0, skipped: 1, removed: 0, stopped: Completed }` with
+# the note still answering under a name whose file is a photo.
+case_ "journal: a remembered refusal does not answer for a document it would remove" \
+  crates/mnema-ingest/src/lib.rs \
+  's{\n        && !recorded\n            \.as_ref\(\)\n            \.is_some_and\(\|entry\| displaces\(skip\.rule, entry, on_disk, None\)\)}{}' \
+  '&& skip.mtime == Some(disk.mtime)
+    {' \
+  mnema-ingest 'a_remembered_refusal_does_not_answer_for_a_document_it_would_remove' --test slice
+
+# The same defect through three walks of one folder — and this case removes
+# BOTH guards, which is a finding rather than a convenience. Measured: with only
+# the clause above deleted, the walk test stays green, because clearing the
+# journal row on a successful index already stops the third walk finding
+# anything to short-circuit on; and with only the clearing deleted it stays
+# green too, because the clause then falls through to a worker. The measured
+# reproduction is closed twice over. Each guard is pinned on its own by the case
+# before this one and the case after it; this one is what says the walk-level
+# behaviour depends on their union and nothing weaker.
+#
+# The marker checks the first substitution only — the two edits are far apart in
+# the file and `contains` takes one contiguous string. `git diff --quiet`, the
+# guard that actually matters, still covers both.
+case_ "journal: neither guard alone is what the three-walk reproduction rests on" \
+  crates/mnema-ingest/src/lib.rs \
+  's{\n        && !recorded\n            \.as_ref\(\)\n            \.is_some_and\(\|entry\| displaces\(skip\.rule, entry, on_disk, None\)\)}{}; s{    db\.forget_skip\(root_id, relative\)\?;\n}{}' \
+  '&& skip.mtime == Some(disk.mtime)
+    {' \
+  mnema-ingest 'a_photo_restored_with_its_own_time_stops_the_note_answering' --test walk
+
+# The other direction, which is what the arm is paid for: a rule that KEEPS must
+# still short-circuit, or a folder of interrupted files spends a worker process
+# each on every walk forever.
+case_ "journal: a rule that keeps still answers without a worker" \
+  crates/mnema-ingest/src/lib.rs \
+  's{\.is_some_and\(\|entry\| displaces\(skip\.rule, entry, on_disk, None\)\)}{.is_some_and(|_| true)}' \
+  '.is_some_and(|_| true)' \
+  mnema-ingest 'a_second_walk_over_an_interrupted_note_asks_no_worker' --test walk
+
+# A file indexed after a refusal kept that refusal for the life of the index —
+# listed in the window as "not indexed" while it was, and left standing as a
+# live verdict for the arm above.
+case_ "journal: indexing a file forgets the refusal that kept it out" \
+  crates/mnema-ingest/src/lib.rs \
+  's{    db\.forget_skip\(root_id, relative\)\?;\n}{}' \
+  'db.insert_path(root_id, relative, id, disk.size_bytes, disk.mtime)?;
+    if let Some(displaced) = displaced {' \
+  mnema-ingest 'indexing_a_file_forgets_the_refusal_that_kept_it_out' --test slice
