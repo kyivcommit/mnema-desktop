@@ -64,17 +64,43 @@ broken=0
 # which is the only thing that says whether the control reddened for the reason
 # it claims. Controls 9 and 10 have two possible red exits between them and are
 # indistinguishable without it.
+#
+# An optional `-m FRAGMENT` before the label asserts that fragment is present in
+# that line — mechanizing the "own reason" rule instead of leaving it to a human
+# to read the message and judge. Without `-m` a control counts as red on exit
+# status alone, exactly as before: controls 1 through 8 call this unchanged and
+# stay unchanged. The gap this closes is real, not theoretical — control 11
+# (added in this same task) went red on the codesign section's message before
+# its own check existed, and nothing before this could tell the difference
+# between that and the check it names actually firing.
 expect_red() {
+  local expect=""
+  if [ "$1" = "-m" ]; then
+    expect="$2"
+    shift 2
+  fi
   local label="$1" script="$2"
   shift 2
-  local out status
+  local out status full msg
   out=$(bash "$script" "$@" 2>&1)
   status=$?
   printf '%s\n' "-- ${label}"
   if [ $status -ne 0 ]; then
-    printf '   red (exit %s): %s\n' "$status" \
-      "$(printf '%s' "$out" | grep 'verify-bundle:' | tail -1 | cut -c1-140)"
-    red=$((red + 1))
+    # Matched against the FULL line, not the 140-column one below it is cut to for
+    # display: a long mktemp path pushes the fragment past column 140 on its own,
+    # which is not a wrong reason, only a long path. Measured on control 12 before
+    # this split existed — its correct message was reported WRONG REASON only
+    # because the path ate the columns the fragment needed.
+    full="$(printf '%s' "$out" | grep 'verify-bundle:' | tail -1)"
+    msg="$(printf '%s' "$full" | cut -c1-140)"
+    if [ -n "${expect}" ] && ! printf '%s' "${full}" | grep -qF -- "${expect}"; then
+      printf '   red (exit %s), but not for its own reason: %s\n' "$status" "$msg"
+      printf '   *** WRONG REASON — this control proves nothing. Expected: %s ***\n' "$expect"
+      green=$((green + 1))
+    else
+      printf '   red (exit %s): %s\n' "$status" "$msg"
+      red=$((red + 1))
+    fi
   else
     printf '   *** STILL GREEN — this control proves nothing ***\n'
     green=$((green + 1))
@@ -150,13 +176,17 @@ copy_repo() {
 # both git-ignored, so copy_repo never carries them. Without this, both controls
 # would redden on "no built worker" instead of on the reason they name. Stages a
 # matching pair, copied from the real build, so that check passes quietly and
-# execution reaches the cargo tree logic being tested.
+# execution reaches the cargo tree logic being tested. The triple is derived the
+# same way scripts/stage-sidecar.sh does, rather than hardcoded, so this does not
+# print a false arm64 name on an Intel host.
 stage_fresh_worker() {
-  local into="$1"
+  local into="$1" triple
+  triple="$(rustc -vV | sed -n 's/^host: //p')"
+  [ -n "${triple}" ] || return 1
   mkdir -p "${into}/target/release" "${into}/src-tauri/binaries" || return 1
   cp "${REPO}/target/release/mnema-extract-worker" "${into}/target/release/mnema-extract-worker" || return 1
   cp "${REPO}/target/release/mnema-extract-worker" \
-    "${into}/src-tauri/binaries/mnema-extract-worker-aarch64-apple-darwin"
+    "${into}/src-tauri/binaries/mnema-extract-worker-${triple}"
 }
 
 echo "### 1. the dmg directory does not exist"
@@ -217,7 +247,8 @@ if must copy_app_out "${LAB}/no-worker" \
   && must rm -f "${LAB}/no-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
   && gone "${LAB}/no-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
   && must image_from "${LAB}/no-worker" "${LAB}/no-worker-img/dmg/Mnema.dmg"; then
-  expect_red "a packaged build with no worker indexes nothing" \
+  expect_red -m "carries no mnema-extract-worker" \
+    "a packaged build with no worker indexes nothing" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-worker-img"
 fi
 
@@ -225,7 +256,8 @@ echo "### 12. the worker is there and is not executable"
 if must copy_app_out "${LAB}/dead-worker" \
   && must chmod a-x "${LAB}/dead-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
   && must image_from "${LAB}/dead-worker" "${LAB}/dead-worker-img/dmg/Mnema.dmg"; then
-  expect_red "a worker that cannot be executed" \
+  expect_red -m "exists and is not executable" \
+    "a worker that cannot be executed" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/dead-worker-img"
 fi
 
@@ -241,11 +273,45 @@ if must copy_repo "${LAB}/stale" \
   && must mkdir -p "${LAB}/stale/src-tauri/binaries" \
   && must cp "${REPO}/target/release/mnema-extract-worker" \
        "${LAB}/stale/src-tauri/binaries/mnema-extract-worker-stale" \
-  && printf 'not the binary you built\n' \
+  && must printf 'not the binary you built\n' \
        >> "${LAB}/stale/src-tauri/binaries/mnema-extract-worker-stale"; then
-  expect_red "a stale sidecar must not ship inside a green build" \
+  expect_red -m "the staged sidecar is not the binary" \
+    "a stale sidecar must not ship inside a green build" \
     "${LAB}/stale/scripts/verify-bundle.sh" "${BUNDLE}"
 fi
+
+echo "### 13b. two staged sidecars for the same triple"
+# Mutates the real src-tauri/binaries/, not a copy: unlike controls 9, 10 and 13
+# there is no relocated script here to point at a fake directory instead —
+# ${repo_root}/src-tauri/binaries always resolves to this one real directory
+# when verify-bundle.sh runs unmutated, and bundle_dir is the only path the
+# script takes as an argument. Modeled on control 3 one level down: two
+# candidate files where the glob used to let `head -1` pick whichever sorted
+# first, and the same "proves nothing about the new build" reason already
+# written for ${dmg_dir} above. This directory is git-ignored and nothing else
+# prunes it, so a sibling left behind here would poison every later run of
+# this suite and of verify-bundle.sh itself — cleaned up unconditionally below,
+# and `check_one_staged` runs again afterward to prove the cleanup worked
+# rather than assume it.
+staging_dir="${REPO}/src-tauri/binaries"
+extra_staged="${staging_dir}/mnema-extract-worker-second-triple"
+check_one_staged() {
+  local n
+  n="$(find "${staging_dir}" -maxdepth 1 -type f -name 'mnema-extract-worker-*' | wc -l | tr -d ' ')"
+  [ "$n" = "1" ] && return 0
+  printf '   %s has %s files matching mnema-extract-worker-*, expected exactly 1\n' "${staging_dir}" "$n"
+  return 1
+}
+if must check_one_staged \
+  && must cp "${REPO}/target/release/mnema-extract-worker" "${extra_staged}" \
+  && there "${extra_staged}"; then
+  expect_red -m "files matching mnema-extract-worker-* in" \
+    "two staged sidecars, and the check must not pick whichever sorted first" \
+    "${REPO}/scripts/verify-bundle.sh" "${BUNDLE}"
+fi
+must rm -f "${extra_staged}"
+gone "${extra_staged}"
+must check_one_staged
 
 echo "### 9. the shell depends on Pdfium and the bundle carries none"
 if must copy_repo "${LAB}/needs-pdfium" \
@@ -253,7 +319,8 @@ if must copy_repo "${LAB}/needs-pdfium" \
     "${LAB}/needs-pdfium/src-tauri/Cargo.toml" \
   && must grep -q 'mnema-extract' "${LAB}/needs-pdfium/src-tauri/Cargo.toml" \
   && must stage_fresh_worker "${LAB}/needs-pdfium"; then
-  expect_red "extraction wired into the shell, library not packaged" \
+  expect_red -m "depends on pdfium-render" \
+    "extraction wired into the shell, library not packaged" \
     "${LAB}/needs-pdfium/scripts/verify-bundle.sh" "${BUNDLE}"
 fi
 
@@ -263,7 +330,8 @@ if must copy_repo "${LAB}/broken-manifest" \
   && must stage_fresh_worker "${LAB}/broken-manifest" \
   && printf '[workspace]\nresolver = "3"\nmembers = ["crates/nope"]\n' \
     > "${LAB}/broken-manifest/Cargo.toml"; then
-  expect_red "an unanswered dependency question must not read as absent" \
+  expect_red -m "cargo tree failed" \
+    "an unanswered dependency question must not read as absent" \
     "${LAB}/broken-manifest/scripts/verify-bundle.sh" "${BUNDLE}"
 fi
 

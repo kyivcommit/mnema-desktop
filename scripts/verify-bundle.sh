@@ -113,6 +113,12 @@ worker="${app}/Contents/MacOS/${worker_name}"
 # that is green in every other respect. The comparison is made against the binary
 # `cargo build` produced, and a missing one is an UNANSWERED question rather than
 # the answer "fresh" — the same distinction the dependency check learned the hard way.
+#
+# Both paths below come from repo_root, not from bundle_dir: pointing this script
+# at a different image still reports on THIS checkout's staged and built files.
+# Deliberate, not an oversight — it is what lets a control run this script from a
+# mutated copy of the repository against the one real bundle and still get a
+# meaningful verdict about that copy's own staged file.
 built_worker="${repo_root}/target/release/${worker_name}"
 [ -f "${built_worker}" ] || fail "no ${built_worker}, so whether the bundled worker is
   the one this build produced is UNANSWERED. That is not the same as answered yes.
@@ -125,10 +131,25 @@ built_worker="${repo_root}/target/release/${worker_name}"
 staged_dir="${repo_root}/src-tauri/binaries"
 [ -d "${staged_dir}" ] || fail "no ${staged_dir}.
   scripts/stage-sidecar.sh creates it; beforeBuildCommand calls that script."
-staged_worker="$(find "${staged_dir}" -maxdepth 1 -type f \
-  -name "${worker_name}-*" 2>/dev/null | head -1)"
-[ -n "${staged_worker}" ] || fail "nothing staged in ${staged_dir}.
-  scripts/stage-sidecar.sh puts it there and beforeBuildCommand calls that script."
+
+# Counted before it is read, same shape as ${dmg_count} above and for the same
+# reason: scripts/stage-sidecar.sh overwrites its own file but never removes a
+# sibling left by a different host triple, and this directory is git-ignored, so
+# nothing else prunes one either. `head -1` on more than one match would verify
+# whichever file sorted first — proving nothing about the one the bundler
+# actually staged, and control 13 shows how loose the glob is: it matches
+# `mnema-extract-worker-stale`, not just a real triple.
+staged_count="$(find "${staged_dir}" -maxdepth 1 -type f \
+  -name "${worker_name}-*" | wc -l | tr -d ' ')"
+case "${staged_count}" in
+  0) fail "nothing staged in ${staged_dir}.
+  scripts/stage-sidecar.sh puts it there and beforeBuildCommand calls that script." ;;
+  1) : ;;
+  *) fail "${staged_count} files matching ${worker_name}-* in ${staged_dir}.
+  Remove the stale ones: a check that verifies whichever one sorted first proves
+  nothing about the new build, the same reason ${dmg_dir} rejects two images." ;;
+esac
+staged_worker="$(find "${staged_dir}" -maxdepth 1 -type f -name "${worker_name}-*")"
 
 staged_sha="$(shasum -a 256 "${staged_worker}" | cut -d' ' -f1)"
 built_sha="$(shasum -a 256 "${built_worker}" | cut -d' ' -f1)"
