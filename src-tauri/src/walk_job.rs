@@ -52,9 +52,9 @@ pub fn start_walk_job(
 
     // No exclusion-rule command exists yet — nothing in this task adds one —
     // so every watched folder walks with the built-in list and `.gitignore`
-    // on and no user prefixes. **Provisional**, in the same sense
-    // `paths::worker_path` is: the smallest default that lets a walk run at
-    // all, not a stand-in for the settings UI the interface spec still owes.
+    // on and no user prefixes. **Provisional**: the smallest default that
+    // lets a walk run at all, not a stand-in for the settings UI the
+    // interface spec still owes.
     // `.expect` rather than `?`: `validate_prefix` only ever runs over
     // `user_prefixes`, which is empty here, so `RulesError` cannot be
     // produced by this call — not "should not", cannot, by inspection of

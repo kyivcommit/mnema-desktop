@@ -1,13 +1,17 @@
 # Building and packaging
 
 How the macOS package is produced, what is inside it, and which of those facts were
-measured rather than assumed. Everything below was run on 2026-07-26 on macOS 26.5.2,
-arm64, with the toolchain `rust-toolchain.toml` names (1.97.1) and `tauri-cli` 2.11.4;
-the Linux figures come from an `ubuntu:24.04` container, arm64, glibc 2.39.
+measured rather than assumed. This page was not written in one sitting, so no single
+date covers every claim on it: a section that names its own date and toolchain was
+measured under those, not under the ones in this paragraph. Everything without a
+date of its own was run on 2026-07-26 on macOS 26.5.2, arm64, with the toolchain
+`rust-toolchain.toml` names (1.97.1) and `tauri-cli` 2.11.4; the Linux figures come
+from an `ubuntu:24.04` container, arm64, glibc 2.39.
 
-Where a claim has not been observed, it says so. `.github/workflows/ci.yml` has never
-run — this repository has no workflow run at all — so every statement about the runners
-is a prediction until the first push.
+Where a claim has not been observed, it says so. `.github/workflows/ci.yml` has run on
+`main`, `refuse-by-content` and `watched-folder` since 2026-07-30, with failures among
+them. `packaging-and-delivery` has never been pushed and has no runs of its own, so
+every statement about the runners is still a prediction until this branch's first push.
 
 ## The version pair
 
@@ -53,6 +57,14 @@ packager needs and is bound to it by a test so the repetition cannot go stale.
 # Once per machine.
 cargo install tauri-cli --version "^2" --locked
 
+# Once per clone, before anything else. Nothing about `src-tauri` compiles until
+# this file exists, in any profile — `cargo build`, `cargo clippy` and `cargo test`
+# have no hooks that would create it, and `cargo tauri dev` runs its hook without
+# waiting for it to finish. (`cargo tauri build` does wait; only the dev hook is
+# unawaited.) See "A fresh checkout cannot build the shell" below for what it says
+# when it stops, and for why the dev hook is not a substitute.
+scripts/stage-sidecar.sh debug     # or release; either satisfies the declaration
+
 # The package.
 cargo tauri build
 
@@ -73,36 +85,120 @@ requires each to exit non-zero, requires the real image to pass, and prints the 
 scripts/verify-bundle-controls.sh
 ```
 
-It prints the tally itself — `red`, `still green`, `broken controls` — and no number
-is repeated here, because an eleventh control would make one stale and nothing would
-notice. That is item 4 in miniature, in the paragraph that removed item 4.
+**Nothing runs it automatically, and that leaves the check itself unguarded.** The CI
+`bundle` job builds the image and runs `scripts/verify-bundle.sh`; no workflow runs the
+controls. So an edit that makes `verify-bundle.sh` stop rejecting things — a branch that
+can no longer be reached, an assertion that any failure satisfies, a check deleted along
+with the state it named — passes CI green and keeps passing. The only thing that would
+notice is a person who remembers to run this script. That is deliberate rather than
+overlooked: the suite needs a built bundle and takes minutes. It is also this
+repository's own signature defect, a step that passes while proving nothing, standing
+one level above the check written to catch it.
+
+It prints the tally itself — `red for its own reason`, `WRONG REASON`, `still green`,
+`broken controls`, `shipped image rejected` — and no number is repeated here, because
+an eleventh control would make one stale and nothing would notice. That is item 4 in
+miniature, in the paragraph that removed item 4. Every control asserts a fragment of
+the message it expects, so a control that exits non-zero for somebody else's reason is
+counted apart from one that proved what it names, and prints which fragment it wanted.
 
 A control whose *setup* fails is counted as broken rather than red, and that
 distinction is not bookkeeping: before it existed, an image that would not attach left
 three controls building a package out of a directory that was never created. All three
 went red — on "no .dmg", which is a different control's reason — and the run still
-reported the full count.
+reported the full count. A control whose asserted fragment is empty is broken for the
+same reason: it would match every message and prove nothing while looking proved.
 
-Two of the controls are worth naming because they are not about the image at all:
+The Pdfium check is worth naming on its own, because what it checks is not the image
+at all, and because it used to work differently:
 
-- **`cargo tree` cannot answer.** The dependency question is asked with a command that
-  can fail, and a failure is not the answer "no". Before this was fixed the pipeline
-  sat inside an `if`, where neither `set -e` nor `pipefail` applies, so a broken
-  manifest or a renamed package printed *"the shell does not link pdfium-render"* and
-  exited 0 — with cargo's own error visible in the log above the green verdict.
-- **the shell depends on Pdfium and the bundle carries none.** The check derives what
-  must be packaged from the graph rather than from a constant, so it stays quiet today
-  and turns red the day extraction is wired into the shell.
+- **The verdict comes from the worker, not from a dependency graph.** This check used
+  to ask `cargo tree -p mnema-desktop`, and that answered a question about the wrong
+  binary once a sidecar existed: `src-tauri` never depended on `mnema-extract`, so the
+  graph said nothing was needed even after extraction moved into a bundled worker that
+  does link Pdfium — the day that happened, a graph-based check would have stayed
+  quiet rather than turned red. `scripts/verify-bundle.sh` now feeds the bundled
+  worker, run from inside the mounted image, one PDF and reads its verdict.
+  `refused`/`unsupported` means the library must **not** be in the bundle — present
+  anyway is dead weight, a defect rather than a spare part. `blocks` means the library
+  must be present and must load from inside the image, and that branch fails on
+  purpose today: no reader is implemented for any format but text, so a worker that
+  answers a PDF with blocks proves the check itself has gone stale, which is the day
+  the check is meant to turn red rather than the day packaging broke. Any other
+  answer is unanswered, and unanswered reads as red, not as a pass.
+
+## The acceptance run
+
+Run once per packaging change, by a person. It is the only part of the criterion
+no script covers, and that is deliberate: driving the window automatically is
+expensive and brittle, and this is the one link a human checks anyway.
+
+1. Download the `mnema-macos-arm64` artefact from a green CI run — **with `gh run download`,
+   not through a browser.** How you fetch it decides whether step 3 works at all; see below.
+2. Mount the image; drag `Mnema.app` into `/Applications`; eject the image.
+3. Launch it from `/Applications`, not from the mounted volume.
+4. Add a folder holding several `.txt` and `.md` files.
+5. The walk finishes without `EndReason::Failed`.
+6. Ask a question whose answer is in one of those files; a citation comes back,
+   and its highlight covers text that is actually in the file.
+
+`.pdf` is not on this list. No reader is implemented for it — D53 — so a PDF in
+that folder comes back refused as unsupported, which is the correct behaviour and
+not a failure of the packaging.
+
+### Why step 1 names the tool
+
+The image is ad-hoc signed and unnotarized on purpose, and `spctl` rejects it either way
+— that verdict is not new and is measured above. What changes with the download is
+whether the system **acts** on the verdict, and Gatekeeper acts only on a file carrying
+`com.apple.quarantine`.
+
+Measured on both paths, same artefact:
+
+| | `gh run download` | downloaded through a browser |
+|---|---|---|
+| `com.apple.quarantine` on the `.dmg` | absent | `0081;…;<agent>;<UUID>` |
+| propagates to the app copied out of the image | — | yes, as `0281;…` |
+| `spctl -a -t exec` | rejected | rejected |
+| `codesign --verify --deep --strict` | valid | valid |
+| the bundled worker reads a file | yes | yes |
+
+So the browser path blocks at launch while the bundle is intact — the seal verifies and
+the worker inside it works. The failure a person meets says the application is damaged,
+which is false, and it is the one step of this list that fails for a reason having
+nothing to do with what was packaged.
+
+One half of this is now observed rather than inferred. The acceptance run was performed
+on 2026-08-03 with an artefact fetched by `gh run download`, and the application launched
+from `/Applications` with **no Gatekeeper prompt at all** — so the left column is measured
+end to end, and the tool named in step 1 is a measured instruction rather than a cautious
+one.
+
+Two limits remain, so nobody re-derives them: the browser case was reproduced by writing
+the attribute LaunchServices writes, not by clicking a download, so the Gatekeeper
+behaviour and the propagation are measured while the exact attribute a given browser
+writes is not; and no launch was attempted from that path, so the block itself is still
+inferred from the quarantine mechanism rather than seen.
+
+Closing this properly needs a Developer ID certificate and notarization, which is a
+purchase and an account decision, not a build change.
 
 ## What the build produces
 
 ```
-target/release/bundle/dmg/Mnema_0.0.0_aarch64.dmg     3,704,157 bytes
-    └─ Mnema.app                                         11.5 MiB
-         Contents/MacOS/mnema-desktop                 11,966,368 bytes, Mach-O arm64
+target/release/bundle/dmg/Mnema_0.0.0_aarch64.dmg      5,815,668 bytes
+    └─ Mnema.app                                          17.7 MiB
+         Contents/MacOS/mnema-desktop                  15,391,264 bytes, Mach-O arm64
+         Contents/MacOS/mnema-extract-worker            3,055,136 bytes, Mach-O arm64
          Contents/Resources/Mnema.icns
          Contents/_CodeSignature/CodeResources
 ```
+
+Measured 2026-08-03 on macOS 26.6 (25G72), arm64, rustc 1.97.1, `tauri-cli` 2.11.4.
+The bundle carries one more binary than it used to: `mnema-extract-worker` did not
+exist in this table before `bundle.externalBin` was wired up, and none of the other
+rows above were adjusted by arithmetic — a fresh `cargo tauri build` and a fresh
+`du` produced every figure in this table.
 
 **`target/release/bundle/macos/` is empty when the build finishes.** With
 `targets: ["dmg"]` the `.app` is an intermediate: the bundler writes the image and then
@@ -112,6 +208,130 @@ is why `verify-bundle.sh` attaches the image and looks at the application inside
 which is also the copy a user actually receives.
 
 The `.icns` is generated from the four committed PNGs; no `.icns` needs to be committed.
+
+## The extraction worker inside the bundle
+
+The application hands each file to a separate short-lived process, `mnema-extract-worker`,
+and resolves it as a sibling of its own executable (`src-tauri/src/paths.rs`). Neither
+`cargo tauri build` nor `cargo tauri dev` builds that binary on its own: `src-tauri`
+deliberately does not depend on `mnema-extract`, so the worker is in no dependency graph
+either command walks. `scripts/stage-sidecar.sh` builds it in the profile it is given and
+copies it to `src-tauri/binaries/mnema-extract-worker-<triple>`, the name
+`bundle.externalBin` requires; that script's header is where the naming convention is
+written down, and this page does not repeat it. `beforeBuildCommand` and `beforeDevCommand`
+each call it; so can a person debugging a bundle, and — see the end of this section — so
+must a person with a fresh clone.
+
+The five facts below were measured on 2026-08-03, macOS 26.6 (25G72), arm64, rustc 1.97.1,
+`tauri-cli` 2.11.4. None of them had been observed here before.
+
+**It lands beside the application's own executable.** Attaching the image and running
+`find …/Mnema.app -name 'mnema-extract-worker*'` returns exactly
+`Contents/MacOS/mnema-extract-worker`, and `ls -l` on it shows `-rwxr-xr-x`. Both halves
+matter: that is the sibling directory `paths.rs` already looks in, so no code had to change,
+and the bundler does not drop the executable bit on the way in.
+
+**The seal still verifies with nested code inside.** `scripts/verify-bundle.sh` exits 0.
+Its `codesign --verify --deep --strict` walks into the sidecar rather than stopping at the
+outer seal — it prints `--prepared:` and `--validated:` lines naming
+`Contents/MacOS/mnema-extract-worker` — and still reports `valid on disk` and
+`satisfies its Designated Requirement`. The bundler signs the sidecar individually first
+(`Signing …/mnema-extract-worker: replacing existing signature`) and seals the bundle after.
+
+**The bundled bytes are not the built bytes.** `shasum -a 256` gives the copy inside the
+image `8b9f1f71…`, and gives `target/release/mnema-extract-worker` and
+`src-tauri/binaries/mnema-extract-worker-aarch64-apple-darwin` the same `b91c71fb…` as each
+other. The sizes differ by 352 bytes, which is the signature the bundler replaces. So the
+staged copy and the built copy can be compared to each other by digest; **the copy inside
+the image cannot be compared to either that way**, and a freshness check that tries reports
+a stale worker on every build. `scripts/verify-bundle.sh` therefore proves freshness at the
+staged file in `src-tauri/binaries/` against `target/release/mnema-extract-worker`, and does
+not compare either of them to the copy inside the image.
+
+**It runs off the read-only mount.** The image was attached with
+`hdiutil attach -readonly -nobrowse -mountpoint /tmp/mnema-m4`, and feeding one NDJSON
+request to `/tmp/mnema-m4/Mnema.app/Contents/MacOS/mnema-extract-worker` returns
+`header`, `page`, two `block` frames and `summary`, and exits 0. The image mounts
+`read-only, nodev, nosuid, noowners` — and not `noexec`, which is the flag that would have
+made this fail. Nothing has to be copied out of the image to exercise the worker.
+
+**The development hook runs, and is not the last writer — nor a guarantee.** With
+`target/debug/mnema-extract-worker` deleted, `cargo tauri dev` logs
+`Running BeforeDevCommand (../scripts/stage-sidecar.sh debug)` and the binary is back within
+four seconds, at the path `worker_path()` resolves to. That closes the gap `paths.rs`
+described, where development worked only after somebody had run a `cargo build` by hand and
+nothing enforced it. Two things qualify it, both measured.
+
+*The dev hook is not awaited.* In every `cargo tauri dev` log on this repository,
+`Running DevCommand` is the line immediately after `Running BeforeDevCommand`, and the hook's
+own output arrives later, interleaved with the dev build — sometimes behind
+`Blocking waiting for file lock on build directory`. Tauri spawns that hook and does not wait,
+which is right for a dev server and wrong for a staging step whose output the build needs. So
+on a clone with no `src-tauri/binaries/` at all, `cargo tauri dev` is a race between the
+hook's copy and `tauri-build`'s validation of the same path: **one failure in ten runs**, on
+`resource path … doesn't exist`, in the run where the dev build's cargo took the
+build-directory lock first and left the hook still compiling when the build script asked for
+the file.
+
+That rate is worth exactly its conditions, so here they are: every run was on this machine
+with a **warm** `target/` and `src-tauri/binaries/` deleted beforehand, three of them also
+with the worker unlinked and three of those also with `src-tauri/src/lib.rs` and
+`crates/mnema-extract/src/lib.rs` touched so the shell itself recompiled. A genuinely cold
+clone compiles for minutes on both sides and shifts the contention this measures; nobody has
+run that. **Since the staged file survives `cargo clean`, the coin is flipped once per clone
+and never again** — which is why one hand-run command retires it.
+
+**The dev hook is therefore a convenience, not the mechanism.** Run `scripts/stage-sidecar.sh`
+once yourself after cloning; that is what makes it dependable, and what the CI `check` job
+does as an explicit step rather than relying on a hook.
+
+*`tauri-build` writes to the same path.* Its build script declares `rerun-if-changed` on
+`tauri.conf.json`, and when it re-runs it copies whatever is in `src-tauri/binaries/` over
+`target/debug/mnema-extract-worker`. Since both profiles now stage, the common path is
+self-consistent: after `scripts/stage-sidecar.sh debug`, the staged file and
+`target/debug/mnema-extract-worker` are the same 5,449,544-byte debug binary, digest
+`5eb4fc08…` for both. **The hazard is narrowed, not gone.** Stage `release` — which
+`cargo tauri build` does on every package — and then run a plain `cargo build -p mnema-desktop`
+with no hook in between, and `target/debug/mnema-extract-worker` becomes the 3,054,784-byte
+release binary, `b91c71fb…`, for both. A development run started after a packaging run
+executes a release worker, and if `mnema-extract`'s sources have moved since, a stale one.
+
+### A fresh checkout cannot build the shell until the sidecar is staged
+
+`src-tauri/binaries/` is git-ignored on purpose: committing it would let a stale worker ship
+inside a green build. The cost is that `tauri-build` refuses to run without it, and says so
+from inside the build script:
+
+```
+error: failed to run custom build command for `mnema-desktop v0.0.0 (…/src-tauri)`
+  resource path `binaries/mnema-extract-worker-aarch64-apple-darwin` doesn't exist
+```
+
+Measured with the directory moved aside: `cargo build -p mnema-desktop`,
+`cargo check -p mnema-desktop` and `cargo clippy -p mnema-desktop --all-targets` all exit 101
+on that error. **Plain cargo has no hooks**, so `cargo clippy --workspace --all-targets` and
+`cargo test --workspace` get nothing to save them, and that is what
+`.github/workflows/ci.yml`'s `check` job runs on a checkout where the directory cannot exist.
+The job therefore stages explicitly, before `fmt`, `clippy` and `test`.
+
+The two `tauri` commands are **not** equivalent to that step, and the difference is not
+symmetry:
+
+- `cargo tauri build` is safe, and the evidence is the log ordering rather than the exit
+  status: from an absent-directory state it prints `Running beforeBuildCommand`, then the
+  hook's own `stage-sidecar: …/src-tauri/binaries/…` line, and only then the build output.
+  `beforeBuildCommand` is awaited. (Two green runs would not have shown that; they cannot
+  separate "awaited" from "won the race" — which is exactly what went wrong with the dev hook
+  above.) So the `bundle` job needs no staging step and does not have one.
+- `cargo tauri dev` is not, because `beforeDevCommand` is *not* awaited. On a clone with
+  nothing staged the hook races `tauri-build`'s validation of the file it is still writing.
+  The hook removes the *certain* failure, not the *possible* one; the rate and the conditions
+  it was measured under are in the section above, and are not repeated here.
+
+Hence the once-per-clone line in *The commands* above. **The requirement belongs to
+`externalBin`, not to the staging script:** `tauri-build` validates the declared path while
+`src-tauri` compiles, in any profile, so it holds however the file arrives and no change to
+how staging works removes it.
 
 ## Signing
 
@@ -154,6 +374,15 @@ both slices:
 | universal | 7,597,603 B | 23.2 MiB | 24,303,184 B |
 | ratio | ×2.05 | ×2.02 | ×2.03 |
 
+Both rows and the ratio belong to a build made before `bundle.externalBin` put a worker
+in the bundle. **When is not recorded.** No build log names the day the universal image
+was produced; the 2026-07-26 at the top of this page is the default this section falls
+under, not a measurement taken for this table, and writing it here as one would state
+more than is known. The current arm64 figures, worker included, are in
+"What the build produces" above; there is no current universal counterpart to compare
+them to, since producing one compiles the dependency tree twice and nobody has run that
+since the worker landed.
+
 So the universal image is a little over twice the size of the one a given user can run,
 and every user downloads a slice for a machine they do not own. Packages are therefore
 built per architecture. Two further consequences worth knowing before anyone reaches
@@ -165,10 +394,17 @@ for it:
 
 ## When Pdfium has to go into the bundle
 
-Nothing in the shipped application loads Pdfium today: `src-tauri` does not depend on
-`mnema-extract`, so `cargo tree -p mnema-desktop -e normal` contains no `pdfium-render`
-and the 7.7 MB library would be dead weight. `verify-bundle.sh` derives that from the
-graph and turns red the day it stops being true, which is the day the following matters.
+Nothing in the shipped application **loads** Pdfium today, but something inside the
+bundle **links** the crate that would: `mnema-extract-worker`, not `mnema-desktop`,
+depends on `mnema-extract`, which depends on `pdfium-render` — `cargo tree -p
+mnema-desktop -e normal` names no such thing, and `cargo tree -p mnema-extract -e
+normal` does (run 2026-08-03). That gap between "linked" and "loaded" is why a check
+that asked the shell's own dependency graph answered the wrong question once a
+sidecar existed (see above); `scripts/verify-bundle.sh` now asks the bundled worker
+directly, by feeding it a PDF, and today's answer is `unsupported` — no reader calls
+into Pdfium yet, so nothing loads the library and the 7.7 MB binary would be dead
+weight if it shipped. That changes the day a PDF reader lands, which is the day the
+following matters.
 
 Both placements were measured on this repository:
 

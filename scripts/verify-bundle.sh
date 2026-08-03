@@ -92,7 +92,115 @@ app="${mountpoint}/${product}.app"
 
 echo "verify-bundle: ${product}.app ($(du -sh "${app}" | cut -f1)), $(file -b "${app}/Contents/MacOS/${executable_name}")"
 
+# --- the extraction worker ----------------------------------------------------
+#
+# The application is a shell: it walks a folder and hands every file to a worker
+# process it expects to find beside itself (src-tauri/src/paths.rs:32-42). Before
+# bundle.externalBin existed, a packaged build had no such file, started fine, and
+# failed every walk on its first extract() call — reported as EndReason::Failed,
+# with nothing in the bundle to explain it.
+worker_name="mnema-extract-worker"
+worker="${app}/Contents/MacOS/${worker_name}"
+
+[ -f "${worker}" ] || fail "${product}.app carries no ${worker_name}.
+  bundle.externalBin in src-tauri/tauri.conf.json is what puts it there, and
+  scripts/stage-sidecar.sh is what builds it. A bundle without it indexes nothing."
+[ -x "${worker}" ] || fail "${worker} exists and is not executable. The walk would
+  fail on its first extract() call with a permission error, not a missing file."
+
+# Freshness is two questions, and neither can be settled by comparing bytes against the
+# image. First, answered here: is the file `externalBin` will copy the one cargo built?
+# That much is a property of the repository — `externalBin` copies whatever sits in
+# src-tauri/binaries/, so a stale file there ships inside a build that is green in every
+# other respect. A missing built binary is an UNANSWERED question rather than the answer
+# "fresh", the same distinction the dependency check learned the hard way. Second,
+# answered after that comparison: was this image written after that binary existed?
+#
+# Both paths below come from repo_root, not from bundle_dir: pointing this script
+# at a different image still reports on THIS checkout's staged and built files.
+# Deliberate, not an oversight — it is what lets a control run this script from a
+# mutated copy of the repository against the one real bundle and still get a
+# meaningful verdict about that copy's own staged file.
+built_worker="${repo_root}/target/release/${worker_name}"
+# The word UNANSWERED sits on the first physical line of this message on purpose: that
+# is the only line carrying the `verify-bundle:` prefix, and it is what control 16b
+# asserts on. Reflowing it would move the fragment onto a line the control never sees.
+[ -f "${built_worker}" ] \
+  || fail "no ${built_worker}, so the worker's freshness is UNANSWERED. Whether the
+  bundled worker is the one this build produced cannot be told from here, and that is
+  not the same as answered yes. Run scripts/stage-sidecar.sh, or build with
+  cargo tauri build, which calls it."
+
+# The directory before its contents, same reason as ${dmg_dir} above: `find` on a
+# path that does not exist fails, and under `set -euo pipefail` the failing
+# pipeline inside the command substitution below would end the script with no
+# output at all — silent, not merely unhelpful.
+staged_dir="${repo_root}/src-tauri/binaries"
+[ -d "${staged_dir}" ] || fail "no ${staged_dir}.
+  scripts/stage-sidecar.sh creates it; beforeBuildCommand calls that script."
+
+# Counted before it is read, same shape as ${dmg_count} above and for the same
+# reason: scripts/stage-sidecar.sh overwrites its own file but never removes a
+# sibling left by a different host triple, and this directory is git-ignored, so
+# nothing else prunes one either. `head -1` on more than one match would verify
+# whichever file sorted first — proving nothing about the one the bundler
+# actually staged, and control 13 shows how loose the glob is: it matches
+# `mnema-extract-worker-stale`, not just a real triple.
+staged_count="$(find "${staged_dir}" -maxdepth 1 -type f \
+  -name "${worker_name}-*" | wc -l | tr -d ' ')"
+case "${staged_count}" in
+  0) fail "nothing staged in ${staged_dir}.
+  scripts/stage-sidecar.sh puts it there and beforeBuildCommand calls that script." ;;
+  1) : ;;
+  *) fail "${staged_count} files matching ${worker_name}-* in ${staged_dir}.
+  Remove the stale ones: a check that verifies whichever one sorted first proves
+  nothing about the new build, the same reason ${dmg_dir} rejects two images." ;;
+esac
+staged_worker="$(find "${staged_dir}" -maxdepth 1 -type f -name "${worker_name}-*")"
+
+staged_sha="$(shasum -a 256 "${staged_worker}" | cut -d' ' -f1)"
+built_sha="$(shasum -a 256 "${built_worker}" | cut -d' ' -f1)"
+[ "${staged_sha}" = "${built_sha}" ] || fail "the staged sidecar is not the binary this
+  build produced:
+    staged ${staged_worker} ${staged_sha}
+    built  ${built_worker} ${built_sha}
+  A stale copy in src-tauri/binaries/ ships inside an otherwise green build. That
+  directory is git-ignored and scripts/stage-sidecar.sh overwrites it every time."
+
+# What that comparison establishes, and what it does not. Measured in task 1: the
+# bundler re-signs the sidecar in place, so the bundled bytes are never equal to the
+# built bytes even on a perfectly fresh build (see docs/BUILD.md, "The extraction
+# worker inside the bundle"), and a direct sha comparison against ${worker} would
+# redden on every good build. So the comparison above is made where it can be made:
+# between the file the bundler WOULD copy next time and the one cargo built. That is
+# a statement about this checkout. It says nothing about which bytes went into THIS
+# image — build an image, edit the worker, re-stage, and staged still equals built
+# while the image carries the older worker. Every other check below passes in that
+# state: the worker is present, executable, runs, and answers.
+#
+# The timestamp closes that path and only that path. It is not identity — identity
+# cannot be had here, for the reason above — it is the cheapest statement that rules
+# out an image written before the worker it is supposed to contain.
+[ "${dmg}" -nt "${built_worker}" ] \
+  || fail "${dmg} is older than the worker this checkout built, so it cannot be carrying
+  that worker. This is NOT the staged sidecar going stale, and it does not duplicate the
+  check above: that one just proved the staged file is the built one, and it can be
+  perfectly fresh while this image predates both. What is stale here is the image —
+  something was rebuilt after it was written. Re-run cargo tauri build."
+
 # --- the signature ------------------------------------------------------------
+#
+# Before anything out of the image is executed, not after. This script is pointed at
+# images it has no reason to trust — its own controls feed it /dev/urandom and shell
+# scripts standing in for the worker — and running a binary out of an artefact whose
+# seal has not been checked is the wrong order on its own terms.
+#
+# It cannot move any higher, and the constraint is not obvious. The two checks above
+# it — the worker is present, the worker is executable — are proved by controls that
+# remove and chmod the worker without re-sealing the copy they mutate. A seal check
+# running before those would redden on the seal instead, and both controls would prove
+# nothing. The controls that swap the worker for a stand-in re-sign the copy first, on
+# purpose, and are unaffected by this order.
 #
 # `--deep` is deprecated for *signing* and is still right for verifying: it walks
 # nested code instead of stopping at the outer seal, which is the whole question
@@ -115,50 +223,95 @@ if ! codesign --verify --deep --strict --verbose=2 "${app}"; then
   seal broke or the identity setting was dropped — not that signing is optional."
 fi
 
-# --- what the bundle has to carry ---------------------------------------------
+# --- what the worker says -----------------------------------------------------
 #
-# Derived from the dependency graph rather than asserted as a constant. Today the
-# shell does not depend on mnema-extract, so no code inside the bundle can load
-# Pdfium and shipping the 7.7 MB library would be dead weight. The day somebody
-# wires extraction into the shell, this turns red until the library is packaged
-# with it — which is the only moment the omission is cheap to fix.
+# The check stops here being about files and starts being about behaviour. Nothing
+# else in this repository proves that the binary a user receives can read a file:
+# the Rust tests build a worker fresh (src-tauri/tests/support/mod.rs:26) and never
+# look inside a bundle.
 #
-# `cargo tree`, not a grep over a manifest: the dependency can arrive through any
-# crate in between, and the graph is what decides what is linked.
-command -v cargo >/dev/null 2>&1 \
-  || fail "cargo is not on PATH, so the dependency check below cannot run. It is
-  not optional — skipping it is how a bundle ships without the library it needs."
+# Run directly off the mounted image: measured in task 1, `hdiutil` mounts it
+# `read-only,nodev,nosuid,noowners`, not `noexec`, so a binary runs fine from
+# there and nothing is copied out first.
+#
+# MNEMA_PDFIUM_LIB_DIR is cleared, not merely unset: it is the first branch of
+# mnema_extract's library search (crates/mnema-extract/src/pdfium_probe.rs:160-193),
+# and leaving it set would let this machine answer a question about the bundle.
+#
+# The status is captured on its own line. Inside an `if` condition a failed run
+# would read as an answer, which is the defect the dependency check below this one
+# used to have.
+ask_worker() {
+  local fixture="$1"
+  answer=""
+  answer_status=0
+  answer="$(printf '{"path":"%s","max_bytes":10485760}\n' "${fixture}" \
+    | env -u MNEMA_PDFIUM_LIB_DIR "${worker}" 2>&1)" || answer_status=$?
+}
 
-# The graph is CAPTURED first and searched second, and the two steps must not be
-# merged back into one `if`. Inside an `if` condition neither `set -e` nor
-# `pipefail` ends anything: a non-zero status is simply "false". So a `cargo tree`
-# that failed — a renamed package, an unreadable manifest, an unreachable
-# registry, a flag that changed meaning — would be indistinguishable from the
-# answer "this dependency is absent", take the `else` branch, print that no
-# Pdfium is needed and exit 0. Measured, before this line existed: `-p
-# mnema-shell` and `--manifest-path /nonexistent/Cargo.toml` both produced a
-# green run with the reassuring message. And the day the check must redden is the
-# day someone is moving crates around, which is exactly when a package name is
-# most likely to be wrong.
-deps="$(cargo tree --manifest-path "${repo_root}/Cargo.toml" \
-  -p mnema-desktop -e normal --prefix none)" \
-  || fail "cargo tree failed, so whether the bundle needs Pdfium is UNANSWERED —
-  which is not the same as answered 'no'. Fix the workspace or the package name
-  above; do not let this degrade into a green run."
+text_fixture="${repo_root}/crates/mnema-extract/tests/fixtures/simple.txt"
+[ -f "${text_fixture}" ] || fail "${text_fixture} is missing; the check has nothing to
+  ask the worker about."
 
-if printf '%s\n' "${deps}" | cut -d' ' -f1 | sort -u | grep -qx 'pdfium-render'; then
-  echo "verify-bundle: the shell links pdfium-render, so the library must be inside the bundle"
-  found="$(find "${app}" -name 'libpdfium*.dylib' | head -1)"
-  [ -n "${found}" ] || fail "mnema-desktop depends on pdfium-render, but
-  ${product}.app carries no libpdfium.dylib. Pdfium is opened by path at run
-  time, never linked, so the executable starts fine and fails on the first PDF
-  instead of at launch. docs/BUILD.md has where it must go, and why
-  Contents/Resources is not that place."
-  codesign --verify --strict --verbose=2 "${found}" \
-    || fail "${found} is inside the bundle but its own signature does not verify.
-  Under the hardened runtime the loader refuses a library it cannot validate."
+ask_worker "${text_fixture}"
+# "on a plain text file" belongs on the first physical line, and so does "on a PDF" in
+# the twin of this check further down: the two messages are otherwise identical up to
+# the word that distinguishes them, and only the first line reaches the control that
+# asserts it (controls 14 and 16c).
+[ "${answer_status}" -eq 0 ] \
+  || fail "the bundled worker exited ${answer_status} on a plain text file. It said:
+  $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+
+printf '%s\n' "${answer}" | grep -q '"frame":"header"' \
+  || fail "the bundled worker returned no header frame for ${text_fixture}. It said:
+  $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+printf '%s\n' "${answer}" | grep -q '"frame":"block"' \
+  || fail "the bundled worker returned no block frame for ${text_fixture}. It said:
+  $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+
+echo "verify-bundle: the bundled worker reads a text file and returns blocks"
+
+# --- what has to be in the bundle, decided by the worker's own answer ----------
+#
+# This used to be derived from `cargo tree -p mnema-desktop`, and that was wrong in
+# both directions once a sidecar existed (D54). The shell does not link
+# pdfium-render and never will; the worker links it and — with no reader
+# implemented for any format but text — never loads it. The day a reader lands, the
+# worker will load it with no change to any dependency graph.
+#
+# So the question is put to the thing that knows: the worker in this bundle, asked
+# about a PDF, from the image, with the environment cleared.
+pdf_fixture="${repo_root}/crates/mnema-extract/tests/fixtures/one-page-text.pdf"
+[ -f "${pdf_fixture}" ] || fail "${pdf_fixture} is missing; the Pdfium question cannot
+  be asked and is therefore UNANSWERED."
+
+ask_worker "${pdf_fixture}"
+[ "${answer_status}" -eq 0 ] \
+  || fail "the bundled worker exited ${answer_status} on a PDF. That is not the answer
+  'no reader' — it is no answer at all, and the bundle's Pdfium obligation stays
+  UNANSWERED. It said:
+  $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+
+packaged_pdfium="$(find "${app}" -name 'libpdfium*.dylib' | head -1)"
+
+if printf '%s\n' "${answer}" | grep -q '"frame":"block"'; then
+  fail "the bundled worker reads PDFs, and this branch is deliberately unimplemented.
+  It has to prove the library came from INSIDE the bundle, and it cannot be written
+  from a machine that has a vendored copy: the third branch of the library search
+  (crates/mnema-extract/src/pdfium_probe.rs:174-186) is an absolute path into the
+  source checkout, baked in at compile time, so a local run and a CI run would prove
+  different things. Whoever lands the reader closes this. See D54 and the packaging
+  spec §4. Found in the bundle: ${packaged_pdfium:-nothing}."
+elif printf '%s\n' "${answer}" | grep -q '"rule":"unsupported"'; then
+  [ -z "${packaged_pdfium}" ] || fail "the bundled worker refuses PDFs as unsupported,
+  so nothing in this bundle can load Pdfium — and ${packaged_pdfium} is in it anyway.
+  7.7 MB of dead weight is a defect, not a spare part. Either a reader landed and this
+  check is looking at a stale build, or the library was packaged by mistake."
+  echo "verify-bundle: the bundled worker refuses PDF as unsupported, so no Pdfium is bundled"
 else
-  echo "verify-bundle: the shell does not link pdfium-render, so no Pdfium is bundled"
+  fail "the bundled worker answered a PDF with neither blocks nor rule=unsupported.
+  An unrecognised verdict is UNANSWERED and must not be read as 'no reader'. It said:
+  $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 fi
 
 echo "verify-bundle: OK"

@@ -85,6 +85,41 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev patchelf
+      # `bundle.externalBin` in tauri.conf.json names a file that has to exist
+      # before `src-tauri` compiles at all — `tauri-build` validates it from
+      # inside the build script, not at bundling time. The two `before*Command`
+      # hooks stage it, but they fire only for `cargo tauri dev` and
+      # `cargo tauri build`; every command in this job is plain cargo, which has
+      # no hooks. And `src-tauri/binaries/` is git-ignored on purpose — a
+      # committed sidecar could ship stale inside a green build — so on a fresh
+      # checkout the file is absent.
+      #
+      # Deleting this step therefore does not skip a check; it stops the build:
+      #
+      #   error: failed to run custom build command for `mnema-desktop v0.0.0`
+      #     resource path `binaries/mnema-extract-worker-<triple>` doesn't exist
+      #
+      # Both `cargo clippy --workspace --all-targets` and `cargo test --workspace`
+      # below end there, on both matrix arms, and `bundle` never runs at all
+      # because it declares `needs: check`. Measured by moving the staged file
+      # aside and watching `cargo check -p mnema-desktop` fail, then pass — not
+      # predicted from the configuration.
+      #
+      # `debug`, not `release`. `tauri-build` only checks that the declared file
+      # exists — it does not care which profile produced it — and every other
+      # command in this job is dev profile. Asking for `release` here would
+      # compile mnema-extract and its dependency tree, pdfium-render included, a
+      # second time on both arms for a file whose contents this job never runs.
+      # The bundle job still stages `release`, through beforeBuildCommand, which
+      # is where the profile actually matters.
+      #
+      # What it buys beyond unblocking: this is the only place the staging script
+      # runs on Linux. It derives the filename suffix from `rustc -vV` on the
+      # machine it runs on, so `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`
+      # are both exercised here rather than only on whichever laptop last built a
+      # package.
+      - name: Stage the extraction worker that src-tauri declares as a sidecar
+        run: scripts/stage-sidecar.sh debug
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # `ui/` has its own test suite (`ui/render.test.js`, pure functions with
@@ -203,9 +238,13 @@ jobs:
       - name: Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
       # No Pdfium step here, and that is a finding rather than an omission: the
-      # shell does not depend on mnema-extract, so nothing inside the bundle can
-      # load the library. verify-bundle.sh derives that from the dependency
-      # graph and fails the day it stops being true.
+      # bundle carries a worker that links the crate which would load the library,
+      # and no reader calls into it, so nothing in the image loads it today. That
+      # is a fact about the worker, and the shell's dependency graph cannot state
+      # it — the graph named nothing even after extraction moved into a bundled
+      # worker that does link Pdfium. verify-bundle.sh asks the worker instead: it
+      # feeds the bundled copy a PDF from inside the mounted image and reddens the
+      # day the answer stops being "unsupported".
       - run: cargo tauri build
       # Never `|| true`, never a grep whose failure is swallowed. The script
       # opens the .dmg and looks at the application inside it; every state it
@@ -217,7 +256,7 @@ jobs:
       # It looks inside the image because `target/release/bundle/macos/` is empty
       # after the build: with targets ["dmg"] the bundler prints
       # `Cleaning …/Mnema.app` once the image is written.
-      - name: The bundle exists, is signed, and carries what the graph says it must
+      - name: The bundle exists, is signed, and its own worker answers for what is in it
         run: scripts/verify-bundle.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

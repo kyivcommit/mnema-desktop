@@ -4,7 +4,9 @@
   "version": "0.0.0",
   "identifier": "com.mnema.desktop",
   "build": {
-    "frontendDist": "../ui"
+    "frontendDist": "../ui",
+    "beforeDevCommand": "../scripts/stage-sidecar.sh debug",
+    "beforeBuildCommand": "../scripts/stage-sidecar.sh release"
   },
   "app": {
     "withGlobalTauri": true,
@@ -23,6 +25,7 @@
   "bundle": {
     "active": true,
     "targets": ["dmg"],
+    "externalBin": ["binaries/mnema-extract-worker"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
