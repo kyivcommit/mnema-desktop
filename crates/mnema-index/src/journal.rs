@@ -14,12 +14,48 @@ use serde::Serialize;
 
 use crate::{Db, Error, INDEX_FORMAT_VERSION};
 
-/// Which rule caused a file, or one page of it, to be skipped. The vocabulary
-/// is closed on purpose — an open `rule` column turns a writer's typo into a
-/// row `skips_for_root` can still list but a future query grouping by rule can
-/// never match again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkipRule {
+/// Declares [`SkipRule`] and, from that same list of variants, the slice
+/// [`SkipRule::every`] hands out. One list, two products: a variant cannot
+/// exist without being enumerated, because the enumeration is generated from
+/// the declaration rather than written beside it.
+///
+/// A macro for a nine-variant enum is a heavy instrument, and it is here
+/// because the lighter ones were measured failing. The list was first an array
+/// of pairs in the tests, then a hand-written `after()` chain here that
+/// `every()` walked. Both looked like coverage:
+///
+/// * deleting a variant from the three arrays in `tests/journal.rs` left every
+///   test in that file green;
+/// * a variant added to the enum with `Fictitious => return None` in `after()`
+///   compiled, ended the chain early, and left the suite green at sixteen
+///   passed — including the test whose whole job was to assert the chain
+///   reaches every rule. The exhaustive `match` forced the new variant to
+///   *appear*; nothing forced the chain to *reach* it, and the only guard was
+///   a length assertion that the truncated chain still satisfied.
+///
+/// Neither failure is a mistake anyone made twice on purpose. Both are the same
+/// shape: a list that promises to grow with the enum and has no way to.
+macro_rules! declare_skip_rules {
+    ($($(#[$attr:meta])* $variant:ident,)+) => {
+        /// Which rule caused a file, or one page of it, to be skipped. The
+        /// vocabulary is closed on purpose — an open `rule` column turns a
+        /// writer's typo into a row `skips_for_root` can still list but a
+        /// future query grouping by rule can never match again.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum SkipRule {
+            $($(#[$attr])* $variant,)+
+        }
+
+        impl SkipRule {
+            /// Every variant, in declaration order, generated from the list
+            /// that declares them. Read [`every`](SkipRule::every) instead —
+            /// this exists so that there is nothing to keep in step.
+            const ALL: &[SkipRule] = &[$(SkipRule::$variant,)+];
+        }
+    };
+}
+
+declare_skip_rules! {
     Crash,
     Timeout,
     Memory,
@@ -145,39 +181,15 @@ impl SkipRule {
         })
     }
 
-    /// The variant declared after this one, or `None` for the last.
-    ///
-    /// Exists only to make [`every`](Self::every) complete by construction, and
-    /// it is an exhaustive `match` for the reason this file is full of them: a
-    /// variant added to the enum must not be able to slip past a test that
-    /// claims to cover every variant.
-    ///
-    /// That is not hypothetical. Measured twice, independently, before this
-    /// existed: deleting `NotText` from all three `every_skip_rule_*` lists in
-    /// `tests/journal.rs` left every test in the file green. The lists caught a
-    /// wrong *value* in a row they already had — renaming the string did fail
-    /// two tests — and caught nothing at all about a row that was simply
-    /// missing. An array of pairs can only ever assert about its own elements,
-    /// so "every variant" was a claim in a doc comment and nowhere in the code.
-    fn after(self) -> Option<Self> {
-        Some(match self {
-            SkipRule::Crash => SkipRule::Timeout,
-            SkipRule::Timeout => SkipRule::Memory,
-            SkipRule::Memory => SkipRule::Unsupported,
-            SkipRule::Unsupported => SkipRule::NoTextLayer,
-            SkipRule::NoTextLayer => SkipRule::Unreadable,
-            SkipRule::Unreadable => SkipRule::TooLarge,
-            SkipRule::TooLarge => SkipRule::NotText,
-            SkipRule::NotText => SkipRule::BinaryTail,
-            SkipRule::BinaryTail => return None,
-        })
-    }
-
     /// Every variant, in declaration order.
     ///
     /// A test that means "every rule" iterates this instead of writing its own
     /// list, so that adding a variant cannot leave one of them quietly covering
-    /// eight rules out of nine.
+    /// eight rules out of nine. What makes that true is not this function but
+    /// [`declare_skip_rules`]: the slice it reads is generated from the same
+    /// list that declares the variants, so there is no step at which a variant
+    /// can be declared and left out. The chain of `after()` links this replaced
+    /// could be — and was, when measured.
     ///
     /// `pub` rather than `pub(crate)` or `#[cfg(test)]` because the tests that
     /// need it are integration tests, which link this crate the way any other
@@ -186,7 +198,7 @@ impl SkipRule {
     /// expose, and a window listing "which rules can appear here" wants exactly
     /// this.
     pub fn every() -> impl Iterator<Item = Self> {
-        std::iter::successors(Some(SkipRule::Crash), |rule| rule.after())
+        SkipRule::ALL.iter().copied()
     }
 
     /// Whether this rule is a **reproducible** determination about the file's

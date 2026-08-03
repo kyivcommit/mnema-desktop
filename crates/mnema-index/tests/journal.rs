@@ -167,31 +167,58 @@ fn expected(rule: SkipRule) -> Expected {
 /// `SkipRule::every` is what makes the three tests below mean "every rule", so
 /// what it yields is worth an assertion of its own.
 ///
-/// The exhaustive `match` behind it forces every variant to *appear*; it does
-/// not force the chain to *reach* every variant. A hand-written `after` that
-/// skipped one, or looped two together, would still compile — and a short
-/// enumeration is exactly the silent under-coverage this whole change exists
-/// to remove, arriving by a different door.
+/// **What this test no longer has to check, and why.** It used to assert the
+/// enumeration's length against the literal `9`, because `every()` walked a
+/// hand-written chain of `after()` links and a chain can stop early. It did
+/// stop early when measured: a tenth variant whose only `after()` arm was
+/// `=> return None` compiled, left the chain nine long, and left this file
+/// green. The length assertion was the sole guard and it was satisfied by
+/// exactly the fault it existed to catch. `every()` now reads a slice generated
+/// from the list that declares the variants (`declare_skip_rules` in
+/// `journal.rs`), so a count here would compare a generated list against a
+/// literal someone has to remember to bump — noise, not a guard.
+///
+/// What is left to check is what the generator does *not* cover, and both are
+/// real:
+///
+/// * `as_str` is a hand-written exhaustive `match`, so a new variant has to
+///   name a string — but nothing stops it naming one another variant already
+///   uses, and a collision is invisible to a `match` the compiler is happy
+///   with;
+/// * `parse` matches on strings, so the compiler cannot force it to grow an arm
+///   for a new variant at all. A rule written to the journal and unable to come
+///   back out is a row `skips_for_root` lists as an unknown.
 #[test]
-fn the_variant_chain_reaches_every_rule_exactly_once() {
-    // Bounded rather than `collect()`: a chain that loops would otherwise hang
-    // the test run instead of failing it.
-    let all: Vec<SkipRule> = SkipRule::every().take(64).collect();
+fn every_rule_is_enumerated_once_and_answers_to_its_own_string() {
+    let all: Vec<SkipRule> = SkipRule::every().collect();
+    assert!(!all.is_empty(), "`every` yielded nothing at all");
 
+    // Keyed by the variant, not by its string: a string collision is a
+    // different fault, checked next, and keying by string here would report it
+    // under a message that names the wrong one.
     let mut seen = std::collections::HashSet::new();
     for rule in &all {
+        assert!(seen.insert(*rule), "{rule:?} is enumerated twice");
+    }
+
+    let mut strings = std::collections::HashSet::new();
+    for rule in &all {
         assert!(
-            seen.insert(expected(*rule).string),
-            "{rule:?} appears twice — the chain loops back on itself"
+            strings.insert(rule.as_str()),
+            "{rule:?} is stored under {:?}, which another rule already uses — \
+             two rules sharing a string are one rule to every query",
+            rule.as_str()
         );
     }
-    assert!(all.len() < 64, "the chain never ends");
-    assert_eq!(
-        all.len(),
-        9,
-        "the chain is a different length than the enum: a variant was added \
-         and `after` was pointed past it, or one was removed"
-    );
+
+    for rule in &all {
+        assert_eq!(
+            SkipRule::parse(rule.as_str()),
+            Some(*rule),
+            "{rule:?} is written as {:?} and does not come back as itself",
+            rule.as_str()
+        );
+    }
 }
 
 /// The two tests above between them pin only `Crash` and `NoTextLayer`, and
