@@ -232,50 +232,46 @@ if ! codesign --verify --deep --strict --verbose=2 "${app}"; then
   seal broke or the identity setting was dropped — not that signing is optional."
 fi
 
-# --- what the bundle has to carry ---------------------------------------------
+# --- what has to be in the bundle, decided by the worker's own answer ----------
 #
-# Derived from the dependency graph rather than asserted as a constant. Today the
-# shell does not depend on mnema-extract, so no code inside the bundle can load
-# Pdfium and shipping the 7.7 MB library would be dead weight. The day somebody
-# wires extraction into the shell, this turns red until the library is packaged
-# with it — which is the only moment the omission is cheap to fix.
+# This used to be derived from `cargo tree -p mnema-desktop`, and that was wrong in
+# both directions once a sidecar existed (D54). The shell does not link
+# pdfium-render and never will; the worker links it and — with no reader
+# implemented for any format but text — never loads it. The day a reader lands, the
+# worker will load it with no change to any dependency graph.
 #
-# `cargo tree`, not a grep over a manifest: the dependency can arrive through any
-# crate in between, and the graph is what decides what is linked.
-command -v cargo >/dev/null 2>&1 \
-  || fail "cargo is not on PATH, so the dependency check below cannot run. It is
-  not optional — skipping it is how a bundle ships without the library it needs."
+# So the question is put to the thing that knows: the worker in this bundle, asked
+# about a PDF, from the image, with the environment cleared.
+pdf_fixture="${repo_root}/crates/mnema-extract/tests/fixtures/one-page-text.pdf"
+[ -f "${pdf_fixture}" ] || fail "${pdf_fixture} is missing; the Pdfium question cannot
+  be asked and is therefore UNANSWERED."
 
-# The graph is CAPTURED first and searched second, and the two steps must not be
-# merged back into one `if`. Inside an `if` condition neither `set -e` nor
-# `pipefail` ends anything: a non-zero status is simply "false". So a `cargo tree`
-# that failed — a renamed package, an unreadable manifest, an unreachable
-# registry, a flag that changed meaning — would be indistinguishable from the
-# answer "this dependency is absent", take the `else` branch, print that no
-# Pdfium is needed and exit 0. Measured, before this line existed: `-p
-# mnema-shell` and `--manifest-path /nonexistent/Cargo.toml` both produced a
-# green run with the reassuring message. And the day the check must redden is the
-# day someone is moving crates around, which is exactly when a package name is
-# most likely to be wrong.
-deps="$(cargo tree --manifest-path "${repo_root}/Cargo.toml" \
-  -p mnema-desktop -e normal --prefix none)" \
-  || fail "cargo tree failed, so whether the bundle needs Pdfium is UNANSWERED —
-  which is not the same as answered 'no'. Fix the workspace or the package name
-  above; do not let this degrade into a green run."
+ask_worker "${pdf_fixture}"
+[ "${answer_status}" -eq 0 ] || fail "the bundled worker exited ${answer_status} on a
+  PDF. That is not the answer 'no reader' — it is no answer at all, and the bundle's
+  Pdfium obligation stays UNANSWERED. It said:
+  $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 
-if printf '%s\n' "${deps}" | cut -d' ' -f1 | sort -u | grep -qx 'pdfium-render'; then
-  echo "verify-bundle: the shell links pdfium-render, so the library must be inside the bundle"
-  found="$(find "${app}" -name 'libpdfium*.dylib' | head -1)"
-  [ -n "${found}" ] || fail "mnema-desktop depends on pdfium-render, but
-  ${product}.app carries no libpdfium.dylib. Pdfium is opened by path at run
-  time, never linked, so the executable starts fine and fails on the first PDF
-  instead of at launch. docs/BUILD.md has where it must go, and why
-  Contents/Resources is not that place."
-  codesign --verify --strict --verbose=2 "${found}" \
-    || fail "${found} is inside the bundle but its own signature does not verify.
-  Under the hardened runtime the loader refuses a library it cannot validate."
+packaged_pdfium="$(find "${app}" -name 'libpdfium*.dylib' | head -1)"
+
+if printf '%s\n' "${answer}" | grep -q '"frame":"block"'; then
+  fail "the bundled worker reads PDFs, and this branch is deliberately unimplemented.
+  It has to prove the library came from INSIDE the bundle, and it cannot be written
+  from a machine that has a vendored copy: the third branch of the library search
+  (crates/mnema-extract/src/pdfium_probe.rs:174-186) is an absolute path into the
+  source checkout, baked in at compile time, so a local run and a CI run would prove
+  different things. Whoever lands the reader closes this. See D54 and the packaging
+  spec §4. Found in the bundle: ${packaged_pdfium:-nothing}."
+elif printf '%s\n' "${answer}" | grep -q '"rule":"unsupported"'; then
+  [ -z "${packaged_pdfium}" ] || fail "the bundled worker refuses PDFs as unsupported,
+  so nothing in this bundle can load Pdfium — and ${packaged_pdfium} is in it anyway.
+  7.7 MB of dead weight is a defect, not a spare part. Either a reader landed and this
+  check is looking at a stale build, or the library was packaged by mistake."
+  echo "verify-bundle: the bundled worker refuses PDF as unsupported, so no Pdfium is bundled"
 else
-  echo "verify-bundle: the shell does not link pdfium-render, so no Pdfium is bundled"
+  fail "the bundled worker answered a PDF with neither blocks nor rule=unsupported.
+  An unrecognised verdict is UNANSWERED and must not be read as 'no reader'. It said:
+  $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 fi
 
 echo "verify-bundle: OK"

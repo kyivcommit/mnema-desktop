@@ -189,24 +189,6 @@ copy_repo() {
   [ -x "$into/scripts/verify-bundle.sh" ]
 }
 
-# Task 2's freshness check runs before the section controls 9 and 10 exist to
-# test, and looks at ${into}/target/release and ${into}/src-tauri/binaries —
-# both git-ignored, so copy_repo never carries them. Without this, both controls
-# would redden on "no built worker" instead of on the reason they name. Stages a
-# matching pair, copied from the real build, so that check passes quietly and
-# execution reaches the cargo tree logic being tested. The triple is derived the
-# same way scripts/stage-sidecar.sh does, rather than hardcoded, so this does not
-# print a false arm64 name on an Intel host.
-stage_fresh_worker() {
-  local into="$1" triple
-  triple="$(rustc -vV | sed -n 's/^host: //p')"
-  [ -n "${triple}" ] || return 1
-  mkdir -p "${into}/target/release" "${into}/src-tauri/binaries" || return 1
-  cp "${REPO}/target/release/mnema-extract-worker" "${into}/target/release/mnema-extract-worker" || return 1
-  cp "${REPO}/target/release/mnema-extract-worker" \
-    "${into}/src-tauri/binaries/mnema-extract-worker-${triple}"
-}
-
 # A stand-in worker for control 14c: reads and discards one request line, then
 # answers with a header frame and nothing else — no Page, no Block, no Summary.
 # `/usr/bin/true` (control 14b) already reaches the header grep at
@@ -405,26 +387,39 @@ if must copy_app_out "${LAB}/header-only-worker" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/header-only-worker-img"
 fi
 
-echo "### 9. the shell depends on Pdfium and the bundle carries none"
-if must copy_repo "${LAB}/needs-pdfium" \
-  && must perl -0pi -e 's{\[dependencies\]\n}{[dependencies]\nmnema-extract = { path = "../crates/mnema-extract" }\n}' \
-    "${LAB}/needs-pdfium/src-tauri/Cargo.toml" \
-  && must grep -q 'mnema-extract' "${LAB}/needs-pdfium/src-tauri/Cargo.toml" \
-  && must stage_fresh_worker "${LAB}/needs-pdfium"; then
-  expect_red -m "depends on pdfium-render" \
-    "extraction wired into the shell, library not packaged" \
-    "${LAB}/needs-pdfium/scripts/verify-bundle.sh" "${BUNDLE}"
+echo "### 15. the worker refuses PDFs and the bundle carries Pdfium anyway"
+# Same re-sign, same reason as control 14: adding a file under Resources after
+# copy_app_out leaves the outer seal covering bytes that are no longer the whole
+# story, and codesign calls that "modified or invalid" — control 7's reason, not
+# this control's. With the Pdfium-verdict check below not yet written, that seal
+# failure is the only thing left to redden on, so without the re-sign this
+# control can never be seen still-green: it proves control 7 twice and itself
+# not at all.
+if must copy_app_out "${LAB}/dead-weight" \
+  && must mkdir -p "${LAB}/dead-weight/Mnema.app/Contents/Resources/pdfium/lib" \
+  && must cp "${REPO}/vendor/pdfium/lib/libpdfium.dylib" \
+       "${LAB}/dead-weight/Mnema.app/Contents/Resources/pdfium/lib/" \
+  && there "${LAB}/dead-weight/Mnema.app/Contents/Resources/pdfium/lib/libpdfium.dylib" \
+  && must codesign --sign - --force --deep "${LAB}/dead-weight/Mnema.app" \
+  && must image_from "${LAB}/dead-weight" "${LAB}/dead-weight-img/dmg/Mnema.dmg"; then
+  expect_red -m "refuses PDFs as unsupported" \
+    "7.7 MB nothing in the bundle can load" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/dead-weight-img"
 fi
 
-echo "### 10. cargo tree cannot answer — which is not the same as answering no"
-if must copy_repo "${LAB}/broken-manifest" \
-  && must cp "${REPO}/scripts/verify-bundle.sh" "${LAB}/broken-manifest/scripts/verify-bundle.sh" \
-  && must stage_fresh_worker "${LAB}/broken-manifest" \
-  && printf '[workspace]\nresolver = "3"\nmembers = ["crates/nope"]\n' \
-    > "${LAB}/broken-manifest/Cargo.toml"; then
-  expect_red -m "cargo tree failed" \
-    "an unanswered dependency question must not read as absent" \
-    "${LAB}/broken-manifest/scripts/verify-bundle.sh" "${BUNDLE}"
+echo "### 16. the worker answers a PDF with something else entirely"
+# Same re-sign, same reason again: pdf-says-nothing.sh's bytes are not the staged
+# worker's, so the seal needs re-cutting before this control's own precondition is
+# observable rather than control 7's.
+if must copy_app_out "${LAB}/odd-verdict" \
+  && must cp "${REPO}/scripts/mutations/pdf-says-nothing.sh" \
+       "${LAB}/odd-verdict/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must chmod +x "${LAB}/odd-verdict/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must codesign --sign - --force --deep "${LAB}/odd-verdict/Mnema.app" \
+  && must image_from "${LAB}/odd-verdict" "${LAB}/odd-verdict-img/dmg/Mnema.dmg"; then
+  expect_red -m "neither blocks nor rule=unsupported" \
+    "an unrecognised verdict must not read as 'no reader'" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/odd-verdict-img"
 fi
 
 echo
