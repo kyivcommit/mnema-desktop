@@ -98,11 +98,20 @@ pub(crate) enum Verdict {
     /// Binary from the start — a photo, a database, an executable.
     NotText,
     /// Text for at least the first `HEAD_BYTES`, then a NUL. What an
-    /// interrupted append leaves behind; also what a UTF-16 file without a
-    /// mark looks like past its first page. Refused all the same, but it must
-    /// not displace what the path already held: the prose it opens with is
-    /// probably still on disk, and deleting the earlier document would lose
-    /// text no longer readable anywhere.
+    /// interrupted append leaves behind. Refused all the same, but it must not
+    /// displace what the path already held: the prose it opens with is probably
+    /// still on disk, and deleting the earlier document would lose text no
+    /// longer readable anywhere.
+    ///
+    /// **Not** what a UTF-16 file without a byte-order mark looks like, which
+    /// this said until it was run: such a file's first NUL is in its opening
+    /// bytes, not past its first page, so it earns `NotText` — measured, at
+    /// byte 15 for Ukrainian, byte 1 for English, and never at all for
+    /// unbroken Cyrillic, which comes back `Text`. The claim mattered because
+    /// `mnema_index::journal`'s `SkipRule::NotText` names markless UTF-16 as
+    /// the first candidate for loosening `classify`, and a reader who believed
+    /// this line would think those files were already safe from displacement.
+    /// They are the ones it deletes.
     BinaryTail,
 }
 
@@ -155,7 +164,13 @@ pub(crate) fn classify(bytes: &[u8]) -> Verdict {
         //
         // `position`, not `any`: behind a mark the offset that matters is
         // measured in code units, so it is converted back to bytes before it
-        // meets `HEAD_BYTES`, which counts bytes.
+        // meets `HEAD_BYTES`, which counts bytes. The conversion is `units * 2`
+        // and it counts from *after* the mark, so this window is two file bytes
+        // wider than the byte branch's: measured, a zero code unit at file
+        // offset 512 is `NotText` and one at 514 is `BinaryTail`. Whether the
+        // two windows should end on the same byte is a separate question from
+        // whether this comment describes them, and only the second is settled
+        // here.
         return match bytes[2..].chunks_exact(2).position(|pair| pair == [0, 0]) {
             None => Verdict::Text,
             Some(units) if units * 2 < HEAD_BYTES => Verdict::NotText,
@@ -526,6 +541,66 @@ mod tests {
         assert_eq!(
             classify(&[0xFF, 0xFE, 0x18, 0xC4, 0x00, 0x00, 0x00, 0x00]),
             Verdict::NotText
+        );
+    }
+
+    /// D51. The tail case *behind a mark*, which nothing covered at all.
+    ///
+    /// Measured before this test existed: replacing this branch's
+    /// `Some(_) => Verdict::BinaryTail` with `Verdict::NotText` left every one
+    /// of this crate's eight targets green, `mnema-ingest --test slice` at 35
+    /// passed, and mnema-pool green. The entire output of one arm of the
+    /// verdict that decides whether a document is deleted was pinned by
+    /// nothing.
+    ///
+    /// The cost is exactly what this cycle exists to prevent, reached through
+    /// the one file shape the randomised harness cannot make:
+    /// `interrupted_append_body` generates UTF-8 prose only. A UTF-16 note with
+    /// a zeroed tail classified as `NotText` has changed bytes, so `displaces`
+    /// answers true, and the prose still sitting on disk in front of the damage
+    /// is deleted from the index.
+    ///
+    /// Both sides of the boundary, and the boundary is **two file bytes later
+    /// than the byte branch's**: `units * 2` counts from after the mark, so a
+    /// zero code unit at file offset `HEAD_BYTES` is still inside the window
+    /// and one at `HEAD_BYTES + 2` is past it.
+    #[test]
+    fn an_interrupted_utf16_note_is_a_tail_and_not_a_photo() {
+        // Mark, then real text up to `zero_at`, then the zeros an interrupted
+        // append leaves behind. Every code unit before the offset is prose, so
+        // nothing but the offset can move the verdict.
+        let note = |zero_at: usize| {
+            assert_eq!(zero_at % 2, 0, "a code unit starts on an even offset");
+            let mut bytes = vec![0xFF, 0xFE];
+            for unit in "нотатка про засідання ".repeat(200).encode_utf16() {
+                if bytes.len() >= zero_at {
+                    break;
+                }
+                bytes.extend_from_slice(&unit.to_le_bytes());
+            }
+            assert_eq!(bytes.len(), zero_at, "the prose must reach the offset");
+            bytes.extend_from_slice(&[0u8; 4096]);
+            bytes
+        };
+
+        assert_eq!(
+            classify(&note(4096)),
+            Verdict::BinaryTail,
+            "a UTF-16 note whose append was interrupted is text that stopped \
+             being text, and deleting its document loses prose that is still \
+             on disk"
+        );
+        assert_eq!(
+            classify(&note(HEAD_BYTES)),
+            Verdict::NotText,
+            "the last code unit inside the window is binary-from-the-start"
+        );
+        assert_eq!(
+            classify(&note(HEAD_BYTES + 2)),
+            Verdict::BinaryTail,
+            "the first code unit past the window is already a tail — two file \
+             bytes later than the byte branch's edge, because `units * 2` \
+             counts from after the mark"
         );
     }
 
