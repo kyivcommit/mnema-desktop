@@ -337,16 +337,27 @@ struct FileState {
     /// A content rule refused this path, and the journal still remembers it
     /// against the file's current size and mtime.
     ///
-    /// While that is true the file cannot come back to the index no matter how
-    /// many clean walks run over it: `ingest_file`'s **second** cheap arm
-    /// answers from the skip journal for any rule where
-    /// `SkipRule::is_about_content()` holds, so no worker is ever asked again.
-    /// That is D51's accepted price, written down — the only lever that clears
-    /// such a verdict is `INDEX_FORMAT_VERSION`, and a walk does not move it.
+    /// While that is true and nothing under this path is indexed, the file does
+    /// not come back no matter how many clean walks run over it: `ingest_file`'s
+    /// **second** cheap arm answers from the skip journal, and no worker is
+    /// asked again. That was D51's accepted price in its original form, and two
+    /// changes have since narrowed it — this comment claimed both were
+    /// impossible until the review that found them:
     ///
-    /// Cleared by anything that moves the file's size or modification time,
-    /// because the journal row is keyed on those: once they differ, the cheap
-    /// arm misses and the file is offered to a worker again.
+    /// * the arm now declines to answer for a document the rule would remove,
+    ///   so a live `path` row under this name sends the file to a worker after
+    ///   all (`mnema_ingest`'s second cheap arm, and `displaces` behind it);
+    /// * a successful index of this path clears the row outright (`repoint`),
+    ///   so `INDEX_FORMAT_VERSION` is no longer the only lever — an ordinary
+    ///   walk moves it.
+    ///
+    /// Cleared here by anything that moves the file's size or modification
+    /// time, because the journal row is keyed on those. That is narrower than
+    /// what actually clears the verdict, and deliberately so: this flag only
+    /// ever suppresses a check, so believing the refusal outlives it costs a
+    /// check `settle` could have made, while the opposite error would be a
+    /// failure the product did not cause. `Version::refused_by_content` above
+    /// records the same asymmetry from the other side.
     refused_by_content: bool,
 }
 
@@ -2429,10 +2440,15 @@ impl World {
             let verdict =
                 self.ingest_with(&relative, PoolConfig::new(&stricter), " [stricter rule]");
             // The refusal is journalled against this file's current size and
-            // mtime, and `SkipRule::NotText.is_about_content()` is true — so
-            // every later walk answers from the journal without asking a
-            // worker, and no number of clean passes brings this path back.
+            // mtime, and `SkipRule::NotText.is_about_content()` is true — so a
+            // later walk answers from the journal without asking a worker, and
+            // no number of clean passes brings this path back on its own.
             // Recorded so that `settle` does not expect it to.
+            //
+            // Two things do bring it back, and the flag deliberately does not
+            // model either — `FileState::refused_by_content` has why: a live
+            // `path` row the rule would remove sends the file to a worker
+            // anyway, and a successful index clears the journal row outright.
             //
             // **On the verdict this call returned, not on the condition that
             // it was offered.** The stricter worker is only reached when the

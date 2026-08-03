@@ -1211,16 +1211,21 @@ fn a_skip_that_could_not_displace_is_not_journalled_either() {
 
 /// A file that **grew** past the ceiling loses what the index held for it.
 ///
-/// This is the case the ceiling branch actually meets on a previously indexed
-/// file, and it took two rulings to find. The obvious worry — someone lowers
-/// `max_bytes` under a file that has not changed — cannot reach here at all:
-/// nothing about that file moved, so the cheap arm matches size, mtime and
-/// stage and answers `Unchanged` before a worker starts. What does reach here
-/// is a file rewritten to something bigger, and keeping the old text for that
-/// one is the stale citation the displacement exists to prevent.
+/// This was once the only case the ceiling branch was thought to meet on a
+/// previously indexed file, and it took two rulings to find. The obvious worry
+/// — someone lowers `max_bytes` under a file that has not changed — cannot
+/// reach here at all: nothing about that file moved, so the cheap arm matches
+/// size, mtime and stage and answers `Unchanged` before a worker starts. What
+/// does reach here is a file rewritten to something bigger, and keeping the old
+/// text for that one is the stale citation the displacement exists to prevent.
 ///
-/// The refusal itself cannot tell the two apart: it is made from `stat`,
-/// without opening the file. The size does — see `displaces`.
+/// Two more cases reach it, and they have their own tests below: a file
+/// rewritten in place at the **same** length under a lowered ceiling, and a
+/// bare `touch` under one. The refusal cannot tell any of them apart — it is
+/// made from `stat`, without opening the file — so the decision is made from
+/// the two numbers there are: `displaces` displaces when the size **or** the
+/// mtime moved, and only a file matching on both is treated as one the ceiling
+/// merely excludes.
 #[test]
 fn a_file_grown_past_the_ceiling_loses_what_the_index_held() {
     let fx = Fixture::with_max_bytes(tempfile::tempdir().unwrap(), 400);
