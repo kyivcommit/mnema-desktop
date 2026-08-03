@@ -165,13 +165,14 @@ pub struct Ended {
     ///
     /// Before this field existed, all three of `Failed`'s causes reached the
     /// window as the single word `"failed"` — indistinguishable from each
-    /// other, and indistinguishable in particular from the shape that is the
-    /// **known, current state of any packaged build**: no `externalBin` is
-    /// wired yet (`paths::worker_path`'s own doc comment says so), so a
-    /// shipped application has no worker binary at the path it looks for one,
-    /// and every walk over it fails this way. A window that could only say
-    /// "failed after N of M" had nothing to tell a person about the one
-    /// failure they were most likely to see.
+    /// other. A missing worker binary is no longer the expected shape of a
+    /// packaged build — `bundle.externalBin` stages one now, and
+    /// `scripts/verify-bundle.sh` is what keeps it there — but it is still
+    /// one of the three causes this field exists to tell apart: a broken
+    /// pool, a panic, or a future bundle that fails to carry the worker in
+    /// all still reach a walk the same way, and a window that could only say
+    /// "failed after N of M" had nothing to tell a person about which one
+    /// they hit.
     pub message: Option<String>,
 }
 

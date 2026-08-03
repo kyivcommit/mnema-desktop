@@ -71,8 +71,11 @@ broken=0
 # The line printed is the LAST `verify-bundle:` line, not the first: the first is
 # the informational one naming the image, and the last is the failure message,
 # which is the only thing that says whether the control reddened for the reason
-# it claims. Controls 9 and 10 have two possible red exits between them and are
-# indistinguishable without it.
+# it claims. Two controls that asked the dependency graph about Pdfium once
+# forced this — each had more than one possible red exit and was
+# indistinguishable from the other without it. Both are gone now, replaced by
+# the worker-verdict controls below (15 and 16), but the rule they forced
+# stayed: any two controls can still collide the same way.
 #
 # An optional `-m FRAGMENT` before the label asserts that fragment is present in
 # that line — mechanizing the "own reason" rule instead of leaving it to a human
@@ -296,18 +299,21 @@ if must copy_repo "${LAB}/stale" \
 fi
 
 echo "### 13b. two staged sidecars for the same triple"
-# Mutates the real src-tauri/binaries/, not a copy: unlike controls 9, 10 and 13
-# there is no relocated script here to point at a fake directory instead —
-# ${repo_root}/src-tauri/binaries always resolves to this one real directory
-# when verify-bundle.sh runs unmutated, and bundle_dir is the only path the
-# script takes as an argument. Modeled on control 3 one level down: two
-# candidate files where the glob used to let `head -1` pick whichever sorted
-# first, and the same "proves nothing about the new build" reason already
-# written for ${dmg_dir} above. This directory is git-ignored and nothing else
-# prunes it, so a sibling left behind here would poison every later run of
-# this suite and of verify-bundle.sh itself — cleaned up unconditionally below,
-# and `check_one_staged` runs again afterward to prove the cleanup worked
-# rather than assume it.
+# Mutates the real src-tauri/binaries/, not a copy. Control 13 gets to stage a
+# second file into a fake src-tauri/binaries/ because it runs a relocated copy
+# of verify-bundle.sh, whose own repo_root resolves to that copy; this control
+# has no such lever, because src-tauri/binaries/ is not an argument
+# verify-bundle.sh takes — repo_root always resolves to the one real
+# directory, and bundle_dir is the only path the script accepts. So this one
+# mutates the real working tree on purpose. Modeled on control 3 one level
+# down: two candidate files where the glob used to let `head -1` pick
+# whichever sorted first, and the same "proves nothing about the new build"
+# reason already written for ${dmg_dir} above. This directory is git-ignored
+# and nothing else prunes it, so a sibling left behind here would poison
+# every later run of this suite and of verify-bundle.sh itself — which is
+# why the EXIT trap above removes it unconditionally on every exit path, and
+# `check_one_staged` runs again afterward to prove the cleanup worked rather
+# than assume it.
 staging_dir="${REPO}/src-tauri/binaries"
 extra_staged="${staging_dir}/mnema-extract-worker-second-triple"
 check_one_staged() {

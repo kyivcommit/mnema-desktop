@@ -11,24 +11,17 @@ pub fn index_path(app_local_data_dir: &Path) -> PathBuf {
 
 /// Where the extraction worker binary is, for a real, running application.
 ///
-/// **Provisional**, and known to be incomplete: nothing in this repository
-/// packages a worker binary next to the application yet.
-/// `src-tauri/tauri.conf.json` has no `bundle.externalBin` entry, and
-/// `scripts/verify-bundle.sh` — which is otherwise careful to check every
-/// dependency `mnema-desktop` links, including refusing a missing
-/// `libpdfium.dylib` — says nothing about this binary at all, checked
-/// directly rather than assumed. So this resolves to a path that exists in
-/// one specific case, `cargo tauri dev` / `cargo run`, where the sibling
-/// directory this joins happens to be `target/<profile>/`, the same place
-/// `cargo build -p mnema-extract --bin mnema-extract-worker` puts it — and
-/// resolves to a path that does not exist inside a signed `.dmg`, where the
-/// executable sits at `Contents/MacOS/mnema-desktop` and nothing copies the
-/// worker beside it. A folder added through a packaged build would start a
-/// walk job whose `Pool` fails on its first `extract()` call — reported as
-/// `EndReason::Failed`, not silently — rather than fail to start at all. This
-/// is the smallest thing that lets the shell's own tests exercise a real
-/// walk; sidecar packaging is an open question for whoever ships the first
-/// build a user runs outside a development checkout.
+/// One path serves both `cargo run` / `cargo tauri dev` and a packaged build,
+/// because both join the same thing: the directory next to the running
+/// executable. Under `cargo run` that directory is `target/<profile>/`;
+/// inside a signed `.dmg` it is `Contents/MacOS/`. What makes the second case
+/// true is `bundle.externalBin` in `src-tauri/tauri.conf.json`, which puts
+/// `mnema-extract-worker` there at package time — this function did not need
+/// to change to become correct for a bundle too. `scripts/stage-sidecar.sh`
+/// is what builds and stages the file that declaration names, and
+/// `scripts/verify-bundle.sh` is what keeps a stale or missing copy from
+/// shipping. What a walk does when the worker still cannot be found at this
+/// path is `job.rs`'s concern, not this function's.
 pub fn worker_path() -> std::io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = exe

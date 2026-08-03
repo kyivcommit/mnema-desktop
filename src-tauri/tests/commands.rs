@@ -1039,12 +1039,13 @@ fn a_second_walk_can_start_the_instant_the_first_says_it_ended() {
 }
 
 /// Gap 1 from the task-12 review, exercised through a real walk rather than
-/// only through `Ended::failed` itself: `paths::worker_path` is provisional —
-/// no `externalBin` is wired yet — so a worker binary missing at the path
-/// `AppState` was given is the **known, current state of any packaged
-/// build**, not a contrived one. Before `Ended.message` existed, this
-/// reached the window as the single word `"failed"`, indistinguishable from
-/// a broken pool or a panic.
+/// only through `Ended::failed` itself. The missing path below is contrived
+/// now, not the shape a shipped build takes — `bundle.externalBin` stages a
+/// worker into a packaged build today, and `scripts/verify-bundle.sh` is what
+/// keeps it there — but the failure this test drives is still real: a bundle
+/// that a future change fails to carry the worker into hits this exact code.
+/// Before `Ended.message` existed, it reached the window as the single word
+/// `"failed"`, indistinguishable from a broken pool or a panic.
 #[test]
 fn a_missing_worker_binary_reports_why_in_the_message() {
     let dir = tempfile::tempdir().unwrap();

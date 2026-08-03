@@ -1,9 +1,12 @@
 # Building and packaging
 
 How the macOS package is produced, what is inside it, and which of those facts were
-measured rather than assumed. Everything below was run on 2026-07-26 on macOS 26.5.2,
-arm64, with the toolchain `rust-toolchain.toml` names (1.97.1) and `tauri-cli` 2.11.4;
-the Linux figures come from an `ubuntu:24.04` container, arm64, glibc 2.39.
+measured rather than assumed. This page was not written in one sitting, so no single
+date covers every claim on it: a section that names its own date and toolchain was
+measured under those, not under the ones in this paragraph. Everything without a
+date of its own was run on 2026-07-26 on macOS 26.5.2, arm64, with the toolchain
+`rust-toolchain.toml` names (1.97.1) and `tauri-cli` 2.11.4; the Linux figures come
+from an `ubuntu:24.04` container, arm64, glibc 2.39.
 
 Where a claim has not been observed, it says so. `.github/workflows/ci.yml` has never
 run — this repository has no workflow run at all — so every statement about the runners
@@ -91,26 +94,58 @@ three controls building a package out of a directory that was never created. All
 went red — on "no .dmg", which is a different control's reason — and the run still
 reported the full count.
 
-Two of the controls are worth naming because they are not about the image at all:
+One of the controls is worth naming on its own, because what it checks is not the
+image at all, and because it used to work differently:
 
-- **`cargo tree` cannot answer.** The dependency question is asked with a command that
-  can fail, and a failure is not the answer "no". Before this was fixed the pipeline
-  sat inside an `if`, where neither `set -e` nor `pipefail` applies, so a broken
-  manifest or a renamed package printed *"the shell does not link pdfium-render"* and
-  exited 0 — with cargo's own error visible in the log above the green verdict.
-- **the shell depends on Pdfium and the bundle carries none.** The check derives what
-  must be packaged from the graph rather than from a constant, so it stays quiet today
-  and turns red the day extraction is wired into the shell.
+- **The verdict comes from the worker, not from a dependency graph.** This check used
+  to ask `cargo tree -p mnema-desktop`, and that answered a question about the wrong
+  binary once a sidecar existed: `src-tauri` never depended on `mnema-extract`, so the
+  graph said nothing was needed even after extraction moved into a bundled worker that
+  does link Pdfium — the day that happened, a graph-based check would have stayed
+  quiet rather than turned red. `scripts/verify-bundle.sh` now feeds the bundled
+  worker, run from inside the mounted image, one PDF and reads its verdict.
+  `refused`/`unsupported` means the library must **not** be in the bundle — present
+  anyway is 7.7 MB of dead weight, a defect rather than a spare part. `blocks` means
+  the library must be present and must load from inside the image, and that branch
+  fails on purpose today: no reader is implemented for any format but text, so a
+  worker that answers a PDF with blocks proves the check itself has gone stale, which
+  is the day the check is meant to turn red rather than the day packaging broke. Any
+  other answer is unanswered, and unanswered reads as red, not as a pass.
+
+## The acceptance run
+
+Run once per packaging change, by a person. It is the only part of the criterion
+no script covers, and that is deliberate: driving the window automatically is
+expensive and brittle, and this is the one link a human checks anyway.
+
+1. Download the `mnema-macos-arm64` artefact from a green CI run.
+2. Mount the image; drag `Mnema.app` into `/Applications`; eject the image.
+3. Launch it from `/Applications`, not from the mounted volume.
+4. Add a folder holding several `.txt` and `.md` files.
+5. The walk finishes without `EndReason::Failed`.
+6. Ask a question whose answer is in one of those files; a citation comes back,
+   and its highlight covers text that is actually in the file.
+
+`.pdf` is not on this list. No reader is implemented for it — D53 — so a PDF in
+that folder comes back refused as unsupported, which is the correct behaviour and
+not a failure of the packaging.
 
 ## What the build produces
 
 ```
-target/release/bundle/dmg/Mnema_0.0.0_aarch64.dmg     3,704,157 bytes
-    └─ Mnema.app                                         11.5 MiB
-         Contents/MacOS/mnema-desktop                 11,966,368 bytes, Mach-O arm64
+target/release/bundle/dmg/Mnema_0.0.0_aarch64.dmg      5,815,668 bytes
+    └─ Mnema.app                                          17.7 MiB
+         Contents/MacOS/mnema-desktop                  15,391,264 bytes, Mach-O arm64
+         Contents/MacOS/mnema-extract-worker            3,055,136 bytes, Mach-O arm64
          Contents/Resources/Mnema.icns
          Contents/_CodeSignature/CodeResources
 ```
+
+Measured 2026-08-03 on macOS 26.6 (25G72), arm64, rustc 1.97.1, `tauri-cli` 2.11.4.
+The bundle carries one more binary than it used to: `mnema-extract-worker` did not
+exist in this table before `bundle.externalBin` was wired up, and none of the other
+rows above were adjusted by arithmetic — a fresh `cargo tauri build` and a fresh
+`du` produced every figure in this table.
 
 **`target/release/bundle/macos/` is empty when the build finishes.** With
 `targets: ["dmg"]` the `.app` is an intermediate: the bundler writes the image and then
@@ -297,10 +332,16 @@ for it:
 
 ## When Pdfium has to go into the bundle
 
-Nothing in the shipped application loads Pdfium today: `src-tauri` does not depend on
-`mnema-extract`, so `cargo tree -p mnema-desktop -e normal` contains no `pdfium-render`
-and the 7.7 MB library would be dead weight. `verify-bundle.sh` derives that from the
-graph and turns red the day it stops being true, which is the day the following matters.
+Nothing in the shipped application **loads** Pdfium today, but something inside the
+bundle **links** the crate that would: `mnema-extract-worker`, not `mnema-desktop`,
+depends on `mnema-extract`, which depends on `pdfium-render` — `cargo tree -p
+mnema-desktop -e normal` names no such thing, and `cargo tree -p mnema-extract -e
+normal` does. That gap between "linked" and "loaded" is why a check that asked the
+shell's own dependency graph answered the wrong question once a sidecar existed (see
+above); `scripts/verify-bundle.sh` now asks the bundled worker directly, by feeding it
+a PDF, and today's answer is `unsupported` — no reader calls into Pdfium yet, so
+nothing loads the library and the 7.7 MB binary would be dead weight if it shipped.
+That changes the day a PDF reader lands, which is the day the following matters.
 
 Both placements were measured on this repository:
 
