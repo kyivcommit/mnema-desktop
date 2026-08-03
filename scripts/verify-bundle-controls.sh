@@ -495,6 +495,23 @@ fi
 # all, and not one of them had ever been run: a branch nobody has seen fire is a claim,
 # not a check. They are numbered after 16 so that nothing above them renumbers, not
 # because they belong here — 16b's subject is the freshness section, far above.
+#
+# None of the three can be seen still green first, and that is a property of these
+# controls as built rather than a skipped step.
+# In an ordinary run all three redden on their own fragment, exactly like every control
+# beside them. WRONG REASON is what they produce only in the experiment described next,
+# which deliberately disables the branch under test; it is not the state of the suite.
+# The still-green step works while disabling the branch under test leaves the state with
+# nothing to redden on. Disable any of these and the state falls into a neighbouring
+# branch that reddens anyway, so the observation degrades to WRONG REASON with the
+# expected fragment printed: red, and provably not on the message the control names.
+# That is the strongest evidence these three admit, not a shortcut past a stricter one.
+# Control 16e below did get a real still green, and why it could is the test for whether
+# a future control can have one: its branch did not exist until the commit that added
+# it, so there was nothing downstream for the state to fall into.
+# For 16b and 16d the fall-through is the branch layout and cannot be arranged away; for
+# 16c it is this stand-in — one printing an unsupported-shaped frame before exiting
+# non-zero would reach the elif and leave the check green. That control is not written.
 
 echo "### 16b. nothing built to compare the bundled worker against"
 # The mirror of control 13's prelude. That control copies the built worker into the
