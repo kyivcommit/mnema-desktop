@@ -31,6 +31,13 @@ __pycache__/
 # kind of tree that could end up hiding source under one.
 /vendor/
 
+# --- staged sidecars ---
+# scripts/stage-sidecar.sh rebuilds this on every `cargo tauri build`, through
+# beforeBuildCommand. Committing it would let a stale worker ship inside a green
+# build, and nothing downstream could tell the difference — verify-bundle.sh
+# checks freshness for exactly that reason.
+/src-tauri/binaries/
+
 # --- model artefacts and run output ---
 # A single full experiment run writes ~2.3 GB of ONNX external-data tensors.
 # All of it is reproducible from the scripts plus the model snapshot.

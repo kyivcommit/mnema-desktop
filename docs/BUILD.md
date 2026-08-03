@@ -53,6 +53,12 @@ packager needs and is bound to it by a test so the repetition cannot go stale.
 # Once per machine.
 cargo install tauri-cli --version "^2" --locked
 
+# Once per clone, before any plain cargo command. `cargo tauri build` and
+# `cargo tauri dev` run this themselves; `cargo build`, `cargo clippy` and
+# `cargo test` do not, and the shell does not compile without it — see
+# "A fresh checkout cannot build the shell" below for what it says when it stops.
+scripts/stage-sidecar.sh release
+
 # The package.
 cargo tauri build
 
@@ -112,6 +118,83 @@ is why `verify-bundle.sh` attaches the image and looks at the application inside
 which is also the copy a user actually receives.
 
 The `.icns` is generated from the four committed PNGs; no `.icns` needs to be committed.
+
+## The extraction worker inside the bundle
+
+The application hands each file to a separate short-lived process, `mnema-extract-worker`,
+and resolves it as a sibling of its own executable (`src-tauri/src/paths.rs`). Neither
+`cargo tauri build` nor `cargo tauri dev` builds that binary on its own: `src-tauri`
+deliberately does not depend on `mnema-extract`, so the worker is in no dependency graph
+either command walks. `scripts/stage-sidecar.sh` builds it and, for a release build, copies
+it to `src-tauri/binaries/mnema-extract-worker-<triple>` — the name `bundle.externalBin`
+requires, and the only place that convention is written down. `beforeBuildCommand` and
+`beforeDevCommand` each call it; so can a person debugging a bundle.
+
+The five facts below were measured on 2026-08-03, macOS 26.6 (25G72), arm64, rustc 1.97.1,
+`tauri-cli` 2.11.4. None of them had been observed here before.
+
+**It lands beside the application's own executable.** Attaching the image and running
+`find …/Mnema.app -name 'mnema-extract-worker*'` returns exactly
+`Contents/MacOS/mnema-extract-worker`, and `ls -l` on it shows `-rwxr-xr-x`. Both halves
+matter: that is the sibling directory `paths.rs` already looks in, so no code had to change,
+and the bundler does not drop the executable bit on the way in.
+
+**The seal still verifies with nested code inside.** `scripts/verify-bundle.sh` exits 0.
+Its `codesign --verify --deep --strict` walks into the sidecar rather than stopping at the
+outer seal — it prints `--prepared:` and `--validated:` lines naming
+`Contents/MacOS/mnema-extract-worker` — and still reports `valid on disk` and
+`satisfies its Designated Requirement`. The bundler signs the sidecar individually first
+(`Signing …/mnema-extract-worker: replacing existing signature`) and seals the bundle after.
+
+**The bundled bytes are not the built bytes.** `shasum -a 256` gives the copy inside the
+image `8b9f1f71…`, and gives `target/release/mnema-extract-worker` and
+`src-tauri/binaries/mnema-extract-worker-aarch64-apple-darwin` the same `b91c71fb…` as each
+other. The sizes differ by 352 bytes, which is the signature the bundler replaces. So the
+staged copy and the built copy can be compared to each other by digest; **the copy inside
+the image cannot be compared to either that way**, and a freshness check that tries reports
+a stale worker on every build.
+
+**It runs off the read-only mount.** Feeding one NDJSON request to
+`/Volumes/…/Mnema.app/Contents/MacOS/mnema-extract-worker` on the attached image returns
+`header`, `page`, two `block` frames and `summary`, and exits 0. The image mounts
+`read-only, nodev, nosuid, noowners` — and not `noexec`, which is the flag that would have
+made this fail. Nothing has to be copied out of the image to exercise the worker.
+
+**The development hook lands the debug binary — but it is not the last writer.** With
+`target/debug/mnema-extract-worker` deleted, `cargo tauri dev` logs
+`Running BeforeDevCommand (../scripts/stage-sidecar.sh debug)` and the binary is back within
+four seconds, at the path `worker_path()` resolves to. That closes the gap `paths.rs`
+described, where development worked only after somebody had run a `cargo build` by hand and
+nothing enforced it. What the hook does not get is the last word. `tauri-build`'s build
+script declares `rerun-if-changed` on `tauri.conf.json`, and when it re-runs it copies the
+staged **release** sidecar over `target/debug/mnema-extract-worker`. Measured with the
+confound removed rather than inferred: with the build script fresh, the debug binary
+(`6a698545…`, 5,449,544 B) survived a whole `cargo tauri dev`; with `tauri.conf.json`
+touched, a plain `cargo build -p mnema-desktop` replaced it with a byte-identical copy of
+`src-tauri/binaries/…` (`b91c71fb…`, 3,054,784 B). **Which worker a development run executes
+therefore depends on which of the two wrote last**, and `tauri-build`'s copy is only as fresh
+as the last `scripts/stage-sidecar.sh release` — a `cargo tauri dev` after a source change to
+`mnema-extract` can run the previous release build of the worker.
+
+### A fresh checkout cannot build the shell until the sidecar is staged
+
+`src-tauri/binaries/` is git-ignored on purpose: committing it would let a stale worker ship
+inside a green build. The cost is that `tauri-build` refuses to run without it, and says so
+from inside the build script:
+
+```
+error: failed to run custom build command for `mnema-desktop v0.0.0 (…/src-tauri)`
+  resource path `binaries/mnema-extract-worker-aarch64-apple-darwin` doesn't exist
+```
+
+Measured with the directory moved aside: `cargo build -p mnema-desktop` and
+`cargo clippy -p mnema-desktop --all-targets` both exit 101 on that error. The two `tauri`
+commands are unaffected, because their `before*Command` hooks stage the file first — but
+**plain cargo has no hooks**, so `cargo clippy --workspace --all-targets` and
+`cargo test --workspace` do not get one. That is what `.github/workflows/ci.yml`'s `check`
+job runs, on a checkout where the directory cannot exist, and the job has no staging step
+yet. A person needs `scripts/stage-sidecar.sh release` once after cloning; the workflow needs
+the same thing, and this is the record that it does not have it.
 
 ## Signing
 
