@@ -589,15 +589,21 @@ fn rules_not_applied_stops_before_any_file_is_read() {
 /// cheapest possible detection of the mismatched install `StopReason::
 /// BrokenWorker` otherwise finds out about eight crashed files later.
 ///
+/// **The stand-in reads files perfectly**, and that is what makes this test
+/// mean anything. It is an older release: the same reading, no `--manifest`.
+/// A stand-in that also broke the frames would stop the walk either way — at
+/// the handshake, or one file later with the identical error over an identical
+/// empty index — and both mutations of this behaviour measured green against
+/// exactly such a test before it was rewritten.
+///
 /// **Three directions, and each rules out a different wrong implementation.**
-/// The same folder walked by the real worker indexes both files, so what
-/// stopped this walk is the binary and not the folder. The stop is before
-/// phase 2 rather than part-way through it: `document`, `path` and the skip
-/// journal are all empty, where a walk that had handed files over and then
-/// failed would leave rows in all three — and a walk that journalled the
+/// The `Err` says the walk refused rather than proceeded. The empty
+/// `document`, `path` and skip journal say it refused *before* phase 2 — a
+/// parent that invented a manifest instead of asking would have indexed both
+/// files here, since this worker reads them, and a parent that journalled the
 /// mismatch per file would be recording forty thousand files as damaged over
-/// one half-finished install, which is the distinction `PoolError` exists to
-/// make.
+/// one mismatched install, which is the distinction `PoolError` exists to
+/// make. The last walk says the folder was always fine.
 #[cfg(unix)]
 #[test]
 fn a_worker_that_cannot_state_its_readers_stops_the_walk_before_any_file() {
@@ -605,7 +611,7 @@ fn a_worker_that_cannot_state_its_readers_stops_the_walk_before_any_file() {
     f.write("docs/kosto.txt", "Кошторис на ремонт даху.");
     f.write("docs/notes.md", "# Заголовок\n\nОдин абзац.\n");
 
-    let sidecar = Pool::new(PoolConfig::new(support::worker_that_states_no_readers(
+    let sidecar = Pool::new(PoolConfig::new(support::worker_from_before_the_manifest(
         f._index.path(),
     )))
     .unwrap();

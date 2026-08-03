@@ -142,15 +142,20 @@ pub fn wrong_worker(dir: &Path, body: &str) -> PathBuf {
     )
 }
 
-/// A stand-in that answers `--manifest` with nothing at all: an executable
-/// that is not this parent's worker — an older release from before the
-/// manifest existed, or another program entirely at the configured path.
+/// A release from before `--manifest` existed: it reads every file exactly as
+/// the current worker does, and answers the manifest question with nothing.
 ///
-/// Kept apart from [`wrong_worker`] rather than folded into it as a flag,
-/// because the two model different faults and only one of them is allowed to
-/// reach a file: this one is the fault the parent must find *before* it sends
-/// anything, and a test that could not name it separately could not assert
-/// that.
+/// The exact inverse of [`wrong_worker`], and deliberately so. **A stand-in
+/// that fails the handshake *and* the frames cannot show which of the two
+/// stopped a walk** — measured, and it is why this function is shaped the way
+/// it is: an earlier version of it printed rubbish for every request, and a
+/// walk that invented its own manifest instead of asking then stopped anyway,
+/// one file later, with the same `PoolError::Protocol` and the same empty
+/// index. Both mutation cases stayed green against a test that read as though
+/// it asserted the handshake. Delegating the files with `exec` — so the real
+/// worker inherits this process's stdin and stdout and the protocol runs
+/// untouched — leaves the handshake as the only thing that can fail, and a
+/// parent that skipped it indexes the folder instead.
 ///
 /// `dead_code` is allowed because this module is compiled into **every** test
 /// binary that declares `mod support;`, and only `walk.rs` has a use for this
@@ -158,11 +163,14 @@ pub fn wrong_worker(dir: &Path, body: &str) -> PathBuf {
 /// warn in the others.
 #[cfg(unix)]
 #[allow(dead_code)]
-pub fn worker_that_states_no_readers(dir: &Path) -> PathBuf {
+pub fn worker_from_before_the_manifest(dir: &Path) -> PathBuf {
     write_script(
         dir,
         "worker-without-a-manifest",
-        "while read -r _line; do\n  printf 'not a frame\\n'\ndone\n",
+        &format!(
+            "if [ \"$1\" = \"--manifest\" ]; then\n  exit 0\nfi\nexec \"{}\" \"$@\"\n",
+            worker().display()
+        ),
     )
 }
 
