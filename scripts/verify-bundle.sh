@@ -108,11 +108,13 @@ worker="${app}/Contents/MacOS/${worker_name}"
 [ -x "${worker}" ] || fail "${worker} exists and is not executable. The walk would
   fail on its first extract() call with a permission error, not a missing file."
 
-# Freshness is a property of the repository, not of the image: `externalBin` copies
-# whatever sits in src-tauri/binaries/, so a stale file there ships inside a build
-# that is green in every other respect. The comparison is made against the binary
-# `cargo build` produced, and a missing one is an UNANSWERED question rather than
-# the answer "fresh" — the same distinction the dependency check learned the hard way.
+# Freshness is two questions, and neither can be settled by comparing bytes against the
+# image. First, answered here: is the file `externalBin` will copy the one cargo built?
+# That much is a property of the repository — `externalBin` copies whatever sits in
+# src-tauri/binaries/, so a stale file there ships inside a build that is green in every
+# other respect. A missing built binary is an UNANSWERED question rather than the answer
+# "fresh", the same distinction the dependency check learned the hard way. Second,
+# answered after that comparison: was this image written after that binary existed?
 #
 # Both paths below come from repo_root, not from bundle_dir: pointing this script
 # at a different image still reports on THIS checkout's staged and built files.
@@ -120,9 +122,14 @@ worker="${app}/Contents/MacOS/${worker_name}"
 # mutated copy of the repository against the one real bundle and still get a
 # meaningful verdict about that copy's own staged file.
 built_worker="${repo_root}/target/release/${worker_name}"
-[ -f "${built_worker}" ] || fail "no ${built_worker}, so whether the bundled worker is
-  the one this build produced is UNANSWERED. That is not the same as answered yes.
-  Run scripts/stage-sidecar.sh, or build with cargo tauri build, which calls it."
+# The word UNANSWERED sits on the first physical line of this message on purpose: that
+# is the only line carrying the `verify-bundle:` prefix, and it is what control 16b
+# asserts on. Reflowing it would move the fragment onto a line the control never sees.
+[ -f "${built_worker}" ] \
+  || fail "no ${built_worker}, so the worker's freshness is UNANSWERED. Whether the
+  bundled worker is the one this build produced cannot be told from here, and that is
+  not the same as answered yes. Run scripts/stage-sidecar.sh, or build with
+  cargo tauri build, which calls it."
 
 # The directory before its contents, same reason as ${dmg_dir} above: `find` on a
 # path that does not exist fails, and under `set -euo pipefail` the failing
@@ -160,11 +167,60 @@ built_sha="$(shasum -a 256 "${built_worker}" | cut -d' ' -f1)"
   A stale copy in src-tauri/binaries/ ships inside an otherwise green build. That
   directory is git-ignored and scripts/stage-sidecar.sh overwrites it every time."
 
-# Measured in task 1: the bundler re-signs the sidecar in place, so the bundled
-# bytes are never equal to the built bytes even on a perfectly fresh build (see
-# docs/BUILD.md, "The extraction worker inside the bundle"). Freshness is
-# therefore proven at the staged file above, not at ${worker} — a direct
-# comparison against the bundled copy would redden on every good build.
+# What that comparison establishes, and what it does not. Measured in task 1: the
+# bundler re-signs the sidecar in place, so the bundled bytes are never equal to the
+# built bytes even on a perfectly fresh build (see docs/BUILD.md, "The extraction
+# worker inside the bundle"), and a direct sha comparison against ${worker} would
+# redden on every good build. So the comparison above is made where it can be made:
+# between the file the bundler WOULD copy next time and the one cargo built. That is
+# a statement about this checkout. It says nothing about which bytes went into THIS
+# image — build an image, edit the worker, re-stage, and staged still equals built
+# while the image carries the older worker. Every other check below passes in that
+# state: the worker is present, executable, runs, and answers.
+#
+# The timestamp closes that path and only that path. It is not identity — identity
+# cannot be had here, for the reason above — it is the cheapest statement that rules
+# out an image written before the worker it is supposed to contain.
+[ "${dmg}" -nt "${built_worker}" ] \
+  || fail "${dmg} is older than the worker this checkout built, so it cannot be carrying
+  it. Something was rebuilt after the image was written, and nothing else here would
+  notice: the staged file still matches the built one, and the worker inside the image
+  still runs. Re-run cargo tauri build."
+
+# --- the signature ------------------------------------------------------------
+#
+# Before anything out of the image is executed, not after. This script is pointed at
+# images it has no reason to trust — its own controls feed it /dev/urandom and shell
+# scripts standing in for the worker — and running a binary out of an artefact whose
+# seal has not been checked is the wrong order on its own terms.
+#
+# It cannot move any higher, and the constraint is not obvious. The two checks above
+# it — the worker is present, the worker is executable — are proved by controls that
+# remove and chmod the worker without re-sealing the copy they mutate. A seal check
+# running before those would redden on the seal instead, and both controls would prove
+# nothing. The controls that swap the worker for a stand-in re-sign the copy first, on
+# purpose, and are unaffected by this order.
+#
+# `--deep` is deprecated for *signing* and is still right for verifying: it walks
+# nested code instead of stopping at the outer seal, which is the whole question
+# once a bundle carries a library. `--strict` refuses the relaxations Gatekeeper
+# does not grant either.
+#
+# This passes only because tauri.conf.json sets `macOS.signingIdentity` to "-".
+# Without it the bundler leaves the .app unsealed — the executable still carries
+# the ad-hoc signature the linker put on it, but the bundle has no
+# `_CodeSignature`, and codesign then answers "code has no resources but
+# signature indicates they must be present" and exits 1. Measured on this
+# repository's first bundle, before the identity was set.
+#
+# What it does NOT establish: Gatekeeper acceptance. An ad-hoc signature has no
+# Team ID and the image is not notarized, so `spctl -a -t exec` rejects it. That
+# is a decision recorded in docs/BUILD.md, not something to paper over here.
+if ! codesign --verify --deep --strict --verbose=2 "${app}"; then
+  fail "the signature of ${product}.app inside the image does not verify. See
+  docs/BUILD.md: the build ad-hoc signs on purpose, so a failure here means the
+  seal broke or the identity setting was dropped — not that signing is optional."
+fi
 
 # --- what the worker says -----------------------------------------------------
 #
@@ -197,8 +253,13 @@ text_fixture="${repo_root}/crates/mnema-extract/tests/fixtures/simple.txt"
   ask the worker about."
 
 ask_worker "${text_fixture}"
-[ "${answer_status}" -eq 0 ] || fail "the bundled worker exited ${answer_status} on a
-  plain text file. It said: $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+# "on a plain text file" belongs on the first physical line, and so does "on a PDF" in
+# the twin of this check further down: the two messages are otherwise identical up to
+# the word that distinguishes them, and only the first line reaches the control that
+# asserts it (controls 14 and 16c).
+[ "${answer_status}" -eq 0 ] \
+  || fail "the bundled worker exited ${answer_status} on a plain text file. It said:
+  $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 
 printf '%s\n' "${answer}" | grep -q '"frame":"header"' \
   || fail "the bundled worker returned no header frame for ${text_fixture}. It said:
@@ -208,29 +269,6 @@ printf '%s\n' "${answer}" | grep -q '"frame":"block"' \
   $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 
 echo "verify-bundle: the bundled worker reads a text file and returns blocks"
-
-# --- the signature ------------------------------------------------------------
-#
-# `--deep` is deprecated for *signing* and is still right for verifying: it walks
-# nested code instead of stopping at the outer seal, which is the whole question
-# once a bundle carries a library. `--strict` refuses the relaxations Gatekeeper
-# does not grant either.
-#
-# This passes only because tauri.conf.json sets `macOS.signingIdentity` to "-".
-# Without it the bundler leaves the .app unsealed — the executable still carries
-# the ad-hoc signature the linker put on it, but the bundle has no
-# `_CodeSignature`, and codesign then answers "code has no resources but
-# signature indicates they must be present" and exits 1. Measured on this
-# repository's first bundle, before the identity was set.
-#
-# What it does NOT establish: Gatekeeper acceptance. An ad-hoc signature has no
-# Team ID and the image is not notarized, so `spctl -a -t exec` rejects it. That
-# is a decision recorded in docs/BUILD.md, not something to paper over here.
-if ! codesign --verify --deep --strict --verbose=2 "${app}"; then
-  fail "the signature of ${product}.app inside the image does not verify. See
-  docs/BUILD.md: the build ad-hoc signs on purpose, so a failure here means the
-  seal broke or the identity setting was dropped — not that signing is optional."
-fi
 
 # --- what has to be in the bundle, decided by the worker's own answer ----------
 #
@@ -247,9 +285,10 @@ pdf_fixture="${repo_root}/crates/mnema-extract/tests/fixtures/one-page-text.pdf"
   be asked and is therefore UNANSWERED."
 
 ask_worker "${pdf_fixture}"
-[ "${answer_status}" -eq 0 ] || fail "the bundled worker exited ${answer_status} on a
-  PDF. That is not the answer 'no reader' — it is no answer at all, and the bundle's
-  Pdfium obligation stays UNANSWERED. It said:
+[ "${answer_status}" -eq 0 ] \
+  || fail "the bundled worker exited ${answer_status} on a PDF. That is not the answer
+  'no reader' — it is no answer at all, and the bundle's Pdfium obligation stays
+  UNANSWERED. It said:
   $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 
 packaged_pdfium="$(find "${app}" -name 'libpdfium*.dylib' | head -1)"

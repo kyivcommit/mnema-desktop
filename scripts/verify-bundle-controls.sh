@@ -30,6 +30,16 @@
 # Not part of CI: it needs a built bundle and takes minutes. It is what you run
 # before believing verify-bundle.sh, and what a reviewer reproduces.
 #
+# The consequence of that, written down because nothing automatic will ever say it:
+# while nothing runs this file, nothing checks that verify-bundle.sh still rejects
+# anything. CI builds an image and runs that script, and a check that has stopped
+# looking passes exactly like a check that looked and found nothing wrong. Delete a
+# branch, leave an assertion any failure satisfies, make a grep unreachable — the run
+# is green, and stays green. What that leaves unprotected is not this suite; it is
+# verify-bundle.sh, and with it the only claim anyone has that a shipped bundle
+# carries a worker which runs. The single thing standing between that claim and a
+# silent no-op is a person remembering to type the line below.
+#
 # Usage:
 #   cargo tauri build
 #   scripts/verify-bundle-controls.sh
@@ -61,9 +71,15 @@ if [ -z "${GOOD}" ]; then
   exit 1
 fi
 
-red=0
-green=0
-broken=0
+# Four ways a control can end and one way the suite itself can, each counted apart so
+# the printed tally names what it counted. They were two before, and "still green"
+# covered a control that reddened on somebody else's message and a real image the check
+# rejected — neither of which prints those words anywhere in its own output.
+red=0      # red, and the message carried the fragment the control named
+wrong=0    # red on something else: proves nothing, and says so
+green=0    # the check accepted a state it is supposed to reject
+broken=0   # the control never got to run: setup failed, or it asserts nothing
+rejected=0 # the shipped image failed the check that must accept it
 
 # Runs the check and requires it to fail. A control that passes is not a smaller
 # problem than a broken check — it IS the broken check, undetected.
@@ -79,20 +95,33 @@ broken=0
 #
 # An optional `-m FRAGMENT` before the label asserts that fragment is present in
 # that line — mechanizing the "own reason" rule instead of leaving it to a human
-# to read the message and judge. Without `-m` a control counts as red on exit
-# status alone, exactly as before: controls 1 through 8 call this unchanged and
-# stay unchanged. The gap this closes is real, not theoretical — control 11
-# (added in this same task) went red on the codesign section's message before
-# its own check existed, and nothing before this could tell the difference
-# between that and the check it names actually firing.
+# to read the message and judge. Every control below now carries one. Without it a
+# control counts as red on exit status alone, and that is satisfied by a misspelled
+# path, a syntax error, or a script that dies before reaching the state under test:
+# eight controls stood on nothing else for a review cycle, the two signature ones
+# among them. The gap is not theoretical — control 11 went red on the codesign
+# section's message before its own check existed, and nothing before this could tell
+# the difference between that and the check it names actually firing.
 expect_red() {
-  local expect=""
+  local expect="" asserted=0
   if [ "$1" = "-m" ]; then
     expect="$2"
+    asserted=1
     shift 2
   fi
   local label="$1" script="$2"
   shift 2
+  # An empty fragment is not a weaker assertion, it is none: it matches every message,
+  # so the control counts red whatever it reddened on — the exact state `-m` exists to
+  # end, wearing the marks of having been fixed. Refused before the check is even run,
+  # and counted BROKEN rather than passed, because a control that asserts nothing while
+  # claiming to is worse than one that never claimed.
+  if [ "${asserted}" -eq 1 ] && [ -z "${expect}" ]; then
+    printf '%s\n' "-- ${label}"
+    printf '   BROKEN CONTROL: -m was given an empty fragment, which asserts nothing\n'
+    broken=$((broken + 1))
+    return 1
+  fi
   local out status full msg
   out=$(bash "$script" "$@" 2>&1)
   status=$?
@@ -114,10 +143,10 @@ expect_red() {
     # at its first line before doing it.
     full="$(printf '%s' "$out" | grep 'verify-bundle:' | tail -1)"
     msg="$(printf '%s' "$full" | cut -c1-140)"
-    if [ -n "${expect}" ] && ! printf '%s' "${full}" | grep -qF -- "${expect}"; then
+    if [ "${asserted}" -eq 1 ] && ! printf '%s' "${full}" | grep -qF -- "${expect}"; then
       printf '   red (exit %s), but not for its own reason: %s\n' "$status" "$msg"
       printf '   *** WRONG REASON — this control proves nothing. Expected: %s ***\n' "$expect"
-      green=$((green + 1))
+      wrong=$((wrong + 1))
     else
       printf '   red (exit %s): %s\n' "$status" "$msg"
       red=$((red + 1))
@@ -207,33 +236,44 @@ SCRIPT
   chmod +x "$dest"
 }
 
+# The first two fragments name the path as well as the wording, because these two
+# messages differ by little else and "not found" is precisely the accident `-m` is here
+# to catch: a control pointed at a path the script never looked at would otherwise be
+# indistinguishable from one that reddened where it meant to.
 echo "### 1. the dmg directory does not exist"
-expect_red "no bundle at all" "${REPO}/scripts/verify-bundle.sh" "${LAB}/absent"
+expect_red -m "no ${LAB}/absent/dmg" \
+  "no bundle at all" "${REPO}/scripts/verify-bundle.sh" "${LAB}/absent"
 
 echo "### 2. the dmg directory is empty"
 if must mkdir -p "${LAB}/empty/dmg"; then
-  expect_red "built nothing" "${REPO}/scripts/verify-bundle.sh" "${LAB}/empty"
+  expect_red -m "no .dmg in ${LAB}/empty/dmg" \
+    "built nothing" "${REPO}/scripts/verify-bundle.sh" "${LAB}/empty"
 fi
 
 echo "### 3. two images side by side"
 if must mkdir -p "${LAB}/two/dmg" \
   && must cp "${GOOD}" "${LAB}/two/dmg/a.dmg" \
   && must cp "${GOOD}" "${LAB}/two/dmg/b.dmg"; then
-  expect_red "one of them is from an older build" "${REPO}/scripts/verify-bundle.sh" "${LAB}/two"
+  # The count is part of the fragment: "some .dmg files in" would be satisfied by a
+  # check that found one image and miscounted, which is the failure this rejects.
+  expect_red -m "2 .dmg files in ${LAB}/two/dmg" \
+    "one of them is from an older build" "${REPO}/scripts/verify-bundle.sh" "${LAB}/two"
 fi
 
 echo "### 4. an image that will not attach"
 if must mkdir -p "${LAB}/corrupt/dmg" \
   && must dd if=/dev/urandom of="${LAB}/corrupt/dmg/Mnema_0.0.0_aarch64.dmg" bs=1024 count=200 status=none \
   && there "${LAB}/corrupt/dmg/Mnema_0.0.0_aarch64.dmg"; then
-  expect_red "the file is named .dmg and is not one" "${REPO}/scripts/verify-bundle.sh" "${LAB}/corrupt"
+  expect_red -m "could not be attached" \
+    "the file is named .dmg and is not one" "${REPO}/scripts/verify-bundle.sh" "${LAB}/corrupt"
 fi
 
 echo "### 5. an image with no application in it"
 if must mkdir -p "${LAB}/hollow/src" \
   && must touch "${LAB}/hollow/src/README" \
   && must image_from "${LAB}/hollow/src" "${LAB}/hollow/dmg/Mnema_0.0.0_aarch64.dmg"; then
-  expect_red "no Mnema.app inside" "${REPO}/scripts/verify-bundle.sh" "${LAB}/hollow"
+  expect_red -m "contains no Mnema.app" \
+    "no Mnema.app inside" "${REPO}/scripts/verify-bundle.sh" "${LAB}/hollow"
 fi
 
 echo "### 6. an application with no executable"
@@ -241,15 +281,24 @@ if must copy_app_out "${LAB}/gutted/src" \
   && must rm -f "${LAB}/gutted/src/Mnema.app/Contents/MacOS/mnema-desktop" \
   && gone "${LAB}/gutted/src/Mnema.app/Contents/MacOS/mnema-desktop" \
   && must image_from "${LAB}/gutted/src" "${LAB}/gutted/dmg/Mnema_0.0.0_aarch64.dmg"; then
-  expect_red "Contents/MacOS is empty" "${REPO}/scripts/verify-bundle.sh" "${LAB}/gutted"
+  expect_red -m "has no executable at Contents/MacOS/mnema-desktop" \
+    "Contents/MacOS is empty" "${REPO}/scripts/verify-bundle.sh" "${LAB}/gutted"
 fi
 
+# Controls 7 and 8 share a fragment, and that is the honest reading rather than a
+# copied line: they produce two different states — a file added under a seal that still
+# exists, and no seal at all — of one branch, and verify-bundle.sh answers both with the
+# same message. What tells them apart is codesign's own output, which is not prefixed
+# `verify-bundle:` and so never reaches the line `expect_red` matches. The fragment
+# proves what it can: each of these reddens on the signature check rather than on a
+# missing file or a dead script, which is what neither of them proved before.
 echo "### 7. a file added after signing"
 if must copy_app_out "${LAB}/tampered/src" \
   && must touch "${LAB}/tampered/src/Mnema.app/Contents/Resources/extra.txt" \
   && there "${LAB}/tampered/src/Mnema.app/Contents/Resources/extra.txt" \
   && must image_from "${LAB}/tampered/src" "${LAB}/tampered/dmg/Mnema_0.0.0_aarch64.dmg"; then
-  expect_red "the seal no longer covers the contents" "${REPO}/scripts/verify-bundle.sh" "${LAB}/tampered"
+  expect_red -m "the signature of Mnema.app inside the image does not verify" \
+    "the seal no longer covers the contents" "${REPO}/scripts/verify-bundle.sh" "${LAB}/tampered"
 fi
 
 echo "### 8. no seal at all — the state this repository's first build produced"
@@ -257,7 +306,8 @@ if must copy_app_out "${LAB}/unsealed/src" \
   && must rm -rf "${LAB}/unsealed/src/Mnema.app/Contents/_CodeSignature" \
   && gone "${LAB}/unsealed/src/Mnema.app/Contents/_CodeSignature" \
   && must image_from "${LAB}/unsealed/src" "${LAB}/unsealed/dmg/Mnema_0.0.0_aarch64.dmg"; then
-  expect_red "signingIdentity dropped from tauri.conf.json" "${REPO}/scripts/verify-bundle.sh" "${LAB}/unsealed"
+  expect_red -m "the signature of Mnema.app inside the image does not verify" \
+    "signingIdentity dropped from tauri.conf.json" "${REPO}/scripts/verify-bundle.sh" "${LAB}/unsealed"
 fi
 
 echo "### 11. the bundle carries no extraction worker"
@@ -282,8 +332,11 @@ fi
 echo "### 13. the staged worker is not the one this build produced"
 # copy_repo carries tracked files only, so target/ — git-ignored — does not come
 # along; the built binary is copied in here by hand so the check reaches the
-# staged-versus-built comparison instead of reddening on "no built_worker" first,
-# which is a different control's reason, not this one's.
+# staged-versus-built comparison instead of reddening on "no built_worker" first.
+# That branch belongs to control 16b below, which is the mirror of this prelude:
+# the same copied repository with the same file deliberately left out. Until 16b
+# was written these lines said "a different control's reason" and no such control
+# existed — a comment asserting coverage that was nowhere in the file.
 if must copy_repo "${LAB}/stale" \
   && must mkdir -p "${LAB}/stale/target/release" \
   && must cp "${REPO}/target/release/mnema-extract-worker" \
@@ -361,7 +414,10 @@ if must copy_app_out "${LAB}/mute-worker" \
   && must chmod +x "${LAB}/mute-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
   && must codesign --sign - --force --deep "${LAB}/mute-worker/Mnema.app" \
   && must image_from "${LAB}/mute-worker" "${LAB}/mute-worker-img/dmg/Mnema.dmg"; then
-  expect_red -m "the bundled worker exited" \
+  # "on a plain text file" and the status, because control 16c reddens on a message
+  # identical up to those words. /usr/bin/false is what exits 1 here, so pinning the
+  # number costs nothing and pins which fixture the check was asking about.
+  expect_red -m "exited 1 on a plain text file" \
     "a worker that exits non-zero and says nothing" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/mute-worker-img"
 fi
@@ -434,6 +490,58 @@ if must copy_app_out "${LAB}/odd-verdict" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/odd-verdict-img"
 fi
 
+# The three below cover the branches that answer "the check could not find out" rather
+# than "the answer is no". That distinction is the reason those branches were written at
+# all, and not one of them had ever been run: a branch nobody has seen fire is a claim,
+# not a check. They are numbered after 16 so that nothing above them renumbers, not
+# because they belong here — 16b's subject is the freshness section, far above.
+
+echo "### 16b. nothing built to compare the bundled worker against"
+# The mirror of control 13's prelude. That control copies the built worker into the
+# copied repository so the check gets past this branch; this one leaves it out, which
+# takes no arranging at all: target/ is git-ignored, so a copy of the tracked files is
+# already in that state, and so is a fresh clone next to a downloaded image. The check
+# must call freshness UNANSWERED there. Answering "fresh" because nothing contradicted
+# it is the failure this whole section is shaped against.
+if must copy_repo "${LAB}/no-built"; then
+  expect_red -m "so the worker's freshness is UNANSWERED" \
+    "no built binary, so freshness is unanswered rather than answered yes" \
+    "${LAB}/no-built/scripts/verify-bundle.sh" "${BUNDLE}"
+fi
+
+echo "### 16c. the worker cannot answer for a PDF"
+# Same re-sign, same reason as control 14: the stand-in's bytes are not the staged
+# worker's, so the seal has to be re-cut or this control reddens on control 7's message
+# instead of its own. Reaches the PDF exit-status check, whose message is identical to
+# control 14's up to the words naming the fixture — which is why both fragments name it.
+if must copy_app_out "${LAB}/pdf-mute" \
+  && must cp "${REPO}/scripts/mutations/pdf-exits-nonzero.sh" \
+       "${LAB}/pdf-mute/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must chmod +x "${LAB}/pdf-mute/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must codesign --sign - --force --deep "${LAB}/pdf-mute/Mnema.app" \
+  && must image_from "${LAB}/pdf-mute" "${LAB}/pdf-mute-img/dmg/Mnema.dmg"; then
+  expect_red -m "exited 1 on a PDF" \
+    "a worker that reads text and then fails on the PDF — UNANSWERED, not 'no reader'" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/pdf-mute-img"
+fi
+
+echo "### 16d. the worker reads PDFs, which is the day this check has to turn red"
+# The branch the packaging spec names as the only reason for writing a third case at
+# all: red the day a reader lands, rather than green while a bundle ships without the
+# library that reader needs. Nothing in this repository can produce that state honestly
+# — no reader exists — so a stand-in produces it, and this is the first time anyone has
+# seen the branch fire. Same re-sign, same reason as control 14.
+if must copy_app_out "${LAB}/pdf-reader" \
+  && must cp "${REPO}/scripts/mutations/pdf-reads-blocks.sh" \
+       "${LAB}/pdf-reader/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must chmod +x "${LAB}/pdf-reader/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must codesign --sign - --force --deep "${LAB}/pdf-reader/Mnema.app" \
+  && must image_from "${LAB}/pdf-reader" "${LAB}/pdf-reader-img/dmg/Mnema.dmg"; then
+  expect_red -m "the bundled worker reads PDFs" \
+    "a worker that answers a PDF with blocks, and no proof the library is inside" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/pdf-reader-img"
+fi
+
 echo
 echo "### and the real bundle, which must pass"
 if bash "${REPO}/scripts/verify-bundle.sh" >/dev/null 2>&1; then
@@ -442,9 +550,12 @@ if bash "${REPO}/scripts/verify-bundle.sh" >/dev/null 2>&1; then
 else
   echo "-- the shipped image"
   echo "   *** RED — the check rejects the bundle it is supposed to accept ***"
-  green=$((green + 1))
+  rejected=$((rejected + 1))
 fi
 
 echo
-echo "red: ${red}   still green: ${green}   broken controls: ${broken}"
-[ "${green}" -eq 0 ] && [ "${broken}" -eq 0 ]
+printf 'red for its own reason: %s   WRONG REASON: %s   still green: %s\n' \
+  "${red}" "${wrong}" "${green}"
+printf 'broken controls: %s   shipped image rejected: %s\n' "${broken}" "${rejected}"
+[ "${wrong}" -eq 0 ] && [ "${green}" -eq 0 ] \
+  && [ "${broken}" -eq 0 ] && [ "${rejected}" -eq 0 ]

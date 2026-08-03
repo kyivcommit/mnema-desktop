@@ -85,15 +85,29 @@ requires each to exit non-zero, requires the real image to pass, and prints the 
 scripts/verify-bundle-controls.sh
 ```
 
-It prints the tally itself — `red`, `still green`, `broken controls` — and no number
-is repeated here, because an eleventh control would make one stale and nothing would
-notice. That is item 4 in miniature, in the paragraph that removed item 4.
+**Nothing runs it automatically, and that leaves the check itself unguarded.** The CI
+`bundle` job builds the image and runs `scripts/verify-bundle.sh`; no workflow runs the
+controls. So an edit that makes `verify-bundle.sh` stop rejecting things — a branch that
+can no longer be reached, an assertion that any failure satisfies, a check deleted along
+with the state it named — passes CI green and keeps passing. The only thing that would
+notice is a person who remembers to run this script. That is deliberate rather than
+overlooked: the suite needs a built bundle and takes minutes. It is also this
+repository's own signature defect, a step that passes while proving nothing, standing
+one level above the check written to catch it.
+
+It prints the tally itself — `red for its own reason`, `WRONG REASON`, `still green`,
+`broken controls`, `shipped image rejected` — and no number is repeated here, because
+an eleventh control would make one stale and nothing would notice. That is item 4 in
+miniature, in the paragraph that removed item 4. Every control asserts a fragment of
+the message it expects, so a control that exits non-zero for somebody else's reason is
+counted apart from one that proved what it names, and prints which fragment it wanted.
 
 A control whose *setup* fails is counted as broken rather than red, and that
 distinction is not bookkeeping: before it existed, an image that would not attach left
 three controls building a package out of a directory that was never created. All three
 went red — on "no .dmg", which is a different control's reason — and the run still
-reported the full count.
+reported the full count. A control whose asserted fragment is empty is broken for the
+same reason: it would match every message and prove nothing while looking proved.
 
 The Pdfium check is worth naming on its own, because what it checks is not the image
 at all, and because it used to work differently:
@@ -322,8 +336,11 @@ both slices:
 | universal | 7,597,603 B | 23.2 MiB | 24,303,184 B |
 | ratio | ×2.05 | ×2.02 | ×2.03 |
 
-Measured 2026-07-26, before `bundle.externalBin` put a worker in the bundle — both rows
-and the ratio belong to that build. The current arm64 figures, worker included, are in
+Both rows and the ratio belong to a build made before `bundle.externalBin` put a worker
+in the bundle. **When is not recorded.** No build log names the day the universal image
+was produced; the 2026-07-26 at the top of this page is the default this section falls
+under, not a measurement taken for this table, and writing it here as one would state
+more than is known. The current arm64 figures, worker included, are in
 "What the build produces" above; there is no current universal counterpart to compare
 them to, since producing one compiles the dependency tree twice and nobody has run that
 since the worker landed.

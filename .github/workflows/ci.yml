@@ -238,9 +238,13 @@ jobs:
       - name: Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
       # No Pdfium step here, and that is a finding rather than an omission: the
-      # shell does not depend on mnema-extract, so nothing inside the bundle can
-      # load the library. verify-bundle.sh derives that from the dependency
-      # graph and fails the day it stops being true.
+      # bundle carries a worker that links the crate which would load the library,
+      # and no reader calls into it, so nothing in the image loads it today. That
+      # is a fact about the worker, and the shell's dependency graph cannot state
+      # it — the graph named nothing even after extraction moved into a bundled
+      # worker that does link Pdfium. verify-bundle.sh asks the worker instead: it
+      # feeds the bundled copy a PDF from inside the mounted image and reddens the
+      # day the answer stops being "unsupported".
       - run: cargo tauri build
       # Never `|| true`, never a grep whose failure is swallowed. The script
       # opens the .dmg and looks at the application inside it; every state it
@@ -252,7 +256,7 @@ jobs:
       # It looks inside the image because `target/release/bundle/macos/` is empty
       # after the build: with targets ["dmg"] the bundler prints
       # `Cleaning …/Mnema.app` once the image is written.
-      - name: The bundle exists, is signed, and carries what the graph says it must
+      - name: The bundle exists, is signed, and its own worker answers for what is in it
         run: scripts/verify-bundle.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
