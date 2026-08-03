@@ -187,14 +187,20 @@ error: failed to run custom build command for `mnema-desktop v0.0.0 (…/src-tau
   resource path `binaries/mnema-extract-worker-aarch64-apple-darwin` doesn't exist
 ```
 
-Measured with the directory moved aside: `cargo build -p mnema-desktop` and
-`cargo clippy -p mnema-desktop --all-targets` both exit 101 on that error. The two `tauri`
-commands are unaffected, because their `before*Command` hooks stage the file first — but
-**plain cargo has no hooks**, so `cargo clippy --workspace --all-targets` and
-`cargo test --workspace` do not get one. That is what `.github/workflows/ci.yml`'s `check`
-job runs, on a checkout where the directory cannot exist, and the job has no staging step
-yet. A person needs `scripts/stage-sidecar.sh release` once after cloning; the workflow needs
-the same thing, and this is the record that it does not have it.
+Measured with the directory moved aside: `cargo build -p mnema-desktop`,
+`cargo check -p mnema-desktop` and `cargo clippy -p mnema-desktop --all-targets` all exit 101
+on that error. The two `tauri` commands are unaffected, because their `before*Command` hooks
+stage the file first — `cargo tauri build` prints `Running beforeBuildCommand` and completes
+from the same absent-directory state, checked rather than assumed. But **plain cargo has no
+hooks**, so `cargo clippy --workspace --all-targets` and `cargo test --workspace` do not get
+one, and that is what `.github/workflows/ci.yml`'s `check` job runs on a checkout where the
+directory cannot exist.
+
+So a person runs `scripts/stage-sidecar.sh release` once after cloning, and the `check` job
+has a step that runs the same thing before `fmt`, `clippy` and `test`. The `bundle` job does
+not, and does not need one. **The requirement is `externalBin`'s, not the staging script's:**
+`tauri-build` validates the declared path while `src-tauri` compiles, so it holds however the
+file arrives, and a change to how the sidecar is staged does not remove it.
 
 ## Signing
 
