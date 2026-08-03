@@ -1198,7 +1198,16 @@ fn a_skip_that_could_not_displace_is_not_journalled_either() {
     assert!(fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
 }
 
-// ------------------------------------- a setting must not delete indexed content
+// ------------------------------- what the ceiling decides from the two numbers it has
+//
+// It used to say "a setting must not delete indexed content", and the tests below
+// now falsify that as written: lowering the ceiling deletes nothing by itself, but
+// after it, anything that moves the file's mtime does — `a_touch_under_a_lowered_
+// ceiling_gives_up_the_document` is that price, taken deliberately. The refusal is
+// made from `stat` without opening the file, so "touched" and "rewritten in place at
+// the same length" are the same two numbers, and one of the two answers has to be
+// wrong. The side chosen is the one that leaves no citation pointing at text the file
+// no longer holds.
 
 /// A file that **grew** past the ceiling loses what the index held for it.
 ///
