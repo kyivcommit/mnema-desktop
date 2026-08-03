@@ -299,13 +299,19 @@ if must copy_repo "${LAB}/stale" \
 fi
 
 echo "### 13b. two staged sidecars for the same triple"
-# Mutates the real src-tauri/binaries/, not a copy. Control 13 gets to stage
-# into a fake src-tauri/binaries/ because it runs a relocated copy
-# of verify-bundle.sh, whose own repo_root resolves to that copy; this control
-# has no such lever, because src-tauri/binaries/ is not an argument
-# verify-bundle.sh takes — repo_root always resolves to the one real
-# directory, and bundle_dir is the only path the script accepts. So this one
-# mutates the real working tree on purpose. Modeled on control 3 one level
+# Mutates the real src-tauri/binaries/, not a copy — a deliberate trade, not
+# an absence of a lever. Control 13 gets to stage into a fake
+# src-tauri/binaries/ because it runs a relocated copy of verify-bundle.sh,
+# whose own repo_root resolves to that copy (verify-bundle.sh:25); the same
+# lever was available here too, and nothing stops a relocated copy from
+# staging two files instead of one. It goes unused because reaching that
+# count check through a copy means repeating control 13's own prelude first
+# — a target/release holding the built worker, so the check reaches the
+# staging directory instead of reddening on "no built_worker" — for a
+# control whose entire subject is the staging directory, not the freshness
+# comparison control 13 already tests. Mutating the one real directory is
+# cheaper than restaging that prelude, not required by any limit of the
+# mechanism. Modeled on control 3 one level
 # down: two candidate files where the glob used to let `head -1` pick
 # whichever sorted first, and the same "proves nothing about the new build"
 # reason already written for ${dmg_dir} above. This directory is git-ignored
