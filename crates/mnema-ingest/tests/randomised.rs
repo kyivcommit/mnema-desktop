@@ -2033,6 +2033,21 @@ impl World {
         // alternative is to teach the invariant what the cheap arm compares —
         // which is the product's logic re-derived in the test, and the whole
         // point of the model above is not to do that.
+        //
+        // **What this dodge costs is a whole state, and an unwritten dodge reads
+        // like coverage, so here it is in words.** Moving the clock forward
+        // exactly when the new length would have matched the recorded one is a
+        // refusal to generate the third ghost: a file whose `(size, mtime)` pair
+        // is what the `path` row records while its bytes are something else, so
+        // the **first** cheap arm answers `Unchanged` over content it has never
+        // seen. That is the same residual `displaces` names for the size ceiling
+        // and `BinaryTail` names for its own head window — the product trusts
+        // that pair, and every trust of it has the same hole — and this harness
+        // does not test it, in either direction. It is not merely undrawn, it is
+        // stepped around on purpose, because the harness has no way to tell that
+        // state from the legitimate one beside it without re-deriving the arm it
+        // is checking. Closing it needs something this file does not have: a
+        // model of what the index was *told*, separate from what it holds.
         let recorded = self.db.path_entry(self.root_id, &relative).unwrap();
         let invisible = recorded.is_some_and(|row| row.size_bytes == content.bytes.len() as i64);
         let at = if invisible {

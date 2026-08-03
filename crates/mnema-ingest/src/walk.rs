@@ -242,6 +242,15 @@ pub struct WalkReport {
 /// Measured directly, by moving phase 3 above phase 2:
 /// `a_rename_keeps_the_document_and_its_chunks` (`tests/walk.rs`) failed
 /// with the document rebuilt onto different chunk ids rather than kept.
+///
+/// **`pool` is borrowed, and the pool this is handed must not outlive the walk
+/// it is handed to.** `Pool::poisoned` is keyed on the path alone — no size, no
+/// modification time, no expiry — so an entry made on one pass answers for
+/// whatever is at that path on the next one, without a worker being asked. The
+/// shell builds a fresh `Pool` per walk job (`src-tauri/src/walk_job.rs`), which
+/// is what makes that unreachable today; a live watcher re-walking on change
+/// against one long-lived pool would make it reachable. That field's own doc
+/// comment has the measurement and what would have to change.
 pub fn walk_root(
     pool: &Pool,
     db: &Db,

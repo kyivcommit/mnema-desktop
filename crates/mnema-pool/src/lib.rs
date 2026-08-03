@@ -472,6 +472,34 @@ pub struct Pool {
     free: Condvar,
     /// Files that killed a worker, and what they were recorded as. Never handed
     /// to a second process.
+    ///
+    /// **Keyed on the path and nothing else, which is strictly weaker than the
+    /// skip journal one level up, and is safe only because of who builds a
+    /// `Pool`.** The journal at least compares `(size, mtime,
+    /// format_version)` before it trusts a remembered verdict
+    /// (`mnema_ingest::ingest_file`'s second cheap arm); this map is read at the
+    /// top of `extract`, before anything has looked at the file, so it carries
+    /// no size, no modification time, no digest and no expiry. Replace the file
+    /// entirely and this still answers for it.
+    ///
+    /// What makes that harmless today is a fact about the caller, not about this
+    /// type: `src-tauri/src/walk_job.rs` builds a **new** `Pool` for every walk
+    /// job, and phase 2 offers each path to it once. So an entry can never
+    /// outlive the pass that made it. Measured on two pools over one index: the
+    /// poisoned one answers `Skipped { Crash }` without asking a worker and the
+    /// old prose stays findable, while a pool without the entry reads the file,
+    /// says `NotText` and displaces.
+    ///
+    /// That is a **contract**, and this comment is the only place it is written
+    /// down — `walk_root` takes `&Pool` and `Pool` is public, so a live watcher
+    /// that re-walks on change against one long-lived pool would make it a
+    /// defect rather than a note. Whoever builds that has to key this map on
+    /// something the file can change, or drop entries when a walk ends.
+    ///
+    /// One mitigation is real and worth having: a refusal **by content** never
+    /// poisons. Only `Answer::Ended` does (below), which is the worker dying —
+    /// so the rules that displace a document are not the ones this map can
+    /// answer for.
     poisoned: Mutex<HashMap<PathBuf, Skip>>,
     spawned: AtomicUsize,
     live: Arc<AtomicUsize>,
