@@ -90,6 +90,22 @@ case_ "wire: the pool knows the string binary_tail" \
                     "unreadable" => Failure::Unreadable,' \
   mnema-ingest 'an_interrupted_append_does_not_delete_what_the_note_still_says' --test slice
 
+# Reading the string is only half of the seam; the other half is the rule the
+# journal is handed, and until now nothing here touched it. Four cases on
+# writing the strings, none on the mapping — while the file's own header says
+# collapsing the two refusals "is the mistake that costs a document", and that
+# mistake lives in exactly one line of `impl From<Failure> for SkipRule`.
+#
+# Measured before `Failure::every` replaced the hand-written list in
+# `every_failure_maps_onto_its_own_skip_rule`: this mutation left all of
+# mnema-pool green (7/23/1 passed) and reddened only `mnema-ingest/tests/slice.rs`
+# — the crate that owns the line was not the crate that caught it.
+case_ "pool: the failure mapping does not collapse binary_tail into not_text" \
+  crates/mnema-pool/src/lib.rs \
+  's{            Failure::BinaryTail => SkipRule::BinaryTail,}{            Failure::BinaryTail => SkipRule::NotText,}' \
+  'Failure::BinaryTail => SkipRule::NotText,' \
+  mnema-pool 'every_failure_maps_onto_its_own_skip_rule' --test supervision
+
 # ------------------------------------------- which refusal deletes, and which not
 
 # A `.txt` overwritten by a photo must stop answering under its own name. This

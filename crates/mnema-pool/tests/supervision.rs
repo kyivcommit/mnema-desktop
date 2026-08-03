@@ -353,30 +353,72 @@ fn a_pool_with_no_workers_and_a_batch_of_none_are_both_refused_at_construction()
     ));
 }
 
+/// What this file expects one failure to be journalled as, written here rather
+/// than read out of `impl From<Failure> for SkipRule` — a test that asks the
+/// code under test what it does and agrees is not a test.
+///
+/// Exhaustive, so a variant added to `Failure` stops this file **compiling**
+/// until someone writes down what the journal should record it as.
+fn journalled_as(failure: Failure) -> SkipRule {
+    match failure {
+        Failure::Crash => SkipRule::Crash,
+        Failure::Timeout => SkipRule::Timeout,
+        Failure::Memory => SkipRule::Memory,
+        Failure::Unsupported => SkipRule::Unsupported,
+        Failure::Unreadable => SkipRule::Unreadable,
+        Failure::TooLarge => SkipRule::TooLarge,
+        Failure::NotText => SkipRule::NotText,
+        // The pair the whole D51 cycle turns on: refused like `NotText` and
+        // journalled unlike it, because `mnema_ingest::displaces` reads the
+        // rule and one of the two deletes a document.
+        Failure::BinaryTail => SkipRule::BinaryTail,
+    }
+}
+
+/// **This test used to carry its own list, and the list did not work.**
+///
+/// It was seven pairs written out, under a comment saying they were "written
+/// out rather than derived, so that a future variant added to either enum has
+/// to face this list". `Failure::BinaryTail` was the first variant added after
+/// that comment and it never faced the list — the list stayed seven long, and
+/// a reviewer measured what that cost: mapping `Failure::BinaryTail` onto
+/// `SkipRule::NotText` left every test in this crate green, and reddened only
+/// `mnema-ingest/tests/slice.rs` — a crate away from the line that owns the
+/// mapping, and only because that crate happens to ingest such a file.
+///
+/// Two halves, and neither is sufficient alone: `journalled_as` is exhaustive,
+/// so a new variant cannot compile without a decision, and the loop runs over
+/// `Failure::every`, so the decision is actually asserted.
 #[test]
 fn every_failure_maps_onto_its_own_skip_rule() {
+    let mut checked = 0;
     // A skip is only useful if the journal can group by it later, so the
-    // mapping must be injective. Written out rather than derived, so that a
-    // future variant added to either enum has to face this list.
-    let cases = [
-        (Failure::Crash, SkipRule::Crash),
-        (Failure::Timeout, SkipRule::Timeout),
-        (Failure::Memory, SkipRule::Memory),
-        (Failure::Unsupported, SkipRule::Unsupported),
-        (Failure::Unreadable, SkipRule::Unreadable),
-        (Failure::TooLarge, SkipRule::TooLarge),
-        (Failure::NotText, SkipRule::NotText),
-    ];
-    let mut seen: Vec<&'static str> = Vec::new();
-    for (failure, expected) in cases {
+    // mapping must be injective as well as correct.
+    let mut seen: Vec<SkipRule> = Vec::new();
+    for failure in Failure::every() {
         let rule: SkipRule = failure.into();
-        assert_eq!(rule, expected, "{failure:?} maps to the wrong rule");
-        assert!(
-            !seen.contains(&rule.as_str()),
-            "{failure:?} shares a rule with an earlier failure"
+        assert_eq!(
+            rule,
+            journalled_as(failure),
+            "{failure:?} maps to the wrong rule"
         );
-        seen.push(rule.as_str());
+        assert!(
+            !seen.contains(&rule),
+            "{failure:?} shares {:?} with an earlier failure",
+            rule.as_str()
+        );
+        seen.push(rule);
+        checked += 1;
     }
+    // The loop above is vacuously true over an empty enumeration, and an
+    // emptied `every` would satisfy every assertion in it. A lower bound rather
+    // than an equality: the generated list cannot fall short of the enum, so
+    // what is left to guard is `every` itself — and a bound does that without
+    // becoming a literal someone has to remember to bump.
+    assert!(
+        checked >= 8,
+        "`Failure::every` yielded only {checked} variants"
+    );
 }
 
 #[test]

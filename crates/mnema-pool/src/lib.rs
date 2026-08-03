@@ -8,19 +8,19 @@
 //! frames it parses live in `mnema_core::wire`, so the crate that binds Pdfium
 //! stays out of the application's dependency graph entirely.
 //!
-//! A worker's life ends in one of five ways, and the supervisor owes a different
-//! answer to each:
+//! A worker's life ends in one of eight ways, and the supervisor owes a
+//! different answer to each:
 //!
-//! | how it ended                           | what the file gets      |
-//! |----------------------------------------|-------------------------|
-//! | answered `Refused` (no reader)         | [`Failure::Unsupported`] |
-//! | answered `Refused` (over the ceiling)  | [`Failure::TooLarge`]    |
-//! | answered `Refused` (not text)          | [`Failure::NotText`]     |
-//! | answered `Refused` (text, then not)    | [`Failure::BinaryTail`]  |
-//! | answered `Failed` (I/O)                | [`Failure::Unreadable`]  |
-//! | said nothing before the deadline        | [`Failure::Timeout`]     |
-//! | died on a signal                       | [`Failure::Crash`]       |
-//! | killed by the out-of-memory killer     | [`Failure::Memory`]      |
+//! | how it ended                          | what the file gets       |
+//! |---------------------------------------|--------------------------|
+//! | answered `Refused` (no reader)        | [`Failure::Unsupported`] |
+//! | answered `Refused` (over the ceiling) | [`Failure::TooLarge`]    |
+//! | answered `Refused` (not text)         | [`Failure::NotText`]     |
+//! | answered `Refused` (text, then not)   | [`Failure::BinaryTail`]  |
+//! | answered `Failed` (I/O)               | [`Failure::Unreadable`]  |
+//! | said nothing before the deadline      | [`Failure::Timeout`]     |
+//! | died on a signal                      | [`Failure::Crash`]       |
+//! | killed by the out-of-memory killer    | [`Failure::Memory`]      |
 //!
 //! Three properties of this design were measured before it was written, and they
 //! are the reasons it has the shape it has rather than a simpler one:
@@ -68,24 +68,70 @@ const READ_AHEAD: usize = 64;
 
 // ---------------------------------------------------------------- what fails
 
-/// Why a file did not make it into the index. Maps onto
-/// [`SkipRule`](mnema_index::SkipRule), the vocabulary the journal
-/// records, but is a smaller set: it names only the ways a *whole document* can
-/// fail, where `SkipRule` also covers a single PDF page with no text layer.
+/// Declares [`Failure`] and, from the same list, the slice
+/// [`Failure::every`] hands out — the form `declare_skip_rules` uses in
+/// `mnema-index` for `SkipRule`, and here for the same measured reason.
 ///
-/// **The mapping lives in this crate**, as `impl From<Failure> for SkipRule`,
-/// for three reasons. The pool is the only code that observes all five outcomes
-/// — a worker that dies on a signal reports nothing itself, so no other crate
-/// could name that case. `mnema-extract` may not depend on `mnema-index` at all
-/// (a worker that links the database library it is forbidden from opening would
-/// undo the boundary it exists to draw, D26/D40), which is why the worker reports
-/// its rule as a plain string and something has to translate. And this crate
-/// already runs inside the application, where the database library is linked
-/// anyway, so the dependency costs nothing that was not already paid. The
-/// direction matters: a journal's vocabulary must not depend on the supervisor
-/// that happens to feed it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Failure {
+/// `every_failure_maps_onto_its_own_skip_rule` in `tests/supervision.rs` used
+/// to carry its own list of variants, with a comment saying it was "written out
+/// rather than derived, so that a future variant added to either enum has to
+/// face this list". The first variant added after that comment was
+/// [`Failure::BinaryTail`], and it did not face the list: the list stayed seven
+/// long, and mapping `BinaryTail` to the wrong rule left the whole of this
+/// crate green — the only test that reddened was in `mnema-ingest`, a crate
+/// away from the line that owns the mapping.
+///
+/// A list written beside an enum cannot say anything about a variant that is
+/// not in it. Generating it from the declaration is what makes the promise in
+/// that comment true.
+macro_rules! declare_failures {
+    ($($(#[$attr:meta])* $variant:ident,)+) => {
+        /// Why a file did not make it into the index. Maps onto
+        /// [`SkipRule`](mnema_index::SkipRule), the vocabulary the journal
+        /// records, but is a smaller set: it names only the ways a *whole
+        /// document* can fail, where `SkipRule` also covers a single PDF page
+        /// with no text layer.
+        ///
+        /// **The mapping lives in this crate**, as `impl From<Failure> for
+        /// SkipRule`, for three reasons. The pool is the only code that
+        /// observes all eight outcomes — a worker that dies on a signal reports
+        /// nothing itself, so no other crate could name that case.
+        /// `mnema-extract` may not depend on `mnema-index` at all (a worker
+        /// that links the database library it is forbidden from opening would
+        /// undo the boundary it exists to draw, D26/D40), which is why the
+        /// worker reports its rule as a plain string and something has to
+        /// translate. And this crate already runs inside the application, where
+        /// the database library is linked anyway, so the dependency costs
+        /// nothing that was not already paid. The direction matters: a
+        /// journal's vocabulary must not depend on the supervisor that happens
+        /// to feed it.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum Failure {
+            $($(#[$attr])* $variant,)+
+        }
+
+        impl Failure {
+            /// Every variant, in declaration order, generated from the list
+            /// that declares them. Read [`every`](Failure::every) instead.
+            const ALL: &[Failure] = &[$(Failure::$variant,)+];
+        }
+    };
+}
+
+impl Failure {
+    /// Every variant, in declaration order.
+    ///
+    /// `pub` for the reason [`mnema_index::SkipRule::every`] is: the test that
+    /// needs it is an integration test, which links this crate the way any
+    /// other caller does and cannot see a `pub(crate)` or a `#[cfg(test)]`
+    /// item. What it buys is that "every failure" in a test means every
+    /// failure, including the one added tomorrow.
+    pub fn every() -> impl Iterator<Item = Self> {
+        Failure::ALL.iter().copied()
+    }
+}
+
+declare_failures! {
     /// The worker died on a signal without answering — a parser fault.
     Crash,
     /// The worker said nothing within the deadline and was killed.
