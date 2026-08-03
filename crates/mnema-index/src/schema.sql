@@ -100,9 +100,9 @@ CREATE TABLE page (
     -- family at all is a typo, and it would silently match no query ever again.
     -- GLOB, not LIKE: LIKE is case-insensitive for ASCII, so it accepted
     -- 'Native:pdf' and 'OCR:y' — values no reader will ever produce and no
-    -- query grouping by family would match again. Free to change only while
-    -- nothing has shipped and this file is still edited in place at
-    -- SCHEMA_VERSION 1; afterwards it is a migration. Same argument that
+    -- query grouping by family would match again. That fix was free only while
+    -- nothing had shipped. It has: this file is FROZEN as migration 1, and a
+    -- change to it now is a new M::up in migrations.rs. Same argument that
     -- removed the tokenchars clause below.
     text_source   TEXT NOT NULL            -- 'native:pdf', 'native:txt', later 'ocr:*'
                   CHECK (text_source GLOB 'native:*' OR text_source GLOB 'ocr:*'),
@@ -380,9 +380,9 @@ CREATE TABLE chunk_embedding_state (
 -- the other two spellings have been folded away before the tokenizer sees them.
 -- For text that did NOT come through prepare_for_search it did worse than
 -- nothing — raw `students’ books` indexed as `students’`, and the plain word
--- `students` found nothing — and `index_chunk_text` is public. Removing it is
--- free exactly now: nothing has shipped, so this file is edited in place and
--- SCHEMA_VERSION stays 1. Later it costs a migration and a full reindex.
+-- `students` found nothing — and `index_chunk_text` is public. Removing it was
+-- free only before anything shipped. This file is FROZEN as migration 1 now:
+-- another change here costs a new M::up in migrations.rs and a full reindex.
 CREATE VIRTUAL TABLE chunk_fts USING fts5(
     text,
     content='chunk_search',

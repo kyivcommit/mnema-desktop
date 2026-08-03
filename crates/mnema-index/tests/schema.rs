@@ -751,8 +751,8 @@ fn block_type_and_text_source_reject_values_outside_their_vocabularies() {
 /// The CHECK used `LIKE`, which is case-insensitive for ASCII, so `Native:pdf`
 /// and `OCR:y` passed — values no reader produces and no query grouping by
 /// family would ever match again. `GLOB` is the one-word fix and it was free
-/// only while nothing had shipped and this file was still edited in place at
-/// `SCHEMA_VERSION` 1.
+/// only before anything shipped: `schema.sql` is frozen as migration 1 now, so
+/// changing that CHECK again costs a new `M::up` in `migrations.rs`.
 #[test]
 fn a_text_source_family_is_lower_case_or_it_is_not_a_family() {
     let dir = tempfile::tempdir().unwrap();

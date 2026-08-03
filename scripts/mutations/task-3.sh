@@ -38,7 +38,7 @@ case_ "the migration is registered, not merely written" \
   '        M::up(include_str!("schema.sql")),
     ])' \
   mnema-index \
-  'migrations::tests::an_existing_version_one_database_keeps_its_rows_and_credits_the_text_reader' --lib
+  'migrations::tests::an_existing_database_keeps_its_rows_and_the_migration_credits_them_all_to_text' --lib
 
 # C3 and C4. The defaults are values, not decoration, and this is the pair the
 # brief calls out: `NOT NULL` is satisfied by the empty string and by 0, so the
@@ -50,14 +50,14 @@ case_ "the default reader is 'text', and the empty string satisfies NOT NULL" \
   "s~ADD COLUMN reader TEXT NOT NULL DEFAULT 'text';~ADD COLUMN reader TEXT NOT NULL DEFAULT '';~" \
   "ADD COLUMN reader TEXT NOT NULL DEFAULT '';" \
   mnema-index \
-  'migrations::tests::an_existing_version_one_database_keeps_its_rows_and_credits_the_text_reader' --lib
+  'migrations::tests::an_existing_database_keeps_its_rows_and_the_migration_credits_them_all_to_text' --lib
 
 case_ "the default version is 1, and 0 satisfies NOT NULL just as well" \
   crates/mnema-index/src/migrations.rs \
   's~ADD COLUMN reader_version INTEGER NOT NULL DEFAULT 1;~ADD COLUMN reader_version INTEGER NOT NULL DEFAULT 0;~' \
   'ADD COLUMN reader_version INTEGER NOT NULL DEFAULT 0;' \
   mnema-index \
-  'migrations::tests::an_existing_version_one_database_keeps_its_rows_and_credits_the_text_reader' --lib
+  'migrations::tests::an_existing_database_keeps_its_rows_and_the_migration_credits_them_all_to_text' --lib
 
 # C5. `ADD COLUMN` rather than a rebuild, and the mutation is the rebuild
 # written out the way it is usually written: rename, create, copy, drop. It
@@ -70,7 +70,42 @@ case_ "the migration adds columns rather than rebuilding the table" \
   "s~ALTER TABLE path ADD COLUMN reader TEXT NOT NULL DEFAULT 'text';\nALTER TABLE path ADD COLUMN reader_version INTEGER NOT NULL DEFAULT 1;~ALTER TABLE path RENAME TO path_old;\nCREATE TABLE path (watched_root_id INTEGER NOT NULL, relative_path TEXT NOT NULL, document_id TEXT NOT NULL, size_bytes INTEGER NOT NULL, mtime INTEGER NOT NULL, reader TEXT NOT NULL DEFAULT 'text', reader_version INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (watched_root_id, relative_path));\nINSERT INTO path SELECT watched_root_id, relative_path, document_id, size_bytes, mtime, 'text', 1 FROM path_old;\nDROP TABLE path_old;~" \
   'ALTER TABLE path RENAME TO path_old;' \
   mnema-index \
-  'migrations::tests::an_existing_version_one_database_keeps_its_rows_and_credits_the_text_reader' --lib
+  'migrations::tests::an_existing_database_keeps_its_rows_and_the_migration_credits_them_all_to_text' --lib
+
+# C5b. The other half of the rebuild, and the half C5 cannot show: a rebuild
+# whose final `DROP TABLE path_old` is forgotten leaves every row of the index
+# duplicated under a scratch name — invisible to every query, and a second copy
+# again on the next migration that does the same. Written here as the leftover
+# table directly, because a rebuild that produced it would trip the `WITHOUT
+# ROWID` assertion first and this one would never be reached.
+case_ "the migration leaves no scratch copy of path behind" \
+  crates/mnema-index/src/migrations.rs \
+  's~ALTER TABLE path ADD COLUMN reader_version INTEGER NOT NULL DEFAULT 1;~ALTER TABLE path ADD COLUMN reader_version INTEGER NOT NULL DEFAULT 1;\nCREATE TABLE path_old AS SELECT * FROM path;~' \
+  'CREATE TABLE path_old AS SELECT * FROM path;' \
+  mnema-index \
+  'migrations::tests::an_existing_database_keeps_its_rows_and_the_migration_credits_them_all_to_text' --lib
+
+# C10. The freeze, in the form C1 cannot see. C1 catches a column added to
+# `schema.sql` only because SQLite refuses the fresh install with "duplicate
+# column name" — loud, and specific to adding a column. Every other edit in
+# place is silent: this one changes the `text_source` CHECK from GLOB back to
+# the LIKE it was fixed away from, adds no column, and leaves
+# `the_migration_set_is_valid` GREEN — a fresh database gets the new rule while
+# every database already on disk keeps the old one, for ever, with nothing
+# anywhere reporting the divergence. Measured: green on validate, red only here.
+case_ "an in-place edit to the shipped DDL that adds no column is still caught" \
+  crates/mnema-index/src/schema.sql \
+  "s~CHECK \(text_source GLOB 'native:\*' OR text_source GLOB 'ocr:\*'\)~CHECK (text_source LIKE 'native:%' OR text_source LIKE 'ocr:%')~" \
+  "CHECK (text_source LIKE 'native:%' OR text_source LIKE 'ocr:%')" \
+  mnema-index \
+  'migrations::tests::the_shipped_schema_is_frozen_and_changes_belong_in_a_new_migration' --lib
+
+# C10's other direction has no case here, because this harness only reports
+# red. It was measured directly instead, and it matters just as much: rewriting
+# a comment INSIDE the `CREATE TABLE path` statement — text SQLite stores in
+# `sqlite_master`, which a naive fingerprint would trip over — leaves
+# `the_shipped_schema_is_frozen…` green. A guard that went red on prose would be
+# switched off within a week, so explaining the schema has to stay free.
 
 # C6. `insert_path` writes what it is handed. Ignoring both arguments and
 # writing the migration's own defaults instead compiles, and — this is the

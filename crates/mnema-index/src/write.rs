@@ -54,11 +54,18 @@ pub struct PathEntry {
     /// answer: not "did the file move?" but "did the code that read it move?".
     /// See `ADD_PATH_READER` in `migrations.rs` for what goes wrong without it.
     ///
-    /// **Neither field is guaranteed non-empty by the schema.** `NOT NULL` is
-    /// satisfied by `""` and by `0`; what keeps a nameless reader out is
-    /// `mnema-pool`'s refusal of a header that names none
-    /// (`crates/mnema-pool/src/lib.rs:1080`). A row that got here another way
-    /// would match no manifest and re-read its file on every walk for ever.
+    /// **Neither field is guaranteed meaningful by the schema**, and the two are
+    /// guarded unequally. `NOT NULL` is satisfied by `""` and by `0`;
+    /// `mnema-pool` refuses a header whose reader is blank
+    /// (`crates/mnema-pool/src/lib.rs:1080`) and says nothing about the version.
+    /// A `reader_version` of 0 is out of reach today only because the field is
+    /// required on the wire and every worker branch sends a published constant —
+    /// a fact about the workers that exist, not a check.
+    ///
+    /// A row that did get here holding a value no manifest names is re-read
+    /// **once**, not for ever: the mismatch sends the file to a worker and
+    /// `repoint` then overwrites both columns with what the worker said. It is
+    /// only a *writer* stuck on a wrong constant that never converges.
     pub reader: String,
     /// `i64` rather than the `u32` the wire carries, because that is what
     /// SQLite stores and reads back; the comparison against a manifest widens
@@ -106,10 +113,13 @@ impl Db {
     }
 
     /// `reader` and `reader_version` are what the worker said produced this
-    /// document, and are not defaulted here on purpose: the migration's
-    /// `DEFAULT 'text'` describes rows that predate the columns, and letting a
-    /// *new* row take it would credit the text reader for work it did not do —
-    /// which reads as "unchanged" against a manifest for ever.
+    /// document, and are not defaulted here on purpose. The migration's
+    /// `DEFAULT 'text'` is a one-off admission about rows written before the
+    /// columns existed; a *new* row taking it would credit the text reader for
+    /// work it did not do, and — unlike the migrated rows, which converge on the
+    /// next walk — nothing would ever correct it. A `.md` written as `text`
+    /// mismatches the manifest, is re-read, and is written as `text` again: a
+    /// worker process per markdown file per walk, permanently, with no error.
     ///
     /// The size and the modification time arrive as one [`OnDisk`] rather than
     /// as two `i64`s. Loose, they sat between `root` and `reader_version` in a
