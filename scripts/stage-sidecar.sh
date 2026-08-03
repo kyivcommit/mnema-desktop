@@ -9,12 +9,26 @@
 # `cargo tauri dev` — which is why paths.rs used to describe the development case
 # as working only after somebody had run a cargo build by hand.
 #
-# release: also copies the binary under the name bundle.externalBin requires.
-#   Tauri looks for `src-tauri/binaries/<name>-<triple>` and strips the triple when
-#   bundling, so the file inside the app is plain `mnema-extract-worker`. That
-#   convention is written down here and nowhere else.
-# debug: nothing to copy. `paths::worker_path()` resolves to target/debug/ under
-#   `cargo tauri dev`, which is where cargo has just put it.
+# Both profiles then copy that binary under the name bundle.externalBin requires:
+# Tauri looks for `src-tauri/binaries/<name>-<triple>` and strips the triple when
+# bundling, so the file inside the app is plain `mnema-extract-worker`. This is
+# the one place that convention is written down — docs/BUILD.md points here rather
+# than repeating it.
+#
+# `debug` stages too, and that is not symmetry for its own sake. `tauri-build`
+# validates the declared external binary while src-tauri COMPILES, in whatever
+# profile — not when a bundle is assembled. So a tree without that file cannot
+# build the shell at all. Measured: with no `src-tauri/binaries/`, `cargo tauri
+# dev` exits 101 on `resource path binaries/mnema-extract-worker-<triple> doesn't
+# exist` — after this hook has run and reported success. An earlier version of
+# this script returned before the copy on the debug profile, and development
+# appeared to work only because some earlier release build had left the file
+# behind; remove that leftover and a fresh clone could not run `tauri dev` at all.
+#
+# One consequence to know rather than discover: whichever profile ran last is what
+# sits in `src-tauri/binaries/`. That is harmless, because `cargo tauri build`
+# re-stages `release` through beforeBuildCommand before it bundles anything, so a
+# debug binary cannot reach a package by being left there.
 #
 # Why a script rather than four lines in tauri.conf.json: build logic that lives
 # only inside the bundler cannot be run by hand, and this repository has already
@@ -54,11 +68,6 @@ built="${repo_root}/target/${profile}/${name}"
   echo "stage-sidecar: ${built} is missing after a successful build." >&2
   exit 1
 }
-
-if [ "${profile}" = "debug" ]; then
-  echo "stage-sidecar: ${built}"
-  exit 0
-fi
 
 triple="$(rustc -vV | sed -n 's/^host: //p')"
 [ -n "${triple}" ] || {

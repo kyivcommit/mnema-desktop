@@ -105,13 +105,21 @@ jobs:
       # aside and watching `cargo check -p mnema-desktop` fail, then pass — not
       # predicted from the configuration.
       #
+      # `debug`, not `release`. `tauri-build` only checks that the declared file
+      # exists — it does not care which profile produced it — and every other
+      # command in this job is dev profile. Asking for `release` here would
+      # compile mnema-extract and its dependency tree, pdfium-render included, a
+      # second time on both arms for a file whose contents this job never runs.
+      # The bundle job still stages `release`, through beforeBuildCommand, which
+      # is where the profile actually matters.
+      #
       # What it buys beyond unblocking: this is the only place the staging script
       # runs on Linux. It derives the filename suffix from `rustc -vV` on the
       # machine it runs on, so `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`
       # are both exercised here rather than only on whichever laptop last built a
       # package.
       - name: Stage the extraction worker that src-tauri declares as a sidecar
-        run: scripts/stage-sidecar.sh release
+        run: scripts/stage-sidecar.sh debug
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # `ui/` has its own test suite (`ui/render.test.js`, pure functions with

@@ -53,11 +53,12 @@ packager needs and is bound to it by a test so the repetition cannot go stale.
 # Once per machine.
 cargo install tauri-cli --version "^2" --locked
 
-# Once per clone, before any plain cargo command. `cargo tauri build` and
-# `cargo tauri dev` run this themselves; `cargo build`, `cargo clippy` and
-# `cargo test` do not, and the shell does not compile without it — see
-# "A fresh checkout cannot build the shell" below for what it says when it stops.
-scripts/stage-sidecar.sh release
+# Once per clone, before anything else. Nothing about `src-tauri` compiles until
+# this file exists, in any profile — `cargo build`, `cargo clippy` and `cargo test`
+# have no hooks that would create it, and the two `tauri` commands run their hooks
+# without waiting for them to finish. See "A fresh checkout cannot build the shell"
+# below for what it says when it stops, and for why the hooks are not a substitute.
+scripts/stage-sidecar.sh debug     # or release; either satisfies the declaration
 
 # The package.
 cargo tauri build
@@ -125,10 +126,12 @@ The application hands each file to a separate short-lived process, `mnema-extrac
 and resolves it as a sibling of its own executable (`src-tauri/src/paths.rs`). Neither
 `cargo tauri build` nor `cargo tauri dev` builds that binary on its own: `src-tauri`
 deliberately does not depend on `mnema-extract`, so the worker is in no dependency graph
-either command walks. `scripts/stage-sidecar.sh` builds it and, for a release build, copies
-it to `src-tauri/binaries/mnema-extract-worker-<triple>` — the name `bundle.externalBin`
-requires, and the only place that convention is written down. `beforeBuildCommand` and
-`beforeDevCommand` each call it; so can a person debugging a bundle.
+either command walks. `scripts/stage-sidecar.sh` builds it in the profile it is given and
+copies it to `src-tauri/binaries/mnema-extract-worker-<triple>`, the name
+`bundle.externalBin` requires; that script's header is where the naming convention is
+written down, and this page does not repeat it. `beforeBuildCommand` and `beforeDevCommand`
+each call it; so can a person debugging a bundle, and — see the end of this section — so
+must a person with a fresh clone.
 
 The five facts below were measured on 2026-08-03, macOS 26.6 (25G72), arm64, rustc 1.97.1,
 `tauri-cli` 2.11.4. None of them had been observed here before.
@@ -154,27 +157,43 @@ staged copy and the built copy can be compared to each other by digest; **the co
 the image cannot be compared to either that way**, and a freshness check that tries reports
 a stale worker on every build.
 
-**It runs off the read-only mount.** Feeding one NDJSON request to
-`/Volumes/…/Mnema.app/Contents/MacOS/mnema-extract-worker` on the attached image returns
+**It runs off the read-only mount.** The image was attached with
+`hdiutil attach -readonly -nobrowse -mountpoint /tmp/mnema-m4`, and feeding one NDJSON
+request to `/tmp/mnema-m4/Mnema.app/Contents/MacOS/mnema-extract-worker` returns
 `header`, `page`, two `block` frames and `summary`, and exits 0. The image mounts
 `read-only, nodev, nosuid, noowners` — and not `noexec`, which is the flag that would have
 made this fail. Nothing has to be copied out of the image to exercise the worker.
 
-**The development hook lands the debug binary — but it is not the last writer.** With
+**The development hook runs, and is not the last writer — nor a guarantee.** With
 `target/debug/mnema-extract-worker` deleted, `cargo tauri dev` logs
 `Running BeforeDevCommand (../scripts/stage-sidecar.sh debug)` and the binary is back within
 four seconds, at the path `worker_path()` resolves to. That closes the gap `paths.rs`
 described, where development worked only after somebody had run a `cargo build` by hand and
-nothing enforced it. What the hook does not get is the last word. `tauri-build`'s build
-script declares `rerun-if-changed` on `tauri.conf.json`, and when it re-runs it copies the
-staged **release** sidecar over `target/debug/mnema-extract-worker`. Measured with the
-confound removed rather than inferred: with the build script fresh, the debug binary
-(`6a698545…`, 5,449,544 B) survived a whole `cargo tauri dev`; with `tauri.conf.json`
-touched, a plain `cargo build -p mnema-desktop` replaced it with a byte-identical copy of
-`src-tauri/binaries/…` (`b91c71fb…`, 3,054,784 B). **Which worker a development run executes
-therefore depends on which of the two wrote last**, and `tauri-build`'s copy is only as fresh
-as the last `scripts/stage-sidecar.sh release` — a `cargo tauri dev` after a source change to
-`mnema-extract` can run the previous release build of the worker.
+nothing enforced it. Two things qualify it, both measured.
+
+*The hook is not awaited.* In every `cargo tauri dev` log on this repository,
+`Running DevCommand` is the line immediately after `Running BeforeDevCommand`, and the hook's
+own output arrives later, interleaved with the dev build — sometimes behind
+`Blocking waiting for file lock on build directory`. Tauri spawns the hook and does not wait,
+which is right for a dev server and wrong for a staging step whose output the build needs. So
+on a clone with no `src-tauri/binaries/` at all, `cargo tauri dev` is a race between the
+hook's copy and `tauri-build`'s validation of the same path. Observed **eight times: seven
+launched, one failed** on `resource path … doesn't exist` — the run where the dev build's
+cargo took the build-directory lock first, leaving the hook still compiling when the build
+script asked for the file. **The hook is therefore a convenience, not the mechanism.** Run
+`scripts/stage-sidecar.sh` once yourself after cloning; that is what makes it dependable, and
+what the CI `check` job does as an explicit step rather than relying on a hook.
+
+*`tauri-build` writes to the same path.* Its build script declares `rerun-if-changed` on
+`tauri.conf.json`, and when it re-runs it copies whatever is in `src-tauri/binaries/` over
+`target/debug/mnema-extract-worker`. Since both profiles now stage, the common path is
+self-consistent: after `scripts/stage-sidecar.sh debug`, the staged file and
+`target/debug/mnema-extract-worker` are the same 5,449,544-byte debug binary, digest
+`5eb4fc08…` for both. **The hazard is narrowed, not gone.** Stage `release` — which
+`cargo tauri build` does on every package — and then run a plain `cargo build -p mnema-desktop`
+with no hook in between, and `target/debug/mnema-extract-worker` becomes the 3,054,784-byte
+release binary, `b91c71fb…`, for both. A development run started after a packaging run
+executes a release worker, and if `mnema-extract`'s sources have moved since, a stale one.
 
 ### A fresh checkout cannot build the shell until the sidecar is staged
 
@@ -189,18 +208,26 @@ error: failed to run custom build command for `mnema-desktop v0.0.0 (…/src-tau
 
 Measured with the directory moved aside: `cargo build -p mnema-desktop`,
 `cargo check -p mnema-desktop` and `cargo clippy -p mnema-desktop --all-targets` all exit 101
-on that error. The two `tauri` commands are unaffected, because their `before*Command` hooks
-stage the file first — `cargo tauri build` prints `Running beforeBuildCommand` and completes
-from the same absent-directory state, checked rather than assumed. But **plain cargo has no
-hooks**, so `cargo clippy --workspace --all-targets` and `cargo test --workspace` do not get
-one, and that is what `.github/workflows/ci.yml`'s `check` job runs on a checkout where the
-directory cannot exist.
+on that error. **Plain cargo has no hooks**, so `cargo clippy --workspace --all-targets` and
+`cargo test --workspace` get nothing to save them, and that is what
+`.github/workflows/ci.yml`'s `check` job runs on a checkout where the directory cannot exist.
+The job therefore stages explicitly, before `fmt`, `clippy` and `test`.
 
-So a person runs `scripts/stage-sidecar.sh release` once after cloning, and the `check` job
-has a step that runs the same thing before `fmt`, `clippy` and `test`. The `bundle` job does
-not, and does not need one. **The requirement is `externalBin`'s, not the staging script's:**
-`tauri-build` validates the declared path while `src-tauri` compiles, so it holds however the
-file arrives, and a change to how the sidecar is staged does not remove it.
+The two `tauri` commands are **not** equivalent to that step, and the difference is not
+symmetry:
+
+- `cargo tauri build` is safe. From the same absent-directory state it prints
+  `Running beforeBuildCommand` and completes, exit 0 — checked, not assumed. The `bundle` job
+  needs no staging step and does not have one.
+- `cargo tauri dev` is not. Tauri does not wait for `beforeDevCommand`, so on a clone with
+  nothing staged the hook races `tauri-build`'s validation of the file it is still writing —
+  one failure in eight observed runs, on the same `resource path … doesn't exist`. The hook
+  removes the *certain* failure, not the *possible* one.
+
+Hence the once-per-clone line in *The commands* above. **The requirement belongs to
+`externalBin`, not to the staging script:** `tauri-build` validates the declared path while
+`src-tauri` compiles, in any profile, so it holds however the file arrives and no change to
+how staging works removes it.
 
 ## Signing
 
