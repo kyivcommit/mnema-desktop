@@ -6,6 +6,7 @@
 //! hyphenation, tables, OCR fallback — is the extraction spec's subject and is
 //! deliberately not decided here.
 
+pub mod manifest;
 mod markdown;
 mod pdfium_probe;
 mod text;

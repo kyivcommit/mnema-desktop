@@ -58,6 +58,18 @@ pub enum Frame {
         sha256: String,
         mime: String,
         source_kind: SourceKind,
+        /// Which reader produced the frames that follow, and which version of
+        /// it. Stated by the worker rather than derived by the parent: the
+        /// parent may not link the crate that holds the readers (D40), and the
+        /// answer has to survive the process boundary anyway.
+        ///
+        /// It is the reader that actually ran, not the one
+        /// `manifest::for_extension` predicts — the two agree today, and the
+        /// day they stop, this field is the one that is true. The manifest
+        /// answers "would this file be read differently now"; this answers
+        /// "how was it read".
+        reader: String,
+        reader_version: u32,
         pages: u32,
     },
     /// Opens a page. Every `Block` after it belongs to this page, until the
@@ -212,6 +224,8 @@ mod tests {
             sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85".to_string(),
             mime: "text/plain".to_string(),
             source_kind: SourceKind::Document,
+            reader: "text".to_string(),
+            reader_version: 1,
             pages: 1,
         }
     }
@@ -319,6 +333,46 @@ mod tests {
                 rule: "not_text".to_string(),
                 reason: "not text".to_string(),
                 sha256: Some("abc123".to_string()),
+            }
+        );
+    }
+
+    /// The opposite decision to the one above, on purpose, and worth stating
+    /// next to it: a header from a worker that predates `reader` does **not**
+    /// parse. No `#[serde(default)]`.
+    ///
+    /// `Refused::sha256` defaults because `None` is a real answer there — the
+    /// size ceiling refuses from `stat` and there is no digest to send. There
+    /// is no such thing as a document produced by no reader, so a default here
+    /// could only be a placeholder, and a placeholder is worse than a stop:
+    /// every file such a worker read would be recorded as made by the empty
+    /// reader at version 0, which never matches any manifest, so every one of
+    /// them would be re-read on every run for ever. A `PoolError::Protocol`
+    /// stops the job instead and names the mismatch — the same answer this
+    /// crate's parent already gives an unknown `Refused` rule, and for the
+    /// same reason.
+    #[test]
+    fn a_header_from_a_worker_that_predates_the_reader_field_is_a_protocol_error() {
+        let old = r#"{"frame":"header","sha256":"abc","mime":"text/plain","source_kind":"document","pages":1}"#;
+        let error = from_line(old).expect_err("a header with no reader must not parse");
+        assert!(
+            error.to_string().contains("reader"),
+            "the error must name the missing field, got: {error}"
+        );
+
+        // The other direction: a header that carries the fields keeps their
+        // values rather than any default. Without this, an implementation that
+        // rejected every header would pass the assertion above.
+        let new = r#"{"frame":"header","sha256":"abc","mime":"text/markdown","source_kind":"document","reader":"markdown","reader_version":4,"pages":2}"#;
+        assert_eq!(
+            from_line(new).unwrap(),
+            Frame::Header {
+                sha256: "abc".to_string(),
+                mime: "text/markdown".to_string(),
+                source_kind: SourceKind::Document,
+                reader: "markdown".to_string(),
+                reader_version: 4,
+                pages: 2,
             }
         );
     }

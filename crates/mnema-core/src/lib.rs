@@ -2,6 +2,7 @@
 
 mod block;
 mod locator;
+pub mod manifest;
 pub mod nfc;
 mod source_kind;
 pub mod wire;

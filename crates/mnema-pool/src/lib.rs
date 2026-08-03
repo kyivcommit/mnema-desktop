@@ -250,6 +250,14 @@ pub struct Document {
     pub sha256: String,
     pub mime: String,
     pub source_kind: SourceKind,
+    /// Which reader produced this document, and which version of it — carried
+    /// through from the header unchanged. The pool does not interpret either:
+    /// it is the parent that stores them beside the path and later compares
+    /// them against a worker's manifest to decide whether the file must be read
+    /// again. Carried here rather than re-derived from `mime` because the pool
+    /// is deliberately the side of the boundary that knows no formats.
+    pub reader: String,
+    pub reader_version: u32,
     pub pages: Vec<ExtractedPage>,
     pub skipped_pages: u32,
     pub text_source: String,
@@ -1091,6 +1099,8 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                     sha256,
                     mime,
                     source_kind,
+                    reader,
+                    reader_version,
                     pages: promised,
                 }) = header
                 else {
@@ -1121,6 +1131,8 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                     sha256,
                     mime,
                     source_kind,
+                    reader,
+                    reader_version,
                     pages,
                     skipped_pages,
                     text_source,

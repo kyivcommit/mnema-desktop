@@ -2596,7 +2596,13 @@ fn a_document_with_no_pages_is_still_written() {
         fx.root.parent().unwrap(),
         &format!(
             "printf '{}\\n{}\\n'",
-            r#"{"frame":"header","sha256":"'"$(printf %064d 7)"'","mime":"application/pdf","source_kind":"document","pages":0}"#,
+            // `reader`/`reader_version` are filled in with a reader this build
+            // does not have, which is what a worker of another version would
+            // send and costs this test nothing: its subject is the page count
+            // of nought, and a header missing a required field would fail it
+            // for the wrong reason — as a protocol error, before the empty
+            // document was ever written.
+            r#"{"frame":"header","sha256":"'"$(printf %064d 7)"'","mime":"application/pdf","source_kind":"document","reader":"pdf","reader_version":1,"pages":0}"#,
             r#"{"frame":"summary","skipped_pages":0,"text_source":"native:pdf"}"#
         ),
     );

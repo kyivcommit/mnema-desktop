@@ -203,6 +203,8 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                     sha256: "0".repeat(64),
                     mime: "text/markdown".to_string(),
                     source_kind: SourceKind::Document,
+                    reader: "markdown".to_string(),
+                    reader_version: 1,
                     pages: 3,
                 },
             );
@@ -230,6 +232,8 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                     sha256: "0".repeat(64),
                     mime: "text/plain".to_string(),
                     source_kind: SourceKind::Document,
+                    reader: "text".to_string(),
+                    reader_version: 1,
                     pages: 1,
                 },
             );
@@ -288,6 +292,8 @@ fn answer(stdout: &mut io::Stdout) {
             sha256: "0".repeat(64),
             mime: "text/plain".to_string(),
             source_kind: SourceKind::Document,
+            reader: "text".to_string(),
+            reader_version: 1,
             pages: 1,
         },
     );

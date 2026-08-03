@@ -15,6 +15,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
+use mnema_extract::manifest;
 use mnema_extract::typing::{Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
 use mnema_extract::{extract_markdown, extract_text};
@@ -45,6 +46,19 @@ fn main() {
             ),
         };
         println!("{line}");
+        return;
+    }
+
+    // The second diagnostic branch, and the one the application actually calls
+    // on every run: it prints what this build's readers are and exits. Not part
+    // of the NDJSON protocol either — the parent needs the answer *before* it
+    // decides which files to send, and it may not link this crate to read the
+    // constants directly (D40). See `mnema_core::manifest`.
+    if args.len() == 2 && args[1] == "--manifest" {
+        println!(
+            "{}",
+            serde_json::to_string(&manifest::manifest()).expect("the manifest serialises")
+        );
         return;
     }
 
@@ -170,6 +184,12 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256,
                 mime: file_type.mime.to_string(),
                 source_kind: file_type.source_kind,
+                // Named in the branch that ran, not looked up from the
+                // manifest by extension: this is the record of how the file
+                // *was* read, and a lookup here would make the two agree by
+                // construction and hide the day they stop agreeing.
+                reader: "text".to_string(),
+                reader_version: manifest::TEXT_READER_VERSION,
                 pages: 1,
             });
             // One page, always, even for an empty file with no blocks under
@@ -195,6 +215,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256,
                 mime: file_type.mime.to_string(),
                 source_kind: file_type.source_kind,
+                reader: "markdown".to_string(),
+                reader_version: manifest::MARKDOWN_READER_VERSION,
                 // The count the pool checks the page frames against, so it is
                 // taken from the same vector those frames come from rather
                 // than counted a second way.
