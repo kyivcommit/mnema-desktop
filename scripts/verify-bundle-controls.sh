@@ -207,6 +207,21 @@ stage_fresh_worker() {
     "${into}/src-tauri/binaries/mnema-extract-worker-${triple}"
 }
 
+# A stand-in worker for control 14c: reads and discards one request line, then
+# answers with a header frame and nothing else — no Page, no Block, no Summary.
+# `/usr/bin/true` (control 14b) already reaches the header grep at
+# verify-bundle.sh:203 by answering nothing at all; this reaches the block grep
+# at :206 instead, which needs a worker that answers something.
+write_header_only_worker() {
+  local dest="$1"
+  cat > "$dest" <<'SCRIPT' || return 1
+#!/bin/sh
+IFS= read -r _request
+printf '{"frame":"header","sha256":"fake-header-only-worker","mime":"text/plain","source_kind":"document","pages":1}\n'
+SCRIPT
+  chmod +x "$dest"
+}
+
 echo "### 1. the dmg directory does not exist"
 expect_red "no bundle at all" "${REPO}/scripts/verify-bundle.sh" "${LAB}/absent"
 
@@ -332,13 +347,20 @@ gone "${extra_staged}"
 must check_one_staged
 
 echo "### 14. the worker cannot answer — which is not the same as answering no"
-# Measured: swapping the worker for /usr/bin/false leaves the outer seal
-# covering bytes that are no longer there — codesign calls that "nested code
-# is modified or invalid", the same reddening control 7 exists for, and
-# without a re-sign that fires before this control's own check ever runs.
-# The real bundler re-signs after staging the sidecar (see the freshness
-# comment in verify-bundle.sh); this mirrors that step so what is under test
-# is the worker's answer, not a seal nobody re-cut.
+# Measured: swapping the worker for /usr/bin/false leaves the outer seal covering
+# bytes that are no longer there, and codesign calls that "nested code is modified
+# or invalid" — the same reddening control 7 exists for. With the check below not
+# yet written, that is the only thing left to redden on, so without this re-sign
+# the control can never be seen still-green: it proves control 7 twice and itself
+# not at all. Once the check exists it runs first and this step no longer decides
+# the colour — it decides whether the red-first observation can be repeated.
+# It is also the state a real build produces: the bundler re-signs after staging
+# the sidecar (see the freshness comment in verify-bundle.sh), so a bundle whose
+# worker cannot answer is properly sealed. That single defect is what is under test.
+#
+# `--deep` here SIGNS, which verify-bundle.sh itself calls deprecated — for
+# *signing*. That deprecation is about a shipped, notarized bundle; resealing a
+# lab fixture that is neither is exactly the case it does not cover.
 if must copy_app_out "${LAB}/mute-worker" \
   && must cp /usr/bin/false \
        "${LAB}/mute-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
@@ -348,6 +370,39 @@ if must copy_app_out "${LAB}/mute-worker" \
   expect_red -m "the bundled worker exited" \
     "a worker that exits non-zero and says nothing" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/mute-worker-img"
+fi
+
+echo "### 14b. the worker exits clean and says nothing"
+# Same re-sign, same reason as control 14: /usr/bin/true's bytes differ from the
+# staged worker's, so the seal needs re-cutting before this control's own
+# precondition — still green, with the check below absent — is observable.
+# Reaches verify-bundle.sh:203's header grep rather than :200's exit check,
+# which is the assertion neither this suite nor a prior run had ever reddened.
+if must copy_app_out "${LAB}/silent-worker" \
+  && must cp /usr/bin/true \
+       "${LAB}/silent-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must chmod +x "${LAB}/silent-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must codesign --sign - --force --deep "${LAB}/silent-worker/Mnema.app" \
+  && must image_from "${LAB}/silent-worker" "${LAB}/silent-worker-img/dmg/Mnema.dmg"; then
+  expect_red -m "returned no header frame" \
+    "a worker that exits 0 and answers nothing — UNANSWERED, not the same reason as 14" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/silent-worker-img"
+fi
+
+echo "### 14c. the worker answers a header and no block"
+# Same re-sign, same reason again. write_header_only_worker's script is not a
+# Mach-O binary, so codesign --deep treats it as a plain resource, hashes it,
+# and reseals around it — measured before writing this control, not assumed.
+# Reaches verify-bundle.sh:206's block grep, the one assertion in this task's
+# headline claim that neither 14 nor 14b exercises.
+if must copy_app_out "${LAB}/header-only-worker" \
+  && must write_header_only_worker \
+       "${LAB}/header-only-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must codesign --sign - --force --deep "${LAB}/header-only-worker/Mnema.app" \
+  && must image_from "${LAB}/header-only-worker" "${LAB}/header-only-worker-img/dmg/Mnema.dmg"; then
+  expect_red -m "returned no block frame" \
+    "a worker that answers a header and never a block" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/header-only-worker-img"
 fi
 
 echo "### 9. the shell depends on Pdfium and the bundle carries none"

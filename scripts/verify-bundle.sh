@@ -204,8 +204,7 @@ printf '%s\n' "${answer}" | grep -q '"frame":"header"' \
   || fail "the bundled worker returned no header frame for ${text_fixture}. It said:
   $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 printf '%s\n' "${answer}" | grep -q '"frame":"block"' \
-  || fail "the bundled worker returned no block for ${text_fixture} — it answered, and
-  the answer contains no text. It said:
+  || fail "the bundled worker returned no block frame for ${text_fixture}. It said:
   $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 
 echo "verify-bundle: the bundled worker reads a text file and returns blocks"
