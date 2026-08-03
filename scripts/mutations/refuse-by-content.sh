@@ -188,6 +188,41 @@ case_ "wire: the worker sends the digest it refused on" \
                 sha256: None,' \
   mnema-extract 'a_photo_is_refused_by_the_real_worker' --test worker_cli
 
+# …and the two branches beside it, which had nothing. The blindness was
+# structural: both of the parent's deterministic witnesses for this field stand
+# a shell script in for the worker and have it print a digest they chose, so
+# they pin that `displaces` CONSUMES it and nothing pinned that anything
+# PRODUCES it. Measured before the test named below existed — dropping the field
+# from the `unsupported` branch left the whole workspace green, 0 failed under
+# `--no-fail-fast`, and `cargo test` without that flag stops at the first failing
+# target and would have hidden even a real one.
+#
+# What it costs is the defect `e345491` closed, arriving from the other end: a
+# missing digest reads as "the bytes are unknown, so displace", so a folder of
+# PDFs indexed by a build with the reader and walked by a build without it loses
+# a document per file with the bytes never having moved.
+case_ "wire: the worker sends the digest for a format it has no reader for" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's{("unsupported".*?)sha256: Some\(sha256\)}{$1sha256: None}s' \
+  'file_type.mime, file_type.reader
+                ),
+                sha256: None,' \
+  mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
+
+# `binary_tail` never displaces, so this field cannot cost a document through
+# `displaces` today — which is exactly why it needs a case at the boundary
+# rather than through the parent. It is the evidence a future rule about that
+# path would be decided on, and nothing downstream would notice it going
+# missing.
+case_ "wire: the worker sends the digest for a note that stopped being text" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's{("binary_tail".*?)sha256: Some\(sha256\)}{$1sha256: None}s' \
+  '                sha256: None,
+            }]
+        }
+        // None of these five formats' \
+  mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
+
 # The digest has to survive two hops inside the pool, and each is a separate
 # field that can be dropped on its own. Dropping either is a silent reversion
 # to deleting on every refusal — `is_none_or` reads a missing digest as "the
