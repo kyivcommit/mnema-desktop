@@ -29,6 +29,7 @@ pub use mnema_core::wire;
 // own name rather than silently reusing this one.
 pub use markdown::{MarkdownPage, SECTION_TITLE_MAX_CHARS, extract_markdown};
 pub use pdfium_probe::{
-    Error, PDFIUM_API_BUILD, PDFIUM_LIB_DIR_ENV, PageProbe, TEXT_LAYER_MIN_CHARS, probe_text_layer,
+    Error, PDFIUM_API_BUILD, PDFIUM_LIB_DIR_ENV, PageProbe, Stage, TEXT_LAYER_MIN_CHARS,
+    probe_text_layer,
 };
 pub use text::extract_text;

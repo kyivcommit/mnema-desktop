@@ -35,14 +35,60 @@ pub struct PageProbe {
     pub has_text_layer: bool,
 }
 
+/// Which step of loading Pdfium an [`Error`] surfaced from, as a value a caller
+/// can match on rather than infer from prose.
+///
+/// It exists because `pdfium()` (below) runs three steps in sequence —
+/// `library_dir`, `verify_build`, `bind_to_library` — and, before this type,
+/// all three reported failure through the same `Error::Library(String)`
+/// variant. `--probe-pdfium` (`src/bin/worker.rs`) answers exactly one
+/// question, "can this build load Pdfium at all", and a caller reading only
+/// its boolean `loaded` field could not tell "the .dylib is not where
+/// expected" apart from "code signing refused to load it" — two failures with
+/// completely different fixes. Measured on a real signed bundle: the first
+/// failure hit was a missing `VERSION` manifest, not the code-signature
+/// question the branch exists to answer; reading only `loaded` would have
+/// recorded the wrong one of the two as settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// No shared library file was found at any of the three candidate
+    /// locations [`library_dir`] checks.
+    LibraryDir,
+    /// The `VERSION` manifest beside the library was missing, unreadable, or
+    /// named a build these bindings were not compiled for. Two different
+    /// causes share this stage — a missing manifest and a build mismatch —
+    /// because both are found inside [`verify_build`], before the library
+    /// itself is ever asked to load; the full cause is still in `Error`'s own
+    /// message.
+    VerifyBuild,
+    /// The library file was found and its `VERSION` verified, but
+    /// `Pdfium::bind_to_library` itself failed. This is the shape a
+    /// code-signing refusal takes: the file is present and named the right
+    /// build, and the dynamic loader still declines it.
+    Bind,
+}
+
+impl Stage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage::LibraryDir => "library_dir",
+            Stage::VerifyBuild => "verify_build",
+            Stage::Bind => "bind",
+        }
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
     #[error("pdfium: {0}")]
     Pdfium(String),
 
-    /// The library, or the version manifest beside it, could not be found or read.
-    #[error("pdfium library: {0}")]
-    Library(String),
+    /// The library, or the version manifest beside it, could not be found or
+    /// read, or the library itself failed to bind. `stage` names which of the
+    /// three — see [`Stage`] for why the distinction matters and
+    /// [`Error::stage`] for how to read it without matching on this variant.
+    #[error("pdfium library ({}): {message}", stage.as_str())]
+    Library { stage: Stage, message: String },
 
     /// The shipped binary is not the build the compiled bindings describe.
     #[error(
@@ -56,6 +102,22 @@ pub enum Error {
         found: u32,
         path: String,
     },
+}
+
+impl Error {
+    /// The stage this error surfaced from, as a string a wire consumer can
+    /// match on directly rather than parse out of `Display`'s prose.
+    /// `"document"` for [`Error::Pdfium`] — a fault in the file itself, after
+    /// the library has already loaded — is not one of `Stage`'s three
+    /// variants because it is not a step of *loading* Pdfium at all, but a
+    /// probe reading this field must still get an answer rather than a gap.
+    pub fn stage(&self) -> &'static str {
+        match self {
+            Error::Pdfium(_) => "document",
+            Error::Library { stage, .. } => stage.as_str(),
+            Error::BuildMismatch { .. } => Stage::VerifyBuild.as_str(),
+        }
+    }
 }
 
 /// Reports, per page, how much text the layer carries and whether that clears
@@ -143,8 +205,9 @@ fn pdfium() -> Result<&'static Pdfium, Error> {
             let dir = library_dir()?;
             let library = Pdfium::pdfium_platform_library_name_at_path(&dir);
             verify_build(&dir)?;
-            let bindings = Pdfium::bind_to_library(&library).map_err(|e| {
-                Error::Library(format!("{} could not be loaded: {e}", library.display()))
+            let bindings = Pdfium::bind_to_library(&library).map_err(|e| Error::Library {
+                stage: Stage::Bind,
+                message: format!("{} could not be loaded: {e}", library.display()),
             })?;
             Ok(Pdfium::new(bindings))
         })
@@ -185,11 +248,14 @@ fn library_dir() -> Result<PathBuf, Error> {
         return Ok(vendored.to_path_buf());
     }
 
-    Err(Error::Library(format!(
-        "no {} found. Set {PDFIUM_LIB_DIR_ENV}, or run scripts/fetch-pdfium.sh to \
-         vendor Pdfium build {PDFIUM_API_BUILD}.",
-        Pdfium::pdfium_platform_library_name().to_string_lossy(),
-    )))
+    Err(Error::Library {
+        stage: Stage::LibraryDir,
+        message: format!(
+            "no {} found. Set {PDFIUM_LIB_DIR_ENV}, or run scripts/fetch-pdfium.sh to \
+             vendor Pdfium build {PDFIUM_API_BUILD}.",
+            Pdfium::pdfium_platform_library_name().to_string_lossy(),
+        ),
+    })
 }
 
 /// Refuses to go on unless the `VERSION` manifest vendored beside the library
@@ -217,17 +283,20 @@ fn verify_build(library_dir: &Path) -> Result<(), Error> {
         library_dir.join("VERSION"),
         library_dir.join("..").join("VERSION"),
     ];
-    let manifest = candidates.iter().find(|p| p.is_file()).ok_or_else(|| {
-        Error::Library(format!(
+    let manifest = candidates.iter().find(|p| p.is_file()).ok_or_else(|| Error::Library {
+        stage: Stage::VerifyBuild,
+        message: format!(
             "no VERSION manifest beside {}. The build of Pdfium cannot be \
              confirmed, and an unconfirmed build is the failure this check exists \
              for. Run scripts/fetch-pdfium.sh.",
             library_dir.display()
-        ))
+        ),
     })?;
 
-    let contents = std::fs::read_to_string(manifest)
-        .map_err(|e| Error::Library(format!("{} could not be read: {e}", manifest.display())))?;
+    let contents = std::fs::read_to_string(manifest).map_err(|e| Error::Library {
+        stage: Stage::VerifyBuild,
+        message: format!("{} could not be read: {e}", manifest.display()),
+    })?;
 
     build_from_version_manifest(&contents, &manifest.display().to_string()).map(|_| ())
 }
@@ -238,11 +307,14 @@ fn build_from_version_manifest(contents: &str, path: &str) -> Result<u32, Error>
     let found = contents
         .lines()
         .find_map(|line| line.trim().strip_prefix("BUILD="))
-        .ok_or_else(|| Error::Library(format!("{path} declares no BUILD= line")))?;
-    let found: u32 = found
-        .trim()
-        .parse()
-        .map_err(|e| Error::Library(format!("{path} has an unreadable BUILD= line: {e}")))?;
+        .ok_or_else(|| Error::Library {
+            stage: Stage::VerifyBuild,
+            message: format!("{path} declares no BUILD= line"),
+        })?;
+    let found: u32 = found.trim().parse().map_err(|e| Error::Library {
+        stage: Stage::VerifyBuild,
+        message: format!("{path} has an unreadable BUILD= line: {e}"),
+    })?;
 
     if found == PDFIUM_API_BUILD {
         Ok(found)
@@ -323,7 +395,18 @@ mod tests {
         // unconfirmed, which is the state this check exists to reject.
         let err = build_from_version_manifest("MAJOR=151\nMINOR=0\nPATCH=0\n", "/vendor/VERSION")
             .expect_err("a manifest with no BUILD= line confirms nothing");
-        assert!(matches!(err, Error::Library(_)));
+        // Both the variant AND the stage it carries: a missing BUILD= line is
+        // discovered inside verify_build, not while looking for the library
+        // itself or while binding it, and `--probe-pdfium` reports exactly
+        // this field to a caller that never sees this match arm.
+        assert!(matches!(
+            err,
+            Error::Library {
+                stage: Stage::VerifyBuild,
+                ..
+            }
+        ));
+        assert_eq!(err.stage(), "verify_build");
     }
 
     #[test]
@@ -331,5 +414,21 @@ mod tests {
         // The accept branch against the real file on disk, not a string literal.
         let dir = library_dir().expect("the vendored library is present");
         verify_build(&dir).expect("the vendored build matches the bindings");
+    }
+
+    #[test]
+    fn a_directory_with_no_version_manifest_fails_at_the_verify_build_stage() {
+        // The real filesystem failure a bundle probe hit first
+        // (task-1-report.md): not a signature refusal, a missing VERSION
+        // file. This drives verify_build() itself, not the string-based
+        // build_from_version_manifest helper above, so it also exercises the
+        // "no candidate path is a file" branch that helper never reaches.
+        let dir = tempfile::tempdir().unwrap();
+        let err = verify_build(dir.path()).expect_err("an empty directory has no VERSION");
+        assert_eq!(err.stage(), "verify_build");
+        assert!(
+            err.to_string().contains("no VERSION manifest"),
+            "the message must still say what verify_build() itself found: {err}"
+        );
     }
 }

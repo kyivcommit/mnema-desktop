@@ -28,9 +28,19 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 3 && args[1] == "--probe-pdfium" {
         let line = match mnema_extract::probe_text_layer(Path::new(&args[2])) {
-            Ok(probes) => format!("{{\"loaded\":true,\"pages\":{}}}", probes.len()),
+            Ok(probes) => format!(
+                "{{\"loaded\":true,\"pages\":{},\"stage\":\"ok\"}}",
+                probes.len()
+            ),
+            // `stage` names which of library_dir/verify_build/bind failed,
+            // separately from `error`'s free text: those three collapse onto
+            // the same `loaded:false` and a caller reading only the boolean
+            // cannot tell "the library is not where expected" apart from
+            // "code signing refused to load it" — see `Stage`'s own doc for
+            // why that gap is not hypothetical.
             Err(e) => format!(
-                "{{\"loaded\":false,\"error\":{}}}",
+                "{{\"loaded\":false,\"stage\":{},\"error\":{}}}",
+                serde_json::to_string(e.stage()).expect("a string serialises"),
                 serde_json::to_string(&e.to_string()).expect("a string serialises")
             ),
         };

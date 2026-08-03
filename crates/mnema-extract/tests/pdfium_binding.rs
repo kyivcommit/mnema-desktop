@@ -134,7 +134,7 @@ fn the_crate_root_error_type_is_the_one_probe_text_layer_actually_returns() {
         .expect_err("a path that does not exist is not a document");
 
     match err {
-        mnema_extract::Error::Pdfium(_) | mnema_extract::Error::Library(_) => {}
+        mnema_extract::Error::Pdfium(_) | mnema_extract::Error::Library { .. } => {}
         mnema_extract::Error::BuildMismatch { .. } => {
             panic!("a missing file is not a build mismatch")
         }
@@ -152,15 +152,20 @@ fn a_missing_file_returns_an_error() {
     );
 }
 
-/// The worker binary, not `probe_text_layer` directly: the question this
-/// answers is whether the *bundled* worker — running under whatever code
-/// signature and library placement packaging gives it — can load Pdfium at
-/// all, which the wire protocol has no way to ask (D53, D54).
+/// The worker binary, not `probe_text_layer` directly. It exists so the
+/// question "can this build load Pdfium at all" can be put to a *packaged*
+/// binary — the wire protocol has no way to ask it (D53, D54) — but this
+/// test itself runs the development binary out of `target/`, under this
+/// process's own ad-hoc-or-absent signature, not the bundle's. What it holds
+/// is the flag's contract: given a good fixture, the answer names both
+/// `loaded` and a page count. Whether the *bundled* worker's answer is the
+/// same is a packaging question, answered separately (task-1-report.md) and
+/// not by this test — the two disagree today.
 #[test]
 fn the_worker_reports_whether_pdfium_loaded() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
         .arg("--probe-pdfium")
-        .arg("tests/fixtures/one-page-text.pdf")
+        .arg(fixture("one-page-text.pdf"))
         .output()
         .expect("the worker binary starts");
     assert!(
@@ -175,6 +180,46 @@ fn the_worker_reports_whether_pdfium_loaded() {
     // binding — it proves the flag was parsed.
     assert_eq!(v["loaded"], serde_json::json!(true));
     assert!(v["pages"].as_u64().expect("a page count") > 0);
+    // No stage on a success, or `"ok"` — never one of the three failure
+    // stages a caller would otherwise read as a real refusal.
+    assert_eq!(v["stage"], serde_json::json!("ok"));
+}
+
+/// The real negative case Important 2 asked for, not a mutation standing in
+/// for one: `MNEMA_PDFIUM_LIB_DIR` pointed at a directory that exists but
+/// holds neither the library nor a `VERSION` manifest. `library_dir()`
+/// returns that path unconditionally when the override is set — it does not
+/// check the directory holds anything — so this fails one step later, inside
+/// `verify_build()`, which is the same shape a bundle assembled from
+/// mismatched parts takes. It is what a real bundle probe hit first
+/// (task-1-report.md), before ever reaching the code-signature question the
+/// branch exists to answer — the reason `stage` exists at all rather than a
+/// bare boolean.
+#[test]
+fn an_empty_library_directory_fails_at_the_verify_build_stage() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .arg("--probe-pdfium")
+        .arg(fixture("one-page-text.pdf"))
+        .env(mnema_extract::PDFIUM_LIB_DIR_ENV, dir.path())
+        .output()
+        .expect("the worker binary starts");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = String::from_utf8(out.stdout).expect("stdout is UTF-8");
+    let v: serde_json::Value = serde_json::from_str(line.trim()).expect("one JSON line");
+    assert_eq!(v["loaded"], serde_json::json!(false));
+    assert_eq!(v["stage"], serde_json::json!("verify_build"));
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("an error string")
+            .contains("VERSION"),
+        "the message must still say what was missing: {v}"
+    );
 }
 
 #[test]
