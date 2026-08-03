@@ -156,7 +156,9 @@ image `8b9f1f71…`, and gives `target/release/mnema-extract-worker` and
 other. The sizes differ by 352 bytes, which is the signature the bundler replaces. So the
 staged copy and the built copy can be compared to each other by digest; **the copy inside
 the image cannot be compared to either that way**, and a freshness check that tries reports
-a stale worker on every build.
+a stale worker on every build. `scripts/verify-bundle.sh` therefore proves freshness at the
+staged file in `src-tauri/binaries/` against `target/release/mnema-extract-worker`, and does
+not compare either of them to the copy inside the image.
 
 **It runs off the read-only mount.** The image was attached with
 `hdiutil attach -readonly -nobrowse -mountpoint /tmp/mnema-m4`, and feeding one NDJSON

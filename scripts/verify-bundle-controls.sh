@@ -145,6 +145,20 @@ copy_repo() {
   [ -x "$into/scripts/verify-bundle.sh" ]
 }
 
+# Task 2's freshness check runs before the section controls 9 and 10 exist to
+# test, and looks at ${into}/target/release and ${into}/src-tauri/binaries —
+# both git-ignored, so copy_repo never carries them. Without this, both controls
+# would redden on "no built worker" instead of on the reason they name. Stages a
+# matching pair, copied from the real build, so that check passes quietly and
+# execution reaches the cargo tree logic being tested.
+stage_fresh_worker() {
+  local into="$1"
+  mkdir -p "${into}/target/release" "${into}/src-tauri/binaries" || return 1
+  cp "${REPO}/target/release/mnema-extract-worker" "${into}/target/release/mnema-extract-worker" || return 1
+  cp "${REPO}/target/release/mnema-extract-worker" \
+    "${into}/src-tauri/binaries/mnema-extract-worker-aarch64-apple-darwin"
+}
+
 echo "### 1. the dmg directory does not exist"
 expect_red "no bundle at all" "${REPO}/scripts/verify-bundle.sh" "${LAB}/absent"
 
@@ -198,11 +212,47 @@ if must copy_app_out "${LAB}/unsealed/src" \
   expect_red "signingIdentity dropped from tauri.conf.json" "${REPO}/scripts/verify-bundle.sh" "${LAB}/unsealed"
 fi
 
+echo "### 11. the bundle carries no extraction worker"
+if must copy_app_out "${LAB}/no-worker" \
+  && must rm -f "${LAB}/no-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && gone "${LAB}/no-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must image_from "${LAB}/no-worker" "${LAB}/no-worker-img/dmg/Mnema.dmg"; then
+  expect_red "a packaged build with no worker indexes nothing" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-worker-img"
+fi
+
+echo "### 12. the worker is there and is not executable"
+if must copy_app_out "${LAB}/dead-worker" \
+  && must chmod a-x "${LAB}/dead-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must image_from "${LAB}/dead-worker" "${LAB}/dead-worker-img/dmg/Mnema.dmg"; then
+  expect_red "a worker that cannot be executed" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/dead-worker-img"
+fi
+
+echo "### 13. the staged worker is not the one this build produced"
+# copy_repo carries tracked files only, so target/ — git-ignored — does not come
+# along; the built binary is copied in here by hand so the check reaches the
+# staged-versus-built comparison instead of reddening on "no built_worker" first,
+# which is a different control's reason, not this one's.
+if must copy_repo "${LAB}/stale" \
+  && must mkdir -p "${LAB}/stale/target/release" \
+  && must cp "${REPO}/target/release/mnema-extract-worker" \
+       "${LAB}/stale/target/release/mnema-extract-worker" \
+  && must mkdir -p "${LAB}/stale/src-tauri/binaries" \
+  && must cp "${REPO}/target/release/mnema-extract-worker" \
+       "${LAB}/stale/src-tauri/binaries/mnema-extract-worker-stale" \
+  && printf 'not the binary you built\n' \
+       >> "${LAB}/stale/src-tauri/binaries/mnema-extract-worker-stale"; then
+  expect_red "a stale sidecar must not ship inside a green build" \
+    "${LAB}/stale/scripts/verify-bundle.sh" "${BUNDLE}"
+fi
+
 echo "### 9. the shell depends on Pdfium and the bundle carries none"
 if must copy_repo "${LAB}/needs-pdfium" \
   && must perl -0pi -e 's{\[dependencies\]\n}{[dependencies]\nmnema-extract = { path = "../crates/mnema-extract" }\n}' \
     "${LAB}/needs-pdfium/src-tauri/Cargo.toml" \
-  && must grep -q 'mnema-extract' "${LAB}/needs-pdfium/src-tauri/Cargo.toml"; then
+  && must grep -q 'mnema-extract' "${LAB}/needs-pdfium/src-tauri/Cargo.toml" \
+  && must stage_fresh_worker "${LAB}/needs-pdfium"; then
   expect_red "extraction wired into the shell, library not packaged" \
     "${LAB}/needs-pdfium/scripts/verify-bundle.sh" "${BUNDLE}"
 fi
@@ -210,6 +260,7 @@ fi
 echo "### 10. cargo tree cannot answer — which is not the same as answering no"
 if must copy_repo "${LAB}/broken-manifest" \
   && must cp "${REPO}/scripts/verify-bundle.sh" "${LAB}/broken-manifest/scripts/verify-bundle.sh" \
+  && must stage_fresh_worker "${LAB}/broken-manifest" \
   && printf '[workspace]\nresolver = "3"\nmembers = ["crates/nope"]\n' \
     > "${LAB}/broken-manifest/Cargo.toml"; then
   expect_red "an unanswered dependency question must not read as absent" \

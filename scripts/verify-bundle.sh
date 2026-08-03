@@ -92,6 +92,59 @@ app="${mountpoint}/${product}.app"
 
 echo "verify-bundle: ${product}.app ($(du -sh "${app}" | cut -f1)), $(file -b "${app}/Contents/MacOS/${executable_name}")"
 
+# --- the extraction worker ----------------------------------------------------
+#
+# The application is a shell: it walks a folder and hands every file to a worker
+# process it expects to find beside itself (src-tauri/src/paths.rs:32-42). Before
+# bundle.externalBin existed, a packaged build had no such file, started fine, and
+# failed every walk on its first extract() call — reported as EndReason::Failed,
+# with nothing in the bundle to explain it.
+worker_name="mnema-extract-worker"
+worker="${app}/Contents/MacOS/${worker_name}"
+
+[ -f "${worker}" ] || fail "${product}.app carries no ${worker_name}.
+  bundle.externalBin in src-tauri/tauri.conf.json is what puts it there, and
+  scripts/stage-sidecar.sh is what builds it. A bundle without it indexes nothing."
+[ -x "${worker}" ] || fail "${worker} exists and is not executable. The walk would
+  fail on its first extract() call with a permission error, not a missing file."
+
+# Freshness is a property of the repository, not of the image: `externalBin` copies
+# whatever sits in src-tauri/binaries/, so a stale file there ships inside a build
+# that is green in every other respect. The comparison is made against the binary
+# `cargo build` produced, and a missing one is an UNANSWERED question rather than
+# the answer "fresh" — the same distinction the dependency check learned the hard way.
+built_worker="${repo_root}/target/release/${worker_name}"
+[ -f "${built_worker}" ] || fail "no ${built_worker}, so whether the bundled worker is
+  the one this build produced is UNANSWERED. That is not the same as answered yes.
+  Run scripts/stage-sidecar.sh, or build with cargo tauri build, which calls it."
+
+# The directory before its contents, same reason as ${dmg_dir} above: `find` on a
+# path that does not exist fails, and under `set -euo pipefail` the failing
+# pipeline inside the command substitution below would end the script with no
+# output at all — silent, not merely unhelpful.
+staged_dir="${repo_root}/src-tauri/binaries"
+[ -d "${staged_dir}" ] || fail "no ${staged_dir}.
+  scripts/stage-sidecar.sh creates it; beforeBuildCommand calls that script."
+staged_worker="$(find "${staged_dir}" -maxdepth 1 -type f \
+  -name "${worker_name}-*" 2>/dev/null | head -1)"
+[ -n "${staged_worker}" ] || fail "nothing staged in ${staged_dir}.
+  scripts/stage-sidecar.sh puts it there and beforeBuildCommand calls that script."
+
+staged_sha="$(shasum -a 256 "${staged_worker}" | cut -d' ' -f1)"
+built_sha="$(shasum -a 256 "${built_worker}" | cut -d' ' -f1)"
+[ "${staged_sha}" = "${built_sha}" ] || fail "the staged sidecar is not the binary this
+  build produced:
+    staged ${staged_worker} ${staged_sha}
+    built  ${built_worker} ${built_sha}
+  A stale copy in src-tauri/binaries/ ships inside an otherwise green build. That
+  directory is git-ignored and scripts/stage-sidecar.sh overwrites it every time."
+
+# Measured in task 1: the bundler re-signs the sidecar in place, so the bundled
+# bytes are never equal to the built bytes even on a perfectly fresh build (see
+# docs/BUILD.md, "The extraction worker inside the bundle"). Freshness is
+# therefore proven at the staged file above, not at ${worker} — a direct
+# comparison against the bundled copy would redden on every good build.
+
 # --- the signature ------------------------------------------------------------
 #
 # `--deep` is deprecated for *signing* and is still right for verifying: it walks
