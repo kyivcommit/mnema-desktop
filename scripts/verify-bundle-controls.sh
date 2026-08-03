@@ -331,6 +331,25 @@ must rm -f "${extra_staged}"
 gone "${extra_staged}"
 must check_one_staged
 
+echo "### 14. the worker cannot answer — which is not the same as answering no"
+# Measured: swapping the worker for /usr/bin/false leaves the outer seal
+# covering bytes that are no longer there — codesign calls that "nested code
+# is modified or invalid", the same reddening control 7 exists for, and
+# without a re-sign that fires before this control's own check ever runs.
+# The real bundler re-signs after staging the sidecar (see the freshness
+# comment in verify-bundle.sh); this mirrors that step so what is under test
+# is the worker's answer, not a seal nobody re-cut.
+if must copy_app_out "${LAB}/mute-worker" \
+  && must cp /usr/bin/false \
+       "${LAB}/mute-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must chmod +x "${LAB}/mute-worker/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must codesign --sign - --force --deep "${LAB}/mute-worker/Mnema.app" \
+  && must image_from "${LAB}/mute-worker" "${LAB}/mute-worker-img/dmg/Mnema.dmg"; then
+  expect_red -m "the bundled worker exited" \
+    "a worker that exits non-zero and says nothing" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/mute-worker-img"
+fi
+
 echo "### 9. the shell depends on Pdfium and the bundle carries none"
 if must copy_repo "${LAB}/needs-pdfium" \
   && must perl -0pi -e 's{\[dependencies\]\n}{[dependencies]\nmnema-extract = { path = "../crates/mnema-extract" }\n}' \

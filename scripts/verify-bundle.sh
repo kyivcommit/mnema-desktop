@@ -166,6 +166,50 @@ built_sha="$(shasum -a 256 "${built_worker}" | cut -d' ' -f1)"
 # therefore proven at the staged file above, not at ${worker} — a direct
 # comparison against the bundled copy would redden on every good build.
 
+# --- what the worker says -----------------------------------------------------
+#
+# The check stops here being about files and starts being about behaviour. Nothing
+# else in this repository proves that the binary a user receives can read a file:
+# the Rust tests build a worker fresh (src-tauri/tests/support/mod.rs:26) and never
+# look inside a bundle.
+#
+# Run directly off the mounted image: measured in task 1, `hdiutil` mounts it
+# `read-only,nodev,nosuid,noowners`, not `noexec`, so a binary runs fine from
+# there and nothing is copied out first.
+#
+# MNEMA_PDFIUM_LIB_DIR is cleared, not merely unset: it is the first branch of
+# mnema_extract's library search (crates/mnema-extract/src/pdfium_probe.rs:160-193),
+# and leaving it set would let this machine answer a question about the bundle.
+#
+# The status is captured on its own line. Inside an `if` condition a failed run
+# would read as an answer, which is the defect the dependency check below this one
+# used to have.
+ask_worker() {
+  local fixture="$1"
+  answer=""
+  answer_status=0
+  answer="$(printf '{"path":"%s","max_bytes":10485760}\n' "${fixture}" \
+    | env -u MNEMA_PDFIUM_LIB_DIR "${worker}" 2>&1)" || answer_status=$?
+}
+
+text_fixture="${repo_root}/crates/mnema-extract/tests/fixtures/simple.txt"
+[ -f "${text_fixture}" ] || fail "${text_fixture} is missing; the check has nothing to
+  ask the worker about."
+
+ask_worker "${text_fixture}"
+[ "${answer_status}" -eq 0 ] || fail "the bundled worker exited ${answer_status} on a
+  plain text file. It said: $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+
+printf '%s\n' "${answer}" | grep -q '"frame":"header"' \
+  || fail "the bundled worker returned no header frame for ${text_fixture}. It said:
+  $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+printf '%s\n' "${answer}" | grep -q '"frame":"block"' \
+  || fail "the bundled worker returned no block for ${text_fixture} — it answered, and
+  the answer contains no text. It said:
+  $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+
+echo "verify-bundle: the bundled worker reads a text file and returns blocks"
+
 # --- the signature ------------------------------------------------------------
 #
 # `--deep` is deprecated for *signing* and is still right for verifying: it walks
