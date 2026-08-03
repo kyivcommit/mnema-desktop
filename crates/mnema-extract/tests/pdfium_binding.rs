@@ -152,6 +152,31 @@ fn a_missing_file_returns_an_error() {
     );
 }
 
+/// The worker binary, not `probe_text_layer` directly: the question this
+/// answers is whether the *bundled* worker — running under whatever code
+/// signature and library placement packaging gives it — can load Pdfium at
+/// all, which the wire protocol has no way to ask (D53, D54).
+#[test]
+fn the_worker_reports_whether_pdfium_loaded() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .arg("--probe-pdfium")
+        .arg("tests/fixtures/one-page-text.pdf")
+        .output()
+        .expect("the worker binary starts");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = String::from_utf8(out.stdout).expect("stdout is UTF-8");
+    let v: serde_json::Value = serde_json::from_str(line.trim()).expect("one JSON line");
+    // Both directions: it must say it loaded AND report pages. A probe that
+    // answers `{"loaded":true}` with no page count proves nothing about the
+    // binding — it proves the flag was parsed.
+    assert_eq!(v["loaded"], serde_json::json!(true));
+    assert!(v["pages"].as_u64().expect("a page count") > 0);
+}
+
 #[test]
 fn concurrent_probes_do_not_crash_the_process() {
     // Pdfium is not thread-safe, and `pdfium-render`'s `thread_safe` feature does

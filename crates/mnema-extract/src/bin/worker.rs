@@ -21,6 +21,23 @@ use mnema_extract::{extract_markdown, extract_text};
 use sha2::{Digest, Sha256};
 
 fn main() {
+    // A diagnostic branch, not part of the NDJSON protocol: it answers one
+    // question — does this build load Pdfium from where it is installed — and
+    // exits. It exists because the question cannot be asked through the wire
+    // while no reader calls the library (D53, D54).
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 3 && args[1] == "--probe-pdfium" {
+        let line = match mnema_extract::probe_text_layer(Path::new(&args[2])) {
+            Ok(probes) => format!("{{\"loaded\":true,\"pages\":{}}}", probes.len()),
+            Err(e) => format!(
+                "{{\"loaded\":false,\"error\":{}}}",
+                serde_json::to_string(&e.to_string()).expect("a string serialises")
+            ),
+        };
+        println!("{line}");
+        return;
+    }
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
