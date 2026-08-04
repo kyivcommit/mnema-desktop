@@ -825,3 +825,260 @@ fn an_html_file_is_read_as_prose_and_its_header_names_the_html_reader() {
     // reader rather than the file — the same rule `native:md` follows.
     assert_eq!(text_source, "native:html");
 }
+
+/// A book of the shape every book has: `mimetype` first and uncompressed, a
+/// container, a package document, and `chapters` as `(member name, body)`
+/// pairs — the spine naming every id in order, whether the archive holds the
+/// member or not.
+fn epub_bytes(chapters: &[(&str, Option<&str>)]) -> Vec<u8> {
+    use std::io::Cursor;
+
+    let manifest: String = chapters
+        .iter()
+        .enumerate()
+        .map(|(n, (href, _))| {
+            format!("<item id=\"c{n}\" href=\"{href}\" media-type=\"application/xhtml+xml\"/>")
+        })
+        .collect();
+    let spine: String = (0..chapters.len())
+        .map(|n| format!("<itemref idref=\"c{n}\"/>"))
+        .collect();
+    let opf = format!(
+        "<package xmlns=\"http://www.idpf.org/2007/opf\">\
+         <manifest>{manifest}</manifest><spine>{spine}</spine></package>"
+    );
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let stored: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("mimetype", stored).unwrap();
+        w.write_all(b"application/epub+zip").unwrap();
+        w.start_file("META-INF/container.xml", deflated).unwrap();
+        w.write_all(
+            b"<container xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\
+              <rootfiles><rootfile full-path=\"content.opf\" \
+              media-type=\"application/oebps-package+xml\"/></rootfiles></container>",
+        )
+        .unwrap();
+        w.start_file("content.opf", deflated).unwrap();
+        w.write_all(opf.as_bytes()).unwrap();
+        for (href, body) in chapters {
+            if let Some(body) = body {
+                w.start_file(*href, deflated).unwrap();
+                w.write_all(body.as_bytes()).unwrap();
+            }
+        }
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+/// The EPUB branch's whole wire shape, at the only place it is produced.
+///
+/// **The frame this test exists for is the summary, not the header.** A book is
+/// the first format on this wire that both sends pages and names pages it did
+/// not send, and the pool stops the entire job — `PoolError::Protocol`, which
+/// accuses the worker binary of being from another release — when one number is
+/// in both lists (`crates/mnema-pool/src/lib.rs:1324`). The natural way to write
+/// "skip this chapter" is to send an empty page for it and count it as well,
+/// and that shape passes every assertion about prose in this file.
+///
+/// The literal `"epub"` rather than `manifest::READER_EPUB` on purpose: a test
+/// that asks the code under test what it says and then agrees is not a test.
+/// The constant is the mechanism, this is the value, and `mnema-ingest` matches
+/// the same constant from the other side of D40 to cite a chapter by its
+/// section.
+#[test]
+fn an_epub_is_read_chapter_by_chapter_and_its_summary_names_what_it_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("книжка.epub");
+    std::fs::write(
+        &path,
+        epub_bytes(&[
+            (
+                "ch1.xhtml",
+                Some(
+                    "<html><head><title>Розділ перший</title></head>\
+                     <body><p>Виторг зріс.</p></body></html>",
+                ),
+            ),
+            // In the spine, in the manifest, and not in the archive.
+            ("ch2.xhtml", None),
+            (
+                "ch3.xhtml",
+                Some(
+                    "<html><head><title>Розділ третій</title></head>\
+                     <body><p>А потім впав.</p></body></html>",
+                ),
+            ),
+        ]),
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Header {
+        reader,
+        reader_version,
+        pages,
+        mime,
+        ..
+    }) = frames.first()
+    else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "epub");
+    assert_eq!(*reader_version, 1);
+    assert_eq!(mime, "application/epub+zip");
+    // Two, not three: a chapter that was skipped produces no page frame, and
+    // the pool checks this count against the frames that arrive.
+    assert_eq!(*pages, 2);
+
+    let sent: Vec<(u32, Option<String>)> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Page {
+                page_no,
+                section_title,
+            } => Some((*page_no, section_title.clone())),
+            _ => None,
+        })
+        .collect();
+    // The numbers are the spine's, so the gap where chapter 2 was is kept
+    // rather than closed — the same honest record a PDF's skipped page leaves.
+    assert_eq!(
+        sent,
+        vec![
+            (1, Some("Розділ перший".to_string())),
+            (3, Some("Розділ третій".to_string())),
+        ]
+    );
+
+    let prose: Vec<&str> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Block(block) => Some(block.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    // Both directions across the wire: the chapters' prose is there, and the
+    // tab labels their `<title>` elements carry are not.
+    assert_eq!(prose, vec!["Виторг зріс.", "А потім впав."]);
+
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    assert_eq!(skipped_pages, &vec![2]);
+    // And the pair the pool stops the whole job over, asserted here because
+    // nothing downstream ever sees the two lists side by side again.
+    assert!(
+        !sent
+            .iter()
+            .any(|(page_no, _)| skipped_pages.contains(page_no)),
+        "a chapter was both sent as a page and reported skipped: {sent:?} / {skipped_pages:?}"
+    );
+    // `native:epub` satisfies `page.text_source`'s CHECK
+    // (`crates/mnema-index/src/schema.sql:101-102`) and names the reader rather
+    // than the file.
+    assert_eq!(text_source, "native:epub");
+}
+
+/// A book with nothing readable in it is refused under a rule about content —
+/// and not under `unsupported`, which is what an EPUB got until this branch
+/// existed and which promises a reader that is coming.
+///
+/// `no_text_layer` rather than `malformed`: the archive is intact and this
+/// reader has nothing to say about what is in it, which is the same sentence
+/// `pdf.rs` says about a scan.
+#[test]
+fn a_book_with_no_readable_chapter_is_refused_by_content_rather_than_as_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("самі-картинки.epub");
+    let bytes = epub_bytes(&[(
+        "cover.xhtml",
+        Some(
+            "<html><head><title>Обкладинка</title></head><body><img src=\"c.jpg\"/></body></html>",
+        ),
+    )]);
+    std::fs::write(&path, &bytes).unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+    assert_eq!(frames.len(), 1);
+    let Frame::Refused {
+        rule,
+        sha256,
+        reason,
+    } = &frames[0]
+    else {
+        panic!("expected Refused, got {:?}", frames[0]);
+    };
+    assert_eq!(rule, "no_text_layer");
+    assert_ne!(rule, "unsupported");
+    // The digest of the bytes this verdict was reached on: the file *was* read,
+    // unlike the `too_large` branch that decides from `stat`, so the parent can
+    // tell whether the file changed or only the rule did.
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let expected = hasher.finalize();
+    assert_eq!(
+        sha256.as_deref(),
+        Some(
+            expected
+                .iter()
+                .fold(String::new(), |mut s, b| {
+                    let _ = write!(s, "{b:02x}");
+                    s
+                })
+                .as_str()
+        )
+    );
+    assert!(reason.contains("chapter"), "{reason}");
+}
+
+/// A book whose structure is broken is refused as damaged, which is a different
+/// rule and a different sentence to the person holding it than "no text here".
+#[test]
+fn a_book_with_no_container_is_refused_as_malformed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("побита.epub");
+    {
+        use std::io::Cursor;
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let stored: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            w.start_file("mimetype", stored).unwrap();
+            w.write_all(b"application/epub+zip").unwrap();
+            w.finish().unwrap();
+        }
+        std::fs::write(&path, buf.into_inner()).unwrap();
+    }
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+    assert_eq!(frames.len(), 1);
+    match &frames[0] {
+        Frame::Refused { rule, .. } => assert_eq!(rule, "malformed"),
+        other => panic!("expected Refused, got {other:?}"),
+    }
+}

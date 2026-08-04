@@ -80,6 +80,13 @@ comrak = { workspace = true }
 scraper = "0.27"
 html5ever = "0.39"
 ego-tree = "0.11"
+# The XML pull parser, at the pin `crates/mnema-deps-probe/Cargo.toml:9` already
+# resolved. `src/epub.rs` uses it for the two documents in a book that are
+# *structure* rather than prose — `META-INF/container.xml` and the package
+# document — and for nothing else: a chapter is XHTML and is read by the HTML
+# parser, which unlike this one has no failure mode that can lose the rest of a
+# file (see that module's doc).
+quick-xml = "0.41"
 
 [dev-dependencies]
 tempfile = { workspace = true }

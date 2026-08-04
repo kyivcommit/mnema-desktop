@@ -19,6 +19,26 @@
 
 use std::io::{Cursor, Read};
 
+/// What one member of an archive may inflate to before it is refused.
+///
+/// Declared here rather than per reader so that the three formats that open an
+/// archive answer alike: a chapter, `word/document.xml` and a sheet are all one
+/// member of one container, and three numbers would be three different answers
+/// to the same question.
+///
+/// The value is a ceiling on the absurd, not a budget for the ordinary. A
+/// chapter of a novel is tens of kilobytes and the largest `word/document.xml`
+/// in a real corpus is a few megabytes; 16 MiB of *decompressed* XML is already
+/// far past anything a person authored. What it exists for is the other end:
+/// Deflate's maximum ratio is 1032:1, so a member of a few kilobytes can ask
+/// this process for gigabytes, and `read_member` decides on what came out of
+/// the stream rather than on what the archive declares.
+///
+/// It bounds one member and deliberately not a whole file — a format that opens
+/// many members owes its own total (`epub::BOOK_MAX_BYTES`), because N members
+/// each just under this cap is the same attack with more entries.
+pub const MEMBER_MAX_BYTES: usize = 16 << 20;
+
 /// Why [`read_member`] could not return a member's bytes.
 #[derive(Debug, thiserror::Error)]
 pub enum ZipPartError {

@@ -103,6 +103,32 @@ pub struct HtmlPage {
     pub blocks: Vec<Block>,
 }
 
+/// Whether a document's `<title>` is part of the text it stores, or only the
+/// name it gives itself.
+///
+/// **A standalone HTML file and an EPUB chapter differ here, and the difference
+/// is not stylistic.** `<title>` lives in `<head>`; nothing paints it on the
+/// page, and this reader's own rule is "what this file would show a reader". It
+/// is kept as text for HTML anyway because a mail export or a single-page
+/// report often carries no heading at all, and the title is then the only
+/// sentence naming the document.
+///
+/// A chapter of a book is the other case. Every chapter carries a `<title>`,
+/// the reading system paints none of them, and it is usually the chapter's
+/// heading repeated — so keeping it stores the heading twice per chapter. The
+/// case that decides it is the cover: `<title>Обкладинка</title>` over a body
+/// holding one `<img>` would otherwise be a chapter whose entire indexed text
+/// is the word `Обкладинка`, and a search for it would cite a page that shows a
+/// picture. Under [`HeadTitle::NamesOnly`] that chapter has no blocks at all,
+/// which is what lets `epub.rs` name it as skipped instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeadTitle {
+    /// The title names the section **and** is stored as a block of it.
+    IsText,
+    /// The title names the section and stores nothing.
+    NamesOnly,
+}
+
 /// Reads HTML into pages, one per section.
 ///
 /// No `Result`, for the same reason `extract_text` and `extract_markdown` have
@@ -125,6 +151,20 @@ pub struct HtmlPage {
 /// mojibaked. One detector also keeps the promise `text.rs` makes: the same
 /// bytes read as `.txt`, `.md` and `.html` are decoded the same way.
 pub fn extract_html(bytes: &[u8]) -> Vec<HtmlPage> {
+    read(bytes, HeadTitle::IsText)
+}
+
+/// The same read, for a document that is one chapter of a book rather than a
+/// file of its own: its `<title>` names the chapter and is not stored as text.
+///
+/// Everything else is identical, deliberately — an EPUB chapter is an XHTML
+/// document, and `epub.rs`'s module doc records why it is parsed by the HTML
+/// parsing algorithm rather than as XML.
+pub(crate) fn extract_html_chapter(bytes: &[u8]) -> Vec<HtmlPage> {
+    read(bytes, HeadTitle::NamesOnly)
+}
+
+fn read(bytes: &[u8], head_title: HeadTitle) -> Vec<HtmlPage> {
     let decoded = crate::text::decode(bytes);
     // **Not normalised here**, unlike `markdown.rs` and `text.rs`, and the
     // difference is measured rather than stylistic. A character reference is
@@ -168,7 +208,12 @@ pub fn extract_html(bytes: &[u8]) -> Vec<HtmlPage> {
                 }
                 match node.value() {
                     Node::Element(element) => {
-                        if gives_no_text(element) {
+                        // MUTATION ANCHOR epub-head-title: the title of a
+                        // chapter names its page and stores no block. See
+                        // [`HeadTitle`] for the cover page that decides it.
+                        let head_matter =
+                            head_title == HeadTitle::NamesOnly && names_the_document(element);
+                        if gives_no_text(element) || head_matter {
                             // Skipping a subtree is not the same as it not being
                             // there: `<iframe>` occupies space on the page, so
                             // the text on either side of it is not one run.
@@ -177,8 +222,16 @@ pub fn extract_html(bytes: &[u8]) -> Vec<HtmlPage> {
                             // and findable by neither half. See
                             // [`renders_a_box`] for why it is the only one of
                             // the seven that does this.
-                            if renders_a_box(element) {
+                            //
+                            // A head title flushes for a different reason: what
+                            // follows it opens a page, and a run left pending
+                            // here would be flushed into that new page instead
+                            // of the one it belongs to.
+                            if renders_a_box(element) || head_matter {
                                 flush(&mut run, &flow, &mut pages);
+                            }
+                            if head_matter && let Some(title) = section_title(node) {
+                                open_page(&mut pages, title);
                             }
                             skipping = 1;
                             continue;
@@ -335,6 +388,17 @@ fn section_title<'a>(element: NodeRef<'a, Node>) -> Option<String> {
     // beforehand would be cut in the wrong place — and could be cut between a
     // base character and its combining mark.
     bound_section_title(nfc::normalise(&words.join(" ")).into_owned())
+}
+
+/// The document's own `<title>`, as opposed to the six headings and to SVG's
+/// tooltip of the same name.
+///
+/// The namespace test is the one [`opens_a_section`] makes and for the same
+/// reason: under [`HeadTitle::NamesOnly`] this decides which subtree is skipped,
+/// and skipping `<svg><title>` would be right by accident while skipping a
+/// diagram's `<text>` would not.
+fn names_the_document(element: &Element) -> bool {
+    element.name.ns == ns!(html) && element.name() == "title"
 }
 
 fn opens_a_section(element: &Element) -> bool {

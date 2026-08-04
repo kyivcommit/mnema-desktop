@@ -19,7 +19,8 @@ use mnema_extract::manifest;
 use mnema_extract::typing::{Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
 use mnema_extract::{
-    PdfError, TEXT_LAYER_MIN_CHARS, extract_html, extract_markdown, extract_pdf, extract_text,
+    EpubError, PdfError, TEXT_LAYER_MIN_CHARS, extract_epub, extract_html, extract_markdown,
+    extract_pdf, extract_text,
 };
 use sha2::{Digest, Sha256};
 
@@ -408,11 +409,85 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256: Some(sha256),
             }],
         },
-        // None of these four formats has a `Vec<Block>` reader in this crate
+        // **The first reader that opens an archive, so the mapping from zip
+        // failures to refusal rules is declared here and repeated by docx and
+        // xlsx.** Three errors, three rules, and every one of them reachable —
+        // there is deliberately no arm for "a chapter is missing", because a
+        // chapter the spine names and the archive does not hold is skipped by
+        // number inside `extract_epub` and never reaches this match. Refusing
+        // the file there would take a whole book out of the index over one
+        // broken link (`epub.rs`'s module doc).
+        Reader::Epub => match extract_epub(&bytes) {
+            Ok(book) => {
+                let blocks: usize = book.chapters.iter().map(|c| c.blocks.len()).sum();
+                let mut frames = Vec::with_capacity(blocks + book.chapters.len() + 2);
+                frames.push(Frame::Header {
+                    sha256,
+                    mime: file_type.mime.to_string(),
+                    source_kind: file_type.source_kind,
+                    // The constant, not the literal `"epub"`. `pages_of` on the
+                    // other side of the wire cites an epub chunk by this exact
+                    // string and may not link this crate (D40), so a typo here
+                    // costs every citation into a book its section name and
+                    // nothing goes red.
+                    reader: manifest::READER_EPUB.to_string(),
+                    reader_version: manifest::EPUB_READER_VERSION,
+                    // From the same vector the Page frames come from, so the
+                    // pool's count check cannot disagree with itself. Skipped
+                    // chapters are NOT in this number: they produce no Page
+                    // frame and are named by `skipped_pages` instead.
+                    pages: book.chapters.len() as u32,
+                });
+                for chapter in book.chapters {
+                    frames.push(Frame::Page {
+                        page_no: chapter.page_no,
+                        // A chapter *is* a section, as an HTML page is, and it
+                        // is the whole of what a citation into a book points
+                        // at.
+                        section_title: chapter.section_title,
+                    });
+                    frames.extend(chapter.blocks.into_iter().map(Frame::Block));
+                }
+                frames.push(Frame::Summary {
+                    // The numbers, not their count: the parent owes a journal
+                    // row per skipped chapter, and a count cannot fill one in.
+                    // Disjoint from the page frames above by construction —
+                    // the pool stops the whole job over a number in both.
+                    skipped_pages: book.skipped,
+                    text_source: "native:epub".to_string(),
+                });
+                frames
+            }
+            // The cap on what one member inflates to, which is **not** the
+            // `max_bytes` from the request — the file passed that from `stat`.
+            // The same rule string all the same, because it is the same answer
+            // to the person holding it ("too big for us"), and because
+            // `SkipRule::TooLarge` is the one refusal that must not displace a
+            // document on a digest it never computed.
+            Err(EpubError::TooLarge) => vec![Frame::Refused {
+                rule: "too_large".to_string(),
+                reason: "a member of this EPUB inflates past the cap on one member".to_string(),
+                sha256: Some(sha256),
+            }],
+            Err(EpubError::NoReadableChapter) => vec![Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: "no chapter of this EPUB carries any text".to_string(),
+                sha256: Some(sha256),
+            }],
+            // Bound to the one remaining variant rather than to a catch-all
+            // `Err(e)`, for the reason the pdf branch states: a catch-all is
+            // how a later variant arrives silently as "this file is damaged".
+            Err(e @ EpubError::Malformed(_)) => vec![Frame::Refused {
+                rule: "malformed".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+        },
+        // None of these three formats has a `Vec<Block>` reader in this crate
         // yet. Reporting them alike as "unsupported" is honestly what is true
-        // today: this worker reads text, markdown, PDF and HTML, and nothing
-        // else.
-        Reader::Docx | Reader::Xlsx | Reader::Epub | Reader::Unrecognized => {
+        // today: this worker reads text, markdown, PDF, HTML and EPUB, and
+        // nothing else.
+        Reader::Docx | Reader::Xlsx | Reader::Unrecognized => {
             vec![Frame::Refused {
                 rule: "unsupported".to_string(),
                 reason: format!(

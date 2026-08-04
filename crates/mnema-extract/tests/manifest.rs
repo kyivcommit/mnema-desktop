@@ -173,6 +173,10 @@ fn the_manifest_names_the_reader_that_identify_actually_picks() {
         // reader. An entry `pdf → pdf@1` would predict otherwise and re-read
         // this file on every walk for ever.
         Some("pdf"),
+        // The same, for the format task 11 added. An EPUB is decided by its
+        // magic bytes and its `mimetype` entry, never by its name, so prose
+        // called `book.epub` is text and the map has to agree.
+        Some("epub"),
     ] {
         let picked = mnema_extract::typing::identify(bytes, ext);
         assert_eq!(
@@ -206,6 +210,14 @@ fn reader_name(reader: mnema_extract::typing::Reader) -> &'static str {
         // `mnema-ingest` matches the same constant to cite an HTML chunk by its
         // section, and no compiler joins the two across D40.
         Reader::Html => mnema_core::manifest::READER_HTML,
+        // The constant a fourth time, and the reason it is one symbol is
+        // sharper here than for html: `mnema-ingest` matches `READER_EPUB` to
+        // cite a chapter as `Coordinate::Section`
+        // (`crates/mnema-ingest/src/lib.rs:1392`), and a literal `"epub"` in
+        // this arm would leave the constant with two users out of three and
+        // remove the cross-check it exists for. No compiler joins the two
+        // across D40.
+        Reader::Epub => mnema_core::manifest::READER_EPUB,
         other => panic!("a reader with no name on the wire yet: {other:?}"),
     }
 }
@@ -252,4 +264,62 @@ fn a_pdf_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
         mnema_core::manifest::READER_PDF,
         "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
     );
+}
+
+/// **An EPUB is decided by content too, so it carries the same bill as a PDF —
+/// and unlike a PDF, it looks as though it should not.**
+///
+/// `.epub` is an extension nothing else uses, so an entry `epub → epub@1` reads
+/// as obviously correct and is not: `identify` reaches the epub reader through
+/// magic bytes and the archive's uncompressed `mimetype` entry
+/// (`src/typing.rs:312-330`), never through the name. A text file called
+/// `notes.epub` is read by the text reader, and a real book called `book.zip` is
+/// read by the epub one. Either entry in the map would be a false claim about
+/// `identify` in one of those two directions.
+///
+/// What the absence costs is what it costs for PDF: every real `.epub` records
+/// `epub@1`, is predicted `text@1` by the cheap arm
+/// (`crates/mnema-ingest/src/lib.rs:274-280`), and is handed to a worker on
+/// every walk. For this format that is a zip open and one HTML parse per
+/// chapter, not a text read.
+#[test]
+fn an_epub_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
+    let epub = minimal_epub();
+    let manifest = mnema_extract::manifest::manifest();
+
+    // Under its own name, under a name that lies about it, and under none:
+    // content decides all three.
+    for ext in [Some("epub"), Some("zip"), None] {
+        assert_eq!(
+            reader_name(mnema_extract::typing::identify(&epub, ext).reader),
+            mnema_core::manifest::READER_EPUB,
+            "{ext:?} named a book's bytes something other than the epub reader"
+        );
+    }
+
+    // And the map predicts none of it, because it cannot.
+    assert!(!manifest.by_extension.contains_key("epub"));
+    assert_eq!(manifest.for_extension(Some("epub")), &manifest.default);
+    assert_ne!(
+        manifest.for_extension(Some("epub")).reader,
+        mnema_core::manifest::READER_EPUB,
+        "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+    );
+}
+
+/// The three things `typing::is_epub` checks and nothing more: a first entry
+/// named `mimetype`, stored uncompressed, holding exactly the media type.
+fn minimal_epub() -> Vec<u8> {
+    use std::io::{Cursor, Write};
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let stored: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        w.start_file("mimetype", stored).unwrap();
+        w.write_all(b"application/epub+zip").unwrap();
+        w.finish().unwrap();
+    }
+    buf.into_inner()
 }
