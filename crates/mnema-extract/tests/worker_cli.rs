@@ -139,7 +139,13 @@ fn a_photo_is_refused_by_the_real_worker() {
 }
 
 /// Every refusal this worker reaches **by reading the file** carries the digest
-/// of what it read — all six of them, not the one that happened to get a test.
+/// of what it read — every one of them, not the one that happened to get a test.
+///
+/// **Deliberately not "all six", although it said that until the epub reader
+/// arrived and made it nine.** A count is a definition, and a definition written
+/// in a doc comment goes stale silently while the table below it is the thing
+/// anyone actually reads. What binds is the rule in the last paragraph, not a
+/// number.
 ///
 /// The digest was pinned on the `not_text` branch alone, and the blindness that
 /// left behind is structural rather than an oversight. Both of the parent's
@@ -156,10 +162,15 @@ fn a_photo_is_refused_by_the_real_worker() {
 /// indexed by a build that has the reader and walked by a build that does not
 /// would lose a document per file, with the bytes never having moved.
 ///
-/// `too_large` is deliberately not in this table and has the opposite assertion
-/// of its own, above: that branch answers from `stat` without opening the file,
-/// so a digest there could only have come from reading what the ceiling exists
-/// not to read.
+/// **`too_large` is reached two ways, and only one of them belongs here.** The
+/// ceiling branch answers from `stat` without opening the file and has the
+/// opposite assertion of its own, above: a digest there could only have come
+/// from reading what the ceiling exists not to read. The epub reader's cap on
+/// what one *member* inflates to is the other way in — the archive passed the
+/// ceiling comfortably, the file really was read, and that row is in the table.
+/// The rule string is the same because it is the same answer to the person
+/// holding the file; the evidence behind it is not, and this is where the two
+/// are told apart.
 ///
 /// The table is written out by hand, which is the one thing this test cannot
 /// fix: a reader refusing under a new rule has to be added here by whoever adds
@@ -260,7 +271,7 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
         // not, and the file really was read. Same rule string, because it is the
         // same answer to the person holding it — and harmless to carry a digest
         // under, because `displaces` decides `TooLarge` on size and mtime and
-        // never looks at the digest (`crates/mnema-ingest/src/lib.rs:1200-1203`).
+        // never looks at the digest (`crates/mnema-ingest/src/lib.rs:1200-1202`).
         (bomb.to_str().expect("a temp path is UTF-8"), "too_large"),
     ] {
         let request = serde_json::json!({ "path": path, "max_bytes": 1_048_576 });
@@ -933,7 +944,7 @@ fn epub_bytes(chapters: &[(&str, Option<&str>)]) -> Vec<u8> {
 /// the first format on this wire that both sends pages and names pages it did
 /// not send, and the pool stops the entire job — `PoolError::Protocol`, which
 /// accuses the worker binary of being from another release — when one number is
-/// in both lists (`crates/mnema-pool/src/lib.rs:1324`). The natural way to write
+/// in both lists (`crates/mnema-pool/src/lib.rs:1338`). The natural way to write
 /// "skip this chapter" is to send an empty page for it and count it as well,
 /// and that shape passes every assertion about prose in this file.
 ///

@@ -280,7 +280,7 @@ fn epub_with_forged_chapter_size() -> Vec<u8> {
 /// remove a whole book from the index over one broken link; one that produced
 /// an empty page for it would leave the parent with nothing to journal; one
 /// that sent both a page and the number stops the entire job
-/// (`crates/mnema-pool/src/lib.rs:1324`), which is the reason this is asserted
+/// (`crates/mnema-pool/src/lib.rs:1338`), which is the reason this is asserted
 /// here rather than downstream.
 #[test]
 fn a_chapter_the_archive_does_not_hold_is_named_rather_than_refusing_the_book() {

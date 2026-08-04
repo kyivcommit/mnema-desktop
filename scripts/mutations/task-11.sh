@@ -10,7 +10,7 @@
 #   * a chapter skipped and not named, which is a book that is quietly shorter;
 #   * a chapter named and also sent, which stops the entire walk with
 #     `PoolError::Protocol` and accuses the worker binary of being from another
-#     release (`crates/mnema-pool/src/lib.rs:1324`);
+#     release (`crates/mnema-pool/src/lib.rs:1338`);
 #   * a chapter renumbered so the gap closes, which is a journal row pointing at
 #     the wrong chapter of the book;
 #   * every chapter skipped at once, which is one book lost to one wrong rule

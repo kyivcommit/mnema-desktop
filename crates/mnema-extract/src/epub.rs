@@ -187,6 +187,9 @@ fn extract(bytes: &[u8], budget: usize) -> Result<EpubBook, EpubError> {
     // already allocated what it is measuring.
     let mut budget = budget;
 
+    // `text::decode`, the crate's one guess, for these two XML documents as well
+    // as for prose — and that is measured rather than obvious. The note above
+    // `resolve` has the table and the rule it overturned.
     let container = read_structure(bytes, CONTAINER_PATH, &mut budget)?;
     let opf_path = rootfile_path(&crate::text::decode(&container))?;
     let opf = read_structure(bytes, &opf_path, &mut budget)?;
