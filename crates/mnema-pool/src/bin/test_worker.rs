@@ -207,12 +207,13 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
         // tests that drive this branch are written against the call *failing*
         // — `unwrap_err()` here, `matches!(outcome, Err(..Protocol..))` in
         // `mnema-ingest/tests/slice.rs` — so a recognised rule flips the result
-        // from `Err` to `Ok` and each stops at the point it unwraps that
-        // result, before any message is looked at. In `supervision.rs` that is
-        // not even an assertion, it is `unwrap_err()`'s own panic. The lesson
-        // is therefore about what a red *says*, not about whether one happens:
-        // "called `unwrap_err()` on an `Ok` value" reads as a pool that has
-        // stopped rejecting unknown rules,
+        // from `Err` to `Ok` and both go red without reading any message. They
+        // do it differently, which is worth keeping straight: `supervision.rs`
+        // panics inside `unwrap_err()` itself, before any assertion runs at
+        // all, while `slice.rs` never unwraps and fails on its `matches!`
+        // assertion. The lesson is therefore about what a red *says*, not about
+        // whether one happens: "called `unwrap_err()` on an `Ok` value" reads
+        // as a pool that has stopped rejecting unknown rules,
         // which is a defect in the code under test, when the real cause is that
         // the test's premise expired. Each caller now asserts that premise
         // directly, so the red names it.

@@ -720,9 +720,15 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 ///   quiet.
 /// * `Memory` — the out-of-memory killer chooses by size, so it keeps choosing
 ///   the worker, over and over, on a machine under pressure.
-/// * `Unreadable` — the file could not be opened at all: missing, not a
+/// * `Unreadable` — the worker came back having learned nothing about the
+///   content. Usually the file could not be opened at all: missing, not a
 ///   regular file, refused by permissions, on a volume that is not there. A
-///   share that drops mid-walk reports it for everything on the volume.
+///   share that drops mid-walk reports it for everything on the volume. It also
+///   covers a reader that could not be started — a library absent, the wrong
+///   build, or refused by code signing — which keeps for the same reason and is
+///   the same shape: one condition outside the file, answering for every file
+///   alike. `SkipRule::Malformed`'s doc comment has why that case must arrive
+///   here rather than on a content rule.
 ///
 ///   **This one is only half safe, and the other half is not built yet.**
 ///   Nothing anywhere removes a `path` row for a file that was renamed or

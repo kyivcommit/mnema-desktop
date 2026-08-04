@@ -176,13 +176,15 @@ declare_skip_rules! {
     /// someone looking at the skip list needs in order to go and fetch the file
     /// again.
     ///
-    /// **Not `Unreadable`** — that is a fact about the *disk*: the path was
-    /// gone, or not a regular file, or permissions refused it, so no reader saw
-    /// a byte. Here a reader opened the file, read it and could not finish, and
-    /// the two part company where it costs a document: `Unreadable` never
-    /// displaces, because a share that drops mid-walk would otherwise empty the
-    /// index, and this rule displaces when the digest says the file is not the
-    /// one the index was built from.
+    /// **Not `Unreadable`** — that rule holds every way the worker can come
+    /// back having learned nothing about the content: the path gone, not a
+    /// regular file, permissions refusing it, the index busy under someone
+    /// else's write (`mnema_ingest`'s `walk.rs` records that one), or the
+    /// reader itself unable to start. Here a reader ran, on bytes it had, and
+    /// could not finish. The two part company where it costs a document:
+    /// `Unreadable` never displaces, because a share that drops mid-walk would
+    /// otherwise empty the index, and this rule displaces when the digest says
+    /// the file is not the one the index was built from.
     ///
     /// A determination about the bytes, so `is_about_content` is true and the
     /// next walk answers from `stat` without spending a worker. That carries
@@ -202,6 +204,12 @@ declare_skip_rules! {
     /// one layer lower: "ten thousand files as damaged when the real fault is a
     /// half-finished install". The shape it takes is a reader that folds every
     /// error it can produce into this rule with one catch-all arm.
+    ///
+    /// **The limit binds [`Encrypted`](Self::Encrypted) identically**, and is
+    /// written once, here, rather than twice. That rule's three answers are the
+    /// same three, so a reader reporting "locked" because its library never came
+    /// up buys the same silent folder — and a reader that cannot start cannot
+    /// have found a password either.
     ///
     /// It costs more here than there, because all three of this rule's other
     /// answers are tuned for damage and all three are wrong for a broken
@@ -262,6 +270,13 @@ declare_skip_rules! {
     /// until `INDEX_FORMAT_VERSION` moves. Whoever builds a password prompt has
     /// to move it, or the files the prompt exists for are the ones it never
     /// gets asked about.
+    ///
+    /// ⚠️ **It inherits [`Malformed`](Self::Malformed)'s limit whole**, and that
+    /// is the one thing to read there before reporting this rule: it means a
+    /// reader looked at the content and found a lock. A reader whose library
+    /// never came up has not looked at anything, cannot have found a password,
+    /// and must take `Unreadable` — for reasons that cost a folder, spelled out
+    /// once beside the other rule rather than copied here to drift.
     Encrypted,
 }
 
@@ -342,9 +357,9 @@ impl SkipRule {
     /// reader again, and the same locked file stays locked.
     /// `Crash`, `Timeout` and `Memory` are readings of the environment that
     /// apply to every file in the walk alike — `displaces` draws the same line
-    /// for the same reason (D44) — and `Unreadable` is a fact about the disk,
-    /// not the bytes, that may well be transient (a file moved mid-scan, a
-    /// permission fixed afterwards).
+    /// for the same reason (D44) — and `Unreadable` is a fact about everything
+    /// except the bytes, which may well be transient (a file moved mid-scan, a
+    /// permission fixed afterwards, an installation repaired).
     ///
     /// `BinaryTail` is the one variant where this predicate and `displaces` no
     /// longer answer alike, and that is not a slip. The verdict *is* about the
@@ -440,11 +455,12 @@ impl SkipRule {
     ///
     /// `Malformed` and `Encrypted` answer **no** on exactly that reasoning, and
     /// their answers depend on a limit held somewhere else rather than on
-    /// anything visible here. `SkipRule::Malformed`'s own doc comment carries
-    /// it: a reader that could not load its library at all must not report
-    /// either rule, because a broken install then produces a long run of them
-    /// and this predicate — correctly, for damage and for a password — declines
-    /// to stop the walk, and `walk_root` clears the counter besides.
+    /// anything visible here. [`SkipRule::Malformed`](Self::Malformed) states it
+    /// for both rules and [`SkipRule::Encrypted`](Self::Encrypted) points back
+    /// at it: a reader that could not load its library at all must report
+    /// neither, because a broken install then produces a long run of them and
+    /// this predicate — correctly, for damage and for a password — declines to
+    /// stop the walk, and `walk_root` clears the counter besides.
     ///
     /// An exhaustive `match`, matching `is_about_content`'s own reasoning for
     /// being one: a variant added to the enum with no line here would

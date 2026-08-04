@@ -20,7 +20,7 @@
 //! | answered `Refused` (text, then not)   | [`Failure::BinaryTail`]  |
 //! | answered `Refused` (damaged)          | [`Failure::Malformed`]   |
 //! | answered `Refused` (password)         | [`Failure::Encrypted`]   |
-//! | answered `Failed` (I/O)               | [`Failure::Unreadable`]  |
+//! | answered `Failed` (I/O, or no reader) | [`Failure::Unreadable`]  |
 //! | said nothing before the deadline      | [`Failure::Timeout`]     |
 //! | died on a signal                      | [`Failure::Crash`]       |
 //! | killed by the out-of-memory killer    | [`Failure::Memory`]      |
@@ -202,10 +202,13 @@ declare_failures! {
     /// not finish it: `Frame::Refused { rule: "malformed" }`.
     ///
     /// Not [`Failure::Unsupported`], which promises a reader that will arrive
-    /// when one already has, and not [`Failure::Unreadable`], which means no
-    /// reader saw a byte.
+    /// when one already has, and not [`Failure::Unreadable`], which covers
+    /// every way the worker can come back having learned nothing about the
+    /// content — the bytes unobtainable, or the reader itself unable to start.
+    /// This variant is the opposite: a reader that ran, on bytes it had.
     /// [`SkipRule::Malformed`](mnema_index::SkipRule::Malformed) carries why the
-    /// distinction costs a document.
+    /// distinction costs a document, and why a reader whose library will not
+    /// load must take [`Failure::Unreadable`] rather than this.
     Malformed,
     /// A reader opened the file and the text is behind a password:
     /// `Frame::Refused { rule: "encrypted" }`.
@@ -246,8 +249,9 @@ pub struct Skip {
     ///
     /// `None` for every outcome the worker did not decide by reading: the size
     /// ceiling (refused from `stat`), a crash, a timeout, an out-of-memory
-    /// kill, an unreadable path, and any answer this pool synthesised without
-    /// a worker at all. The parent uses it to tell a file that *changed* into
+    /// kill, anything reaching [`Failure::Unreadable`] — a path that could not
+    /// be opened, or a reader that could not be started over one that could —
+    /// and any answer this pool synthesised without a worker at all. The parent uses it to tell a file that *changed* into
     /// something unindexable from a file that did not change while the rule
     /// under it did — see `mnema_ingest`'s `displaces`, which is where the
     /// difference costs a document.
@@ -684,7 +688,7 @@ impl Pool {
                     }
                     return Ok(Outcome::Extracted(document));
                 }
-                // Refusals and I/O failures retire the worker too: the batch
+                // Refusals and failures retire the worker too: the batch
                 // counter is reset only by success, so that a file which upset a
                 // parser never shares a process with the next one. The cost is
                 // one process per refused file — 4 ms — which a folder of
@@ -1089,7 +1093,8 @@ fn read_lines(stdout: ChildStdout, lines: SyncSender<io::Result<String>>) {
 
 enum Answer {
     Document(Document),
-    /// The worker answered with a refusal or an I/O failure: one frame, no
+    /// The worker answered with a refusal or a failure — a file it declined on
+    /// content, or a request it could not carry out at all: one frame, no
     /// document, and a rule already chosen.
     Skipped {
         failure: Failure,
@@ -1274,7 +1279,7 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                     text_source,
                 }));
             }
-            // A refusal or an I/O failure is the whole answer, so one arriving
+            // A refusal or a failure is the whole answer, so one arriving
             // after a header means the two binaries disagree about the
             // protocol.
             Frame::Refused {
@@ -1311,7 +1316,7 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
             }
             Frame::Failed { message } => {
                 if header.is_some() {
-                    return Err(protocol(&line, "an I/O failure after a header"));
+                    return Err(protocol(&line, "a failure frame after a header"));
                 }
                 return Ok(Answer::Skipped {
                     failure: Failure::Unreadable,
