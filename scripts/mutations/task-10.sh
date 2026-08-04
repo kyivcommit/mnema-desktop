@@ -343,9 +343,8 @@ case_ "ingest: the comparison is against the reader that ran, not the predicted 
 # re-enters at the top.
 case_ "ingest: a rebuild stops claiming the stage it is replacing" \
   crates/mnema-ingest/src/lib.rs \
-  's{                    db\.record_stage\(&id, STAGE_CHUNK, STATUS_REBUILDING\)\?;\n                    db\.clear_document_content\(&id\)\?;}{                    db.clear_document_content(&id)?;}' \
-  '`ingest_with_busy_retry` (`walk.rs`) back in at the top.
-                    db.clear_document_content(&id)?;' \
+  's{db\.record_stage\(&id, STAGE_CHUNK, STATUS_REBUILDING\)\?;}{/* the stage keeps claiming done */}' \
+  '/* the stage keeps claiming done */' \
   mnema-ingest 'a_rebuild_interrupted_between_slices_is_finished_by_the_next_walk' --test slice
 
 # C29. The reader on a `path` row describes the document that path *named*. Read
@@ -374,9 +373,8 @@ case_ "reader: the text is normalised after the parse, not before it" \
 # `передпісля` — a word in no file, findable by neither half.
 case_ "reader: a box on the page ends the run around it" \
   crates/mnema-extract/src/html.rs \
-  's{                            if renders_a_box\(element\) \{\n                                flush\(&mut run, &flow, &mut pages\);\n                            \}\n                            skipping = 1;}{                            skipping = 1;}' \
-  'the seven that does this.
-                            skipping = 1;' \
+  's{                            if renders_a_box\(element\) \{\n                                flush\(&mut run, &flow, &mut pages\);\n                            \}}{                            /* the box does not end the run */}' \
+  '/* the box does not end the run */' \
   mnema-extract 'a_box_on_the_page_ends_a_run_and_something_invisible_does_not' --test html
 
 # C32. And the other direction, which C31 does not cover: ending the run at

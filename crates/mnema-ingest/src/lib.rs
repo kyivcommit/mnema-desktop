@@ -522,8 +522,11 @@ pub fn ingest_file(
                     // commits with this slice), and a `done` stage — all five
                     // of the cheap arm's conditions satisfied, `Unchanged` for
                     // ever, and the rest of the document gone. It needs no
-                    // crash: `IngestError::Busy` on a later slice sends
-                    // `ingest_with_busy_retry` (`walk.rs`) back in at the top.
+                    // crash: `IngestError::Busy` on a later slice's transaction
+                    // is retried by calling this function again from the top
+                    // (`crates/mnema-ingest/src/walk.rs:930-940`), where the
+                    // cheap arm now answers — so ordinary write contention is
+                    // enough to truncate a document silently.
                     db.record_stage(&id, STAGE_CHUNK, STATUS_REBUILDING)?;
                     db.clear_document_content(&id)?;
                 } else {
