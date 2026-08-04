@@ -21,7 +21,7 @@
 # capped read.
 case_ "the cap is decided from the stream, not the member's declared size" \
   crates/mnema-extract/src/zip_part.rs \
-  's~    let member = archive\.by_name\(name\)\.map_err\(\|e\| match e \{\n        zip::result::ZipError::FileNotFound => ZipPartError::Missing,\n        _ => ZipPartError::Malformed,\n    \}\)\?;\n\n    let mut out = Vec::new\(\);\n    member\n        \.take\(cap as u64 \+ 1\)\n        \.read_to_end\(&mut out\)\n        \.map_err\(\|_\| ZipPartError::Malformed\)\?;\n    if out\.len\(\) > cap \{~    let mut member = archive.by_name(name).map_err(|e| match e {\n        zip::result::ZipError::FileNotFound => ZipPartError::Missing,\n        _ => ZipPartError::Malformed,\n    })?;\n\n    if member.size() > cap as u64 {\n        return Err(ZipPartError::TooLarge);\n    }\n    let mut out = Vec::new();\n    member\n        .read_to_end(&mut out)\n        .map_err(|_| ZipPartError::Malformed)?;\n    if false {~' \
+  's~    let member = archive\.by_name\(name\)\.map_err\(\|e\| match e \{\n        zip::result::ZipError::FileNotFound => ZipPartError::Missing,\n        _ => ZipPartError::Malformed,\n    \}\)\?;\n\n    let mut out = Vec::new\(\);\n    member\n        // `saturating_add`: no caller reaches `cap == usize::MAX` today, but\n        // it costs nothing and an overflowing `\+ 1` would wrap to 0 and cap\n        // every read at zero bytes instead\.\n        \.take\(\(cap as u64\)\.saturating_add\(1\)\)\n        \.read_to_end\(&mut out\)\n        \.map_err\(\|_\| ZipPartError::Malformed\)\?;\n    if out\.len\(\) > cap \{~    let mut member = archive.by_name(name).map_err(|e| match e {\n        zip::result::ZipError::FileNotFound => ZipPartError::Missing,\n        _ => ZipPartError::Malformed,\n    })?;\n\n    if member.size() > cap as u64 {\n        return Err(ZipPartError::TooLarge);\n    }\n    let mut out = Vec::new();\n    member\n        .read_to_end(&mut out)\n        .map_err(|_| ZipPartError::Malformed)?;\n    if false {~' \
   'if member.size() > cap as u64 {' \
   mnema-extract 'a_declared_size_does_not_decide_anything' --test zip_part
 
@@ -31,7 +31,7 @@ case_ "the cap is decided from the stream, not the member's declared size" \
 # silently truncated and returned as `Ok` rather than refused.
 case_ "the capped read asks for one byte past the cap, not exactly the cap" \
   crates/mnema-extract/src/zip_part.rs \
-  's~\.take\(cap as u64 \+ 1\)~.take(cap as u64)~' \
+  's~\.take\(\(cap as u64\)\.saturating_add\(1\)\)~.take(cap as u64)~' \
   '.take(cap as u64)' \
   mnema-extract 'a_declared_size_does_not_decide_anything' --test zip_part
 

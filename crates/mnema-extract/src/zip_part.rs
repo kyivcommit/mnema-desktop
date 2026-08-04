@@ -22,10 +22,17 @@ use std::io::{Cursor, Read};
 /// Why [`read_member`] could not return a member's bytes.
 #[derive(Debug, thiserror::Error)]
 pub enum ZipPartError {
-    /// The archive parses and this member is not in it. For docx/xlsx/epub
-    /// that should not happen — `typing::identify` already required the
-    /// member to exist before naming the reader — so reaching this means the
-    /// archive changed under us between identification and reading.
+    /// The archive parses and this member is not in it.
+    ///
+    /// For docx and xlsx that should not happen: `typing::identify` already
+    /// required `word/document.xml` / `xl/workbook.xml` to exist before
+    /// naming either reader (`typing.rs:279`, `:287`), so reaching this for
+    /// one of them means the archive changed under us between
+    /// identification and reading. Not so for epub — `typing::identify`'s
+    /// `is_epub` (`typing.rs:312-324`) checks only the `mimetype` entry, not
+    /// any member the spine will later name, so an epub whose spine points
+    /// at a member the archive doesn't actually have reaches this on an
+    /// otherwise ordinary file.
     #[error("zip member not found")]
     Missing,
 
@@ -57,7 +64,10 @@ pub fn read_member(bytes: &[u8], name: &str, cap: usize) -> Result<Vec<u8>, ZipP
 
     let mut out = Vec::new();
     member
-        .take(cap as u64 + 1)
+        // `saturating_add`: no caller reaches `cap == usize::MAX` today, but
+        // it costs nothing and an overflowing `+ 1` would wrap to 0 and cap
+        // every read at zero bytes instead.
+        .take((cap as u64).saturating_add(1))
         .read_to_end(&mut out)
         .map_err(|_| ZipPartError::Malformed)?;
     if out.len() > cap {
