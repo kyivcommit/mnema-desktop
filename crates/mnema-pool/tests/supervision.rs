@@ -598,6 +598,53 @@ fn a_page_count_that_disagrees_with_the_frames_stops_the_job() {
     );
 }
 
+/// A page reported as read **and** as skipped stops the job, and a page
+/// reported only as skipped goes through.
+///
+/// The summary is the one frame carrying both lists, and this is the only
+/// place they are ever side by side: `Document` hands the parent a vector of
+/// pages and a vector of numbers, and the parent writes a journal row for
+/// every number without being able to ask whether the page is also in the
+/// index. So the contradiction has to be caught here or not at all, and what
+/// it costs is the skip window telling someone page 1 of their contract is
+/// missing while a search cites it.
+///
+/// **Both directions, and the second is not decoration.** A pool that refused
+/// every summary carrying numbers at all would satisfy the first assertion and
+/// stop every walk over a folder with one scanned page in it — which is the
+/// same outcome `SkipRule::NoTextLayer`'s missing parse arm had.
+#[test]
+fn a_page_that_arrived_and_was_reported_skipped_stops_the_job() {
+    let _watchdog = Watchdog::new("page in both lists", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let error = extract(&pool, "both-lists:x").unwrap_err();
+    let PoolError::Protocol { detail, .. } = &error else {
+        panic!("expected a protocol error, got {error:?}");
+    };
+    assert!(
+        detail.contains('1'),
+        "the detail must name the page that was in both lists: {detail}"
+    );
+
+    let document = document(extract(&pool, "skipped-page:x").unwrap());
+    assert_eq!(
+        document.skipped_pages,
+        vec![2],
+        "the ordinary shape — a gap, and the number that fills it — still \
+         reaches the parent"
+    );
+    assert_eq!(
+        document
+            .pages
+            .iter()
+            .map(|page| page.page_no)
+            .collect::<Vec<_>>(),
+        vec![1, 3],
+        "and the pages that did arrive are not disturbed by the check"
+    );
+}
+
 /// A header whose reader has no name stops the job, and one that names a
 /// reader goes through.
 ///

@@ -278,6 +278,71 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 },
             );
         }
+        // A page reported as read *and* as skipped. The counts agree — one page
+        // promised, one page frame sent — so the check above passes it, and
+        // nothing further down ever sees the two lists side by side again. What
+        // it would cost is a journal row saying page 1 has no text layer, in
+        // the window that answers "why is this not in my index?", about a page
+        // the index holds and cites.
+        "both-lists" => {
+            write_frame(
+                stdout,
+                &Frame::Header {
+                    sha256: "0".repeat(64),
+                    mime: "application/pdf".to_string(),
+                    source_kind: SourceKind::Document,
+                    reader: "pdf".to_string(),
+                    reader_version: 1,
+                    pages: 1,
+                },
+            );
+            write_frame(
+                stdout,
+                &Frame::Page {
+                    page_no: 1,
+                    section_title: None,
+                },
+            );
+            write_frame(
+                stdout,
+                &Frame::Summary {
+                    skipped_pages: vec![1],
+                    text_source: "native:pdf".to_string(),
+                },
+            );
+        }
+        // A reader that dropped a page and named it, which is the ordinary
+        // shape of the frame above and has to go through: a pool that refused
+        // every summary carrying numbers would satisfy the test as well.
+        "skipped-page" => {
+            write_frame(
+                stdout,
+                &Frame::Header {
+                    sha256: "0".repeat(64),
+                    mime: "application/pdf".to_string(),
+                    source_kind: SourceKind::Document,
+                    reader: "pdf".to_string(),
+                    reader_version: 1,
+                    pages: 2,
+                },
+            );
+            for page_no in [1, 3] {
+                write_frame(
+                    stdout,
+                    &Frame::Page {
+                        page_no,
+                        section_title: None,
+                    },
+                );
+            }
+            write_frame(
+                stdout,
+                &Frame::Summary {
+                    skipped_pages: vec![2],
+                    text_source: "native:pdf".to_string(),
+                },
+            );
+        }
         // A header whose reader has no name. Not a hypothetical shape: `""` is
         // what `#[serde(default)]` on that field would hand the parent, and it
         // is what any producer writing the frame by hand leaves behind — the

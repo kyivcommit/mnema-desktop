@@ -2710,6 +2710,11 @@ fn a_scanned_file_keeps_its_document_when_the_bytes_did_not_move() {
 /// to leave behind: the path comes to name a document that was indexed under
 /// another name, and nothing about that write touches this path's journal.
 ///
+/// **Two documents, each missing a different page**, because a row belongs to
+/// one path and nothing else in the test could tell a removal scoped to the
+/// path from one scoped to the whole watched root — which would empty the
+/// journal of every other file on every ingest.
+///
 /// `#[cfg(unix)]` for the reason the section below gives: the reader that
 /// skips a page is the PDF one, and reaching it from this crate means a
 /// stand-in worker, which is a shell script.
@@ -2720,10 +2725,19 @@ fn a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back() {
     // Neither is ever parsed: the workers below are scripts, and what makes
     // these two files is that their digests differ.
     let scanned = b"%PDF-1.7\ninvented: a contract whose middle page is a photograph\n".as_slice();
-    let clean = b"%PDF-1.7\ninvented: an amendment, every page of it typed\n".as_slice();
+    let clean = b"%PDF-1.7\ninvented: an amendment, one page of it a photograph\n".as_slice();
 
-    let amendment = pdf_frames(clean, &[1, 2], Vec::new(), "Додаткова угода про постачання");
-    let contract = pdf_frames(scanned, &[1, 3], vec![2], "Договір оренди приміщення");
+    let amendment = pdf_frames(clean, &[1, 3], vec![2], "Додаткова угода про постачання");
+    let contract = pdf_frames(scanned, &[1, 2, 3], vec![7], "Договір оренди приміщення");
+    let named = |fx: &Fixture| -> Vec<(String, Option<i64>, String)> {
+        fx.db
+            .skips_for_root(fx.root_id)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.relative_path, r.page_no, r.rule))
+            .collect()
+    };
+    let row = |path: &str, page: i64| (path.to_string(), Some(page), "no_text_layer".to_string());
 
     // The amendment goes in first, under its own name, so that the pass at the
     // end of this test finds its content already in the index and takes the
@@ -2732,31 +2746,33 @@ fn a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back() {
     // `worker_answering` is called again for every pass rather than once per
     // script: `support::wrong_worker` writes to one fixed name, so two of them
     // held at the same time are one file, and the second overwrites the first
-    // without either `PathBuf` changing.
+    // without either `PathBuf` changing. Measured — this test passed for the
+    // wrong reason until it did.
     fx.place_at("архів/додаток.pdf", clean, mtime());
     assert!(matches!(
         fx.ingest_with_worker("архів/додаток.pdf", &worker_answering(&fx, &amendment)),
         Ingested::Indexed { .. }
     ));
 
-    // The contract, whose middle page is a photograph of one.
+    // The contract, whose page 7 is a photograph of one.
     fx.place_at("договори/договір.pdf", scanned, mtime());
     assert!(matches!(
         fx.ingest_with_worker("договори/договір.pdf", &worker_answering(&fx, &contract)),
         Ingested::Indexed { .. }
     ));
 
-    let rows = fx.db.skips_for_root(fx.root_id).unwrap();
     assert_eq!(
-        rows.iter()
-            .map(|r| (r.relative_path.as_str(), r.page_no, r.rule.as_str()))
-            .collect::<Vec<_>>(),
-        vec![("договори/договір.pdf", Some(2), "no_text_layer")],
-        "the page that was skipped is named, under the path it was skipped in, \
-         and no other page of either document has a row"
+        named(&fx),
+        vec![row("архів/додаток.pdf", 2), row("договори/договір.pdf", 7),],
+        "each document's skipped page is named, under its own path, and no \
+         page that was read has a row"
     );
     assert!(
-        !rows.iter().any(|r| r.page_no.is_none()),
+        !fx.db
+            .skips_for_root(fx.root_id)
+            .unwrap()
+            .iter()
+            .any(|r| r.page_no.is_none()),
         "a per-page skip is not also a verdict on the file: a whole-file row \
          here would be read by `skip_entry` and answer for the document"
     );
@@ -2773,9 +2789,12 @@ fn a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back() {
         matches!(outcome, Ingested::AlreadyIndexed { .. }),
         "the premise is the branch that leaves before the write, got {outcome:?}"
     );
-    assert!(
-        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
-        "a page that now has text keeps a row saying it has none"
+    assert_eq!(
+        named(&fx),
+        vec![row("архів/додаток.pdf", 2), row("договори/договір.pdf", 2),],
+        "page 7 stopped being missing from what this path holds and its row is \
+         gone; the page missing from what it holds now has one; and the other \
+         file's row is not this path's to remove"
     );
 }
 
