@@ -242,17 +242,17 @@ case_ "reader: inline markup inside a sentence stays one block" \
 # one nothing downstream can undo.
 case_ "reader: the text is not folded on its way into a block" \
   crates/mnema-extract/src/html.rs \
-  's{        text: std::mem::take\(run\),}{        text: \{\n            let folded = run.split_whitespace().collect::<Vec<_>>().join(" ");\n            run.clear();\n            folded\n        \},}' \
-  'let folded = run.split_whitespace().collect::<Vec<_>>().join(" ");' \
+  's{    let text = nfc::normalise\(run\)\.into_owned\(\);}{    let text = nfc::normalise(run).split_whitespace().collect::<Vec<_>>().join(" ");}' \
+  'let text = nfc::normalise(run).split_whitespace().collect::<Vec<_>>().join(" ");' \
   mnema-extract 'the_text_is_verbatim_after_nfc_and_nothing_else' --test html
 
 # C21. NFC dropped. A Ukrainian `й` written decomposed and one written composed
 # tokenize as two different words (D32), so a document becomes unfindable by its
 # own spelling — and macOS hands over decomposed text.
-case_ "reader: the source is normalised before anything is taken out of it" \
+case_ "reader: a block's text is normalised at all" \
   crates/mnema-extract/src/html.rs \
-  's{    let source = nfc::normalise\(&decoded\);}{    let source = std::borrow::Cow::Borrowed(decoded.as_str());}' \
-  'let source = std::borrow::Cow::Borrowed(decoded.as_str());' \
+  's{    let text = nfc::normalise\(run\)\.into_owned\(\);}{    let text = run.clone();}' \
+  'let text = run.clone();' \
   mnema-extract 'the_text_is_verbatim_after_nfc_and_nothing_else' --test html
 
 # C22. Line numbers invented for a format that has none. `pages_of` gives this
@@ -297,9 +297,10 @@ case_ "ingest: a document made by another reader is rebuilt, not confirmed" \
 # the html case exactly.
 case_ "ingest: a reader that changed its name changed the reading" \
   crates/mnema-ingest/src/lib.rs \
-  's{        entry\.reader != document\.reader\n            \|\| entry\.reader_version != i64::from\(document\.reader_version\)}{        entry.reader_version != i64::from(document.reader_version)}' \
-  '    let stale_reading = recorded.as_ref().is_some_and(|entry| {
-        entry.reader_version != i64::from(document.reader_version)' \
+  's{            entry\.reader != document\.reader\n                \|\| entry\.reader_version != i64::from\(document\.reader_version\)}{            entry.reader_version != i64::from(document.reader_version)}' \
+  'is_some_and(|entry| {
+            entry.reader_version != i64::from(document.reader_version)
+        });' \
   mnema-ingest 'a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was' --test slice
 
 # C26. The version half dropped. A reader whose output changes without its name
@@ -308,10 +309,10 @@ case_ "ingest: a reader that changed its name changed the reading" \
 # the document that is missing it.
 case_ "ingest: a reader at a new version changed the reading too" \
   crates/mnema-ingest/src/lib.rs \
-  's{        entry\.reader != document\.reader\n            \|\| entry\.reader_version != i64::from\(document\.reader_version\)}{        entry.reader != document.reader}' \
-  '    let stale_reading = recorded.as_ref().is_some_and(|entry| {
-        entry.reader != document.reader
-    });' \
+  's{            entry\.reader != document\.reader\n                \|\| entry\.reader_version != i64::from\(document\.reader_version\)}{            entry.reader != document.reader}' \
+  'is_some_and(|entry| {
+            entry.reader != document.reader
+        });' \
   mnema-ingest 'a_reader_version_bump_re_extracts_the_document_rather_than_confirming_it' --test slice
 
 # C27. The comparison made against the manifest's *prediction* instead of
@@ -321,9 +322,9 @@ case_ "ingest: a reader at a new version changed the reading too" \
 # citation into it, on every single walk.
 case_ "ingest: the comparison is against the reader that ran, not the predicted one" \
   crates/mnema-ingest/src/lib.rs \
-  's{        entry\.reader != document\.reader\n            \|\| entry\.reader_version != i64::from\(document\.reader_version\)}{        entry.reader != expected.reader\n            \|\| entry.reader_version != i64::from(expected.version)}' \
+  's{            entry\.reader != document\.reader\n                \|\| entry\.reader_version != i64::from\(document\.reader_version\)}{            entry.reader != expected.reader\n                || entry.reader_version != i64::from(expected.version)}' \
   'entry.reader != expected.reader
-            || entry.reader_version != i64::from(expected.version)' \
+                || entry.reader_version != i64::from(expected.version)' \
   mnema-ingest 'a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that' --test slice
 
 # --------------------------- fix round 1: what the rebuild itself opened up
