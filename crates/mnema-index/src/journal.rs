@@ -75,6 +75,24 @@ declare_skip_rules! {
     /// may well be transient (a file moved mid-scan, a permission fixed
     /// afterwards) and is worth retrying on the next pass.
     ///
+    /// **It also covers a reader that could not be brought up at all** — the
+    /// library it needs missing, the wrong build, or refused by code signing —
+    /// which is *not* a fact about the user's disk and is the one place this
+    /// rule's name undersells what it holds. It is here because its three
+    /// answers are the ones that case needs and no other rule's are: keep the
+    /// document, count towards a broken environment, and do not remember the
+    /// verdict, so the walk after the repair asks again.
+    /// [`SkipRule::Malformed`](Self::Malformed) carries what routing it onto a
+    /// content rule would cost instead.
+    ///
+    /// The name is therefore coarser than the cases under it, and `reason` is
+    /// where the difference lives: the pool copies the worker's own message
+    /// through unchanged, so "could not load libpdfium" and "no such file" are
+    /// one rule and two sentences. A window grouping by rule alone will show
+    /// them together; that is a known limit of this vocabulary rather than an
+    /// oversight, and the alternative — a rule per environmental cause — is a
+    /// decision of its own.
+    ///
     /// `skipped.rule` is a plain `TEXT` column with no CHECK constraint
     /// (`schema.sql:233`), so adding this value needed no migration and no
     /// `SCHEMA_VERSION` bump.
@@ -185,20 +203,42 @@ declare_skip_rules! {
     /// half-finished install". The shape it takes is a reader that folds every
     /// error it can produce into this rule with one catch-all arm.
     ///
-    /// It costs more here than there, because both of this rule's other answers
-    /// are tuned for damage and both are wrong for a broken install.
-    /// `suggests_broken_environment` is false — right for a folder of truncated
-    /// downloads, and it means a run of these will **not** stop the walk. And
-    /// `is_about_content` is true, so every one of those rows outlives the
-    /// repair: quarantine a library, walk a folder, fix the installation, and
-    /// nothing comes back until `INDEX_FORMAT_VERSION` moves. A whole library of
-    /// PDFs journalled as broken files, by a walk that reports success.
+    /// It costs more here than there, because all three of this rule's other
+    /// answers are tuned for damage and all three are wrong for a broken
+    /// install.
     ///
-    /// A reader in that state has two honest ways out and this is neither of
-    /// them: `Frame::Failed`, which the pool reads as `Unreadable` — kept, and
-    /// counted as evidence about the environment — or not answering at all,
-    /// which it reads as a crash. Note that `"crash"` is not among the rule
-    /// strings the pool accepts, so a worker cannot ask for that one by name.
+    /// * `suggests_broken_environment` is false — right for a folder of
+    ///   truncated downloads, and it means a run of these will **not** stop the
+    ///   walk.
+    /// * Worse than not stopping it: `walk_root` **resets**
+    ///   `consecutive_environmental` to zero on any rule that answers false
+    ///   (`crates/mnema-ingest/src/walk.rs`, the `else` beside the counter). So
+    ///   a folder holding PDFs among other files does not merely fail to raise
+    ///   the alarm — it wipes the count of a genuine environmental run passing
+    ///   through at the same time, and the walk that should have stopped
+    ///   carries on.
+    /// * `is_about_content` is true, so every one of those rows outlives the
+    ///   repair: quarantine a library, walk a folder, fix the installation, and
+    ///   nothing comes back until `INDEX_FORMAT_VERSION` moves.
+    ///
+    /// A whole library of PDFs journalled as broken files, by a walk that
+    /// reports success and has had its one alarm silenced.
+    ///
+    /// **The way out is `Frame::Failed`**, which the pool reads as
+    /// `Unreadable`: the document is kept, the run counts as evidence about the
+    /// environment, and nothing is remembered, so the walk after the repair
+    /// asks again. Its `message` is carried into `skipped.reason` verbatim,
+    /// which is what makes a quarantined library diagnosable — the rule says
+    /// `unreadable` and the reason says which library and why. Both
+    /// `wire::Frame::Failed` and `SkipRule::Unreadable` say so on their own
+    /// side; this is the same agreement read from here.
+    ///
+    /// Dying instead lands on `Crash`, which has the same two flags and is
+    /// honest as far as it goes, but the cause then survives only in the
+    /// worker's stderr file: the user is told the worker died, not that a
+    /// library would not load. Note also that `"crash"` is not among the rule
+    /// strings the pool's wire `match` accepts, so a worker cannot ask for that
+    /// one by name.
     Malformed,
     /// The file is whole, the reader is the right one, and the text is behind a
     /// password.
@@ -398,12 +438,13 @@ impl SkipRule {
     /// them is dying, and ending the walk would leave the rest of the folder
     /// unindexed over it.
     ///
-    /// `Malformed` answers **no** on exactly that reasoning, and it is the one
-    /// variant here whose answer depends on a limit held somewhere else.
-    /// `SkipRule::Malformed`'s own doc comment carries it: a reader that could
-    /// not load its library at all must not report that rule, because a broken
-    /// install then produces a long run of them and this predicate — correctly,
-    /// for damage — declines to stop the walk.
+    /// `Malformed` and `Encrypted` answer **no** on exactly that reasoning, and
+    /// their answers depend on a limit held somewhere else rather than on
+    /// anything visible here. `SkipRule::Malformed`'s own doc comment carries
+    /// it: a reader that could not load its library at all must not report
+    /// either rule, because a broken install then produces a long run of them
+    /// and this predicate — correctly, for damage and for a password — declines
+    /// to stop the walk, and `walk_root` clears the counter besides.
     ///
     /// An exhaustive `match`, matching `is_about_content`'s own reasoning for
     /// being one: a variant added to the enum with no line here would

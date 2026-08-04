@@ -170,8 +170,18 @@ declare_failures! {
     /// is [`SkipRule::TooLarge`](mnema_index::SkipRule::TooLarge) and
     /// `mnema_ingest`'s `displaces`.
     TooLarge,
-    /// The file could not be read at all: missing, not a regular file, refused
-    /// by permissions, or a path this protocol cannot carry.
+    /// The worker could not carry out the request and learned nothing about the
+    /// file's content: missing, not a regular file, refused by permissions, a
+    /// path this protocol cannot carry — **or the reader the file needs could
+    /// not be brought up**, a library that is absent, the wrong build, or
+    /// refused by code signing.
+    ///
+    /// The last one is not a fact about the file, and it is here rather than on
+    /// a content rule for exactly that reason: this variant keeps the document
+    /// and counts towards a broken environment, which is what a half-finished
+    /// install needs. `SkipRule::Malformed`'s doc comment has what routing it
+    /// anywhere else costs. Which of the causes fired survives only in
+    /// [`Skip::reason`], carried verbatim from the worker's own message.
     Unreadable,
     /// The worker looked at the bytes and they are not text (D51):
     /// `Frame::Refused { rule: "not_text" }`.
@@ -1306,8 +1316,11 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 return Ok(Answer::Skipped {
                     failure: Failure::Unreadable,
                     reason: message,
-                    // `Failed` means the worker could not obtain the bytes at
-                    // all, so there is nothing to have hashed.
+                    // The frame carries no digest field, and nothing here needs
+                    // one: a worker that could not obtain the bytes has nothing
+                    // to have hashed, and one whose reader would not come up
+                    // learned nothing it could attest to. `Unreadable` never
+                    // consults a digest — it keeps the document either way.
                     sha256: None,
                 });
             }

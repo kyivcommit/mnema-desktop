@@ -155,12 +155,31 @@ pub enum Frame {
         #[serde(default)]
         sha256: Option<String>,
     },
-    /// The worker could not even obtain the file's bytes to classify: the
-    /// path does not exist, is not a regular file (a directory, say), could
-    /// not be read for permissions, or — the request line itself — was not
-    /// valid JSON. Distinct from `Refused`: a refusal is a decision about
-    /// content the worker did manage to look at, a `Failed` is the world not
-    /// matching what the request claimed.
+    /// The worker could not carry out the request, having learned nothing
+    /// about the file's content in the attempt. Usually because it could not
+    /// obtain the bytes to classify: the path does not exist, is not a regular
+    /// file (a directory, say), could not be read for permissions, or — the
+    /// request line itself — was not valid JSON.
+    ///
+    /// **Also when the reader the file needs could not be brought up at all**,
+    /// which is not a fact about the file and must not be reported as one. A
+    /// dynamic library that is missing, is the wrong build, or is refused by
+    /// code signing (`crates/mnema-extract/src/pdfium_probe.rs` splits those
+    /// three) leaves the worker with bytes it cannot say anything about. The
+    /// alternative — folding it into a content rule — is the failure
+    /// `SkipRule::Malformed`'s own doc comment is written to forbid: every PDF
+    /// journalled as damaged by a walk that reports success, and the rows
+    /// outliving the repair.
+    ///
+    /// Distinct from `Refused`: a refusal is a decision about content the
+    /// worker did manage to look at, a `Failed` is the world not matching what
+    /// the request claimed. That line is what the two have in common across
+    /// both cases above — neither says anything about what is *in* the file,
+    /// which is why both are safe to retry and neither may remove a document.
+    ///
+    /// `message` is the only place the difference survives: the rule this maps
+    /// onto cannot distinguish them, and the reason column can. A worker in
+    /// this state should say which library and why.
     ///
     /// `mnema_index::SkipRule::Unreadable` is the rule this maps
     /// onto; `mnema_pool::Failure` performs the mapping and its doc comment
