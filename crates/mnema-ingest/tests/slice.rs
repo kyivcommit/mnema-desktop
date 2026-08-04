@@ -16,6 +16,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mnema_core::Coordinate;
 use mnema_core::manifest::{Manifest, ReaderId};
+#[cfg(unix)]
+use mnema_core::wire::{Frame, to_line};
+#[cfg(unix)]
+use mnema_core::{Block, BlockType, SourceKind};
 use mnema_index::{Db, SkipRule, open, register_vector_extension};
 use mnema_ingest::{Ingested, ingest_file};
 use mnema_pool::{Pool, PoolConfig};
@@ -339,6 +343,19 @@ fn char_slice(s: &str, start: u32, end: u32) -> String {
         .skip(start as usize)
         .take((end - start) as usize)
         .collect()
+}
+
+/// The digest of some bytes, in the hex a worker's header carries.
+fn sha256_of(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 // ------------------------------------------------------------------- the slice
@@ -2429,15 +2446,7 @@ fn a_file_no_reader_can_take_keeps_its_document_when_only_the_rule_changed() {
 
     // The same bytes, a later mtime — and a build that has no reader for them.
     fx.place_at("notes/dovidka.txt", prose.as_bytes(), mtime_just_after());
-    let mut hasher = Sha256::new();
-    hasher.update(prose.as_bytes());
-    let sha256 = hasher
-        .finalize()
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        });
+    let sha256 = sha256_of(prose.as_bytes());
     let without_the_reader = support::wrong_worker(
         fx.root.parent().unwrap(),
         &format!(
@@ -3211,4 +3220,361 @@ fn content_that_comes_back_finds_no_checkpoint_waiting_for_it() {
         mnema_index::DocumentStatus::Indexed
     );
     assert!(!fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
+}
+
+// ------------------------------------------- a coordinate for every reader
+
+// Every test below is `cfg(unix)` for one reason: the stand-in worker is a
+// shell script (`support::wrong_worker`), and none of the five readers these
+// coordinates belong to exists yet — pdf, html, docx, epub and xlsx arrive in
+// later tasks of this cycle. Until they do, a worker that *states* it is one of
+// them is the only way to reach `pages_of`'s new arms at all, and on Windows
+// they are unreached. What holds them there is `mnema-chunk`'s own suite, which
+// is platform-independent and covers the half that computes a range.
+
+/// A stand-in worker that answers every request with exactly these frames,
+/// whatever file it is handed.
+///
+/// The frames are typed [`Frame`] values put through the wire's own `to_line`
+/// rather than JSON written out by hand: a literal would be a second copy of
+/// the protocol, green until the day a field moves. A quoted heredoc carries
+/// them into the script, so nothing inside them is expanded by the shell.
+#[cfg(unix)]
+fn worker_answering(fx: &Fixture, frames: &[Frame]) -> PathBuf {
+    let lines: String = frames
+        .iter()
+        .map(|frame| to_line(frame).expect("a frame serialises"))
+        .collect();
+    support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!("cat <<'MNEMA_FRAMES'\n{lines}MNEMA_FRAMES"),
+    )
+}
+
+/// A block of a format that has no lines of its own — which is what every one
+/// of these readers produces except xlsx.
+#[cfg(unix)]
+fn unlined_block(text: &str) -> Block {
+    Block {
+        block_type: BlockType::Paragraph,
+        reading_order: 0,
+        language: Some("uk".to_string()),
+        text: text.to_string(),
+        line_start: None,
+        line_end: None,
+    }
+}
+
+/// The coordinate of the one chunk a word is found in.
+#[cfg(unix)]
+fn coordinate_of(fx: &Fixture, word: &str) -> Coordinate {
+    let hits = fx.db.search_lexical(word, 10).unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the fixture is only readable if {word:?} sits in exactly one chunk"
+    );
+    fx.db
+        .citation(hits[0])
+        .unwrap()
+        .expect("a chunk that was found has a citation")
+        .coordinate
+}
+
+/// A PDF's citation names the page it came from.
+///
+/// The whole reason `pages_of` asks which reader made a document. A PDF block
+/// carries no line numbers, and `PageContext::Lines` turns that into
+/// `Coordinate::None` — every page of every PDF cited with no coordinate at
+/// all, silently and without an error anywhere (spec §2.6).
+///
+/// **Two pages, numbered 7 and 9**, and neither number is the page's position
+/// in the document. A coordinate taken from a counter instead of from the page
+/// frame passes a one-page fixture and fails here, and so does one that copies
+/// the first page's number onto the rest.
+#[cfg(unix)]
+#[test]
+fn a_pdf_chunk_cites_its_page_not_nothing() {
+    let fx = Fixture::new();
+    let bytes = b"%PDF-1.7\ninvented, and never parsed: the worker below is a script\n";
+    fx.place("zvity/richnyi.pdf", bytes);
+
+    let worker = worker_answering(
+        &fx,
+        &[
+            Frame::Header {
+                sha256: sha256_of(bytes),
+                mime: "application/pdf".to_string(),
+                source_kind: SourceKind::Document,
+                reader: "pdf".to_string(),
+                reader_version: 1,
+                pages: 2,
+            },
+            Frame::Page {
+                page_no: 7,
+                section_title: None,
+            },
+            Frame::Block(unlined_block(
+                "Річний звіт про виконання кошторису за минулий період.",
+            )),
+            Frame::Page {
+                page_no: 9,
+                section_title: None,
+            },
+            Frame::Block(unlined_block(
+                "Додаток до звіту: перелік придбаного обладнання для філії.",
+            )),
+            Frame::Summary {
+                skipped_pages: 0,
+                text_source: "native:pdf".to_string(),
+            },
+        ],
+    );
+
+    let outcome = fx.ingest_with_worker("zvity/richnyi.pdf", &worker);
+    let Ingested::Indexed { chunks, .. } = &outcome else {
+        panic!("expected the pdf to index, got {outcome:?}")
+    };
+    assert_eq!(*chunks, 2, "one chunk per page");
+
+    assert_eq!(
+        coordinate_of(&fx, "кошторису"),
+        Coordinate::Page { number: 7 },
+        "a PDF block has no line numbers, and `Lines` turns that into \
+         Coordinate::None"
+    );
+    assert_eq!(
+        coordinate_of(&fx, "обладнання"),
+        Coordinate::Page { number: 9 },
+        "the second page's coordinate must come from its own page frame"
+    );
+}
+
+/// html, docx and epub have sections where a PDF has pages, and none of the
+/// three has a line number to fall back on.
+///
+/// One title per reader, all three different: a coordinate hard-coded to any
+/// one of them, or taken from the first page indexed, fails on the other two.
+#[cfg(unix)]
+#[test]
+fn html_docx_and_epub_cite_the_section_their_page_names() {
+    let fx = Fixture::new();
+    // The reader, the file it made, the section its page names, a sentence to
+    // find it by, and the word to search — one word per document, or
+    // `coordinate_of` cannot tell the three apart.
+    let readers = [
+        (
+            "html",
+            "dovidky/umovy.html",
+            "Розділ 3. Умови постачання",
+            "Комісія розглянула звернення щодо умов постачання.",
+            "звернення",
+        ),
+        (
+            "docx",
+            "dovidky/koshtorys.docx",
+            "Додаток Б. Кошторис робіт",
+            "Кошторис складено за формою, узгодженою сторонами.",
+            "формою",
+        ),
+        (
+            "epub",
+            "dovidky/pryimannia.epub",
+            "Глава друга. Приймання",
+            "Приймання виконаних робіт підтверджується актом.",
+            "актом",
+        ),
+    ];
+
+    for (reader, relative, title, prose, word) in readers {
+        let bytes = format!("invented bytes for {reader}, never parsed\n").into_bytes();
+        fx.place(relative, &bytes);
+        let worker = worker_answering(
+            &fx,
+            &[
+                Frame::Header {
+                    sha256: sha256_of(&bytes),
+                    mime: format!("application/x-invented-{reader}"),
+                    source_kind: SourceKind::Document,
+                    reader: reader.to_string(),
+                    reader_version: 1,
+                    pages: 1,
+                },
+                Frame::Page {
+                    page_no: 1,
+                    section_title: Some(title.to_string()),
+                },
+                Frame::Block(unlined_block(prose)),
+                Frame::Summary {
+                    skipped_pages: 0,
+                    text_source: format!("native:{reader}"),
+                },
+            ],
+        );
+
+        let outcome = fx.ingest_with_worker(relative, &worker);
+        assert!(
+            matches!(outcome, Ingested::Indexed { .. }),
+            "expected {reader} to index, got {outcome:?}"
+        );
+        assert_eq!(
+            coordinate_of(&fx, word),
+            Coordinate::Section {
+                title: title.to_string()
+            },
+            "{reader} must cite the section its own page names"
+        );
+    }
+}
+
+/// A spreadsheet chunk cites the rows it covers, not the sheet it sits on.
+///
+/// This is the one the other tests here cannot stand in for, and the reason
+/// `PageContext::Rows` exists at all. A sheet is one page, so a *fixed*
+/// coordinate would give every chunk of this document the same answer — "аркуш
+/// Кошторис, рядки 1–480" — for a chunk that covers forty of them. Non-empty,
+/// plausible, and pointing at twelve times too much: an assertion that the
+/// coordinate merely *exists* is satisfied by exactly that defect, so the
+/// assertions below are that each chunk's range equals the rows of the blocks
+/// it actually names, and that not every chunk carries the same one.
+///
+/// The expected range is read back out of the `block` table rather than
+/// computed from the fixture, so a chunk whose spans name blocks other than the
+/// ones its coordinate was built from fails here too.
+#[cfg(unix)]
+#[test]
+fn an_xlsx_chunk_cites_the_rows_it_covers_not_the_whole_sheet() {
+    let fx = Fixture::new();
+    let bytes = b"PK\x03\x04 invented, and never unzipped\n";
+    fx.place("koshtorysy/biudzhet.xlsx", bytes);
+
+    // Twelve blocks of forty sheet rows each: one sheet spanning rows 1–480.
+    let mut frames = vec![
+        Frame::Header {
+            sha256: sha256_of(bytes),
+            mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string(),
+            source_kind: SourceKind::Data,
+            reader: "xlsx".to_string(),
+            reader_version: 1,
+            pages: 1,
+        },
+        Frame::Page {
+            page_no: 1,
+            section_title: Some("Кошторис".to_string()),
+        },
+    ];
+    frames.extend((0..12u32).map(|i| {
+        Frame::Block(Block {
+            block_type: BlockType::Table,
+            reading_order: i64::from(i),
+            language: Some("uk".to_string()),
+            text: (0..3)
+                .map(|row| {
+                    format!(
+                        "Позиція {i}.{row}: закупівля лабораторного обладнання для філії, \
+                         сума узгоджена комісією.\n"
+                    )
+                })
+                .collect(),
+            // The rows this block occupies in the sheet, which is what the
+            // xlsx reader owes every block it emits (spec §2.6).
+            line_start: Some(i * 40 + 1),
+            line_end: Some(i * 40 + 40),
+        })
+    }));
+    frames.push(Frame::Summary {
+        skipped_pages: 0,
+        text_source: "native:xlsx".to_string(),
+    });
+
+    let worker = worker_answering(&fx, &frames);
+    let outcome = fx.ingest_with_worker("koshtorysy/biudzhet.xlsx", &worker);
+    let Ingested::Indexed {
+        document_id,
+        chunks,
+    } = &outcome
+    else {
+        panic!("expected the spreadsheet to index, got {outcome:?}")
+    };
+    assert!(
+        *chunks >= 3,
+        "a sheet that becomes one chunk cannot tell a narrowed coordinate from \
+         a fixed one, and this fixture produced {chunks}"
+    );
+
+    // The premise: the sheet really does span 480 rows, so a coordinate naming
+    // all of them is a visibly different answer from one naming a chunk's.
+    let sheet: (i64, i64) = fx
+        .db
+        .conn()
+        .query_row(
+            "SELECT min(line_start), max(line_end) FROM block",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(sheet, (1, 480), "the fixture's own rows");
+
+    let mut ranges = Vec::new();
+    for id in fx.chunk_ids(document_id) {
+        let citation = fx
+            .db
+            .citation(id)
+            .unwrap()
+            .expect("a chunk that was written has a citation");
+        let Coordinate::SheetRows {
+            sheet: name,
+            start,
+            end,
+        } = citation.coordinate
+        else {
+            panic!("chunk {id} carries {:?}", citation.coordinate)
+        };
+        assert_eq!(name, "Кошторис", "the sheet's name, from its page");
+
+        let covered: Vec<i64> = citation.spans.iter().map(|s| s.block_id).collect();
+        assert_eq!(
+            (start, end),
+            rows_of(&fx, &covered),
+            "chunk {id} cites rows {start}–{end} while covering blocks {covered:?}"
+        );
+        assert_ne!(
+            (start, end),
+            (1, 480),
+            "chunk {id} cites the whole sheet — which is what `Fixed` would give \
+             it, and what this variant exists to prevent"
+        );
+        ranges.push((start, end));
+    }
+    ranges.dedup();
+    assert!(
+        ranges.len() > 1,
+        "every chunk carries the same range, so nothing here distinguishes a \
+         narrowed coordinate from a fixed one: {ranges:?}"
+    );
+}
+
+/// The row range of a set of blocks, read back out of the database.
+#[cfg(unix)]
+fn rows_of(fx: &Fixture, block_ids: &[i64]) -> (u32, u32) {
+    let mut start = u32::MAX;
+    let mut end = 0;
+    for id in block_ids {
+        let rows: (Option<i64>, Option<i64>) = fx
+            .db
+            .conn()
+            .query_row(
+                "SELECT line_start, line_end FROM block WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let (a, b) = (
+            rows.0.expect("the fixture gives every block its rows"),
+            rows.1.expect("the fixture gives every block its rows"),
+        );
+        start = start.min(a as u32);
+        end = end.max(b as u32);
+    }
+    (start, end)
 }

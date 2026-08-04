@@ -235,6 +235,25 @@ fn cases() -> Vec<Case> {
             page: PageContext::Fixed(Coordinate::Page { number: 3 }),
         },
         Case {
+            // A sheet, whose blocks are rows rather than paragraphs. Here for
+            // the general properties: `Rows` computes a range where `Fixed`
+            // copies one, so it is a different path through `coordinate` and
+            // the packing must be indifferent to it.
+            name: "a sheet of rows",
+            blocks: (0..8)
+                .map(|i| {
+                    block(
+                        prose(260, i, "\n"),
+                        Some(i as u32 * 40 + 1),
+                        Some(i as u32 * 40 + 40),
+                    )
+                })
+                .collect(),
+            page: PageContext::Rows {
+                sheet: "Кошторис".into(),
+            },
+        },
+        Case {
             name: "short tail after three full blocks",
             blocks: vec![
                 block(prose(900, 0, " "), Some(1), Some(12)),
@@ -1050,6 +1069,130 @@ fn a_fixed_coordinate_is_copied_onto_every_chunk() {
     for chunk in &chunks {
         assert_eq!(chunk.locator.coordinate, Coordinate::Page { number: 7 });
     }
+}
+
+/// The row range of the blocks a chunk actually names — the answer `Rows` owes,
+/// taken from the chunk's own locator rather than from the fixture, so a chunk
+/// whose spans and whose coordinate disagree fails rather than passes twice.
+fn rows_named_by(chunk: &Chunk, blocks: &[(i64, &Block)]) -> (u32, u32) {
+    let mut start = u32::MAX;
+    let mut end = 0;
+    for seg in &chunk.locator.spans {
+        let b = find_block(blocks, seg.block_id);
+        start = start.min(b.line_start.expect("this fixture gives every block rows"));
+        end = end.max(b.line_end.expect("this fixture gives every block rows"));
+    }
+    (start, end)
+}
+
+/// A sheet's chunk cites the rows it covers, and this is the whole reason
+/// `PageContext::Rows` exists rather than a `Fixed` sheet coordinate.
+///
+/// A sheet is one page, so `Fixed` would put the sheet's whole extent on every
+/// chunk of it — 1–480 for a chunk covering forty rows. That coordinate is
+/// non-empty and plausible, so "the chunk has a coordinate" is satisfied by
+/// exactly the defect; what is asserted instead is that each chunk's range
+/// equals the rows of the blocks it names, that none of them is the sheet's
+/// own, and that they are not all the same range — the last because a fixture
+/// of one chunk cannot tell a narrowed coordinate from a copied one.
+#[test]
+fn a_sheet_range_narrows_to_the_chunk_and_not_to_the_sheet() {
+    // Twelve blocks of forty sheet rows each: one sheet spanning rows 1–480.
+    let blocks: Vec<Block> = (0..12)
+        .map(|i| {
+            block(
+                prose(300, i, "\n"),
+                Some(i as u32 * 40 + 1),
+                Some(i as u32 * 40 + 40),
+            )
+        })
+        .collect();
+    let with_ids = ids(&blocks);
+    let chunks = chunk_blocks(
+        &with_ids,
+        0,
+        &PageContext::Rows {
+            sheet: "Кошторис".into(),
+        },
+    );
+    assert!(
+        chunks.len() >= 3,
+        "3 600 characters must become several chunks or nothing here \
+         discriminates: {} chunk(s)",
+        chunks.len()
+    );
+
+    let mut ranges = Vec::new();
+    for chunk in &chunks {
+        let Coordinate::SheetRows { sheet, start, end } = &chunk.locator.coordinate else {
+            panic!("chunk {} carries {:?}", chunk.ord, chunk.locator.coordinate)
+        };
+        assert_eq!(sheet, "Кошторис", "the sheet's name, from the page");
+        assert_eq!(
+            (*start, *end),
+            rows_named_by(chunk, &with_ids),
+            "chunk {} cites rows {start}–{end}, which is not what its own spans \
+             cover",
+            chunk.ord
+        );
+        assert_ne!(
+            (*start, *end),
+            (1, 480),
+            "chunk {} cites the whole sheet, which is what `Fixed` would give it",
+            chunk.ord
+        );
+        ranges.push((*start, *end));
+    }
+    ranges.dedup();
+    assert!(
+        ranges.len() > 1,
+        "every chunk carries the same range, so nothing here distinguishes a \
+         narrowed coordinate from a copied one: {ranges:?}"
+    );
+}
+
+/// The row numbers are the sheet reader's obligation, and a block without them
+/// makes the range a guess — exactly as it does for a text file.
+///
+/// Both directions, because either alone is satisfied by a mistake: an
+/// implementation that never answered `SheetRows` would pass the first half,
+/// and one that invented a range from the blocks that *do* have rows would pass
+/// the second.
+#[test]
+fn a_sheet_block_without_rows_leaves_the_chunk_uncoordinated() {
+    let sheet = PageContext::Rows {
+        sheet: "Кошторис".into(),
+    };
+
+    let missing = vec![
+        block(prose(300, 0, " "), Some(1), Some(10)),
+        block(prose(50, 3, " "), None, None),
+        block(prose(300, 5, " "), Some(15), Some(40)),
+    ];
+    let chunks = chunk_blocks(&ids(&missing), 0, &sheet);
+    assert_eq!(
+        chunks[0].locator.coordinate,
+        Coordinate::None,
+        "render nothing rather than invent a row range for a block that names none"
+    );
+
+    // The same three blocks, each with its rows: the fixture is one row number
+    // away from a sheet coordinate, so the assertion above is about the missing
+    // rows and not about `Rows` never answering at all.
+    let complete = vec![
+        block(prose(300, 0, " "), Some(1), Some(10)),
+        block(prose(50, 3, " "), Some(11), Some(14)),
+        block(prose(300, 5, " "), Some(15), Some(40)),
+    ];
+    let chunks = chunk_blocks(&ids(&complete), 0, &sheet);
+    assert_eq!(
+        chunks[0].locator.coordinate,
+        Coordinate::SheetRows {
+            sheet: "Кошторис".into(),
+            start: 1,
+            end: 40,
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------

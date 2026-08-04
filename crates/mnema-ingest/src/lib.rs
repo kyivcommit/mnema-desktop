@@ -30,7 +30,7 @@ use std::path::Path;
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
 use mnema_core::manifest::Manifest;
-use mnema_core::{Block, BlockType, OnDisk, SourceKind};
+use mnema_core::{Block, BlockType, Coordinate, OnDisk, SourceKind};
 use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipRule};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
 
@@ -1060,18 +1060,41 @@ struct PageOf<'a> {
 
 /// The extracted document's own pages, in the form the write loop wants.
 ///
-/// A straight map, and it is only that because the wire carries a page marker:
-/// until it did, this function had to refuse anything with more than one page
-/// rather than guess which block belonged to which — every block of a
-/// thousand-page document on page 1 is a state the schema accepts without
-/// complaint and no test would notice.
+/// **The `PageContext` is chosen by the reader that made the document**, and
+/// until it was, a citation from any format without line numbers carried no
+/// coordinate at all.
 ///
-/// `PageContext::Lines` for every reader that exists today: txt and markdown
-/// both have line numbers, and the chunker computes each chunk's coordinate
-/// from the blocks it actually covers. A PDF page will want
-/// `PageContext::Fixed(Coordinate::Page …)` and will therefore have to decide
-/// this per reader — the information is `document.mime`'s to give, not this
-/// loop's to assume, and there is nothing to decide between yet.
+/// `PageContext::Lines` used to go on every page unconditionally, which is
+/// right for exactly the two readers that existed then: txt and markdown both
+/// have line numbers, and the chunker computes each chunk's range from the
+/// blocks it actually covers. For a block *without* them the chunker answers
+/// `Coordinate::None` (`crates/mnema-chunk/src/lib.rs`'s `line_range`) — so
+/// pdf, html, docx and epub, none of which has a line to name, would every one
+/// of them have been cited with nothing, silently and without an error
+/// anywhere. No test would have seen it either: they are all over txt and md.
+///
+/// `document.reader` rather than `document.mime`, which is what this comment
+/// used to promise. The reader is the record of how the file *was* read — the
+/// worker states it in the header, in the branch that ran
+/// (`crates/mnema-extract/src/bin/worker.rs`) — while a mime can be shared by
+/// two readings and is derived from the same decision anyway. It is also the
+/// string the `path` row stores, so a document and the coordinates of its
+/// chunks are keyed on one fact rather than two that can disagree.
+///
+/// **The arms are matched on a string, and a reader whose name is not among
+/// them falls to `Lines` without complaint.** That is the right default — a
+/// build that adds a text-shaped reader gets line numbers, which is what such
+/// a reader emits — but it is also how a typo would be spent: a `"xslx"` here
+/// would cost every spreadsheet its coordinate, quietly. Nothing in this crate
+/// can check the names against the readers, because D40 forbids depending on
+/// the crate that holds them; what does check them is that each name is asserted
+/// end to end in `tests/slice.rs`, against a worker stating it.
+///
+/// A straight map otherwise, and it is only that because the wire carries a
+/// page marker: until it did, this function had to refuse anything with more
+/// than one page rather than guess which block belonged to which — every block
+/// of a thousand-page document on page 1 is a state the schema accepts without
+/// complaint and no test would notice.
 fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
     document
         .pages
@@ -1080,7 +1103,34 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
             page_no: i64::from(page.page_no),
             section_title: page.section_title.as_deref(),
             blocks: &page.blocks,
-            context: PageContext::Lines,
+            context: match document.reader.as_str() {
+                // The page number the reader gave this page, not its position
+                // among the pages that arrived: a reader that drops a page it
+                // cannot read leaves a gap, and the gap is the honest record.
+                "pdf" => PageContext::Fixed(Coordinate::Page {
+                    number: page.page_no,
+                }),
+                // A section is the whole of what these three have to point at,
+                // and it is identical for every chunk of the page — which is
+                // what `Fixed` means. An untitled page therefore cites an empty
+                // section, and the obligation to name one is the reader's
+                // (spec §6, invariant 1), not this loop's to paper over.
+                "html" | "docx" | "epub" => PageContext::Fixed(Coordinate::Section {
+                    title: page.section_title.clone().unwrap_or_default(),
+                }),
+                // **Not `Fixed`.** A sheet is one page, so a fixed coordinate
+                // would repeat the sheet's whole extent onto every chunk of it
+                // — rows 10–20 cited as "аркуш Дані, рядки 1–500". The range
+                // has to come from the blocks each chunk covers, which is what
+                // `PageContext::Rows` computes; the page supplies only the
+                // sheet's name.
+                "xlsx" => PageContext::Rows {
+                    sheet: page.section_title.clone().unwrap_or_default(),
+                },
+                // text, markdown, and anything a future build adds without
+                // deciding: line numbers are what those readers emit.
+                _ => PageContext::Lines,
+            },
         })
         .collect()
 }
