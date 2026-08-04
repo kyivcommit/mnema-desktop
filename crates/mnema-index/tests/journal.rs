@@ -4,6 +4,8 @@
 //! `grep "INTO skipped"` over the crates returned nothing but the schema
 //! itself.
 
+use std::collections::HashSet;
+
 use mnema_core::{OnDisk, SourceKind};
 use mnema_index::{Db, DocumentStatus, SkipRule, open, register_vector_extension};
 
@@ -76,6 +78,45 @@ fn a_page_without_a_text_layer_is_recorded_against_that_page() {
     )
     .unwrap();
     assert_eq!(db.skips_for_root(1).unwrap()[0].page_no, Some(4));
+}
+
+/// A file that left the tree takes its page rows with it, and a file that is
+/// still there keeps its own.
+///
+/// Reconciliation's `forget_skips_not_in` is the only thing that reaps a path
+/// nobody re-reads, and until a reader could skip a page there was nothing of
+/// this kind for it to reap — so the behaviour was reachable by nothing and
+/// asserted nowhere. What it costs to get wrong is a page of a deleted file
+/// still being reported missing from the index, for the life of the index,
+/// under a filename that no longer exists.
+///
+/// Both directions in one test: a removal that spared page rows would fail the
+/// first assertion, and one that took every root's page rows would fail the
+/// second.
+#[test]
+fn a_path_that_left_the_tree_takes_its_page_rows_with_it() {
+    let db = fixture_empty();
+    for (path, page) in [
+        ("архів/зниклий.pdf", None),
+        ("архів/зниклий.pdf", Some(2)),
+        ("архів/наявний.pdf", Some(5)),
+    ] {
+        db.record_skip(1, path, page, "no text layer", SkipRule::NoTextLayer, None)
+            .unwrap();
+    }
+
+    let seen = HashSet::from(["архів/наявний.pdf"]);
+    assert_eq!(db.forget_skips_not_in(1, &seen, &[]).unwrap(), 2);
+    assert_eq!(
+        db.skips_for_root(1)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.relative_path, r.page_no))
+            .collect::<Vec<_>>(),
+        vec![("архів/наявний.pdf".to_string(), Some(5))],
+        "the vanished path's rows go, both of them, and the surviving path's \
+         page row is not swept up with them"
+    );
 }
 
 // ------------------------------------------------- what every rule answers

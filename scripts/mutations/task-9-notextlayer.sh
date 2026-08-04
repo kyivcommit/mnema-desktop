@@ -175,6 +175,19 @@ case_ "ingest: a refusal that removes the document removes its page rows" \
         Ok(())' \
   mnema-ingest 'a_refusal_that_takes_the_document_away_takes_its_page_rows_with_it' --test slice
 
+# N14. Reconciliation's own removal, narrowed to whole-file rows. It is the
+# only thing that reaps a path nobody re-reads, and until this cycle there were
+# no per-page rows for it to reap — so the behaviour was reachable by nothing
+# and asserted nowhere. Narrowed, a deleted file goes on having a page reported
+# missing from the index, for the life of the index, under a filename that is
+# not there.
+case_ "index: reconciliation reaps a vanished path's page rows too" \
+  crates/mnema-index/src/journal.rs \
+  's{                "DELETE FROM skipped WHERE watched_root_id = \?1 AND relative_path = \?2",}{                "DELETE FROM skipped WHERE watched_root_id = ?1 AND relative_path = ?2 AND page_no IS NULL",}' \
+  'AND relative_path = ?2 AND page_no IS NULL",
+                params![root_id, relative],' \
+  mnema-index 'a_path_that_left_the_tree_takes_its_page_rows_with_it' --test journal
+
 # N13. The other direction, and it is what keeps the removal conditional. A
 # worker that died says nothing about the file: the document stays, so the
 # account of what is missing from it has to stay too. Made unconditional here by
