@@ -109,6 +109,49 @@ case_ "the walk compares against the worker's manifest, not one of its own" \
   mnema-ingest \
   'a_worker_that_cannot_state_its_readers_stops_the_walk_before_any_file' --test walk
 
+# C9. A manifest naming no reader is refused. `run_one` refuses a HEADER naming
+# no reader and gives as its reason that no manifest ever names the empty
+# reader; this is the line that keeps that sentence true. Left out, every `path`
+# row mismatches a value nothing can equal and the whole index goes to workers
+# on every walk, for ever, with nothing anywhere saying so. Neither `NOT NULL`
+# nor serde sees `""`.
+case_ "a manifest naming no reader is refused rather than stored" \
+  crates/mnema-pool/src/lib.rs \
+  's~            return Err\(protocol\(\n                &String::from_utf8_lossy\(&out\.stdout\),\n                "a manifest naming no reader",~            let _ = protocol(\n                \&String::from_utf8_lossy(\&out.stdout),\n                "a manifest naming no reader",~' \
+  '            let _ = protocol(' \
+  mnema-pool 'a_manifest_naming_no_reader_is_refused_and_a_named_one_is_not' --test manifest
+
+# C10. And the map is checked, not only the default. A guard written for one of
+# the two fields leaves the other open, and an empty name under a single
+# extension re-reads only that extension's files — the same defect at a size
+# nobody goes looking for.
+case_ "every reader the manifest publishes is checked, not only the default" \
+  crates/mnema-pool/src/lib.rs \
+  's~        if std::iter::once\(&manifest\.default\)\n            \.chain\(manifest\.by_extension\.values\(\)\)\n~        if std::iter::once(\&manifest.default)\n~' \
+  '        if std::iter::once(&manifest.default)
+            .any(' \
+  mnema-pool 'an_extension_naming_no_reader_is_refused_too' --test manifest
+
+# C11. The bill the residual is allowed to run up, and its size. A re-read that
+# rebuilds instead of landing on the document it already has moves every
+# `chunk.id` out from under every citation into it — turning a bounded
+# per-walk cost into a per-walk invalidation. This is what
+# `a_reader_no_build_agrees_on_…` is for.
+#
+# The id-reuse half of that test is measured rather than cased, and the
+# measurement is in the test's own comment: `chunk.id` is an `INTEGER PRIMARY
+# KEY` with no `AUTOINCREMENT`, so over a table holding ONE document a rebuild
+# hands back the ids it just deleted (`1,2,3` → `1,2,3`), and only a second
+# document's rows above them make the comparison sensitive (`1,2,3` → `7,8,9`).
+# No mutation of product code can show that: it is a property of the fixture,
+# and the review that found it is what the second file in that test now answers.
+case_ "a re-read lands on the document it already has, and does not rebuild it" \
+  crates/mnema-ingest/src/lib.rs \
+  's~        if db\.stage_status\(&id, STAGE_CHUNK\)\?\.as_deref\(\) == Some\(STATUS_DONE\) \{~        if false {~' \
+  '        if false {' \
+  mnema-ingest \
+  'a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that' --test slice
+
 # What has no case here, named rather than left to be discovered: the exit-status
 # check inside `Pool::manifest`. Removing it leaves every test green, and that is
 # honest rather than a gap in the tests — both stand-ins that fail the handshake

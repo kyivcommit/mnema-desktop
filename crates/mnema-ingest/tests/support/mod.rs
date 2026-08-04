@@ -124,8 +124,8 @@ pub fn worker() -> &'static Path {
 /// models is the one D44 was written for and is the commoner one anyway: the
 /// binary is the right binary, and the library it loads is not.
 ///
-/// Use [`worker_that_states_no_readers`] for the other shape — a sidecar that
-/// is not this parent's worker at all.
+/// Use [`worker_from_before_the_manifest`] for the other shape — a binary that
+/// reads files perfectly and cannot answer the handshake.
 #[cfg(unix)]
 pub fn wrong_worker(dir: &Path, body: &str) -> PathBuf {
     // Quoted, not interpolated bare: a target directory can hold a space. It

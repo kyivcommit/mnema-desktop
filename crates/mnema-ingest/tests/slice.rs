@@ -754,6 +754,25 @@ fn a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that() {
     else {
         panic!("expected the first pass to index the file")
     };
+
+    // A second document, indexed **after** this one, and the whole reason it is
+    // here is the `chunk.id` assertion at the end. `chunk.id` is an `INTEGER
+    // PRIMARY KEY` with no `AUTOINCREMENT` (`crates/mnema-index/src/
+    // schema.sql:149`), so SQLite allocates one past the largest rowid in the
+    // table — and over a table holding one document, a rebuild that empties it
+    // hands back the very ids it just deleted. Measured, on this table's shape:
+    // one document gives `1,2,3` before and `1,2,3` after, while a second
+    // document's rows sitting above them give `1,2,3` before and `7,8,9` after.
+    // Without this file the assertion is satisfied by the rebuild it names, and
+    // the sentence under it describes something it cannot see. Measured here
+    // too: this document's chunk ids are `[1]` against a table whose largest is
+    // `2`, so a rebuild has to allocate past it.
+    //
+    // After, not before: indexed first, this document's chunks are still the
+    // top of the table and a rebuild reuses their ids anyway.
+    fx.place_at("other.txt", CONTRACT.as_bytes(), mtime());
+    assert!(matches!(fx.ingest("other.txt"), Ingested::Indexed { .. }));
+
     let ids = fx.chunk_ids(&document_id);
     assert_eq!(ids.len(), chunks, "every chunk written has a row");
 
@@ -770,7 +789,10 @@ fn a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that() {
 
     // …and that is the whole bill. Nothing was rebuilt, nothing was journalled,
     // and the path still names the document every citation into it names.
-    assert_eq!(fx.count("SELECT count(*) FROM document"), 1);
+    //
+    // Two documents: this file, and the one indexed above it to give the
+    // `chunk.id` comparison something to be sensitive to.
+    assert_eq!(fx.count("SELECT count(*) FROM document"), 2);
     assert_eq!(
         fx.chunk_ids(&document_id),
         ids,

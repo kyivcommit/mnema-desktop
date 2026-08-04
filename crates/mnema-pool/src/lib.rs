@@ -784,12 +784,34 @@ impl Pool {
                 ),
             ));
         }
-        serde_json::from_slice(&out.stdout).map_err(|source| {
+        let manifest: Manifest = serde_json::from_slice(&out.stdout).map_err(|source| {
             protocol(
                 &String::from_utf8_lossy(&out.stdout),
                 &format!("--manifest did not answer with a reader manifest: {source}"),
             )
-        })
+        })?;
+        // The other end of the argument `run_one` makes about a header naming
+        // no reader: it refuses one *because* no manifest ever names the empty
+        // reader. This is the line that keeps that sentence true, and it is not
+        // symmetry for its own sake — were it false, every `path` row would
+        // mismatch a manifest entry nothing can equal, and the whole index
+        // would be handed to workers on every walk, for ever, with nothing
+        // anywhere saying so. `NOT NULL` catches neither end of it, and
+        // `serde` is happy with `""`.
+        //
+        // Every reader the manifest publishes, not only the default: an empty
+        // name under one extension re-reads only that extension's files, which
+        // is the same defect at a size nobody notices.
+        if std::iter::once(&manifest.default)
+            .chain(manifest.by_extension.values())
+            .any(|id| id.reader.trim().is_empty())
+        {
+            return Err(protocol(
+                &String::from_utf8_lossy(&out.stdout),
+                "a manifest naming no reader",
+            ));
+        }
+        Ok(manifest)
     }
 
     fn poisoned(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Skip>> {
