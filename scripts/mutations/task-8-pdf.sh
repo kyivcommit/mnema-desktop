@@ -186,15 +186,17 @@ case_ "worker: the header counts the pages sent, not the document's" \
   crates/mnema-extract/src/bin/worker.rs \
   's{                    pages: doc\.pages\.len\(\) as u32,}{                    pages: (doc.pages.len() + doc.skipped.len()) as u32,}' \
   'pages: (doc.pages.len() + doc.skipped.len()) as u32,' \
-  mnema-extract 'a_skipped_pdf_page_leaves_a_gap_and_is_counted_rather_than_announced' --test worker_cli
+  mnema-extract 'a_skipped_pdf_page_leaves_a_gap_and_is_named_rather_than_announced' --test worker_cli
 
-# C16. The other half of the same pair: the summary's count of what was dropped.
-case_ "worker: the summary counts the pages that were skipped" \
+# C16. The other half of the same pair: the summary's account of what was
+# dropped. Task 9 turned the count into the numbers themselves, so the line this
+# mutates and the test it reddens both moved; the case is the same one.
+case_ "worker: the summary names the pages that were skipped" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{                    skipped_pages: doc\.skipped\.len\(\) as u32,}{                    skipped_pages: 0,}' \
-  'skipped_pages: 0,
+  's{                    skipped_pages: doc\.skipped,}{                    skipped_pages: Vec::new(),}' \
+  'skipped_pages: Vec::new(),
                     text_source: "native:pdf"' \
-  mnema-extract 'a_skipped_pdf_page_leaves_a_gap_and_is_counted_rather_than_announced' --test worker_cli
+  mnema-extract 'a_skipped_pdf_page_leaves_a_gap_and_is_named_rather_than_announced' --test worker_cli
 
 # C17. A line number invented for a format that has none. `pages_of` gives a PDF
 # `PageContext::Fixed(Coordinate::Page)` *because* these blocks carry no rows;

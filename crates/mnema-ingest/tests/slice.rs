@@ -3249,7 +3249,7 @@ fn a_document_with_no_pages_is_still_written() {
             // for the wrong reason — as a protocol error, before the empty
             // document was ever written.
             r#"{"frame":"header","sha256":"'"$(printf %064d 7)"'","mime":"application/pdf","source_kind":"document","reader":"pdf","reader_version":1,"pages":0}"#,
-            r#"{"frame":"summary","skipped_pages":0,"text_source":"native:pdf"}"#
+            r#"{"frame":"summary","skipped_pages":[],"text_source":"native:pdf"}"#
         ),
     );
     set_mtime(&path, mtime_just_after());
@@ -3565,7 +3565,7 @@ fn a_pdf_chunk_cites_its_page_not_nothing() {
                 "Додаток до звіту: перелік придбаного обладнання для філії.",
             )),
             Frame::Summary {
-                skipped_pages: 0,
+                skipped_pages: Vec::new(),
                 text_source: "native:pdf".to_string(),
             },
         ],
@@ -3646,7 +3646,7 @@ fn html_docx_and_epub_cite_the_section_their_page_names() {
                 },
                 Frame::Block(unlined_block(prose)),
                 Frame::Summary {
-                    skipped_pages: 0,
+                    skipped_pages: Vec::new(),
                     text_source: format!("native:{reader}"),
                 },
             ],
@@ -3710,7 +3710,7 @@ fn a_page_that_names_no_section_carries_an_empty_one_rather_than_none() {
                 "Текст, який не має над собою жодного заголовка.",
             )),
             Frame::Summary {
-                skipped_pages: 0,
+                skipped_pages: Vec::new(),
                 text_source: "native:html".to_string(),
             },
         ],
@@ -3785,7 +3785,7 @@ fn an_xlsx_chunk_cites_the_rows_it_covers_not_the_whole_sheet() {
         })
     }));
     frames.push(Frame::Summary {
-        skipped_pages: 0,
+        skipped_pages: Vec::new(),
         text_source: "native:xlsx".to_string(),
     });
 

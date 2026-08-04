@@ -90,24 +90,32 @@ pub enum Frame {
     /// needs its `page` row.
     ///
     /// `page_no` is the reader's own numbering, not a counter of these frames:
-    /// a reader that skips a page (`Summary::skipped_pages`) leaves a gap
-    /// here, and the gap is the honest record of it.
+    /// a reader that skips a page (`Summary::skipped_pages` names it) leaves a
+    /// gap here, and the gap is the honest record of it.
     Page {
         page_no: u32,
         section_title: Option<String>,
     },
     /// One source block, in reading order within its page.
     Block(Block),
-    /// Sent once, after the last block. `skipped_pages` counts pages a reader
-    /// dropped mid-document (a scanned PDF page with no text layer, say) —
-    /// zero for every format that cannot skip a page. `text_source` matches
+    /// Sent once, after the last block. `skipped_pages` **names** the pages a
+    /// reader dropped mid-document (a scanned PDF page with no text layer,
+    /// say) — empty for every format that cannot skip a page, and disjoint
+    /// from the `Page` frames that arrived. `text_source` matches
     /// `page.text_source`'s vocabulary (`schema.sql:101-102`); a document
     /// with several pages of different sources is not representable by this
     /// one field, which is fine for the readers this task ships (txt is
     /// always `native:txt`) and is a known limit for whoever adds a
     /// multi-page-source-family reader later.
+    ///
+    /// Numbers rather than a count, because the behaviour requirements ask for
+    /// a journal row per skipped page and a count cannot say which page of the
+    /// contract the scanner missed. The count is `skipped_pages.len()` and is
+    /// **not** carried beside them, for the reason `mnema_pool::Document`
+    /// gives for not keeping the header's page count: two numbers that can
+    /// disagree leave a caller free to trust the wrong one.
     Summary {
-        skipped_pages: u32,
+        skipped_pages: Vec<u32>,
         text_source: String,
     },
     /// The worker looked at the file (or its metadata) and declined to read
@@ -283,9 +291,12 @@ mod tests {
         })
     }
 
+    /// Two skipped pages, not none: an empty vector round-trips through a
+    /// serialiser that drops the field entirely, so a fixture others copy has
+    /// to carry numbers for the round-trip test to be asking anything.
     fn sample_summary() -> Frame {
         Frame::Summary {
-            skipped_pages: 0,
+            skipped_pages: vec![2, 5],
             text_source: "native:txt".to_string(),
         }
     }

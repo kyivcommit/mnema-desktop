@@ -273,7 +273,7 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
             write_frame(
                 stdout,
                 &Frame::Summary {
-                    skipped_pages: 0,
+                    skipped_pages: Vec::new(),
                     text_source: "native:md".to_string(),
                 },
             );
@@ -306,7 +306,7 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
             write_frame(
                 stdout,
                 &Frame::Summary {
-                    skipped_pages: 0,
+                    skipped_pages: Vec::new(),
                     text_source: "native:txt".to_string(),
                 },
             );
@@ -343,7 +343,7 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
             write_frame(
                 stdout,
                 &Frame::Summary {
-                    skipped_pages: 0,
+                    skipped_pages: Vec::new(),
                     text_source: "native:txt".to_string(),
                 },
             );
@@ -406,7 +406,7 @@ fn answer(stdout: &mut io::Stdout) {
     write_frame(
         stdout,
         &Frame::Summary {
-            skipped_pages: 0,
+            skipped_pages: Vec::new(),
             text_source: "native:txt".to_string(),
         },
     );

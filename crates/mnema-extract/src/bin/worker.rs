@@ -209,7 +209,9 @@ fn handle_request(line: &str) -> Vec<Frame> {
             });
             frames.extend(blocks.into_iter().map(Frame::Block));
             frames.push(Frame::Summary {
-                skipped_pages: 0,
+                // Empty, not absent: a format with one page has no page it
+                // could drop, and the field says so rather than being optional.
+                skipped_pages: Vec::new(),
                 text_source: "native:txt".to_string(),
             });
             frames
@@ -237,7 +239,9 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 frames.extend(page.blocks.into_iter().map(Frame::Block));
             }
             frames.push(Frame::Summary {
-                skipped_pages: 0,
+                // Markdown drops no page: `extract_markdown` makes one per
+                // heading and keeps every one it makes.
+                skipped_pages: Vec::new(),
                 // `native:md` satisfies `page.text_source`'s CHECK
                 // (`crates/mnema-index/src/schema.sql:101-102`) and names the
                 // reader rather than the file: text that came out of a
@@ -308,7 +312,7 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     // From the same vector the Page frames come from, so the
                     // pool's count check cannot disagree with itself. Skipped
                     // pages are NOT in this number: they produce no Page frame
-                    // and are counted by `skipped_pages` instead.
+                    // and are named by `skipped_pages` instead.
                     pages: doc.pages.len() as u32,
                 });
                 for page in doc.pages {
@@ -322,7 +326,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     frames.extend(page.blocks.into_iter().map(Frame::Block));
                 }
                 frames.push(Frame::Summary {
-                    skipped_pages: doc.skipped.len() as u32,
+                    // The numbers, not their count. This reader is the only
+                    // thing in the product that ever knows *which* page of a
+                    // contract the scanner missed, and the parent owes a
+                    // journal row per page — which a count cannot fill in.
+                    skipped_pages: doc.skipped,
                     text_source: "native:pdf".to_string(),
                 });
                 frames

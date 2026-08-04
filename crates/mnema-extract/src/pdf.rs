@@ -7,9 +7,10 @@
 //! as though its content were the word `Page`. `TEXT_LAYER_MIN_CHARS`
 //! (`pdfium_probe.rs`) is the product's answer, and a page below it goes into
 //! [`PdfDocument::skipped`] by number. It is dropped from the text and kept in
-//! the record: `Summary::skipped_pages` counts it, and the gap it leaves in
-//! `page_no` is what `Frame::Page`'s own doc comment calls the honest record of
-//! a reader that skipped something.
+//! the record: `Summary::skipped_pages` carries the number out of this process,
+//! the parent journals a row for it, and the gap it leaves in `page_no` is what
+//! `Frame::Page`'s own doc comment calls the honest record of a reader that
+//! skipped something.
 //!
 //! **Three failures, and the difference between them is worth more than the
 //! code that makes it.**
@@ -79,10 +80,9 @@ pub struct PdfDocument {
     /// checks it against page counts the fixture generator printed, rather than
     /// against anything that reads the file.
     ///
-    /// Numbers rather than a count, although `Summary::skipped_pages` sends
-    /// only the count today: the count cannot answer "which page of this
-    /// contract did the scanner miss", and the reader is the only thing that
-    /// ever knows.
+    /// Numbers rather than a count, and `Summary::skipped_pages` now carries
+    /// them out whole: a count cannot answer "which page of this contract did
+    /// the scanner miss", and this reader is the only thing that ever knows.
     pub skipped: Vec<u32>,
 }
 

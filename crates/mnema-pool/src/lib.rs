@@ -99,8 +99,8 @@ macro_rules! declare_failures {
         /// misread. The rule reaches this enum only for a PDF where **every**
         /// page fell below the threshold — a file with nothing to cite. A PDF
         /// that lost some of its pages is a document that arrived, and its
-        /// skipped pages are counted in `Summary::skipped_pages` rather than
-        /// refused here.
+        /// skipped pages are named in `Document::skipped_pages` — and journalled
+        /// a row each by the parent — rather than refused here.
         ///
         /// **The mapping lives in this crate**, as `impl From<Failure> for
         /// SkipRule`, for three reasons. The pool is the only code that
@@ -295,7 +295,7 @@ pub struct Skip {
 ///
 /// `page_no` is the reader's own numbering rather than this page's index in the
 /// vector, and the two can differ — a reader that drops a page it cannot read
-/// leaves a gap, which `Summary::skipped_pages` counts and this preserves.
+/// leaves a gap, which `Document::skipped_pages` names and this preserves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedPage {
     pub page_no: u32,
@@ -307,8 +307,8 @@ pub struct ExtractedPage {
 /// their blocks in reading order, and the summary's.
 ///
 /// Carries more than the blocks because the wire already does, and the schema
-/// needs all of it — `document.mime`, `page.text_source`, and the count of pages
-/// a reader dropped mid-document. Returning only the blocks would mean
+/// needs all of it — `document.mime`, `page.text_source`, and the numbers of the
+/// pages a reader dropped mid-document. Returning only the blocks would mean
 /// extracting the file twice.
 ///
 /// The header's page *count* is not kept: it has been checked against
@@ -329,7 +329,19 @@ pub struct Document {
     pub reader: String,
     pub reader_version: u32,
     pub pages: Vec<ExtractedPage>,
-    pub skipped_pages: u32,
+    /// The pages the reader dropped mid-document, by their own numbers, in the
+    /// order the summary sent them. Empty for every format that cannot skip a
+    /// page.
+    ///
+    /// Numbers rather than a count for the reason the parent has: it owes the
+    /// skip journal a row per skipped page, and "how many" cannot say which
+    /// page of a contract the scanner missed. The count is `.len()`, and
+    /// keeping it beside them would be the second number this type refuses
+    /// above.
+    ///
+    /// Disjoint from `pages` by the check in `run_one`: a page announced as
+    /// both read and skipped is a worker that does not speak this protocol.
+    pub skipped_pages: Vec<u32>,
     pub text_source: String,
 }
 
@@ -1298,6 +1310,24 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                             "the header promised {promised} pages and {} arrived",
                             pages.len()
                         ),
+                    ));
+                }
+                // The same accusation, about the pair this summary is the only
+                // frame to carry both halves of. A page cannot be both read
+                // and skipped, and the two answers are not merely redundant:
+                // the parent writes a journal row saying "this page has no
+                // text layer" for every number here, so a page in both lists
+                // is the skip window telling someone a page is missing while
+                // the index holds it and cites it. Checked here rather than
+                // trusted, because nothing further down ever sees the two
+                // lists side by side again.
+                if let Some(both) = skipped_pages
+                    .iter()
+                    .find(|no| pages.iter().any(|page| page.page_no == **no))
+                {
+                    return Err(protocol(
+                        &line,
+                        &format!("page {both} arrived and was reported skipped"),
                     ));
                 }
                 return Ok(Answer::Document(Document {

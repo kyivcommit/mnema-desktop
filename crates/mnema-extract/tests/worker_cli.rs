@@ -449,21 +449,26 @@ fn a_pdf_is_read_and_its_header_names_the_pdf_reader() {
     else {
         panic!("expected a summary, got {:?}", frames.last());
     };
-    assert_eq!(*skipped_pages, 0);
+    assert!(skipped_pages.is_empty());
     // `native:pdf`, satisfying `page.text_source`'s CHECK and naming the
     // reader rather than the file — the same rule `native:md` follows.
     assert_eq!(text_source, "native:pdf");
 }
 
 /// A PDF that lost a page in the middle: the gap reaches the wire, the header
-/// counts what arrived, and the summary counts what did not.
+/// counts what arrived, and the summary **names** what did not.
 ///
 /// This is the pool's own integrity check exercised at its producer: it
 /// requires `Header::pages` to equal the number of `Page` frames, and it does
 /// **not** look at the largest `page_no`. A reader that announced 3 because the
 /// document has three pages would stop the job.
+///
+/// The summary assertion is the whole vector, and it constrains both
+/// directions: the page that was skipped is named, and the two that were not
+/// are absent. `skipped_pages.len() == 1` is satisfied by `[1]`, which would be
+/// a journal row against a page the index holds and cites.
 #[test]
-fn a_skipped_pdf_page_leaves_a_gap_and_is_counted_rather_than_announced() {
+fn a_skipped_pdf_page_leaves_a_gap_and_is_named_rather_than_announced() {
     let request = serde_json::json!({
         "path": "tests/fixtures/text-stamp-text.pdf",
         "max_bytes": 1_048_576,
@@ -495,7 +500,12 @@ fn a_skipped_pdf_page_leaves_a_gap_and_is_counted_rather_than_announced() {
     let Some(Frame::Summary { skipped_pages, .. }) = frames.last() else {
         panic!("expected a summary, got {:?}", frames.last());
     };
-    assert_eq!(*skipped_pages, 1);
+    assert_eq!(
+        skipped_pages,
+        &vec![2],
+        "the middle page is the one without a text layer, and the summary is \
+         the only place its number can leave this process"
+    );
 }
 
 /// A scan of a paper document is refused after being read, under a rule about
