@@ -665,10 +665,12 @@ fn journal_skipped_pages(
             ),
             SkipRule::NoTextLayer,
             // **No measurement, although the rule is one `record_skip` stores
-            // them for.** `size_bytes`, `mtime` and the rest describe the file
-            // the walk stat'ed, and the only reader of them is `skip_entry`,
-            // which takes `page_no IS NULL` — so on a page's row they would be
-            // written, never read, and left to go stale, in three columns that
+            // one for.** What this drops is `size_bytes` and `mtime`, and
+            // nothing else: `format_version` is in that statement's `params!`
+            // unconditionally and is written either way. Both describe the file
+            // the walk stat'ed, and their only reader is `skip_entry`, which
+            // takes `page_no IS NULL` — so on a page's row they would be
+            // written, never read, and left to go stale, in two columns that
             // read as though they described the page.
             None,
         )?;

@@ -20,7 +20,7 @@ use mnema_core::manifest::{Manifest, ReaderId};
 use mnema_core::wire::{Frame, to_line};
 #[cfg(unix)]
 use mnema_core::{Block, BlockType, SourceKind};
-use mnema_index::{Db, SkipRule, open, register_vector_extension};
+use mnema_index::{Db, INDEX_FORMAT_VERSION, SkipRule, open, register_vector_extension};
 use mnema_ingest::{Ingested, ingest_file};
 use mnema_pool::{Pool, PoolConfig};
 use sha2::{Digest, Sha256};
@@ -2773,16 +2773,25 @@ fn a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back() {
         "the pages that did have text are in the index all the same"
     );
     // The file's own measurement is deliberately not stamped on a page's row:
-    // `skip_entry` reads `page_no IS NULL`, so on these three columns it would
-    // be written, never read, and left to go stale.
+    // `skip_entry` reads `page_no IS NULL`, so `size_bytes` and `mtime` would
+    // be written there, never read, and left to go stale. Those two and no
+    // others — `format_version` comes from the same statement whether or not a
+    // measurement was passed, and the second clause below is what says so
+    // rather than a comment claiming it.
+    //
+    // Counted as "how many page rows carry neither", not as "how many carry
+    // one": a `= 0` is satisfied by an empty table, and would then be resting
+    // on the row-set assertion above to know there are any rows at all.
     assert_eq!(
-        fx.count(
+        fx.count(&format!(
             "SELECT count(*) FROM skipped
               WHERE page_no IS NOT NULL
-                AND (size_bytes IS NOT NULL OR mtime IS NOT NULL)"
-        ),
-        0,
-        "a page's row carries no measurement of the file it is a page of"
+                AND size_bytes IS NULL AND mtime IS NULL
+                AND format_version = {INDEX_FORMAT_VERSION}"
+        )),
+        2,
+        "both page rows are there, neither carries a measurement of the file it \
+         is a page of, and both carry this build's format version all the same"
     );
 
     // The contract's name comes to hold the amendment's bytes — content this
@@ -2855,14 +2864,16 @@ fn a_reader_that_learns_to_read_a_page_does_not_erase_the_note_that_it_is_missin
         "the premise is the branch that writes no pages, got {outcome:?}"
     );
 
+    // The set, not its size. `len() == 2` is satisfied by `[1, 2]`, and under
+    // *that* index the row this test goes on to require would be false — so a
+    // premise counting pages would let the whole test pass while asserting the
+    // opposite of what it says. Measured: with the fixture altered to leave
+    // pages 1 and 2 indexed, the counting version passed green.
     assert_eq!(
-        fx.db
-            .indexed_page_numbers(&sha256_of(contract))
-            .unwrap()
-            .len(),
-        2,
+        fx.db.indexed_page_numbers(&sha256_of(contract)).unwrap(),
+        vec![1, 3],
         "the premise fails unless the index still holds the older extraction — \
-         two pages, not three"
+         pages 1 and 3, with the gap where page 2 is not"
     );
     assert_eq!(
         named(&fx),
@@ -2918,12 +2929,12 @@ fn no_row_is_written_for_a_page_the_index_holds() {
         "page 2 of this document is in the index; a row calling it missing is \
          the pool's stop-the-job contradiction arriving by another road"
     );
+    // The set, for the reason the test above states: a count of three is
+    // satisfied by an index holding pages 1, 3 and 4, and page 2 — the one this
+    // test is about — would not be in it.
     assert_eq!(
-        fx.db
-            .indexed_page_numbers(&sha256_of(report))
-            .unwrap()
-            .len(),
-        3,
+        fx.db.indexed_page_numbers(&sha256_of(report)).unwrap(),
+        vec![1, 2, 3],
         "and the premise fails unless the index really does hold that page"
     );
 }
