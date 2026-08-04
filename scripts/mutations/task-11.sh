@@ -376,3 +376,27 @@ case_ "reader: a chapter's block text is normalised at all" \
   's{    let text = nfc::normalise\(run\)\.into_owned\(\);}{    let text = run.clone();}' \
   'let text = run.clone();' \
   mnema-extract 'a_chapters_text_is_verbatim_after_nfc_and_nothing_else' --test epub
+
+# C36. The chapter's name left unbounded. `section_title` is one column shown by
+# one interface, and a name three hundred characters long is a citation that
+# fills the pane it appears in. Reached through the HTML reader rather than
+# called here, which is why this case mutates `markdown.rs` and reddens an epub
+# test: the shared rule is what four readers must not each decide.
+case_ "reader: a chapter's name is bounded by the rule every reader shares" \
+  crates/mnema-extract/src/markdown.rs \
+  's{    if flattened\.chars\(\)\.count\(\) <= SECTION_TITLE_MAX_CHARS \{\n        return Some\(flattened\);\n    \}}{    return Some(flattened);}' \
+  'return Some(flattened);' \
+  mnema-extract 'a_chapters_name_is_bounded_by_the_rule_every_reader_shares' --test epub
+
+# C37. The digest dropped from an epub refusal. It is the field that tells the
+# parent whether the file changed or only the rule did — and this branch is the
+# second way into `too_large`, the one that *did* open the file, so unlike the
+# ceiling above it the digest is real and owed. `every_refusal…` is a
+# hand-written table, which is exactly why a reader that refuses under a new
+# rule and does not add its rows is a branch nothing measures.
+case_ "worker: an epub refused after being read carries the digest it was read on" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's{                reason: "a member of this EPUB inflates past the cap on one member"\.to_string\(\),\n                sha256: Some\(sha256\),}{                reason: "a member of this EPUB inflates past the cap on one member".to_string(),\n                sha256: None,}' \
+  'reason: "a member of this EPUB inflates past the cap on one member".to_string(),
+                sha256: None,' \
+  mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli

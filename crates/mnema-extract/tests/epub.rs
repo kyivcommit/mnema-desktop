@@ -1172,3 +1172,53 @@ fn one_chapter_that_will_not_decompress_does_not_cost_the_book() {
     assert_eq!(book.skipped, vec![2]);
     assert_eq!(texts(&book), vec!["Цілий розділ.", "І цей цілий."]);
 }
+
+/// A chapter's name is bounded by the one rule every reader shares.
+///
+/// `markdown::bound_section_title` is reached through the HTML reader here
+/// rather than called directly, which is the point: `section_title` is one
+/// column shown by one interface, and four readers each deciding how long a
+/// name may be is four numbers. This states the contract as *this* reader's, so
+/// that a later version taking the name from somewhere else — the navigation
+/// document, say — cannot quietly stop bounding it.
+#[test]
+fn a_chapters_name_is_bounded_by_the_rule_every_reader_shares() {
+    let long = "Розділ ".repeat(60);
+    let bytes = epub(
+        "content.opf",
+        &[chapter("c1", "ch1.xhtml", &xhtml(&long, "<p>Текст.</p>"))],
+        &["c1"],
+    );
+    let book = extract_epub(&bytes).unwrap();
+    let title = book.chapters[0]
+        .section_title
+        .as_deref()
+        .expect("the chapter is named");
+
+    assert_eq!(
+        title.chars().count(),
+        mnema_extract::SECTION_TITLE_MAX_CHARS
+    );
+    // Cut *visibly*, and the ellipsis is the whole of what makes it visible: a
+    // name silently truncated reads as the name the chapter has.
+    assert!(title.ends_with('…'), "{title:?}");
+    // And the other direction, so that a reader returning a constant string
+    // could not pass: what is kept is this chapter's own name, from the front.
+    assert!(title.starts_with("Розділ Розділ"), "{title:?}");
+    // A short name is not touched at all.
+    let bytes = epub(
+        "content.opf",
+        &[chapter(
+            "c1",
+            "ch1.xhtml",
+            &xhtml("Коротко", "<p>Текст.</p>"),
+        )],
+        &["c1"],
+    );
+    assert_eq!(
+        extract_epub(&bytes).unwrap().chapters[0]
+            .section_title
+            .as_deref(),
+        Some("Коротко")
+    );
+}

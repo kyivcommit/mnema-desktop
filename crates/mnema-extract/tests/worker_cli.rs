@@ -189,6 +189,34 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
     let damaged = dir.path().join("zvit.pdf");
     std::fs::write(&damaged, b"%PDF-1.4\nthis document ends mid-object").unwrap();
 
+    // Three books, for the three ways this reader refuses one after reading it.
+    // Built here for the same reason as the two files above: each is derived
+    // from a rule this repository already states.
+    let pictures = dir.path().join("albom.epub");
+    std::fs::write(
+        &pictures,
+        epub_bytes(&[(
+            "cover.xhtml",
+            Some("<html><head><title>Обкладинка</title></head><body><img src=\"c.jpg\"/></body></html>"),
+        )]),
+    )
+    .unwrap();
+
+    // A zip carrying the `mimetype` entry `is_epub` requires and nothing that
+    // makes it a book — no container, so no spine, so nothing to read.
+    let not_a_book = dir.path().join("nedokniga.epub");
+    std::fs::write(&not_a_book, epub_bytes(&[])).unwrap();
+
+    // A chapter that inflates past `zip_part::MEMBER_MAX_BYTES` out of an
+    // archive small enough to sail through the request's own ceiling.
+    let bomb = dir.path().join("bomba.epub");
+    let huge = "a".repeat(20 << 20);
+    std::fs::write(&bomb, epub_bytes(&[("ch1.xhtml", Some(&huge))])).unwrap();
+    assert!(
+        std::fs::metadata(&bomb).unwrap().len() < 1_048_576,
+        "the archive itself must pass the ceiling, or this row measures the wrong branch"
+    );
+
     for (path, want_rule) in [
         ("tests/fixtures/solid.png", "not_text"),
         // `one-page-text.pdf` used to be this row, under `unsupported`. It is
@@ -212,6 +240,28 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
             interrupted.to_str().expect("a temp path is UTF-8"),
             "binary_tail",
         ),
+        // **The three rows the epub reader owes**, because this table is
+        // written out by hand and a branch left out of it is a branch nothing
+        // measures. All three are verdicts about content — the file was opened
+        // — so all three owe the digest they were reached on.
+        (
+            pictures.to_str().expect("a temp path is UTF-8"),
+            "no_text_layer",
+        ),
+        (
+            not_a_book.to_str().expect("a temp path is UTF-8"),
+            "malformed",
+        ),
+        // **`too_large` reached a second way, and this is the row that says so.**
+        // The branch above `not_text` decides from `stat` without opening the
+        // file, and carries no digest precisely because of it. This one is a cap
+        // on what a *member* inflates to: the archive is a few kilobytes and
+        // passes the request's ceiling comfortably, one chapter inside it does
+        // not, and the file really was read. Same rule string, because it is the
+        // same answer to the person holding it — and harmless to carry a digest
+        // under, because `displaces` decides `TooLarge` on size and mtime and
+        // never looks at the digest (`crates/mnema-ingest/src/lib.rs:1200-1203`).
+        (bomb.to_str().expect("a temp path is UTF-8"), "too_large"),
     ] {
         let request = serde_json::json!({ "path": path, "max_bytes": 1_048_576 });
         let out = run_worker(&[&request.to_string()]);
