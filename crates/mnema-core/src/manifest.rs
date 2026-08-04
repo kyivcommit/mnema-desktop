@@ -20,6 +20,34 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// The names the format readers answer to, on the wire and in the index.
+///
+/// A string is what actually crosses the boundary — `Frame::Header::reader`,
+/// [`ReaderId::reader`] and the `path.reader` column all carry one — and until
+/// these constants existed the same name was written out as an independent
+/// literal on each side. `mnema_ingest::pages_of` picks a chunk's coordinate by
+/// that name, so a spreadsheet reader that called itself `"spreadsheet"` would
+/// fall to the line-number default and cite "рядки 10–20" with no sheet on
+/// them: plausible, silent, and green, because the only test naming the other
+/// literal would have been written by whoever changed it.
+///
+/// **What they are is one symbol, not a check.** Nothing makes a reader use
+/// them: `mnema-extract` is free to print any string it likes, and D40 keeps
+/// `mnema-ingest` from ever looking. What they buy is that the two sides can
+/// name the same thing rather than agree by coincidence — and the values below
+/// are pinned, because `mnema-ingest/tests/slice.rs` states these literals to a
+/// stand-in worker and asserts the coordinate that comes back.
+///
+/// The five formats of G7.1, and no more. `text` and `markdown` are absent on
+/// purpose: nothing matches on them — they reach the same default arm as a
+/// reader no build has heard of — so a constant for them would be a name with
+/// no second user.
+pub const READER_PDF: &str = "pdf";
+pub const READER_HTML: &str = "html";
+pub const READER_DOCX: &str = "docx";
+pub const READER_EPUB: &str = "epub";
+pub const READER_XLSX: &str = "xlsx";
+
 /// A reader and the version of it that produced (or would produce) a document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReaderId {

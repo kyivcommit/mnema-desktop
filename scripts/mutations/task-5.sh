@@ -24,7 +24,7 @@
 # the case that says so.
 case_ "a pdf page reaches the pdf arm by the name its header carries" \
   crates/mnema-ingest/src/lib.rs \
-  's~                "pdf" => PageContext::Fixed~                "pdf-by-another-name" => PageContext::Fixed~' \
+  's~                READER_PDF => PageContext::Fixed~                "pdf-by-another-name" => PageContext::Fixed~' \
   '                "pdf-by-another-name" => PageContext::Fixed' \
   mnema-ingest 'a_pdf_chunk_cites_its_page_not_nothing' --test slice
 
@@ -43,8 +43,8 @@ case_ "the pdf coordinate is the page's own number, not a constant" \
 # format stays green. The test iterates all three for exactly this.
 case_ "every one of the three section readers is named in the arm" \
   crates/mnema-ingest/src/lib.rs \
-  's~                "html" \| "docx" \| "epub" =>~                "html" | "docx" =>~' \
-  '                "html" | "docx" =>' \
+  's~                READER_HTML \| READER_DOCX \| READER_EPUB =>~                READER_HTML | READER_DOCX =>~' \
+  '                READER_HTML | READER_DOCX =>' \
   mnema-ingest 'html_docx_and_epub_cite_the_section_their_page_names' --test slice
 
 # C4. The section is the page's title, not an empty string. `Coordinate::Section
@@ -53,8 +53,8 @@ case_ "every one of the three section readers is named in the arm" \
 # coordinate as far as any "is it non-empty" assertion is concerned.
 case_ "the section coordinate carries the title its page names" \
   crates/mnema-ingest/src/lib.rs \
-  's~                    title: page\.section_title\.clone\(\)\.unwrap_or_default\(\),~                    title: String::new(),~' \
-  '                    title: String::new(),' \
+  's~                        title: page\.section_title\.clone\(\)\.unwrap_or_default\(\),~                        title: String::new(),~' \
+  '                        title: String::new(),' \
   mnema-ingest 'html_docx_and_epub_cite_the_section_their_page_names' --test slice
 
 # ------------------------------------------------------------------- the sheet
@@ -65,8 +65,8 @@ case_ "the section coordinate carries the title its page names" \
 # cites the sheet instead of the rows.
 case_ "a sheet gets Rows, not a fixed coordinate naming the sheet" \
   crates/mnema-ingest/src/lib.rs \
-  's~                "xlsx" => PageContext::Rows \{\n                    sheet: page\.section_title\.clone\(\)\.unwrap_or_default\(\),\n                \},~                "xlsx" => PageContext::Fixed(Coordinate::Section {\n                    title: page.section_title.clone().unwrap_or_default(),\n                }),~' \
-  '                "xlsx" => PageContext::Fixed(Coordinate::Section {' \
+  's~                READER_XLSX => PageContext::Rows \{\n                    sheet: page\.section_title\.clone\(\)\.unwrap_or_default\(\),\n                \},~                READER_XLSX => PageContext::Fixed(Coordinate::Section {\n                    title: page.section_title.clone().unwrap_or_default(),\n                }),~' \
+  '                READER_XLSX => PageContext::Fixed(Coordinate::Section {' \
   mnema-ingest 'an_xlsx_chunk_cites_the_rows_it_covers_not_the_whole_sheet' --test slice
 
 # C6. The defect itself, at the level that computes it: a range taken over every
@@ -140,6 +140,23 @@ case_ "the readers that already had line coordinates keep them" \
 # untitled one has a test of its own.
 case_ "an untitled section page is an empty section, not no coordinate" \
   crates/mnema-ingest/src/lib.rs \
-  's~                "html" \| "docx" \| "epub" => PageContext::Fixed\(Coordinate::Section \{\n                    title: page\.section_title\.clone\(\)\.unwrap_or_default\(\),\n                \}\),~                "html" | "docx" | "epub" => PageContext::Fixed(match \&page.section_title {\n                    Some(title) => Coordinate::Section {\n                        title: title.clone(),\n                    },\n                    None => Coordinate::None,\n                }),~' \
-  '                "html" | "docx" | "epub" => PageContext::Fixed(match &page.section_title {' \
+  's~                    PageContext::Fixed\(Coordinate::Section \{\n                        title: page\.section_title\.clone\(\)\.unwrap_or_default\(\),\n                    \}\)~                    PageContext::Fixed(match \&page.section_title {\n                        Some(title) => Coordinate::Section {\n                            title: title.clone(),\n                        },\n                        None => Coordinate::None,\n                    })~' \
+  '                    PageContext::Fixed(match &page.section_title {' \
   mnema-ingest 'a_page_that_names_no_section_carries_an_empty_one_rather_than_none' --test slice
+
+# C12. And the constants are not free-floating: their values are what a header
+# actually carries, and this is the case that says so. `mnema-ingest` cannot ask
+# `mnema-extract` what its readers call themselves (D40), so the closest thing
+# to a check is that the arm and the wire agree on a literal — the stand-in
+# states "pdf", `pages_of` matches READER_PDF, and a constant that drifts from
+# the string on the wire falls to the default with every PDF page uncoordinated.
+#
+# What no case here can reach, named rather than left to be found: whether the
+# pdf reader, when it exists, uses this symbol at all. Both sides of every
+# assertion in this file are written in this repository by the same commit; the
+# real counterpart is the literal in `worker.rs`, and it is a later task's.
+case_ "the constant the pdf arm matches is the string a header carries" \
+  crates/mnema-core/src/manifest.rs \
+  's~pub const READER_PDF: &str = "pdf";~pub const READER_PDF: \&str = "pdf-2";~' \
+  'pub const READER_PDF: &str = "pdf-2";' \
+  mnema-ingest 'a_pdf_chunk_cites_its_page_not_nothing' --test slice

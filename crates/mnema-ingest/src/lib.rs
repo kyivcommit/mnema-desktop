@@ -29,7 +29,9 @@
 use std::path::Path;
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
-use mnema_core::manifest::Manifest;
+use mnema_core::manifest::{
+    Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_PDF, READER_XLSX,
+};
 use mnema_core::{Block, BlockType, Coordinate, OnDisk, SourceKind};
 use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipRule};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
@@ -1081,14 +1083,24 @@ struct PageOf<'a> {
 /// string the `path` row stores, so a document and the coordinates of its
 /// chunks are keyed on one fact rather than two that can disagree.
 ///
-/// **The arms are matched on a string, and a reader whose name is not among
-/// them falls to `Lines` without complaint.** That is the right default — a
-/// build that adds a text-shaped reader gets line numbers, which is what such
-/// a reader emits — but it is also how a typo would be spent: a `"xslx"` here
-/// would cost every spreadsheet its coordinate, quietly. Nothing in this crate
-/// can check the names against the readers, because D40 forbids depending on
-/// the crate that holds them; what does check them is that each name is asserted
-/// end to end in `tests/slice.rs`, against a worker stating it.
+/// **A reader whose name is not among the arms falls to `Lines` without
+/// complaint.** That is the right default — a build that adds a text-shaped
+/// reader gets line numbers, which is what such a reader emits — and it is also
+/// where a name that does not match is spent. For the four page-shaped formats
+/// that is `Coordinate::None`, the defect this function was written to fix,
+/// back again. For xlsx it is worse and quieter: those blocks *do* carry row
+/// numbers, so the default answers `Coordinate::Line { start: 10, end: 20 }` —
+/// "рядки 10–20", with no sheet on them and nothing saying which.
+///
+/// The names are `mnema_core::manifest`'s constants rather than literals, so
+/// that this arm and the reader that will emit the name are one symbol.
+/// **That is a shared name, not a check.** Nothing here can verify that the pdf
+/// reader calls itself `READER_PDF`: D40 forbids depending on the crate that
+/// holds it, and the end-to-end tests cannot close that gap either — the
+/// stand-in worker they run against states whatever string the test wrote, so
+/// both sides of that assertion are written in one place. What those tests do
+/// pin is this mapping, name to context, and — because they state the literals
+/// rather than the constants — the values of the constants themselves.
 ///
 /// A straight map otherwise, and it is only that because the wire carries a
 /// page marker: until it did, this function had to refuse anything with more
@@ -1107,7 +1119,7 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
                 // The page number the reader gave this page, not its position
                 // among the pages that arrived: a reader that drops a page it
                 // cannot read leaves a gap, and the gap is the honest record.
-                "pdf" => PageContext::Fixed(Coordinate::Page {
+                READER_PDF => PageContext::Fixed(Coordinate::Page {
                     number: page.page_no,
                 }),
                 // A section is the whole of what these three have to point at,
@@ -1115,16 +1127,18 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
                 // what `Fixed` means. An untitled page therefore cites an empty
                 // section, and the obligation to name one is the reader's
                 // (spec §6, invariant 1), not this loop's to paper over.
-                "html" | "docx" | "epub" => PageContext::Fixed(Coordinate::Section {
-                    title: page.section_title.clone().unwrap_or_default(),
-                }),
+                READER_HTML | READER_DOCX | READER_EPUB => {
+                    PageContext::Fixed(Coordinate::Section {
+                        title: page.section_title.clone().unwrap_or_default(),
+                    })
+                }
                 // **Not `Fixed`.** A sheet is one page, so a fixed coordinate
                 // would repeat the sheet's whole extent onto every chunk of it
                 // — rows 10–20 cited as "аркуш Дані, рядки 1–500". The range
                 // has to come from the blocks each chunk covers, which is what
                 // `PageContext::Rows` computes; the page supplies only the
                 // sheet's name.
-                "xlsx" => PageContext::Rows {
+                READER_XLSX => PageContext::Rows {
                     sheet: page.section_title.clone().unwrap_or_default(),
                 },
                 // text, markdown, and anything a future build adds without
