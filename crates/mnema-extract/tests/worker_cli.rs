@@ -139,7 +139,7 @@ fn a_photo_is_refused_by_the_real_worker() {
 }
 
 /// Every refusal this worker reaches **by reading the file** carries the digest
-/// of what it read — all five of them, not the one that happened to get a test.
+/// of what it read — all six of them, not the one that happened to get a test.
 ///
 /// The digest was pinned on the `not_text` branch alone, and the blindness that
 /// left behind is structural rather than an oversight. Both of the parent's
@@ -202,6 +202,12 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
         ("tests/fixtures/all-scanned.pdf", "no_text_layer"),
         ("tests/fixtures/password-locked.pdf", "encrypted"),
         (damaged.to_str().expect("a temp path is UTF-8"), "malformed"),
+        // The second way into `malformed`, and it is not the first one over
+        // again: this file *is* a document — pdfium loaded it, read page 1 and
+        // declined page 2. It reached the refusal from the middle of a page
+        // loop rather than from the load, which is a different branch and owes
+        // the same digest.
+        ("tests/fixtures/unloadable-middle-page.pdf", "malformed"),
         (
             interrupted.to_str().expect("a temp path is UTF-8"),
             "binary_tail",

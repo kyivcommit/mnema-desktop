@@ -206,6 +206,71 @@ case_ "reader: a pdf block carries no line numbers" \
                 line_end: Some(1),' \
   mnema-extract 'a_page_with_a_text_layer_becomes_a_block_of_that_page' --test pdf
 
+# ------------------------------------------- every page the document declares
+#
+# Added in fix round 1. The defect these guard was found by *running* the worker
+# on a crafted file, not by reading the loop: `pages().iter()` is
+# `self.pages.get(i).ok()`, so the first page `FPDF_LoadPage` declines ends the
+# iteration, and a three-page contract came back as a one-page document with
+# `skipped_pages: 0`, no gap, the pool's integrity check satisfied, and the walk
+# green. Nothing recorded that two pages had gone.
+
+# C21. The iterator put back. This is the defect verbatim.
+case_ "reader: pages are counted by FPDF_GetPageCount, not by an iterator that gives up" \
+  crates/mnema-extract/src/pdf.rs \
+  's{    let count = all_pages\.len\(\);}{    let count = all_pages.iter().count() as i32;}' \
+  'let count = all_pages.iter().count() as i32;' \
+  mnema-extract 'a_page_that_will_not_load_refuses_the_document_rather_than_ending_it' --test pdf
+
+# C22. The other way to lose it: a page that will not load recorded as a page
+# with no text. `no_text_layer` is a verdict about content that the journal
+# keeps until `INDEX_FORMAT_VERSION` moves and that no reader upgrade reaches
+# (D57), so this is the reader remembering its own failure as a fact about the
+# scan — which `pdf.rs`'s own comment forbids and this arm would have done.
+case_ "reader: a page that will not load is not a page without text" \
+  crates/mnema-extract/src/pdf.rs \
+  's{        let page = all_pages\.get\(index\)\.map_err\(\|e\| \{\n            PdfError::Malformed\(format!\(\n                "page \{page_no\} of this PDF could not be loaded: \{e\}"\n            \)\)\n        \}\)\?;}{        let Ok(page) = all_pages.get(index) else \{\n            skipped.push(page_no);\n            continue;\n        \};}' \
+  'let Ok(page) = all_pages.get(index) else {' \
+  mnema-extract 'a_page_that_will_not_load_refuses_the_document_rather_than_ending_it' --test pdf
+
+# C23. The page number dropped from the message. It is the last place it can be:
+# `Frame::Refused` carries a rule and a sentence, and nothing downstream of the
+# worker ever learns which page failed.
+case_ "reader: the refusal names the page that failed" \
+  crates/mnema-extract/src/pdf.rs \
+  's{                "page \{page_no\} of this PDF could not be loaded: \{e\}"}{                "a page of this PDF could not be loaded: \{e\}"}' \
+  '"a page of this PDF could not be loaded: {e}"' \
+  mnema-extract 'a_page_that_will_not_load_refuses_the_document_rather_than_ending_it' --test pdf
+
+# C24. A document with no pages answered as a scan. Vacuously true and
+# misleading — "no page carries a text layer of at least 48 characters" about a
+# file with no pages — and remembered as a verdict about content.
+case_ "reader: a document with no pages is not a scan" \
+  crates/mnema-extract/src/pdf.rs \
+  's{    if count <= 0 \{}{    if count < 0 \{}' \
+  'if count < 0 {' \
+  mnema-extract 'a_pdf_with_no_pages_at_all_is_not_reported_as_having_no_text' --test pdf
+
+# C25. A page lost from **both** lists — the class the partition test names and
+# the one it could not see while it took its page count from `probe_text_layer`,
+# which walks the same iterator the reader did. The yardstick is now a literal
+# the fixture generator printed, so it cannot move with the reader.
+case_ "reader: the pages read and the pages named are every page of the file" \
+  crates/mnema-extract/src/pdf.rs \
+  's{    for index in 0\.\.count \{}{    for index in 0..count.saturating_sub(1) \{}' \
+  'for index in 0..count.saturating_sub(1) {' \
+  mnema-extract 'every_page_of_a_document_is_either_read_or_named' --test pdf
+
+# C26. The same truncation in the probe, which is what `--probe-pdfium` answers
+# a packaging question with: a probe that under-counts pages says a bundle is
+# fine when it is not, and it must not disagree with the reader about which
+# pages a document has.
+case_ "probe: the diagnostic counts pages the same way the reader does" \
+  crates/mnema-extract/src/pdfium_probe.rs \
+  's{    for index in 0\.\.all_pages\.len\(\) \{\n        let page = all_pages\n            \.get\(index\)\n            \.map_err\(\|e\| Error::Pdfium\(format!\("page \{\} could not be loaded: \{e\}", index \+ 1\)\)\)\?;}{    for page in all_pages.iter() \{}' \
+  'for page in all_pages.iter() {' \
+  mnema-extract 'the_probe_and_the_reader_see_the_same_pages' --test pdf
+
 # ------------------------------------------------------------- the pool's arm
 
 # C18. The arm whose absence would have stopped a walk on the first scanned PDF

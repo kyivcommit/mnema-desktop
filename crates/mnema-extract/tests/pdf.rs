@@ -226,24 +226,89 @@ fn a_password_protected_pdf_is_locked_rather_than_damaged() {
     );
 }
 
+/// A page pdfium refuses to load is not a page without a text layer — and,
+/// above all, is not the end of the document.
+///
+/// **This is the shape `pdfium-render`'s page iterator gives that failure away
+/// in.** `PdfPagesIterator::next` is `self.pages.get(i).ok()`
+/// (`pdfium-render-0.9.3/src/pdf/document/pages.rs:608-613`), so the first page
+/// `FPDF_LoadPage` declines ends the iteration. Read with that iterator, the
+/// three-page fixture below came back as a **one-page document**: header
+/// `pages: 1`, `skipped_pages: 0`, no gap in `page_no`, the pool's integrity
+/// check satisfied because the header agreed with the frames that arrived, and
+/// the walk green. Nothing anywhere recorded that two pages of a contract had
+/// gone. Measured on this fixture before the fix, not reasoned about.
+///
+/// Refusing the document is the same policy a failing `page.text()` already
+/// had, and it is chosen over `skipped` for the reason `pdf.rs` states there:
+/// `no_text_layer` is a verdict about *content* that the journal keeps until
+/// `INDEX_FORMAT_VERSION` moves, so a reader that put this page there would
+/// remember its own failure as a fact about the scan.
+#[test]
+fn a_page_that_will_not_load_refuses_the_document_rather_than_ending_it() {
+    let err = extract_pdf(include_bytes!("fixtures/unloadable-middle-page.pdf"))
+        .expect_err("a document with a page that will not load is not one this reader finished");
+
+    match &err {
+        PdfError::Malformed(message) => assert!(
+            message.contains("page 2"),
+            "the message must name the page that failed, since nothing downstream can: {message}"
+        ),
+        // Both neighbours named, because either is a plausible wrong answer and
+        // each is silent in its own way.
+        other => panic!(
+            "a page that will not load is neither a scan nor a locked file: {other:?}. \
+             Reported as `no_text_layer` it would be journalled as content and outlive \
+             the fix; dropped from the page list it would vanish with no record at all."
+        ),
+    }
+}
+
+/// A PDF with no pages is not a scan.
+///
+/// The third meaning that used to share one arm with the other two. Before the
+/// fix, `pages.is_empty()` was reached by a scan, by a document with no pages,
+/// and by a document whose pages would not load — and the worker answered all
+/// three "no page of this PDF carries a text layer of at least 48 characters",
+/// a sentence about pages the file does not have, remembered as a verdict about
+/// content. Now only the scan reaches it.
+#[test]
+fn a_pdf_with_no_pages_at_all_is_not_reported_as_having_no_text() {
+    let err = extract_pdf(include_bytes!("fixtures/no-pages.pdf"))
+        .expect_err("a document with no pages has nothing this reader can return");
+
+    match &err {
+        PdfError::Malformed(message) => assert!(
+            message.contains("no pages"),
+            "the sentence is the only place this differs from a scan: {message}"
+        ),
+        other => panic!("a document with no pages is not {other:?}"),
+    }
+}
+
 /// The `PdfDocument` a caller gets back partitions the document: every page is
 /// either read or named, never both and never neither.
 ///
 /// A property rather than a case, and it is the one thing no single fixture
 /// above can state — each of them knows its own page count by hand, so a
 /// reader that quietly lost a page from *both* lists would pass all three.
+///
+/// **The page counts are literals from `make_fixtures.py`, and that is the
+/// point.** This test took `total` from `probe_text_layer(…).len()`, which
+/// reaches the same truncating iterator the reader did: both sides of the
+/// assertion moved together, so a reader that lost a page lost it from the
+/// yardstick as well and the invariant named in this docstring could not go
+/// red. It stayed green through the defect it exists to catch. A number the
+/// generator printed cannot move with the reader.
 #[test]
 fn every_page_of_a_document_is_either_read_or_named() {
-    for name in [
-        "one-page-text.pdf",
-        "text-stamp-text.pdf",
-        "all-scanned.pdf",
+    for (name, pages_in_the_file) in [
+        ("one-page-text.pdf", 1u32),
+        ("text-stamp-text.pdf", 3),
+        ("all-scanned.pdf", 3),
     ] {
         let bytes = std::fs::read(fixture(name)).expect("the fixture is on disk");
         let doc = extract_pdf(&bytes).expect("the fixture parses");
-        let total = probe_text_layer(&fixture(name))
-            .expect("the fixture parses")
-            .len();
 
         let mut seen: Vec<u32> = doc
             .pages
@@ -254,8 +319,39 @@ fn every_page_of_a_document_is_either_read_or_named() {
         seen.sort_unstable();
         assert_eq!(
             seen,
-            (1..=total as u32).collect::<Vec<_>>(),
+            (1..=pages_in_the_file).collect::<Vec<_>>(),
             "{name}: the read pages and the skipped ones must be every page, once each"
         );
     }
+}
+
+/// …and the same yardstick applied to the diagnostic, which shares the defect
+/// and the fix.
+///
+/// `probe_text_layer` is what `--probe-pdfium` answers a packaging question
+/// with, and it walked the same iterator: on the fixture above it reported one
+/// page for a three-page file. A probe that under-reports pages is a probe that
+/// says a bundle is fine when it is not, so the two are held to one answer here
+/// rather than left to agree by habit.
+#[test]
+fn the_probe_and_the_reader_see_the_same_pages() {
+    for (name, pages_in_the_file) in [
+        ("one-page-text.pdf", 1usize),
+        ("text-stamp-text.pdf", 3),
+        ("all-scanned.pdf", 3),
+    ] {
+        let probes = probe_text_layer(&fixture(name)).expect("the fixture parses");
+        assert_eq!(probes.len(), pages_in_the_file, "{name}");
+        assert_eq!(
+            probes.iter().map(|p| p.page_no).collect::<Vec<_>>(),
+            (1..=pages_in_the_file as u32).collect::<Vec<_>>(),
+            "{name}: the probe numbers pages from one, in document order"
+        );
+    }
+
+    // And it stops rather than truncating on the page it cannot load, which is
+    // the direction that matters: a shorter list is the answer nobody can tell
+    // from a shorter document.
+    probe_text_layer(&fixture("unloadable-middle-page.pdf"))
+        .expect_err("a page that will not load is not a page the probe may leave out");
 }

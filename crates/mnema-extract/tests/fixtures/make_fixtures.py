@@ -28,6 +28,12 @@ BODY_TEXT_2 = "signed 2026-07-25, covering pallet haulage for one calendar quart
 BODY_TEXT_3 = "Schedule B lists forty pallets of dried barley, collected weekly"
 BODY_TEXT_4 = "from the Ravella yard, each delivery note countersigned on arrival."
 
+# A third body, for `unloadable-middle-page.pdf`: the page *after* the broken one
+# has to be distinguishable from both of its neighbours, or "the reader stopped
+# at the break" and "the reader carried on past it" look alike.
+BODY_TEXT_5 = "Annex C records the arbitration venue and the notice period agreed,"
+BODY_TEXT_6 = "together with the schedule of penalties for a late collection."
+
 # Deliberately far below the threshold. A scanner footer or a Bates stamp is what
 # a scanned page carries when it carries nothing else, and the point of the
 # threshold is that such a page must not count as having a text layer.
@@ -53,8 +59,16 @@ def content_stream(lines: list[str]) -> bytes:
     return "\n".join(out).encode("ascii")
 
 
-def build(pages: list[list[str]], locked: bool = False) -> bytes:
+def build(
+    pages: list[list[str]], locked: bool = False, break_page: int | None = None
+) -> bytes:
     """Assembles a PDF whose pages draw the given lines, in the given order.
+
+    With `break_page`, that page's object is the literal `null` while `/Count`
+    still announces every page. `FPDF_LoadPage` then has no dictionary to load
+    for it and fails, which is the one failure a page can have that is neither
+    "no text layer" nor a document pdfium refuses outright — and the one
+    `pdfium-render`'s page iterator turns into the end of the document.
 
     With `locked`, the file also carries a standard-security-handler /Encrypt
     dictionary whose /U cannot be produced from any password: a reader trying to
@@ -82,11 +96,16 @@ def build(pages: list[list[str]], locked: bool = False) -> bytes:
         b"<< /Type /Pages /Kids [%s] /Count %d >>" % (kids.encode("ascii"), n_pages),
     ]
     for i in range(n_pages):
-        objs.append(
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            b"/Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>"
-            % (font_obj, first_stream_obj + i)
-        )
+        if i == break_page:
+            # The object exists, is referenced by /Kids, is counted by /Count —
+            # and is not a page.
+            objs.append(b"null")
+        else:
+            objs.append(
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                b"/Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>"
+                % (font_obj, first_stream_obj + i)
+            )
     for lines in pages:
         stream = zlib.compress(content_stream(lines))
         objs.append(
@@ -130,8 +149,13 @@ def build(pages: list[list[str]], locked: bool = False) -> bytes:
     return bytes(out)
 
 
-def write(name: str, pages: list[list[str]], locked: bool = False) -> None:
-    data = build(pages, locked=locked)
+def write(
+    name: str,
+    pages: list[list[str]],
+    locked: bool = False,
+    break_page: int | None = None,
+) -> None:
+    data = build(pages, locked=locked, break_page=break_page)
     (HERE / name).write_bytes(data)
     counts = [
         sum(1 for c in "".join(lines) if not c.isspace()) for lines in pages
@@ -181,4 +205,18 @@ if __name__ == "__main__":
     # would have read are the ones the reader proves it can read elsewhere, so
     # the refusal cannot be blamed on the content.
     write("password-locked.pdf", [[BODY_TEXT, BODY_TEXT_2]], locked=True)
+    # Three pages, the middle one unloadable. The page it breaks is the middle
+    # one for the same reason `text-stamp-text.pdf` skips the middle one: with
+    # the break at the end, "stopped early" and "read everything" produce the
+    # same page list.
+    write(
+        "unloadable-middle-page.pdf",
+        [[BODY_TEXT, BODY_TEXT_2], [BODY_TEXT_3, BODY_TEXT_4], [BODY_TEXT_5, BODY_TEXT_6]],
+        break_page=1,
+    )
+    # A catalogue, a page tree with `/Count 0`, and nothing to read. Degenerate
+    # and not damaged, which is why it needs a fixture of its own: it is the
+    # third way to reach "this document produced no pages", and the other two
+    # are a scan and a document whose pages would not load.
+    write("no-pages.pdf", [])
     write_solid_png()

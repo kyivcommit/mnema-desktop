@@ -67,8 +67,17 @@ pub struct PdfPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PdfDocument {
     pub pages: Vec<PdfPage>,
-    /// Ascending, 1-based, and disjoint from `pages` — every page of the
-    /// document appears in exactly one of the two.
+    /// Ascending, 1-based, and disjoint from `pages` — every page the document
+    /// declares appears in exactly one of the two.
+    ///
+    /// That is a promise the loop keeps by construction, not by care: it runs
+    /// over `0..FPDF_GetPageCount` and any page it cannot handle takes the
+    /// whole document out through `Err`. It was **not** true of the first
+    /// version of this reader, which walked `pages().iter()` and stopped at the
+    /// first page pdfium declined — pages that appeared in neither list and in
+    /// no journal row. `every_page_of_a_document_is_either_read_or_named`
+    /// checks it against page counts the fixture generator printed, rather than
+    /// against anything that reads the file.
     ///
     /// Numbers rather than a count, although `Summary::skipped_pages` sends
     /// only the count today: the count cannot answer "which page of this
@@ -118,10 +127,13 @@ pub enum PdfError {
 /// be interleaved. This crate's test binary died with SIGSEGV before that lock
 /// existed.
 ///
-/// An empty `pages` is a real answer, not an error: a scan of a paper contract
-/// has pages, and none of them has text. The caller decides what to do with it
-/// — `src/bin/worker.rs` refuses the file under `no_text_layer`, which is a
-/// rule about content and is remembered as one.
+/// An empty `pages` is a real answer, not an error, and it now means exactly
+/// one thing: a scan of a paper contract, whose pages exist and hold no text.
+/// The caller refuses such a file under `no_text_layer` (`src/bin/worker.rs`),
+/// which is a rule about content and is remembered as one — so the two other
+/// ways to produce no pages must not arrive here. A document with no pages at
+/// all, and a document with a page that would not load, are both `Malformed`
+/// below.
 pub fn extract_pdf(bytes: &[u8]) -> Result<PdfDocument, PdfError> {
     // First, and on its own line, because everything after it is about the
     // document and this is the only thing here that is not. `pdfium()` has not
@@ -133,25 +145,63 @@ pub fn extract_pdf(bytes: &[u8]) -> Result<PdfDocument, PdfError> {
         .load_pdf_from_byte_slice(bytes, None)
         .map_err(load_failure)?;
 
+    // **By index over `FPDF_GetPageCount`, never `pages().iter()`.**
+    // `PdfPagesIterator::next` is `self.pages.get(i).ok()`
+    // (`pdfium-render-0.9.3/src/pdf/document/pages.rs:608-613`), so the first
+    // page `FPDF_LoadPage` declines silently becomes the end of the document.
+    // Measured on `tests/fixtures/unloadable-middle-page.pdf`: a three-page
+    // contract came back as a one-page one, with `skipped_pages: 0`, no gap in
+    // `page_no`, the pool's header/page-frame check satisfied because both
+    // numbers came from the truncated read, and the walk green. Nothing
+    // recorded that two pages had gone, and content-addressing meant no later
+    // pass would look again.
+    let all_pages = document.pages();
+    let count = all_pages.len();
+
+    // A document with no pages at all, kept apart from a document whose pages
+    // hold no text. Both used to leave `pages` empty, and the worker answers an
+    // empty `pages` with "no page of this PDF carries a text layer of at least
+    // N characters" — a sentence about pages this file does not have, recorded
+    // as a verdict about content and remembered until `INDEX_FORMAT_VERSION`
+    // moves. After this, that arm means one thing: every page was read and
+    // every one was below the threshold.
+    if count <= 0 {
+        return Err(PdfError::Malformed(
+            "this PDF declares no pages, so there is nothing in it to read".to_string(),
+        ));
+    }
+
     let mut pages = Vec::new();
     let mut skipped = Vec::new();
 
-    for (i, page) in document.pages().iter().enumerate() {
-        let page_no = (i + 1) as u32;
-        // A page whose text cannot be read is **not** a page without a text
-        // layer, and must not be recorded as one: `no_text_layer` is a verdict
-        // about content that the journal keeps until `INDEX_FORMAT_VERSION`
-        // moves, so a reader that guessed here would remember its own failure
-        // as a fact about the scan. The whole document is refused instead,
-        // which is what `page_texts` already does on the same failure — the
-        // probe and the reader must not disagree about whether a file is
-        // readable. What that costs is real and is the smaller cost: one
-        // damaged page refuses a document whose other pages were fine, and
+    for index in 0..count {
+        let page_no = (index + 1) as u32;
+        // A page that will not load, and a page whose text cannot be read, are
+        // the same answer here and it is deliberately **not** `skipped`.
+        // `no_text_layer` is a verdict about content that the journal keeps
+        // until `INDEX_FORMAT_VERSION` moves, so a reader recording either one
+        // there would remember its own failure as a fact about the scan — and
+        // by D57 no reader upgrade reaches that journal row. The whole document
+        // is refused instead. What that costs is real and is the smaller cost:
+        // one bad page refuses a document whose other pages were fine, and
         // `SkipRule::Malformed` does not displace what the index already holds
         // unless the bytes moved.
+        //
+        // The page number is in the message because it is the last place it can
+        // be: `Frame::Refused` carries a rule and a sentence, and nothing after
+        // the worker ever learns which page it was.
+        let page = all_pages.get(index).map_err(|e| {
+            PdfError::Malformed(format!(
+                "page {page_no} of this PDF could not be loaded: {e}"
+            ))
+        })?;
         let raw = page
             .text()
-            .map_err(|e| PdfError::Malformed(e.to_string()))?
+            .map_err(|e| {
+                PdfError::Malformed(format!(
+                    "page {page_no} of this PDF has no readable text: {e}"
+                ))
+            })?
             .all();
 
         if !has_text_layer(text_layer_chars(&raw)) {

@@ -188,8 +188,19 @@ pub(crate) fn page_texts(path: &Path) -> Result<Vec<String>, Error> {
         .load_pdf_from_file(path, None)
         .map_err(|e| Error::Pdfium(e.to_string()))?;
 
+    // By index over `FPDF_GetPageCount`, for the reason `pdf::extract_pdf`
+    // spells out at length: `pages().iter()` swallows the first page
+    // `FPDF_LoadPage` declines and ends there, so a short list is returned for
+    // a long document with nothing to say it happened. Here that answer is what
+    // `--probe-pdfium` reports to a packaging check — a probe that under-counts
+    // pages says a bundle is fine when it is not — and the probe and the reader
+    // must not disagree about which pages a document has.
+    let all_pages = document.pages();
     let mut out = Vec::new();
-    for page in document.pages().iter() {
+    for index in 0..all_pages.len() {
+        let page = all_pages
+            .get(index)
+            .map_err(|e| Error::Pdfium(format!("page {} could not be loaded: {e}", index + 1)))?;
         let text = page.text().map_err(|e| Error::Pdfium(e.to_string()))?;
         out.push(text.all());
     }
@@ -439,10 +450,23 @@ mod tests {
     /// threshold admitted. Both spellings, because a counter that normalised
     /// nothing and a counter that normalised everything agree on the composed
     /// input alone.
+    ///
+    /// The second letter's base is **U+0456, the Cyrillic `і`** — `ї` is
+    /// U+0457 and decomposes to U+0456 + U+0308. It was written with a Latin
+    /// `i` at first, which composes to `ï` and made this string `йïщ`. The
+    /// arithmetic was right and the sentence above it was not: a test that
+    /// says "the alphabet this product is built for" while measuring Latin
+    /// text is the kind of confidently wrong comment a later task reads and
+    /// takes a decision from.
     #[test]
     fn characters_are_counted_after_normalisation_not_before() {
         let composed = "йїщ";
-        let decomposed = "и\u{0306}i\u{0308}щ";
+        let decomposed = "и\u{0306}\u{0456}\u{0308}щ";
+        // The premise, not assumed: these two really are the same three
+        // letters, spelled apart and together. Without it the assertions below
+        // would still pass on two unrelated strings that happen to normalise
+        // to the same length.
+        assert_eq!(nfc::normalise(decomposed), composed);
         assert_eq!(text_layer_chars(composed), 3);
         assert_eq!(
             text_layer_chars(decomposed),
