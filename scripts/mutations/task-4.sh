@@ -91,7 +91,7 @@ case_ "the extension is the part after the dot, not the file name" \
 # `Pool::manifest` return `Result` at all rather than `Manifest`.
 case_ "a binary that cannot state its readers is refused, not guessed at" \
   crates/mnema-pool/src/lib.rs \
-  's~        serde_json::from_slice\(&out\.stdout\)\.map_err\(\|source\| \{~        if true {\n            return Ok(Manifest {\n                default: mnema_core::manifest::ReaderId::new("text", 1),\n                by_extension: Default::default(),\n            });\n        }\n        serde_json::from_slice(\&out.stdout).map_err(|source| {~' \
+  's~        let manifest: Manifest = serde_json::from_slice~        if true {\n            return Ok(Manifest {\n                default: mnema_core::manifest::ReaderId::new("text", 1),\n                by_extension: Default::default(),\n            });\n        }\n        let manifest: Manifest = serde_json::from_slice~' \
   '            return Ok(Manifest {' \
   mnema-ingest \
   'a_worker_that_cannot_state_its_readers_stops_the_walk_before_any_file' --test walk
@@ -117,8 +117,8 @@ case_ "the walk compares against the worker's manifest, not one of its own" \
 # nor serde sees `""`.
 case_ "a manifest naming no reader is refused rather than stored" \
   crates/mnema-pool/src/lib.rs \
-  's~            return Err\(protocol\(\n                &String::from_utf8_lossy\(&out\.stdout\),\n                "a manifest naming no reader",~            let _ = protocol(\n                \&String::from_utf8_lossy(\&out.stdout),\n                "a manifest naming no reader",~' \
-  '            let _ = protocol(' \
+  's~            \.any\(\|id\| id\.reader\.trim\(\)\.is_empty\(\)\)~            .any(|id| id.reader.trim() == "a name no reader has")~' \
+  '            .any(|id| id.reader.trim() == "a name no reader has")' \
   mnema-pool 'a_manifest_naming_no_reader_is_refused_and_a_named_one_is_not' --test manifest
 
 # C10. And the map is checked, not only the default. A guard written for one of
