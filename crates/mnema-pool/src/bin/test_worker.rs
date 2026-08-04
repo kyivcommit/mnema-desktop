@@ -176,11 +176,20 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
         ),
         // A refusal under a rule this pool has never heard of, which is what a
         // worker from another release looks like.
+        //
+        // The string was `"encrypted"` until that became a rule the pool does
+        // know, and the swap is the whole lesson of this branch: a stand-in for
+        // "unknown" must be a name nobody will later implement, or the test
+        // above it quietly stops testing anything. It did not go quiet here —
+        // `a_refusal_under_an_unknown_rule_stops_the_job` reddened the moment
+        // the pool learned the word — but only because that test also asserts
+        // the error names the rule. A test that had merely checked "some
+        // refusal came back" would have gone on passing.
         "newrule" => write_frame(
             stdout,
             &Frame::Refused {
-                rule: "encrypted".to_string(),
-                reason: format!("{rest} is password-protected"),
+                rule: "rule_from_a_later_release".to_string(),
+                reason: format!("{rest} was refused for a reason this build cannot name"),
                 sha256: None,
             },
         ),

@@ -372,6 +372,12 @@ fn journalled_as(failure: Failure) -> SkipRule {
         // journalled unlike it, because `mnema_ingest::displaces` reads the
         // rule and one of the two deletes a document.
         Failure::BinaryTail => SkipRule::BinaryTail,
+        // Two rules that behave alike in `displaces` and must still not share a
+        // journal row: "this file is broken" and "this file is locked" are the
+        // same instruction to the index and different instructions to the
+        // person holding the file.
+        Failure::Malformed => SkipRule::Malformed,
+        Failure::Encrypted => SkipRule::Encrypted,
     }
 }
 
@@ -862,23 +868,38 @@ fn this_macos_still_refuses_an_address_space_rlimit() {
 ///
 /// The strictness is load-bearing far outside this crate, which its own
 /// comment understates. Every rule this pool *does* know maps onto a
-/// `SkipRule`, and `mnema-ingest` removes what the index holds under a path
-/// for three of them — unconditionally for `Unsupported` and `NotText`,
-/// conditionally for `TooLarge` (only when the size on disk changed). So a
-/// worker from another release refusing under, say,
-/// `"encrypted"` would — if this arm guessed `Unsupported` — delete the
+/// `SkipRule`, and `mnema-ingest` removes what the index holds under a path for
+/// most of them — conditionally on the digest for `Unsupported`, `NotText`,
+/// `Malformed` and `Encrypted`, and on the size and time on disk for
+/// `TooLarge`. So a worker from another release refusing under a name this
+/// build has never seen would — if this arm guessed `Unsupported` — delete the
 /// indexed content of every file it named, returning `Ok` each time and
 /// stopping nothing. `crates/mnema-ingest/tests/slice.rs` asserts the other
 /// half, that the index is untouched.
+///
+/// **The stand-in rule used to be `"encrypted"`, and it stopped being unknown.**
+/// The task that added `SkipRule::Encrypted` made this test fail — visibly,
+/// because it asserts the error *names* the rule rather than only that some
+/// error came back. A weaker assertion here would have let a pool that now
+/// accepts the string go on claiming it rejects unknown ones.
 #[test]
 fn a_refusal_under_an_unknown_rule_stops_the_job() {
     let _watchdog = Watchdog::new("unknown rule", Duration::from_secs(30));
     let pool = Pool::new(config()).unwrap();
 
+    // Not any rule this build knows: the premise of the test is that the pool
+    // has never seen the string, so `SkipRule::parse` must not recognise it
+    // either. That is asserted rather than assumed, because the last time this
+    // premise was left implicit it expired.
+    assert_eq!(
+        SkipRule::parse("rule_from_a_later_release"),
+        None,
+        "the stand-in for an unknown rule has become a rule this build knows"
+    );
     let error = extract(&pool, "newrule:sealed.docx").unwrap_err();
     match &error {
         PoolError::Protocol { detail, .. } => assert!(
-            detail.contains("encrypted"),
+            detail.contains("rule_from_a_later_release"),
             "the error must name the rule nobody recognised: {detail}"
         ),
         other => panic!("expected a protocol error, got {other:?}"),

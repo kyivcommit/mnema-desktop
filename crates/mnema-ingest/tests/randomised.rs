@@ -1434,7 +1434,24 @@ impl World {
                 // a reader, and no sidecar in this file models one. The
                 // deterministic pair does
                 // (`a_file_no_reader_can_take_keeps_its_document_when_only_the_rule_changed`).
-                SkipRule::NotText | SkipRule::Unsupported => match last.hash.as_deref() {
+                // `Malformed` and `Encrypted` are judged by the same two lines
+                // because `displaces` gives them the same condition, and they
+                // are placed here rather than in the empty arm below on
+                // purpose: an empty arm accepts both behaviours, which is how a
+                // rule gets onto the wrong side of `displaces` without a single
+                // seed going red.
+                //
+                // **Dormant today, and named as dormant rather than left to be
+                // discovered.** No operation in this generator produces either
+                // rule — nothing in this build sends those wire strings, so the
+                // real worker cannot answer with them — and a reader that
+                // refuses a truncated or locked file is what makes this arm
+                // start firing. It is written now so that the reader arrives to
+                // an assertion instead of to an empty arm.
+                SkipRule::NotText
+                | SkipRule::Unsupported
+                | SkipRule::Malformed
+                | SkipRule::Encrypted => match last.hash.as_deref() {
                     // The worker saw exactly the bytes the index was built
                     // from. The rule changed, the file did not.
                     Some(sha) if sha == held => {

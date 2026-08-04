@@ -677,15 +677,25 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// silently, while the progress bar advances: a worker binary that does not
 /// match its parent answers the same way for all forty thousand of them.
 ///
-/// **Displace, but only when the bytes moved** — `NotText` and `Unsupported`.
-/// The worker read the file and determined something about its bytes: they are
-/// not text at all, or no reader in this product can take that format. Run it
-/// again on the same bytes and it says the same thing, so what the index holds
-/// is a previous version of a file that has since become unindexable — *if*
-/// the bytes are not the ones the index was built from. When they are, the rule
-/// changed and the file did not, and deleting the document loses text that is
-/// still on disk. The digest the worker refused on is what tells the two apart;
-/// the arms below carry the reasoning, and D51 the measurement.
+/// **Displace, but only when the bytes moved** — `NotText`, `Unsupported`,
+/// `Malformed` and `Encrypted`. The worker read the file and determined
+/// something about its bytes: they are not text at all, no reader in this
+/// product can take that format, the right reader could not finish them, or
+/// they are behind a password. Run it again on the same bytes and it says the
+/// same thing, so what the index holds is a previous version of a file that has
+/// since become unindexable — *if* the bytes are not the ones the index was
+/// built from. When they are, the rule changed and the file did not, and
+/// deleting the document loses text that is still on disk. The digest the
+/// worker refused on is what tells the two apart; the arms below carry the
+/// reasoning, and D51 the measurement.
+///
+/// Three of those four are refusals a *release* can reverse — a reader arrives,
+/// a reader gets better at damage, a password prompt is built — and that is
+/// what puts them here rather than on the unconditional side. `NotText` is the
+/// exception that shows the condition is not free: it promises the opposite,
+/// that no release makes a photo into prose, and it is conditional anyway,
+/// because the file under the path can be replaced by one whose bytes the index
+/// never saw.
 ///
 /// **Displace outright** — `NoTextLayer`. A rule about one page rather than a
 /// file, which no reader in this product can produce yet. Its arm below says
@@ -909,6 +919,24 @@ fn displaces(
         // by one that does not, is a document lost per file — with the bytes
         // never having moved.
         SkipRule::Unsupported => content.is_none_or(|sha| sha != recorded.document_id),
+        // The same condition again, and again on lines of their own rather
+        // than folded in above, for the reason `Unsupported` gives: each is
+        // refused by a different branch of a reader and each is worth being
+        // able to break on its own.
+        //
+        // They are here for the *same argument* as `Unsupported` rather than by
+        // analogy with it, and the argument is the one the ordering above
+        // records: a rule belongs on the conditional side when a release can
+        // change the verdict without the file changing. Damage is exactly that
+        // — what a reader survives is what a vendored library's next version
+        // alters — and so is a password, because "cannot open this" becomes
+        // "ask for a key" the day a prompt is built. A folder walked once by a
+        // build whose reader recovers and once by a build whose reader gives up
+        // would otherwise be a document lost per file, with the bytes never
+        // having moved: the identical loss `Unsupported`'s own arm was
+        // corrected for, arriving from two more directions.
+        SkipRule::Malformed => content.is_none_or(|sha| sha != recorded.document_id),
+        SkipRule::Encrypted => content.is_none_or(|sha| sha != recorded.document_id),
         // Unconditional, and deliberately not folded into the arm above even
         // though the two would behave alike today.
         //

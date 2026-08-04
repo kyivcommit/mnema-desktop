@@ -8,8 +8,9 @@
 //! frames it parses live in `mnema_core::wire`, so the crate that binds Pdfium
 //! stays out of the application's dependency graph entirely.
 //!
-//! A worker's life ends in one of eight ways, and the supervisor owes a
-//! different answer to each:
+//! A worker's life ends in one of the ways below, and the supervisor owes a
+//! different answer to each. [`Failure::every`] is the list that cannot go
+//! stale; this table is here to be read:
 //!
 //! | how it ended                          | what the file gets       |
 //! |---------------------------------------|--------------------------|
@@ -17,6 +18,8 @@
 //! | answered `Refused` (over the ceiling) | [`Failure::TooLarge`]    |
 //! | answered `Refused` (not text)         | [`Failure::NotText`]     |
 //! | answered `Refused` (text, then not)   | [`Failure::BinaryTail`]  |
+//! | answered `Refused` (damaged)          | [`Failure::Malformed`]   |
+//! | answered `Refused` (password)         | [`Failure::Encrypted`]   |
 //! | answered `Failed` (I/O)               | [`Failure::Unreadable`]  |
 //! | said nothing before the deadline      | [`Failure::Timeout`]     |
 //! | died on a signal                      | [`Failure::Crash`]       |
@@ -95,7 +98,7 @@ macro_rules! declare_failures {
         ///
         /// **The mapping lives in this crate**, as `impl From<Failure> for
         /// SkipRule`, for three reasons. The pool is the only code that
-        /// observes all eight outcomes — a worker that dies on a signal reports
+        /// observes every outcome — a worker that dies on a signal reports
         /// nothing itself, so no other crate could name that case.
         /// `mnema-extract` may not depend on `mnema-index` at all (a worker
         /// that links the database library it is forbidden from opening would
@@ -185,6 +188,24 @@ declare_failures! {
     /// [`SkipRule::BinaryTail`](mnema_index::SkipRule::BinaryTail) carries the
     /// rest.
     BinaryTail,
+    /// A reader opened the file, found it to be the format it claims, and could
+    /// not finish it: `Frame::Refused { rule: "malformed" }`.
+    ///
+    /// Not [`Failure::Unsupported`], which promises a reader that will arrive
+    /// when one already has, and not [`Failure::Unreadable`], which means no
+    /// reader saw a byte.
+    /// [`SkipRule::Malformed`](mnema_index::SkipRule::Malformed) carries why the
+    /// distinction costs a document.
+    Malformed,
+    /// A reader opened the file and the text is behind a password:
+    /// `Frame::Refused { rule: "encrypted" }`.
+    ///
+    /// Not folded into [`Failure::Malformed`] although the parent treats the
+    /// two alike today — see
+    /// [`SkipRule::Encrypted`](mnema_index::SkipRule::Encrypted). A password and
+    /// damage are one answer to this pool and two answers to the person reading
+    /// the skip list.
+    Encrypted,
 }
 
 impl From<Failure> for SkipRule {
@@ -198,6 +219,8 @@ impl From<Failure> for SkipRule {
             Failure::TooLarge => SkipRule::TooLarge,
             Failure::NotText => SkipRule::NotText,
             Failure::BinaryTail => SkipRule::BinaryTail,
+            Failure::Malformed => SkipRule::Malformed,
+            Failure::Encrypted => SkipRule::Encrypted,
         }
     }
 }
@@ -1258,6 +1281,8 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                     "binary_tail" => Failure::BinaryTail,
                     "unreadable" => Failure::Unreadable,
                     "too_large" => Failure::TooLarge,
+                    "malformed" => Failure::Malformed,
+                    "encrypted" => Failure::Encrypted,
                     // Strict on purpose. A rule this pool does not know means
                     // the worker is from another release, and answering ten
                     // thousand files with a guess would bury that.

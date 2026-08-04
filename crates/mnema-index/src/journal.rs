@@ -147,6 +147,55 @@ declare_skip_rules! {
     /// user still has under that path is the document they had before rather
     /// than an absence.
     BinaryTail,
+    /// The file is the format its magic claims and this product has a reader
+    /// for it, and the bytes are damaged: a PDF that ends mid-object, a zip
+    /// whose central directory does not parse.
+    ///
+    /// **Not `Unsupported`** — that one promises a reader that will arrive, and
+    /// for this file one already has. The two answer the user differently:
+    /// "this product cannot read that format yet" is a limit of the product,
+    /// and "this file is broken" is a fact about the file, which is the answer
+    /// someone looking at the skip list needs in order to go and fetch the file
+    /// again.
+    ///
+    /// **Not `Unreadable`** — that is a fact about the *disk*: the path was
+    /// gone, or not a regular file, or permissions refused it, so no reader saw
+    /// a byte. Here a reader opened the file, read it and could not finish, and
+    /// the two part company where it costs a document: `Unreadable` never
+    /// displaces, because a share that drops mid-walk would otherwise empty the
+    /// index, and this rule displaces when the digest says the file is not the
+    /// one the index was built from.
+    ///
+    /// A determination about the bytes, so `is_about_content` is true and the
+    /// next walk answers from `stat` without spending a worker. That carries
+    /// `NotText`'s consequence with it: a file refused here is not looked at
+    /// again for the life of the index unless `INDEX_FORMAT_VERSION` moves — so
+    /// a release whose reader survives damage this one gives up on must bump
+    /// it, or the files it could now read stay refused forever.
+    Malformed,
+    /// The file is whole, the reader is the right one, and the text is behind a
+    /// password.
+    ///
+    /// **Not `Malformed`**, although both arrive from a reader that opened the
+    /// file and produced nothing, and although `displaces` gives them the
+    /// identical condition today. They are different things to the person
+    /// reading the skip list: one is fixed by supplying a password and the
+    /// other is not fixed. "Which of my documents are locked?" is a question
+    /// this journal can only answer while the two have separate rules, and it
+    /// is the question that decides whether a password prompt is worth
+    /// building.
+    ///
+    /// **Not `Unsupported`** either, for a sharper reason than `Malformed`'s: a
+    /// locked file is not a format this product lacks a reader for. Folding it
+    /// there would say a future release might read it, when what is missing is
+    /// not code but a key the user has.
+    ///
+    /// `is_about_content` for the same reason as `Malformed` and with the same
+    /// consequence: the same bytes stay locked, so the journal answers for them
+    /// until `INDEX_FORMAT_VERSION` moves. Whoever builds a password prompt has
+    /// to move it, or the files the prompt exists for are the ones it never
+    /// gets asked about.
+    Encrypted,
 }
 
 impl SkipRule {
@@ -161,6 +210,8 @@ impl SkipRule {
             SkipRule::TooLarge => "too_large",
             SkipRule::NotText => "not_text",
             SkipRule::BinaryTail => "binary_tail",
+            SkipRule::Malformed => "malformed",
+            SkipRule::Encrypted => "encrypted",
         }
     }
 
@@ -180,6 +231,8 @@ impl SkipRule {
             "too_large" => SkipRule::TooLarge,
             "not_text" => SkipRule::NotText,
             "binary_tail" => SkipRule::BinaryTail,
+            "malformed" => SkipRule::Malformed,
+            "encrypted" => SkipRule::Encrypted,
             _ => return None,
         })
     }
@@ -188,7 +241,7 @@ impl SkipRule {
     ///
     /// A test that means "every rule" iterates this instead of writing its own
     /// list, so that adding a variant cannot leave one of them quietly covering
-    /// eight rules out of nine. What makes that true is not this function but
+    /// every rule except the new one. What makes that true is not this function but
     /// [`declare_skip_rules`]: the slice it reads is generated from the same
     /// list that declares the variants, so there is no step at which a variant
     /// can be declared and left out. The chain of `after()` links this replaced
@@ -216,7 +269,10 @@ impl SkipRule {
     /// verdict that *can* change look permanent, and the file is never looked
     /// at again for the life of the index.
     ///
-    /// Only `Unsupported`, `NoTextLayer`, `NotText` and `BinaryTail` qualify.
+    /// Only `Unsupported`, `NoTextLayer`, `NotText`, `BinaryTail`, `Malformed`
+    /// and `Encrypted` qualify — the last two because damage and a password are
+    /// both properties of the bytes: the same truncated file truncates the same
+    /// reader again, and the same locked file stays locked.
     /// `Crash`, `Timeout` and `Memory` are readings of the environment that
     /// apply to every file in the walk alike — `displaces` draws the same line
     /// for the same reason (D44) — and `Unreadable` is a fact about the disk,
@@ -266,7 +322,9 @@ impl SkipRule {
             SkipRule::Unsupported
             | SkipRule::NoTextLayer
             | SkipRule::NotText
-            | SkipRule::BinaryTail => true,
+            | SkipRule::BinaryTail
+            | SkipRule::Malformed
+            | SkipRule::Encrypted => true,
             SkipRule::Crash
             | SkipRule::Timeout
             | SkipRule::Memory
@@ -326,7 +384,9 @@ impl SkipRule {
             | SkipRule::NoTextLayer
             | SkipRule::TooLarge
             | SkipRule::NotText
-            | SkipRule::BinaryTail => false,
+            | SkipRule::BinaryTail
+            | SkipRule::Malformed
+            | SkipRule::Encrypted => false,
         }
     }
 }

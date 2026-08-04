@@ -2469,6 +2469,163 @@ fn a_file_no_reader_can_take_keeps_its_document_when_only_the_rule_changed() {
     );
 }
 
+/// The state neither `Unsupported` nor `Unreadable` could say: the file **is**
+/// the format its magic claims, this product **has** a reader for it, and the
+/// reader could not finish — a PDF that ends mid-object, a zip whose central
+/// directory does not parse.
+///
+/// It lands on the same side of `displaces` as `Unsupported`, and for the same
+/// argument rather than by analogy. What a reader survives is what a release
+/// changes: a folder indexed by a build whose reader recovers from the damage
+/// and walked again by one that does not — a rollback, a second machine, a
+/// vendored library at a different version — would lose a document per file,
+/// with the bytes never having moved. The stand-in worker is that other build,
+/// and it carries the file's real digest because a reader that opened a file
+/// and gave up part-way through still hashed the bytes it was handed.
+///
+/// **Both directions, and the second is what makes the first mean anything.**
+/// "Does not displace when the digest matches" is satisfied by a rule that
+/// never displaces at all — the one-sided shape this file has been caught in
+/// before.
+#[cfg(unix)]
+#[test]
+fn a_damaged_file_keeps_its_document_when_the_bytes_did_not_move() {
+    let fx = Fixture::new();
+    let prose = "Акт приймання робіт, складений у двох примірниках.\n".repeat(50);
+    fx.place_at("акти/акт.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("акти/акт.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("примірниках", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    // The same bytes, a later mtime — and a build whose reader gives up on
+    // them.
+    fx.place_at("акти/акт.txt", prose.as_bytes(), mtime_just_after());
+    let unchanged = sha256_of(prose.as_bytes());
+    let gives_up = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"malformed","reason":"the document ends mid-object","sha256":"{unchanged}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("акти/акт.txt", &gives_up),
+        Ingested::Skipped {
+            rule: SkipRule::Malformed
+        },
+        "the premise fails unless the wire string arrives as this rule and no other"
+    );
+    assert!(
+        !fx.db.search_lexical("примірниках", 10).unwrap().is_empty(),
+        "the bytes are identical to what the index was built from, so a build \
+         whose reader cannot finish them must not take the document away"
+    );
+
+    // The other direction, which is the whole point of the digest: the same
+    // rule over bytes that are *not* the indexed ones is a file replaced by a
+    // broken one, and the old text has to stop answering under a name it is no
+    // longer in.
+    let broken = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog\nendo".as_slice();
+    fx.place_at(
+        "акти/акт.txt",
+        broken,
+        mtime_just_after() + Duration::from_millis(250),
+    );
+    let replaced = sha256_of(broken);
+    let gives_up_on_a_replacement = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"malformed","reason":"the document ends mid-object","sha256":"{replaced}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("акти/акт.txt", &gives_up_on_a_replacement),
+        Ingested::Skipped {
+            rule: SkipRule::Malformed
+        }
+    );
+    assert!(
+        fx.db.search_lexical("примірниках", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+}
+
+/// The other half of the pair, and a separate test rather than a second
+/// assertion in the one above, because `displaces` gives the two rules
+/// separate arms — a mutation of either has to have something of its own to
+/// redden.
+///
+/// A password is not damage. The file is whole and the reader is the right
+/// one; what is missing is a key, and the two are different things to the
+/// person reading the skip list — one is fixed by supplying a password and the
+/// other is not fixed at all. Same conditional displacement, same reason: a
+/// build that learns to ask for passwords must not have deleted the documents
+/// of every locked file the build before it met.
+#[cfg(unix)]
+#[test]
+fn a_locked_file_keeps_its_document_when_the_bytes_did_not_move() {
+    let fx = Fixture::new();
+    let prose = "Довідка про доходи, видана на вимогу заявника.\n".repeat(50);
+    fx.place_at("довідки/довідка.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("довідки/довідка.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("заявника", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    fx.place_at("довідки/довідка.txt", prose.as_bytes(), mtime_just_after());
+    let unchanged = sha256_of(prose.as_bytes());
+    let asks_for_a_password = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"encrypted","reason":"this document is password-protected","sha256":"{unchanged}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("довідки/довідка.txt", &asks_for_a_password),
+        Ingested::Skipped {
+            rule: SkipRule::Encrypted
+        },
+        "the premise fails unless the wire string arrives as this rule and no other"
+    );
+    assert!(
+        !fx.db.search_lexical("заявника", 10).unwrap().is_empty(),
+        "the bytes are identical to what the index was built from, so a build \
+         that cannot open them must not take the document away"
+    );
+
+    let locked = b"%PDF-1.7\n1 0 obj\n<< /Encrypt 2 0 R >>\n".as_slice();
+    fx.place_at(
+        "довідки/довідка.txt",
+        locked,
+        mtime_just_after() + Duration::from_millis(250),
+    );
+    let replaced = sha256_of(locked);
+    let asks_about_a_replacement = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"encrypted","reason":"this document is password-protected","sha256":"{replaced}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("довідки/довідка.txt", &asks_about_a_replacement),
+        Ingested::Skipped {
+            rule: SkipRule::Encrypted
+        }
+    );
+    assert!(
+        fx.db.search_lexical("заявника", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+}
+
 // ------------------------------------------------- markdown, and its pages
 
 /// An invented handbook: content before the first heading, two sections, and a
@@ -2879,6 +3036,12 @@ fn a_deadline_the_machine_could_not_meet_does_not_delete_the_document() {
 /// would remove the indexed content of every file it named. The pool's own
 /// test pins the `Err`; this pins what the index looks like afterwards, which
 /// is the half that matters here.
+///
+/// The rule string was `"encrypted"` until this build learned that word, and
+/// the replacement is deliberately one no roadmap contains: a stand-in for
+/// "unknown" that is only unknown for a while tests the opposite of what it
+/// claims. `SkipRule::parse` is asked directly rather than trusted, for the
+/// same reason.
 #[cfg(unix)]
 #[test]
 fn a_worker_from_another_release_stops_the_job_and_leaves_the_index_alone() {
@@ -2888,9 +3051,14 @@ fn a_worker_from_another_release_stops_the_job_and_leaves_the_index_alone() {
         panic!("expected the file to index")
     };
 
+    assert_eq!(
+        SkipRule::parse("rule_from_a_later_release"),
+        None,
+        "the stand-in for an unknown rule has become a rule this build knows"
+    );
     let broken = support::wrong_worker(
         fx.root.parent().unwrap(),
-        r#"printf '{"frame":"refused","rule":"encrypted","reason":"password"}\n'"#,
+        r#"printf '{"frame":"refused","rule":"rule_from_a_later_release","reason":"unnameable"}\n'"#,
     );
     set_mtime(&path, mtime_just_after());
     let outcome = fx.try_ingest_with_worker("contracts/ravella.txt", &broken);
