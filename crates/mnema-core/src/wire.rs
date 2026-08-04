@@ -185,6 +185,10 @@ pub enum Frame {
     /// onto; `mnema_pool::Failure` performs the mapping and its doc comment
     /// carries the reasoning. That variant did not exist while task 7 was
     /// written, which is why this comment once said the case had no home.
+    ///
+    /// The rule is **wider than this frame** and should not be read back as its
+    /// definition: three of the ways into it never involve a worker at all, so
+    /// they cannot arrive as a frame. Its own variant enumerates them.
     Failed { message: String },
 }
 

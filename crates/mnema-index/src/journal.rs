@@ -61,37 +61,63 @@ declare_skip_rules! {
     Memory,
     Unsupported,
     NoTextLayer,
-    /// The file could not be read at all: the path did not exist, was not a
-    /// regular file, or permissions refused it. Added by the pool (task 8),
-    /// which is the first code that had to name this outcome: the extraction
-    /// worker reports it as `wire::Frame::Failed` and none of the five rules
-    /// above covers it — a file that was never there is not a crash, not a
-    /// timeout, not a memory kill, and not an unsupported format.
+    /// Nothing was learned about this file's content, for a reason that is not
+    /// about its content.
     ///
-    /// It earns a rule of its own rather than being folded into `Unsupported`
-    /// because the two demand different things of the user. An unsupported
-    /// format is a limit of this product and stays skipped until the product
-    /// grows a reader; an unreadable file is a fact about the user's disk that
-    /// may well be transient (a file moved mid-scan, a permission fixed
-    /// afterwards) and is worth retrying on the next pass.
+    /// **Defined by the list below rather than by a sentence, and that is the
+    /// point.** Three rounds of review each replaced one short definition with
+    /// another — "a fact about the user's disk", "no reader saw a byte", "what
+    /// the worker came back with" — and each was falsified by a case already in
+    /// the tree, because the cases sit at three different levels. A phrase
+    /// narrow enough to be informative is narrower than the rule. So: a new
+    /// case is added as an entry here, and is not expected to fit a definition
+    /// written before it.
     ///
-    /// **It also covers a reader that could not be brought up at all** — the
-    /// library it needs missing, the wrong build, or refused by code signing —
-    /// which is *not* a fact about the user's disk and is the one place this
-    /// rule's name undersells what it holds. It is here because its three
-    /// answers are the ones that case needs and no other rule's are: keep the
-    /// document, count towards a broken environment, and do not remember the
-    /// verdict, so the walk after the repair asks again.
-    /// [`SkipRule::Malformed`](Self::Malformed) carries what routing it onto a
-    /// content rule would cost instead.
+    /// 1. **The worker was asked and could not obtain the bytes.** The path did
+    ///    not exist, was not a regular file, permissions refused it, or the
+    ///    request line was not valid JSON. Reported as `wire::Frame::Failed`;
+    ///    this is the case the rule was added for.
+    /// 2. **The worker was asked and the reader could not be started.** The
+    ///    library it needs missing, the wrong build, or refused by code signing
+    ///    (`crates/mnema-extract/src/pdfium_probe.rs` splits those three). The
+    ///    bytes may well have been readable; nothing read them.
+    ///    [`Malformed`](Self::Malformed) carries what routing this onto a
+    ///    content rule would cost, which is a folder at a time.
+    /// 3. **No worker was asked at all.** Three ways in, and all three write
+    ///    this rule directly:
+    ///    * the walk refused the entry before any worker — every `PreSkipRule`
+    ///      lands here (`mnema_walk`'s five: an unrepresentable name, a cloud
+    ///      placeholder, an unreadable entry, a non-file, a size that does not
+    ///      fit), in `walk_root` (`crates/mnema-ingest/src/walk.rs:362`);
+    ///    * the path is not valid UTF-8, so the extraction request cannot
+    ///      express it at all (`Pool::extract`,
+    ///      `crates/mnema-pool/src/lib.rs:619`);
+    ///    * the **journal write itself** kept failing — the index was still busy
+    ///      under someone else's write after every retry
+    ///      (`ingest_with_busy_retry`, `crates/mnema-ingest/src/walk.rs:963`).
+    ///      Note what this one is not: the worker may have run perfectly and
+    ///      produced a whole document. It is the clearest case that this rule
+    ///      cannot be defined by what a worker reported.
     ///
-    /// The name is therefore coarser than the cases under it, and `reason` is
-    /// where the difference lives: the pool copies the worker's own message
-    /// through unchanged, so "could not load libpdfium" and "no such file" are
-    /// one rule and two sentences. A window grouping by rule alone will show
-    /// them together; that is a known limit of this vocabulary rather than an
-    /// oversight, and the alternative — a rule per environmental cause — is a
-    /// decision of its own.
+    /// What the entries share, and the only test for admitting a new one: the
+    /// verdict says nothing about the file's bytes, and it may stop being true
+    /// on the very next walk. That is what earns all three of this rule's
+    /// answers — keep the document (`mnema_ingest`'s `displaces`), count
+    /// towards a broken environment, and do **not** remember the verdict, so
+    /// the pass after the repair asks again.
+    ///
+    /// It is not folded into `Unsupported` because the two demand different
+    /// things of the user: an unsupported format is a limit of this product and
+    /// stays skipped until the product grows a reader, while everything above
+    /// is worth retrying and may need nothing from the product at all.
+    ///
+    /// **The name is coarser than the list**, and `reason` is where the
+    /// difference lives — carried through unchanged from whoever recorded it,
+    /// so "could not load libpdfium", "no such file" and "the index was still
+    /// busy" are one rule and three sentences. A window grouping by rule alone
+    /// shows them together. That is a known limit of this vocabulary rather
+    /// than an oversight; the alternative, a rule per cause, is a decision of
+    /// its own and has not been taken.
     ///
     /// `skipped.rule` is a plain `TEXT` column with no CHECK constraint
     /// (`schema.sql:233`), so adding this value needed no migration and no
@@ -176,12 +202,12 @@ declare_skip_rules! {
     /// someone looking at the skip list needs in order to go and fetch the file
     /// again.
     ///
-    /// **Not `Unreadable`** — that rule holds every way the worker can come
-    /// back having learned nothing about the content: the path gone, not a
-    /// regular file, permissions refusing it, the index busy under someone
-    /// else's write (`mnema_ingest`'s `walk.rs` records that one), or the
-    /// reader itself unable to start. Here a reader ran, on bytes it had, and
-    /// could not finish. The two part company where it costs a document:
+    /// **Not `Unreadable`** — that rule holds the cases where nothing was
+    /// learned about the content at all, and it is defined by the list on its
+    /// own variant rather than paraphrased here, because every paraphrase of it
+    /// so far has been narrower than the rule. Here a reader ran, on bytes it
+    /// had, and could not finish. The two part company where it costs a
+    /// document:
     /// `Unreadable` never displaces, because a share that drops mid-walk would
     /// otherwise empty the index, and this rule displaces when the digest says
     /// the file is not the one the index was built from.

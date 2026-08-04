@@ -170,11 +170,16 @@ declare_failures! {
     /// is [`SkipRule::TooLarge`](mnema_index::SkipRule::TooLarge) and
     /// `mnema_ingest`'s `displaces`.
     TooLarge,
-    /// The worker could not carry out the request and learned nothing about the
-    /// file's content: missing, not a regular file, refused by permissions, a
-    /// path this protocol cannot carry — **or the reader the file needs could
-    /// not be brought up**, a library that is absent, the wrong build, or
-    /// refused by code signing.
+    /// Nothing was learned about the file's content, for a reason that is not
+    /// about its content: missing, not a regular file, refused by permissions,
+    /// **or the reader the file needs could not be brought up** — a library
+    /// absent, the wrong build, or refused by code signing.
+    ///
+    /// Not always a worker's answer, which is why it is not phrased as one:
+    /// [`Pool::extract`] returns this variant itself, before starting anything,
+    /// for a path that is not valid UTF-8 and so cannot be put in a request.
+    /// [`SkipRule::Unreadable`](mnema_index::SkipRule::Unreadable) enumerates
+    /// every way in, including two more that never reach this crate.
     ///
     /// The last one is not a fact about the file, and it is here rather than on
     /// a content rule for exactly that reason: this variant keeps the document

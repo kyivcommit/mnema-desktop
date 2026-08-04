@@ -315,10 +315,10 @@ fn every_skip_rule_is_sorted_onto_its_side_of_suggests_broken_environment() {
 /// whose central directory does not parse — used to have only `Unsupported` to
 /// go under, which promises a reader that will arrive when one already has;
 /// and a file whose text sits behind a password used to have the same. Neither
-/// is `Unreadable` either: that rule is for a worker that came back having
-/// learned nothing about the content — no bytes, or no reader to read them
-/// with — and it is on the keeping side of `displaces`. These two are the
-/// opposite, a reader that ran on bytes it had.
+/// is `Unreadable` either: that rule collects the cases where nothing was
+/// learned about the content at all — its own variant enumerates them — and it
+/// is on the keeping side of `displaces`. These two are the opposite: a reader
+/// that ran, on bytes it had.
 ///
 /// Both are determinations about the bytes — the same damaged bytes damage the
 /// same reader again, and the same encrypted bytes stay encrypted — so both are
