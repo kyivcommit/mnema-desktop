@@ -2693,6 +2693,192 @@ fn a_scanned_file_keeps_its_document_when_the_bytes_did_not_move() {
     );
 }
 
+/// A page the reader dropped gets a journal row of its own, and the row goes
+/// away when it stops being true.
+///
+/// The first half is the requirement: a count crossing the wire could say a
+/// page was lost and never which one, so nobody reading "why is this not in my
+/// index?" could be told that page 2 of a three-page contract is the page
+/// missing.
+///
+/// **The second half is the one that needed building.** `forget_skip`
+/// deliberately leaves per-page rows alone, and `forget_skips_not_in` only
+/// fires for paths a walk did not see — so without a removal of its own a row
+/// saying "page 2 has no text layer" outlives the file it was about. The pass
+/// that takes it back here is the one that returns `AlreadyIndexed` and leaves
+/// before any content is written, which is the branch where a row is easiest
+/// to leave behind: the path comes to name a document that was indexed under
+/// another name, and nothing about that write touches this path's journal.
+///
+/// `#[cfg(unix)]` for the reason the section below gives: the reader that
+/// skips a page is the PDF one, and reaching it from this crate means a
+/// stand-in worker, which is a shell script.
+#[cfg(unix)]
+#[test]
+fn a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back() {
+    let fx = Fixture::new();
+    // Neither is ever parsed: the workers below are scripts, and what makes
+    // these two files is that their digests differ.
+    let scanned = b"%PDF-1.7\ninvented: a contract whose middle page is a photograph\n".as_slice();
+    let clean = b"%PDF-1.7\ninvented: an amendment, every page of it typed\n".as_slice();
+
+    let amendment = pdf_frames(clean, &[1, 2], Vec::new(), "Додаткова угода про постачання");
+    let contract = pdf_frames(scanned, &[1, 3], vec![2], "Договір оренди приміщення");
+
+    // The amendment goes in first, under its own name, so that the pass at the
+    // end of this test finds its content already in the index and takes the
+    // `AlreadyIndexed` branch rather than writing anything.
+    //
+    // `worker_answering` is called again for every pass rather than once per
+    // script: `support::wrong_worker` writes to one fixed name, so two of them
+    // held at the same time are one file, and the second overwrites the first
+    // without either `PathBuf` changing.
+    fx.place_at("архів/додаток.pdf", clean, mtime());
+    assert!(matches!(
+        fx.ingest_with_worker("архів/додаток.pdf", &worker_answering(&fx, &amendment)),
+        Ingested::Indexed { .. }
+    ));
+
+    // The contract, whose middle page is a photograph of one.
+    fx.place_at("договори/договір.pdf", scanned, mtime());
+    assert!(matches!(
+        fx.ingest_with_worker("договори/договір.pdf", &worker_answering(&fx, &contract)),
+        Ingested::Indexed { .. }
+    ));
+
+    let rows = fx.db.skips_for_root(fx.root_id).unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| (r.relative_path.as_str(), r.page_no, r.rule.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("договори/договір.pdf", Some(2), "no_text_layer")],
+        "the page that was skipped is named, under the path it was skipped in, \
+         and no other page of either document has a row"
+    );
+    assert!(
+        !rows.iter().any(|r| r.page_no.is_none()),
+        "a per-page skip is not also a verdict on the file: a whole-file row \
+         here would be read by `skip_entry` and answer for the document"
+    );
+    assert!(
+        !fx.db.search_lexical("оренди", 10).unwrap().is_empty(),
+        "the pages that did have text are in the index all the same"
+    );
+
+    // The contract's name comes to hold the amendment's bytes — content this
+    // index already has under another path, so the write is skipped entirely.
+    fx.place_at("договори/договір.pdf", clean, mtime_just_after());
+    let outcome = fx.ingest_with_worker("договори/договір.pdf", &worker_answering(&fx, &amendment));
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the premise is the branch that leaves before the write, got {outcome:?}"
+    );
+    assert!(
+        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
+        "a page that now has text keeps a row saying it has none"
+    );
+}
+
+/// The other way a per-page row can outlive its document, and it is not the
+/// pass above: a refusal writes no `path` row, so `repoint` never runs.
+///
+/// A file that stops being readable altogether has the index's copy of it
+/// removed when the bytes moved (`displaces`), and the rows naming its missing
+/// pages have to go with it — otherwise the skip window says "page 2 of
+/// договір.pdf has no text layer" about a document that is not in the index at
+/// all, for ever, since nothing re-reads a path a walk keeps finding.
+///
+/// **Both directions, and the second is the one that stops the removal from
+/// being unconditional.** An environmental refusal — a worker that died, a
+/// deadline the machine missed — deliberately keeps the document, and the rows
+/// belong to the document: taking them away on a crash would delete the
+/// explanation of a document that is still there, on the one event that says
+/// nothing about the file at all.
+#[cfg(unix)]
+#[test]
+fn a_refusal_that_takes_the_document_away_takes_its_page_rows_with_it() {
+    let fx = Fixture::new();
+    let scanned = b"%PDF-1.7\ninvented: a lease whose middle page is a photograph\n".as_slice();
+
+    fx.place_at("договори/оренда.pdf", scanned, mtime());
+    assert!(matches!(
+        fx.ingest_with_worker(
+            "договори/оренда.pdf",
+            &worker_answering(
+                &fx,
+                &pdf_frames(scanned, &[1, 3], vec![2], "Договір оренди приміщення")
+            )
+        ),
+        Ingested::Indexed { .. }
+    ));
+    let named_page = |fx: &Fixture| -> Vec<Option<i64>> {
+        fx.db
+            .skips_for_root(fx.root_id)
+            .unwrap()
+            .iter()
+            .map(|r| r.page_no)
+            .collect()
+    };
+    assert_eq!(
+        named_page(&fx),
+        vec![Some(2)],
+        "the premise fails if the row was never written"
+    );
+
+    // A worker that died. It keeps the document, so it keeps the account of
+    // what is missing from it.
+    fx.place_at("договори/оренда.pdf", scanned, mtime_just_after());
+    let died = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
+    assert_eq!(
+        fx.ingest_with_worker("договори/оренда.pdf", &died),
+        Ingested::Skipped {
+            rule: SkipRule::Crash
+        }
+    );
+    assert!(
+        !fx.db.search_lexical("оренди", 10).unwrap().is_empty(),
+        "the premise fails unless this rule kept the document"
+    );
+    assert_eq!(
+        named_page(&fx),
+        vec![Some(2), None],
+        "the file's own verdict is added — after the page's row, which is older \
+         and is left standing"
+    );
+
+    // The file is replaced by bytes no reader takes. The document goes, and
+    // the row that named a page of it has nothing left to be about.
+    let photo = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".as_slice();
+    fx.place_at(
+        "договори/оренда.pdf",
+        photo,
+        mtime_just_after() + Duration::from_millis(250),
+    );
+    let replaced = sha256_of(photo);
+    let refuses = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"not_text","reason":"this file is not text","sha256":"{replaced}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("договори/оренда.pdf", &refuses),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        }
+    );
+    assert!(
+        fx.db.search_lexical("оренди", 10).unwrap().is_empty(),
+        "the premise fails unless this rule took the document away"
+    );
+    assert_eq!(
+        named_page(&fx),
+        vec![None],
+        "the file's verdict is the only thing left: no page of a document the \
+         index no longer holds is still being reported missing from it"
+    );
+}
+
 // ------------------------------------------------- markdown, and its pages
 
 /// An invented handbook: content before the first heading, two sections, and a
@@ -3489,6 +3675,38 @@ fn worker_answering(fx: &Fixture, frames: &[Frame]) -> PathBuf {
         fx.root.parent().unwrap(),
         &format!("cat <<'MNEMA_FRAMES'\n{lines}MNEMA_FRAMES"),
     )
+}
+
+/// What a PDF reader sends for a document whose pages `sent` carried a text
+/// layer and whose pages `skipped` did not.
+///
+/// The header's count is `sent.len()` rather than the document's page count,
+/// which is the pool's own integrity check: a reader that announced the pages
+/// it *has* would stop the job on every PDF with a scan in it.
+#[cfg(unix)]
+fn pdf_frames(bytes: &[u8], sent: &[u32], skipped: Vec<u32>, text: &str) -> Vec<Frame> {
+    let mut frames = vec![Frame::Header {
+        sha256: sha256_of(bytes),
+        mime: "application/pdf".to_string(),
+        source_kind: SourceKind::Document,
+        reader: "pdf".to_string(),
+        reader_version: 1,
+        pages: sent.len() as u32,
+    }];
+    for page_no in sent {
+        frames.push(Frame::Page {
+            page_no: *page_no,
+            section_title: None,
+        });
+        frames.push(Frame::Block(unlined_block(&format!(
+            "{text}, сторінка {page_no}."
+        ))));
+    }
+    frames.push(Frame::Summary {
+        skipped_pages: skipped,
+        text_source: "native:pdf".to_string(),
+    });
+    frames
 }
 
 /// A block of a format that has no lines of its own — which is what every one

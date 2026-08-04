@@ -536,6 +536,12 @@ pub fn ingest_file(
 /// document and credit a reader that never touched it, which reads as
 /// "unchanged" against a manifest for ever. It is the argument
 /// `Db::insert_block` already makes for taking a `Block`, one level up.
+///
+/// **The fifth is a skip-journal row for every page the reader dropped**, which
+/// is the other half of the third: the file's own verdict and the pages missing
+/// from the document under it are two different facts about one path, and both
+/// are settled here so that neither can stand while the other says otherwise.
+/// The comment on those calls has what only this pass can and cannot fix.
 fn repoint(
     db: &Db,
     root_id: i64,
@@ -558,6 +564,45 @@ fn repoint(
         i64::from(document.reader_version),
     )?;
     db.forget_skip(root_id, relative)?;
+    // **The fifth thing it does is journal the pages this document lost**, and
+    // the removal is not tidiness: nothing else in the tree takes a per-page
+    // row away from a path a walk still finds (`Db::forget_page_skips` carries
+    // the case), so an upsert per page would leave every row the new extraction
+    // does *not* name standing for ever.
+    //
+    // Here rather than beside the write for the reason the paragraph above
+    // gives about the refusal: the path row and the account of what is missing
+    // from the document it names are one fact, and the branch that answers
+    // `AlreadyIndexed` leaves before a single page is written — with a path now
+    // naming different content and, without this, the previous document's
+    // missing pages still listed under it.
+    //
+    // **What it cannot do is correct a document it did not write.** On the
+    // `AlreadyIndexed` branch the index keeps the pages some earlier pass
+    // extracted from these same bytes, while these rows come from the reader
+    // that just ran; the two disagree exactly when a *reader* changed and the
+    // bytes did not, which is the staleness
+    // `a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that`
+    // already records and `INDEX_FORMAT_VERSION` is what clears.
+    db.forget_page_skips(root_id, relative)?;
+    for page_no in &document.skipped_pages {
+        db.record_skip(
+            root_id,
+            relative,
+            Some(i64::from(*page_no)),
+            // Written here rather than carried on the wire: `Frame::Summary`
+            // sends numbers, and the threshold that decided them belongs to
+            // `mnema-extract`, which this crate may not depend on (D40). So the
+            // sentence says which page and what is missing, and does not invent
+            // a number it cannot see.
+            &format!(
+                "page {page_no} of this document carries no text layer, so it \
+                 was read as a scan and left out"
+            ),
+            SkipRule::NoTextLayer,
+            Some(disk),
+        )?;
+    }
     if let Some(displaced) = displaced {
         // No `displaced != id` guard, and it is not an omission: the insert
         // above has just written a row naming `id`, so when the two are the
@@ -623,6 +668,20 @@ fn record_skip(
         {
             db.delete_path(root_id, relative)?;
             forget_if_unnamed(db, &recorded.document_id)?;
+            // The pages that were missing from the document this path held are
+            // a fact about that document, so they go when it does — and only
+            // then. `displaces` is the condition rather than a second rule of
+            // its own: on the keeping side the document is still in the index
+            // and still missing those pages, and removing the rows would delete
+            // the explanation over an event that says nothing about the file.
+            //
+            // Without it the rows are unreachable. A refusal writes no `path`
+            // row, so `repoint` — the only other place that maintains them —
+            // never runs for this path again, and `forget_skips_not_in` fires
+            // only for paths a walk stops finding. The window answering "why is
+            // this not in my index?" would go on naming a missing page of a
+            // document the index does not hold.
+            db.forget_page_skips(root_id, relative)?;
         }
         Ok(())
     })

@@ -705,13 +705,45 @@ impl Db {
     ///
     /// Only whole-file rows (`page_no IS NULL`), matching what `skip_entry`
     /// reads and what `ingest_file` writes for a file. A per-page row belongs to
-    /// one page of one document and is not this path's verdict; the reader that
-    /// will produce those does not exist yet, and folding them in here would
-    /// silently erase them the moment it does.
+    /// one page of one document and is not this path's verdict: it must not
+    /// answer for the file, and it must not be erased by a pass that only
+    /// settles the file. [`forget_page_skips`](Db::forget_page_skips) is the one
+    /// that maintains those, and the two are called together wherever a path
+    /// comes to name a document.
     pub fn forget_skip(&self, root_id: i64, relative_path: &str) -> Result<(), Error> {
         self.conn().execute(
             "DELETE FROM skipped
               WHERE watched_root_id = ?1 AND relative_path = ?2 AND page_no IS NULL",
+            params![root_id, relative_path],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets every per-page row recorded against one path.
+    ///
+    /// The exact complement of [`forget_skip`](Db::forget_skip), and it exists
+    /// because a per-page row is otherwise **immortal**. Nothing else in the
+    /// tree removes one for a path a walk still finds: `forget_skip` excludes
+    /// them by the clause above, and `forget_skips_not_in` fires only for paths
+    /// a complete walk did not see. So a file read once by a reader that
+    /// skipped its page 7, read again after the page was replaced by typed
+    /// text, would keep a row saying page 7 carries no text layer — in the very
+    /// window that answers "why is this not in my index?", about a page that is
+    /// in it.
+    ///
+    /// Its caller is `mnema_ingest`'s `repoint`, which calls it immediately
+    /// before writing the rows the current extraction reported, inside the same
+    /// transaction as the `path` row. Delete-then-write rather than an upsert
+    /// per page: an upsert leaves behind exactly the rows this is here to
+    /// remove — the ones the new extraction does *not* name.
+    ///
+    /// `page_no IS NOT NULL`, and the file's own verdict is left alone: the two
+    /// are different facts with different lifetimes, and a pass that finishes by
+    /// writing a document removes both, each through its own call.
+    pub fn forget_page_skips(&self, root_id: i64, relative_path: &str) -> Result<(), Error> {
+        self.conn().execute(
+            "DELETE FROM skipped
+              WHERE watched_root_id = ?1 AND relative_path = ?2 AND page_no IS NOT NULL",
             params![root_id, relative_path],
         )?;
         Ok(())
