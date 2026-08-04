@@ -55,9 +55,11 @@ encoding_rs = "0.8"
 # Same pin as crates/mnema-deps-probe/Cargo.toml's `zip` probe: task 6a's
 # `typing::identify` opens a candidate docx/xlsx/epub as a zip archive to check
 # for its required member, and the fixtures in tests/typing.rs write one with
-# the same crate. `default-features = false` + `deflate` only, for the same
-# reason the probe states it: the defaults drag in six compressors that no
-# OOXML or EPUB file uses.
+# the same crate. Task 6's `zip_part::read_member` is the second consumer —
+# it reads the member `typing::identify` only checked for — and reuses the
+# same pin rather than asking for a second one. `default-features = false` +
+# `deflate` only, for the same reason the probe states it: the defaults drag
+# in six compressors that no OOXML or EPUB file uses.
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # The markdown parser. Only its parse tree and `sourcepos` are used — nothing
 # here renders anything, and `src/markdown.rs`'s module doc says why that is

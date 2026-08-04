@@ -11,6 +11,7 @@ mod markdown;
 mod pdfium_probe;
 mod text;
 pub mod typing;
+pub mod zip_part;
 
 // The wire format moved to `mnema-core` and is re-exported here under the name
 // task 7 committed to. It had to move: `mnema-pool` parses these frames and
