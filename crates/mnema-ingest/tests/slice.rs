@@ -1117,12 +1117,14 @@ fn the_same_content_under_two_paths_is_one_document() {
 #[test]
 fn a_file_the_worker_refuses_is_recorded_and_the_walk_continues() {
     let fx = Fixture::new();
-    // A PDF header is enough: typing decides by content, and there is no PDF
-    // reader yet, so the worker refuses the file as unsupported.
-    fx.place("scans/tender.pdf", b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n");
+    // An empty zip: typing decides by content, and a zip carrying none of the
+    // members that make it a docx, an xlsx or an epub is a format no reader
+    // takes. It was a `%PDF-` stub until the PDF reader landed, which is a
+    // different verdict now — see `support::NO_READER_FOR_THIS`.
+    fx.place("scans/tender.zip", support::NO_READER_FOR_THIS);
     fx.place("contracts/ravella.txt", CONTRACT.as_bytes());
 
-    let refused = fx.ingest("scans/tender.pdf");
+    let refused = fx.ingest("scans/tender.zip");
     assert_eq!(
         refused,
         Ingested::Skipped {
@@ -1132,7 +1134,7 @@ fn a_file_the_worker_refuses_is_recorded_and_the_walk_continues() {
 
     let skips = fx.db.skips_for_root(fx.root_id).unwrap();
     assert_eq!(skips.len(), 1);
-    assert_eq!(skips[0].relative_path, "scans/tender.pdf");
+    assert_eq!(skips[0].relative_path, "scans/tender.zip");
     assert_eq!(skips[0].rule, "unsupported");
     // The worker's own sentence, not one this crate invented. It names the
     // format rather than the file — `Frame::Refused` for an unsupported reader
@@ -1140,7 +1142,7 @@ fn a_file_the_worker_refuses_is_recorded_and_the_walk_continues() {
     // (`crates/mnema-extract/src/bin/worker.rs:98-104,149-156`) — and the row's
     // own `relative_path` column is what says which file it was.
     assert!(
-        skips[0].reason.contains("application/pdf"),
+        skips[0].reason.contains("application/zip"),
         "the worker's own reason must survive into the journal: {}",
         skips[0].reason
     );
@@ -1175,13 +1177,9 @@ fn a_file_replaced_by_content_no_reader_can_take_stops_answering() {
     };
     assert!(!fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
 
-    // The user saves a PDF over it. The worker reads the bytes and declines
-    // them: there is no PDF reader yet.
-    set_bytes_and_mtime(
-        &path,
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
-        mtime_just_after(),
-    );
+    // The user saves an archive over it. The worker reads the bytes and
+    // declines them: no reader takes that format.
+    set_bytes_and_mtime(&path, support::NO_READER_FOR_THIS, mtime_just_after());
     assert_eq!(
         fx.ingest("contracts/ravella.txt"),
         Ingested::Skipped {
@@ -1572,11 +1570,7 @@ fn a_skip_that_could_not_displace_is_not_journalled_either() {
     let path = fx.place_at("contracts/ravella.txt", CONTRACT.as_bytes(), mtime());
     fx.ingest("contracts/ravella.txt");
 
-    set_bytes_and_mtime(
-        &path,
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
-        mtime_just_after(),
-    );
+    set_bytes_and_mtime(&path, support::NO_READER_FOR_THIS, mtime_just_after());
     // The displacement's own delete is what fails here.
     fx.break_writes_to("DELETE", "document");
     let outcome = fx.try_ingest("contracts/ravella.txt");
@@ -2035,13 +2029,9 @@ fn a_remembered_refusal_does_not_answer_for_a_document_it_would_remove() {
 #[test]
 fn indexing_a_file_forgets_the_refusal_that_kept_it_out() {
     let fx = Fixture::new();
-    let path = fx.place_at(
-        "scans/tender.pdf",
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
-        mtime(),
-    );
+    let path = fx.place_at("scans/tender.zip", support::NO_READER_FOR_THIS, mtime());
     assert_eq!(
-        fx.ingest("scans/tender.pdf"),
+        fx.ingest("scans/tender.zip"),
         Ingested::Skipped {
             rule: SkipRule::Unsupported
         }
@@ -2053,13 +2043,13 @@ fn indexing_a_file_forgets_the_refusal_that_kept_it_out() {
             .iter()
             .map(|s| s.relative_path.clone())
             .collect::<Vec<_>>(),
-        vec!["scans/tender.pdf".to_string()],
+        vec!["scans/tender.zip".to_string()],
         "a refusal that records nothing leaves the user with no answer at all"
     );
 
     set_bytes_and_mtime(&path, CONTRACT.as_bytes(), mtime_just_after());
     assert!(matches!(
-        fx.ingest("scans/tender.pdf"),
+        fx.ingest("scans/tender.zip"),
         Ingested::Indexed { .. }
     ));
     assert!(
@@ -2070,16 +2060,16 @@ fn indexing_a_file_forgets_the_refusal_that_kept_it_out() {
     // The same for the branch that writes no document of its own: a second path
     // onto content already chunked repoints and nothing else, and that is
     // exactly where a refusal for the new name would otherwise survive.
-    let other = fx.place_at("scans/copy.pdf", b"%PDF-1.7\n<<>>\nendobj\n", mtime());
+    let other = fx.place_at("scans/copy.zip", support::NO_READER_FOR_THIS, mtime());
     assert_eq!(
-        fx.ingest("scans/copy.pdf"),
+        fx.ingest("scans/copy.zip"),
         Ingested::Skipped {
             rule: SkipRule::Unsupported
         }
     );
     set_bytes_and_mtime(&other, CONTRACT.as_bytes(), mtime_just_after());
     assert!(matches!(
-        fx.ingest("scans/copy.pdf"),
+        fx.ingest("scans/copy.zip"),
         Ingested::AlreadyIndexed { .. }
     ));
     assert!(
@@ -2103,13 +2093,9 @@ fn indexing_a_file_forgets_the_refusal_that_kept_it_out() {
 #[test]
 fn a_remembered_content_skip_is_answered_without_asking_the_pool() {
     let fx = Fixture::new();
-    fx.place_at(
-        "scans/tender.pdf",
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
-        mtime(),
-    );
+    fx.place_at("scans/tender.zip", support::NO_READER_FOR_THIS, mtime());
     assert_eq!(
-        fx.ingest("scans/tender.pdf"),
+        fx.ingest("scans/tender.zip"),
         Ingested::Skipped {
             rule: SkipRule::Unsupported
         }
@@ -2117,7 +2103,7 @@ fn a_remembered_content_skip_is_answered_without_asking_the_pool() {
 
     let broken = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
     assert_eq!(
-        fx.ingest_with_worker("scans/tender.pdf", &broken),
+        fx.ingest_with_worker("scans/tender.zip", &broken),
         Ingested::Skipped {
             rule: SkipRule::Unsupported
         },
@@ -2393,13 +2379,13 @@ fn a_text_file_overwritten_by_a_format_with_no_reader_stops_answering() {
         "the premise fails if the text was never searchable"
     );
 
-    // A PDF header with nothing readable behind it. `identify` answers
-    // `Reader::Pdf` on the magic alone, and no reader for that format is built
-    // — task 6 shipped plain text and markdown — so the worker refuses the
-    // file as `unsupported` after reading and hashing its bytes.
+    // An archive with nothing readable in it. `identify` answers
+    // `Reader::Unrecognized` from the zip signature and the absence of any
+    // member that names a format, so the worker refuses the file as
+    // `unsupported` after reading and hashing its bytes.
     fx.place_at(
         "notes/protokol.txt",
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
+        support::NO_READER_FOR_THIS,
         mtime_just_after(),
     );
     assert_eq!(
@@ -3343,11 +3329,7 @@ fn content_that_comes_back_finds_no_checkpoint_waiting_for_it() {
     };
 
     // Dropped: a PDF saved over it, which the worker reads and declines.
-    set_bytes_and_mtime(
-        &path,
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
-        mtime_just_after(),
-    );
+    set_bytes_and_mtime(&path, support::NO_READER_FOR_THIS, mtime_just_after());
     assert_eq!(
         fx.ingest("contracts/ravella.txt"),
         Ingested::Skipped {

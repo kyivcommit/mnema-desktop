@@ -93,8 +93,14 @@ macro_rules! declare_failures {
         /// Why a file did not make it into the index. Maps onto
         /// [`SkipRule`](mnema_index::SkipRule), the vocabulary the journal
         /// records, but is a smaller set: it names only the ways a *whole
-        /// document* can fail, where `SkipRule` also covers a single PDF page
-        /// with no text layer.
+        /// document* can fail, where `SkipRule` also covers a single page.
+        ///
+        /// [`Failure::NoTextLayer`] is where that distinction is easiest to
+        /// misread. The rule reaches this enum only for a PDF where **every**
+        /// page fell below the threshold — a file with nothing to cite. A PDF
+        /// that lost some of its pages is a document that arrived, and its
+        /// skipped pages are counted in `Summary::skipped_pages` rather than
+        /// refused here.
         ///
         /// **The mapping lives in this crate**, as `impl From<Failure> for
         /// SkipRule`, for three reasons. The pool is the only code that
@@ -226,6 +232,24 @@ declare_failures! {
     /// damage are one answer to this pool and two answers to the person reading
     /// the skip list.
     Encrypted,
+    /// A PDF was read and **no** page of it carried a text layer above the
+    /// threshold: `Frame::Refused { rule: "no_text_layer" }`. A scan of a paper
+    /// document, in other words — pages that exist and hold no characters a
+    /// search could ever match.
+    ///
+    /// [`SkipRule::NoTextLayer`](mnema_index::SkipRule::NoTextLayer) has
+    /// existed since the skeleton and had no way to arrive: nothing sent the
+    /// string. The gap this closes was the expensive kind — parsing is strict,
+    /// so the *first* scanned PDF in a folder would have answered
+    /// `PoolError::Protocol` and **stopped the whole walk**, reading as a
+    /// mismatched worker binary rather than as a missing arm.
+    ///
+    /// Not [`Failure::Unsupported`], which promises a reader that is coming:
+    /// the reader is here, it ran, and the file has no text in it. Not
+    /// [`Failure::NotText`] either — a PDF *is* a document format this product
+    /// reads, and OCR is the answer to this one (D29 removed it from v1),
+    /// where nothing will ever make a photograph prose.
+    NoTextLayer,
 }
 
 impl From<Failure> for SkipRule {
@@ -241,6 +265,7 @@ impl From<Failure> for SkipRule {
             Failure::BinaryTail => SkipRule::BinaryTail,
             Failure::Malformed => SkipRule::Malformed,
             Failure::Encrypted => SkipRule::Encrypted,
+            Failure::NoTextLayer => SkipRule::NoTextLayer,
         }
     }
 }
@@ -1305,6 +1330,7 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                     "too_large" => Failure::TooLarge,
                     "malformed" => Failure::Malformed,
                     "encrypted" => Failure::Encrypted,
+                    "no_text_layer" => Failure::NoTextLayer,
                     // Strict on purpose. A rule this pool does not know means
                     // the worker is from another release, and answering ten
                     // thousand files with a guess would bury that.

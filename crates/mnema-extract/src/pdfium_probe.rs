@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use mnema_core::nfc;
 use pdfium_render::prelude::*;
 
 /// Minimum characters on a page for its text layer to count as usable.
@@ -128,14 +129,49 @@ pub fn probe_text_layer(path: &Path) -> Result<Vec<PageProbe>, Error> {
         .into_iter()
         .enumerate()
         .map(|(i, text)| {
-            let count = text.chars().filter(|c| !c.is_whitespace()).count();
+            let count = text_layer_chars(&text);
             PageProbe {
                 page_no: (i + 1) as u32,
                 char_count: count,
-                has_text_layer: count >= TEXT_LAYER_MIN_CHARS,
+                has_text_layer: has_text_layer(count),
             }
         })
         .collect())
+}
+
+/// How many characters of text layer a page carries, for the purpose of
+/// [`TEXT_LAYER_MIN_CHARS`].
+///
+/// **NFC first, and that is not tidying.** The string a page's text becomes in
+/// the index is `nfc::normalise`d (D32, D38), and normalisation changes the
+/// character count: a Ukrainian `й` written decomposed is two characters before
+/// it and one after. Counting the raw string would let a page of forty
+/// decomposed letters count as eighty, clear the threshold, and be stored as
+/// forty — below the minimum the threshold exists to enforce, in the alphabet
+/// this product is built for.
+///
+/// Whitespace does not count, because a scanned page's furniture is a handful
+/// of glyphs spread over a page and the amount of space between them says
+/// nothing about how much text there is.
+pub(crate) fn text_layer_chars(text: &str) -> usize {
+    nfc::normalise(text)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .count()
+}
+
+/// The threshold decision itself, taken from a count that
+/// [`text_layer_chars`] produced.
+///
+/// One function rather than a comparison at each call site: `probe_text_layer`
+/// publishes the answer as a diagnostic and `pdf::extract_pdf` acts on it by
+/// dropping a page, and those two must not be able to disagree about which
+/// pages of a document have a text layer. Splitting it from the counting is
+/// what lets the boundary itself be asserted against the constant rather than
+/// against a fixture — see `the_threshold_is_inclusive_at_the_constant`, which
+/// is the only thing in this crate that can tell `>=` from `>`.
+pub(crate) fn has_text_layer(char_count: usize) -> bool {
+    char_count >= TEXT_LAYER_MIN_CHARS
 }
 
 /// The text layer of every page, in document order.
@@ -179,7 +215,12 @@ pub(crate) fn page_texts(path: &Path) -> Result<Vec<String>, Error> {
 /// makes PDF extraction sequential across the process. Recovering the throughput
 /// means separate processes, which is the extraction spec's decision, not this
 /// probe's.
-fn lock_pdfium() -> std::sync::MutexGuard<'static, ()> {
+///
+/// `pub(crate)` so that `pdf::extract_pdf` serialises through **this** lock.
+/// A second mutex would be the same segfault with two names: what has to be
+/// exclusive is the FFI, not any one caller's use of it, and two locks each
+/// held correctly protect nothing from each other.
+pub(crate) fn lock_pdfium() -> std::sync::MutexGuard<'static, ()> {
     static PDFIUM_IN_USE: Mutex<()> = Mutex::new(());
 
     // The guarded value is `()`; there is no state for a panicking thread to have
@@ -197,7 +238,14 @@ fn lock_pdfium() -> std::sync::MutexGuard<'static, ()> {
 /// second call from failing with an error about the library instead of about the
 /// document. Holding it in a `static` is what the `thread_safe` feature's `Sync`
 /// impl permits; what makes it *safe* is [`lock_pdfium`], not that feature.
-fn pdfium() -> Result<&'static Pdfium, Error> {
+///
+/// **Every error this returns is the reader failing to come up, never a fact
+/// about a document**, and `pdf::extract_pdf` relies on exactly that to route
+/// it to `Frame::Failed` rather than to a content rule. It holds by
+/// construction rather than by care: the closure below runs `library_dir`,
+/// `verify_build` and `bind_to_library` and nothing else, and no file has been
+/// named at this point, let alone opened.
+pub(crate) fn pdfium() -> Result<&'static Pdfium, Error> {
     static PDFIUM: OnceLock<Result<Pdfium, Error>> = OnceLock::new();
 
     PDFIUM
@@ -361,6 +409,50 @@ mod tests {
     // case would red on *every* bump, and the refuse case would red on a bump to
     // whichever number it had hard-coded as "some other build". Moving the pin is
     // supposed to be a decision, not a fight with the suite.
+
+    /// The one place `>=` can be told from `>`.
+    ///
+    /// No fixture can do it. `tests/pdf.rs` runs against pages of 119 and 8
+    /// characters — seventy-one clear on one side and forty short on the
+    /// other — so every assertion over them survives moving the comparison by
+    /// one, and a fixture cut to exactly 48 would pin the constant's value
+    /// into a `.pdf` blob that nobody could re-derive after a product decision
+    /// moved it. Stated against the constant instead, both directions, so a
+    /// bump costs nothing and an off-by-one costs this test.
+    #[test]
+    fn the_threshold_is_inclusive_at_the_constant() {
+        assert!(
+            has_text_layer(TEXT_LAYER_MIN_CHARS),
+            "a page carrying exactly the minimum has a text layer"
+        );
+        assert!(
+            !has_text_layer(TEXT_LAYER_MIN_CHARS - 1),
+            "one character short of the minimum is a stamp"
+        );
+    }
+
+    /// Counting after NFC, asserted on the alphabet it matters for.
+    ///
+    /// `й` decomposed is `и` + U+0306: two characters that become one. A
+    /// counter that ran before normalisation would answer twice the truth for
+    /// a page written that way, and the page stored would be half the size the
+    /// threshold admitted. Both spellings, because a counter that normalised
+    /// nothing and a counter that normalised everything agree on the composed
+    /// input alone.
+    #[test]
+    fn characters_are_counted_after_normalisation_not_before() {
+        let composed = "йїщ";
+        let decomposed = "и\u{0306}i\u{0308}щ";
+        assert_eq!(text_layer_chars(composed), 3);
+        assert_eq!(
+            text_layer_chars(decomposed),
+            3,
+            "the decomposed spelling of the same three letters must not count as five"
+        );
+        // Whitespace is not text: a scanner footer spread across a page is
+        // still a scanner footer.
+        assert_eq!(text_layer_chars(" й \r\n ї\tщ "), 3);
+    }
 
     #[test]
     fn a_manifest_for_another_build_is_refused() {

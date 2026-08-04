@@ -1,13 +1,17 @@
 //! Document extraction.
 //!
-//! At present this holds only the Pdfium binding probe: enough to prove the
-//! library loads, that the binary matches the bindings compiled against it, and
-//! that a page of text comes back. What a page's text *is* — reading order,
-//! hyphenation, tables, OCR fallback — is the extraction spec's subject and is
-//! deliberately not decided here.
+//! Plain text, markdown and PDF, plus the Pdfium binding probe that came before
+//! any of them — enough to prove the library loads and that the binary matches
+//! the bindings compiled against it, which `--probe-pdfium` still asks of a
+//! packaged build (D53, D54).
+//!
+//! What a PDF page's text *is* beyond its text layer — reading order across
+//! columns, hyphenation, tables, OCR for the pages `pdf::extract_pdf` skips —
+//! is the extraction spec's subject and is deliberately still not decided here.
 
 pub mod manifest;
 mod markdown;
+mod pdf;
 mod pdfium_probe;
 mod text;
 pub mod typing;
@@ -26,10 +30,16 @@ pub use mnema_core::wire;
 // name. A prior commit re-exported the wrong one: it kept `Error` bound to
 // `text`'s (then non-empty) error and dropped `pdfium_probe::Error` from the
 // public API entirely, so `probe_text_layer`'s actual return type became
-// unnameable outside this crate. Should a second fallible reader arrive
-// (pdf: crash, timeout; a zip-based format: a corrupt archive), it needs its
-// own name rather than silently reusing this one.
+// unnameable outside this crate.
+//
+// The second fallible reader has since arrived and took its own name, as that
+// warning asked: `PdfError` (`pdf.rs`), which carries this one in its `Library`
+// variant rather than replacing it. Keeping them separate is what lets the
+// worker route "the library would not load" and "the document is damaged" to
+// two different frames — one `Error` for both would have made that a decision
+// about a string.
 pub use markdown::{MarkdownPage, SECTION_TITLE_MAX_CHARS, extract_markdown};
+pub use pdf::{PdfDocument, PdfError, PdfPage, extract_pdf};
 pub use pdfium_probe::{
     Error, PDFIUM_API_BUILD, PDFIUM_LIB_DIR_ENV, PageProbe, Stage, TEXT_LAYER_MIN_CHARS,
     probe_text_layer,

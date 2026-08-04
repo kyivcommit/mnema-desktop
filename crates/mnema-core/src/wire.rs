@@ -111,10 +111,12 @@ pub enum Frame {
         text_source: String,
     },
     /// The worker looked at the file (or its metadata) and declined to read
-    /// it: today, either its size exceeds the request's `max_bytes` ceiling
-    /// — checked from `stat`, before a byte is loaded — or
-    /// `typing::identify` named a `Reader` this crate does not implement yet
-    /// (`Pdf`, `Docx`, `Xlsx`, `Epub`, or `Reader::Unrecognized` itself).
+    /// it: its size exceeds the request's `max_bytes` ceiling — checked from
+    /// `stat`, before a byte is loaded — or `typing::identify` named a
+    /// `Reader` that crate does not implement yet (`Docx`, `Xlsx`, `Epub`, or
+    /// `Reader::Unrecognized` itself), or a reader ran and refused what it
+    /// found: bytes that are not text, a text file with a binary tail, a PDF
+    /// that is damaged, locked, or carries no text layer on any page.
     ///
     /// `rule` is a plain string rather than `mnema_index::SkipRule`
     /// on purpose: neither this crate nor `mnema-extract` may depend on

@@ -18,14 +18,21 @@ use std::path::Path;
 use mnema_extract::manifest;
 use mnema_extract::typing::{Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
-use mnema_extract::{extract_markdown, extract_text};
+use mnema_extract::{PdfError, TEXT_LAYER_MIN_CHARS, extract_markdown, extract_pdf, extract_text};
 use sha2::{Digest, Sha256};
 
 fn main() {
     // A diagnostic branch, not part of the NDJSON protocol: it answers one
     // question — does this build load Pdfium from where it is installed — and
-    // exits. It exists because the question cannot be asked through the wire
-    // while no reader calls the library (D53, D54).
+    // exits (D53, D54).
+    //
+    // It was written when no reader called the library, so the wire could not
+    // be asked at all. The wire can be asked now: send a PDF and a bundle
+    // whose library will not load answers `Frame::Failed`. The flag stays
+    // because the two answers are not the same one. This branch needs no
+    // readable PDF and no file the caller had to bring, and it names *which*
+    // of the three loading stages failed — while the wire's answer is a
+    // sentence about one file, from a run that had to have a file to send.
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 3 && args[1] == "--probe-pdfium" {
         let line = match mnema_extract::probe_text_layer(Path::new(&args[2])) {
@@ -270,12 +277,87 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256: Some(sha256),
             }]
         }
-        // None of these five formats has a `Vec<Block>` reader in this crate
-        // yet — task 6 shipped only plain text, and `pdfium_probe` proves the
-        // binding links without deciding what a page's text *is* (its own
-        // doc comment). Reporting them alike as "unsupported" is honestly
-        // what is true today: this worker can read text and nothing else.
-        Reader::Pdf | Reader::Docx | Reader::Xlsx | Reader::Epub | Reader::Unrecognized => {
+        Reader::Pdf => match extract_pdf(&bytes) {
+            // Every page was below the text-layer threshold, so there is no
+            // document to build — but the file *was* read, and this says so
+            // under a rule about content rather than under `unsupported`,
+            // which promises a reader that is coming. `SkipRule::NoTextLayer`
+            // is what the parent records.
+            Ok(doc) if doc.pages.is_empty() => vec![Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: format!(
+                    "no page of this PDF carries a text layer of at least \
+                     {TEXT_LAYER_MIN_CHARS} characters"
+                ),
+                sha256: Some(sha256),
+            }],
+            Ok(doc) => {
+                let blocks: usize = doc.pages.iter().map(|p| p.blocks.len()).sum();
+                let mut frames = Vec::with_capacity(blocks + doc.pages.len() + 2);
+                frames.push(Frame::Header {
+                    sha256,
+                    mime: file_type.mime.to_string(),
+                    source_kind: file_type.source_kind,
+                    // The constant, not the literal `"pdf"`. `pages_of` on the
+                    // other side of the wire picks a PDF chunk's coordinate by
+                    // this exact string and may not link this crate (D40), so
+                    // a typo here would cost every PDF citation its page
+                    // number and nothing would go red.
+                    reader: manifest::READER_PDF.to_string(),
+                    reader_version: manifest::PDF_READER_VERSION,
+                    // From the same vector the Page frames come from, so the
+                    // pool's count check cannot disagree with itself. Skipped
+                    // pages are NOT in this number: they produce no Page frame
+                    // and are counted by `skipped_pages` instead.
+                    pages: doc.pages.len() as u32,
+                });
+                for page in doc.pages {
+                    frames.push(Frame::Page {
+                        page_no: page.page_no,
+                        // A PDF page is not a section. `pages_of` gives this
+                        // reader `Coordinate::Page`, which is what a citation
+                        // into a PDF points at.
+                        section_title: None,
+                    });
+                    frames.extend(page.blocks.into_iter().map(Frame::Block));
+                }
+                frames.push(Frame::Summary {
+                    skipped_pages: doc.skipped.len() as u32,
+                    text_source: "native:pdf".to_string(),
+                });
+                frames
+            }
+            Err(PdfError::Encrypted) => vec![Frame::Refused {
+                rule: "encrypted".to_string(),
+                reason: "this PDF is password-protected".to_string(),
+                sha256: Some(sha256),
+            }],
+            // A reader that could not load its own library is NOT a damaged
+            // file, and this arm must not swallow it. Under `malformed` the
+            // walk would not stop (`suggests_broken_environment() == false`)
+            // and the verdict would outlive the repair
+            // (`is_about_content() == true`): every PDF in a folder journalled
+            // as damaged by a green walk, and a fixed install returning
+            // nothing. `crates/mnema-pool/src/lib.rs:300-303` names exactly
+            // that outcome, and a quarantined `libpdfium.dylib` has already
+            // happened on this machine.
+            Err(PdfError::Library(e)) => vec![Frame::Failed {
+                message: format!("pdfium could not be loaded: {e}"),
+            }],
+            // Bound to the one remaining variant rather than written as a
+            // catch-all `Err(e)`. A catch-all is how a later variant — a
+            // timeout, a page limit — would arrive silently as "this file is
+            // damaged", which is the mistake the arm above exists to undo.
+            Err(e @ PdfError::Malformed(_)) => vec![Frame::Refused {
+                rule: "malformed".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+        },
+        // None of these four formats has a `Vec<Block>` reader in this crate
+        // yet. Reporting them alike as "unsupported" is honestly what is true
+        // today: this worker reads text, markdown and PDF, and nothing else.
+        Reader::Docx | Reader::Xlsx | Reader::Epub | Reader::Unrecognized => {
             vec![Frame::Refused {
                 rule: "unsupported".to_string(),
                 reason: format!(

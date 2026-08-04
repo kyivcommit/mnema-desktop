@@ -195,6 +195,18 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 sha256: None,
             },
         ),
+        // A PDF that is a scan: pages exist, none of them carries text. The
+        // reader ran and there is nothing to index, which is neither
+        // "unsupported" (no reader is coming — one already came) nor
+        // "not_text" (a PDF is a document format this product reads).
+        "scanned" => write_frame(
+            stdout,
+            &Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: format!("no page of {rest} carries a text layer"),
+                sha256: None,
+            },
+        ),
         // A refusal under a rule this pool has never heard of, which is what a
         // worker from another release looks like.
         //

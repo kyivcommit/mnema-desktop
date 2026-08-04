@@ -146,6 +146,11 @@ fn the_manifest_names_the_reader_that_identify_actually_picks() {
         Some("csv"),
         Some("html"),
         Some("MD"),
+        // The trap on the other side of `pdf` being absent from the map: these
+        // bytes are prose, so a file *named* `notes.pdf` is read by the text
+        // reader. An entry `pdf → pdf@1` would predict otherwise and re-read
+        // this file on every walk for ever.
+        Some("pdf"),
     ] {
         let picked = mnema_extract::typing::identify(bytes, ext);
         assert_eq!(
@@ -167,6 +172,55 @@ fn reader_name(reader: mnema_extract::typing::Reader) -> &'static str {
     match reader {
         Reader::PlainText => "text",
         Reader::Markdown => "markdown",
+        // The constant, not `"pdf"`. This is one of the three places the name
+        // is written, and the only one on the reading side: `mnema-ingest`
+        // matches the same constant to give a PDF chunk a page number, and no
+        // compiler joins the two across D40.
+        Reader::Pdf => mnema_core::manifest::READER_PDF,
         other => panic!("a reader with no name on the wire yet: {other:?}"),
     }
+}
+
+/// **A PDF is decided by content, so it is absent from the manifest — and that
+/// absence has a bill.**
+///
+/// The three facts are asserted together because separately each looks fine.
+/// `identify` gives real PDF bytes to the pdf reader whatever the file is
+/// called; the manifest predicts by extension and has no `pdf` entry, so it
+/// predicts the *text* reader for `report.pdf`; and the parent's cheap arm
+/// compares the two (`crates/mnema-ingest/src/lib.rs:274-280`). Every real PDF
+/// therefore misses that arm on every walk and is handed to a worker again —
+/// which for this format is a full pdfium parse, serialised process-wide,
+/// rather than a text read.
+///
+/// It is not a defect to fix here. An entry `pdf → pdf@1` would be a false
+/// claim about `identify` — the loop above proves prose named `notes.pdf` is
+/// read as text — and would cost that file the same re-read in the other
+/// direction. What closes it is a stored prediction per path or a manifest that
+/// can say "chosen by content", both of them decisions of their own. This test
+/// exists so the cost is written down where someone changing the map will meet
+/// it, rather than measured a third time.
+#[test]
+fn a_pdf_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
+    let pdf = std::fs::read("tests/fixtures/one-page-text.pdf").expect("the fixture is on disk");
+    let manifest = mnema_extract::manifest::manifest();
+
+    // Under its own name, and under a name that lies about it: content decides,
+    // so both are the pdf reader.
+    for ext in [Some("pdf"), Some("md"), None] {
+        assert_eq!(
+            reader_name(mnema_extract::typing::identify(&pdf, ext).reader),
+            mnema_core::manifest::READER_PDF,
+            "{ext:?} named a PDF's bytes something other than the pdf reader"
+        );
+    }
+
+    // And the manifest predicts none of that, because it cannot.
+    assert!(!manifest.by_extension.contains_key("pdf"));
+    assert_eq!(manifest.for_extension(Some("pdf")), &manifest.default);
+    assert_ne!(
+        manifest.for_extension(Some("pdf")).reader,
+        mnema_core::manifest::READER_PDF,
+        "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+    );
 }

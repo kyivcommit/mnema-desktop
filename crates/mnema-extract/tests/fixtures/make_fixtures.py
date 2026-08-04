@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the PDF fixtures used by tests/pdfium_binding.rs.
+"""Builds the PDF fixtures used by tests/pdfium_binding.rs and tests/pdf.rs.
 
 Run from anywhere:  python3 crates/mnema-extract/tests/fixtures/make_fixtures.py
 
@@ -21,10 +21,23 @@ HERE = pathlib.Path(__file__).parent
 BODY_TEXT = "Invented contract 4417 between Northwind Depot and Ravella Freight,"
 BODY_TEXT_2 = "signed 2026-07-25, covering pallet haulage for one calendar quarter."
 
+# A *second* body, and its words share none of the first's. `text-stamp-text.pdf`
+# asserts that the page which survives a skipped neighbour is page 3 and carries
+# page 3's own words — a reader that emitted page 1 twice, or that renumbered the
+# survivors 1..n, would satisfy a count and fail on these sentences.
+BODY_TEXT_3 = "Schedule B lists forty pallets of dried barley, collected weekly"
+BODY_TEXT_4 = "from the Ravella yard, each delivery note countersigned on arrival."
+
 # Deliberately far below the threshold. A scanner footer or a Bates stamp is what
 # a scanned page carries when it carries nothing else, and the point of the
 # threshold is that such a page must not count as having a text layer.
 STAMP_TEXT = "Page 2 of 2"
+
+# The same stamp for a three-page scan, numbered so that no two pages of
+# `all-scanned.pdf` draw identical bytes. A fixture whose pages are
+# indistinguishable cannot tell "every page was skipped" from "one page was
+# skipped three times".
+SCAN_STAMPS = ["Page 1 of 3", "Page 2 of 3", "Page 3 of 3"]
 
 
 def content_stream(lines: list[str]) -> bytes:
@@ -40,14 +53,28 @@ def content_stream(lines: list[str]) -> bytes:
     return "\n".join(out).encode("ascii")
 
 
-def build(pages: list[list[str]]) -> bytes:
-    """Assembles a PDF whose pages draw the given lines, in the given order."""
+def build(pages: list[list[str]], locked: bool = False) -> bytes:
+    """Assembles a PDF whose pages draw the given lines, in the given order.
+
+    With `locked`, the file also carries a standard-security-handler /Encrypt
+    dictionary whose /U cannot be produced from any password: a reader trying to
+    open it with the empty password computes a different key and stops. That is
+    exactly what a password-protected PDF looks like to a reader without the
+    password, which is the only thing the test needs — and it avoids
+    implementing RC4 and the MD5 key ladder here, which would be a second
+    unverified thing in a fixture builder.
+
+    The streams are therefore *not* encrypted. Nothing reads them: authentication
+    fails at load, before any object is decrypted.
+    """
     n_pages = len(pages)
     # Object numbering: 1 catalog, 2 page tree, 3..(2+n) pages,
-    # (3+n)..(2+2n) content streams, (3+2n) the font.
+    # (3+n)..(2+2n) content streams, (3+2n) the font, and — when locked —
+    # (4+2n) the encryption dictionary.
     first_page_obj = 3
     first_stream_obj = first_page_obj + n_pages
     font_obj = first_stream_obj + n_pages
+    encrypt_obj = font_obj + 1
 
     kids = " ".join(f"{first_page_obj + i} 0 R" for i in range(n_pages))
     objs = [
@@ -68,6 +95,14 @@ def build(pages: list[list[str]]) -> bytes:
             + b"\nendstream"
         )
     objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    if locked:
+        # V1/R2 is 40-bit RC4, the oldest standard handler and the one every
+        # reader implements — so a reader that stops here stopped because it
+        # has no key, not because it does not know the scheme.
+        objs.append(
+            b"<< /Filter /Standard /V 1 /R 2 /O <%s> /U <%s> /P -1 >>"
+            % (b"a1" * 32, b"b2" * 32)
+        )
 
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
@@ -78,15 +113,25 @@ def build(pages: list[list[str]]) -> bytes:
     out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
     for off in offsets:
         out += b"%010d 00000 n \n" % off
-    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+    # /ID is required alongside /Encrypt: the standard handler derives its key
+    # from the first ID string, so a file without one is not one a reader can
+    # even attempt to unlock.
+    extra = (
+        b" /Encrypt %d 0 R /ID [<%s> <%s>]"
+        % (encrypt_obj, b"0123456789abcdef" * 2, b"0123456789abcdef" * 2)
+        if locked
+        else b""
+    )
+    out += b"trailer\n<< /Size %d /Root 1 0 R%s >>\nstartxref\n%d\n%%%%EOF\n" % (
         len(objs) + 1,
+        extra,
         xref,
     )
     return bytes(out)
 
 
-def write(name: str, pages: list[list[str]]) -> None:
-    data = build(pages)
+def write(name: str, pages: list[list[str]], locked: bool = False) -> None:
+    data = build(pages, locked=locked)
     (HERE / name).write_bytes(data)
     counts = [
         sum(1 for c in "".join(lines) if not c.isspace()) for lines in pages
@@ -124,4 +169,16 @@ if __name__ == "__main__":
     # text arrives first and the stamp page second, which is what proves the probe
     # reports document order rather than whatever order pdfium happens to yield.
     write("text-then-stamp.pdf", [[BODY_TEXT, BODY_TEXT_2], [STAMP_TEXT]])
+    # The skipped page is neither the first nor the last, which is what makes
+    # `tests/pdf.rs` sensitive: on a two-page fixture "dropped page 2" and
+    # "dropped the last page" and "kept only page 1" are the same observation.
+    write(
+        "text-stamp-text.pdf",
+        [[BODY_TEXT, BODY_TEXT_2], [STAMP_TEXT], [BODY_TEXT_3, BODY_TEXT_4]],
+    )
+    write("all-scanned.pdf", [[stamp] for stamp in SCAN_STAMPS])
+    # Byte for byte the body of one-page-text.pdf, plus a lock. The pages it
+    # would have read are the ones the reader proves it can read elsewhere, so
+    # the refusal cannot be blamed on the content.
+    write("password-locked.pdf", [[BODY_TEXT, BODY_TEXT_2]], locked=True)
     write_solid_png()

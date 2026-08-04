@@ -8,7 +8,17 @@
 // Re-exported so a caller of `manifest()` can name what it got back without a
 // second `use` line pointing at another crate — the same convenience `wire`
 // already provides (`lib.rs`). The types are still `mnema-core`'s.
-pub use mnema_core::manifest::{Manifest, ReaderId};
+//
+// `READER_PDF` comes through here for a sharper reason than convenience. The
+// worker writes it into `Frame::Header::reader`, and `mnema_ingest::pages_of`
+// matches on that string to give a PDF chunk a page number instead of a line
+// range — across a process boundary and across D40, with no compiler between
+// the two. A literal `"pdf"` in the worker would be a second spelling of a
+// name that has to be one symbol: mistype it and the reader falls to
+// `PageContext::Lines`, every PDF citation loses its page, and nothing goes
+// red. The constant is `mnema-core`'s because neither side of that boundary
+// owns it.
+pub use mnema_core::manifest::{Manifest, READER_PDF, ReaderId};
 
 /// Bumped by whoever changes what that reader produces from the same bytes.
 ///
@@ -19,12 +29,34 @@ pub use mnema_core::manifest::{Manifest, ReaderId};
 /// changing anything costs one re-read of every such file.
 pub const TEXT_READER_VERSION: u32 = 1;
 pub const MARKDOWN_READER_VERSION: u32 = 1;
+pub const PDF_READER_VERSION: u32 = 1;
 
 /// Keyed on extension rather than on reader name, and the empty-looking map is
 /// the point: `.html` has no entry today because the text reader takes it, and
 /// the parent needs to see that entry *appear* to know the file must be read
 /// again. A map of reader versions alone would answer `text@1 == text@1` and
 /// never re-read it.
+///
+/// **`pdf` is deliberately absent, and it is the first reader for which that
+/// absence costs something.** This map is a claim about `typing::identify`, and
+/// `identify` decides a PDF by its magic bytes, not by its name — so an entry
+/// `pdf → pdf@1` would be a claim that a *text* file called `notes.pdf` is read
+/// by the pdf reader, which it is not
+/// (`the_manifest_names_the_reader_that_identify_actually_picks` is what holds
+/// this map to that).
+///
+/// What the absence costs is measured and is not zero: the parent's cheap arm
+/// compares the reader recorded on a path against this prediction
+/// (`crates/mnema-ingest/src/lib.rs:274-280`), so every real `.pdf` records
+/// `pdf@1`, is predicted `text@1`, and is handed to a worker on **every** walk.
+/// The re-read is content-addressed and rebuilds nothing — that bill is
+/// itemised at `mnema-ingest`'s own comment on the arm and measured by
+/// `a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that` —
+/// but for this format the work per pass is a full pdfium parse, serialised
+/// process-wide, rather than a text read. Closing it needs what that comment
+/// names: a stored prediction per path, or a manifest that can say "this reader
+/// is chosen by content". Both are decisions of their own; neither is a line
+/// in this function.
 pub fn manifest() -> Manifest {
     let mut by_extension = std::collections::BTreeMap::new();
     by_extension.insert(

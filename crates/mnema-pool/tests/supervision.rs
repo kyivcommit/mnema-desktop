@@ -405,6 +405,45 @@ fn a_pool_with_no_workers_and_a_batch_of_none_are_both_refused_at_construction()
     ));
 }
 
+/// The wire string a scanned PDF is refused under reaches its rule.
+///
+/// **This is the arm whose absence would have stopped a walk on the first
+/// scanned PDF in a folder.** `SkipRule::NoTextLayer` has existed since the
+/// skeleton — declared, judged `is_about_content`, given a `displaces` answer —
+/// and nothing sent the string, so nothing needed the parse arm. Frame parsing
+/// is strict by design: an unknown rule is `PoolError::Protocol` and stops the
+/// whole job, reading as "this worker binary is from another release" rather
+/// than as a missing match arm. The first PDF reader is what makes it
+/// reachable, and this is the test that says it arrived.
+///
+/// Both directions, in the shape `a_damaged_file_and_a_locked_one_cross_the_wire_apart`
+/// established: the rule must be `NoTextLayer` **and** must not be whichever
+/// neighbour a careless arm would fold it into. `Unsupported` is the near miss
+/// — both are refusals about a format — and they are opposite promises: one
+/// says a reader is coming, this one says the reader came and there is no text.
+#[test]
+fn a_scanned_pdf_crosses_the_wire_as_its_own_rule() {
+    let _watchdog = Watchdog::new("no text layer", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let scanned = skip(extract(&pool, "scanned:dohovir.pdf").unwrap());
+    assert_eq!(scanned.failure, Failure::NoTextLayer);
+    assert_eq!(SkipRule::from(scanned.failure), SkipRule::NoTextLayer);
+    assert_ne!(
+        scanned.failure,
+        Failure::Unsupported,
+        "a reader that ran and found no text is not a format waiting for a reader"
+    );
+    // The worker's own wording, absent from the request this pool sent, so its
+    // presence proves the answer came back over the wire rather than being
+    // invented locally.
+    assert!(
+        scanned.reason.contains("carries a text layer"),
+        "the worker's own words must survive into the journal: {}",
+        scanned.reason
+    );
+}
+
 /// What this file expects one failure to be journalled as, written here rather
 /// than read out of `impl From<Failure> for SkipRule` — a test that asks the
 /// code under test what it does and agrees is not a test.
@@ -430,6 +469,10 @@ fn journalled_as(failure: Failure) -> SkipRule {
         // person holding the file.
         Failure::Malformed => SkipRule::Malformed,
         Failure::Encrypted => SkipRule::Encrypted,
+        // The rule that existed for a whole skeleton with no way to arrive:
+        // `SkipRule::NoTextLayer` was declared, judged and given a `displaces`
+        // answer before anything could send the string.
+        Failure::NoTextLayer => SkipRule::NoTextLayer,
     }
 }
 

@@ -19,6 +19,28 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+// -------------------------------------------------- a format with no reader
+
+/// A file the worker refuses under `SkipRule::Unsupported`: a zip archive with
+/// no member any reader recognises. `typing::identify` answers
+/// `Reader::Unrecognized` for it, and the worker's `unsupported` branch is
+/// "no reader implemented yet" — a promise that one is coming.
+///
+/// Twenty-two bytes: an end-of-central-directory record and nothing else,
+/// which is what an empty zip is. Written out rather than produced with the
+/// `zip` crate so that this crate does not take a dependency to make a file
+/// whose whole content is a constant.
+///
+/// **It used to be `%PDF-1.7…`, and every test using it silently changed
+/// subject when the PDF reader landed.** A `%PDF-` stub is now refused as
+/// `malformed` — a verdict about *damage*, which is remembered until
+/// `INDEX_FORMAT_VERSION` moves — where these tests need `unsupported`, whose
+/// whole point is that it is the least stable verdict this product gives.
+/// Seven tests went red on the rule and were fixed here rather than by
+/// lowering each assertion to whatever the new answer happened to be.
+pub const NO_READER_FOR_THIS: &[u8] = b"PK\x05\x06\
+    \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
 // ------------------------------------------------------------ the real worker
 
 /// The extraction worker binary.

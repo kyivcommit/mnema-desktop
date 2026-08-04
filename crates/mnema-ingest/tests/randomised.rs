@@ -657,6 +657,20 @@ impl World {
         }
     }
 
+    /// ⚠️ **These bytes changed meaning when the PDF reader landed, and this
+    /// harness did not go red.** A `%PDF-` stub used to be refused as
+    /// `unsupported` — "no reader implemented yet". It is now `malformed`: the
+    /// pdf reader runs, pdfium is handed a truncated document and says so.
+    ///
+    /// Nothing here asserts which rule fired — invariant 3c asks only that a
+    /// refused file is not in the index — so `Shape::Opaque` is still a
+    /// truthful model of *a file that is refused by content*, and the harness
+    /// is still measuring something real. What it is no longer measuring is
+    /// `Unsupported`, which is the rule with a `displaces` decision of its own
+    /// and no other generator. Task 14 gives this generator the new formats;
+    /// picking a shape per rule rather than one shape for all refusals is the
+    /// decision it inherits, and it is written here rather than in a report
+    /// because this is where someone will be standing when they need it.
     fn opaque_body(&self) -> Content {
         Content {
             bytes: b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n".to_vec(),

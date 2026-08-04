@@ -139,7 +139,7 @@ fn a_photo_is_refused_by_the_real_worker() {
 }
 
 /// Every refusal this worker reaches **by reading the file** carries the digest
-/// of what it read — all three of them, not the one that happened to get a test.
+/// of what it read — all five of them, not the one that happened to get a test.
 ///
 /// The digest was pinned on the `not_text` branch alone, and the blindness that
 /// left behind is structural rather than an oversight. Both of the parent's
@@ -162,9 +162,11 @@ fn a_photo_is_refused_by_the_real_worker() {
 /// not to read.
 ///
 /// The table is written out by hand, which is the one thing this test cannot
-/// fix: a seventh `Reader` variant refusing under a new rule has to be added
-/// here by whoever adds it. What it does close is that no branch reachable
-/// today is judged by nothing.
+/// fix: a reader refusing under a new rule has to be added here by whoever adds
+/// it. What it does close is that no branch reachable today is judged by
+/// nothing. The three PDF rows arrived that way — the pdf reader turned one row
+/// (`one-page-text.pdf`, then `unsupported`) into three refusals by content,
+/// and a row left behind would have been a branch nothing measured.
 #[test]
 fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
     let dir = tempfile::tempdir().unwrap();
@@ -180,9 +182,26 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
     bytes.extend(std::iter::repeat_n(0u8, 64));
     std::fs::write(&interrupted, &bytes).unwrap();
 
+    // A PDF by its magic bytes and nothing else after them. Built here for the
+    // same reason as the file above: it is derived from a rule already stated
+    // (`typing::identify` decides a PDF on `%PDF-`), and a blob in `fixtures`
+    // would be one more thing to believe.
+    let damaged = dir.path().join("zvit.pdf");
+    std::fs::write(&damaged, b"%PDF-1.4\nthis document ends mid-object").unwrap();
+
     for (path, want_rule) in [
         ("tests/fixtures/solid.png", "not_text"),
-        ("tests/fixtures/one-page-text.pdf", "unsupported"),
+        // `one-page-text.pdf` used to be this row, under `unsupported`. It is
+        // not refused at all any more — the pdf reader reads it — so the row
+        // moved to the PDFs that *are* refused after being read, which is
+        // three rules rather than one. Each is a verdict about content, so
+        // each owes the digest it was reached on: without it `displaces`
+        // reads a missing digest as "the bytes are unknown, displace", and a
+        // folder of scans walked by a build whose Pdfium is a version behind
+        // loses a document per file with the bytes never having moved.
+        ("tests/fixtures/all-scanned.pdf", "no_text_layer"),
+        ("tests/fixtures/password-locked.pdf", "encrypted"),
+        (damaged.to_str().expect("a temp path is UTF-8"), "malformed"),
         (
             interrupted.to_str().expect("a temp path is UTF-8"),
             "binary_tail",
@@ -350,6 +369,153 @@ fn a_markdown_file_announces_one_page_per_section_and_sends_that_many() {
     // produced the text, and the same bytes read two ways are not the same
     // evidence.
     assert_eq!(text_source, "native:md");
+}
+
+/// The PDF branch's whole wire shape, at the only place it is produced.
+///
+/// `reader` is the assertion that matters most here and the one nothing else
+/// in the workspace can make. `mnema_ingest::pages_of` picks a PDF chunk's
+/// coordinate by matching this exact string, across a process boundary and
+/// across D40 — so there is no compiler between the two, and a header saying
+/// `"pdf-2"` would send every PDF citation to `PageContext::Lines`, which
+/// answers `Coordinate::None` for a block with no line numbers. Plausible,
+/// silent, and green everywhere else.
+///
+/// The literal `"pdf"` rather than `manifest::READER_PDF`: a test that asks
+/// the code under test what it says and agrees is not a test. The constant is
+/// the mechanism, this is the value, and `mnema-ingest/tests/slice.rs` states
+/// the same literal from the other side.
+#[test]
+fn a_pdf_is_read_and_its_header_names_the_pdf_reader() {
+    let request = serde_json::json!({
+        "path": "tests/fixtures/one-page-text.pdf",
+        "max_bytes": 1_048_576,
+    });
+    let frames = frames_of(&run_worker(&[&request.to_string()]));
+
+    let Some(Frame::Header {
+        reader,
+        reader_version,
+        pages,
+        mime,
+        ..
+    }) = frames.first()
+    else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "pdf");
+    assert_eq!(*reader_version, 1);
+    assert_eq!(*pages, 1);
+    assert_eq!(mime, "application/pdf");
+
+    match &frames[1] {
+        Frame::Page {
+            page_no,
+            section_title,
+        } => {
+            assert_eq!(*page_no, 1);
+            // A PDF page is not a section: `pages_of` cites `Coordinate::Page`
+            // for this reader, and a title here would be furniture nobody
+            // asked for.
+            assert_eq!(*section_title, None);
+        }
+        other => panic!("expected a page frame, got {other:?}"),
+    }
+
+    match &frames[2] {
+        Frame::Block(block) => {
+            assert!(
+                block.text.contains("Northwind Depot"),
+                "the fixture's own words must survive the wire: {:?}",
+                block.text
+            );
+            // Not `is_none()` on one of them: a reader that filled in a line
+            // range would be cited as rows of a page that has none.
+            assert_eq!((block.line_start, block.line_end), (None, None));
+        }
+        other => panic!("expected a block frame, got {other:?}"),
+    }
+
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    assert_eq!(*skipped_pages, 0);
+    // `native:pdf`, satisfying `page.text_source`'s CHECK and naming the
+    // reader rather than the file — the same rule `native:md` follows.
+    assert_eq!(text_source, "native:pdf");
+}
+
+/// A PDF that lost a page in the middle: the gap reaches the wire, the header
+/// counts what arrived, and the summary counts what did not.
+///
+/// This is the pool's own integrity check exercised at its producer: it
+/// requires `Header::pages` to equal the number of `Page` frames, and it does
+/// **not** look at the largest `page_no`. A reader that announced 3 because the
+/// document has three pages would stop the job.
+#[test]
+fn a_skipped_pdf_page_leaves_a_gap_and_is_counted_rather_than_announced() {
+    let request = serde_json::json!({
+        "path": "tests/fixtures/text-stamp-text.pdf",
+        "max_bytes": 1_048_576,
+    });
+    let frames = frames_of(&run_worker(&[&request.to_string()]));
+
+    let Some(Frame::Header { pages, .. }) = frames.first() else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    let sent: Vec<u32> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Page { page_no, .. } => Some(*page_no),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        sent,
+        vec![1, 3],
+        "the skipped page leaves a gap, which `Frame::Page`'s doc calls the honest record"
+    );
+    assert_eq!(
+        *pages,
+        sent.len() as u32,
+        "the header counts the page frames that arrive, not the document's pages"
+    );
+
+    let Some(Frame::Summary { skipped_pages, .. }) = frames.last() else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    assert_eq!(*skipped_pages, 1);
+}
+
+/// A scan of a paper document is refused after being read, under a rule about
+/// content — not `unsupported`, which promises a reader that is coming when
+/// the reader is already here and found no text.
+#[test]
+fn a_pdf_with_no_text_layer_on_any_page_is_refused_under_its_own_rule() {
+    let request = serde_json::json!({
+        "path": "tests/fixtures/all-scanned.pdf",
+        "max_bytes": 1_048_576,
+    });
+    let frames = frames_of(&run_worker(&[&request.to_string()]));
+
+    match frames.as_slice() {
+        [Frame::Refused { rule, reason, .. }] => {
+            assert_eq!(rule, "no_text_layer");
+            // The threshold it failed, in the sentence a person reads: "no
+            // text" alone does not distinguish a scan from an empty file, and
+            // the number is the product decision they may want to argue with.
+            assert!(
+                reason.contains(&mnema_extract::TEXT_LAYER_MIN_CHARS.to_string()),
+                "the refusal must name the threshold it applied: {reason}"
+            );
+        }
+        other => panic!("expected exactly one refusal, got {other:?}"),
+    }
 }
 
 #[test]
