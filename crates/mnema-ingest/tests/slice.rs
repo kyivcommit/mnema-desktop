@@ -2612,6 +2612,87 @@ fn a_locked_file_keeps_its_document_when_the_bytes_did_not_move() {
     );
 }
 
+/// The third of the pair's pattern, and the one whose rule used to displace
+/// outright.
+///
+/// A scan is not damage and not a password either: the file is whole, the
+/// reader is the right one, and what is missing is a text layer above a
+/// threshold this product chose. `TEXT_LAYER_MIN_CHARS` is a product decision
+/// someone may argue with, and a reader is a thing releases improve — so the
+/// same folder of scans walked once by a build that found text on the page and
+/// once by a build that did not is a document lost per file, with the bytes
+/// never having moved. That is the loss `Unsupported`'s arm was corrected for,
+/// arriving from a third direction.
+///
+/// A `.txt` under a stand-in worker, like the two tests above and for their
+/// reason: the script answers with this rule whatever it is handed, so the
+/// fixture does not have to be a PDF the real reader would have to agree
+/// about.
+#[cfg(unix)]
+#[test]
+fn a_scanned_file_keeps_its_document_when_the_bytes_did_not_move() {
+    let fx = Fixture::new();
+    let prose = "Опис майна, переданого на відповідальне зберігання.\n".repeat(50);
+    fx.place_at("описи/опис.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("описи/опис.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("зберігання", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    fx.place_at("описи/опис.txt", prose.as_bytes(), mtime_just_after());
+    let unchanged = sha256_of(prose.as_bytes());
+    let finds_no_text_layer = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"no_text_layer","reason":"no page of this PDF carries a text layer of at least 48 characters","sha256":"{unchanged}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("описи/опис.txt", &finds_no_text_layer),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        },
+        "the premise fails unless the wire string arrives as this rule and no other"
+    );
+    assert!(
+        !fx.db.search_lexical("зберігання", 10).unwrap().is_empty(),
+        "the bytes are identical to what the index was built from, so a build \
+         that finds no text layer on them must not take the document away"
+    );
+
+    // The other direction, and it is what stops this arm from being satisfied
+    // by a constant `false`: the same rule over bytes that are *not* the
+    // indexed ones is a document replaced by a photograph of one, and the old
+    // text has to stop answering under a name it is no longer in.
+    let scanned = b"%PDF-1.7\n1 0 obj\n<< /Type /Page /Contents 3 0 R >>\n".as_slice();
+    fx.place_at(
+        "описи/опис.txt",
+        scanned,
+        mtime_just_after() + Duration::from_millis(250),
+    );
+    let replaced = sha256_of(scanned);
+    let finds_none_on_a_replacement = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"no_text_layer","reason":"no page of this PDF carries a text layer of at least 48 characters","sha256":"{replaced}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("описи/опис.txt", &finds_none_on_a_replacement),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert!(
+        fx.db.search_lexical("зберігання", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+}
+
 // ------------------------------------------------- markdown, and its pages
 
 /// An invented handbook: content before the first heading, two sections, and a

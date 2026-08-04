@@ -678,28 +678,30 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// match its parent answers the same way for all forty thousand of them.
 ///
 /// **Displace, but only when the bytes moved** — `NotText`, `Unsupported`,
-/// `Malformed` and `Encrypted`. The worker read the file and determined
-/// something about its bytes: they are not text at all, no reader in this
-/// product can take that format, the right reader could not finish them, or
-/// they are behind a password. Run it again on the same bytes and it says the
-/// same thing, so what the index holds is a previous version of a file that has
-/// since become unindexable — *if* the bytes are not the ones the index was
-/// built from. When they are, the rule changed and the file did not, and
-/// deleting the document loses text that is still on disk. The digest the
-/// worker refused on is what tells the two apart; the arms below carry the
-/// reasoning, and D51 the measurement.
+/// `Malformed`, `Encrypted` and `NoTextLayer`. The worker read the file and
+/// determined something about its bytes: they are not text at all, no reader in
+/// this product can take that format, the right reader could not finish them,
+/// they are behind a password, or no page of them carries a text layer worth
+/// indexing. Run it again on the same bytes and it says the same thing, so what
+/// the index holds is a previous version of a file that has since become
+/// unindexable — *if* the bytes are not the ones the index was built from. When
+/// they are, the rule changed and the file did not, and deleting the document
+/// loses text that is still on disk. The digest the worker refused on is what
+/// tells the two apart; the arms below carry the reasoning, and D51 the
+/// measurement.
 ///
-/// Three of those four are refusals a *release* can reverse — a reader arrives,
-/// a reader gets better at damage, a password prompt is built — and that is
-/// what puts them here rather than on the unconditional side. `NotText` is the
-/// exception that shows the condition is not free: it promises the opposite,
-/// that no release makes a photo into prose, and it is conditional anyway,
-/// because the file under the path can be replaced by one whose bytes the index
-/// never saw.
+/// Four of those five are refusals a *release* can reverse — a reader arrives,
+/// a reader gets better at damage, a password prompt is built, a threshold
+/// moves — and that is what puts them here rather than on the unconditional
+/// side. `NotText` is the exception that shows the condition is not free: it
+/// promises the opposite, that no release makes a photo into prose, and it is
+/// conditional anyway, because the file under the path can be replaced by one
+/// whose bytes the index never saw.
 ///
-/// **Displace outright** — `NoTextLayer`. A rule about one page rather than a
-/// file, which no reader in this product can produce yet. Its arm below says
-/// why it is not folded in with the two above.
+/// **Nothing displaces outright.** `NoTextLayer` did, on the strength of being
+/// dormant — no wire string reached it and no reader could earn it. The PDF
+/// reader earns it now, and it turned out to belong with the four above rather
+/// than apart from them; its arm carries why.
 ///
 /// **Keep** — `Crash`, `Timeout`, `Memory`, `Unreadable`, and `BinaryTail`.
 /// The first four are not statements about the file at all; the fifth is one,
@@ -945,22 +947,28 @@ fn displaces(
         // corrected for, arriving from two more directions.
         SkipRule::Malformed => content.is_none_or(|sha| sha != recorded.document_id),
         SkipRule::Encrypted => content.is_none_or(|sha| sha != recorded.document_id),
-        // Unconditional, and deliberately not folded into the arm above even
-        // though the two would behave alike today.
+        // The same condition once more, and on a line of its own for the same
+        // reason as the two above.
         //
-        // Nothing in this product produces this rule: no wire string maps to
-        // it, and the only reader that could earn it — a PDF reader that opens
-        // a scanned page and finds no text layer — is not built. It is
-        // dormant, so it has no digest to compare against and `is_none_or`
-        // would displace on every one of them anyway.
+        // The comment this replaces asked whoever built the PDF reader to
+        // decide this rather than inherit it, because the rule was dormant —
+        // no wire string mapped to it and nothing could earn it. The reader is
+        // built now, and the decision is that it belongs on this side.
         //
-        // What the separate branch buys is that whoever builds that reader has
-        // to decide this rather than inherit it. And the decision is not the
-        // same one: this rule is about a *page*, not a file, so "the bytes did
-        // not change" would not even mean what it means above — a document
-        // whose pages are readable except one is not a file that stopped being
-        // indexable.
-        SkipRule::NoTextLayer => true,
+        // As a *file-level* verdict this rule means every page of the document
+        // fell below `TEXT_LAYER_MIN_CHARS`, which is a threshold this product
+        // picked and may move, read by a library a release may improve. So it
+        // is the least stable verdict of the four, not the most: a folder of
+        // scans walked once by a build that found text on the page and once by
+        // a build that did not is a document lost per file, with the bytes
+        // never having moved.
+        //
+        // It is a rule about a page as well as about a file, and the two
+        // meanings do not conflict here. This function is only ever asked
+        // about the whole-file row: a page's own row carries `page_no` and is
+        // never a verdict on the path (`Db::skip_entry` reads `page_no IS
+        // NULL`, `Db::forget_page_skips` is what maintains the others).
+        SkipRule::NoTextLayer => content.is_none_or(|sha| sha != recorded.document_id),
         // Something that happened, and that happens to every file alike.
         SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => false,
         // The one refusal by content that keeps: the file still opens with the
