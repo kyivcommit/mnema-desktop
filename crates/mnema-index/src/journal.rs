@@ -64,14 +64,22 @@ declare_skip_rules! {
     /// Nothing was learned about this file's content, for a reason that is not
     /// about its content.
     ///
-    /// **Defined by the list below rather than by a sentence, and that is the
-    /// point.** Three rounds of review each replaced one short definition with
-    /// another — "a fact about the user's disk", "no reader saw a byte", "what
-    /// the worker came back with" — and each was falsified by a case already in
-    /// the tree, because the cases sit at three different levels. A phrase
-    /// narrow enough to be informative is narrower than the rule. So: a new
-    /// case is added as an entry here, and is not expected to fit a definition
-    /// written before it.
+    /// **Defined by the list below rather than by a sentence or a count, and
+    /// that is the point.** Successive rounds of review each replaced one short
+    /// definition with another — "a fact about the user's disk", "no reader saw
+    /// a byte", "what the worker came back with" — and each was falsified by a
+    /// case already in the tree, because the cases do not sit at one level: some
+    /// are what a worker reported, some happen with no worker involved, and one
+    /// can follow an extraction that succeeded outright. A phrase narrow enough
+    /// to be informative is narrower than the rule.
+    ///
+    /// The first attempt to fix that by enumerating still said "three ways in",
+    /// and there were four. **A count is a definition too** — it claims closure
+    /// the same way a phrase claims coverage, and a case already in the tree
+    /// refutes it the same way. So the list is deliberately unnumbered at the
+    /// level where it grows, and what governs admission is the test below it,
+    /// not the length. A new case is added as an entry, and is not expected to
+    /// fit anything written before it.
     ///
     /// 1. **The worker was asked and could not obtain the bytes.** The path did
     ///    not exist, was not a regular file, permissions refused it, or the
@@ -83,8 +91,8 @@ declare_skip_rules! {
     ///    bytes may well have been readable; nothing read them.
     ///    [`Malformed`](Self::Malformed) carries what routing this onto a
     ///    content rule would cost, which is a folder at a time.
-    /// 3. **No worker was asked at all.** Three ways in, and all three write
-    ///    this rule directly:
+    /// 3. **No worker was asked at all.** Each of these writes the rule
+    ///    directly, without a pool answer to map:
     ///    * the walk refused the entry before any worker — every `PreSkipRule`
     ///      lands here (`mnema_walk`'s five: an unrepresentable name, a cloud
     ///      placeholder, an unreadable entry, a non-file, a size that does not
@@ -92,6 +100,14 @@ declare_skip_rules! {
     ///    * the path is not valid UTF-8, so the extraction request cannot
     ///      express it at all (`Pool::extract`,
     ///      `crates/mnema-pool/src/lib.rs:619`);
+    ///    * the caller had **no measurement** of the file to hand — `on_disk`
+    ///      was `None`, which `ingest_file` documents as "the walk could not
+    ///      stat the file at all" and refuses on before spending a worker
+    ///      (`crates/mnema-ingest/src/lib.rs:339`). Unreachable from the
+    ///      product as it stands, because `walk_root` always passes `Some`
+    ///      (`crates/mnema-ingest/src/walk.rs:937`) — but `ingest_file` is
+    ///      `pub` and the parameter is `Option` with a documented meaning, so
+    ///      it is an entry in this list rather than a branch that cannot fire;
     ///    * the **journal write itself** kept failing — the index was still busy
     ///      under someone else's write after every retry
     ///      (`ingest_with_busy_retry`, `crates/mnema-ingest/src/walk.rs:963`).
@@ -120,7 +136,8 @@ declare_skip_rules! {
     /// its own and has not been taken.
     ///
     /// `skipped.rule` is a plain `TEXT` column with no CHECK constraint
-    /// (`schema.sql:233`), so adding this value needed no migration and no
+    /// (`skipped.rule`, `schema.sql:271`), so adding this value needed no
+    /// migration and no
     /// `SCHEMA_VERSION` bump.
     Unreadable,
     /// The file is larger than the ceiling the pool was configured with, and

@@ -724,11 +724,13 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 ///   not about the content. Usually the file could not be opened at all:
 ///   missing, not a regular file, refused by permissions, on a volume that is
 ///   not there. A share that drops mid-walk reports it for everything on the
-///   volume. It also covers a reader that could not be started, and three cases
-///   where no worker ran at all — `SkipRule::Unreadable` enumerates them, and
-///   deliberately does not try to summarise them, since every summary so far
-///   has been narrower than the rule. What they share is what puts them on this
-///   side: one condition outside the file, answering for every file alike.
+///   volume. It also covers a reader that could not be started, and cases where
+///   no worker ran at all — including the arm in this very function that
+///   refuses a file the walk could not measure. `SkipRule::Unreadable`
+///   enumerates them, and deliberately neither summarises nor counts them,
+///   since every summary so far has been narrower than the rule and the first
+///   count was short. What they share is what puts them on this side: one
+///   condition outside the file, answering for every file alike.
 ///
 ///   **This one is only half safe, and the other half is not built yet.**
 ///   Nothing anywhere removes a `path` row for a file that was renamed or

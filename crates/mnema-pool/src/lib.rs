@@ -207,10 +207,12 @@ declare_failures! {
     /// not finish it: `Frame::Refused { rule: "malformed" }`.
     ///
     /// Not [`Failure::Unsupported`], which promises a reader that will arrive
-    /// when one already has, and not [`Failure::Unreadable`], which covers
-    /// every way the worker can come back having learned nothing about the
-    /// content — the bytes unobtainable, or the reader itself unable to start.
-    /// This variant is the opposite: a reader that ran, on bytes it had.
+    /// when one already has, and not [`Failure::Unreadable`], whose own
+    /// docstring twenty lines up says what that one holds — deliberately not
+    /// paraphrased again here, because every paraphrase of that variant written
+    /// so far has claimed more completeness than it had, this one included.
+    /// This variant is the narrow, positive case: a reader that ran, on bytes
+    /// it had.
     /// [`SkipRule::Malformed`](mnema_index::SkipRule::Malformed) carries why the
     /// distinction costs a document, and why a reader whose library will not
     /// load must take [`Failure::Unreadable`] rather than this.
