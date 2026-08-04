@@ -213,7 +213,7 @@ case_ "ingest: a pass that writes no pages rewrites no rows about them" \
   's{                if renaming \{\n                    journal_skipped_pages\(db, root_id, relative, &document\)\?;\n                \}}{                journal_skipped_pages(db, root_id, relative, \&document)?;}' \
   'repoint(db, root_id, relative, &document, disk, displaced.as_deref())?;
                 journal_skipped_pages(db, root_id, relative, &document)?;' \
-  mnema-ingest 'a_reader_that_learns_to_read_a_page_does_not_erase_the_note_that_it_is_missing' --test slice
+  mnema-ingest 'a_pass_that_wrote_no_page_does_not_rewrite_the_account_of_missing_ones' --test slice
 
 # N16. The filter that keeps a row off a page the index holds. Same branch, the
 # mirror direction: a build whose reader newly drops a page would journal "page

@@ -387,8 +387,44 @@ pub fn ingest_file(
     // creates it or empties it. Read here and used inside the transaction
     // below, so the whole recovery is one atomic unit — see `rebuild` there.
     let mut rebuild = false;
+    // **Whether the rows under this document were made by the reader that just
+    // ran**, which is a different question from whether the bytes moved — and
+    // the one the content address cannot answer. `document.id` is the sha256 of
+    // the file, so a release that gives an extension a new reader changes every
+    // page, block and chunk of it while leaving the id exactly where it was.
+    //
+    // Without this the manifest's whole mechanism stopped one step short. The
+    // cheap arm above notices that `.html` changed hands and hands the file to a
+    // worker; the worker reads it as prose; and the branch below then finds the
+    // document present with its chunk stage `done` and returns having written
+    // nothing — so the text reader's markup stays in the index. Worse, `repoint`
+    // writes the new reader into the `path` row in the same transaction, the
+    // next walk's cheap arm agrees, and the stale reading is there for the life
+    // of that index. `INDEX_FORMAT_VERSION` does not reach it either: that lever
+    // is read only by the skip journal's arm, and an indexed file is not a skip.
+    // Measured before this line existed, in
+    // `a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was`.
+    //
+    // Compared against the reader that **ran**, not against
+    // `manifest.for_extension`: the manifest is a prediction, and what makes the
+    // stored rows stale is which reader actually made them. That also keeps the
+    // arm quiet in the case the manifest cannot predict — a reader chosen by
+    // content disagrees with the map on every walk and would otherwise rebuild
+    // the document, and move every chunk id, on every walk.
+    //
+    // **What it cannot see is a document reached by a path with no row of its
+    // own.** Two paths to identical bytes are one document (D33), and the reader
+    // is recorded per path; walking the copy that was never indexed answers
+    // "nothing to compare" and leaves the old rows standing until the walk
+    // reaches the path that does have a row. Closing that needs the reader
+    // recorded on the `document` row, which is a column and a migration rather
+    // than a line here.
+    let stale_reading = recorded.as_ref().is_some_and(|entry| {
+        entry.reader != document.reader
+            || entry.reader_version != i64::from(document.reader_version)
+    });
     if db.document_exists(&id)? {
-        if db.stage_status(&id, STAGE_CHUNK)?.as_deref() == Some(STATUS_DONE) {
+        if !stale_reading && db.stage_status(&id, STAGE_CHUNK)?.as_deref() == Some(STATUS_DONE) {
             // Nothing is written here, and that governs the journal too. The
             // path's account of its missing pages is rewritten **only when the
             // path is coming to name a different document**: this pass extracted

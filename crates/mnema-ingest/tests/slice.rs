@@ -206,6 +206,50 @@ impl Fixture {
         self.ingest_with(relative, PoolConfig::new(worker))
     }
 
+    /// A named worker **and** a named manifest, which the two helpers above
+    /// each give only one of.
+    ///
+    /// Needed by the one test whose subject is a release boundary: the build
+    /// that indexed a file had both an older manifest and an older worker, and
+    /// a test that moved only one of them would describe a build that never
+    /// shipped.
+    fn ingest_with_worker_against(
+        &self,
+        relative: &str,
+        worker: &Path,
+        manifest: &Manifest,
+    ) -> Ingested {
+        let pool = Pool::new(PoolConfig::new(worker)).unwrap();
+        let absolute = self.root.join(relative);
+        let on_disk = mnema_walk::stat(&absolute);
+        ingest_file(
+            &pool,
+            &self.db,
+            self.root_id,
+            &absolute,
+            relative,
+            on_disk,
+            manifest,
+        )
+        .expect("a per-file problem must never stop the job")
+    }
+
+    /// Every chunk of one document, as text, in `ord` order.
+    ///
+    /// The text rather than the ids: the question this answers is what a search
+    /// would return and what a citation would show, which is the thing a stale
+    /// reading corrupts.
+    fn chunk_texts(&self, document_id: &str) -> Vec<String> {
+        self.db
+            .conn()
+            .prepare("SELECT text FROM chunk WHERE document_id = ?1 ORDER BY ord")
+            .unwrap()
+            .query_map([document_id], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
     fn try_ingest_with_worker(
         &self,
         relative: &str,
@@ -618,8 +662,9 @@ fn a_path_row_credits_the_reader_the_worker_actually_ran() {
 /// its successor by name: spec §2 puts it in the same class deliberately —
 /// indexed as text today, out of scope for this cycle — so the premise is a
 /// stated decision rather than a gap waiting to close under the test. What
-/// happens on the day an extension really does change hands is measured on
-/// `.html` itself, by the test the next commit adds.
+/// happens on the day an extension really does change hands is measured
+/// against `.html` itself in
+/// `a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was`.
 fn with_rtf_reader(before: &Manifest) -> Manifest {
     let mut after = before.clone();
     after
@@ -745,11 +790,157 @@ fn a_file_is_reread_when_its_extension_changed_hands() {
     );
     // And a re-read is what it was, rather than some other way of not being
     // `Unchanged`: only the arms past the cheap one can answer `AlreadyIndexed`,
-    // and reaching them means the file was handed to a worker.
+    // and reaching them means the file was handed to a worker. The worker
+    // behind this pool reports `text` for a `.rtf`, exactly as the row already
+    // says, so the reading did not change and nothing is rebuilt — which is the
+    // subject of `a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was`.
     assert!(
         matches!(outcome, Ingested::AlreadyIndexed { .. }),
         "the bytes never moved, so a re-read lands back on the document the \
          index already holds: {outcome:?}"
+    );
+}
+
+/// A document the index already holds, read again by a **different reader**, is
+/// rebuilt — not left exactly as the old reader made it.
+///
+/// **This is the last step of the mechanism the manifest exists for, and it was
+/// missing.** The cheap arm notices that `.html` changed hands and hands the
+/// file to a worker; the worker reads it as prose; and then step 3 finds the
+/// document already there with its chunk stage `done` and returns
+/// `AlreadyIndexed` **having written nothing**. The document id is the sha256
+/// of the bytes and the bytes did not move, so nothing about it looks stale.
+/// What is stale is every page, block and chunk under it — made by the text
+/// reader, holding `<style>.a{color:red}</style>` as prose (spec §2.1).
+///
+/// And it is worse than a missed opportunity, because `repoint` writes the new
+/// reader into the `path` row in the same transaction: the next walk's cheap
+/// arm then agrees, answers `Unchanged`, and the markup is in that index for
+/// the life of it. `INDEX_FORMAT_VERSION` does not reach it either — that lever
+/// is read only by the *skip journal*'s arm (`ingest_file`, step 2), and an
+/// `.html` file is not a skip. So a build that shipped an html reader would
+/// have cost one worker process per file and changed not one citation.
+///
+/// The rebuild is decided by comparing the reader the `path` row records
+/// against the reader that **just ran**, not against the manifest: the manifest
+/// is a prediction, and what makes the stored rows stale is which reader
+/// actually made them.
+///
+/// Both directions, and the second is what makes the first mean anything: the
+/// markup is gone from the chunks **and** the prose is there, under a page that
+/// now names its section. A test asserting only that something changed is
+/// satisfied by a rebuild that lost the document.
+#[cfg(unix)]
+#[test]
+fn a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was() {
+    let fx = Fixture::new();
+    let bytes = "<style>.a{color:red}</style><h1>Умови постачання</h1>\
+                 <p>Кошторис узгоджено сторонами.</p>\n"
+        .as_bytes();
+    fx.place_at("dovidky/umovy.html", bytes, mtime());
+
+    // The build that indexed it: no html entry in the manifest, and a worker
+    // that read the file as plain text — spec §2.1's measurement as a starting
+    // state rather than as a sentence.
+    let before = {
+        let mut manifest = fx.manifest.clone();
+        manifest.by_extension.remove("html");
+        manifest
+    };
+    let old_worker = worker_answering(
+        &fx,
+        &[
+            Frame::Header {
+                sha256: sha256_of(bytes),
+                mime: "text/plain".to_string(),
+                source_kind: SourceKind::Document,
+                reader: "text".to_string(),
+                reader_version: 1,
+                pages: 1,
+            },
+            Frame::Page {
+                page_no: 1,
+                section_title: None,
+            },
+            Frame::Block(unlined_block(&String::from_utf8_lossy(bytes))),
+            Frame::Summary {
+                skipped_pages: Vec::new(),
+                text_source: "native:txt".to_string(),
+            },
+        ],
+    );
+    let Ingested::Indexed { document_id, .. } =
+        fx.ingest_with_worker_against("dovidky/umovy.html", &old_worker, &before)
+    else {
+        panic!("expected the old build to index the file")
+    };
+    assert!(
+        fx.chunk_texts(&document_id)
+            .iter()
+            .any(|text| text.contains("color:red")),
+        "the premise of this test is that the markup is in the index"
+    );
+
+    // Today's build: the manifest gives `.html` a reader of its own, and the
+    // worker reads the file as prose under a named section.
+    let new_worker = worker_answering(
+        &fx,
+        &[
+            Frame::Header {
+                sha256: sha256_of(bytes),
+                mime: "text/html".to_string(),
+                source_kind: SourceKind::Document,
+                reader: "html".to_string(),
+                reader_version: 1,
+                pages: 1,
+            },
+            Frame::Page {
+                page_no: 1,
+                section_title: Some("Умови постачання".to_string()),
+            },
+            Frame::Block(unlined_block("Кошторис узгоджено сторонами.")),
+            Frame::Summary {
+                skipped_pages: Vec::new(),
+                text_source: "native:html".to_string(),
+            },
+        ],
+    );
+    let outcome = fx.ingest_with_worker_against("dovidky/umovy.html", &new_worker, &fx.manifest);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "a reading made by a reader this build no longer uses has to be \
+         replaced, not confirmed: {outcome:?}"
+    );
+
+    let chunks = fx.chunk_texts(&document_id);
+    assert!(
+        !chunks.iter().any(|text| text.contains("color:red")),
+        "the old reader's markup survived the re-read: {chunks:?}"
+    );
+    assert!(
+        chunks
+            .iter()
+            .any(|text| text.contains("Кошторис узгоджено сторонами.")),
+        "the new reader's prose is not in the index: {chunks:?}"
+    );
+    // And the citation now points at the section, which is the whole of what a
+    // chunk of this format has to point at.
+    assert_eq!(
+        coordinate_of(&fx, "сторонами"),
+        Coordinate::Section {
+            title: "Умови постачання".to_string()
+        },
+    );
+    // One document, not two: the bytes never moved, so this is the same
+    // document rebuilt rather than a second one beside it.
+    assert_eq!(fx.count("SELECT count(*) FROM document"), 1);
+
+    // …and the next walk is quiet again. Without this the fix would trade a
+    // stale index for a rebuild of every html file on every walk, for ever.
+    let again = fx.ingest_with_worker_against("dovidky/umovy.html", &new_worker, &fx.manifest);
+    assert!(
+        matches!(again, Ingested::Unchanged { .. }),
+        "the reading and the bytes both agree now, so nothing is owed: {again:?}"
     );
 }
 
@@ -855,6 +1046,17 @@ fn a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that() {
 /// something derived instead of something stored would re-read the same file on
 /// every walk from then on, and only the third pass here would notice.
 ///
+/// **The bill is a re-*build*, not only a re-read, and that is deliberate.**
+/// The row says `text@1` and the markdown reader is what ran, so step 3 cannot
+/// tell a document the markdown reader really made from one indexed as plain
+/// text before `fb3a924` — and in the second case the stored reading is wrong:
+/// no sections, so every citation into it names lines of a document that has
+/// sections. Rebuilding repairs that and costs the first walk one re-chunk per
+/// markdown file, with the chunk ids moving. What would make the distinction
+/// possible is a migration that wrote "unknown" instead of a plausible value;
+/// `text@1` is already on disk in migrated indexes, so that is a decision of
+/// its own rather than a line here.
+///
 /// The row is rewritten to what the migration leaves behind rather than an
 /// upgrade being staged, because the shape is the whole content of the case —
 /// a real document, made by the markdown reader, under a row that credits the
@@ -879,9 +1081,10 @@ fn a_row_the_migration_credited_to_text_is_read_again_once_and_then_settles() {
 
     let second = fx.ingest("notes.md");
     assert!(
-        matches!(second, Ingested::AlreadyIndexed { .. }),
+        matches!(second, Ingested::Indexed { .. }),
         "a row crediting a reader the manifest does not give .md must be read \
-         again: {second:?}"
+         again — and the rows it credits to that reader replaced, since nothing \
+         says the markdown reader made them: {second:?}"
     );
     let row = fx
         .db
@@ -2823,19 +3026,26 @@ fn a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back() {
     );
 }
 
-/// A release that teaches the reader to read a page does **not** delete the row
-/// saying that page is missing — because the page is still missing.
+/// A pass that wrote no page does **not** rewrite the account of which pages
+/// are missing.
 ///
 /// The pass this is about writes nothing. The document is already in the index,
-/// its chunking is finished, and `ingest_file` answers `AlreadyIndexed` before a
-/// single page row is touched — so the pages the index holds are the ones the
-/// *previous* reader put there, whatever today's reader says about the same
-/// bytes. Rewriting the journal from today's account there deletes a true row:
-/// page 2's text is still absent from the index, and the only record that said
-/// so is gone. `repoint` writes the new `reader_version` into the `path` row in
-/// the same transaction, so the cheap arm agrees from the next walk on and
-/// nothing re-reads the file until `INDEX_FORMAT_VERSION` moves — the row does
-/// not come back on its own.
+/// its chunking is finished, the reader that just ran is the one the `path` row
+/// already records, and `ingest_file` answers `AlreadyIndexed` before a single
+/// page row is touched — so the pages the index holds are the ones the earlier
+/// pass put there, whatever this worker says about the same bytes. Rewriting
+/// the journal from today's account there deletes a true row: page 2's text is
+/// still absent from the index, and the only record that said so is gone.
+///
+/// **This test used to describe a release upgrade — a reader that learns to
+/// read page 2 — and that is no longer this branch.** Step 3 now compares the
+/// reader that ran against the one the row records, so a version bump
+/// re-extracts the document instead of confirming it, and the note goes because
+/// the page comes back:
+/// `a_reader_version_bump_re_extracts_the_document_rather_than_confirming_it`
+/// is that half, and it is the outcome `PDF_READER_VERSION` exists to produce.
+/// What is left here is the branch itself, reached by the ordinary way a
+/// re-read costs nothing — a file whose mtime moved and whose bytes did not.
 ///
 /// **The direction that stops "never touch anything" from satisfying this** is
 /// `a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back`,
@@ -2845,7 +3055,7 @@ fn a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back() {
 /// to redden.
 #[cfg(unix)]
 #[test]
-fn a_reader_that_learns_to_read_a_page_does_not_erase_the_note_that_it_is_missing() {
+fn a_pass_that_wrote_no_page_does_not_rewrite_the_account_of_missing_ones() {
     let fx = Fixture::new();
     let contract = b"%PDF-1.7\ninvented: a contract read twice by two releases\n".as_slice();
     fx.place_at("договори/постачання.pdf", contract, mtime());
@@ -2866,10 +3076,13 @@ fn a_reader_that_learns_to_read_a_page_does_not_erase_the_note_that_it_is_missin
     };
     assert_eq!(named(&fx), vec![Some(2)], "the premise is a row to lose");
 
-    // Release two reads what release one could not — of the same bytes, so the
-    // document is the one already in the index and nothing is written.
+    // The same reader, at the same version, over bytes that did not move — only
+    // the mtime did, which is what makes the cheap arm miss and the worker run
+    // at all. Its account of the skipped pages differs from the journal's, and
+    // that is what this branch must not act on: it wrote no page, so it has
+    // nothing to say about which ones are missing.
     fx.place_at("договори/постачання.pdf", contract, mtime_just_after());
-    let newer = pdf_frames_from(contract, &[1, 2, 3], Vec::new(), "Договір постачання", 2);
+    let newer = pdf_frames_from(contract, &[1, 2, 3], Vec::new(), "Договір постачання", 1);
     let outcome = fx.ingest_with_worker("договори/постачання.pdf", &worker_answering(&fx, &newer));
     assert!(
         matches!(outcome, Ingested::AlreadyIndexed { .. }),
@@ -2891,6 +3104,66 @@ fn a_reader_that_learns_to_read_a_page_does_not_erase_the_note_that_it_is_missin
         named(&fx),
         vec![Some(2)],
         "page 2 is still not in the index, so the row that says so is still true"
+    );
+}
+
+/// A release that learns to read a page **delivers** it, and the note saying it
+/// was missing goes because the page stopped being missing.
+///
+/// **This is what a reader version is for, and until step 3 compared readers it
+/// bought nothing.** `PDF_READER_VERSION`'s own doc says it is "the thing the
+/// parent compares to decide whether a document already in the index was made
+/// by today's code" — and the comparison reached only the *cheap arm*, which
+/// decides whether to run a worker. Past it, the document was found under the
+/// same content hash with its chunking finished and the pass returned having
+/// written nothing. So a release that fixed a reader re-read every affected
+/// file, at full cost, and changed not one page of what the index answers with.
+/// Measured: before the reader comparison was added to step 3, this test's
+/// second pass came back `AlreadyIndexed` with pages 1 and 3 in the index and
+/// the row for page 2 still standing.
+///
+/// Three assertions rather than one, because each is satisfied by a different
+/// mistake: the pass wrote (`Indexed`), the page it learned to read is in the
+/// index (not "some pages are"), and the journal row is gone **because** of
+/// that rather than by a sweep — the other test in this pair is where a row
+/// that is still true has to survive.
+#[cfg(unix)]
+#[test]
+fn a_reader_version_bump_re_extracts_the_document_rather_than_confirming_it() {
+    let fx = Fixture::new();
+    let contract = b"%PDF-1.7\ninvented: a contract read twice by two releases\n".as_slice();
+    fx.place_at("договори/постачання.pdf", contract, mtime());
+
+    // Release one: page 2 is a photograph, and the index gets pages 1 and 3.
+    let older = pdf_frames_from(contract, &[1, 3], vec![2], "Договір постачання", 1);
+    assert!(matches!(
+        fx.ingest_with_worker("договори/постачання.pdf", &worker_answering(&fx, &older)),
+        Ingested::Indexed { .. }
+    ));
+    assert_eq!(
+        fx.db.indexed_page_numbers(&sha256_of(contract)).unwrap(),
+        vec![1, 3],
+        "the premise is a document with a page missing from it"
+    );
+
+    // Release two reads what release one could not, and says so with its
+    // version. The bytes are the same, so this is the same document — the one
+    // thing that must not follow is that it is therefore the same reading.
+    let newer = pdf_frames_from(contract, &[1, 2, 3], Vec::new(), "Договір постачання", 2);
+    let outcome = fx.ingest_with_worker("договори/постачання.pdf", &worker_answering(&fx, &newer));
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "a reader that says it reads these bytes differently has to be believed \
+         about the document it already made: {outcome:?}"
+    );
+    assert_eq!(
+        fx.db.indexed_page_numbers(&sha256_of(contract)).unwrap(),
+        vec![1, 2, 3],
+        "the page the new reader learned to read is what the upgrade was for"
+    );
+    assert!(
+        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
+        "no page of this document is missing any more, so no row may say one is"
     );
 }
 
