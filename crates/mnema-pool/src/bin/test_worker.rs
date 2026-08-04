@@ -198,14 +198,22 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
         // A refusal under a rule this pool has never heard of, which is what a
         // worker from another release looks like.
         //
-        // The string was `"encrypted"` until that became a rule the pool does
-        // know, and the swap is the whole lesson of this branch: a stand-in for
-        // "unknown" must be a name nobody will later implement, or the test
-        // above it quietly stops testing anything. It did not go quiet here —
-        // `a_refusal_under_an_unknown_rule_stops_the_job` reddened the moment
-        // the pool learned the word — but only because that test also asserts
-        // the error names the rule. A test that had merely checked "some
-        // refusal came back" would have gone on passing.
+        // The string was `"encrypted"` until the task that added
+        // `SkipRule::Encrypted` made it a rule this pool does know. A stand-in
+        // for "unknown" has to be a name nobody will later implement, so this
+        // one is deliberately not a word any roadmap contains.
+        //
+        // **It did not go quiet, and not because of anything clever.** Both
+        // tests that drive this branch are written against the call *failing*
+        // — `unwrap_err()` here, `matches!(outcome, Err(..Protocol..))` in
+        // `mnema-ingest/tests/slice.rs` — so a recognised rule flips the result
+        // from `Err` to `Ok` and each panics on its first assertion, before any
+        // message is looked at. The lesson is therefore about what a red
+        // *says*, not about whether one happens: "called `unwrap_err()` on an
+        // `Ok` value" reads as a pool that stopped rejecting unknown rules,
+        // which is a defect in the code under test, when the real cause is that
+        // the test's premise expired. Each caller now asserts that premise
+        // directly, so the red names it.
         "newrule" => write_frame(
             stdout,
             &Frame::Refused {

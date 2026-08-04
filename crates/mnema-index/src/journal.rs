@@ -19,7 +19,7 @@ use crate::{Db, Error, INDEX_FORMAT_VERSION};
 /// exist without being enumerated, because the enumeration is generated from
 /// the declaration rather than written beside it.
 ///
-/// A macro for a nine-variant enum is a heavy instrument, and it is here
+/// A macro for an enum this small is a heavy instrument, and it is here
 /// because the lighter ones were measured failing. The list was first an array
 /// of pairs in the tests, then a hand-written `after()` chain here that
 /// `every()` walked. Both looked like coverage:
@@ -172,6 +172,33 @@ declare_skip_rules! {
     /// again for the life of the index unless `INDEX_FORMAT_VERSION` moves — so
     /// a release whose reader survives damage this one gives up on must bump
     /// it, or the files it could now read stay refused forever.
+    ///
+    /// ⚠️ **The limit that makes both of those answers correct: this rule means
+    /// the *content* is damaged, and a reader that never got as far as the
+    /// content does not belong here.** A reader whose library would not load —
+    /// missing, the wrong build, or refused by code signing, three causes
+    /// `crates/mnema-extract/src/pdfium_probe.rs` already separates as
+    /// `Stage::LibraryDir`, `Stage::VerifyBuild` and `Stage::Bind` — has learned
+    /// nothing whatever about the file it was handed. Routing that here is the
+    /// failure `mnema_pool`'s `PoolError` names in its own doc comment, arriving
+    /// one layer lower: "ten thousand files as damaged when the real fault is a
+    /// half-finished install". The shape it takes is a reader that folds every
+    /// error it can produce into this rule with one catch-all arm.
+    ///
+    /// It costs more here than there, because both of this rule's other answers
+    /// are tuned for damage and both are wrong for a broken install.
+    /// `suggests_broken_environment` is false — right for a folder of truncated
+    /// downloads, and it means a run of these will **not** stop the walk. And
+    /// `is_about_content` is true, so every one of those rows outlives the
+    /// repair: quarantine a library, walk a folder, fix the installation, and
+    /// nothing comes back until `INDEX_FORMAT_VERSION` moves. A whole library of
+    /// PDFs journalled as broken files, by a walk that reports success.
+    ///
+    /// A reader in that state has two honest ways out and this is neither of
+    /// them: `Frame::Failed`, which the pool reads as `Unreadable` — kept, and
+    /// counted as evidence about the environment — or not answering at all,
+    /// which it reads as a crash. Note that `"crash"` is not among the rule
+    /// strings the pool accepts, so a worker cannot ask for that one by name.
     Malformed,
     /// The file is whole, the reader is the right one, and the text is behind a
     /// password.
@@ -343,7 +370,7 @@ impl SkipRule {
     /// worth trusting on its own, without spending a worker on the file a
     /// second time. This asks whether a run of them means a walker should
     /// stop asking a worker to do more work at all. The two questions split
-    /// the same nine variants differently, and `TooLarge` is the case that
+    /// the same variants differently, and `TooLarge` is the case that
     /// proves it has to: it answers **no** to both. It is not a fact about
     /// the bytes (`is_about_content` — a setting can move the ceiling out
     /// from under a file that never changed), and it is not a fact about the
@@ -370,6 +397,13 @@ impl SkipRule {
     /// files — a power cut, a copy that stopped — not that the worker reading
     /// them is dying, and ending the walk would leave the rest of the folder
     /// unindexed over it.
+    ///
+    /// `Malformed` answers **no** on exactly that reasoning, and it is the one
+    /// variant here whose answer depends on a limit held somewhere else.
+    /// `SkipRule::Malformed`'s own doc comment carries it: a reader that could
+    /// not load its library at all must not report that rule, because a broken
+    /// install then produces a long run of them and this predicate — correctly,
+    /// for damage — declines to stop the walk.
     ///
     /// An exhaustive `match`, matching `is_about_content`'s own reasoning for
     /// being one: a variant added to the enum with no line here would

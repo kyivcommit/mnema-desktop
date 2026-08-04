@@ -3037,11 +3037,20 @@ fn a_deadline_the_machine_could_not_meet_does_not_delete_the_document() {
 /// test pins the `Err`; this pins what the index looks like afterwards, which
 /// is the half that matters here.
 ///
-/// The rule string was `"encrypted"` until this build learned that word, and
-/// the replacement is deliberately one no roadmap contains: a stand-in for
-/// "unknown" that is only unknown for a while tests the opposite of what it
-/// claims. `SkipRule::parse` is asked directly rather than trusted, for the
-/// same reason.
+/// The rule string was `"encrypted"` until this build learned that word: a
+/// stand-in for "unknown" that is only unknown for a while tests the opposite
+/// of what it claims, so the replacement is deliberately one no roadmap
+/// contains.
+///
+/// **This test reddened when that happened, and it does not name the rule
+/// anywhere** — the `matches!` below asks only for a `Protocol` error. It went
+/// red because a recognised rule makes the call return `Ok`, and it would have
+/// gone red a second time over regardless: the stand-in worker sends a refusal
+/// with no `sha256`, `Frame::Refused` gives that field `#[serde(default)]`
+/// (`crates/mnema-core/src/wire.rs`), and `displaces` treats an unknown digest
+/// as displacing — so the document these assertions expect to still be there
+/// would have been deleted. What was missing was never redness; it was a red
+/// that points at the premise instead of at the pool. Hence the `parse` check.
 #[cfg(unix)]
 #[test]
 fn a_worker_from_another_release_stops_the_job_and_leaves_the_index_alone() {

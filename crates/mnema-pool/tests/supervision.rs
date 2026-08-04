@@ -930,19 +930,28 @@ fn this_macos_still_refuses_an_address_space_rlimit() {
 /// half, that the index is untouched.
 ///
 /// **The stand-in rule used to be `"encrypted"`, and it stopped being unknown.**
-/// The task that added `SkipRule::Encrypted` made this test fail — visibly,
-/// because it asserts the error *names* the rule rather than only that some
-/// error came back. A weaker assertion here would have let a pool that now
-/// accepts the string go on claiming it rejects unknown ones.
+/// The task that added `SkipRule::Encrypted` made this test fail, and the
+/// failure was not subtle: `extract` returns `Ok` for a rule the pool now
+/// recognises, so `unwrap_err()` below panics before `detail` is read at all.
+/// Nothing about the assertion on the message saved it, and no weaker form of
+/// this test would have gone quiet either — the sibling in
+/// `mnema-ingest/tests/slice.rs` does not name the rule and reddened just the
+/// same, because it too asserts an `Err`.
+///
+/// What that leaves is a lesson about what a red *says* rather than whether one
+/// happens. "called `Result::unwrap_err()` on an `Ok` value" reads as this pool
+/// having stopped rejecting unknown rules — a defect in the code under test —
+/// when what actually happened is that the test's own premise expired. An
+/// unasserted premise fails in the voice of the thing it was holding up, which
+/// is why the premise is now asserted first, on its own line.
 #[test]
 fn a_refusal_under_an_unknown_rule_stops_the_job() {
     let _watchdog = Watchdog::new("unknown rule", Duration::from_secs(30));
     let pool = Pool::new(config()).unwrap();
 
-    // Not any rule this build knows: the premise of the test is that the pool
-    // has never seen the string, so `SkipRule::parse` must not recognise it
-    // either. That is asserted rather than assumed, because the last time this
-    // premise was left implicit it expired.
+    // The premise, asserted rather than assumed, and first so that it is what
+    // fails when it stops holding. The last stand-in expired without a line
+    // like this one, and the red that followed accused the pool instead.
     assert_eq!(
         SkipRule::parse("rule_from_a_later_release"),
         None,
