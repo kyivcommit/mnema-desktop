@@ -389,8 +389,22 @@ pub fn ingest_file(
     let mut rebuild = false;
     if db.document_exists(&id)? {
         if db.stage_status(&id, STAGE_CHUNK)?.as_deref() == Some(STATUS_DONE) {
+            // Nothing is written here, and that governs the journal too. The
+            // path's account of its missing pages is rewritten **only when the
+            // path is coming to name a different document**: this pass extracted
+            // the file but wrote none of its pages, so for a path that already
+            // named this document neither the pages nor the pages missing from
+            // them have moved, and the rows that are there were written by the
+            // pass that did write them. `journal_skipped_pages` has what
+            // rewriting them anyway costs — a true row deleted, silently, on a
+            // release that improves a reader.
+            let renaming = displaced.as_deref() != Some(id.as_str());
             db.transaction(|_| {
-                repoint(db, root_id, relative, &document, disk, displaced.as_deref())
+                repoint(db, root_id, relative, &document, disk, displaced.as_deref())?;
+                if renaming {
+                    journal_skipped_pages(db, root_id, relative, &document)?;
+                }
+                Ok(())
             })?;
             return Ok(Ingested::AlreadyIndexed { document_id: id });
         }
@@ -426,6 +440,11 @@ pub fn ingest_file(
                     db.insert_document(&id, &document.mime, disk.size_bytes, document.source_kind)?;
                 }
                 repoint(db, root_id, relative, &document, disk, displaced.as_deref())?;
+                // Unconditional here, unlike the `AlreadyIndexed` branch: this
+                // pass is the one writing the pages, so its account of which
+                // ones are missing is the account, whatever the path named
+                // before and whichever reader wrote the rows that are there.
+                journal_skipped_pages(db, root_id, relative, &document)?;
             }
             let mut written = 0usize;
             for page in slice {
@@ -537,11 +556,9 @@ pub fn ingest_file(
 /// "unchanged" against a manifest for ever. It is the argument
 /// `Db::insert_block` already makes for taking a `Block`, one level up.
 ///
-/// **The fifth is a skip-journal row for every page the reader dropped**, which
-/// is the other half of the third: the file's own verdict and the pages missing
-/// from the document under it are two different facts about one path, and both
-/// are settled here so that neither can stand while the other says otherwise.
-/// The comment on those calls has what only this pass can and cannot fix.
+/// The pages missing from the document it now names are the other half of the
+/// third fact, and they are **not** settled here — [`journal_skipped_pages`] is
+/// where, and its doc comment has why the two could not be one call.
 fn repoint(
     db: &Db,
     root_id: i64,
@@ -564,32 +581,79 @@ fn repoint(
         i64::from(document.reader_version),
     )?;
     db.forget_skip(root_id, relative)?;
-    // **The fifth thing it does is journal the pages this document lost**, and
-    // the removal is not tidiness: nothing else in the tree takes a per-page
-    // row away from a path a walk still finds (`Db::forget_page_skips` carries
-    // the case), so an upsert per page would leave every row the new extraction
-    // does *not* name standing for ever.
-    //
-    // Here rather than beside the write for the reason the paragraph above
-    // gives about the refusal: the path row and the account of what is missing
-    // from the document it names are one fact, and the branch that answers
-    // `AlreadyIndexed` leaves before a single page is written — with a path now
-    // naming different content and, without this, the previous document's
-    // missing pages still listed under it.
-    //
-    // **What it cannot do is correct a document it did not write.** On the
-    // `AlreadyIndexed` branch the index keeps the pages some earlier pass
-    // extracted from these same bytes, while these rows come from the reader
-    // that just ran; the two disagree exactly when a *reader* changed and the
-    // bytes did not, which is the staleness
-    // `a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that`
-    // already records and `INDEX_FORMAT_VERSION` is what clears.
+    if let Some(displaced) = displaced {
+        // No `displaced != id` guard, and it is not an omission: the insert
+        // above has just written a row naming `id`, so when the two are the
+        // same the count below is at least 1 and says so. A second condition
+        // that cannot change an outcome reads like a case someone thought
+        // about, which is worse than no condition at all.
+        forget_if_unnamed(db, displaced)?;
+    }
+    Ok(())
+}
+
+/// Rewrites the skip journal's account of which pages are missing from the
+/// document `relative` now names.
+///
+/// Delete-then-write rather than an upsert per page: an upsert leaves behind
+/// exactly the rows this exists to remove — the ones the current account does
+/// *not* name. Nothing else in the tree reaches a per-page row for a path a
+/// walk still finds (`Db::forget_page_skips` carries the case), so a row left
+/// standing here is left standing for the life of the index.
+///
+/// **A row is written only for a page the index does not hold**, and that
+/// filter is the whole reason this is a function rather than four lines inside
+/// [`repoint`]. `document.skipped_pages` is what the reader that just ran said
+/// about these bytes; the pages in the index were put there by whatever reader
+/// ran when the document was first extracted, and a release can change one
+/// without changing the other. Written unfiltered, a build whose reader newly
+/// drops a page would journal "page 5 has no text layer" about a page this
+/// index holds and cites on demand — which is the contradiction `mnema_pool`'s
+/// `run_one` stops the whole job over when a worker sends it, arriving through
+/// the database door instead and accepted in silence.
+///
+/// On the write path the filter cannot fire and is not there for that path: the
+/// pages are inserted *after* this runs, a rebuild has just cleared them, and
+/// the pool has already refused a summary naming a page that also arrived. It
+/// is the `AlreadyIndexed` caller it exists for.
+///
+/// **Its other half is the caller's**, because this function cannot see it:
+/// `ingest_file` calls it on the `AlreadyIndexed` branch **only when the path
+/// did not already name this document**. A path that keeps naming the same
+/// document over a pass that wrote nothing has had neither its pages nor its
+/// missing pages changed by that pass, and rewriting the rows from a newer
+/// reader's account would delete a true one — a reader that learns to read page
+/// 2 makes the row for page 2 disappear while page 2 is still absent from the
+/// index, and `repoint` writes the new `reader_version` into the `path` row in
+/// the same transaction, so the cheap arm agrees from then on and nothing ever
+/// re-reads the file. That is a true fact deleted silently on an ordinary
+/// release upgrade, and it is why the branch that writes no pages writes no
+/// rows about them either.
+///
+/// What is left over is named rather than hidden: a path that comes to hold
+/// content **already** in the index under another name gets rows from today's
+/// reader for the pages the index lacks, and if today's reader reads a page the
+/// old extraction dropped, nothing under this path records that the index is
+/// still missing it. That is under-reporting where the alternative is a false
+/// row, and the choice is not close. Both are cleared by the re-extraction
+/// `INDEX_FORMAT_VERSION` forces.
+fn journal_skipped_pages(
+    db: &Db,
+    root_id: i64,
+    relative: &str,
+    document: &Document,
+) -> Result<(), mnema_index::Error> {
     db.forget_page_skips(root_id, relative)?;
+    let held = db.indexed_page_numbers(&document.sha256)?;
     for page_no in &document.skipped_pages {
+        let page_no = i64::from(*page_no);
+        if held.contains(&page_no) {
+            continue;
+        }
         db.record_skip(
             root_id,
             relative,
-            Some(i64::from(*page_no)),
+            Some(page_no),
             // Written here rather than carried on the wire: `Frame::Summary`
             // sends numbers, and the threshold that decided them belongs to
             // `mnema-extract`, which this crate may not depend on (D40). So the
@@ -600,16 +664,14 @@ fn repoint(
                  was read as a scan and left out"
             ),
             SkipRule::NoTextLayer,
-            Some(disk),
+            // **No measurement, although the rule is one `record_skip` stores
+            // them for.** `size_bytes`, `mtime` and the rest describe the file
+            // the walk stat'ed, and the only reader of them is `skip_entry`,
+            // which takes `page_no IS NULL` — so on a page's row they would be
+            // written, never read, and left to go stale, in three columns that
+            // read as though they described the page.
+            None,
         )?;
-    }
-    if let Some(displaced) = displaced {
-        // No `displaced != id` guard, and it is not an omission: the insert
-        // above has just written a row naming `id`, so when the two are the
-        // same the count below is at least 1 and says so. A second condition
-        // that cannot change an outcome reads like a case someone thought
-        // about, which is worse than no condition at all.
-        forget_if_unnamed(db, displaced)?;
     }
     Ok(())
 }

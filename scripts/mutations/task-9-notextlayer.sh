@@ -98,7 +98,7 @@ case_ "pool: an ordinary skipped page is not a protocol failure" \
 # index at all.
 case_ "ingest: a skipped page is journalled against the page, not the file" \
   crates/mnema-ingest/src/lib.rs \
-  's{            Some\(i64::from\(\*page_no\)\),}{            None,}' \
+  's{            Some\(page_no\),}{            None,}' \
   '            relative,
             None,
             // Written here rather than carried on the wire' \
@@ -110,7 +110,7 @@ case_ "ingest: a skipped page is journalled against the page, not the file" \
 # correctly.
 case_ "ingest: the row names the page the reader skipped" \
   crates/mnema-ingest/src/lib.rs \
-  's{            Some\(i64::from\(\*page_no\)\),}{            Some(1),}' \
+  's{            Some\(page_no\),}{            Some(1),}' \
   '            Some(1),' \
   mnema-ingest 'a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back' --test slice
 
@@ -119,21 +119,21 @@ case_ "ingest: the row names the page the reader skipped" \
 # Nothing goes red on its own: both rules are about content and both displace.
 case_ "ingest: a skipped page is filed under its own rule" \
   crates/mnema-ingest/src/lib.rs \
-  's{            SkipRule::NoTextLayer,\n            Some\(disk\),}{            SkipRule::Unsupported,\n            Some(disk),}' \
-  'SkipRule::Unsupported,
-            Some(disk),' \
+  's{            SkipRule::NoTextLayer,}{            SkipRule::Unsupported,}' \
+  '            SkipRule::Unsupported,' \
   mnema-ingest 'a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back' --test slice
 
-# N9. The removal in `repoint`, taken out. This is the immortal row: nothing
-# else in the tree deletes a per-page row for a path a walk keeps finding —
-# `forget_skip` excludes them by its own clause, `forget_skips_not_in` fires
-# only for paths the walk did not see. The pass that reddens it is the one that
-# answers `AlreadyIndexed` and leaves before any content is written, which is
-# where a row is easiest to leave behind.
+# N9. The removal in `journal_skipped_pages`, taken out. This is the immortal
+# row: nothing else in the tree deletes a per-page row for a path a walk keeps
+# finding — `forget_skip` excludes them by its own clause, `forget_skips_not_in`
+# fires only for paths the walk did not see. The pass that reddens it is the one
+# that answers `AlreadyIndexed` with the path coming to name a different
+# document, which is where a row is easiest to leave behind.
 case_ "ingest: a page that stopped being missing stops being listed" \
   crates/mnema-ingest/src/lib.rs \
-  's{    db\.forget_page_skips\(root_id, relative\)\?;\n    for page_no in &document\.skipped_pages \{}{    for page_no in &document.skipped_pages \{}' \
-  'db.forget_skip(root_id, relative)?;' \
+  's{    db\.forget_page_skips\(root_id, relative\)\?;\n    let held}{    let held}' \
+  ') -> Result<(), mnema_index::Error> {
+    let held' \
   mnema-ingest 'a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back' --test slice
 
 # N10. The same removal, scoped to the watched root instead of to the path. One
@@ -175,6 +175,17 @@ case_ "ingest: a refusal that removes the document removes its page rows" \
         Ok(())' \
   mnema-ingest 'a_refusal_that_takes_the_document_away_takes_its_page_rows_with_it' --test slice
 
+# N13. The other direction, and it is what keeps the removal conditional. A
+# worker that died says nothing about the file: the document stays, so the
+# account of what is missing from it has to stay too. Made unconditional here by
+# running it before the `displaces` question is asked.
+case_ "ingest: an environmental refusal keeps the rows with the document" \
+  crates/mnema-ingest/src/lib.rs \
+  's{        db\.record_skip\(root_id, relative, None, reason, rule, on_disk\)\?;}{        db.forget_page_skips(root_id, relative)?;\n        db.record_skip(root_id, relative, None, reason, rule, on_disk)?;}' \
+  '        db.forget_page_skips(root_id, relative)?;
+        db.record_skip(root_id, relative, None, reason, rule, on_disk)?;' \
+  mnema-ingest 'a_refusal_that_takes_the_document_away_takes_its_page_rows_with_it' --test slice
+
 # N14. Reconciliation's own removal, narrowed to whole-file rows. It is the
 # only thing that reaps a path nobody re-reads, and until this cycle there were
 # no per-page rows for it to reap — so the behaviour was reachable by nothing
@@ -188,13 +199,41 @@ case_ "index: reconciliation reaps a vanished path's page rows too" \
                 params![root_id, relative],' \
   mnema-index 'a_path_that_left_the_tree_takes_its_page_rows_with_it' --test journal
 
-# N13. The other direction, and it is what keeps the removal conditional. A
-# worker that died says nothing about the file: the document stays, so the
-# account of what is missing from it has to stay too. Made unconditional here by
-# running it before the `displaces` question is asked.
-case_ "ingest: an environmental refusal keeps the rows with the document" \
+# ----------------------- a document this pass did not write is not this pass's
+
+# N15. The gate on the `AlreadyIndexed` branch, removed. That branch writes no
+# pages: the index keeps whatever an earlier reader put there. Rewriting the
+# journal from today's account deletes a *true* row — a release that learns to
+# read page 2 erases the note saying page 2 is missing while page 2 is still
+# missing — and `repoint` writes the new `reader_version` in the same
+# transaction, so the cheap arm agrees from then on and nothing re-reads the
+# file. Silent, on an ordinary upgrade.
+case_ "ingest: a pass that writes no pages rewrites no rows about them" \
   crates/mnema-ingest/src/lib.rs \
-  's{        db\.record_skip\(root_id, relative, None, reason, rule, on_disk\)\?;}{        db.forget_page_skips(root_id, relative)?;\n        db.record_skip(root_id, relative, None, reason, rule, on_disk)?;}' \
-  '        db.forget_page_skips(root_id, relative)?;
-        db.record_skip(root_id, relative, None, reason, rule, on_disk)?;' \
-  mnema-ingest 'a_refusal_that_takes_the_document_away_takes_its_page_rows_with_it' --test slice
+  's{                if renaming \{\n                    journal_skipped_pages\(db, root_id, relative, &document\)\?;\n                \}}{                journal_skipped_pages(db, root_id, relative, \&document)?;}' \
+  'repoint(db, root_id, relative, &document, disk, displaced.as_deref())?;
+                journal_skipped_pages(db, root_id, relative, &document)?;' \
+  mnema-ingest 'a_reader_that_learns_to_read_a_page_does_not_erase_the_note_that_it_is_missing' --test slice
+
+# N16. The filter that keeps a row off a page the index holds. Same branch, the
+# mirror direction: a build whose reader newly drops a page would journal "page
+# 2 has no text layer" about a page this index holds and cites on demand —
+# which is the contradiction `run_one` stops the whole job over, arriving
+# through the database door instead and accepted in silence.
+case_ "ingest: no row is written about a page the index holds" \
+  crates/mnema-ingest/src/lib.rs \
+  's{        if held\.contains\(&page_no\) \{\n            continue;\n        \}\n}{}' \
+  'let page_no = i64::from(*page_no);
+        db.record_skip(' \
+  mnema-ingest 'no_row_is_written_for_a_page_the_index_holds' --test slice
+
+# N17. The measurement deliberately left off a page's row. `record_skip` stores
+# `size_bytes`/`mtime` for a content rule and `NoTextLayer` is one — but the
+# only reader of those columns is `skip_entry`, which takes `page_no IS NULL`.
+# Stamped on a page's row they are written, never read, and go stale, in three
+# columns that read as though they described the page.
+case_ "ingest: a page's row carries no measurement of its file" \
+  crates/mnema-ingest/src/lib.rs \
+  's{            None,\n        \)\?;\n    \}\n    Ok\(\(\)\)}{            Some(OnDisk \{ size_bytes: 1, mtime: 1 \}),\n        )?;\n    \}\n    Ok(())}' \
+  '            Some(OnDisk { size_bytes: 1, mtime: 1 }),' \
+  mnema-ingest 'a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back' --test slice

@@ -1321,6 +1321,20 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 // the index holds it and cites it. Checked here rather than
                 // trusted, because nothing further down ever sees the two
                 // lists side by side again.
+                //
+                // **A contradiction between two things this frame states, and
+                // deliberately nothing more.** A duplicate in `skipped_pages`,
+                // or a `0`, is a number that is merely implausible on its own,
+                // and this pool is not the place that judges those: it knows no
+                // formats, `Frame::Page.page_no` arrives just as unchecked (and
+                // `page.page_no` carries no CHECK either), and a duplicate
+                // collapses on the journal's own conflict key while a zero
+                // costs one misleading row. Refusing them here would spend
+                // `PoolError::Protocol` — which stops the whole job and accuses
+                // the worker binary of being from another release — on
+                // something no part of the system can ever detect again, which
+                // is the price the check above is worth paying and this one is
+                // not.
                 if let Some(both) = skipped_pages
                     .iter()
                     .find(|no| pages.iter().any(|page| page.page_no == **no))

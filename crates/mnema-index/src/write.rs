@@ -289,6 +289,30 @@ impl Db {
         Ok(n == 1)
     }
 
+    /// The page numbers this index actually holds for one document, ascending.
+    ///
+    /// The reader's own numbering, not positions — a document that lost its
+    /// page 2 comes back as `[1, 3]`, and the gap is what `Frame::Page`'s doc
+    /// comment calls the honest record.
+    ///
+    /// It exists because "what did the reader that just ran say?" and "what is
+    /// in the index?" are two different questions, and `mnema_ingest`'s
+    /// `journal_skipped_pages` may only answer the second. A document already
+    /// in the index was extracted by whatever reader ran at the time, and a
+    /// later reader disagreeing with it does not change a single row — so a
+    /// journal row written from the later reader's account can name a page this
+    /// table holds and every citation of it can be produced on demand. That is
+    /// the contradiction `mnema_pool`'s `run_one` stops the whole job over when
+    /// it arrives on the wire, and this is the door it would otherwise come in
+    /// through.
+    pub fn indexed_page_numbers(&self, document_id: &str) -> Result<Vec<i64>, Error> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT page_no FROM page WHERE document_id = ?1 ORDER BY page_no")?;
+        let rows = stmt.query_map(params![document_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn insert_page(
         &self,
         document_id: &str,

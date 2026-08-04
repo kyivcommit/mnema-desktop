@@ -2764,21 +2764,25 @@ fn a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back() {
     assert_eq!(
         named(&fx),
         vec![row("архів/додаток.pdf", 2), row("договори/договір.pdf", 7),],
-        "each document's skipped page is named, under its own path, and no \
-         page that was read has a row"
-    );
-    assert!(
-        !fx.db
-            .skips_for_root(fx.root_id)
-            .unwrap()
-            .iter()
-            .any(|r| r.page_no.is_none()),
-        "a per-page skip is not also a verdict on the file: a whole-file row \
-         here would be read by `skip_entry` and answer for the document"
+        "each document's skipped page is named, under its own path, no page \
+         that was read has a row, and none of them is a whole-file row — which \
+         `skip_entry` would read and answer for the document with"
     );
     assert!(
         !fx.db.search_lexical("оренди", 10).unwrap().is_empty(),
         "the pages that did have text are in the index all the same"
+    );
+    // The file's own measurement is deliberately not stamped on a page's row:
+    // `skip_entry` reads `page_no IS NULL`, so on these three columns it would
+    // be written, never read, and left to go stale.
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM skipped
+              WHERE page_no IS NOT NULL
+                AND (size_bytes IS NOT NULL OR mtime IS NOT NULL)"
+        ),
+        0,
+        "a page's row carries no measurement of the file it is a page of"
     );
 
     // The contract's name comes to hold the amendment's bytes — content this
@@ -2795,6 +2799,132 @@ fn a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back() {
         "page 7 stopped being missing from what this path holds and its row is \
          gone; the page missing from what it holds now has one; and the other \
          file's row is not this path's to remove"
+    );
+}
+
+/// A release that teaches the reader to read a page does **not** delete the row
+/// saying that page is missing — because the page is still missing.
+///
+/// The pass this is about writes nothing. The document is already in the index,
+/// its chunking is finished, and `ingest_file` answers `AlreadyIndexed` before a
+/// single page row is touched — so the pages the index holds are the ones the
+/// *previous* reader put there, whatever today's reader says about the same
+/// bytes. Rewriting the journal from today's account there deletes a true row:
+/// page 2's text is still absent from the index, and the only record that said
+/// so is gone. `repoint` writes the new `reader_version` into the `path` row in
+/// the same transaction, so the cheap arm agrees from the next walk on and
+/// nothing re-reads the file until `INDEX_FORMAT_VERSION` moves — the row does
+/// not come back on its own.
+///
+/// **The direction that stops "never touch anything" from satisfying this** is
+/// `a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back`,
+/// where the same branch is reached with the path coming to name a *different*
+/// document and the old rows must go. A separate test rather than a second
+/// assertion here, so that a mutation of either side has something of its own
+/// to redden.
+#[cfg(unix)]
+#[test]
+fn a_reader_that_learns_to_read_a_page_does_not_erase_the_note_that_it_is_missing() {
+    let fx = Fixture::new();
+    let contract = b"%PDF-1.7\ninvented: a contract read twice by two releases\n".as_slice();
+    fx.place_at("договори/постачання.pdf", contract, mtime());
+
+    // Release one: page 2 is a photograph, and the index gets pages 1 and 3.
+    let older = pdf_frames_from(contract, &[1, 3], vec![2], "Договір постачання", 1);
+    assert!(matches!(
+        fx.ingest_with_worker("договори/постачання.pdf", &worker_answering(&fx, &older)),
+        Ingested::Indexed { .. }
+    ));
+    let named = |fx: &Fixture| -> Vec<Option<i64>> {
+        fx.db
+            .skips_for_root(fx.root_id)
+            .unwrap()
+            .iter()
+            .map(|r| r.page_no)
+            .collect()
+    };
+    assert_eq!(named(&fx), vec![Some(2)], "the premise is a row to lose");
+
+    // Release two reads what release one could not — of the same bytes, so the
+    // document is the one already in the index and nothing is written.
+    fx.place_at("договори/постачання.pdf", contract, mtime_just_after());
+    let newer = pdf_frames_from(contract, &[1, 2, 3], Vec::new(), "Договір постачання", 2);
+    let outcome = fx.ingest_with_worker("договори/постачання.pdf", &worker_answering(&fx, &newer));
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the premise is the branch that writes no pages, got {outcome:?}"
+    );
+
+    assert_eq!(
+        fx.db
+            .indexed_page_numbers(&sha256_of(contract))
+            .unwrap()
+            .len(),
+        2,
+        "the premise fails unless the index still holds the older extraction — \
+         two pages, not three"
+    );
+    assert_eq!(
+        named(&fx),
+        vec![Some(2)],
+        "page 2 is still not in the index, so the row that says so is still true"
+    );
+}
+
+/// And the mirror: no row is written for a page the index holds and cites.
+///
+/// A path comes to hold content this index already has, read this time by a
+/// build whose reader drops a page the earlier one kept. The write is skipped —
+/// the document is already there, complete — so a row taken from today's
+/// account would name a page that is in the index, findable, and citable on
+/// demand. That is the contradiction `mnema_pool`'s `run_one` stops the whole
+/// job over when a worker sends it in one frame
+/// (`a_page_that_arrived_and_was_reported_skipped_stops_the_job`), arriving
+/// through the database instead.
+///
+/// **The direction that stops a filter from simply dropping everything** is the
+/// last pass of
+/// `a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back`,
+/// which reaches this same branch with a page the index does *not* hold and
+/// requires the row to be written.
+#[cfg(unix)]
+#[test]
+fn no_row_is_written_for_a_page_the_index_holds() {
+    let fx = Fixture::new();
+    let report = b"%PDF-1.7\ninvented: a report typed on every one of its pages\n".as_slice();
+    let whole = pdf_frames(report, &[1, 2, 3], Vec::new(), "Звіт про виконання");
+
+    fx.place_at("звіти/оригінал.pdf", report, mtime());
+    assert!(matches!(
+        fx.ingest_with_worker("звіти/оригінал.pdf", &worker_answering(&fx, &whole)),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
+        "the premise fails if the first pass journalled anything"
+    );
+
+    // The same bytes under a second name, read by a build that drops page 2.
+    let drops_a_page = pdf_frames(report, &[1, 3], vec![2], "Звіт про виконання");
+    fx.place_at("звіти/копія.pdf", report, mtime());
+    let outcome = fx.ingest_with_worker("звіти/копія.pdf", &worker_answering(&fx, &drops_a_page));
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the premise is content already in the index, got {outcome:?}"
+    );
+
+    assert!(
+        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
+        "page 2 of this document is in the index; a row calling it missing is \
+         the pool's stop-the-job contradiction arriving by another road"
+    );
+    assert_eq!(
+        fx.db
+            .indexed_page_numbers(&sha256_of(report))
+            .unwrap()
+            .len(),
+        3,
+        "and the premise fails unless the index really does hold that page"
     );
 }
 
@@ -3704,12 +3834,25 @@ fn worker_answering(fx: &Fixture, frames: &[Frame]) -> PathBuf {
 /// it *has* would stop the job on every PDF with a scan in it.
 #[cfg(unix)]
 fn pdf_frames(bytes: &[u8], sent: &[u32], skipped: Vec<u32>, text: &str) -> Vec<Frame> {
+    pdf_frames_from(bytes, sent, skipped, text, 1)
+}
+
+/// The same, from a named release of the reader — for the tests whose subject
+/// is what a reader upgrade does to an already-indexed document.
+#[cfg(unix)]
+fn pdf_frames_from(
+    bytes: &[u8],
+    sent: &[u32],
+    skipped: Vec<u32>,
+    text: &str,
+    reader_version: u32,
+) -> Vec<Frame> {
     let mut frames = vec![Frame::Header {
         sha256: sha256_of(bytes),
         mime: "application/pdf".to_string(),
         source_kind: SourceKind::Document,
         reader: "pdf".to_string(),
-        reader_version: 1,
+        reader_version,
         pages: sent.len() as u32,
     }];
     for page_no in sent {

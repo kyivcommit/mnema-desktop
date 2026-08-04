@@ -623,7 +623,7 @@ fn a_page_that_arrived_and_was_reported_skipped_stops_the_job() {
         panic!("expected a protocol error, got {error:?}");
     };
     assert!(
-        detail.contains('1'),
+        detail.contains("page 1"),
         "the detail must name the page that was in both lists: {detail}"
     );
 

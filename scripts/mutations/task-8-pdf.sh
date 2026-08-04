@@ -167,9 +167,11 @@ case_ "reader: a survivor keeps its own page number, gap and all" \
   'page_no: pages.len() as u32 + 1,' \
   mnema-extract 'a_page_under_the_threshold_is_skipped_by_number_and_its_neighbours_are_not' --test pdf
 
-# C14. A page dropped without being named. `Summary::skipped_pages` would count
-# zero, the journal would hold no row, and a contract missing its middle page
-# would read as a contract that never had one.
+# C14. A page dropped without being named. `Summary::skipped_pages` would name
+# nothing, the journal would hold no row, and a contract missing its middle page
+# would read as a contract that never had one. (It carried a count when this
+# case was written; task 9 replaced the count with the numbers themselves, which
+# is what the wording follows.)
 case_ "reader: a skipped page is named, not silently dropped" \
   crates/mnema-extract/src/pdf.rs \
   's{            skipped\.push\(page_no\);\n            continue;}{            continue;}' \
