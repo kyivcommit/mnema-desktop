@@ -192,6 +192,13 @@ case_ "reader: a chapter is read under a cap at all" \
 # C17. The cap that ignores the book's remaining budget: N members each just
 # under `MEMBER_MAX_BYTES` is the same bomb with more entries, and the way this
 # process reports gigabytes of chapters is by being killed.
+#
+# It used to redden by *panicking* on `*budget -= member.len()` rather than on
+# the assertion it names — a real red for the wrong reason. `saturating_sub`
+# fixed that: the book now comes back `Ok` under this mutation and the case
+# fails on `Err(EpubError::TooLarge)`, which is what it claims to measure.
+# `checked_sub` would have been worse than either, enforcing the budget a second
+# way and leaving this case permanently green.
 case_ "reader: the member cap is the smaller of the two, not the member's alone" \
   crates/mnema-extract/src/epub.rs \
   's{    let cap = MEMBER_MAX_BYTES\.min\(\*budget\);}{    let cap = MEMBER_MAX_BYTES;}' \
@@ -202,7 +209,7 @@ case_ "reader: the member cap is the smaller of the two, not the member's alone"
 # the other side: a total that is not a total.
 case_ "reader: every member spends the budget it draws against" \
   crates/mnema-extract/src/epub.rs \
-  's{    \*budget -= member\.len\(\);}{    let _ = member.len();}' \
+  's{    \*budget = budget\.saturating_sub\(member\.len\(\)\);}{    let _ = member.len();}' \
   'let _ = member.len();' \
   mnema-extract 'epub::tests::a_book_draws_every_member_against_one_budget' --lib
 
