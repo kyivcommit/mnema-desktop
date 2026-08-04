@@ -180,11 +180,18 @@ case_ "reader: a document that begins with a heading has no empty page in front"
 # everything else is inline. Nothing is lost, and two paragraphs separated by a
 # web component are stored as one block whose text runs the last word of one
 # into the first word of the other — words that are in no document.
+#
+# Written the first time as a change to the *opening* arm alone, and it stayed
+# green — correctly: the closing arm still asked `is_inline`, so every run was
+# still flushed at the right place and the reader's output did not move. A case
+# that will not go red is worse than no case, so this one inverts the default in
+# `is_inline` itself, where both arms read it.
 case_ "reader: an element nobody enumerated ends a run rather than joining one" \
   crates/mnema-extract/src/html.rs \
-  's{                        if is_inline\(element\) \{\n                            continue;\n                        \}}{                        if !matches!(\n                            element.name(),\n                            "p" \| "div" \| "h1" \| "h2" \| "h3" \| "h4" \| "h5" \| "h6"\n                                \| "li" \| "td" \| "th" \| "html" \| "head" \| "body"\n                        ) \{\n                            continue;\n                        \}}' \
-  'if !matches!(
-                            element.name(),' \
+  's{fn is_inline\(element: &Element\) -> bool \{\n    matches!\(}{fn is_inline(element: \&Element) -> bool \{\n    if !matches!(element.name(), "p" \| "div" \| "li" \| "td" \| "th" \| "html" \| "head" \| "body") \{\n        return true;\n    \}\n    matches!(}' \
+  'if !matches!(element.name(), "p" | "div" | "li" | "td" | "th" | "html" | "head" | "body") {
+        return true;
+    }' \
   mnema-extract 'prose_inside_an_element_nobody_enumerated_is_still_read' --test html
 
 # C16. The run cleared instead of flushed at a closing boundary — the shape of

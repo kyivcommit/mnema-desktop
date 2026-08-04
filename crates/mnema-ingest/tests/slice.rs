@@ -4266,6 +4266,51 @@ fn a_pdf_chunk_cites_its_page_not_nothing() {
     );
 }
 
+/// The whole chain for HTML, with the real worker: bytes on disk to a citation.
+///
+/// Spec §6 invariant 1 asks every format for a non-empty coordinate, and the two
+/// ends of this one are joined only by a string — `manifest::READER_HTML` on the
+/// worker's side, the literal `"html"` in `pages_of` on the parent's, with a
+/// process boundary and D40 between them. Every other test of this format stands
+/// on one side or the other: `mnema-extract/tests/html.rs` on the reader,
+/// `worker_cli.rs` on the frames it sends, and the loop below on `pages_of` with
+/// a scripted worker. This is the one that runs the real binary over a real file
+/// and reads the citation back out of the database.
+///
+/// Both directions, and the second is the defect this format had: the section is
+/// named **and** the stylesheet is not searchable.
+#[cfg(unix)]
+#[test]
+fn an_html_file_indexed_by_the_real_worker_cites_its_section() {
+    let fx = Fixture::new();
+    fx.place(
+        "dovidky/umovy.html",
+        "<html><head><title>Умови постачання</title>\
+         <style>.a{color:red}</style></head>\
+         <body><h1>Розділ 3. Приймання</h1>\
+         <p>Комісія розглянула звернення щодо строків.</p>\
+         <script>var x=1;</script></body></html>"
+            .as_bytes(),
+    );
+    let outcome = fx.ingest("dovidky/umovy.html");
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "expected the real worker to index the file, got {outcome:?}"
+    );
+
+    assert_eq!(
+        coordinate_of(&fx, "звернення"),
+        Coordinate::Section {
+            title: "Розділ 3. Приймання".to_string()
+        },
+    );
+    assert!(
+        fx.db.search_lexical("color", 10).unwrap().is_empty(),
+        "the stylesheet reached the lexical index, which is the defect spec §2.1 \
+         measured in a shipped build"
+    );
+}
+
 /// html, docx and epub have sections where a PDF has pages, and none of the
 /// three has a line number to fall back on.
 ///

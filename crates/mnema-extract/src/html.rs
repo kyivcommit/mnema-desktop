@@ -1,13 +1,17 @@
 //! The HTML reader: what the page would show becomes prose, and a heading
 //! opens a section.
 //!
-//! **This is the one format in the product that is already wrong rather than
-//! merely unread.** `.html` has no entry in `identify_plain_text`, so today it
-//! falls to the text reader and is indexed whole — measured, one block holding
+//! **This is the one format in the product that was already wrong rather than
+//! merely unread.** `identify_plain_text` had no arm for `.html`, so it fell to
+//! the text reader and was indexed whole — measured, one block holding
 //! `<!DOCTYPE html>…<style>.a{color:red}</style>…<script>var x=1;</script>…`
-//! (spec §2.1). A search hits `color:red`; a citation highlights markup. Every
+//! (spec §2.1). A search hit `color:red`; a citation highlighted markup. Every
 //! other format in this cycle refuses honestly and gains a reader; this one
-//! stops lying.
+//! stops lying — and for the files an index already holds, only because
+//! `mnema_ingest::ingest_file` now rebuilds a document whose reader changed.
+//!
+//! A section is opened by a heading, `h1`–`h6`, **and by `<title>`**; see
+//! [`section_title`] for why the second is not decoration.
 //!
 //! **The rule that decides what is text: what this file would show a reader.**
 //! It is not "everything outside `<script>` and `<style>`", and the difference
