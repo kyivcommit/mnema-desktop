@@ -3427,6 +3427,68 @@ fn html_docx_and_epub_cite_the_section_their_page_names() {
     }
 }
 
+/// A page of one of those three formats that names **no** section carries an
+/// empty one, not `Coordinate::None` — and that is a decision rather than a
+/// leftover.
+///
+/// The two render identically: `Coordinate::Section { title: "" }` and
+/// `Coordinate::None` are both the empty string, so on screen this is not a
+/// choice at all. In the database it is. A section with no title says "this
+/// document has sections and this page was not given one", which is a reader
+/// with a hole in it; `None` says "this format has no coordinate to give",
+/// which is what a bare text file is. Collapsing the first into the second
+/// makes a defect indistinguishable from a design.
+///
+/// Naming a section is therefore the reader's obligation (spec §6, invariant
+/// 1), not this loop's to paper over — and this test is where that obligation
+/// is written down, so that whoever writes `html.rs` meets it here rather than
+/// in a citation.
+#[cfg(unix)]
+#[test]
+fn a_page_that_names_no_section_carries_an_empty_one_rather_than_none() {
+    let fx = Fixture::new();
+    let bytes = b"invented html, never parsed\n";
+    fx.place("dovidky/bez-zagolovka.html", bytes);
+
+    let worker = worker_answering(
+        &fx,
+        &[
+            Frame::Header {
+                sha256: sha256_of(bytes),
+                mime: "text/html".to_string(),
+                source_kind: SourceKind::Document,
+                reader: "html".to_string(),
+                reader_version: 1,
+                pages: 1,
+            },
+            // What a page with no heading above it looks like on the wire.
+            Frame::Page {
+                page_no: 1,
+                section_title: None,
+            },
+            Frame::Block(unlined_block(
+                "Текст, який не має над собою жодного заголовка.",
+            )),
+            Frame::Summary {
+                skipped_pages: 0,
+                text_source: "native:html".to_string(),
+            },
+        ],
+    );
+
+    let outcome = fx.ingest_with_worker("dovidky/bez-zagolovka.html", &worker);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "expected the untitled page to index, got {outcome:?}"
+    );
+    assert_eq!(
+        coordinate_of(&fx, "заголовка"),
+        Coordinate::Section {
+            title: String::new()
+        },
+    );
+}
+
 /// A spreadsheet chunk cites the rows it covers, not the sheet it sits on.
 ///
 /// This is the one the other tests here cannot stand in for, and the reason
