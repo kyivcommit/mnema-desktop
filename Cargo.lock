@@ -2835,9 +2835,12 @@ version = "0.0.0"
 dependencies = [
  "chardetng",
  "comrak",
+ "ego-tree",
  "encoding_rs",
+ "html5ever 0.39.0",
  "mnema-core",
  "pdfium-render",
+ "scraper",
  "serde",
  "serde_json",
  "sha2 0.11.0",

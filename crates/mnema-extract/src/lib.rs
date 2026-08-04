@@ -1,14 +1,15 @@
 //! Document extraction.
 //!
-//! Plain text, markdown and PDF, plus the Pdfium binding probe that came before
-//! any of them — enough to prove the library loads and that the binary matches
-//! the bindings compiled against it, which `--probe-pdfium` still asks of a
-//! packaged build (D53, D54).
+//! Plain text, markdown, PDF and HTML, plus the Pdfium binding probe that came
+//! before any of them — enough to prove the library loads and that the binary
+//! matches the bindings compiled against it, which `--probe-pdfium` still asks
+//! of a packaged build (D53, D54).
 //!
 //! What a PDF page's text *is* beyond its text layer — reading order across
 //! columns, hyphenation, tables, OCR for the pages `pdf::extract_pdf` skips —
 //! is the extraction spec's subject and is deliberately still not decided here.
 
+mod html;
 pub mod manifest;
 mod markdown;
 mod pdf;
@@ -38,6 +39,7 @@ pub use mnema_core::wire;
 // worker route "the library would not load" and "the document is damaged" to
 // two different frames — one `Error` for both would have made that a decision
 // about a string.
+pub use html::{HtmlPage, extract_html};
 pub use markdown::{MarkdownPage, SECTION_TITLE_MAX_CHARS, extract_markdown};
 pub use pdf::{PdfDocument, PdfError, PdfPage, extract_pdf};
 pub use pdfium_probe::{

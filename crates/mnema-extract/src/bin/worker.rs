@@ -18,7 +18,9 @@ use std::path::Path;
 use mnema_extract::manifest;
 use mnema_extract::typing::{Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
-use mnema_extract::{PdfError, TEXT_LAYER_MIN_CHARS, extract_markdown, extract_pdf, extract_text};
+use mnema_extract::{
+    PdfError, TEXT_LAYER_MIN_CHARS, extract_html, extract_markdown, extract_pdf, extract_text,
+};
 use sha2::{Digest, Sha256};
 
 fn main() {
@@ -251,6 +253,46 @@ fn handle_request(line: &str) -> Vec<Frame> {
             });
             frames
         }
+        Reader::Html => {
+            let pages = extract_html(&bytes);
+            let blocks: usize = pages.iter().map(|page| page.blocks.len()).sum();
+            let mut frames = Vec::with_capacity(blocks + pages.len() + 2);
+            frames.push(Frame::Header {
+                sha256,
+                mime: file_type.mime.to_string(),
+                source_kind: file_type.source_kind,
+                // The constant, not the literal `"html"`. `pages_of` on the
+                // other side of the wire matches this exact string to cite an
+                // HTML chunk by its section, and may not link this crate (D40);
+                // a typo here falls to `PageContext::Lines`, which asks blocks
+                // that carry no line numbers for a line range and answers
+                // `Coordinate::None` — a citation with no coordinate at all,
+                // silently, with everything else green.
+                reader: manifest::READER_HTML.to_string(),
+                reader_version: manifest::HTML_READER_VERSION,
+                // From the same vector the Page frames come from, so the pool's
+                // count check cannot disagree with itself.
+                pages: pages.len() as u32,
+            });
+            for page in pages {
+                frames.push(Frame::Page {
+                    page_no: page.page_no,
+                    // Unlike a PDF's, an HTML page *is* a section, and this is
+                    // the whole of what a citation into it points at.
+                    section_title: page.section_title,
+                });
+                frames.extend(page.blocks.into_iter().map(Frame::Block));
+            }
+            frames.push(Frame::Summary {
+                // Empty, not absent: this reader cannot skip a page. It makes
+                // one per section and keeps every one it makes, so a number
+                // here would name a page that was also sent — which the pool
+                // reads as a mismatched worker binary and stops the job for.
+                skipped_pages: Vec::new(),
+                text_source: "native:html".to_string(),
+            });
+            frames
+        }
         // Not "no reader yet" — the answer this branch gives for the other
         // five. These bytes are not text at all, and no release adds a reader
         // that makes them prose (D51).
@@ -364,7 +406,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
         },
         // None of these four formats has a `Vec<Block>` reader in this crate
         // yet. Reporting them alike as "unsupported" is honestly what is true
-        // today: this worker reads text, markdown and PDF, and nothing else.
+        // today: this worker reads text, markdown, PDF and HTML, and nothing
+        // else.
         Reader::Docx | Reader::Xlsx | Reader::Epub | Reader::Unrecognized => {
             vec![Frame::Refused {
                 rule: "unsupported".to_string(),

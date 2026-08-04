@@ -27,10 +27,29 @@ fn the_worker_states_which_reader_takes_each_extension() {
     // (crates/mnema-extract/src/typing.rs:342) is a real answer and the
     // manifest carries it as one.
     assert_eq!(v["default"]["reader"], serde_json::json!("text"));
-    // Both directions: html is NOT yet its own reader, and the manifest must
-    // say so rather than omit it. Task 10 flips this, and this assertion is
-    // what makes that flip visible.
-    assert!(v["by_extension"].get("html").is_none());
+    // **The entry this whole mechanism was built for.** Until task 10 this
+    // asserted the opposite — that `html` was *absent*, because the text reader
+    // took it — precisely so that the day a reader arrived would be visible
+    // here rather than nowhere. This is that day, and flipping the assertion is
+    // the event, not a weakening of it: every `.html` already in an index is
+    // recorded `text@1`, and only this entry appearing makes the parent read
+    // those files again.
+    assert_eq!(
+        v["by_extension"]["html"]["reader"],
+        serde_json::json!("html")
+    );
+    assert_eq!(v["by_extension"]["html"]["version"], serde_json::json!(1));
+    // Both spellings, and the second is not decoration: `identify_plain_text`
+    // matches `Some("html") | Some("htm")`, so a map carrying only one predicts
+    // the wrong reader for every `.htm` on disk.
+    assert_eq!(
+        v["by_extension"]["htm"]["reader"],
+        serde_json::json!("html")
+    );
+    // And the other direction, which is what the old assertion was doing: an
+    // extension no reader claims must still be absent, or the map stops being
+    // a claim about anything.
+    assert!(v["by_extension"].get("txt").is_none());
 }
 
 #[test]
@@ -144,8 +163,11 @@ fn the_manifest_names_the_reader_that_identify_actually_picks() {
         Some("txt"),
         Some("rs"),
         Some("csv"),
-        Some("html"),
         Some("MD"),
+        // The case rule again, on the extension that changed hands in task 10:
+        // `identify_plain_text` matches `Some("html")` exactly, so `HTML` is
+        // read as text and the map must agree rather than be helpful.
+        Some("HTML"),
         // The trap on the other side of `pdf` being absent from the map: these
         // bytes are prose, so a file *named* `notes.pdf` is read by the text
         // reader. An entry `pdf → pdf@1` would predict otherwise and re-read
@@ -177,6 +199,13 @@ fn reader_name(reader: mnema_extract::typing::Reader) -> &'static str {
         // matches the same constant to give a PDF chunk a page number, and no
         // compiler joins the two across D40.
         Reader::Pdf => mnema_core::manifest::READER_PDF,
+        // The constant again, and this is the third of the three places the
+        // html name is written: the header the worker sends, the manifest, and
+        // here. A literal `"html"` in this arm would leave the constant with
+        // two users out of three and remove the cross-check it exists for —
+        // `mnema-ingest` matches the same constant to cite an HTML chunk by its
+        // section, and no compiler joins the two across D40.
+        Reader::Html => mnema_core::manifest::READER_HTML,
         other => panic!("a reader with no name on the wire yet: {other:?}"),
     }
 }

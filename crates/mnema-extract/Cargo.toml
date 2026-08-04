@@ -65,6 +65,21 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # here renders anything, and `src/markdown.rs`'s module doc says why that is
 # not a stylistic preference.
 comrak = { workspace = true }
+# The HTML parser, at the pins `crates/mnema-deps-probe/Cargo.toml:15-16`
+# already resolved and built together. `scraper` is the tree; `html5ever` is
+# under it and is named here only for `ns!(html)`, which is how `src/html.rs`
+# tells an HTML `<title>` (a document's name) from an SVG one (a tooltip).
+#
+# `ego-tree` is `scraper`'s own tree type and is not a version this crate
+# chooses: `scraper 0.27` requires `ego-tree 0.11.0` exactly
+# (`scraper-0.27.0/Cargo.toml:70-71`), and a different one would not unify with
+# the tree `Html::parse_document` returns. It is named because `src/html.rs`
+# walks that tree with `Edge::Open`/`Edge::Close` rather than recursively —
+# measured, an HTML file can nest 100,000 elements deep, and recursion over it
+# is a stack overflow rather than a refusal.
+scraper = "0.27"
+html5ever = "0.39"
+ego-tree = "0.11"
 
 [dev-dependencies]
 tempfile = { workspace = true }

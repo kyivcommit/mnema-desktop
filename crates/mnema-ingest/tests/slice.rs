@@ -603,17 +603,28 @@ fn a_path_row_credits_the_reader_the_worker_actually_ran() {
     assert_eq!(markdown.reader_version, 1);
 }
 
-/// `before`, plus the entry a build that had grown an html reader would carry.
+/// `before`, plus the entry a build that had grown an `.rtf` reader would
+/// carry.
 ///
 /// Built from a measured manifest rather than written out whole, so that the
 /// two differ by exactly the one thing the test is about. A pair of literals
 /// would also differ in whatever the product changed since they were written,
 /// and the assertion would then be about the literals.
-fn with_html_reader(before: &Manifest) -> Manifest {
+///
+/// **This said `html` until task 10 shipped an html reader, and the change is
+/// the event rather than a rename.** These two tests need an extension that
+/// this build reads with the *default* reader and that some later build might
+/// take over; `.html` was that extension and has stopped being one. `.rtf` is
+/// its successor by name: spec §2 puts it in the same class deliberately —
+/// indexed as text today, out of scope for this cycle — so the premise is a
+/// stated decision rather than a gap waiting to close under the test. What
+/// happens on the day an extension really does change hands is measured on
+/// `.html` itself, by the test the next commit adds.
+fn with_rtf_reader(before: &Manifest) -> Manifest {
     let mut after = before.clone();
     after
         .by_extension
-        .insert("html".to_string(), ReaderId::new("html", 1));
+        .insert("rtf".to_string(), ReaderId::new("rtf", 1));
     after
 }
 
@@ -674,11 +685,12 @@ fn a_bumped_reader_version_is_a_reader_that_changed_too() {
 /// A file is read again when the reader that takes its extension changes hands
 /// — and is not, when nothing changed hands.
 ///
-/// `.html` is the case the whole mechanism was built for, and the only one
-/// available before a second reader exists. It is indexed today by the text
-/// reader, because `identify_plain_text` has no arm for it, so its `path` row
+/// `.html` was the case the whole mechanism was built for, and **that day has
+/// come**: task 10 gave it a reader, so it is no longer an extension this build
+/// hands to the default. `.rtf` takes its place here — indexed by the text
+/// reader because `identify_plain_text` has no arm for it, so its `path` row
 /// says `text@1`. A manifest of reader *versions* alone would compare `text@1`
-/// against `text@1` for ever: the day an html reader arrives, not one
+/// against `text@1` for ever: the day a reader for it arrives, not one
 /// already-indexed page would be read again, and the index would go on
 /// answering out of a reading no part of the build performs any more. Keying
 /// the manifest on the extension is what makes that visible, and this is where
@@ -692,44 +704,44 @@ fn a_bumped_reader_version_is_a_reader_that_changed_too() {
 /// direction is a claim about this build rather than about a literal that
 /// happens to match it.
 ///
-/// The second manifest describes a build this repository does not have yet
-/// (task 10 is what produces one), so the re-read it forces is answered by a
-/// worker that still reads the file as text. That is all this test needs — its
-/// subject is whether the file reaches a worker at all — and what the two
-/// disagreeing costs is pinned by the test below.
+/// The second manifest describes a build this repository does not have, so the
+/// re-read it forces is answered by a worker that still reads the file as text.
+/// That is all this test needs — its subject is whether the file reaches a
+/// worker at all — and what the two disagreeing costs is pinned by the test
+/// below.
 #[test]
 fn a_file_is_reread_when_its_extension_changed_hands() {
     let fx = Fixture::new();
-    fx.place_at("notes.html", "<p>Кошторис</p>\n".as_bytes(), mtime());
+    fx.place_at("notes.rtf", "{\\rtf1\\ansi Кошторис}\n".as_bytes(), mtime());
 
-    // The build that indexed it: no html reader, so the default took the file.
+    // The build that indexed it: no rtf reader, so the default took the file.
     let before = fx.manifest.clone();
-    let first = fx.ingest_against("notes.html", &before);
+    let first = fx.ingest_against("notes.rtf", &before);
     assert!(matches!(first, Ingested::Indexed { .. }), "{first:?}");
     let row = fx
         .db
-        .path_entry(fx.root_id, "notes.html")
+        .path_entry(fx.root_id, "notes.rtf")
         .unwrap()
         .expect("the file is indexed, so it has a path row");
     assert_eq!(
         (row.reader.as_str(), row.reader_version),
         ("text", 1),
-        "the premise of this test is that html is read by the default reader"
+        "the premise of this test is that rtf is read by the default reader"
     );
 
     // Nothing moved: not the file, not the manifest.
-    let again = fx.ingest_against("notes.html", &before);
+    let again = fx.ingest_against("notes.rtf", &before);
     assert!(
         matches!(again, Ingested::Unchanged { .. }),
         "an unchanged file under an unchanged manifest must not cost a worker: {again:?}"
     );
 
-    // The same file, against the manifest of a build that has an html reader.
-    let after = with_html_reader(&before);
-    let outcome = fx.ingest_against("notes.html", &after);
+    // The same file, against the manifest of a build that has an rtf reader.
+    let after = with_rtf_reader(&before);
+    let outcome = fx.ingest_against("notes.rtf", &after);
     assert!(
         !matches!(outcome, Ingested::Unchanged { .. }),
-        "an html reader arriving must make the file worth re-reading: {outcome:?}"
+        "a reader for this extension arriving must make the file worth re-reading: {outcome:?}"
     );
     // And a re-read is what it was, rather than some other way of not being
     // `Unchanged`: only the arms past the cheap one can answer `AlreadyIndexed`,
@@ -759,15 +771,15 @@ fn a_file_is_reread_when_its_extension_changed_hands() {
 #[test]
 fn a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that() {
     let fx = Fixture::new();
-    fx.place_at("notes.html", "<p>Кошторис</p>\n".as_bytes(), mtime());
+    fx.place_at("notes.rtf", "{\\rtf1\\ansi Кошторис}\n".as_bytes(), mtime());
 
-    // A manifest this pool's worker will never satisfy: it promises an html
+    // A manifest this pool's worker will never satisfy: it promises an rtf
     // reader, and the binary behind the pool has none.
-    let disagreeing = with_html_reader(&fx.manifest);
+    let disagreeing = with_rtf_reader(&fx.manifest);
     let Ingested::Indexed {
         document_id,
         chunks,
-    } = fx.ingest_against("notes.html", &disagreeing)
+    } = fx.ingest_against("notes.rtf", &disagreeing)
     else {
         panic!("expected the first pass to index the file")
     };
@@ -794,7 +806,7 @@ fn a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that() {
     assert_eq!(ids.len(), chunks, "every chunk written has a row");
 
     for pass in 1..=3 {
-        let outcome = fx.ingest_against("notes.html", &disagreeing);
+        let outcome = fx.ingest_against("notes.rtf", &disagreeing);
         let Ingested::AlreadyIndexed { document_id: again } = &outcome else {
             panic!("pass {pass}: expected the file to be read again, got {outcome:?}")
         };
@@ -823,7 +835,7 @@ fn a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that() {
     );
     assert_eq!(
         fx.db
-            .path_entry(fx.root_id, "notes.html")
+            .path_entry(fx.root_id, "notes.rtf")
             .unwrap()
             .expect("the path row survives being rewritten")
             .document_id,

@@ -18,7 +18,7 @@
 // `PageContext::Lines`, every PDF citation loses its page, and nothing goes
 // red. The constant is `mnema-core`'s because neither side of that boundary
 // owns it.
-pub use mnema_core::manifest::{Manifest, READER_PDF, ReaderId};
+pub use mnema_core::manifest::{Manifest, READER_HTML, READER_PDF, ReaderId};
 
 /// Bumped by whoever changes what that reader produces from the same bytes.
 ///
@@ -30,12 +30,14 @@ pub use mnema_core::manifest::{Manifest, READER_PDF, ReaderId};
 pub const TEXT_READER_VERSION: u32 = 1;
 pub const MARKDOWN_READER_VERSION: u32 = 1;
 pub const PDF_READER_VERSION: u32 = 1;
+pub const HTML_READER_VERSION: u32 = 1;
 
-/// Keyed on extension rather than on reader name, and the empty-looking map is
-/// the point: `.html` has no entry today because the text reader takes it, and
-/// the parent needs to see that entry *appear* to know the file must be read
-/// again. A map of reader versions alone would answer `text@1 == text@1` and
-/// never re-read it.
+/// Keyed on extension rather than on reader name, and `html` is the entry the
+/// whole mechanism was built for: `.html` was read by the *text* reader and is
+/// recorded as `text@1` in every index written before this build, so a map of
+/// reader versions alone would answer `text@1 == text@1` and never read those
+/// files again. What the parent has to be able to see is that the extension
+/// changed hands, and this is where it sees it.
 ///
 /// **`pdf` is deliberately absent, and it is the first reader for which that
 /// absence costs something.** This map is a claim about `typing::identify`, and
@@ -63,6 +65,18 @@ pub fn manifest() -> Manifest {
         "md".to_string(),
         ReaderId::new("markdown", MARKDOWN_READER_VERSION),
     );
+    // **Both spellings, and neither is optional.** `identify_plain_text`
+    // matches `Some("html") | Some("htm")`, and this map is a claim about that
+    // function: listing only one would predict the text reader for the other
+    // and hand every `.htm` in the folder to a worker on every walk, for ever.
+    // `the_manifest_names_the_reader_that_identify_actually_picks` holds the
+    // two together.
+    for extension in ["html", "htm"] {
+        by_extension.insert(
+            extension.to_string(),
+            ReaderId::new(READER_HTML, HTML_READER_VERSION),
+        );
+    }
     Manifest {
         default: ReaderId::new("text", TEXT_READER_VERSION),
         by_extension,

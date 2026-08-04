@@ -40,6 +40,12 @@ pub enum Reader {
     /// text, but a structure — sections, fences, tables — that plain text
     /// cannot see. It left this list's `PlainText` arm in task 11.
     Markdown,
+    /// `html`/`htm`, read by `html::extract_html`. Plain text as far as
+    /// `classify` is concerned — no magic distinguishes it — and the one format
+    /// in this product that was **wrong** rather than unread before its reader
+    /// arrived: it fell to `PlainText` below and was indexed with its CSS and
+    /// its JavaScript in the prose (spec §2.1).
+    Html,
     Pdf,
     Docx,
     Xlsx,
@@ -332,9 +338,20 @@ fn is_epub<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>) -> bool {
 /// Markdown is the one of these that has a reader of its own. It was read as
 /// plain text until task 11, which indexed it — badly: no sections, and a
 /// fenced block indistinguishable from the prose around it.
+///
+/// HTML is the second, and its arrival is the reason the manifest exists.
+/// Until it landed, `.html` fell to the `_ =>` arm below and was indexed as
+/// `text/plain` — markup, CSS and JavaScript together (spec §2.1) — and every
+/// such file is recorded as `text@1`, which no version bump can distinguish
+/// from today's reading. `crates/mnema-extract/src/manifest.rs` gains the
+/// matching entries in the same commit; the two have to move together or the
+/// parent predicts a reader that never ran.
 fn identify_plain_text(extension: Option<&str>) -> FileType {
     let (mime, source_kind, reader) = match extension {
         Some("md") => ("text/markdown", SourceKind::Document, Reader::Markdown),
+        // Both spellings, because both are the same format and a manifest keyed
+        // on extension has to carry each one it claims.
+        Some("html") | Some("htm") => ("text/html", SourceKind::Document, Reader::Html),
         Some("csv") => ("text/csv", SourceKind::Data, Reader::PlainText),
         Some(ext) if is_source_extension(ext) => {
             ("text/plain", SourceKind::Code, Reader::PlainText)

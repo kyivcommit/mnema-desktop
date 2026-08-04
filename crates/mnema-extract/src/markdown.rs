@@ -220,6 +220,21 @@ fn heading_title<'a>(lines: &Lines<'_>, heading: &'a AstNode<'a>) -> Option<Stri
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    bound_section_title(flattened)
+}
+
+/// The last step of every reader that names a page after a heading: refuse an
+/// empty title, and cut a long one so that the cut is visible.
+///
+/// Shared rather than repeated, and it lives beside the constant it applies.
+/// `html.rs` is the second caller and `epub.rs`/`docx.rs` are the next two —
+/// four readers deciding independently how long a title may be is four
+/// numbers, and `page.section_title` is one column displayed by one interface.
+///
+/// The input is already flattened onto one line by its caller: what "the
+/// heading's own text" is differs per format (a source span here, a subtree in
+/// `html.rs`), and only what happens *after* that is common.
+pub(crate) fn bound_section_title(flattened: String) -> Option<String> {
     if flattened.is_empty() {
         return None;
     }

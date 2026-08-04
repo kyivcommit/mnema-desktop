@@ -719,3 +719,109 @@ fn a_bare_zip_with_no_recognizable_member_is_refused_as_unsupported() {
         other => panic!("expected Refused, got {other:?}"),
     }
 }
+
+/// The HTML branch's whole wire shape, at the only place it is produced.
+///
+/// **The one format that was answered wrongly rather than refused.** Before
+/// this branch existed, `.html` reached `Reader::PlainText` and the worker sent
+/// `reader: "text"`, `mime: "text/plain"`, `native:txt` and one block holding
+/// the file's markup — measured in spec §2.1 against a shipped build. Every
+/// field below is one of the four things that changed, and each is checked at
+/// its value rather than against the code that produces it.
+///
+/// `reader` is the assertion that matters most and the one nothing else in the
+/// workspace can make. `mnema_ingest::pages_of` matches this exact string to
+/// cite an HTML chunk as `Coordinate::Section`, across a process boundary and
+/// across D40 — a header saying `"html-2"` falls to `PageContext::Lines`, which
+/// asks blocks that carry no line numbers for a line range and answers
+/// `Coordinate::None`. The literal `"html"` rather than `manifest::READER_HTML`
+/// on purpose: a test that asks the code under test what it says and then
+/// agrees is not a test. The constant is the mechanism, this is the value, and
+/// `mnema-ingest/tests/slice.rs` states the same literal from the other side.
+#[test]
+fn an_html_file_is_read_as_prose_and_its_header_names_the_html_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("звіт.html");
+    std::fs::write(
+        &path,
+        "<html><head><title>Річний звіт</title><style>.a{color:red}</style></head>\
+         <body><p>Вступ до звіту.</p><h1>Розділ перший</h1><p>Виторг зріс.</p>\
+         <script>var x=1;</script></body></html>",
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Header {
+        reader,
+        reader_version,
+        pages,
+        mime,
+        ..
+    }) = frames.first()
+    else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "html");
+    assert_eq!(*reader_version, 1);
+    // Not `text/plain`, which is what this file used to be called.
+    assert_eq!(mime, "text/html");
+    // Two sections: the document's title names the first, the heading the
+    // second. The pool checks this count against the page frames that arrive.
+    assert_eq!(*pages, 2);
+
+    let sent: Vec<&Frame> = frames
+        .iter()
+        .filter(|f| matches!(f, Frame::Page { .. }))
+        .collect();
+    assert_eq!(
+        sent.len(),
+        2,
+        "the header's count must be the frames' count"
+    );
+    assert!(
+        matches!(
+            sent[1],
+            Frame::Page {
+                page_no: 2,
+                section_title: Some(title),
+            } if title == "Розділ перший"
+        ),
+        // Unlike a PDF's, an HTML page carries a section title: it is the whole
+        // of what a citation into this format points at.
+        "{:?}",
+        sent[1]
+    );
+
+    let prose: String = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Block(block) => Some(block.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Both directions across the wire: the markup is gone and the prose is not.
+    assert!(!prose.contains("color:red"), "{prose:?}");
+    assert!(!prose.contains("var x"), "{prose:?}");
+    assert!(prose.contains("Виторг зріс."), "{prose:?}");
+    assert!(prose.contains("Вступ до звіту."), "{prose:?}");
+
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    // Empty rather than absent: this reader cannot skip a page, and a number
+    // here naming a page that was also sent stops the whole job.
+    assert!(skipped_pages.is_empty(), "{skipped_pages:?}");
+    // `native:html`, satisfying `page.text_source`'s CHECK and naming the
+    // reader rather than the file — the same rule `native:md` follows.
+    assert_eq!(text_source, "native:html");
+}
