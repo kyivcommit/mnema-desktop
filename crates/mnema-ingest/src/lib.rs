@@ -50,6 +50,24 @@ pub const STAGE_CHUNK: &str = "chunk";
 /// What `ingest_stage.status` says about a stage that finished.
 pub const STATUS_DONE: &str = "done";
 
+/// What it says while a **finished** stage is being replaced.
+///
+/// A rebuild is the one write that starts from a `done` stage: the document is
+/// complete and a reader that reads it differently has arrived, so its rows are
+/// cleared and written again. Between the first slice and step 5 the stage
+/// would otherwise still claim `done` over a document holding twenty pages, and
+/// the cheap arm — which reads exactly that stage — would answer `Unchanged`
+/// for the life of the index. Writing this instead, in the same transaction
+/// that clears the rows, puts an interrupted rebuild back on the path that
+/// finishes it.
+///
+/// A third value rather than reusing "the stage is absent", because the two say
+/// different things to anyone reading the journal: never started, against
+/// started again and not finished. `ingest_stage.status` has no CHECK
+/// (`crates/mnema-index/src/schema.sql:257-263`), so adding one costs no
+/// migration; nothing reads it but the comparison against [`STATUS_DONE`].
+pub const STATUS_REBUILDING: &str = "rebuilding";
+
 /// How many pages are written under one transaction.
 ///
 /// **Provisional, and now exercised.** A `.txt` is exactly one page (D37), so
@@ -413,16 +431,37 @@ pub fn ingest_file(
     // the document, and move every chunk id, on every walk.
     //
     // **What it cannot see is a document reached by a path with no row of its
-    // own.** Two paths to identical bytes are one document (D33), and the reader
-    // is recorded per path; walking the copy that was never indexed answers
-    // "nothing to compare" and leaves the old rows standing until the walk
-    // reaches the path that does have a row. Closing that needs the reader
-    // recorded on the `document` row, which is a column and a migration rather
-    // than a line here.
-    let stale_reading = recorded.as_ref().is_some_and(|entry| {
-        entry.reader != document.reader
-            || entry.reader_version != i64::from(document.reader_version)
-    });
+    // own, and that blindness is permanent rather than temporary.** Two paths to
+    // identical bytes are one document (D33), and the reader is recorded per
+    // path — so walking a copy that was never indexed answers "nothing to
+    // compare". Measured: a file indexed as `a.html` by the text reader and
+    // *renamed* to `b.html` before the first walk of a build with an html reader
+    // comes back `AlreadyIndexed` with `<style>.a{color:red}</style>` still in
+    // its chunk, `search_lexical("color")` still finding it, and every later
+    // walk answering `Unchanged`. The row that could have said otherwise went
+    // with the old name. Renaming a file between two releases is ordinary, so
+    // this is not a corner: for those files the defect this whole reader exists
+    // to fix survives it.
+    //
+    // Closing it properly needs the reader recorded on the `document` row — a
+    // column and a migration, not a line here. What could narrow it without one
+    // is a query for the readers recorded on **any** path naming this document,
+    // since the old row does still exist at the moment the new name is walked
+    // (`repoint` only deletes the row for the path it is rewriting); that is a
+    // new index on `path.document_id` and a decision about which of several
+    // disagreeing rows wins, so it is stated here rather than done.
+    //
+    // `!renaming`, because the recorded reader describes the document that path
+    // **named**, not the one just read. A path whose bytes are replaced by
+    // content already in the index under a different reader would otherwise
+    // clear and rewrite a document that today's reader made, moving every
+    // `chunk.id` under every citation into it for nothing.
+    let renaming = displaced.as_deref() != Some(id.as_str());
+    let stale_reading = !renaming
+        && recorded.as_ref().is_some_and(|entry| {
+            entry.reader != document.reader
+                || entry.reader_version != i64::from(document.reader_version)
+        });
     if db.document_exists(&id)? {
         if !stale_reading && db.stage_status(&id, STAGE_CHUNK)?.as_deref() == Some(STATUS_DONE) {
             // Nothing is written here, and that governs the journal too. The
@@ -434,7 +473,6 @@ pub fn ingest_file(
             // pass that did write them. `journal_skipped_pages` has what
             // rewriting them anyway costs — a true row deleted, silently, on a
             // release that improves a reader.
-            let renaming = displaced.as_deref() != Some(id.as_str());
             db.transaction(|_| {
                 repoint(db, root_id, relative, &document, disk, displaced.as_deref())?;
                 if renaming {
@@ -471,6 +509,22 @@ pub fn ingest_file(
                     // Inside this transaction rather than before it, so a
                     // second interruption during the recovery rolls the clear
                     // back instead of leaving the document empty.
+                    //
+                    // **The stage goes first, and it is what makes step 5's
+                    // recovery true for this path.** That comment says a crash
+                    // before the checkpoint costs a re-index because "the cheap
+                    // arm finds no finished stage" — which held while `rebuild`
+                    // could only be reached with the stage already unfinished.
+                    // A reader that changed reaches it with the stage `done`,
+                    // and `clear_document_content` does not touch stages: any
+                    // failure after slice 0 would leave pages 1..20, a `path`
+                    // row already crediting the new reader (`repoint`, below,
+                    // commits with this slice), and a `done` stage — all five
+                    // of the cheap arm's conditions satisfied, `Unchanged` for
+                    // ever, and the rest of the document gone. It needs no
+                    // crash: `IngestError::Busy` on a later slice sends
+                    // `ingest_with_busy_retry` (`walk.rs`) back in at the top.
+                    db.record_stage(&id, STAGE_CHUNK, STATUS_REBUILDING)?;
                     db.clear_document_content(&id)?;
                 } else {
                     db.insert_document(&id, &document.mime, disk.size_bytes, document.source_kind)?;
@@ -525,7 +579,9 @@ pub fn ingest_file(
     //    Outside the write, and the two of them **together**. Outside, because
     //    a document is searchable once its rows are there and a crash before
     //    this point costs a re-index rather than a lie — the cheap arm finds no
-    //    finished stage, and step 3 rebuilds.
+    //    finished stage, and step 3 rebuilds. That is true of a rebuild only
+    //    because slice 0 writes `STATUS_REBUILDING` over the `done` it started
+    //    from; see the comment there for what it cost when it did not.
     //
     //    Together, because that recovery is reached by finding no finished
     //    stage. Written as two autocommit statements, a crash between them

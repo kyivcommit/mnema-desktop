@@ -261,13 +261,17 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256,
                 mime: file_type.mime.to_string(),
                 source_kind: file_type.source_kind,
-                // The constant, not the literal `"html"`. `pages_of` on the
-                // other side of the wire matches this exact string to cite an
-                // HTML chunk by its section, and may not link this crate (D40);
-                // a typo here falls to `PageContext::Lines`, which asks blocks
-                // that carry no line numbers for a line range and answers
-                // `Coordinate::None` — a citation with no coordinate at all,
-                // silently, with everything else green.
+                // The constant, and `pages_of` matches the **same constant**
+                // (`crates/mnema-ingest/src/lib.rs:1333`) rather than a literal
+                // — so a typo here is not the risk, and saying it was would be
+                // an unchecked claim about the other side of D40. What the two
+                // ends really are is one symbol with a process boundary between
+                // them, and what can still put a different string on the wire
+                // is a *different build* of this binary answering a parent that
+                // expects this one. Whichever way it happens, the parent falls
+                // to `PageContext::Lines`, asks blocks that carry no line
+                // numbers for a line range, and answers `Coordinate::None`: a
+                // citation with no coordinate, silently, everything else green.
                 reader: manifest::READER_HTML.to_string(),
                 reader_version: manifest::HTML_READER_VERSION,
                 // From the same vector the Page frames come from, so the pool's

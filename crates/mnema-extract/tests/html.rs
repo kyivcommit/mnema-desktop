@@ -406,6 +406,38 @@ fn indentation_inside_an_element_is_kept_and_the_space_between_two_is_not_a_bloc
     assert_eq!(texts(&pages), vec!["\n    Виторг зріс.\n  "]);
 }
 
+/// A combining mark written as a character reference is composed too.
+///
+/// The reader normalised the **source**, before parsing, until a review
+/// measured this: `и&#774;` holds no combining mark until the parser has
+/// decoded the reference, so NFC over the source composed nothing and the mark
+/// it produced was never composed at all. Two spellings of one word then
+/// tokenize apart, which is the harm D32 exists to prevent — and the test above
+/// cannot see it, because its fixture is decomposed in the source.
+///
+/// Four forms of the same claim, so that the fix cannot be a `й`-shaped special
+/// case: decomposed in the source, decomposed by reference, both halves by
+/// reference, and a Latin letter with an acute.
+#[test]
+fn a_combining_mark_written_as_a_character_reference_is_composed_too() {
+    for (label, source, expected) in [
+        ("decomposed in the source", "<p>и\u{0306}</p>", "й"),
+        ("the mark by reference", "<p>и&#774;</p>", "й"),
+        ("both halves by reference", "<p>&#1080;&#774;</p>", "й"),
+        ("a Latin acute by reference", "<p>e&#769;</p>", "é"),
+    ] {
+        let pages = extract_html(source.as_bytes());
+        assert_eq!(texts(&pages), vec![expected], "{label}");
+    }
+
+    // The title a heading gives its page is normalised on the same pass, and
+    // before it is bounded: a page named `и\u{306}од` and a query typed `йод`
+    // are two different strings, and no offset is measured into a title to make
+    // that recoverable.
+    let pages = extract_html("<h1>и&#774;од</h1><p>текст</p>".as_bytes());
+    assert_eq!(pages[0].section_title.as_deref(), Some("йод"));
+}
+
 /// A character reference is the character it names, not the six bytes that
 /// spell it.
 ///
@@ -441,6 +473,33 @@ fn inline_markup_inside_a_sentence_stays_one_block() {
 fn a_line_break_does_not_glue_two_words_together() {
     let pages = extract_html("<p>перший<br>другий</p>".as_bytes());
     assert_eq!(texts(&pages), vec!["перший", "другий"]);
+}
+
+/// A box on the page ends the run around it; something invisible does not.
+///
+/// Skipping a subtree and the subtree not being there are two different things,
+/// and a review found the reader treating them as one: `<iframe>` was skipped
+/// without ending the run, so `<p>перед<iframe></iframe>після</p>` was stored as
+/// `передпісля` — a word in no file, findable by neither half. It is the same
+/// defect `<br>` has its own rule for.
+///
+/// Three directions, because each alone is satisfied by a mistake. Ending the
+/// run on **every** skipped element would split a sentence where a browser
+/// shows one, since `<script>` and `<noembed>` are `display: none` in the HTML
+/// rendering section's default style sheet and the words around them really are
+/// adjacent on the page. Ending it on none is the defect.
+#[test]
+fn a_box_on_the_page_ends_a_run_and_something_invisible_does_not() {
+    let boxed = extract_html("<p>перед<iframe></iframe>після</p>".as_bytes());
+    assert_eq!(texts(&boxed), vec!["перед", "після"]);
+
+    let scripted = extract_html("<p>Виторг <script>var x=1;</script>зріс</p>".as_bytes());
+    assert_eq!(texts(&scripted), vec!["Виторг зріс"]);
+
+    // Pinned rather than left to chance: `<noembed>` draws nothing, so the two
+    // words are neighbours on the page and storing them as neighbours is right.
+    let invisible = extract_html("<p>перед<noembed>запас</noembed>після</p>".as_bytes());
+    assert_eq!(texts(&invisible), vec!["передпісля"]);
 }
 
 /// Types that an HTML element really has, and `Paragraph` for everything else.

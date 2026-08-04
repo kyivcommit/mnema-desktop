@@ -126,12 +126,16 @@ pub struct HtmlPage {
 /// bytes read as `.txt`, `.md` and `.html` are decoded the same way.
 pub fn extract_html(bytes: &[u8]) -> Vec<HtmlPage> {
     let decoded = crate::text::decode(bytes);
-    // Once, over everything, before the parser sees it and before any text is
-    // taken out of it (D32, D38). Tag names, attribute names and character
-    // references are ASCII, so normalising the markup with the prose changes
-    // nothing about the tree.
-    let source = nfc::normalise(&decoded);
-    let document = Html::parse_document(&source);
+    // **Not normalised here**, unlike `markdown.rs` and `text.rs`, and the
+    // difference is measured rather than stylistic. A character reference is
+    // markup: `и&#774;` holds no combining mark until the parser decodes it, so
+    // NFC over the source composes nothing and the mark it produces is never
+    // composed at all — `<p>и\u{0306}</p>` came back `"й"` while
+    // `<p>и&#774;</p>` came back `"и\u{306}"`, which is D32's own harm, two
+    // spellings of one word tokenizing apart. Normalisation therefore runs on
+    // the text taken *out* of the tree — in `flush` and in `section_title` —
+    // where every character exists that ever will.
+    let document = Html::parse_document(&decoded);
 
     let mut pages = vec![HtmlPage {
         page_no: 1,
@@ -165,6 +169,17 @@ pub fn extract_html(bytes: &[u8]) -> Vec<HtmlPage> {
                 match node.value() {
                     Node::Element(element) => {
                         if gives_no_text(element) {
+                            // Skipping a subtree is not the same as it not being
+                            // there: `<iframe>` occupies space on the page, so
+                            // the text on either side of it is not one run.
+                            // Without this, `<p>перед<iframe></iframe>після</p>`
+                            // was stored as `передпісля` — a word in no file,
+                            // and findable by neither half. See
+                            // [`renders_a_box`] for why it is the only one of
+                            // the seven that does this.
+                            if renders_a_box(element) {
+                                flush(&mut run, &flow, &mut pages);
+                            }
                             skipping = 1;
                             continue;
                         }
@@ -223,6 +238,12 @@ fn flush(run: &mut String, flow: &[BlockType], pages: &mut [HtmlPage]) {
         run.clear();
         return;
     }
+    // Here rather than over the source, because a combining mark written as a
+    // character reference does not exist until the parser has decoded it — see
+    // `extract_html`. Once per block, before the text is stored and before
+    // anything downstream takes an offset or a hash from it (D32, D38).
+    let text = nfc::normalise(run).into_owned();
+    run.clear();
     let block_type = flow.last().copied().unwrap_or(BlockType::Paragraph);
     let page = pages.last_mut().expect("a page is always open");
     page.blocks.push(Block {
@@ -234,7 +255,7 @@ fn flush(run: &mut String, flow: &[BlockType], pages: &mut [HtmlPage]) {
         // Nothing here detects language; a per-block guess is the extraction
         // spec's subject, as in every other reader.
         language: None,
-        text: std::mem::take(run),
+        text,
         line_start: None,
         line_end: None,
     });
@@ -308,7 +329,12 @@ fn section_title<'a>(element: NodeRef<'a, Node>) -> Option<String> {
     // empty `<b>` — is not a section. A page named by the empty string is
     // worse than an unnamed page: it renders as a section that exists and has
     // no name.
-    bound_section_title(words.join(" "))
+    //
+    // Normalised **before** it is bounded, not after: NFC changes the character
+    // count on decomposed input, so a title cut at `SECTION_TITLE_MAX_CHARS`
+    // beforehand would be cut in the wrong place — and could be cut between a
+    // base character and its combining mark.
+    bound_section_title(nfc::normalise(&words.join(" ")).into_owned())
 }
 
 fn opens_a_section(element: &Element) -> bool {
@@ -364,6 +390,23 @@ fn gives_no_text(element: &Element) -> bool {
     )
 }
 
+/// The one member of [`gives_no_text`] that still occupies space on the page.
+///
+/// The HTML rendering section's default style sheet gives `script`, `style`,
+/// `noembed`, `noframes` and `template` `display: none`, and `noscript` the
+/// same while scripting is on — so text on either side of any of them really is
+/// one run, and joining it is what a browser shows. `<iframe>` is not on that
+/// list: it is a replaced element and draws a box, so the words around it are
+/// not adjacent on the page. Measured before this existed:
+/// `<p>перед<iframe></iframe>після</p>` was stored as `передпісля`.
+///
+/// This is the same argument `<br>` gets in [`is_inline`], and the same cost of
+/// getting it wrong: a word that is in no file and that a search for either
+/// half will not find.
+fn renders_a_box(element: &Element) -> bool {
+    element.name() == "iframe"
+}
+
 /// Elements that are part of the sentence around them rather than a block of
 /// their own.
 ///
@@ -374,6 +417,13 @@ fn gives_no_text(element: &Element) -> bool {
 /// merge two paragraphs into one block whenever an unknown element separated
 /// them. Neither loses text; only one of them puts words next to each other
 /// that the document does not.
+///
+/// **That claim is about the elements this function decides, and no others.**
+/// A subtree that [`gives_no_text`] never reaches it at all, and it took a
+/// review to notice: `<iframe>` was skipped without ending the run, so
+/// `<p>перед<iframe></iframe>після</p>` was stored as `передпісля` — exactly
+/// the word this list exists not to invent. [`renders_a_box`] is where that is
+/// decided now.
 ///
 /// `<br>` is deliberately absent although it is inline: it *is* a line break,
 /// and joining across it would store `першийдругий` for a document that shows

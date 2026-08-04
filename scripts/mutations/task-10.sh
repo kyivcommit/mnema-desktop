@@ -325,3 +325,68 @@ case_ "ingest: the comparison is against the reader that ran, not the predicted 
   'entry.reader != expected.reader
             || entry.reader_version != i64::from(expected.version)' \
   mnema-ingest 'a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that' --test slice
+
+# --------------------------- fix round 1: what the rebuild itself opened up
+#
+# The rebuild in C24–C27 is reached with the chunk stage already `done`, which
+# is a state `ingest_file` had never been in before: every earlier route to
+# `rebuild` came from a stage that was *not* finished, and step 5's comment
+# ("a crash before this point costs a re-index rather than a lie — the cheap arm
+# finds no finished stage") was true because of it. These five are the cases the
+# review's Critical and its two behavioural Minors asked for.
+
+# C28. **The Critical.** The stage left claiming `done` while the rows that made
+# it true are cleared. Any failure past slice 0 then leaves pages 1..20, a path
+# row already crediting the new reader, and all five of the cheap arm's
+# conditions satisfied — `Unchanged` for the life of the index, with the rest of
+# the document gone. No crash needed: `IngestError::Busy` on a later slice
+# re-enters at the top.
+case_ "ingest: a rebuild stops claiming the stage it is replacing" \
+  crates/mnema-ingest/src/lib.rs \
+  's{                    db\.record_stage\(&id, STAGE_CHUNK, STATUS_REBUILDING\)\?;\n                    db\.clear_document_content\(&id\)\?;}{                    db.clear_document_content(&id)?;}' \
+  '`ingest_with_busy_retry` (`walk.rs`) back in at the top.
+                    db.clear_document_content(&id)?;' \
+  mnema-ingest 'a_rebuild_interrupted_between_slices_is_finished_by_the_next_walk' --test slice
+
+# C29. The reader on a `path` row describes the document that path *named*. Read
+# as a statement about the document just read, it makes a perfectly current
+# reading look stale: a full clear and rewrite where the answer is that there is
+# nothing to do, and every `chunk.id` moves under every citation into it.
+case_ "ingest: only the path that already named this document can call it stale" \
+  crates/mnema-ingest/src/lib.rs \
+  's{    let stale_reading = !renaming\n        && recorded\.as_ref\(\)\.is_some_and\(\|entry\| \{\n            entry\.reader != document\.reader\n                \|\| entry\.reader_version != i64::from\(document\.reader_version\)\n        \}\);}{    let stale_reading = recorded.as_ref().is_some_and(|entry| \{\n        entry.reader != document.reader\n            || entry.reader_version != i64::from(document.reader_version)\n    \});}' \
+  'let stale_reading = recorded.as_ref().is_some_and(|entry| {' \
+  mnema-ingest 'a_path_that_comes_to_name_a_document_this_reader_made_is_not_rebuilt' --test slice
+
+# C30. NFC put back over the *source*, before the parse — the ordering as it
+# shipped, and the reason it is wrong: `и&#774;` holds no combining mark until
+# the parser decodes the reference, so normalising the source composes nothing
+# and the mark it produces is never composed at all. Two spellings of one word,
+# tokenized apart, which is the harm D32 exists to prevent.
+case_ "reader: the text is normalised after the parse, not before it" \
+  crates/mnema-extract/src/html.rs \
+  's{    let document = Html::parse_document\(&decoded\);}{    let source = nfc::normalise(\&decoded);\n    let document = Html::parse_document(\&source);};s{    let text = nfc::normalise\(run\)\.into_owned\(\);\n    run\.clear\(\);}{    let text = std::mem::take(run);}' \
+  'let source = nfc::normalise(&decoded);' \
+  mnema-extract 'a_combining_mark_written_as_a_character_reference_is_composed_too' --test html
+
+# C31. The run not ended at an element that draws a box. `<iframe>` was skipped
+# without flushing, so `<p>перед<iframe></iframe>після</p>` was stored as
+# `передпісля` — a word in no file, findable by neither half.
+case_ "reader: a box on the page ends the run around it" \
+  crates/mnema-extract/src/html.rs \
+  's{                            if renders_a_box\(element\) \{\n                                flush\(&mut run, &flow, &mut pages\);\n                            \}\n                            skipping = 1;}{                            skipping = 1;}' \
+  'the seven that does this.
+                            skipping = 1;' \
+  mnema-extract 'a_box_on_the_page_ends_a_run_and_something_invisible_does_not' --test html
+
+# C32. And the other direction, which C31 does not cover: ending the run at
+# *every* skipped element splits a sentence where a browser shows one, because
+# the other six are `display: none` and the words around them really are
+# adjacent on the page.
+case_ "reader: something invisible does not end the run around it" \
+  crates/mnema-extract/src/html.rs \
+  's{fn renders_a_box\(element: &Element\) -> bool \{\n    element\.name\(\) == "iframe"\n\}}{fn renders_a_box(element: \&Element) -> bool \{\n    let _ = element;\n    true\n\}}' \
+  'let _ = element;
+    true
+}' \
+  mnema-extract 'a_box_on_the_page_ends_a_run_and_something_invisible_does_not' --test html

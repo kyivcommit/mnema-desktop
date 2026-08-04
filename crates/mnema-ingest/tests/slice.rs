@@ -219,6 +219,18 @@ impl Fixture {
         worker: &Path,
         manifest: &Manifest,
     ) -> Ingested {
+        self.try_ingest_with_worker_against(relative, worker, manifest)
+            .expect("a per-file problem must never stop the job")
+    }
+
+    /// The same, for the one test whose subject is a write that **fails**
+    /// part-way.
+    fn try_ingest_with_worker_against(
+        &self,
+        relative: &str,
+        worker: &Path,
+        manifest: &Manifest,
+    ) -> Result<Ingested, mnema_ingest::IngestError> {
         let pool = Pool::new(PoolConfig::new(worker)).unwrap();
         let absolute = self.root.join(relative);
         let on_disk = mnema_walk::stat(&absolute);
@@ -231,7 +243,6 @@ impl Fixture {
             on_disk,
             manifest,
         )
-        .expect("a per-file problem must never stop the job")
     }
 
     /// Every chunk of one document, as text, in `ord` order.
@@ -295,10 +306,20 @@ impl Fixture {
     /// writes — the alternative is a fault-injection seam in production code,
     /// which would be a shape the product carries for the tests' sake.
     fn break_writes_to(&self, event: &str, table: &str) {
+        self.break_writes_to_when(event, table, "1");
+    }
+
+    /// The same, firing only on the rows `when` selects.
+    ///
+    /// For the one test that has to fail a *later* transaction of a multi-slice
+    /// write while letting the first one commit — an unconditional trigger
+    /// fails slice 0 and rolls the whole thing back, which is the state that
+    /// recovers on its own and therefore proves nothing.
+    fn break_writes_to_when(&self, event: &str, table: &str, when: &str) {
         self.db
             .conn()
             .execute_batch(&format!(
-                "CREATE TRIGGER forced_failure BEFORE {event} ON {table} BEGIN
+                "CREATE TRIGGER forced_failure BEFORE {event} ON {table} WHEN {when} BEGIN
                      SELECT RAISE(ABORT, 'forced failure');
                  END;"
             ))
@@ -847,8 +868,15 @@ fn a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was() {
         manifest.by_extension.remove("html");
         manifest
     };
-    let old_worker = worker_answering(
-        &fx,
+    // Two directories, because `support::wrong_worker` always writes
+    // `<dir>/wrong-worker`: built in one, these two would be one file and the
+    // second's frames would replace the first's. The test would still pass —
+    // the old worker runs before the new one is built — and it would be passing
+    // for a reason that has nothing to do with its subject.
+    let old_dir = tempfile::tempdir().unwrap();
+    let new_dir = tempfile::tempdir().unwrap();
+    let old_worker = worker_answering_in(
+        old_dir.path(),
         &[
             Frame::Header {
                 sha256: sha256_of(bytes),
@@ -883,8 +911,8 @@ fn a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was() {
 
     // Today's build: the manifest gives `.html` a reader of its own, and the
     // worker reads the file as prose under a named section.
-    let new_worker = worker_answering(
-        &fx,
+    let new_worker = worker_answering_in(
+        new_dir.path(),
         &[
             Frame::Header {
                 sha256: sha256_of(bytes),
@@ -941,6 +969,168 @@ fn a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was() {
     assert!(
         matches!(again, Ingested::Unchanged { .. }),
         "the reading and the bytes both agree now, so nothing is owed: {again:?}"
+    );
+}
+
+/// A rebuild interrupted between slices is finished by the next walk, rather
+/// than leaving a truncated document every walk from then on calls `Unchanged`.
+///
+/// **The state this guards was opened by the rebuild itself.** Before it,
+/// `rebuild` could only be reached with the chunk stage *unfinished*, which is
+/// what step 5's comment relies on: "a crash before this point costs a re-index
+/// rather than a lie — the cheap arm finds no finished stage". A reader that
+/// changed reaches it with the stage `done`, and `clear_document_content` does
+/// not touch stages — so a failure after slice 0 leaves pages 1..20, a `path`
+/// row already crediting the new reader (`repoint` commits with that slice), and
+/// a `done` stage. All five of the cheap arm's conditions then agree and the
+/// rest of the document is gone for the life of the index.
+///
+/// It needs no crash to reach: `IngestError::Busy` on a later slice sends
+/// `ingest_with_busy_retry` (`walk.rs`) back in at the top, where the cheap arm
+/// now answers.
+///
+/// The failure is injected with a trigger that fires only past
+/// `PAGES_PER_TRANSACTION`, because that is the whole point — an unconditional
+/// one fails slice 0, rolls the entire write back, and leaves the state that
+/// recovers on its own.
+///
+/// Both directions, and the counting one is what makes the other mean anything:
+/// the third pass **writes** (`Indexed`, not `Unchanged`) **and** the document
+/// comes back whole. A pass that answered `Indexed` having written twenty pages
+/// satisfies the first alone.
+#[cfg(unix)]
+#[test]
+fn a_rebuild_interrupted_between_slices_is_finished_by_the_next_walk() {
+    let fx = Fixture::new();
+    // More sections than one transaction writes, so the write really is sliced
+    // and there is a "between" for the failure to fall into.
+    let sections = mnema_ingest::PAGES_PER_TRANSACTION as u32 + 5;
+    let bytes = b"<h1>invented html, never parsed</h1>\n".as_slice();
+    fx.place_at("dovidky/umovy.html", bytes, mtime());
+
+    let old_dir = tempfile::tempdir().unwrap();
+    let new_dir = tempfile::tempdir().unwrap();
+    let old_worker = worker_answering_in(old_dir.path(), &html_frames(bytes, sections, 1));
+    let new_worker = worker_answering_in(new_dir.path(), &html_frames(bytes, sections, 2));
+
+    assert!(matches!(
+        fx.ingest_with_worker_against("dovidky/umovy.html", &old_worker, &fx.manifest),
+        Ingested::Indexed { .. }
+    ));
+    assert_eq!(
+        fx.count("SELECT count(*) FROM page"),
+        i64::from(sections),
+        "the premise is a complete document to interrupt the rebuild of"
+    );
+
+    // The build after it: the same reader at a new version, which is what makes
+    // the document's reading stale, and a write that dies on the second slice.
+    let bumped = {
+        let mut manifest = fx.manifest.clone();
+        manifest
+            .by_extension
+            .insert("html".to_string(), ReaderId::new("html", 2));
+        manifest
+    };
+    fx.break_writes_to_when(
+        "INSERT",
+        "page",
+        &format!("NEW.page_no > {}", mnema_ingest::PAGES_PER_TRANSACTION),
+    );
+    let interrupted = fx.try_ingest_with_worker_against("dovidky/umovy.html", &new_worker, &bumped);
+    assert!(
+        interrupted.is_err(),
+        "the premise is a write that failed part-way: {interrupted:?}"
+    );
+    fx.unbreak_writes();
+
+    // What it left behind: slice 0 committed, the rest did not.
+    assert_eq!(
+        fx.count("SELECT count(*) FROM page"),
+        mnema_ingest::PAGES_PER_TRANSACTION as i64,
+        "the premise is a document truncated at one slice"
+    );
+
+    let outcome = fx.ingest_with_worker_against("dovidky/umovy.html", &new_worker, &bumped);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "an interrupted rebuild has to be finished, not confirmed: {outcome:?}"
+    );
+    assert_eq!(
+        fx.count("SELECT count(*) FROM page"),
+        i64::from(sections),
+        "the pages the interrupted rebuild never wrote are still missing"
+    );
+    // And it settles: nothing is owed once the document and its row agree.
+    let again = fx.ingest_with_worker_against("dovidky/umovy.html", &new_worker, &bumped);
+    assert!(
+        matches!(again, Ingested::Unchanged { .. }),
+        "a finished rebuild must not repeat on every walk: {again:?}"
+    );
+}
+
+/// A path that comes to name a document **this** reader made is not rebuilt.
+///
+/// The reader on a `path` row describes the document that path *named*, which is
+/// not always the one just read: replace a file's bytes with content the index
+/// already holds, and the row still credits whatever made the document it used
+/// to point at. Read as a statement about the new document, that row makes a
+/// perfectly current reading look stale — `clear_document_content` and a full
+/// rewrite where the correct answer is that there is nothing to do, with every
+/// `chunk.id` moving out from under every citation into it, and under D29 the
+/// embeddings recomputed.
+///
+/// Narrow — it needs a duplicate already in the index — and one condition, the
+/// same one the branch below computes as `renaming`.
+///
+/// Both directions: the outcome is `AlreadyIndexed`, **and** the chunk ids of
+/// the document being pointed at are the ones it already had. Either alone is
+/// satisfied by a mistake — a pass that rebuilt and answered `AlreadyIndexed`
+/// would pass the first.
+#[cfg(unix)]
+#[test]
+fn a_path_that_comes_to_name_a_document_this_reader_made_is_not_rebuilt() {
+    let fx = Fixture::new();
+
+    // A markdown document, made by the reader its row credits.
+    fx.place_at(
+        "notes.md",
+        "# Заголовок\n\nОдин абзац.\n".as_bytes(),
+        mtime(),
+    );
+    assert!(matches!(fx.ingest("notes.md"), Ingested::Indexed { .. }));
+
+    // And an html document beside it, made by the html reader.
+    let html = b"<h1>invented html, never parsed</h1>\n".as_slice();
+    let dir = tempfile::tempdir().unwrap();
+    let worker = worker_answering_in(dir.path(), &html_frames(html, 2, 1));
+    fx.place_at("dovidky/umovy.html", html, mtime());
+    let Ingested::Indexed { document_id, .. } =
+        fx.ingest_with_worker_against("dovidky/umovy.html", &worker, &fx.manifest)
+    else {
+        panic!("expected the html document to index")
+    };
+    let ids_before = fx.chunk_ids(&document_id);
+    assert!(
+        !ids_before.is_empty(),
+        "the premise is chunks that can move"
+    );
+
+    // Now `notes.md` comes to hold those same bytes. Its row still says
+    // `markdown@1`; the reader that just ran is `html@1`; and the document it
+    // is coming to name was made by exactly that reader.
+    fx.place_at("notes.md", html, mtime_just_after());
+    let outcome = fx.ingest_with_worker_against("notes.md", &worker, &fx.manifest);
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the document under this path's new content was made by the reader that \
+         just ran, so there is nothing to replace: {outcome:?}"
+    );
+    assert_eq!(
+        fx.chunk_ids(&document_id),
+        ids_before,
+        "the document was rebuilt under new chunk ids, which invalidates every \
+         citation into it"
     );
 }
 
@@ -4112,14 +4302,56 @@ fn content_that_comes_back_finds_no_checkpoint_waiting_for_it() {
 /// them into the script, so nothing inside them is expanded by the shell.
 #[cfg(unix)]
 fn worker_answering(fx: &Fixture, frames: &[Frame]) -> PathBuf {
+    worker_answering_in(fx.root.parent().unwrap(), frames)
+}
+
+/// The same, in a directory the caller names — for the tests that need **two**
+/// stand-in workers alive at once.
+///
+/// `support::wrong_worker` always writes `<dir>/wrong-worker`, so two calls with
+/// the same directory are one file and the second call's frames replace the
+/// first's. Measured, after a review asked: two calls returned the same path,
+/// and reading the "first" worker got the second one's frames. The test that
+/// needs both — a document indexed by one build and re-read by another — was
+/// correct only because its statements happened to run in the order that hid
+/// it, which is not a property a test about two builds should have.
+#[cfg(unix)]
+fn worker_answering_in(dir: &Path, frames: &[Frame]) -> PathBuf {
     let lines: String = frames
         .iter()
         .map(|frame| to_line(frame).expect("a frame serialises"))
         .collect();
-    support::wrong_worker(
-        fx.root.parent().unwrap(),
-        &format!("cat <<'MNEMA_FRAMES'\n{lines}MNEMA_FRAMES"),
-    )
+    support::wrong_worker(dir, &format!("cat <<'MNEMA_FRAMES'\n{lines}MNEMA_FRAMES"))
+}
+
+/// What an html reader sends for a document of `pages` sections.
+///
+/// `reader_version` is a parameter because the tests that use this are about a
+/// release boundary: the same bytes, read by two builds that say so.
+#[cfg(unix)]
+fn html_frames(bytes: &[u8], pages: u32, reader_version: u32) -> Vec<Frame> {
+    let mut frames = vec![Frame::Header {
+        sha256: sha256_of(bytes),
+        mime: "text/html".to_string(),
+        source_kind: SourceKind::Document,
+        reader: "html".to_string(),
+        reader_version,
+        pages,
+    }];
+    for page_no in 1..=pages {
+        frames.push(Frame::Page {
+            page_no,
+            section_title: Some(format!("Розділ {page_no}")),
+        });
+        frames.push(Frame::Block(unlined_block(&format!(
+            "Комісія розглянула звернення, розділ {page_no}."
+        ))));
+    }
+    frames.push(Frame::Summary {
+        skipped_pages: Vec::new(),
+        text_source: "native:html".to_string(),
+    });
+    frames
 }
 
 /// What a PDF reader sends for a document whose pages `sent` carried a text
@@ -4269,13 +4501,17 @@ fn a_pdf_chunk_cites_its_page_not_nothing() {
 /// The whole chain for HTML, with the real worker: bytes on disk to a citation.
 ///
 /// Spec §6 invariant 1 asks every format for a non-empty coordinate, and the two
-/// ends of this one are joined only by a string — `manifest::READER_HTML` on the
-/// worker's side, the literal `"html"` in `pages_of` on the parent's, with a
-/// process boundary and D40 between them. Every other test of this format stands
-/// on one side or the other: `mnema-extract/tests/html.rs` on the reader,
-/// `worker_cli.rs` on the frames it sends, and the loop below on `pages_of` with
-/// a scripted worker. This is the one that runs the real binary over a real file
-/// and reads the citation back out of the database.
+/// ends of this one are joined only by a string on a wire: `manifest::READER_HTML`
+/// written by the worker, and the same constant matched by `pages_of`
+/// (`crates/mnema-ingest/src/lib.rs:33` imports it, `:1333` matches it) — one
+/// symbol, with a process boundary and D40 between the two ends rather than a
+/// compiler. **Not** a literal on the parent's side, which an earlier version of
+/// this comment claimed: what can still put a different string on the wire is a
+/// different build of the worker, not a typo. Every other test of this format
+/// stands on one side or the other — `mnema-extract/tests/html.rs` on the
+/// reader, `worker_cli.rs` on the frames it sends, and the loop below on
+/// `pages_of` with a scripted worker. This is the one that runs the real binary
+/// over a real file and reads the citation back out of the database.
 ///
 /// Both directions, and the second is the defect this format had: the section is
 /// named **and** the stylesheet is not searchable.
