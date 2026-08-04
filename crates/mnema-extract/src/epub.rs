@@ -187,9 +187,32 @@ fn extract(bytes: &[u8], budget: usize) -> Result<EpubBook, EpubError> {
     // already allocated what it is measuring.
     let mut budget = budget;
 
-    // `text::decode`, the crate's one guess, for these two XML documents as well
-    // as for prose — and that is measured rather than obvious. The note above
-    // `resolve` has the table and the rule it overturned.
+    // **`text::decode` — the crate's one guess — for these two XML documents as
+    // well as for prose, and that is a correction to what this file did first.**
+    //
+    // The argument for decoding structure strictly as UTF-8 is a good one on
+    // paper: XML states its encoding rather than leaving it to be guessed, EPUB
+    // narrows it to UTF-8 or UTF-16, and a mis-guessed package document is a
+    // Cyrillic href turned into mojibake, a member name matching nothing, and
+    // every chapter of the book silently skipped. It was written that way, and
+    // then measured, and the measurement went the other way:
+    //
+    //   package document                        chardetng   strict UTF-8
+    //   UTF-8, one Cyrillic letter in one href  correct     correct
+    //   UTF-8, minimal, two Cyrillic letters    correct     correct
+    //   windows-1251, long                      correct     mojibake
+    //   windows-1251, minimal                   mojibake    mojibake
+    //
+    // The case the strict rule was written for — a short, mostly-ASCII document
+    // where a detector has little to go on — does not exist: chardetng answered
+    // UTF-8 for every UTF-8 fixture including the shortest. What does exist is
+    // the row under it: EPUB forbids a windows-1251 package document and
+    // producers have shipped them, and there the guess is right where the
+    // standard is not. Strict decoding is never better and sometimes worse, so
+    // the crate keeps one decoder — which is also `text.rs`'s own promise, that
+    // the same bytes are read the same way whichever reader opens them.
+    // `a_package_document_in_a_legacy_encoding_is_still_read` holds the bottom
+    // two rows; mutation C33 puts the strict rule back and reddens it.
     let container = read_structure(bytes, CONTAINER_PATH, &mut budget)?;
     let opf_path = rootfile_path(&crate::text::decode(&container))?;
     let opf = read_structure(bytes, &opf_path, &mut budget)?;
@@ -221,10 +244,12 @@ fn extract(bytes: &[u8], budget: usize) -> Result<EpubBook, EpubError> {
         // back, and it has to mean the same thing in both lists.
         let page_no = index as u32 + 1;
 
-        let Some(item) = package.items.get(idref) else {
-            // A spine entry naming a manifest id that is not in the manifest.
-            // Invalid per the standard and survivable: the rest of the book is
-            // still a book.
+        // Two ways to be here and one answer: a spine entry that names an id
+        // the manifest does not declare, and one that names no id this reader
+        // could read at all (`<itemref/>`, or an `idref` holding an entity no
+        // package document declares). Both are invalid and both are survivable
+        // — what must not happen is that either leaves no number behind.
+        let Some(item) = idref.as_ref().and_then(|idref| package.items.get(idref)) else {
             skipped.push(page_no);
             continue;
         };
@@ -326,36 +351,31 @@ fn read_structure(bytes: &[u8], path: &str, budget: &mut usize) -> Result<Vec<u8
 fn read_member(bytes: &[u8], path: &str, budget: &mut usize) -> Result<Vec<u8>, ZipPartError> {
     let cap = MEMBER_MAX_BYTES.min(*budget);
     let member = zip_part::read_member(bytes, path, cap)?;
-    *budget -= member.len();
+    // **The invariant, written down: `member.len() <= cap <= *budget`.** The
+    // first half is `zip_part::read_member`'s — it returns `Ok` only when what
+    // came out of the stream is at most `cap` (`zip_part.rs`) — and the second
+    // is the line above. So the subtraction cannot go below zero today, and it
+    // holds across two files, which is exactly the kind of invariant an edit
+    // separates without noticing.
+    //
+    // `saturating_sub` rather than `-=` for what the failure would look like,
+    // not for whether it can happen: a plain `-=` panics in the worker under
+    // debug and, under release, wraps to something near `usize::MAX`, after
+    // which the book's budget silently stops bounding anything — the one
+    // outcome this cap exists to prevent, arriving through the cap itself.
+    // Saturating to zero fails the other way: every later member gets a cap of
+    // zero and the book is refused, loudly and wrongly, instead of read
+    // without a limit.
+    //
+    // **Deliberately not `checked_sub` with an early `TooLarge`.** That would
+    // enforce the budget a second time, on its own, and mutation C17 — which
+    // takes `*budget` out of `cap` — would then still be refused by this line
+    // and stop reddening. A second enforcement path that hides the guard on the
+    // first is worse than no second path.
+    *budget = budget.saturating_sub(member.len());
     Ok(member)
 }
 
-/// The structure documents are decoded by [`crate::text::decode`], the same
-/// guess every prose reader in this crate uses — **and that is a correction to
-/// what this file said first.**
-///
-/// The argument for decoding them strictly as UTF-8 instead is a good one on
-/// paper: XML states its encoding rather than leaving it to be guessed, EPUB
-/// narrows it to UTF-8 or UTF-16, and a mis-guessed package document is a
-/// Cyrillic href turned into mojibake, a member name that matches nothing, and
-/// every chapter of the book silently skipped. It was written that way, and
-/// then measured, and the measurement went the other way:
-///
-/// | package document                       | chardetng | strict UTF-8 |
-/// |----------------------------------------|-----------|--------------|
-/// | UTF-8, one Cyrillic letter in one href | correct   | correct      |
-/// | UTF-8, minimal, two Cyrillic letters   | correct   | correct      |
-/// | windows-1251, long                     | correct   | mojibake     |
-/// | windows-1251, minimal                  | mojibake  | mojibake     |
-///
-/// The case the strict rule was written for — a short, mostly-ASCII document
-/// where a detector has little to go on — does not exist: chardetng answered
-/// UTF-8 for every UTF-8 fixture including the shortest. What does exist is the
-/// row underneath it: EPUB forbids a windows-1251 package document and
-/// producers have shipped them, and there the guess is right where the standard
-/// is not. Strict decoding is never better and sometimes worse, so the crate
-/// keeps one decoder — which is also the promise `text.rs` makes, that the same
-/// bytes are read the same way whichever reader opens them.
 /// One attribute's value, with the escapes XML defines already undone.
 ///
 /// `&amp;` in an href is `&` in the member's name, and a book whose chapter is
@@ -436,7 +456,11 @@ struct Item {
 /// files are, and in what order they are read.
 struct Package {
     items: HashMap<String, Item>,
-    spine: Vec<String>,
+    /// One entry per `<itemref>` the package document declares, in order —
+    /// `None` for one that names no id this reader can use. The length is what
+    /// numbers the chapters, so an entry dropped here is a chapter that leaves
+    /// no number behind and moves every later one down.
+    spine: Vec<Option<String>>,
 }
 
 /// Reads the manifest and the spine out of the package document.
@@ -448,7 +472,7 @@ struct Package {
 fn parse_package(opf: &str) -> Result<Package, EpubError> {
     let mut reader = quick_xml::Reader::from_str(opf);
     let mut items: HashMap<String, Item> = HashMap::new();
-    let mut spine: Vec<String> = Vec::new();
+    let mut spine: Vec<Option<String>> = Vec::new();
     let mut in_manifest = false;
     let mut in_spine = false;
 
@@ -475,17 +499,43 @@ fn parse_package(opf: &str) -> Result<Package, EpubError> {
                             }
                         }
                         if let (Some(id), Some(href)) = (id, href) {
-                            items.insert(id, Item { href, media_type });
+                            // **First declaration wins, and this is the one
+                            // broken package document in this file whose cost
+                            // is not a skip.** A manifest that declares an id
+                            // twice has two readable chapters competing for one
+                            // spine entry, so whichever loses is a chapter
+                            // whose text is silently replaced by another's
+                            // under a number that names neither. `insert` took
+                            // the last, which is "whichever the producer wrote
+                            // second" — not a rule anyone can reason about. An
+                            // XML id binds at its first declaration and a
+                            // second is the error, so that is the answer.
+                            items.entry(id).or_insert(Item { href, media_type });
                         }
                     }
+                    // **Every `<itemref>` is a spine entry, including one this
+                    // reader cannot use.** Pushing only the ones that name a
+                    // usable id is how a declared chapter leaves no trace at
+                    // all: no page, no number in `skipped`, and every later
+                    // chapter moved down one to cover the hole. Measured — an
+                    // `<itemref/>` between two chapters gave `page_no [1, 2]`
+                    // and an empty `skipped`, so the book's third chapter came
+                    // back as its second.
+                    //
+                    // `None` rather than an empty string, and the difference is
+                    // not tidiness. `items` is keyed on whatever the manifest
+                    // declared, and a manifest may declare `id=""`; an empty
+                    // string here would then *match* it, and the entry that
+                    // names no chapter would be read as that one — the wrong
+                    // chapter's text under this chapter's number, which is the
+                    // one outcome worse than a skip.
                     b"itemref" if in_spine => {
-                        for attribute in e.attributes().flatten() {
-                            if attribute.key.local_name().as_ref() == b"idref"
-                                && let Some(value) = attribute_value(&attribute)
-                            {
-                                spine.push(value);
-                            }
-                        }
+                        let idref = e.attributes().flatten().find_map(|attribute| {
+                            (attribute.key.local_name().as_ref() == b"idref")
+                                .then(|| attribute_value(&attribute))
+                                .flatten()
+                        });
+                        spine.push(idref);
                     }
                     _ => {}
                 }
@@ -736,7 +786,8 @@ mod tests {
         );
     }
 
-    /// A colon inside a filename is not a URL scheme, and a URL scheme is.
+    /// An incomplete or malformed escape is the literal `%` it is, rather than
+    /// a dropped character: `100%.xhtml` is a name a zip can hold.
     /// An incomplete escape is the literal `%` it is, rather than a dropped
     /// character: `100%.xhtml` is a name a zip can hold.
     #[test]

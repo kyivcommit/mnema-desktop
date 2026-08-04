@@ -223,15 +223,26 @@ fn read(bytes: &[u8], head_title: HeadTitle) -> Vec<HtmlPage> {
                             // [`renders_a_box`] for why it is the only one of
                             // the seven that does this.
                             //
-                            // A head title flushes for a different reason: what
+                            // **On a line of its own, and it has to stay on
+                            // one.** Folding this into the head-title branch
+                            // below cost `scripts/mutations/task-10.sh`'s C31
+                            // its anchor once already: the case names this
+                            // condition, the reasons are unrelated, and the two
+                            // are never true together (`iframe` is not
+                            // `title`). Keeping them apart is what lets the
+                            // guard for the defect above go on measuring it.
+                            if renders_a_box(element) {
+                                flush(&mut run, &flow, &mut pages);
+                            }
+                            // A head title flushes for its own reason: what
                             // follows it opens a page, and a run left pending
                             // here would be flushed into that new page instead
                             // of the one it belongs to.
-                            if renders_a_box(element) || head_matter {
+                            if head_matter {
                                 flush(&mut run, &flow, &mut pages);
-                            }
-                            if head_matter && let Some(title) = section_title(node) {
-                                open_page(&mut pages, title);
+                                if let Some(title) = section_title(node) {
+                                    open_page(&mut pages, title);
+                                }
                             }
                             skipping = 1;
                             continue;

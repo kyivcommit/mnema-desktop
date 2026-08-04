@@ -372,9 +372,18 @@ case_ "reader: the text is normalised after the parse, not before it" \
 # C31. The run not ended at an element that draws a box. `<iframe>` was skipped
 # without flushing, so `<p>перед<iframe></iframe>після</p>` was stored as
 # `передпісля` — a word in no file, findable by neither half.
+#
+# **The condition is matched loosely on purpose, and that is a repair.** This
+# case was anchored on the exact text `if renders_a_box(element) {`, and task 11
+# widened that line to `|| head_matter` — the substitution then matched nothing,
+# the case reported BROKEN, and this gate exited 1 while every test stayed green.
+# Anchoring on code rather than on the comment beside it was necessary and not
+# sufficient: what makes an anchor durable is naming the thing the change cannot
+# move. `renders_a_box(element)` is that thing; whatever else the condition
+# grows, this still finds it.
 case_ "reader: a box on the page ends the run around it" \
   crates/mnema-extract/src/html.rs \
-  's{                            if renders_a_box\(element\) \{\n                                flush\(&mut run, &flow, &mut pages\);\n                            \}}{                            /* the box does not end the run */}' \
+  's{if renders_a_box\(element\)[^\{]*\{\n\s*flush\(&mut run, &flow, &mut pages\);\n\s*\}}{/* the box does not end the run */}' \
   '/* the box does not end the run */' \
   mnema-extract 'a_box_on_the_page_ends_a_run_and_something_invisible_does_not' --test html
 

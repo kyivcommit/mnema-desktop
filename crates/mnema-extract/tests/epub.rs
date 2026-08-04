@@ -1099,7 +1099,8 @@ fn a_manifest_entry_that_states_no_media_type_is_still_read() {
 /// href here into replacement characters, matches no member, skips every
 /// chapter and refuses the book as having no text in it. `text::decode`'s guess
 /// reads it. Measured both ways before the choice was made; the table is in
-/// `epub.rs`, above `resolve`'s decoder note.
+/// `epub.rs`, at the two `text::decode` calls inside `extract` — where the
+/// decision is taken rather than beside some other function.
 ///
 /// The href is written unencoded, which is also what such producers do.
 #[test]
@@ -1221,4 +1222,215 @@ fn a_chapters_name_is_bounded_by_the_rule_every_reader_shares() {
             .as_deref(),
         Some("Коротко")
     );
+}
+
+/// **A spine entry this reader cannot use is still a spine entry.**
+///
+/// An `<itemref>` with no `idref` at all, and one whose `idref` is an entity no
+/// package document declares, are both invalid — and both are *declared*
+/// chapters. Dropping them while parsing takes them outside the partition
+/// `every_entry_of_the_spine_is_either_read_or_named` checks, which divides the
+/// spine this reader *built*, not the one the book states: what the parser threw
+/// away cannot fail that test by construction. The cost is not a missing page,
+/// it is a renumbering — every later chapter moves down one, and the journal
+/// says nothing.
+///
+/// The neighbouring case is the one to compare against. An `<item>` with no
+/// `href` is dropped too, but the spine still names its id, so `items.get`
+/// misses and the chapter gets a number. One half degraded to "skipped" and the
+/// other to "gone" for the same class of broken package document.
+#[test]
+fn a_spine_entry_with_no_usable_idref_is_named_rather_than_dropped() {
+    for (label, itemref) in [
+        ("no idref attribute at all", "<itemref/>"),
+        (
+            "an idref no package document declares",
+            "<itemref idref=\"&undeclared;\"/>",
+        ),
+        ("an empty idref", "<itemref idref=\"\"/>"),
+        (
+            "an idref naming nothing in the manifest",
+            "<itemref idref=\"nosuch\"/>",
+        ),
+    ] {
+        let opf = format!(
+            "<package xmlns=\"http://www.idpf.org/2007/opf\"><manifest>\
+             <item id=\"c1\" href=\"ch1.xhtml\" media-type=\"application/xhtml+xml\"/>\
+             <item id=\"c3\" href=\"ch3.xhtml\" media-type=\"application/xhtml+xml\"/>\
+             </manifest><spine><itemref idref=\"c1\"/>{itemref}<itemref idref=\"c3\"/></spine></package>"
+        );
+        let bytes = zip_with(&[
+            (
+                "META-INF/container.xml".to_string(),
+                b"<container xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\
+                  <rootfiles><rootfile full-path=\"content.opf\" \
+                  media-type=\"application/oebps-package+xml\"/></rootfiles></container>"
+                    .to_vec(),
+            ),
+            ("content.opf".to_string(), opf.into_bytes()),
+            (
+                "ch1.xhtml".to_string(),
+                xhtml("Перший", "<p>Перший розділ.</p>").into_bytes(),
+            ),
+            (
+                "ch3.xhtml".to_string(),
+                xhtml("Третій", "<p>Третій розділ.</p>").into_bytes(),
+            ),
+        ]);
+
+        let book = extract_epub(&bytes).unwrap();
+        // The middle entry is unusable, so it is named — and the third chapter
+        // keeps the number the book gives it rather than moving into the hole.
+        assert_eq!(book.skipped, vec![2], "{label}");
+        assert_eq!(
+            book.chapters.iter().map(|c| c.page_no).collect::<Vec<_>>(),
+            vec![1, 3],
+            "{label}"
+        );
+        // And the text is the two real chapters, in order: a renumbering would
+        // satisfy nothing here, but a reader that dropped the wrong entry would.
+        assert_eq!(
+            texts(&book),
+            vec!["Перший розділ.", "Третій розділ."],
+            "{label}"
+        );
+    }
+}
+
+/// An XML escape in an href is a character in the member's name.
+///
+/// `Q&A.xhtml` is a filename a zip can hold and a package document cannot write
+/// literally — `&` opens an entity reference, so every producer writes
+/// `Q&amp;A.xhtml`. Every other transformation between an href and a member name
+/// has a test; this one is the last that did not.
+#[test]
+fn an_xml_escape_in_an_href_is_a_character_in_the_member_name() {
+    let bytes = epub(
+        "content.opf",
+        &[Item {
+            id: "c1".to_string(),
+            href: "Q&amp;A.xhtml".to_string(),
+            media_type: Some("application/xhtml+xml".to_string()),
+            member: Some((
+                "Q&A.xhtml".to_string(),
+                xhtml("Питання", "<p>Знайдено за розкодованим амперсандом.</p>").into_bytes(),
+            )),
+        }],
+        &["c1"],
+    );
+    let book = extract_epub(&bytes).unwrap();
+    assert_eq!(texts(&book), vec!["Знайдено за розкодованим амперсандом."]);
+    assert!(book.skipped.is_empty(), "{:?}", book.skipped);
+}
+
+/// The media type is read as a media type, not compared as a string.
+///
+/// Both of these are ordinary in a real package document and both would, read
+/// literally, fail to match `application/xhtml+xml` — and narrowing here does
+/// not cost one chapter, it costs **every** chapter of the book, which arrives
+/// at the user as `no_text_layer` on a book full of text.
+#[test]
+fn a_media_type_with_a_parameter_or_odd_case_is_still_a_content_document() {
+    for media_type in [
+        "application/xhtml+xml",
+        "application/xhtml+xml; charset=utf-8",
+        "APPLICATION/XHTML+XML",
+        "  text/html ; charset=windows-1251",
+    ] {
+        let bytes = epub(
+            "content.opf",
+            &[Item {
+                id: "c1".to_string(),
+                href: "ch1.xhtml".to_string(),
+                media_type: Some(media_type.to_string()),
+                member: Some((
+                    "ch1.xhtml".to_string(),
+                    xhtml("Розділ", "<p>Це розділ.</p>").into_bytes(),
+                )),
+            }],
+            &["c1"],
+        );
+        let book = extract_epub(&bytes).expect(media_type);
+        assert_eq!(texts(&book), vec!["Це розділ."], "{media_type}");
+    }
+
+    // The other direction, so that a reader answering "yes" to everything could
+    // not pass: a picture is still not a content document, parameter and all.
+    let bytes = epub(
+        "content.opf",
+        &[Item {
+            id: "plate".to_string(),
+            href: "plate.svg".to_string(),
+            media_type: Some("IMAGE/SVG+XML; charset=utf-8".to_string()),
+            member: Some((
+                "plate.svg".to_string(),
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>Мапа</text></svg>"
+                    .as_bytes()
+                    .to_vec(),
+            )),
+        }],
+        &["plate"],
+    );
+    assert!(matches!(
+        extract_epub(&bytes),
+        Err(EpubError::NoReadableChapter)
+    ));
+}
+
+/// A chapter's name is normalised on the same pass its text is, and XHTML is
+/// where that matters: these producers write `&#1080;&#774;` rather than the
+/// characters themselves, so a title normalised over the *source* would compose
+/// nothing at all and a page named `и\u{306}од` would not answer a query typed
+/// `йод`. Task 10 asserts this for an HTML heading; a book's titles arrive by a
+/// different route and are asserted here.
+#[test]
+fn a_chapter_name_from_a_character_reference_is_composed_too() {
+    let bytes = epub(
+        "content.opf",
+        &[chapter(
+            "c1",
+            "ch1.xhtml",
+            &xhtml("&#1080;&#774;од", "<p>текст</p>"),
+        )],
+        &["c1"],
+    );
+    let book = extract_epub(&bytes).unwrap();
+    assert_eq!(book.chapters[0].section_title.as_deref(), Some("йод"));
+}
+
+/// A manifest that declares one id twice binds the **first** of them.
+///
+/// Invalid per the standard, and the one kind of broken package document in
+/// this file whose cost is not a skip: both entries are readable, so whichever
+/// loses is a chapter whose text is silently replaced by another chapter's
+/// under a number that names neither. First wins because that is what an XML id
+/// means — the first declaration is the binding one and a second is the error —
+/// and because the alternative is "whichever the producer wrote last", which is
+/// not a rule anyone can reason about.
+#[test]
+fn a_duplicate_manifest_id_binds_the_first_declaration() {
+    let opf = "<package xmlns=\"http://www.idpf.org/2007/opf\"><manifest>\
+               <item id=\"c1\" href=\"first.xhtml\" media-type=\"application/xhtml+xml\"/>\
+               <item id=\"c1\" href=\"second.xhtml\" media-type=\"application/xhtml+xml\"/>\
+               </manifest><spine><itemref idref=\"c1\"/></spine></package>";
+    let bytes = zip_with(&[
+        (
+            "META-INF/container.xml".to_string(),
+            b"<container xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\
+              <rootfiles><rootfile full-path=\"content.opf\" \
+              media-type=\"application/oebps-package+xml\"/></rootfiles></container>"
+                .to_vec(),
+        ),
+        ("content.opf".to_string(), opf.as_bytes().to_vec()),
+        (
+            "first.xhtml".to_string(),
+            xhtml("Перший", "<p>Перший оголошений.</p>").into_bytes(),
+        ),
+        (
+            "second.xhtml".to_string(),
+            xhtml("Другий", "<p>Другий оголошений.</p>").into_bytes(),
+        ),
+    ]);
+    let book = extract_epub(&bytes).unwrap();
+    assert_eq!(texts(&book), vec!["Перший оголошений."]);
 }

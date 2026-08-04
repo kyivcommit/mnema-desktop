@@ -213,8 +213,10 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
     )
     .unwrap();
 
-    // A zip carrying the `mimetype` entry `is_epub` requires and nothing that
-    // makes it a book — no container, so no spine, so nothing to read.
+    // A book whose package document declares an empty spine: the container and
+    // the package document are both there, and neither names a chapter. The
+    // refusal comes from the empty-spine check, not from a missing container —
+    // `epub_bytes(&[])` writes both structure members.
     let not_a_book = dir.path().join("nedokniga.epub");
     std::fs::write(&not_a_book, epub_bytes(&[])).unwrap();
 
@@ -1089,8 +1091,12 @@ fn a_book_with_no_readable_chapter_is_refused_by_content_rather_than_as_unsuppor
     else {
         panic!("expected Refused, got {:?}", frames[0]);
     };
+    // `no_text_layer`, and the name of this test is the claim: not
+    // `unsupported`, which is what an EPUB got before this branch existed and
+    // which promises a reader that is still coming. Asserting both would be one
+    // assertion — `assert_ne!` against a different string cannot fail once the
+    // line above has passed.
     assert_eq!(rule, "no_text_layer");
-    assert_ne!(rule, "unsupported");
     // The digest of the bytes this verdict was reached on: the file *was* read,
     // unlike the `too_large` branch that decides from `stat`, so the parent can
     // tell whether the file changed or only the rule did.

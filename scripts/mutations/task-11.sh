@@ -165,7 +165,7 @@ case_ "reader: a chapter's tab label is not its text" \
 # spec §6, invariant 1.
 case_ "reader: a chapter's title still names it" \
   crates/mnema-extract/src/html.rs \
-  's{                            if head_matter && let Some\(title\) = section_title\(node\) \{\n                                open_page\(&mut pages, title\);\n                            \}}{                            /* the title names nothing */}' \
+  's{                                if let Some\(title\) = section_title\(node\) \{\n                                    open_page\(&mut pages, title\);\n                                \}}{                                /* the title names nothing */}' \
   '/* the title names nothing */' \
   mnema-extract 'a_chapters_title_names_it_without_being_its_text' --test epub
 
@@ -400,3 +400,57 @@ case_ "worker: an epub refused after being read carries the digest it was read o
   'reason: "a member of this EPUB inflates past the cap on one member".to_string(),
                 sha256: None,' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
+
+# ------------------------------- fix round 1: what the review's own runs found
+
+# C38. **A spine entry this reader cannot use, dropped instead of numbered.**
+# Measured by the review, not inferred: an `<itemref/>` between two chapters gave
+# `page_no [1, 2]` and an empty `skipped`, so the book's third chapter came back
+# as its second. It slips past `every_entry_of_the_spine_is_either_read_or_named`
+# by construction — that test partitions the spine this reader *built*, and what
+# the parser threw away was never in it.
+case_ "reader: an itemref with no usable idref is still a spine entry" \
+  crates/mnema-extract/src/epub.rs \
+  's{                        spine\.push\(idref\);}{                        if let Some(idref) = idref \{ spine.push(Some(idref)); \}}' \
+  'if let Some(idref) = idref { spine.push(Some(idref)); }' \
+  mnema-extract 'a_spine_entry_with_no_usable_idref_is_named_rather_than_dropped' --test epub
+
+# C39. XML escapes left in an href. `Q&A.xhtml` is a name a zip holds and a
+# package document cannot write literally, so every producer writes
+# `Q&amp;A.xhtml`; read raw, that chapter is looked for under a name with five
+# extra characters in it and is skipped.
+case_ "reader: an xml escape in an href is a character in the member name" \
+  crates/mnema-extract/src/epub.rs \
+  's{        \.normalized_value\(quick_xml::XmlVersion::Implicit1_0\)\n        \.ok\(\)\n        \.map\(\|value\| value\.into_owned\(\)\)}{        .value\n        .iter()\n        .map(|b| *b as char)\n        .collect::<String>()\n        .into()}' \
+  '.map(|b| *b as char)' \
+  mnema-extract 'an_xml_escape_in_an_href_is_a_character_in_the_member_name' --test epub
+
+# C40. The media type compared as a string instead of read as one.
+# `text/html; charset=utf-8` in a spine is ordinary, and narrowing here does not
+# cost a chapter — it costs every chapter of the book, which reaches the user as
+# `no_text_layer` on a book full of text.
+case_ "reader: a media type is read as one, not compared as a string" \
+  crates/mnema-extract/src/epub.rs \
+  's{    let bare = media_type\n        \.split\('"'"';'"'"'\)\n        \.next\(\)\n        \.unwrap_or\(""\)\n        \.trim\(\)\n        \.to_ascii_lowercase\(\);}{    let bare = media_type.to_string();}' \
+  'let bare = media_type.to_string();' \
+  mnema-extract 'a_media_type_with_a_parameter_or_odd_case_is_still_a_content_document' --test epub
+
+# C41. NFC dropped from the section title specifically — a different line from
+# C35, which normalises a *block*. XHTML producers write `&#1080;&#774;` rather
+# than the characters, so a chapter named `и\u{306}од` answers no query typed
+# `йод`, and no offset is ever measured into a title to make that recoverable.
+case_ "reader: a chapter's name is normalised, not only its blocks" \
+  crates/mnema-extract/src/html.rs \
+  's{    bound_section_title\(nfc::normalise\(&words\.join\(" "\)\)\.into_owned\(\)\)}{    bound_section_title(words.join(" "))}' \
+  'bound_section_title(words.join(" "))' \
+  mnema-extract 'a_chapter_name_from_a_character_reference_is_composed_too' --test epub
+
+# C42. A duplicate manifest id bound to the last declaration rather than the
+# first. The one broken package document here whose cost is not a skip: two
+# readable chapters compete for one spine entry, and the loser is a chapter
+# whose text is silently replaced by another's under a number naming neither.
+case_ "reader: a duplicate manifest id binds the first declaration" \
+  crates/mnema-extract/src/epub.rs \
+  's{                            items\.entry\(id\)\.or_insert\(Item \{ href, media_type \}\);}{                            items.insert(id, Item \{ href, media_type \});}' \
+  'items.insert(id, Item { href, media_type });' \
+  mnema-extract 'a_duplicate_manifest_id_binds_the_first_declaration' --test epub
