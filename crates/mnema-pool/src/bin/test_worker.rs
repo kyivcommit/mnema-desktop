@@ -174,6 +174,27 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 sha256: None,
             },
         ),
+        // The reader opened the file, it is the format it claims, and it could
+        // not be finished. Distinct from `"unsupported"` on the wire because it
+        // is a distinct answer to the user: no release is coming to read this
+        // file, the file itself is broken.
+        "damaged" => write_frame(
+            stdout,
+            &Frame::Refused {
+                rule: "malformed".to_string(),
+                reason: format!("{rest} ends mid-object"),
+                sha256: None,
+            },
+        ),
+        // The other half of that pair: whole file, right reader, missing key.
+        "locked" => write_frame(
+            stdout,
+            &Frame::Refused {
+                rule: "encrypted".to_string(),
+                reason: format!("{rest} is password-protected"),
+                sha256: None,
+            },
+        ),
         // A refusal under a rule this pool has never heard of, which is what a
         // worker from another release looks like.
         //

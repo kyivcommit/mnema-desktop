@@ -330,6 +330,58 @@ fn a_file_over_the_ceiling_is_named_apart_from_a_format_with_no_reader() {
     assert_eq!(unsupported.failure, Failure::Unsupported);
 }
 
+/// The two rules a reader that can fail *part-way* needs, driven across the
+/// wire the way `a_refusal_by_content_crosses_the_wire` drives `"not_text"` —
+/// and for a sharper reason than that one had.
+///
+/// Nothing in this build sends either string yet. The first reader that meets a
+/// truncated document or a password-protected one will, and frame parsing is
+/// strict: a pool that does not know the word answers `PoolError::Protocol` and
+/// **stops the whole job**, on a file that should have been one skipped row.
+/// That failure would read as a mismatched worker binary rather than as a
+/// missing match arm, which is the most expensive way for this to be wrong.
+///
+/// `From<Failure>` is asserted here as well as in
+/// `every_failure_maps_onto_its_own_skip_rule` because the two answer different
+/// questions: that one asks whether every failure has a rule, this one asks
+/// whether the *string a worker actually sends* reaches that rule. The mapping
+/// can be right and the parse arm missing.
+#[test]
+fn a_damaged_file_and_a_locked_one_cross_the_wire_apart() {
+    let _watchdog = Watchdog::new("malformed and encrypted", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let damaged = skip(extract(&pool, "damaged:zvit.pdf").unwrap());
+    assert_eq!(damaged.failure, Failure::Malformed);
+    assert_eq!(SkipRule::from(damaged.failure), SkipRule::Malformed);
+    // The worker's own wording, absent from the request this pool sent, so its
+    // presence proves the answer came back over the wire rather than being
+    // invented locally — the same guard `a_refusal_by_content_crosses_the_wire`
+    // uses, and for the same reason.
+    assert!(
+        damaged.reason.contains("ends mid-object"),
+        "the worker's own words must survive into the journal: {}",
+        damaged.reason
+    );
+
+    let locked = skip(extract(&pool, "locked:vidomist.pdf").unwrap());
+    assert_eq!(locked.failure, Failure::Encrypted);
+    assert_eq!(SkipRule::from(locked.failure), SkipRule::Encrypted);
+    assert!(
+        locked.reason.contains("password-protected"),
+        "the worker's own words must survive into the journal: {}",
+        locked.reason
+    );
+
+    // Both directions of the split, because a single-sided assertion here is
+    // satisfied by an arm that maps every unknown-ish rule onto one failure.
+    assert_ne!(
+        damaged.failure, locked.failure,
+        "damage and a password must not collapse onto one failure — the journal \
+         is the only place a user can be told which of the two their file is"
+    );
+}
+
 #[test]
 fn a_pool_with_no_workers_and_a_batch_of_none_are_both_refused_at_construction() {
     // Not pedantry about zero. A pool with no slots would block its first
