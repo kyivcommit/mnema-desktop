@@ -38,6 +38,11 @@ fn open_index() -> (tempfile::TempDir, Db) {
 /// of step from the second document onward, which is what makes a wrong join
 /// key visible at all.
 fn write_document(db: &Db, id: &str, text: &str) -> i64 {
+    write_document_of(db, id, &[text])[0]
+}
+
+/// The same, for a document of several chunks.
+fn write_document_of(db: &Db, id: &str, texts: &[&str]) -> Vec<i64> {
     let doc = db
         .insert_document(id, "text/plain", 1, SourceKind::Document)
         .unwrap();
@@ -54,35 +59,41 @@ fn write_document(db: &Db, id: &str, text: &str) -> i64 {
         },
     )
     .unwrap();
-    let block = db
-        .insert_block(
-            page,
-            &Block {
-                block_type: BlockType::Paragraph,
-                reading_order: 1,
-                language: None,
-                text: text.to_string(),
-                line_start: None,
-                line_end: None,
-            },
-        )
-        .unwrap();
-    db.insert_chunk(
-        &doc,
-        0,
-        text,
-        &Locator {
-            spans: vec![Segment {
-                block_id: block,
-                start: 0,
-                end: text.chars().count() as u32,
-                block_start: 0,
-            }],
-            coordinate: Coordinate::None,
-        },
-        SourceKind::Document,
-    )
-    .unwrap()
+    let mut ids = Vec::with_capacity(texts.len());
+    for (i, text) in texts.iter().enumerate() {
+        let block = db
+            .insert_block(
+                page,
+                &Block {
+                    block_type: BlockType::Paragraph,
+                    reading_order: i as i64 + 1,
+                    language: None,
+                    text: (*text).to_string(),
+                    line_start: None,
+                    line_end: None,
+                },
+            )
+            .unwrap();
+        ids.push(
+            db.insert_chunk(
+                &doc,
+                i as i64,
+                text,
+                &Locator {
+                    spans: vec![Segment {
+                        block_id: block,
+                        start: 0,
+                        end: text.chars().count() as u32,
+                        block_start: 0,
+                    }],
+                    coordinate: Coordinate::None,
+                },
+                SourceKind::Document,
+            )
+            .unwrap(),
+        );
+    }
+    ids
 }
 
 /// How many rows of the lexical index `term` matches, asked of `chunk_fts`
@@ -166,6 +177,71 @@ fn a_finished_document_is_found_while_another_is_being_written() {
         vec![settled_chunk],
         "the finished document must still be found, and the one being written \
          (chunk {writing_chunk}) must not be"
+    );
+}
+
+/// A document being written must not eat the limit on the way out.
+///
+/// The predicate is in the `WHERE` clause rather than applied to
+/// `search_lexical`'s result, and this is the difference between the two: SQL
+/// applies `WHERE` before `LIMIT`, so the limit counts hits a person can see.
+/// Filtering the returned ids in Rust instead reads as the same change and is
+/// not — the limit would then be spent on rows nobody is shown, and a document
+/// being rebuilt would push finished documents off the end of the results.
+///
+/// **The ranking is the whole fixture, and getting it wrong made this test
+/// green against the wrong implementation.** `rank` is bm25, which favours the
+/// short chunk, so a one-line finished document beats twenty-five mid-write ones
+/// and sits inside any limit either way — the first version of this test proved
+/// nothing, measured by rewriting `search_lexical` to filter its own results and
+/// watching it pass. So the finished document is the long one here: it ranks
+/// **below** all twenty-five, and a limit of five spent on rows nobody may be
+/// shown returns nothing at all about an index that holds the answer.
+#[test]
+fn a_document_being_written_does_not_spend_the_limit() {
+    let (_d, db) = open_index();
+    // One term each, so bm25 ranks these above anything longer.
+    let writing: Vec<String> = (0..25).map(|_| "Вільхівка".to_string()).collect();
+    let borrowed: Vec<&str> = writing.iter().map(String::as_str).collect();
+    write_document_of(&db, &"g".repeat(64), &borrowed);
+
+    let settled = "h".repeat(64);
+    let settled_chunk = write_document(
+        &db,
+        &settled,
+        "Кошторис ремонту доріг місцевого значення, складений управлінням \
+         земельних ресурсів за наслідками обстеження, у якому серед інших \
+         обстежених ділянок згадана Вільхівка",
+    );
+    db.set_document_status(&settled, DocumentStatus::Indexed)
+        .unwrap();
+
+    assert_eq!(
+        rows_in_the_lexical_index(&db, "вільхівка"),
+        26,
+        "twenty-five chunks mid-write and one finished, all carrying the word"
+    );
+    // The premise, and it is the half that was missing: the finished document is
+    // last of the twenty-six. Without this the fixture can drift back into one
+    // where the limit was never contended for.
+    let unfiltered: Vec<i64> = db
+        .conn()
+        .prepare("SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH '\"вільхівка\"' ORDER BY rank")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        unfiltered.last(),
+        Some(&settled_chunk),
+        "the finished chunk must rank last, or the limit below is not contended"
+    );
+
+    assert_eq!(
+        db.search_lexical("Вільхівка", 5).unwrap(),
+        vec![settled_chunk],
+        "the five slots belong to documents a person may be shown"
     );
 }
 
