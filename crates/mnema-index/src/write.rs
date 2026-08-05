@@ -479,10 +479,9 @@ impl Db {
     /// The same split, and for the same reason, as `insert_chunk` /
     /// `insert_chunk_in`: the atomicity of the pair is not weakened here, it is
     /// widened to the caller's transaction. `tx` must be a transaction on
-    /// **this** `Db`'s connection; nothing in the type system says so, and one
-    /// from another connection would deadlock against this one's write lock
-    /// rather than fail cleanly.
+    /// **this** `Db`'s connection, which [`same_connection`] is what enforces.
     pub fn clear_document_content_in(&self, tx: &Transaction<'_>, id: &str) -> Result<(), Error> {
+        same_connection(self, tx);
         tx.execute("DELETE FROM page WHERE document_id = ?1", params![id])?;
         crate::journal::write_document_status(tx, id, DocumentStatus::Pending)
     }
@@ -549,8 +548,7 @@ impl Db {
     ///
     /// `tx` must be a transaction on **this** `Db`'s connection. Nothing in the
     /// type system says so — `Transaction` borrows a `Connection`, not a `Db` —
-    /// and a transaction from another connection would deadlock against this
-    /// one's write lock rather than fail cleanly.
+    /// so [`same_connection`] says it at run time.
     pub fn insert_chunk_in(
         &self,
         tx: &Transaction<'_>,
@@ -560,6 +558,7 @@ impl Db {
         locator: &Locator,
         kind: SourceKind,
     ) -> Result<i64, Error> {
+        same_connection(self, tx);
         validate_locator(locator, text)?;
         let block_id = locator.spans[0].block_id;
         let span = serde_json::to_string(&locator.spans).map_err(Error::Json)?;
@@ -623,6 +622,44 @@ impl Db {
             relative_path: row.get(4)?,
         }))
     }
+}
+
+/// Panics unless `tx` is a transaction on `db`'s own connection.
+///
+/// The `_in` methods widen their atomicity to a transaction the caller opened,
+/// and that is only true of a transaction on **this** connection. `Transaction`
+/// borrows a `Connection`, not a `Db`, so the type system cannot say it — and
+/// the doc comments used to say the mistake was self-punishing: a foreign
+/// transaction "would deadlock against this one's write lock". **It does not.**
+/// Measured: `one.clear_document_content_in(&tx_of_two, id)` returns `Ok` in
+/// 407 µs, the foreign transaction commits, and the write lands. Nothing on
+/// `self` is touched, so there is nothing to block against.
+///
+/// What actually happens is worse than a deadlock, which is why this is a check
+/// and not a corrected sentence: the pair commits atomically with somebody
+/// else's unit of work. The caller's rollback silently takes these rows with
+/// it, or its commit silently keeps them — a document emptied without being
+/// taken out of the search, or the reverse. That is the split D61 exists to
+/// close, reached through a different door and just as quiet.
+///
+/// `assert!` rather than `debug_assert!`, deliberately. The comparison is one
+/// pointer against another next to a SQL statement, so its cost is not
+/// measurable; and what it prevents is silent in release, which is exactly
+/// where `debug_assert!` is compiled out. A programming error that panics is a
+/// bug report; the same error shipped is an index that answers with a document
+/// it should not, and nobody finds out.
+///
+/// Pointer equality is sound here rather than approximate: `Db::conn` returns
+/// `&self.conn`, and a transaction on it borrows that same field, so the
+/// addresses are equal exactly when the connection is the same one. Measured
+/// both ways — `true` for a transaction on this `Db`, `false` for one on
+/// another `Db` over the same file.
+fn same_connection(db: &Db, tx: &Transaction<'_>) {
+    assert!(
+        std::ptr::eq(db.conn(), &**tx),
+        "the transaction belongs to another connection: these writes would \
+         commit or roll back with somebody else's unit of work"
+    );
 }
 
 /// Refuses a locator whose spans are empty, out of order, overlapping, or

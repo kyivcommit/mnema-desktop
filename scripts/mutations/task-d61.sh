@@ -109,6 +109,32 @@ case_ "clear: emptying a document takes it out of the search" \
 # it: correct for the one caller it had, and leaving the state D61 abolishes —
 # content gone, status still `indexed` — one statement away for the next one.
 # The mutation is that exact shape, restored.
+# ------------------------------------ and the connection the pair commits on
+
+# `same_connection` replaced a doc comment that described a failure which does
+# not happen: a foreign transaction was said to deadlock, and it returns Ok in
+# 407 µs while the write commits with somebody else's unit of work. The check is
+# what makes the widened atomicity true, so it is mutated in both directions —
+# off, and inverted — and the inverted case is what says it does not simply fire
+# on everything, which would take the product's own rebuild down with it.
+case_ "connection: a foreign transaction is refused by the clear" \
+  crates/mnema-index/src/write.rs \
+  's{std::ptr::eq\(db\.conn\(\), &\*\*tx\)}{true /* connection check removed */}' \
+  'true /* connection check removed */' \
+  mnema-index 'a_transaction_from_another_connection::is_refused_by_clear_document_content_in' --test citation
+
+case_ "connection: a foreign transaction is refused by the chunk write" \
+  crates/mnema-index/src/write.rs \
+  's{std::ptr::eq\(db\.conn\(\), &\*\*tx\)}{true /* connection check removed */}' \
+  'true /* connection check removed */' \
+  mnema-index 'a_transaction_from_another_connection::is_refused_by_insert_chunk_in' --test citation
+
+case_ "connection: and this Db's own transaction is not" \
+  crates/mnema-index/src/write.rs \
+  's{std::ptr::eq\(db\.conn\(\), &\*\*tx\)}{!std::ptr::eq(db.conn(), &**tx)}' \
+  '!std::ptr::eq(db.conn(), &**tx)' \
+  mnema-index 'a_transaction_from_another_connection::but_this_db_s_own_transaction_goes_through' --test citation
+
 case_ "clear: the delete and the status are one write or neither" \
   crates/mnema-index/src/write.rs \
   's{self\.transaction\(\|tx\| self\.clear_document_content_in\(tx, id\)\)}{{ self.conn().execute("DELETE FROM page WHERE document_id = ?1", params![id])?; crate::journal::write_document_status(self.conn(), id, DocumentStatus::Pending) }}' \

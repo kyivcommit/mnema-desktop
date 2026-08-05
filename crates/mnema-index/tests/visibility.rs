@@ -259,10 +259,22 @@ fn a_document_being_written_does_not_spend_the_limit() {
 /// every search", and the size of that is the owner's to weigh, not something
 /// to be asserted once and forgotten.
 ///
-/// Both shapes, because they are not the same question. A selective query
-/// reaches the join with a handful of candidate rows; a broad one reaches it
-/// with every chunk in the index, which is the worst this predicate can cost
-/// and the one worth knowing.
+/// Three shapes, and the third is the one this test got wrong the first time.
+/// A selective query reaches the join with a handful of candidate rows; a broad
+/// one reaches it with every chunk in the index. Neither of those is the worst
+/// case, and calling the broad one "the worst this predicate can cost" — which
+/// this comment did — was a claim about a benchmark that could not reach it:
+/// every document here was `indexed`, so the predicate discarded nothing, the
+/// `LIMIT` filled from the first twenty rows and the join stopped there. What
+/// costs is a broad query whose hits are **all** in documents being written:
+/// nothing satisfies the predicate, so the scan runs to the end of the match
+/// list instead of stopping at twenty. Measured below, and it is about thirty
+/// times the difference the "all indexed" row shows.
+///
+/// The last arm re-measures the all-indexed broad query after the worst-case
+/// one, so the two are not separated by warm cache or by order: if the second
+/// reading of it matches the first, the gap belongs to the shape and not to the
+/// sequence.
 #[test]
 #[ignore = "a measurement, not an assertion; ten thousand chunks"]
 fn what_the_predicate_costs_on_a_non_empty_index() {
@@ -369,8 +381,16 @@ fn what_the_predicate_costs_on_a_non_empty_index() {
         let with = before.elapsed() / RUNS;
 
         // The same rows in the same order, which is what makes the two timings
-        // comparable at all — and what pins the hand-built expression above to
-        // the one `search_lexical` builds for itself.
+        // comparable at all.
+        //
+        // It compares *results*, not expressions, and that is as far as it
+        // reaches: it would not notice two different expressions that happen to
+        // select the same rows. It holds here only because both queries are one
+        // term — for a multi-word query `as_fts5_phrases` emits several quoted
+        // phrases and the `format!` above would emit one, which is a different
+        // expression this assertion could still pass. A second query word in
+        // this fixture therefore needs the hand-built side rewritten, not just
+        // added to the list.
         assert_eq!(hits, filtered, "{label}: the two queries must agree");
         assert!(
             !hits.is_empty(),
@@ -381,6 +401,50 @@ fn what_the_predicate_costs_on_a_non_empty_index() {
              ({DOCUMENTS} documents, {CHUNKS_PER_DOCUMENT} chunks each)"
         );
     }
+
+    // The worst shape, which is not either of the two above: a broad query
+    // whose every hit is in a document being written. Nothing satisfies the
+    // predicate, so the `LIMIT` never fills and the scan runs the whole match
+    // list instead of stopping at twenty rows.
+    //
+    // Reached rather than asserted. The arrangement is what an ordinary walk
+    // over a folder of similar documents looks like from a search box while it
+    // is running — the extreme of it, with nothing yet finished.
+    let broad = "Довідка";
+    for d in 0..DOCUMENTS {
+        db.set_document_status(&format!("{d:064x}"), DocumentStatus::Pending)
+            .unwrap();
+    }
+    let before = std::time::Instant::now();
+    let mut nothing_visible = Vec::new();
+    for _ in 0..RUNS {
+        nothing_visible = db.search_lexical(broad, 20).unwrap();
+    }
+    let worst = before.elapsed() / RUNS;
+    assert!(
+        nothing_visible.is_empty(),
+        "the premise is a broad query with nothing to answer with"
+    );
+
+    // …and the control for it. The same query with every document `indexed`
+    // again, measured last rather than first: if this agrees with the broad row
+    // above, the gap is the shape and not the order or a warm cache.
+    for d in 0..DOCUMENTS {
+        db.set_document_status(&format!("{d:064x}"), DocumentStatus::Indexed)
+            .unwrap();
+    }
+    let before = std::time::Instant::now();
+    let mut again = Vec::new();
+    for _ in 0..RUNS {
+        again = db.search_lexical(broad, 20).unwrap();
+    }
+    let all_indexed_again = before.elapsed() / RUNS;
+    assert_eq!(again.len(), 20, "the control must be the contended query");
+
+    println!(
+        "broad, NOTHING visible (the worst shape): {worst:?}  \
+         — same query, everything indexed again: {all_indexed_again:?}"
+    );
 }
 
 /// `pending` is not the only status that is not `indexed`, and the predicate is

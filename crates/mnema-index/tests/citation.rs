@@ -2,6 +2,7 @@ use mnema_core::{Block, BlockType, Coordinate, Locator, OnDisk, Segment, SourceK
 use mnema_index::{
     Citation, Db, DocumentStatus, INDEX_FORMAT_VERSION, open, register_vector_extension,
 };
+use rusqlite::{Transaction, TransactionBehavior};
 
 fn fresh(dir: &tempfile::TempDir) -> Db {
     register_vector_extension().unwrap();
@@ -1009,6 +1010,116 @@ fn emptying_a_document_and_taking_it_out_of_the_search_are_one_write() {
         "and the document is still whole, so it still answers — without this the \
          assertions above are satisfied by a search that returns nothing"
     );
+}
+
+/// A transaction from another connection is refused, by both `_in` methods.
+///
+/// The doc comments used to say this case punished itself — a foreign
+/// transaction "would deadlock against this one's write lock". It does not:
+/// measured, `clear_document_content_in` with a transaction opened on a second
+/// `Db` over the same file returns `Ok` in 407 µs and the write commits with
+/// that transaction. Nothing on `self` is touched, so there is nothing to block
+/// against, and the pair's atomicity silently becomes somebody else's.
+///
+/// Both directions, and the second half is what stops this from being satisfied
+/// by a method that refuses everything: the same call on this `Db`'s own
+/// transaction goes through and writes.
+mod a_transaction_from_another_connection {
+    use super::*;
+
+    /// Two `Db`s over one file — the arrangement a running walk and a searching
+    /// window are already in (`AppState::open_job_index`).
+    fn two_connections() -> (tempfile::TempDir, Db, Db, String) {
+        let dir = tempfile::tempdir().unwrap();
+        register_vector_extension().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let one = mnema_index::open(&path).unwrap();
+        let two = mnema_index::open(&path).unwrap();
+        let doc = one
+            .insert_document(&"n".repeat(64), "text/plain", 40, SourceKind::Document)
+            .unwrap();
+        one.insert_page(&doc, 1, "native:txt", None).unwrap();
+        (dir, one, two, doc)
+    }
+
+    #[test]
+    #[should_panic(expected = "the transaction belongs to another connection")]
+    fn is_refused_by_clear_document_content_in() {
+        let (_d, one, two, doc) = two_connections();
+        let tx = Transaction::new_unchecked(two.conn(), TransactionBehavior::Immediate).unwrap();
+        let _ = one.clear_document_content_in(&tx, &doc);
+    }
+
+    #[test]
+    #[should_panic(expected = "the transaction belongs to another connection")]
+    fn is_refused_by_insert_chunk_in() {
+        let (_d, one, two, doc) = two_connections();
+        let page: i64 = one
+            .conn()
+            .query_row("SELECT id FROM page", [], |r| r.get(0))
+            .unwrap();
+        let block = one
+            .insert_block(page, &paragraph(0, "кошторис", Some(1), Some(1)))
+            .unwrap();
+        let tx = Transaction::new_unchecked(two.conn(), TransactionBehavior::Immediate).unwrap();
+        let _ = one.insert_chunk_in(
+            &tx,
+            &doc,
+            0,
+            "кошторис",
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block,
+                    start: 0,
+                    end: 8,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        );
+    }
+
+    /// The other direction. Without it both tests above are satisfied by an
+    /// assertion that fires on every call, which would take the product's own
+    /// rebuild with it.
+    #[test]
+    fn but_this_db_s_own_transaction_goes_through() {
+        let (_d, one, _two, doc) = two_connections();
+        let page: i64 = one
+            .conn()
+            .query_row("SELECT id FROM page", [], |r| r.get(0))
+            .unwrap();
+        let block = one
+            .insert_block(page, &paragraph(0, "кошторис", Some(1), Some(1)))
+            .unwrap();
+        one.transaction(|tx| {
+            one.insert_chunk_in(
+                tx,
+                &doc,
+                0,
+                "кошторис",
+                &Locator {
+                    spans: vec![Segment {
+                        block_id: block,
+                        start: 0,
+                        end: 8,
+                        block_start: 0,
+                    }],
+                    coordinate: Coordinate::None,
+                },
+                SourceKind::Document,
+            )?;
+            one.clear_document_content_in(tx, &doc)
+        })
+        .expect("a transaction on this Db's own connection is the ordinary case");
+
+        assert_eq!(
+            one.document_status(&doc).unwrap(),
+            DocumentStatus::Pending,
+            "both writes ran, so the clear's half of the pair landed"
+        );
+    }
 }
 
 /// The reason `clear_document_content` exists rather than a second call to
