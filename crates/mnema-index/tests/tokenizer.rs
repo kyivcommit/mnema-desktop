@@ -1,6 +1,14 @@
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
-use mnema_index::{Db, open, prepare_for_search, register_vector_extension};
+use mnema_index::{Db, DocumentStatus, open, prepare_for_search, register_vector_extension};
 
+/// A finished document holding one chunk per text.
+///
+/// **Finished**, and the last line is what makes it so. `insert_document`
+/// leaves the row at `pending` — a document mid-write — and under D61 a search
+/// does not answer with one of those. Every test in this file is about the
+/// tokenizer rather than about visibility, so the fixture says what `ingest_
+/// file`'s step 5 says and gets out of the way; `tests/visibility.rs` is where
+/// the status itself is the subject.
 fn db_with(texts: &[(&str, SourceKind)]) -> (tempfile::TempDir, Db, Vec<i64>) {
     register_vector_extension().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -43,6 +51,8 @@ fn db_with(texts: &[(&str, SourceKind)]) -> (tempfile::TempDir, Db, Vec<i64>) {
             .unwrap();
         ids.push(id);
     }
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
     (dir, db, ids)
 }
 

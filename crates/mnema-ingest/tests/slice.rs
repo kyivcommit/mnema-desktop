@@ -1069,6 +1069,142 @@ fn a_rebuild_interrupted_between_slices_is_finished_by_the_next_walk() {
     );
 }
 
+/// A document being rebuilt answers no search until it is whole again. D61.
+///
+/// This is the state the test above leaves behind, asked the question a person
+/// asks: pages 1..20 of 25 are committed, the other five are gone, and every
+/// one of the twenty is in `chunk_fts`. A search for a surviving section hits,
+/// a search for a lost one returns nothing, and the window has no way to say
+/// which of the two just happened — so the reader concludes the file does not
+/// contain what it does contain. The document is found and silently short.
+///
+/// Three assertions, and the first alone is worthless. "No hits" is what a
+/// broken search returns and what an empty index returns, so it is pinned from
+/// both sides: `chunk_fts` is asked directly, past the predicate, and must hold
+/// the very rows the search declines to return; a neighbour document that is
+/// whole must keep answering *during* the rebuild; and the same query must come
+/// back the moment the rebuild finishes.
+#[cfg(unix)]
+#[test]
+fn a_document_being_rebuilt_answers_no_search_until_it_is_whole_again() {
+    let fx = Fixture::new();
+    let sections = mnema_ingest::PAGES_PER_TRANSACTION as u32 + 5;
+    let bytes = b"<h1>invented html, never parsed</h1>\n".as_slice();
+    fx.place_at("dovidky/umovy.html", bytes, mtime());
+
+    // The neighbour: a different file, read by the real worker, indexed once and
+    // never touched again. It is what makes "no hits" mean "this document is
+    // being written" rather than "search stopped working".
+    fx.place_at(
+        "dovidky/kadastr.txt",
+        "Кадастровий витяг, урочище Гайворон.".as_bytes(),
+        mtime(),
+    );
+    assert!(matches!(
+        fx.ingest("dovidky/kadastr.txt"),
+        Ingested::Indexed { .. }
+    ));
+
+    let old_dir = tempfile::tempdir().unwrap();
+    let new_dir = tempfile::tempdir().unwrap();
+    let old_worker = worker_answering_in(old_dir.path(), &html_frames(bytes, sections, 1));
+    let new_worker = worker_answering_in(new_dir.path(), &html_frames(bytes, sections, 2));
+
+    let Ingested::Indexed { document_id, .. } =
+        fx.ingest_with_worker_against("dovidky/umovy.html", &old_worker, &fx.manifest)
+    else {
+        panic!("the premise is a complete document to interrupt the rebuild of")
+    };
+    // `html_frames` numbers its sections, and the numbers are what let one query
+    // name one section: the digits of "розділ 3" tokenize apart from those of
+    // "розділ 13", so this asks for section 3 and nothing else.
+    assert_eq!(
+        fx.db.search_lexical("розділ 3", 10).unwrap().len(),
+        1,
+        "the premise is a document that answers before anything is rebuilt"
+    );
+
+    let bumped = {
+        let mut manifest = fx.manifest.clone();
+        manifest
+            .by_extension
+            .insert("html".to_string(), ReaderId::new("html", 2));
+        manifest
+    };
+    fx.break_writes_to_when(
+        "INSERT",
+        "page",
+        &format!("NEW.page_no > {}", mnema_ingest::PAGES_PER_TRANSACTION),
+    );
+    assert!(
+        fx.try_ingest_with_worker_against("dovidky/umovy.html", &new_worker, &bumped)
+            .is_err(),
+        "the premise is a rebuild that failed part-way"
+    );
+    fx.unbreak_writes();
+
+    // The state a person would now search against: twenty sections written, five
+    // missing, and the twenty sitting in the lexical index.
+    // Of *this* document: the neighbour has a page of its own in the same table.
+    let pages_written: i64 = fx
+        .db
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM page WHERE document_id = ?1",
+            [&document_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pages_written,
+        mnema_ingest::PAGES_PER_TRANSACTION as i64,
+        "the premise is a document truncated at one slice"
+    );
+    assert_eq!(
+        fx.count(r#"SELECT count(*) FROM chunk_fts WHERE chunk_fts MATCH '"розділ" "3"'"#),
+        1,
+        "the premise is that the surviving section IS in the lexical index — \
+         otherwise the silence below is about an empty index, not a predicate"
+    );
+
+    assert!(
+        fx.db.search_lexical("розділ 3", 10).unwrap().is_empty(),
+        "a document mid-rebuild must not answer with the part of itself that \
+         happens to be written"
+    );
+    assert!(
+        fx.db.search_lexical("розділ 24", 10).unwrap().is_empty(),
+        "and the lost section is what made answering with the other one a lie"
+    );
+    assert_eq!(
+        fx.db.search_lexical("Гайворон", 10).unwrap().len(),
+        1,
+        "the neighbour is whole and must keep answering: without this, every \
+         assertion above is satisfied by a search that returns nothing at all"
+    );
+
+    let outcome = fx.ingest_with_worker_against("dovidky/umovy.html", &new_worker, &bumped);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "an interrupted rebuild has to be finished: {outcome:?}"
+    );
+    assert_eq!(
+        fx.db.document_status(&document_id).unwrap(),
+        mnema_index::DocumentStatus::Indexed
+    );
+    assert_eq!(
+        fx.db.search_lexical("розділ 3", 10).unwrap().len(),
+        1,
+        "the document is whole again, so it answers again"
+    );
+    assert_eq!(
+        fx.db.search_lexical("розділ 24", 10).unwrap().len(),
+        1,
+        "including the section the interrupted rebuild never wrote"
+    );
+    assert_eq!(fx.db.search_lexical("Гайворон", 10).unwrap().len(), 1);
+}
+
 /// A path that comes to name a document **this** reader made is not rebuilt.
 ///
 /// The reader on a `path` row describes the document that path *named*, which is

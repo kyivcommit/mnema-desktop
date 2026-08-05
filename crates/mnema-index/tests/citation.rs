@@ -1,5 +1,7 @@
 use mnema_core::{Block, BlockType, Coordinate, Locator, OnDisk, Segment, SourceKind};
-use mnema_index::{Citation, Db, INDEX_FORMAT_VERSION, open, register_vector_extension};
+use mnema_index::{
+    Citation, Db, DocumentStatus, INDEX_FORMAT_VERSION, open, register_vector_extension,
+};
 
 fn fresh(dir: &tempfile::TempDir) -> Db {
     register_vector_extension().unwrap();
@@ -425,9 +427,15 @@ fn a_citation_answers_only_through_its_typed_coordinate() {
 
 // -------------------------------------------------------- atomic chunk write
 
-/// One page, one block, document `"doc-1"` already inserted — shared setup for
-/// the tests below, which care only about `insert_chunk` and `search_lexical`,
-/// not about the four-level model itself.
+/// One page, one block, document `"doc-1"` already inserted **and declared
+/// finished** — shared setup for the tests below, which care only about
+/// `insert_chunk` and `search_lexical`, not about the four-level model itself.
+///
+/// Finished, because under D61 a search does not answer with a document that is
+/// still being written, and `insert_document` leaves one at `pending`. It
+/// matters most for the tests here that assert **no** hits: a fixture left
+/// `pending` satisfies them whatever `insert_chunk` did, which is the shape of
+/// coverage that is not coverage.
 struct OnePage {
     db: Db,
     block: i64,
@@ -451,6 +459,8 @@ fn fixture_one_page() -> OnePage {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh(&dir);
     db.insert_document("doc-1", "text/plain", 4, SourceKind::Document)
+        .unwrap();
+    db.set_document_status("doc-1", DocumentStatus::Indexed)
         .unwrap();
     let page = db.insert_page("doc-1", 1, "native:txt", None).unwrap();
     let block = db
@@ -872,6 +882,8 @@ fn clearing_a_documents_content_empties_the_lexical_index_but_keeps_its_paths() 
         SourceKind::Document,
     )
     .unwrap();
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
     assert!(!db.search_lexical("кошторис", 10).unwrap().is_empty());
 
     db.clear_document_content(&doc).unwrap();
@@ -885,10 +897,21 @@ fn clearing_a_documents_content_empties_the_lexical_index_but_keeps_its_paths() 
         0,
         "search rows cascade"
     );
+    // `chunk_fts` directly, not through `search_lexical`, and the difference is
+    // the whole subject of this test. D61 gave `clear_document_content` a second
+    // statement that returns the document to `pending`, and from then on
+    // `search_lexical` answers nothing about it whatever the trigger did — so
+    // asking the search would be asking the predicate, and the trigger that
+    // this test is named for could stop firing without anything going red.
+    assert_eq!(
+        count("SELECT count(*) FROM chunk_fts"),
+        0,
+        "the trigger on chunk_search does not fire on a cascade, so a rebuilt \
+         document would keep its old text in the lexical index"
+    );
     assert!(
         db.search_lexical("кошторис", 10).unwrap().is_empty(),
-        "the lexical index still answers, so the trigger on chunk_search does not \
-         fire on a cascade and a rebuilt document would keep its old text findable"
+        "and the search agrees, for both of the two reasons it now has"
     );
 
     assert!(

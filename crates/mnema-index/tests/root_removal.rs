@@ -4,7 +4,7 @@
 //! searches, quoting a folder the user disconnected.
 
 use mnema_core::{Block, BlockType, Coordinate, Locator, OnDisk, Segment, SourceKind};
-use mnema_index::{Db, open, register_vector_extension};
+use mnema_index::{Db, DocumentStatus, open, register_vector_extension};
 use rusqlite::params;
 
 fn fresh(dir: &tempfile::TempDir) -> Db {
@@ -36,7 +36,9 @@ fn fixture_db() -> Fixture {
 
 /// One document at one path under `root`, with a single page, block and chunk
 /// carrying `text` — enough of the four-level ladder for `search_lexical` and
-/// `document_exists` to answer through it.
+/// `document_exists` to answer through it, and declared finished so that the
+/// first of those two answers at all (D61: `insert_document` leaves a document
+/// at `pending`, and a search does not answer with one of those).
 ///
 /// The id is a counter rather than a real content hash: nothing in this file
 /// reads it back as bytes, and the schema puts no CHECK on its shape — other
@@ -92,6 +94,8 @@ fn insert_document_with_chunk(db: &Db, root: i64, relative_path: &str, text: &st
         SourceKind::Document,
     )
     .unwrap();
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
     doc
 }
 
@@ -131,6 +135,16 @@ fn removing_a_root_removes_the_documents_whose_last_path_it_held() {
 
     assert_eq!(removed, 1);
     assert!(!db.document_exists(&doc).unwrap());
+    // `chunk_fts` directly, because `search_lexical` now joins through
+    // `document` (D61) and would answer nothing for a chunk whose document row
+    // is gone even if the chunk itself survived — which is the failure this
+    // test is named for. The search is asked too, but after the table that can
+    // still say otherwise.
+    let fts: i64 = db
+        .conn()
+        .query_row("SELECT count(*) FROM chunk_fts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fts, 0, "the chunk outlived the root that reached it");
     assert!(db.search_lexical("marker", 10).unwrap().is_empty());
 }
 

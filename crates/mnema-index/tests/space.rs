@@ -10,7 +10,7 @@
 //! shorter one.
 
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
-use mnema_index::{Db, open, register_vector_extension};
+use mnema_index::{Db, DocumentStatus, open, register_vector_extension};
 
 fn fresh(dir: &tempfile::TempDir) -> Db {
     register_vector_extension().unwrap();
@@ -233,6 +233,11 @@ fn no_model_mode_is_a_valid_database() {
             },
             SourceKind::Document,
         )
+        .unwrap();
+    // The last act of an indexing job. Without it the document stays `pending`
+    // and D61's predicate declines to answer with it, which would fail this
+    // test for a reason that has nothing to do with embedding spaces.
+    db.set_document_status(&doc, DocumentStatus::Indexed)
         .unwrap();
 
     assert_eq!(

@@ -36,7 +36,11 @@ impl Db {
             return Ok(Vec::new());
         }
         let mut stmt = self.conn().prepare(
-            "SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+            "SELECT chunk_fts.rowid FROM chunk_fts
+               JOIN chunk ON chunk.id = chunk_fts.rowid
+               JOIN document ON document.id = chunk.document_id
+              WHERE chunk_fts MATCH ?1 AND document.status = 'indexed'
+              ORDER BY rank LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![expr, limit], |r| r.get::<_, i64>(0))?;
         let mut out = Vec::new();

@@ -2,7 +2,7 @@ use mnema_core::{Block, Coordinate, Locator, OnDisk, Segment, SourceKind};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 
-use crate::{Db, Error};
+use crate::{Db, DocumentStatus, Error};
 
 /// Bumped whenever text preparation or the chunking constants change, so a
 /// database holding two formats can tell them apart. D14. Bumped to 2: which
@@ -419,8 +419,27 @@ impl Db {
     /// file, which is a rebuild of one document losing another path's place in
     /// the index.
     ///
-    /// One statement, so that a caller running it inside a transaction with the
-    /// rebuild gets the whole recovery atomically. `chunk_search` needs no
+    /// **The row does go back to `pending`, and that is the point of the second
+    /// statement.** `status` answers one question — may this document be
+    /// searched (`schema.sql:68-70`) — and `search_lexical` is the caller that
+    /// asks it. A document whose content has just been emptied cannot honestly
+    /// answer `indexed`: the rebuild writes its pages back one slice at a time,
+    /// and between the clear and the checkpoint the document is searchable and
+    /// silently short — a query for a section already rewritten hits, a query
+    /// for one not yet rewritten returns nothing, and the two are
+    /// indistinguishable from the window. Measured on an interrupted rebuild of
+    /// twenty-five sections, where twenty answered and five did not. D61.
+    ///
+    /// Here rather than at the call site, and that is the whole of the fix:
+    /// `insert_document` leaves a first indexing at `pending` through the
+    /// column's own DEFAULT, so a document being built has never been
+    /// searchable. This is the same fact for a document being *re*built, and
+    /// putting it in the method that empties the content makes the two the same
+    /// by construction instead of a rule the next rebuild path has to remember.
+    ///
+    /// Two statements now, not one, and a caller **must** still run them inside
+    /// its own transaction with the rest of the rebuild — which every caller
+    /// already had to do, for the reason below. `chunk_search` needs no
     /// statement of its own: it cascades from `chunk`, and its `AFTER DELETE`
     /// trigger keeps `chunk_fts` in step even though the delete arrives through
     /// a cascade rather than directly — measured, and pinned by
@@ -444,6 +463,7 @@ impl Db {
     pub fn clear_document_content(&self, id: &str) -> Result<(), Error> {
         self.conn()
             .execute("DELETE FROM page WHERE document_id = ?1", params![id])?;
+        self.set_document_status(id, DocumentStatus::Pending)?;
         Ok(())
     }
 
