@@ -528,7 +528,7 @@ pub fn ingest_file(
                     // cheap arm now answers — so ordinary write contention is
                     // enough to truncate a document silently.
                     db.record_stage(&id, STAGE_CHUNK, STATUS_REBUILDING)?;
-                    db.clear_document_content(&id)?;
+                    db.clear_document_content_in(tx, &id)?;
                 } else {
                     db.insert_document(&id, &document.mime, disk.size_bytes, document.source_kind)?;
                 }

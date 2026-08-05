@@ -16,7 +16,4 @@ thiserror = { workspace = true }
 unicode-general-category = { workspace = true }
 
 [dev-dependencies]
-# For the one test that runs `search_lexical`'s statement without its predicate,
-# so the two numbers it prints come from one build and one index.
-rusqlite = { workspace = true }
 tempfile = { workspace = true }

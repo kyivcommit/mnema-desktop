@@ -11,7 +11,7 @@
 //! Every fixture is invented — names, places and numbers that belong to nobody.
 
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
-use mnema_index::{Db, DocumentStatus, open, register_vector_extension};
+use mnema_index::{Db, DocumentStatus, open, prepare_for_search, register_vector_extension};
 
 fn open_index() -> (tempfile::TempDir, Db) {
     register_vector_extension().unwrap();
@@ -317,38 +317,65 @@ fn what_the_predicate_costs_on_a_non_empty_index() {
             .unwrap();
     }
 
-    // The same statement without the predicate, so the two numbers come from
-    // one build, one machine and one index rather than from two runs of
-    // different code. This is the query `search_lexical` ran before D61.
-    let unfiltered = |expr: &str| {
+    // `search_lexical` minus the predicate and nothing else — the query it ran
+    // before D61 — so the two numbers come from one build, one machine and one
+    // index rather than from two runs of different code.
+    //
+    // **Everything but the predicate is repeated on this side deliberately**:
+    // the query preparation and the `Vec<i64>` the caller gets back. Timing a
+    // bare `.count()` over a pre-built expression against a full
+    // `search_lexical` would measure the join *plus* that setup and report the
+    // sum as the cost of the predicate. It is small — measured separately at
+    // well under a microsecond against a difference of seven — but a benchmark
+    // whose number is only trustworthy alongside a second measurement nobody
+    // re-runs is a benchmark that will mislead the next reader.
+    //
+    // Both queries here are one term, so quoting the prepared text is what
+    // `as_fts5_phrases` would produce; the assertion below is what says so,
+    // since that function is private to the crate.
+    let unfiltered = |query: &str| -> Vec<i64> {
+        let prepared = prepare_for_search(query, SourceKind::Document);
+        let expr = format!("\"{prepared}\"");
         let mut stmt = db
             .conn()
             .prepare("SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ?1 ORDER BY rank LIMIT ?2")
             .unwrap();
-        stmt.query_map(rusqlite::params![expr, 20i64], |r| r.get::<_, i64>(0))
-            .unwrap()
-            .count()
+        let rows = stmt
+            .query_map(rusqlite::params![expr, 20i64], |r| r.get::<_, i64>(0))
+            .unwrap();
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.unwrap());
+        }
+        out
     };
 
-    for (label, query, expr) in [
-        ("broad   (matches every chunk)", "Довідка", "\"довідка\""),
-        ("selective (matches one chunk)", "17ф31", "\"17ф31\""),
+    for (label, query) in [
+        ("broad   (matches every chunk)", "Довідка"),
+        ("selective (matches one chunk)", "17ф31"),
     ] {
         let before = std::time::Instant::now();
-        let mut hits = 0;
+        let mut hits = Vec::new();
         for _ in 0..RUNS {
-            hits = unfiltered(expr);
+            hits = unfiltered(query);
         }
         let without = before.elapsed() / RUNS;
 
         let before = std::time::Instant::now();
-        let mut filtered = 0;
+        let mut filtered = Vec::new();
         for _ in 0..RUNS {
-            filtered = db.search_lexical(query, 20).unwrap().len();
+            filtered = db.search_lexical(query, 20).unwrap();
         }
         let with = before.elapsed() / RUNS;
 
+        // The same rows in the same order, which is what makes the two timings
+        // comparable at all — and what pins the hand-built expression above to
+        // the one `search_lexical` builds for itself.
         assert_eq!(hits, filtered, "{label}: the two queries must agree");
+        assert!(
+            !hits.is_empty(),
+            "{label}: a query that matches nothing times nothing"
+        );
         println!(
             "{label}: without {without:?}, with {with:?}  \
              ({DOCUMENTS} documents, {CHUNKS_PER_DOCUMENT} chunks each)"

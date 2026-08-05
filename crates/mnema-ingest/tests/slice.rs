@@ -1205,6 +1205,120 @@ fn a_document_being_rebuilt_answers_no_search_until_it_is_whole_again() {
     assert_eq!(fx.db.search_lexical("Гайворон", 10).unwrap().len(), 1);
 }
 
+/// The same question of a **first** indexing, through `ingest_file` rather than
+/// through a fixture. D61.
+///
+/// The test above interrupts a rebuild; this one interrupts a document that has
+/// never been indexed at all, which is the other write path and the one whose
+/// silence rests on `insert_document` leaving the row at the column's DEFAULT.
+/// `visibility.rs` pins that DEFAULT, and pinning it is not the same as pinning
+/// this: a change that set `Indexed` anywhere before step 5 would leave every
+/// unit test in that file green while a half-written document went back to
+/// answering searches. Nothing in the suite crossed that gap until here.
+///
+/// Same three assertions as above, and for the same reason: `chunk_fts` holds
+/// the rows the search declines, a whole neighbour keeps answering throughout,
+/// and the query comes back when the document is finished.
+#[cfg(unix)]
+#[test]
+fn a_document_being_indexed_for_the_first_time_answers_no_search() {
+    let fx = Fixture::new();
+    let sections = mnema_ingest::PAGES_PER_TRANSACTION as u32 + 5;
+    let bytes = b"<h1>invented html, never parsed</h1>\n".as_slice();
+    fx.place_at("dovidky/umovy.html", bytes, mtime());
+
+    fx.place_at(
+        "dovidky/kadastr.txt",
+        "Кадастровий витяг, урочище Гайворон.".as_bytes(),
+        mtime(),
+    );
+    assert!(matches!(
+        fx.ingest("dovidky/kadastr.txt"),
+        Ingested::Indexed { .. }
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let worker = worker_answering_in(dir.path(), &html_frames(bytes, sections, 1));
+
+    // No previous pass over this file: the interruption falls inside the first
+    // indexing there has ever been of it.
+    fx.break_writes_to_when(
+        "INSERT",
+        "page",
+        &format!("NEW.page_no > {}", mnema_ingest::PAGES_PER_TRANSACTION),
+    );
+    assert!(
+        fx.try_ingest_with_worker_against("dovidky/umovy.html", &worker, &fx.manifest)
+            .is_err(),
+        "the premise is a first indexing that failed part-way"
+    );
+    fx.unbreak_writes();
+
+    let document_id: String = fx
+        .db
+        .conn()
+        .query_row(
+            "SELECT id FROM document WHERE id <> (SELECT document_id FROM path
+                WHERE relative_path = 'dovidky/kadastr.txt')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        fx.db.document_status(&document_id).unwrap(),
+        mnema_index::DocumentStatus::Pending,
+        "a first indexing spends its whole write at the column's own DEFAULT"
+    );
+    let pages_written: i64 = fx
+        .db
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM page WHERE document_id = ?1",
+            [&document_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pages_written,
+        mnema_ingest::PAGES_PER_TRANSACTION as i64,
+        "the premise is a document truncated at one slice"
+    );
+    assert_eq!(
+        fx.count(r#"SELECT count(*) FROM chunk_fts WHERE chunk_fts MATCH '"розділ" "3"'"#),
+        1,
+        "the premise is that the written section IS in the lexical index"
+    );
+
+    assert!(
+        fx.db.search_lexical("розділ 3", 10).unwrap().is_empty(),
+        "a document being indexed for the first time must not answer with the \
+         part of itself that happens to be written"
+    );
+    assert_eq!(
+        fx.db.search_lexical("Гайворон", 10).unwrap().len(),
+        1,
+        "the neighbour is whole and must keep answering: without this the \
+         assertion above is satisfied by a search that returns nothing at all"
+    );
+
+    let outcome = fx.ingest_with_worker_against("dovidky/umovy.html", &worker, &fx.manifest);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "an unfinished first indexing has to be finished: {outcome:?}"
+    );
+    assert_eq!(
+        fx.db.document_status(&document_id).unwrap(),
+        mnema_index::DocumentStatus::Indexed
+    );
+    assert_eq!(fx.db.search_lexical("розділ 3", 10).unwrap().len(), 1);
+    assert_eq!(
+        fx.db.search_lexical("розділ 24", 10).unwrap().len(),
+        1,
+        "including the section the interrupted pass never wrote"
+    );
+    assert_eq!(fx.db.search_lexical("Гайворон", 10).unwrap().len(), 1);
+}
+
 /// A path that comes to name a document **this** reader made is not rebuilt.
 ///
 /// The reader on a `path` row describes the document that path *named*, which is

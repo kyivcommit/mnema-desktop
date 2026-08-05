@@ -64,6 +64,33 @@ case_ "search: the join reaches a chunk's document, not a neighbour's" \
   'JOIN chunk ON chunk.block_id = chunk_fts.rowid' \
   mnema-index 'a_finished_document_is_found_while_another_is_being_written' --test visibility
 
+# The same mutation once more, against `ingest_file` rather than a fixture. The
+# first case above pins the DEFAULT on `insert_document`; this one pins that a
+# first indexing really does spend its whole write under it. A change setting
+# `Indexed` anywhere before step 5 leaves that case green and this one red.
+case_ "search: no predicate at all — a first indexing answers mid-write, end to end" \
+  crates/mnema-index/src/search.rs \
+  "s{AND document\\.status = 'indexed'}{AND 1 = 1 /* predicate removed */}" \
+  "AND 1 = 1 /* predicate removed */" \
+  mnema-ingest 'a_document_being_indexed_for_the_first_time_answers_no_search' --test slice
+
+# The predicate has to be in the same statement as the LIMIT, not applied to the
+# rows that statement returned: `WHERE` runs before `LIMIT`, so the limit counts
+# hits a person may be shown. Spend it first and a document being written pushes
+# finished ones off the end — here, off it entirely.
+#
+# The first report on this task called the case impossible to anchor narrowly
+# and said so in writing, which would have left the next session believing it.
+# It is one substring, the same one four cases above already use, and the review
+# of that report is where it came from. Narrow, and measured to be: the control
+# it was checked against — `a_document_still_being_written_answers_no_search`,
+# where nothing contends for the limit — stays green under it.
+case_ "search: the limit is spent before the predicate (the Rust-filter shape)" \
+  crates/mnema-index/src/search.rs \
+  "s{AND document\\.status = 'indexed'}{AND document.status = 'indexed' AND chunk_fts.rowid IN (SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ?1 ORDER BY rank LIMIT ?2)}" \
+  "AND chunk_fts.rowid IN (SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ?1 ORDER BY rank LIMIT ?2)" \
+  mnema-index 'a_document_being_written_does_not_spend_the_limit' --test visibility
+
 # ------------------------------------------- and the half that makes it true
 
 # Without this line the predicate is real and the rebuild walks straight past
@@ -73,6 +100,17 @@ case_ "search: the join reaches a chunk's document, not a neighbour's" \
 # green with the predicate in place.
 case_ "clear: emptying a document takes it out of the search" \
   crates/mnema-index/src/write.rs \
-  's{self\.set_document_status\(id, DocumentStatus::Pending\)\?;}{let _ = DocumentStatus::Pending; /* status left as it was */}' \
-  'let _ = DocumentStatus::Pending; /* status left as it was */' \
+  's{crate::journal::write_document_status\(tx, id, DocumentStatus::Pending\)}{let _ = DocumentStatus::Pending; Ok(()) /* status left as it was */}' \
+  'let _ = DocumentStatus::Pending; Ok(()) /* status left as it was */' \
   mnema-ingest 'a_document_being_rebuilt_answers_no_search_until_it_is_whole_again' --test slice
+
+# …and the two statements are one write or neither. Two statements on
+# `self.conn()` is what this method was between the D61 fix and the review of
+# it: correct for the one caller it had, and leaving the state D61 abolishes —
+# content gone, status still `indexed` — one statement away for the next one.
+# The mutation is that exact shape, restored.
+case_ "clear: the delete and the status are one write or neither" \
+  crates/mnema-index/src/write.rs \
+  's{self\.transaction\(\|tx\| self\.clear_document_content_in\(tx, id\)\)}{{ self.conn().execute("DELETE FROM page WHERE document_id = ?1", params![id])?; crate::journal::write_document_status(self.conn(), id, DocumentStatus::Pending) }}' \
+  'crate::journal::write_document_status(self.conn(), id, DocumentStatus::Pending)' \
+  mnema-index 'emptying_a_document_and_taking_it_out_of_the_search_are_one_write' --test citation

@@ -925,6 +925,92 @@ fn clearing_a_documents_content_empties_the_lexical_index_but_keeps_its_paths() 
     );
 }
 
+/// Emptying a document and taking it out of the search are one write or
+/// neither. D61.
+///
+/// The pair is what makes the fix a fix: content gone with the status still
+/// `indexed` is exactly the state D61 abolishes, and before this it was
+/// reachable by nothing worse than calling the method outside a transaction —
+/// the delete would commit on its own and the status write behind it would not.
+/// One statement was atomic by itself; two are not, so the method opens a
+/// transaction and `clear_document_content_in` is what an orchestrator uses.
+///
+/// Forced with a trigger that aborts the status write, which is the only way
+/// from outside to fail the second of two writes while letting the first run —
+/// the same instrument `tests/slice.rs` uses, and the alternative is a
+/// fault-injection seam in production code.
+///
+/// Both directions: the call fails **and** the document is exactly as it was.
+/// Either alone is satisfied by a method that does nothing at all.
+#[test]
+fn emptying_a_document_and_taking_it_out_of_the_search_are_one_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+
+    let doc = db
+        .insert_document(&"m".repeat(64), "text/plain", 40, SourceKind::Document)
+        .unwrap();
+    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(page, &paragraph(0, "кошторис на ремонт", Some(1), Some(1)))
+        .unwrap();
+    db.insert_chunk(
+        &doc,
+        0,
+        "кошторис на ремонт",
+        &Locator {
+            spans: vec![Segment {
+                block_id: block,
+                start: 0,
+                end: 18,
+                block_start: 0,
+            }],
+            coordinate: Coordinate::Line { start: 1, end: 1 },
+        },
+        SourceKind::Document,
+    )
+    .unwrap();
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
+
+    db.conn()
+        .execute_batch(
+            "CREATE TRIGGER forced_failure BEFORE UPDATE ON document BEGIN
+                 SELECT RAISE(ABORT, 'forced failure');
+             END;",
+        )
+        .unwrap();
+    let outcome = db.clear_document_content(&doc);
+    db.conn()
+        .execute_batch("DROP TRIGGER forced_failure")
+        .unwrap();
+
+    assert!(
+        outcome.is_err(),
+        "the premise is a status write that failed: {outcome:?}"
+    );
+
+    let count = |sql: &str| -> i64 { db.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT count(*) FROM page"),
+        1,
+        "the delete committed without the status write beside it, which leaves \
+         a document with no content still answering searches"
+    );
+    assert_eq!(count("SELECT count(*) FROM chunk_fts"), 1);
+    assert_eq!(
+        db.document_status(&doc).unwrap(),
+        DocumentStatus::Indexed,
+        "nothing happened, so the status is the one the document came in with"
+    );
+    assert_eq!(
+        db.search_lexical("кошторис", 10).unwrap().len(),
+        1,
+        "and the document is still whole, so it still answers — without this the \
+         assertions above are satisfied by a search that returns nothing"
+    );
+}
+
 /// The reason `clear_document_content` exists rather than a second call to
 /// `delete_document`: deleting a document takes every path that names it.
 ///

@@ -820,11 +820,7 @@ impl Db {
 
     /// Sets a document's lifecycle status.
     pub fn set_document_status(&self, id: &str, status: DocumentStatus) -> Result<(), Error> {
-        self.conn().execute(
-            "UPDATE document SET status = ?1 WHERE id = ?2",
-            params![status.as_str(), id],
-        )?;
-        Ok(())
+        write_document_status(self.conn(), id, status)
     }
 
     pub fn document_status(&self, id: &str) -> Result<DocumentStatus, Error> {
@@ -888,6 +884,25 @@ impl Db {
             )
             .optional()?)
     }
+}
+
+/// Writes one document's lifecycle status.
+///
+/// Takes `&rusqlite::Connection` rather than `&Db` for the same reason
+/// `write_search_row` does (`search.rs`): `Transaction` derefs to `Connection`,
+/// so one statement serves both a standalone write and a caller's transaction
+/// — and `clear_document_content_in` needs the second form, since the status it
+/// writes has to land with the delete beside it or not at all.
+pub(crate) fn write_document_status(
+    conn: &rusqlite::Connection,
+    id: &str,
+    status: DocumentStatus,
+) -> Result<(), Error> {
+    conn.execute(
+        "UPDATE document SET status = ?1 WHERE id = ?2",
+        params![status.as_str(), id],
+    )?;
+    Ok(())
 }
 
 /// Whether `relative` names something inside the subtree `prefix` names —

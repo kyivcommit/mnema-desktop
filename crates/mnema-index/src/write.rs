@@ -437,13 +437,21 @@ impl Db {
     /// putting it in the method that empties the content makes the two the same
     /// by construction instead of a rule the next rebuild path has to remember.
     ///
-    /// Two statements now, not one, and a caller **must** still run them inside
-    /// its own transaction with the rest of the rebuild — which every caller
-    /// already had to do, for the reason below. `chunk_search` needs no
-    /// statement of its own: it cascades from `chunk`, and its `AFTER DELETE`
-    /// trigger keeps `chunk_fts` in step even though the delete arrives through
-    /// a cascade rather than directly — measured, and pinned by
-    /// `tests/citation.rs`.
+    /// Two statements now, not one, and this method opens a transaction over
+    /// them rather than asking to be called inside somebody else's. Before D61
+    /// it was a single statement and atomic by itself; the pair is not, and a
+    /// caller running it outside a transaction would leave the content gone and
+    /// the status still `indexed` — precisely the state D61 exists to abolish,
+    /// reintroduced by the fix for it. Stated in prose it is a rule the next
+    /// caller can miss, so it is stated in the types instead:
+    /// [`Db::clear_document_content_in`] is the form an orchestrator uses, and
+    /// this one is the standalone wrapper, exactly as `insert_chunk` /
+    /// `insert_chunk_in` are.
+    ///
+    /// `chunk_search` needs no statement of its own: it cascades from `chunk`,
+    /// and its `AFTER DELETE` trigger keeps `chunk_fts` in step even though the
+    /// delete arrives through a cascade rather than directly — measured, and
+    /// pinned by `tests/citation.rs`.
     ///
     /// **What it does not reach: the vectors.** `chunk_embedding_state`
     /// cascades from `chunk` and goes; the `vec_emb_<space_id>` tables are
@@ -461,10 +469,22 @@ impl Db {
     /// regression — it is written down here because this is the method a
     /// rebuild goes through.
     pub fn clear_document_content(&self, id: &str) -> Result<(), Error> {
-        self.conn()
-            .execute("DELETE FROM page WHERE document_id = ?1", params![id])?;
-        self.set_document_status(id, DocumentStatus::Pending)?;
-        Ok(())
+        self.transaction(|tx| self.clear_document_content_in(tx, id))
+    }
+
+    /// [`Db::clear_document_content`] under a transaction the caller already
+    /// opened — what a rebuild uses, since SQLite has no nested `BEGIN` and the
+    /// clear has to land with the pages written after it.
+    ///
+    /// The same split, and for the same reason, as `insert_chunk` /
+    /// `insert_chunk_in`: the atomicity of the pair is not weakened here, it is
+    /// widened to the caller's transaction. `tx` must be a transaction on
+    /// **this** `Db`'s connection; nothing in the type system says so, and one
+    /// from another connection would deadlock against this one's write lock
+    /// rather than fail cleanly.
+    pub fn clear_document_content_in(&self, tx: &Transaction<'_>, id: &str) -> Result<(), Error> {
+        tx.execute("DELETE FROM page WHERE document_id = ?1", params![id])?;
+        crate::journal::write_document_status(tx, id, DocumentStatus::Pending)
     }
 
     /// Runs `f` inside one IMMEDIATE transaction, committing if it succeeds and
