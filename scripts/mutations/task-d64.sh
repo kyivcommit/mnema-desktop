@@ -1,3 +1,18 @@
+# C2. The reader *name* half of the same comparison — the one a format changing
+# hands moves, as `.html` did inside this cycle when it left the text reader.
+#
+# ⚠️ **Green until `a_format_changes_hands` existed.** Every pass that changed
+# the name also changed the version, so deleting this comparison changed no
+# outcome: the version comparison beside it still answered. The case only means
+# something against a corpus that can move one without the other, and reaching
+# that needed a file recorded at exactly `markdown@1` — which needed an
+# operation that builds its own.
+case_ "ingest: a different reader name rebuilds too" \
+  crates/mnema-ingest/src/lib.rs \
+  's~            entry\.reader != document\.reader\n                \|\| entry\.reader_version != i64::from\(document\.reader_version\)~            entry.reader_version != i64::from(document.reader_version) // name ignored~' \
+  'i64::from(document.reader_version) // name ignored' \
+  mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
+
 # Mutation cases for D64: the harness models the rebuild path. Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/task-d64.sh
@@ -82,4 +97,12 @@ case_ "harness: the document a rebuild is cut in is long enough to have a seam" 
   crates/mnema-ingest/tests/randomised.rs \
   's~            let units = mnema_ingest::PAGES_PER_TRANSACTION \+ 2 \+ self\.rng\.below\(4\);~            let units = 2;~' \
   '            let units = 2;' \
+  mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
+
+# C7. The handover operation stops being drawn, so the name half of
+# `stale_reading` has no generator again and C2 goes quiet with it.
+case_ "harness: the corpus really moves a format between readers" \
+  crates/mnema-ingest/tests/randomised.rs \
+  's~            28 => self\.a_format_changes_hands\(\),~            28 => self.run_walk(),~' \
+  '28 => self.run_walk(),' \
   mnema-ingest 'random_sequences_do_not_lose_data' --test randomised

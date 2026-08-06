@@ -3113,7 +3113,7 @@ impl World {
         let choice = if self.files.is_empty() {
             0
         } else {
-            self.rng.below(29)
+            self.rng.below(30)
         };
         match choice {
             0 => self.create(),
@@ -3169,6 +3169,7 @@ impl World {
             // corpus.
             26 => self.the_build_learned_to_read_better(),
             27 => self.an_interrupted_rebuild_is_finished_by_the_next_pass(),
+            28 => self.a_format_changes_hands(),
             _ => self.run_walk(),
         }
     }
@@ -3929,17 +3930,12 @@ impl World {
             // the name half on its own, and it is not a contrivance — it is what
             // `.html` did inside this cycle when it left the text reader for the
             // html one.
-            let markdown = matches!(
-                self.files.get(&relative).map(|state| state.shape),
-                Some(Shape::Markdown(_))
-            );
-            let (reader, version, state) = if markdown && self.rng.chance(50) {
-                ("text", 1, "reader-changed-hands")
-            } else {
-                // Never 1 for the version half: a version equal to the recorded
-                // one is not a better reader, it is the same one.
-                ("text", 2 + (self.stricter_rotation % 3) as u32, "rebuilt")
-            };
+            // Never 1: a version equal to the recorded one is not a better
+            // reader, it is the same one. The **name** half of `stale_reading`
+            // is `a_format_changes_hands`, which has to build its own file to
+            // reach it — see there.
+            let (reader, version, state) =
+                ("text", 2 + (self.stricter_rotation % 3) as u32, "rebuilt");
             let better = better_reader_worker(self.dir.path(), reader, version);
             self.note(format!(
                 "  walk {relative} past a build whose {reader} reader is at version {version}"
@@ -3968,6 +3964,58 @@ impl World {
             // performed.
             if verdict.is_some() && self.last.get(&relative).is_some_and(|last| last.indexed) {
                 self.reached.states.insert(state);
+            }
+        }
+    }
+
+    /// **A format changes hands**: the same file, the same version, a different
+    /// *reader*.
+    ///
+    /// `stale_reading` is two comparisons — `reader != recorded.reader ||
+    /// reader_version != recorded.reader_version` — and until this operation
+    /// existed the corpus only ever moved the second. Measured: the mutation
+    /// that deletes the **name** comparison stayed green, because every pass
+    /// that changed the name changed the version with it.
+    ///
+    /// It is not a contrivance either. `.html` did exactly this inside this
+    /// cycle: it was read by the text reader, was recorded as `text@1` in every
+    /// index built before, and moved to a reader of its own. The version did not
+    /// have to change for the reading to be stale.
+    ///
+    /// **Builds its own file, and that is the whole reason it is a separate
+    /// operation.** The name half is only reachable when the recorded version
+    /// equals the offered one, and a file this corpus has already rebuilt is
+    /// recorded at 2 or above — offering version 1 over *that* is a version
+    /// change again, and the case tests nothing. A fresh markdown file indexed
+    /// by the real worker is recorded `markdown@1` exactly.
+    fn a_format_changes_hands(&mut self) {
+        #[cfg(unix)]
+        {
+            let n = self.next_counter();
+            let relative = format!("docs/handover-{n}.md");
+            let units = 1 + self.rng.below(3);
+            let content = self.markdown_body(units);
+            let at = self.next_tick();
+            self.note(format!("  create {relative} for a reader handover"));
+            self.write_at(&relative, content, at);
+            self.ingest(&relative);
+            if self.paths_now().get(&relative).is_none() {
+                // Excluded, or never offered; there is nothing recorded to go
+                // stale against.
+                return;
+            }
+
+            self.retouch(&relative);
+            // The text reader at the version markdown is already recorded at, so
+            // the **only** difference is which reader read it.
+            let better = better_reader_worker(self.dir.path(), "text", 1);
+            self.note(format!(
+                "  walk {relative} past a build where .md is read by text@1"
+            ));
+            let verdict =
+                self.ingest_with(&relative, PoolConfig::new(&better), " [text reader v1]");
+            if verdict.is_some() && self.last.get(&relative).is_some_and(|last| last.indexed) {
+                self.reached.states.insert("reader-changed-hands");
             }
         }
     }
