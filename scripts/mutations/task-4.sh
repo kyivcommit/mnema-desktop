@@ -145,10 +145,17 @@ case_ "every reader the manifest publishes is checked, not only the default" \
 # document's rows above them make the comparison sensitive (`1,2,3` → `7,8,9`).
 # No mutation of product code can show that: it is a property of the fixture,
 # and the review that found it is what the second file in that test now answers.
+#
+# The mutation names only the stage lookup, not the whole `if`. It used to name
+# the whole line, and D61 then widened that line to `if !stale_reading && …` —
+# after which this case matched nothing at all: not red, not green, silently not
+# applied, while `cargo test`, fmt, clippy and task 4's own file all stayed clean.
+# Found by task 16, three tasks after it stopped working, and only because
+# removing a crate put this file inside that task's gate.
 case_ "a re-read lands on the document it already has, and does not rebuild it" \
   crates/mnema-ingest/src/lib.rs \
-  's~        if db\.stage_status\(&id, STAGE_CHUNK\)\?\.as_deref\(\) == Some\(STATUS_DONE\) \{~        if false {~' \
-  '        if false {' \
+  's~db\.stage_status\(&id, STAGE_CHUNK\)\?\.as_deref\(\) == Some\(STATUS_DONE\)~false~' \
+  '&& false {' \
   mnema-ingest \
   'a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that' --test slice
 
