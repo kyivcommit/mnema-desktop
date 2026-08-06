@@ -3935,7 +3935,16 @@ impl World {
             // same bytes under a new reader version are *rebuilt*; if this ever
             // answers `AlreadyIndexed` the operation is a no-op and every
             // invariant below it is judging an ordinary walk.
-            if verdict == Some(Verdict::Settled) {
+            // **`Indexed`, not `Settled`** — and the difference is the whole
+            // operation. `Verdict::Settled` folds `Indexed`, `Unchanged` and
+            // `AlreadyIndexed` together, so recording the class on it marked
+            // the rebuild as reached even when the pass had *confirmed* the
+            // document instead of rebuilding it. Measured: the mutation that
+            // makes the sidecar announce version 1 — no version change, no
+            // rebuild, by construction — left the corpus assertion green.
+            // A class recorded when it did not happen is worse than one that is
+            // never recorded, because it reports coverage rather than absence.
+            if self.last.get(&relative).is_some_and(|last| last.indexed) {
                 self.reached.states.insert("rebuilt");
             }
         }
@@ -4004,7 +4013,7 @@ impl World {
                 PoolConfig::new(&better),
                 &format!(" [text reader v{version}, resuming]"),
             );
-            if let Some(Verdict::Settled) = verdict {
+            if self.last.get(&relative).is_some_and(|last| last.indexed) {
                 let finished = self
                     .documents_now()
                     .values()
@@ -4017,6 +4026,14 @@ impl World {
                     ));
                 }
                 self.reached.states.insert("rebuild-resumed");
+            } else {
+                self.fail(format!(
+                    "D64 invariant 2 — the pass after an interrupted rebuild of {relative} \
+                     did not read the file again ({verdict:?}). An interrupted pass must not \
+                     leave a state the next walk answers `Unchanged` from: the document \
+                     would stay half-written for ever, and every later walk would agree it \
+                     was fine"
+                ));
             }
         }
     }
