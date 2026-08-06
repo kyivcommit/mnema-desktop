@@ -91,17 +91,40 @@
 //!   it is code, it is never painted, and a citation quoting `=SUM(B1:C1)` for a
 //!   cell the person sees as `42` is the sharper failure. A row of nothing but
 //!   uncached formulas is therefore an empty row and is dropped.
+//! - **One cell reference named twice keeps the last value, silently.** Measured
+//!   after a review asked which of the two wins, because the answer was neither
+//!   written down nor tested: `<c r="A1">…0…</c><c r="A1">…1…</c>` stores the
+//!   second. Either would be an arbitrary choice — what was missing is that it
+//!   is *a* choice, so `a_malformed_row_is_read_the_way_a_spreadsheet_would`
+//!   pins it. Excel does not write such a file; a crafted one does.
 //!
-//! **The one thing this reader knowingly gets wrong is a date.** A date in xlsx
-//! is a number plus a style, and calamine does read the style: the cell arrives
-//! as `Data::DateTime(ExcelDateTime { value: 46000.0, .. })`. But
-//! `impl Display for ExcelDateTime` prints `self.value`
-//! (`datatype.rs:986-990`) **in every feature configuration**, so `46000` is
-//! what reaches the index and `06.08.2026` finds nothing. Turning it into a date
-//! needs calamine's `dates` feature, which is `chrono`, plus a decision about
-//! which format to render — a dependency and a display policy, neither of them a
-//! line in this file. `a_date_is_indexed_as_the_number_it_is_in_the_file`
-//! records it so it cannot be forgotten.
+//! **No number format is applied, and that is the largest thing this reader
+//! knowingly gets wrong.** A cell in xlsx is a raw value plus a `numFmt` in
+//! `xl/styles.xml` that says how it is painted; calamine hands back the value,
+//! and `Display` prints it. So what reaches the index is never what the sheet
+//! shows for any formatted cell:
+//!
+//! | cell | the sheet shows | the index gets |
+//! |---|---|---|
+//! | `0.15`, numFmt 9 | `15%` | `0.15` |
+//! | `1500.5`, numFmt 44 | `1 500,50 ₴` | `1500.5` |
+//! | `46000`, numFmt 14 | `06.08.2026` | `46000` |
+//! | `1e15` | `1E+15` | `1000000000000000` |
+//! | `t="b"`, `1` | `TRUE` | `true` |
+//!
+//! A search for `15%` fails for exactly the reason a search for `06.08.2026`
+//! fails, and **this was written as a fact about dates until a review measured
+//! the rest of the column.** The date is the sharpest instance because a whole
+//! column of them is unreadable rather than merely unformatted, not because it
+//! is a separate defect.
+//!
+//! It is not a coding error either: the server reads `openpyxl`'s `cell.value`
+//! and lands in the same place. Closing it needs calamine's `dates` feature —
+//! which is `chrono` — *and* a rule for which of the several hundred format
+//! codes render how, in whose locale; a dependency and a display policy, neither
+//! of them a line in this file.
+//! `no_number_format_is_applied_so_a_cell_is_indexed_as_its_raw_value` pins the
+//! class rather than one member of it.
 //!
 //! **A hidden sheet is read.** `sheets_metadata()` reports `Hidden` and
 //! `VeryHidden` and calamine reads all three alike; openpyxl's `wb.worksheets`
@@ -209,7 +232,15 @@ pub enum XlsxError {
     /// Decided on what came out of the stream, never on the size the archive
     /// declares — see `zip_part`'s module doc for the forged-size case that
     /// makes the distinction load-bearing.
-    #[error("a member of this workbook inflates past the cap on one member")]
+    ///
+    /// **The message names both, and it used to name only the first.** Since
+    /// this task the string is what a person is shown (`reason: e.to_string()`
+    /// in the worker), and a workbook of a thousand small members refused by the
+    /// total would have read "past the cap on one member" — a true-sounding
+    /// sentence about the wrong rule. `epub.rs:153` still has the narrow
+    /// wording for the same two-cap arrangement; it is another reader's
+    /// user-visible string and is left alone rather than changed from here.
+    #[error("this workbook decompresses past the cap on what one file may inflate to")]
     TooLarge,
 
     /// The workbook declares sheets and not one of them produced a row with a
@@ -326,6 +357,24 @@ fn extract(bytes: &[u8], budget: usize) -> Result<XlsxWorkbook, XlsxError> {
 /// a workbook whose sheets are fine is not a reason to refuse the workbook, and
 /// this function cannot tell which members calamine will actually open.
 ///
+/// **A member that breaks is not a member that was free**, and the first version
+/// of this function had it the other way round. `io::copy` reports what it moved
+/// only when it *succeeds*, and a broken deflate stream has already inflated
+/// everything before the break — measured: `Err("Invalid checksum")` after
+/// 4 194 304 bytes reached the sink. Skipping the charge on that arm made a
+/// 417 KB archive of 100 members inflate **400 MiB** and answer `Ok`, a third
+/// again over a budget that never fired. It never leaked — `take` and the
+/// counter bound each member — but the pool's 120 s deadline
+/// (`crates/mnema-pool/src/lib.rs:552`) turns that into a worker slot eaten
+/// whole and a journal row saying `Timeout`, with nothing naming the cause.
+/// So the bytes are counted **on the way past** and charged whichever way the
+/// copy ends.
+///
+/// Counted rather than charged at `cap`, which was the other candidate: a member
+/// that broke after a hundred bytes would then be billed sixteen megabytes, and
+/// a mildly damaged workbook would be refused for damage under a rule about
+/// size. The budget falls from work done, and this is what work done is.
+///
 /// **Every member, not only the ones that look like XML.** A worksheet's path
 /// comes out of `xl/_rels/workbook.xml.rels` and can be anything, so a rule
 /// keyed on the extension would leave a bomb parked at `xl/worksheets/sheet1.dat`
@@ -345,13 +394,15 @@ fn measure_package(bytes: &[u8], budget: usize) -> Result<(), XlsxError> {
         // `cap + 1` so that "exactly at the cap" and "over it" are told apart by
         // what came out of the stream, never by the size the central directory
         // declares — the forged-size case `zip_part`'s module doc measures.
-        // `io::sink` rather than a buffer: this pass keeps nothing, and a
-        // `Vec<u8>` here would be sixteen megabytes allocated to be dropped.
-        let Ok(inflated) =
-            std::io::copy(&mut Read::take(&mut member, cap + 1), &mut std::io::sink())
-        else {
-            continue;
-        };
+        //
+        // The result is deliberately discarded: [`Inflated`] has the count
+        // either way, and the whole point is that a stream which breaks
+        // half-way still inflated everything up to the break. Nothing is kept —
+        // this pass counts and drops, so a `Vec<u8>` here would be sixteen
+        // megabytes allocated in order to be thrown away.
+        let mut inflated = Inflated(0);
+        let _ = std::io::copy(&mut Read::take(&mut member, cap + 1), &mut inflated);
+        let inflated = inflated.0;
         if inflated > cap {
             return Err(XlsxError::TooLarge);
         }
@@ -365,6 +416,28 @@ fn measure_package(bytes: &[u8], budget: usize) -> Result<(), XlsxError> {
     }
 
     Ok(())
+}
+
+/// A sink that counts what passes through it.
+///
+/// `io::sink()` would do the discarding and `io::copy`'s return value would do
+/// the counting — but only on the arm where the copy succeeds, which is the one
+/// arm where the count does not matter. This carries it out of the failing arm
+/// too; see [`measure_package`] for what that was worth.
+struct Inflated(u64);
+
+impl std::io::Write for Inflated {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // `saturating_add` for the same reason the budget's subtraction uses
+        // it: `take` bounds this well below `u64::MAX`, and a counter that
+        // wrapped would report a bomb as a small member.
+        self.0 = self.0.saturating_add(buf.len() as u64);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// What asking a workbook for one sheet answered.
@@ -559,6 +632,144 @@ mod tests {
         ];
         members.extend(extra.iter().cloned());
         archive(&members)
+    }
+
+    /// Flips the stored CRC-32 of every member whose name starts with `prefix`,
+    /// so that member inflates in full and then fails at the end of its stream.
+    ///
+    /// The CRC sits 14 bytes into a local file header and 16 into a central
+    /// directory entry; both are patched, because which one the reader trusts is
+    /// the library's business. Matching on the name is what keeps the workbook's
+    /// own parts intact — corrupting those would test something else entirely.
+    fn break_streams(bytes: &mut [u8], prefix: &str) -> usize {
+        // (signature, crc offset, name-length offset, name offset)
+        const HEADERS: [(&[u8; 4], usize, usize, usize); 2] =
+            [(b"PK\x03\x04", 14, 26, 30), (b"PK\x01\x02", 16, 28, 46)];
+        let mut broken = 0;
+        for i in 0..bytes.len().saturating_sub(46) {
+            for (signature, crc, len_at, name_at) in HEADERS {
+                if &bytes[i..i + 4] != signature {
+                    continue;
+                }
+                let len = u16::from_le_bytes([bytes[i + len_at], bytes[i + len_at + 1]]) as usize;
+                let Some(name) = bytes.get(i + name_at..i + name_at + len) else {
+                    continue;
+                };
+                if name.starts_with(prefix.as_bytes()) {
+                    bytes[i + crc] ^= 0xff;
+                    broken += 1;
+                }
+            }
+        }
+        broken
+    }
+
+    /// **`extract_xlsx` spends [`WORKBOOK_MAX_BYTES`], and nothing said so until
+    /// this test.**
+    ///
+    /// Measured by a review: replacing the budget in [`extract_xlsx`] with
+    /// `usize::MAX` left **all 244 tests of this crate green**. Every other cap
+    /// test goes through the private `extract`, so the mechanism was covered and
+    /// the wiring was not — and the wiring is the half a later edit touches.
+    ///
+    /// It is the one assertion in this file that cannot use a budget of a few
+    /// kilobytes, because the number under test is a quarter of a gigabyte and
+    /// the only way to exceed it is to inflate it. The member is therefore
+    /// deflated **once** and copied compressed seventeen times
+    /// (`raw_copy_file_rename`): building it the obvious way cost 6,6 s of the
+    /// suite, and all but a fraction of that was re-deflating the same sixteen
+    /// megabytes over and over. `zip` deflates a run of one byte at about
+    /// 1000:1, so the archive itself stays a few hundred kilobytes.
+    ///
+    /// Both directions, and the second is what makes the first mean anything:
+    /// the same bytes with the budget lifted are **not** refused for size, so
+    /// the refusal above came from the budget rather than from anything else
+    /// about a 17-member archive.
+    #[test]
+    fn the_public_entry_spends_the_workbook_budget() {
+        // Seventeen members of exactly `MEMBER_MAX_BYTES`: none is over the
+        // per-member cap on its own, and together they are 272 MiB against a
+        // 256 MiB total. The case `zip_part`'s own doc names — "N members each
+        // just under this cap is the same attack with more entries".
+        let members = WORKBOOK_MAX_BYTES / MEMBER_MAX_BYTES + 1;
+        let one = archive(&[("xl/big.xml", vec![b'a'; MEMBER_MAX_BYTES])]);
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            for i in 0..members {
+                let mut source = zip::ZipArchive::new(Cursor::new(&one)).unwrap();
+                w.raw_copy_file_rename(source.by_index_raw(0).unwrap(), format!("xl/big{i}.xml"))
+                    .unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+
+        assert!(matches!(extract_xlsx(&bytes), Err(XlsxError::TooLarge)));
+
+        // With the budget lifted, the per-member cap alone lets all seventeen
+        // through and the read fails later, on not being a workbook at all.
+        assert!(matches!(
+            extract(&bytes, usize::MAX),
+            Err(XlsxError::Malformed(_))
+        ));
+    }
+
+    /// **A member whose stream breaks has already inflated, and it is charged
+    /// for it.**
+    ///
+    /// The defect this replaces: `io::copy` reports what it moved only on the
+    /// arm where it succeeds, so skipping the charge on the failing arm made a
+    /// broken member free. Measured before the fix — a 417 KB archive of 100
+    /// members inflated 400 MiB and answered `Ok` against a 256 MiB budget.
+    ///
+    /// Four assertions, and the first is a **premise about the fixture**: it
+    /// asserts that these members really do inflate and then error, so that a
+    /// `zip` release which stopped validating checksums would redden this test
+    /// instead of quietly turning it into a test of nothing.
+    #[test]
+    fn a_member_whose_stream_breaks_is_still_charged_to_the_budget() {
+        let filler: Vec<(&str, Vec<u8>)> = vec![
+            ("xl/broken-a.xml", vec![b'a'; 2000]),
+            ("xl/broken-b.xml", vec![b'b'; 2000]),
+            ("xl/broken-c.xml", vec![b'c'; 2000]),
+        ];
+        let mut bytes = one_sheet(
+            r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#,
+            "<si><t>рядок</t></si>",
+            &filler,
+        );
+        assert_eq!(
+            break_streams(&mut bytes, "xl/broken-"),
+            6,
+            "three members, two headers each"
+        );
+
+        // The premise: this member inflates in full and *then* fails.
+        let mut zipped = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        let mut member = zipped.by_name("xl/broken-a.xml").unwrap();
+        let mut counted = Inflated(0);
+        let outcome = std::io::copy(&mut member, &mut counted);
+        assert!(
+            outcome.is_err(),
+            "the fixture is not broken, so this test measures nothing"
+        );
+        assert_eq!(
+            counted.0, 2000,
+            "a broken stream still emitted its whole member"
+        );
+
+        // Three broken members of 2 000 bytes against a budget of 3 000: the
+        // first is charged, and the second must not fit. Uncharged, every one of
+        // them measures 2 000 against an unspent 3 000 for ever.
+        assert!(matches!(extract(&bytes, 3000), Err(XlsxError::TooLarge)));
+
+        // And the other direction, so the assertion above is not satisfied by a
+        // reader that refuses any damaged archive: the same bytes under a real
+        // budget are read, broken members and all.
+        let workbook = extract(&bytes, WORKBOOK_MAX_BYTES).expect("a broken filler is not damage");
+        assert_eq!(workbook.sheets[0].blocks[0].text, "рядок");
     }
 
     /// **The cap stands before calamine opens the file, and it stands on the

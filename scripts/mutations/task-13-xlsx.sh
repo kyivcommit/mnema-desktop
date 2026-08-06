@@ -383,3 +383,42 @@ case_ "worker: an xlsm is not refused for its name" \
   's~        Reader::Xlsx => match extract_xlsx\(&bytes\) \{~        Reader::Xlsx if extension == Some("xlsm") => vec![Frame::Failed {\n            message: "no".to_string(),\n        }],\n        Reader::Xlsx => match extract_xlsx(&bytes) {~' \
   'Reader::Xlsx if extension == Some("xlsm") => vec![Frame::Failed {' \
   mnema-extract 'an_xlsm_is_read_by_the_spreadsheet_reader' --test worker_cli
+
+# ------------------------------------------------- fix round 1: the error arm
+
+# C36. **The defect the review measured, restored.** `io::copy` reports what it
+# moved only when it succeeds, so the first version skipped the charge on the
+# failing arm — and a member whose deflate stream breaks has already inflated
+# everything before the break. A 417 KB archive of 100 members then inflated
+# 400 MiB against a 256 MiB budget and answered `Ok`.
+case_ "reader: a broken member is charged for what it inflated" \
+  crates/mnema-extract/src/xlsx.rs \
+  's~        let mut inflated = Inflated\(0\);\n        let _ = std::io::copy\(&mut Read::take\(&mut member, cap \+ 1\), &mut inflated\);\n        let inflated = inflated\.0;~        let mut counted = Inflated(0);\n        let Ok(inflated) = std::io::copy(\&mut Read::take(\&mut member, cap + 1), \&mut counted) else {\n            continue;\n        };~' \
+  'let Ok(inflated) = std::io::copy(&mut Read::take(&mut member, cap + 1), &mut counted) else {' \
+  mnema-extract 'xlsx::tests::a_member_whose_stream_breaks_is_still_charged_to_the_budget' --lib
+
+# C37. The counter must count what passes, not what the caller asked for: a
+# writer that reported zero would make every member free again, by the other
+# road.
+case_ "reader: the sink counts the bytes that pass through it" \
+  crates/mnema-extract/src/xlsx.rs \
+  's~        self\.0 = self\.0\.saturating_add\(buf\.len\(\) as u64\);~        self.0 = self.0;~' \
+  '        self.0 = self.0;' \
+  mnema-extract 'xlsx::tests::a_member_over_the_cap_refuses_the_workbook_and_one_under_it_does_not' --lib
+
+# C38. **The wiring, not the mechanism.** Every other cap case goes through the
+# private `extract`; the review measured that replacing this budget with
+# `usize::MAX` left all 244 tests of the crate green.
+case_ "reader: the public entry spends WORKBOOK_MAX_BYTES" \
+  crates/mnema-extract/src/xlsx.rs \
+  's~    extract\(bytes, WORKBOOK_MAX_BYTES\)~    extract(bytes, usize::MAX)~' \
+  'extract(bytes, usize::MAX)' \
+  mnema-extract 'xlsx::tests::the_public_entry_spends_the_workbook_budget' --lib
+
+# C39. One cell reference named twice: which of the two survives is arbitrary,
+# but it is a choice, and until this case nothing said which one the reader made.
+case_ "reader: a repeated cell reference keeps the last value" \
+  crates/mnema-extract/src/xlsx.rs \
+  's~                rows\.entry\(row\)\.or_default\(\)\.insert\(column, text\);~                rows.entry(row).or_default().entry(column).or_insert(text);~' \
+  'rows.entry(row).or_default().entry(column).or_insert(text);' \
+  mnema-extract 'a_malformed_row_is_read_the_way_a_spreadsheet_would' --test xlsx

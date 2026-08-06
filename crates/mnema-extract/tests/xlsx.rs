@@ -588,33 +588,42 @@ fn a_formula_is_read_by_its_cached_value_and_never_by_its_source() {
     );
 }
 
-/// **A date is indexed as the number it is in the file, and this test exists so
-/// that stays a decision rather than a surprise.**
+/// **No number format is applied, so a cell is indexed as its raw value — and
+/// this test exists so that stays a decision rather than a surprise.**
 ///
-/// A date in xlsx is a serial number plus a style, and calamine *does* read the
-/// style: the cell arrives as `Data::DateTime`. But
-/// `impl Display for ExcelDateTime` prints `self.value`
-/// (`calamine-0.36.0/src/datatype.rs:986-990`) in every feature configuration,
-/// so `46000` is what a search would have to be typed as. Closing it needs
-/// calamine's `dates` feature — which is `chrono` — **and** a decision about
-/// which format to render, neither of which is a line in this reader.
+/// **This was `a_date_is_indexed_as_the_number_it_is_in_the_file` and pinned one
+/// cell**, because a date is where the loss is loudest. A review measured the
+/// rest of the column and the date turned out to be an instance, not a case: a
+/// cell in xlsx is a raw value plus a `numFmt` that says how it is painted,
+/// calamine hands back the value, and `Display` prints it. A search for `15%`
+/// fails for exactly the reason a search for `06.08.2026` fails. The name and
+/// the fixture now hold the class; the date is still here as its sharpest
+/// member.
 ///
-/// Asserted as the current behaviour rather than left undescribed: an
-/// undocumented gap is one a later reader has to rediscover, and this one is the
-/// largest this reader has.
+/// Closing it needs calamine's `dates` feature — which is `chrono` — **and** a
+/// rule for which format codes render how, in whose locale. Neither is a line in
+/// this reader, and the scope of that is unchanged by widening this test.
 #[test]
-fn a_date_is_indexed_as_the_number_it_is_in_the_file() {
-    let styles = r#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14" applyNumberFormat="1"/></cellXfs></styleSheet>"#;
+fn no_number_format_is_applied_so_a_cell_is_indexed_as_its_raw_value() {
+    // numFmt 9 is `0%`, 44 is an accounting currency, 14 is `dd/mm/yyyy`. All
+    // three are built in, so the styles here declare no `<numFmts>` of their own.
+    let styles = r#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="4"><xf numFmtId="0"/><xf numFmtId="9" applyNumberFormat="1"/><xf numFmtId="44" applyNumberFormat="1"/><xf numFmtId="14" applyNumberFormat="1"/></cellXfs></styleSheet>"#;
     let bytes = workbook(
         &[Sheet::new(
-            "Дати",
+            "Формати",
             concat!(
-                // Styled as a date (numFmtId 14 is `dd/mm/yyyy`), and a plain
-                // number of the same value beside it.
-                r#"<row r="1"><c r="A1" s="1"><v>46000</v></c><c r="B1" s="0"><v>46000</v></c>"#,
-                // An ISO date, which the format also allows and which *does*
-                // survive as text.
-                r#"<c r="C1" t="d"><v>2026-08-06T12:00:00</v></c></row>"#,
+                // A percentage the sheet shows as `15%`…
+                r#"<row r="1"><c r="A1" s="1"><v>0.15</v></c>"#,
+                // …a currency it shows as `1 500,50 ₴`…
+                r#"<c r="B1" s="2"><v>1500.5</v></c>"#,
+                // …and a date it shows as `06.08.2026`, beside the same number
+                // with no format at all: the two are indistinguishable in the
+                // index, which is the whole finding.
+                r#"<c r="C1" s="3"><v>46000</v></c><c r="D1" s="0"><v>46000</v></c>"#,
+                // A boolean the sheet shows as `TRUE`, and an ISO date, which is
+                // the one dated form that *does* survive as text.
+                r#"<c r="E1" t="b"><v>1</v></c>"#,
+                r#"<c r="F1" t="d"><v>2026-08-06T12:00:00</v></c></row>"#,
             ),
         )],
         "",
@@ -625,8 +634,53 @@ fn a_date_is_indexed_as_the_number_it_is_in_the_file() {
     assert_eq!(rows.len(), 1);
     let (text, _, _) = &rows[0];
     assert_eq!(
-        text, "46000\t46000\t2026-08-06T12:00:00",
-        "a styled date and a bare number are the same string today — the gap this test records"
+        text, "0.15\t1500.5\t46000\t46000\ttrue\t2026-08-06T12:00:00",
+        "a formatted cell reaches the index as its raw value — the class this test records"
+    );
+
+    // Both directions, because the assertion above is a string and a string is
+    // satisfied by many wrong readers: what the sheet *shows* is nowhere in it.
+    for shown in ["15%", "₴", "06.08.2026", "TRUE"] {
+        assert!(
+            !text.contains(shown),
+            "the sheet shows {shown} and the index would then have it: {text:?}"
+        );
+    }
+}
+
+/// The shapes a well-formed sheet does not have, read the way a spreadsheet
+/// would read them.
+///
+/// **Written because a review asked which of two cells with the same reference
+/// wins and the answer was neither documented nor tested.** Any of these could
+/// go the other way without being wrong; what would be wrong is for them to be
+/// accidents. Excel writes none of them; a crafted file writes all of them, and
+/// this reader meets crafted files by construction.
+#[test]
+fn a_malformed_row_is_read_the_way_a_spreadsheet_would() {
+    let bytes = one_sheet(
+        "Крафт",
+        concat!(
+            // One reference named twice: the last value wins and the first is
+            // gone without a trace.
+            r#"<row r="1"><c r="A1" t="s"><v>0</v></c><c r="A1" t="s"><v>1</v></c></row>"#,
+            // One row number opened twice: the cells join into one block rather
+            // than becoming two blocks claiming the same row.
+            r#"<row r="2"><c r="A2" t="s"><v>2</v></c></row>"#,
+            r#"<row r="2"><c r="B2" t="s"><v>3</v></c></row>"#,
+        ),
+        concat!(
+            "<si><t>перше</t></si><si><t>друге</t></si>",
+            "<si><t>ліворуч</t></si><si><t>праворуч</t></si>",
+        ),
+    );
+
+    assert_eq!(
+        rows_of(&bytes, 0),
+        vec![
+            ("друге".to_string(), Some(1), Some(1)),
+            ("ліворуч\tправоруч".to_string(), Some(2), Some(2)),
+        ]
     );
 }
 

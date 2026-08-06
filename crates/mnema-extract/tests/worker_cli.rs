@@ -1631,11 +1631,18 @@ fn an_xlsx_is_read_sheet_by_sheet_and_its_summary_names_what_it_skipped() {
     // And disjoint from what was sent — the exact state the pool refuses the
     // whole job over.
     //
-    // **Shadowed today and kept on purpose.** Every mutation that puts a number
-    // in both lists also changes one of the two exact assertions above, so this
-    // loop has never been the one that fired. It is an *invariant* where those
-    // are values, and values are what a later session updates to match whatever
-    // the code now produces: this survives that edit and they do not.
+    // **It cannot fire while the two exact assertions above stand, and it is
+    // kept anyway.** Not "shadowed today" — that wording said "one day it will",
+    // and it will not: `assert_eq!(sent, …)` and `assert_eq!(skipped_pages, …)`
+    // pin both lists completely, so this condition is already decided before the
+    // loop runs. Measured, not reasoned: C22 reddens on `*pages` above, and no
+    // mutation in the set reddens disjointness itself.
+    //
+    // It stays because it is an *invariant* where those two are *values*, and a
+    // value is what a later session edits to match whatever the code now
+    // produces. This survives that edit; they do not. That is insurance against
+    // the test rotting, not against the code — which is what separates it from
+    // the two dead guards this branch removed from production code.
     for no in skipped_pages {
         assert!(
             !sent.iter().any(|(page_no, _)| page_no == no),
