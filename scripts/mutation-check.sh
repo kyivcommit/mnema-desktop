@@ -51,8 +51,21 @@ trap cleanup EXIT
 git -C "$REPO" worktree add -q --detach "$TREE" HEAD || exit 1
 # Vendored native libraries are gitignored, so the worktree has none. Tests that
 # need them would otherwise fail for a reason that has nothing to do with the
-# mutation.
+# mutation. `vendor/` also holds the Pdfium the bundle now ships, which
+# `bundle.resources` makes a compile-time requirement of src-tauri and not only
+# a run-time one.
 [ -d "$REPO/vendor" ] && cp -R "$REPO/vendor" "$TREE/vendor"
+# And the staged sidecar, for the same reason and with a sharper edge: it is
+# gitignored too, and `tauri-build` refuses to compile src-tauri at all without
+# it — `resource path binaries/mnema-extract-worker-<triple> doesn't exist`. So
+# from the day the sidecar landed until this line was written, every case in
+# this suite whose test lives in `mnema-desktop` could not run: 23 in task-8.sh
+# and 3 in task-9.sh, reported honestly as "refusing to mutate against N tests
+# that are not green to begin with" and read by nobody. Copied rather than
+# rebuilt — the tests that need it read the workflow and the profile, not the
+# binary, and `tauri-build` only checks the file is there.
+[ -d "$REPO/src-tauri/binaries" ] \
+  && cp -R "$REPO/src-tauri/binaries" "$TREE/src-tauri/binaries"
 
 cd "$TREE" || exit 1
 
