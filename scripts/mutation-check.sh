@@ -143,7 +143,11 @@ case_() {
     broken=$((broken + 1))
   elif [ $status -ne 0 ]; then
     echo "   red"
-    printf '%s' "$out" | grep -E "panicked at|assertion|left:|right:|not found" | head -4 | sed 's/^/     /'
+    # `missing`/`unexpected` are here because an assertion that compares sets
+    # puts its detail on continuation lines carrying none of the other words:
+    # without them a corpus case prints its location and nothing about which
+    # dimension diverged, which is most of what the case is for.
+    printf '%s' "$out" | grep -E "panicked at|assertion|left:|right:|not found|missing|unexpected" | head -6 | sed 's/^/     /'
     red=$((red + 1))
   else
     echo "   *** STILL GREEN: $test does not protect what it names ***"
