@@ -208,9 +208,9 @@ done
 /// that would have been missing precisely the two fields this whole task turns
 /// on, and would have looked like a product defect.
 #[cfg(unix)]
-fn better_reader_worker(dir: &Path, version: u32) -> PathBuf {
+fn better_reader_worker(dir: &Path, reader: &str, version: u32) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let path = dir.join(format!("better-reader-{version}"));
+    let path = dir.join(format!("better-reader-{reader}-{version}"));
     std::fs::write(
         &path,
         format!(
@@ -219,7 +219,7 @@ while read -r line; do
   file=$(printf '%s' "$line" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')
   sha=$(shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1)
   pages=$(grep -c . "$file")
-  printf '{{"frame":"header","sha256":"%s","mime":"text/plain","source_kind":"document","reader":"text","reader_version":{version},"pages":%s}}
+  printf '{{"frame":"header","sha256":"%s","mime":"text/plain","source_kind":"document","reader":"{reader}","reader_version":{version},"pages":%s}}
 ' "$sha" "$pages"
   n=0
   while IFS= read -r text; do
@@ -3918,18 +3918,36 @@ impl World {
             // from the `path` row and no worker runs at all — the version can
             // only be compared by a pass that got as far as asking one.
             self.retouch(&relative);
-            // Never 1: that is what the real reader announces, and a version
-            // equal to the recorded one is not a better reader, it is the same
-            // one.
-            let version = 2 + (self.stricter_rotation % 3) as u32;
-            let better = better_reader_worker(self.dir.path(), version);
+            // **Two ways for a reading to be stale, and the harness has to
+            // reach both.** `stale_reading` is `reader != recorded.reader ||
+            // reader_version != recorded.reader_version`, and a corpus that
+            // only ever changes the version judges half of it: measured, the
+            // mutation removing the *name* comparison stayed green, because
+            // every pass that changed the name changed the version too.
+            //
+            // A markdown file offered by the *text* reader **at version 1** is
+            // the name half on its own, and it is not a contrivance — it is what
+            // `.html` did inside this cycle when it left the text reader for the
+            // html one.
+            let markdown = matches!(
+                self.files.get(&relative).map(|state| state.shape),
+                Some(Shape::Markdown(_))
+            );
+            let (reader, version, state) = if markdown && self.rng.chance(50) {
+                ("text", 1, "reader-changed-hands")
+            } else {
+                // Never 1 for the version half: a version equal to the recorded
+                // one is not a better reader, it is the same one.
+                ("text", 2 + (self.stricter_rotation % 3) as u32, "rebuilt")
+            };
+            let better = better_reader_worker(self.dir.path(), reader, version);
             self.note(format!(
-                "  walk {relative} past a build whose text reader is at version {version}"
+                "  walk {relative} past a build whose {reader} reader is at version {version}"
             ));
             let verdict = self.ingest_with(
                 &relative,
                 PoolConfig::new(&better),
-                &format!(" [text reader v{version}]"),
+                &format!(" [{reader} reader v{version}]"),
             );
             // **Asserted, not assumed.** The point of the operation is that the
             // same bytes under a new reader version are *rebuilt*; if this ever
@@ -3944,8 +3962,12 @@ impl World {
             // rebuild, by construction — left the corpus assertion green.
             // A class recorded when it did not happen is worse than one that is
             // never recorded, because it reports coverage rather than absence.
-            if self.last.get(&relative).is_some_and(|last| last.indexed) {
-                self.reached.states.insert("rebuilt");
+            // `verdict.is_some()` first: an excluded path is never offered, and
+            // `self.last` then still holds **an earlier call's** entry for it —
+            // which is how this could record a rebuild the operation never
+            // performed.
+            if verdict.is_some() && self.last.get(&relative).is_some_and(|last| last.indexed) {
+                self.reached.states.insert(state);
             }
         }
     }
@@ -3980,7 +4002,7 @@ impl World {
 
             self.retouch(&relative);
             let version = 2 + (self.stricter_rotation % 3) as u32;
-            let better = better_reader_worker(self.dir.path(), version);
+            let better = better_reader_worker(self.dir.path(), "text", version);
 
             // The abort lands on a page the *second* slice writes, so slice 0 is
             // committed and the document is genuinely half-written — which is
@@ -4013,6 +4035,11 @@ impl World {
                 PoolConfig::new(&better),
                 &format!(" [text reader v{version}, resuming]"),
             );
+            if verdict.is_none() {
+                // Excluded between the two passes; nothing was offered, so
+                // there is nothing to assert about what an offer answered.
+                return;
+            }
             if self.last.get(&relative).is_some_and(|last| last.indexed) {
                 let finished = self
                     .documents_now()
@@ -4736,7 +4763,9 @@ fn random_sequences_do_not_lose_data() {
     // the branch. Compared as a set, like the three above it, so a state that
     // stops being driven fails and a state driven without anyone deciding it
     // should be fails too.
-    let want_states: BTreeSet<&str> = ["rebuilt", "rebuild-resumed"].into_iter().collect();
+    let want_states: BTreeSet<&str> = ["rebuilt", "rebuild-resumed", "reader-changed-hands"]
+        .into_iter()
+        .collect();
     assert_eq!(
         reached.states, want_states,
         "the corpus did not drive the product through exactly the rebuild states this file \
