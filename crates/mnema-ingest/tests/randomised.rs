@@ -177,6 +177,70 @@ done
     path
 }
 
+/// A sidecar that **succeeds**: it reads the file and answers with a valid frame
+/// stream, at whatever `reader_version` it is built with.
+///
+/// **This is the capability the harness did not have.** Every other sidecar here
+/// refuses — `babbling_worker` is not a worker at all, `stricter_worker` answers
+/// one refusal — and refusals can never reach the machinery this cycle added:
+/// a reader version bump **rebuilds** a document instead of confirming it,
+/// `ingest_stage.status` passes through `rebuilding`, `document.status` goes
+/// back to `pending` so a document being written answers no search (D61), and an
+/// interrupted rebuild is finished by the next walk rather than left as
+/// `Unchanged`. Reaching any of that needs a worker that gets as far as writing.
+///
+/// **One page per non-empty line, rather than one page per file.** The real text
+/// reader makes a single page of many blocks, and a single page cannot be cut
+/// across transactions — `PAGES_PER_TRANSACTION` is 20, so a document has to
+/// declare more than twenty *pages* before the write loop makes more than one
+/// slice, and a failure between two slices is exactly the state invariant 2
+/// exists for. A line per page is the cheapest honest shape that gets there.
+///
+/// Every marker the file holds is therefore still in some block, which is what
+/// keeps `check_stored_is_findable` a real check over a rebuilt document rather
+/// than a vacuous one.
+///
+/// ⚠️ **The frame shapes here were read off a run of the real binary, and the
+/// first read was of a stale one.** `target/debug/mnema-extract-worker` was
+/// three days old — `cargo clean -p` deletes it and not everything puts it back
+/// — and its header carried no `reader` or `reader_version` at all, with
+/// `skipped_pages` still a number rather than a list. A sidecar derived from
+/// that would have been missing precisely the two fields this whole task turns
+/// on, and would have looked like a product defect.
+#[cfg(unix)]
+fn better_reader_worker(dir: &Path, version: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(format!("better-reader-{version}"));
+    std::fs::write(
+        &path,
+        format!(
+            r#"#!/bin/sh
+while read -r line; do
+  file=$(printf '%s' "$line" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')
+  sha=$(shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1)
+  pages=$(grep -c . "$file")
+  printf '{{"frame":"header","sha256":"%s","mime":"text/plain","source_kind":"document","reader":"text","reader_version":{version},"pages":%s}}
+' "$sha" "$pages"
+  n=0
+  while IFS= read -r text; do
+    [ -z "$text" ] && continue
+    n=$((n+1))
+    printf '{{"frame":"page","page_no":%s,"section_title":null}}
+' "$n"
+    printf '{{"frame":"block","block_type":"paragraph","reading_order":0,"language":null,"text":"%s","line_start":%s,"line_end":%s}}
+' "$text" "$n" "$n"
+  done < "$file"
+  printf '{{"frame":"summary","skipped_pages":[],"text_source":"native:txt"}}
+'
+done
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 // ------------------------------------------------------------------ the dice
 
 /// splitmix64 — three lines, no dependency, and identical on every platform.
@@ -1904,6 +1968,7 @@ impl World {
         self.check_a_refusal_by_content_did_what_its_rule_says(before, &after);
         self.check_a_page_that_has_text_again_leaves_no_row();
         self.check_stored_is_findable(&after, &documents);
+        self.check_an_unfinished_document_answers_nothing(&after, &documents);
         self.check_chunks_are_searchable();
         self.check_ord_is_dense();
         self.check_checkpoints_agree(&documents);
@@ -2709,6 +2774,60 @@ impl World {
     /// half-written by an interrupted job is legitimately incomplete; that it
     /// must not *stay* that way is invariant 6's business, and the sequence
     /// ending in [`World::settle`] is where it is collected.
+    /// **3f. A document answers a search whole, or does not answer at all —
+    /// never with part of itself.**
+    ///
+    /// The other half of invariant 4, and the half nothing stated.
+    /// `check_stored_is_findable` **skips** a document that is not settled
+    /// (`is_settled`: `status == indexed && stage == done`), which is right —
+    /// a document half-written has no obligation to be findable. What follows
+    /// from that and was never written down is the opposite obligation: while
+    /// it is half-written it must be findable **not at all**, and this is where
+    /// the two halves meet.
+    ///
+    /// It is D61's whole content. A rebuild puts `document.status` back to
+    /// `pending` precisely so that the document stops answering while its
+    /// chunks are being replaced; without that, a rebuild cut between slices
+    /// leaves a document answering with the chunks that landed — a search
+    /// returning half a contract, with nothing anywhere saying it is half.
+    ///
+    /// **Scoped to hits that belong to this document.** The same marker can
+    /// legitimately answer from somewhere else — a copy of the file at another
+    /// path, indexed and finished — and that is not this document answering.
+    /// `document_of_chunk` is what tells them apart; without it this invariant
+    /// would fail on an ordinary `copy` and would then be "fixed" by weakening
+    /// it, which is how a real one gets lost.
+    fn check_an_unfinished_document_answers_nothing(
+        &self,
+        after: &BTreeMap<String, String>,
+        documents: &BTreeMap<String, (String, Option<String>)>,
+    ) {
+        for (relative, document) in after {
+            if self.is_settled(documents, document) {
+                continue;
+            }
+            let Some(state) = self.files.get(relative) else {
+                continue;
+            };
+            let Some((status, stage)) = documents.get(document) else {
+                continue;
+            };
+            for marker in sample(&state.markers) {
+                for chunk_id in self.db.search_lexical(marker, 20).unwrap() {
+                    if self.document_of_chunk(chunk_id).as_deref() == Some(document.as_str()) {
+                        self.fail(format!(
+                            "invariant 3f — {relative} names a document that is not finished \
+                             (status {status:?}, stage {stage:?}) and chunk {chunk_id} of that \
+                             same document already answers a search for {marker:?}. A document \
+                             being written must answer whole or not at all; this one answers \
+                             with the part that happened to land"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     fn check_stored_is_findable(
         &self,
         after: &BTreeMap<String, String>,
@@ -2994,7 +3113,7 @@ impl World {
         let choice = if self.files.is_empty() {
             0
         } else {
-            self.rng.below(27)
+            self.rng.below(29)
         };
         match choice {
             0 => self.create(),
@@ -3043,6 +3162,13 @@ impl World {
             // one class in this file whose evidence lives in a *second* table
             // and is cleared by a path of its own.
             25 => self.document_with_an_unreadable_page(),
+            // The rebuild machinery. Two slots, and the weighting is the same
+            // argument `database_refuses_a_write` makes for its two: everything
+            // downstream of a rebuild needs a rebuild to have happened, and one
+            // slot in twenty-eight put the whole path at roughly once per
+            // corpus.
+            26 => self.the_build_learned_to_read_better(),
+            27 => self.an_interrupted_rebuild_is_finished_by_the_next_pass(),
             _ => self.run_walk(),
         }
     }
@@ -3752,6 +3878,149 @@ impl World {
         self.reingest();
     }
 
+    /// **The build learned to read better**: the same file, the same digest, a
+    /// different reader version.
+    ///
+    /// This is the operation the whole task exists for. `ingest_file` compares
+    /// the reader and version recorded on the `path` row against the one the
+    /// worker just announced (`crates/mnema-ingest/src/lib.rs`'s `stale_reading`),
+    /// and when they differ it **rebuilds** the document rather than answering
+    /// `AlreadyIndexed` — clearing the old chunks, putting `document.status`
+    /// back to `pending` so the document answers no search while it is being
+    /// written, and passing `ingest_stage.status` through `rebuilding`.
+    ///
+    /// Nothing in this file could reach that before: a rebuild needs a worker
+    /// that **succeeds**, and every sidecar here refused.
+    ///
+    /// Restricted to prose, and that is a property of the sidecar rather than
+    /// of the product: it re-emits the file's own lines as JSON, so a format
+    /// whose bytes are markup or an archive would need escaping this shell
+    /// script has no business doing. The rebuild machinery is per-document and
+    /// does not care which reader produced it.
+    fn the_build_learned_to_read_better(&mut self) {
+        #[cfg(unix)]
+        {
+            let candidates: Vec<String> = self
+                .paths_now()
+                .into_keys()
+                .filter(|relative| {
+                    matches!(
+                        self.files.get(relative).map(|state| state.shape),
+                        Some(Shape::Text(_)) | Some(Shape::Markdown(_))
+                    )
+                })
+                .collect();
+            if candidates.is_empty() {
+                return;
+            }
+            let relative = self.rng.pick(&candidates).clone();
+            // The mtime has to move or the first cheap arm answers `Unchanged`
+            // from the `path` row and no worker runs at all — the version can
+            // only be compared by a pass that got as far as asking one.
+            self.retouch(&relative);
+            // Never 1: that is what the real reader announces, and a version
+            // equal to the recorded one is not a better reader, it is the same
+            // one.
+            let version = 2 + (self.stricter_rotation % 3) as u32;
+            let better = better_reader_worker(self.dir.path(), version);
+            self.note(format!(
+                "  walk {relative} past a build whose text reader is at version {version}"
+            ));
+            let verdict = self.ingest_with(
+                &relative,
+                PoolConfig::new(&better),
+                &format!(" [text reader v{version}]"),
+            );
+            // **Asserted, not assumed.** The point of the operation is that the
+            // same bytes under a new reader version are *rebuilt*; if this ever
+            // answers `AlreadyIndexed` the operation is a no-op and every
+            // invariant below it is judging an ordinary walk.
+            if verdict == Some(Verdict::Settled) {
+                self.reached.states.insert("rebuilt");
+            }
+        }
+    }
+
+    /// A rebuild that is cut off **between two slices**, and the pass after it.
+    ///
+    /// `PAGES_PER_TRANSACTION` is 20 and the sidecar emits one page per line, so
+    /// a file of more than twenty paragraphs is written in more than one
+    /// transaction. Aborting the second leaves the document half-written: the
+    /// two invariants this task exists for are that such a document answers no
+    /// search **at all** rather than with the half that landed, and that the
+    /// next pass finishes it rather than reading the leftover state as
+    /// `Unchanged`.
+    ///
+    /// Both already cost a Critical once, around the `AlreadyIndexed` branch and
+    /// slice 0's commit.
+    fn an_interrupted_rebuild_is_finished_by_the_next_pass(&mut self) {
+        #[cfg(unix)]
+        {
+            // A document long enough to be cut, written fresh so that the pass
+            // below is a rebuild of something the index already holds.
+            let n = self.next_counter();
+            let relative = format!("docs/long-{n}.txt");
+            let units = mnema_ingest::PAGES_PER_TRANSACTION + 2 + self.rng.below(4);
+            let content = self.text_body(units);
+            let at = self.next_tick();
+            self.note(format!(
+                "  create {relative} ({units} paragraphs) for a cut rebuild"
+            ));
+            self.write_at(&relative, content, at);
+            self.ingest(&relative);
+
+            self.retouch(&relative);
+            let version = 2 + (self.stricter_rotation % 3) as u32;
+            let better = better_reader_worker(self.dir.path(), version);
+
+            // The abort lands on a page the *second* slice writes, so slice 0 is
+            // committed and the document is genuinely half-written — which is
+            // the state, not merely a failed write.
+            self.db
+                .conn()
+                .execute_batch(
+                    "CREATE TRIGGER forced_failure BEFORE INSERT ON page                      WHEN new.page_no > 20 BEGIN                          SELECT RAISE(ABORT, 'forced failure');                      END;",
+                )
+                .unwrap();
+            self.note(format!(
+                "  rebuild {relative} at v{version}, cut between slices"
+            ));
+            self.ingest_with(
+                &relative,
+                PoolConfig::new(&better),
+                &format!(" [text reader v{version}, cut]"),
+            );
+            self.db
+                .conn()
+                .execute_batch("DROP TRIGGER forced_failure")
+                .unwrap();
+
+            // **The pass after the interruption.** It must read the file again
+            // and finish the document; answering `Unchanged` would mean the
+            // interrupted pass left behind a `path` row the cheap arm trusts,
+            // and the half-written document would stay half-written for ever.
+            let verdict = self.ingest_with(
+                &relative,
+                PoolConfig::new(&better),
+                &format!(" [text reader v{version}, resuming]"),
+            );
+            if let Some(Verdict::Settled) = verdict {
+                let finished = self
+                    .documents_now()
+                    .values()
+                    .any(|(status, stage)| status == "indexed" && stage.as_deref() == Some("done"));
+                if !finished {
+                    self.fail(format!(
+                        "D64 invariant 2 — the pass after an interrupted rebuild of {relative} \
+                         settled and left no finished document behind. An interrupted pass \
+                         must not leave a state the next walk reads as done"
+                    ));
+                }
+                self.reached.states.insert("rebuild-resumed");
+            }
+        }
+    }
+
     fn babbling_sidecar(&mut self) {
         #[cfg(unix)]
         {
@@ -4297,6 +4566,15 @@ struct Reached {
     rules: BTreeSet<&'static str>,
     /// Every reader that produced a document the index kept.
     readers: BTreeSet<String>,
+    /// Which states of the **rebuild** machinery this run actually drove the
+    /// product through.
+    ///
+    /// The dimension Task 14's corpus assertion did not have, and the reason
+    /// this is a task rather than a line in a report: `shapes`, `rules` and
+    /// `readers` all passed at full strength while containing no entry for the
+    /// riskiest machinery on the branch. A check written to expose an unreached
+    /// class was reporting success over one.
+    states: BTreeSet<&'static str>,
     /// How many times a settled call found the journal holding a per-page row
     /// **under this run's watched root** — an observation count, not a set of
     /// page numbers, and the doc comment said the wrong one of those.
@@ -4314,6 +4592,7 @@ impl Reached {
         self.shapes.extend(other.shapes);
         self.rules.extend(other.rules);
         self.readers.extend(other.readers);
+        self.states.extend(other.states);
         self.page_skips += other.page_skips;
     }
 }
@@ -4375,8 +4654,8 @@ fn random_sequences_do_not_lose_data() {
         // generated at all.
         eprintln!(
             "seed {seed} reached:\n  shapes:  {:?}\n  readers: {:?}\n  rules:   {:?}\n  \
-             per-page rows seen: {}",
-            reached.shapes, reached.readers, reached.rules, reached.page_skips
+             states:  {:?}\n  per-page rows seen: {}",
+            reached.shapes, reached.readers, reached.rules, reached.states, reached.page_skips
         );
         return;
     }
@@ -4433,6 +4712,23 @@ fn random_sequences_do_not_lose_data() {
          should. That function is exhaustive over `SkipRule`, so a rule added to the product \
          cannot reach this assertion without someone deciding whether the harness models it"
     );
+    // **The dimension whose absence made this a task of its own.** Task 14's
+    // corpus assertion passed at full strength while `shapes`, `rules` and
+    // `readers` held no entry for any rebuild state — so the check written to
+    // expose an unreached class reported success over the riskiest machinery on
+    // the branch. Compared as a set, like the three above it, so a state that
+    // stops being driven fails and a state driven without anyone deciding it
+    // should be fails too.
+    let want_states: BTreeSet<&str> = ["rebuilt", "rebuild-resumed"].into_iter().collect();
+    assert_eq!(
+        reached.states, want_states,
+        "the corpus did not drive the product through exactly the rebuild states this file \
+         claims to cover. A reader-version bump must *rebuild* rather than confirm, and an \
+         interrupted rebuild must be finished by the next pass — neither is reachable \
+         through a sidecar that only refuses, which is why every earlier corpus was silent \
+         about both"
+    );
+
     assert!(
         reached.page_skips > 0,
         "no reader reported a skipped page in this corpus, so the per-page journal rows          Task 9 added — and the path that removes them — are untested"
