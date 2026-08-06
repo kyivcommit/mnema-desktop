@@ -38,8 +38,8 @@ tempfile = { workspace = true }
 # back out of the index would be the index marking its own work.
 sha2 = { workspace = true }
 # `tests/randomised.rs` only, and at the pin the whole workspace already
-# resolves (`crates/mnema-deps-probe/Cargo.toml:8`, `mnema-extract`'s own
-# dependency). Four of the five formats the harness now generates are zip
+# resolves (`mnema-extract`'s own dependency, and the one the deleted
+# dependency probe first measured). Four of the five formats the harness now generates are zip
 # containers, and the generator has to build them the way a producer does —
 # writing the bytes by hand would make the fixtures a second implementation of
 # the archive format, which is the thing they are supposed to be independent of.

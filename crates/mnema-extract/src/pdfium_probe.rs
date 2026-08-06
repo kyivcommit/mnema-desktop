@@ -257,7 +257,33 @@ pub(crate) fn lock_pdfium() -> std::sync::MutexGuard<'static, ()> {
 /// `verify_build` and `bind_to_library` and nothing else, and no file has been
 /// named at this point, let alone opened.
 pub(crate) fn pdfium() -> Result<&'static Pdfium, Error> {
-    static PDFIUM: OnceLock<Result<Pdfium, Error>> = OnceLock::new();
+    bound_pdfium().map(|(pdfium, _)| pdfium)
+}
+
+/// The directory the loaded library was loaded **from**, recorded by the call
+/// that loaded it.
+///
+/// Not `library_dir()` called a second time. That would re-derive an answer
+/// from the same inputs and agree with itself by construction, which is what a
+/// packaging check must not accept: `library_dir` has three branches, one of
+/// them an absolute path baked into the binary at compile time
+/// (`CARGO_MANIFEST_DIR`), and a bundle that reached that branch is loading the
+/// developer's checkout while looking identical from the outside. Measured on
+/// this repository's own image: the bundled worker did exactly that, and the
+/// only reason it was visible at all is that code signing then refused the
+/// load. `scripts/verify-bundle.sh` compares this against the mounted image, so
+/// it must be the path that was handed to the loader on the run that succeeded.
+///
+/// The scope is that and no more: this is the path `bind_to_library` was
+/// given, not a reading of dyld's loaded-image table. The two can differ only
+/// if the same library is already mapped in the process under that install
+/// name, and the worker loads nothing else.
+pub fn loaded_library_dir() -> Result<&'static Path, Error> {
+    bound_pdfium().map(|(_, dir)| dir.as_path())
+}
+
+fn bound_pdfium() -> Result<&'static (Pdfium, PathBuf), Error> {
+    static PDFIUM: OnceLock<Result<(Pdfium, PathBuf), Error>> = OnceLock::new();
 
     PDFIUM
         .get_or_init(|| {
@@ -268,7 +294,7 @@ pub(crate) fn pdfium() -> Result<&'static Pdfium, Error> {
                 stage: Stage::Bind,
                 message: format!("{} could not be loaded: {e}", library.display()),
             })?;
-            Ok(Pdfium::new(bindings))
+            Ok((Pdfium::new(bindings), dir))
         })
         .as_ref()
         .map_err(Clone::clone)
@@ -285,7 +311,10 @@ fn library_dir() -> Result<PathBuf, Error> {
         return Ok(PathBuf::from(dir));
     }
 
-    // 2. Beside the running executable — where a bundled application will ship it.
+    // 2. Beside the running executable — a flat install, and the shape a
+    //    relocated worker takes. NOT where the macOS bundle ships it; that is
+    //    (3), and this branch stays because it is the only one that needs no
+    //    bundle layout and no environment.
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
         && dir.join(Pdfium::pdfium_platform_library_name()).is_file()
@@ -293,9 +322,23 @@ fn library_dir() -> Result<PathBuf, Error> {
         return Ok(dir.to_path_buf());
     }
 
-    // 3. The vendored copy in a development checkout. Baked in at compile time
-    //    because a library cannot ask where the workspace was; a packaged build
-    //    never reaches this branch, having matched (2).
+    // 3. Inside a packaged macOS application. See [`bundled_library_dir`] for
+    //    why the vendored layout is reproduced rather than flattened.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+        && let Some(dir) = bundled_library_dir(exe_dir)
+    {
+        return Ok(dir);
+    }
+
+    // 4. The vendored copy in a development checkout. Baked in at compile time
+    //    because a library cannot ask where the workspace was.
+    //
+    //    A packaged build must never reach this branch, and "must never" is not
+    //    "cannot": before Pdfium was put into the bundle, a signed image on the
+    //    machine that built it reached exactly here and loaded the checkout —
+    //    which is why `loaded_library_dir` exists and why
+    //    `scripts/verify-bundle.sh` asserts on it rather than on this comment.
     let vendored = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../vendor/pdfium/lib"
@@ -315,6 +358,34 @@ fn library_dir() -> Result<PathBuf, Error> {
             Pdfium::pdfium_platform_library_name().to_string_lossy(),
         ),
     })
+}
+
+/// Where a packaged macOS application keeps the library, derived from the
+/// directory its executables run in — `Contents/MacOS` becomes
+/// `Contents/Resources/pdfium/lib`.
+///
+/// **The vendored layout is reproduced, not flattened, and that is the whole
+/// design.** `verify_build` requires a `VERSION` manifest in the library's
+/// directory or its parent, so `pdfium/lib/libpdfium.dylib` puts the manifest
+/// at `pdfium/VERSION` — the same two paths `scripts/fetch-pdfium.sh`
+/// installs. Flattening the library into `Contents/Resources` would leave the
+/// manifest with nowhere to sit that is not shared with every other resource.
+/// `Contents/Frameworks` — the conventional home for a `.dylib` — was measured
+/// and rejected for the same reason: Tauri's `bundle.macOS.frameworks` accepts
+/// only `.dylib` and `.framework` entries, so the manifest cannot go there at
+/// all (docs/BUILD.md).
+///
+/// Returns `None` unless the library is really there, so that a caller cannot
+/// mistake "this is where it would be" for "this is where it is".
+fn bundled_library_dir(exe_dir: &Path) -> Option<PathBuf> {
+    let dir = exe_dir
+        .parent()?
+        .join("Resources")
+        .join("pdfium")
+        .join("lib");
+    dir.join(Pdfium::pdfium_platform_library_name())
+        .is_file()
+        .then_some(dir)
 }
 
 /// Refuses to go on unless the `VERSION` manifest vendored beside the library
@@ -533,6 +604,57 @@ mod tests {
         // The accept branch against the real file on disk, not a string literal.
         let dir = library_dir().expect("the vendored library is present");
         verify_build(&dir).expect("the vendored build matches the bindings");
+    }
+
+    /// The bundle layout, asserted through the check that actually reads it.
+    ///
+    /// The derived path alone would be worth little: comparing
+    /// `bundled_library_dir`'s answer against a second spelling of the same
+    /// join proves the two spellings agree. What has to hold is that the
+    /// layout satisfies `verify_build`, whose manifest search is `<dir>/VERSION`
+    /// and `<dir>/../VERSION` and is written in a different file. So the tree is
+    /// built the way the bundler builds it and `verify_build` is run on the
+    /// result — which is what fails if either side of that pair moves.
+    #[test]
+    fn a_bundle_shaped_tree_yields_a_library_dir_whose_manifest_verify_build_finds() {
+        let root = tempfile::tempdir().unwrap();
+        let macos = root.path().join("Mnema.app/Contents/MacOS");
+        let lib = root.path().join("Mnema.app/Contents/Resources/pdfium/lib");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        // Contents, not bytes: nothing here loads it, and a real 7.7 MB library
+        // in a unit test would be measuring the fixture.
+        std::fs::write(lib.join(Pdfium::pdfium_platform_library_name()), b"x").unwrap();
+        std::fs::write(
+            lib.parent().unwrap().join("VERSION"),
+            format!("MAJOR=151\nMINOR=0\nBUILD={PDFIUM_API_BUILD}\nPATCH=0\n"),
+        )
+        .unwrap();
+
+        let found = bundled_library_dir(&macos).expect("a bundle-shaped tree has a library");
+        assert_eq!(found, lib);
+        verify_build(&found).expect("the manifest one directory up is the one verify_build reads");
+    }
+
+    /// The other direction, and it is not symmetry for its own sake: the
+    /// function is what tells a packaged application apart from a development
+    /// one, and an answer of "yes, here" for a tree with no library in it would
+    /// send `bind_to_library` at a path that does not exist and report the
+    /// failure as a *binding* fault rather than as a missing library.
+    #[test]
+    fn a_tree_with_no_library_in_it_is_not_a_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let macos = root.path().join("Mnema.app/Contents/MacOS");
+        // The directory exists and is empty: the near miss, not the easy one.
+        std::fs::create_dir_all(root.path().join("Mnema.app/Contents/Resources/pdfium/lib"))
+            .unwrap();
+        std::fs::create_dir_all(&macos).unwrap();
+        assert!(
+            bundled_library_dir(&macos).is_none(),
+            "an empty pdfium/lib is not a packaged library"
+        );
+        // And a path with no parent at all, which is the branch `?` covers.
+        assert!(bundled_library_dir(Path::new("/")).is_none());
     }
 
     #[test]

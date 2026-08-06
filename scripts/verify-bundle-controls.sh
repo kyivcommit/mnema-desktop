@@ -187,6 +187,21 @@ there() {
 # A fresh copy of Mnema.app, taken out of the real image. Every structural
 # control mutates one of these and rebuilds an image around it, so that what is
 # being checked is a disk image and not a directory that resembles one.
+#
+# ⚠️ What the re-signs below this line do to a copy, measured rather than assumed,
+# because it inverts a conclusion anyone will reach by trying it here:
+#
+#   codesign --sign - --force --deep  →  flags 0x10002(adhoc,runtime) become 0x2(adhoc)
+#                                        and the entitlements are gone.
+#
+# The bundler signs with the hardened runtime and with
+# `com.apple.security.cs.disable-library-validation`; a `--deep` re-sign keeps neither.
+# So in a re-signed lab copy the worker loads Pdfium happily — and it loads it because
+# library validation is no longer being enforced at all, not because the entitlement is
+# unnecessary. Take that run as evidence about the shipped product and you will delete
+# the entitlement and ship a build that reads no PDFs on any machine. The configuration a
+# user actually runs is reproduced by exactly two things here: the shipped-image step at
+# the bottom, and control 17.
 copy_app_out() {
   local into="$1" mnt
   mnt=$(mktemp -d "${LAB}/mnt.XXXXXX") || return 1
@@ -456,23 +471,48 @@ if must copy_app_out "${LAB}/header-only-worker" \
 fi
 
 echo "### 15. the worker refuses PDFs and the bundle carries Pdfium anyway"
-# Same re-sign, same reason as control 14: adding a file under Resources after
-# copy_app_out leaves the outer seal covering bytes that are no longer the whole
-# story, and codesign calls that "modified or invalid" — control 7's reason, not
-# this control's. With the Pdfium-verdict check below not yet written, that seal
-# failure is the only thing left to redden on, so without the re-sign this
-# control can never be seen still-green: it proves control 7 twice and itself
-# not at all.
+# Same re-sign, same reason as control 14: the stand-in's bytes are not the staged
+# worker's, so the seal has to be re-cut or this reddens on control 7's message.
+#
+# It needs a stand-in now, and that is the finding rather than a convenience. Until
+# the format-readers cycle, the real worker produced this state by itself — it refused
+# every PDF — and `Contents/Resources/pdfium/lib/libpdfium.dylib` was a file this
+# control created. Both halves inverted at once: the worker reads PDFs, and
+# `bundle.resources` puts the library at exactly that path in every build. Left as it
+# was, the `cp` would have overwritten the real library with an identical copy and the
+# control would have gone quietly GREEN — the shape this suite exists to refuse,
+# produced by the suite itself.
 if must copy_app_out "${LAB}/dead-weight" \
-  && must mkdir -p "${LAB}/dead-weight/Mnema.app/Contents/Resources/pdfium/lib" \
-  && must cp "${REPO}/vendor/pdfium/lib/libpdfium.dylib" \
-       "${LAB}/dead-weight/Mnema.app/Contents/Resources/pdfium/lib/" \
+  && must cp "${REPO}/scripts/mutations/pdf-refuses-unsupported.sh" \
+       "${LAB}/dead-weight/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must chmod +x "${LAB}/dead-weight/Mnema.app/Contents/MacOS/mnema-extract-worker" \
   && there "${LAB}/dead-weight/Mnema.app/Contents/Resources/pdfium/lib/libpdfium.dylib" \
   && must codesign --sign - --force --deep "${LAB}/dead-weight/Mnema.app" \
   && must image_from "${LAB}/dead-weight" "${LAB}/dead-weight-img/dmg/Mnema.dmg"; then
   expect_red -m "refuses PDFs as unsupported" \
     "7.7 MB nothing in the bundle can load" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/dead-weight-img"
+fi
+
+echo "### 15b. two copies of the library, and no telling which one ran"
+# The dead-weight defect in the shape this repository can now actually produce: the
+# library is packaged unconditionally, so a second copy left over from another
+# placement — `Contents/Frameworks` was measured as a candidate and rejected — makes
+# 7.7 MB of the image dead without making the bundle fail at anything.
+#
+# The real worker, not a stand-in, because the question is what the check does with a
+# real reading bundle. Sorting cannot answer which copy loaded, and the check is not
+# allowed to guess: control 16f is what happens when it picks the wrong one.
+if must copy_app_out "${LAB}/two-libs" \
+  && must mkdir -p "${LAB}/two-libs/Mnema.app/Contents/Frameworks" \
+  && must cp "${REPO}/vendor/pdfium/lib/libpdfium.dylib" \
+       "${LAB}/two-libs/Mnema.app/Contents/Frameworks/" \
+  && there "${LAB}/two-libs/Mnema.app/Contents/Frameworks/libpdfium.dylib" \
+  && must codesign --sign - --force --deep "${LAB}/two-libs/Mnema.app" \
+  && must image_from "${LAB}/two-libs" "${LAB}/two-libs-img/dmg/Mnema.dmg"; then
+  expect_red -m "2 copies of libpdfium*.dylib" \
+    "one of them is dead weight and sorting does not say which" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/two-libs-img"
 fi
 
 echo "### 16. the worker answers a PDF with something else entirely"
@@ -542,21 +582,100 @@ if must copy_app_out "${LAB}/pdf-mute" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/pdf-mute-img"
 fi
 
-echo "### 16d. the worker reads PDFs, which is the day this check has to turn red"
-# The branch the packaging spec names as the only reason for writing a third case at
-# all: red the day a reader lands, rather than green while a bundle ships without the
-# library that reader needs. Nothing in this repository can produce that state honestly
-# — no reader exists — so a stand-in produces it, and this is the first time anyone has
-# seen the branch fire. Same re-sign, same reason as control 14.
+echo "### 16d. the worker reads PDFs and its probe says it cannot load Pdfium"
+# This control used to be the whole of the PDF-reader case: the branch was a `fail`
+# saying "whoever lands the reader closes this", and any worker answering blocks
+# reddened it. A reader landed, so the branch now asks the worker where its library
+# came from, and the four controls here cover the four ways that can go wrong. This is
+# the first: a worker that reads PDFs over the wire and then cannot say `loaded:true`.
+# Two answers from one process disagreeing is not a state to pick a side in.
+# Same re-sign, same reason as control 14.
 if must copy_app_out "${LAB}/pdf-reader" \
   && must cp "${REPO}/scripts/mutations/pdf-reads-blocks.sh" \
        "${LAB}/pdf-reader/Mnema.app/Contents/MacOS/mnema-extract-worker" \
   && must chmod +x "${LAB}/pdf-reader/Mnema.app/Contents/MacOS/mnema-extract-worker" \
   && must codesign --sign - --force --deep "${LAB}/pdf-reader/Mnema.app" \
   && must image_from "${LAB}/pdf-reader" "${LAB}/pdf-reader-img/dmg/Mnema.dmg"; then
-  expect_red -m "the bundled worker reads PDFs" \
-    "a worker that answers a PDF with blocks, and no proof the library is inside" \
+  expect_red -m "then said it cannot load Pdfium" \
+    "a worker that answers a PDF with blocks and cannot run its own probe" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/pdf-reader-img"
+fi
+
+echo "### 16f. the worker reads PDFs with a library that is not in the image"
+# The defect this whole branch was written for, and the one a check that stopped at
+# "it reads PDFs" passes: the bundled worker loaded the developer's vendor/ tree. It is
+# not hypothetical — the first bundle built after the reader landed did exactly that
+# (task 16), and the only thing that made it visible was a code-signing refusal, which
+# the entitlement now removes. Same re-sign, same reason as control 14.
+if must copy_app_out "${LAB}/outside-lib" \
+  && must cp "${REPO}/scripts/mutations/pdf-loads-from-outside.sh" \
+       "${LAB}/outside-lib/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must chmod +x "${LAB}/outside-lib/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && there "${LAB}/outside-lib/Mnema.app/Contents/Resources/pdfium/lib/libpdfium.dylib" \
+  && must codesign --sign - --force --deep "${LAB}/outside-lib/Mnema.app" \
+  && must image_from "${LAB}/outside-lib" "${LAB}/outside-lib-img/dmg/Mnema.dmg"; then
+  # The library IS in this image — `there` above proves it — and that is the point:
+  # a check asserting only "a libpdfium is in the bundle" calls this bundle good.
+  expect_red -m "loaded Pdfium from OUTSIDE this image" \
+    "the library is in the image and is not the one that ran" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/outside-lib-img"
+fi
+
+echo "### 16g. the worker reads PDFs and will not say where its library came from"
+# What deleting the `library_dir` field from --probe-pdfium turns every bundle into.
+# The answer is then absent rather than wrong, and an absent answer must not be read as
+# the good one — the distinction the UNANSWERED branches above exist for, arriving here
+# through a field instead of an exit status. Same re-sign, same reason as control 14.
+if must copy_app_out "${LAB}/mute-probe" \
+  && must cp "${REPO}/scripts/mutations/pdf-hides-its-library.sh" \
+       "${LAB}/mute-probe/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must chmod +x "${LAB}/mute-probe/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must codesign --sign - --force --deep "${LAB}/mute-probe/Mnema.app" \
+  && must image_from "${LAB}/mute-probe" "${LAB}/mute-probe-img/dmg/Mnema.dmg"; then
+  expect_red -m "named no library_dir" \
+    "loaded:true with no directory is UNANSWERED, not 'from inside the bundle'" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/mute-probe-img"
+fi
+
+echo "### 16h. the worker reads a PDF and then its probe exits non-zero"
+# The last of the four, and the one with the strongest pull towards being waved through:
+# the wire has already answered with blocks, so a failed probe looks like a formality
+# that did not matter. It is the difference between reporting on the run that happened
+# and the run one wanted. Exits 3, so the status in the message is a number the stand-in
+# put there rather than the 1 that any failure produces. Same re-sign, same reason as 14.
+if must copy_app_out "${LAB}/probe-dead" \
+  && must cp "${REPO}/scripts/mutations/pdf-probe-fails.sh" \
+       "${LAB}/probe-dead/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must chmod +x "${LAB}/probe-dead/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must codesign --sign - --force --deep "${LAB}/probe-dead/Mnema.app" \
+  && must image_from "${LAB}/probe-dead" "${LAB}/probe-dead-img/dmg/Mnema.dmg"; then
+  expect_red -m "exited 3 on --probe-pdfium" \
+    "the two answers disagree, and neither of them is the one to keep" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/probe-dead-img"
+fi
+
+echo "### 16i. the worker reads PDFs and nothing packaged the library"
+# Not an invented state: it is the bundle this repository built on the day the reader
+# landed and before `bundle.resources` existed. It read PDFs perfectly — out of the
+# developer's checkout — and every other check in verify-bundle.sh passed on it. Delete
+# the `resources` block from tauri.conf.json and this is what comes back.
+#
+# The stand-in is the one that reads everything, because the real worker in this state
+# cannot be made to answer blocks: with no library in the image it falls through to the
+# compile-time vendored path, which exists on the machine running this suite and would
+# make the control pass for the machine's reason rather than the bundle's.
+# Same re-sign, same reason as control 14.
+if must copy_app_out "${LAB}/no-lib" \
+  && must cp "${REPO}/scripts/mutations/pdf-reads-blocks.sh" \
+       "${LAB}/no-lib/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must chmod +x "${LAB}/no-lib/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must rm -f "${LAB}/no-lib/Mnema.app/Contents/Resources/pdfium/lib/libpdfium.dylib" \
+  && gone "${LAB}/no-lib/Mnema.app/Contents/Resources/pdfium/lib/libpdfium.dylib" \
+  && must codesign --sign - --force --deep "${LAB}/no-lib/Mnema.app" \
+  && must image_from "${LAB}/no-lib" "${LAB}/no-lib-img/dmg/Mnema.dmg"; then
+  expect_red -m "carries no libpdfium*.dylib" \
+    "a reading bundle with no library in it reads from somewhere else" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-lib-img"
 fi
 
 echo "### 16e. the image is older than the worker this checkout built"
@@ -579,6 +698,34 @@ if must copy_repo "${LAB}/stale-image" \
   expect_red -m "is older than the worker this checkout built" \
     "an image written before the worker it is supposed to contain" \
     "${LAB}/stale-image/scripts/verify-bundle.sh" "${BUNDLE}"
+fi
+
+echo "### 17. the shipped signing configuration, minus the entitlement"
+# Controls 15 and 16 above prove that this suite's own re-signing does NOT reproduce the
+# state a user runs — see the note above `copy_app_out`. This one does reproduce it, and
+# it is the only control here whose subject is the signature rather than the check's
+# logic: hardened runtime on, no entitlement, which is what `src-tauri/entitlements.plist`
+# and the `entitlements` line in tauri.conf.json exist to prevent.
+#
+# The worker is signed on its own and the bundle is re-sealed WITHOUT `--deep`, so the
+# worker keeps the signature this control gave it. Measured: the seal still verifies, so
+# the run reaches the PDF verdict rather than reddening on control 7's message.
+#
+# It shares a fragment with control 16, deliberately and for the same reason controls 7
+# and 8 share one: two different states, one message. The bundled worker cannot load its
+# own library, so it answers `Frame::Failed` — which is neither blocks nor unsupported,
+# and the branch that says so is the only one that can speak. What tells the two apart is
+# the state each builds, not the line each matches. Without this control the entitlement
+# is a line in a config file with nothing in the repository saying what it buys; the
+# shipped-image step below fails if it is removed, but only this one names why.
+if must copy_app_out "${LAB}/no-entitlement" \
+  && must codesign --sign - --force --options runtime \
+       "${LAB}/no-entitlement/Mnema.app/Contents/MacOS/mnema-extract-worker" \
+  && must codesign --sign - --force "${LAB}/no-entitlement/Mnema.app" \
+  && must image_from "${LAB}/no-entitlement" "${LAB}/no-entitlement-img/dmg/Mnema.dmg"; then
+  expect_red -m "neither blocks nor rule=unsupported" \
+    "hardened runtime with no disable-library-validation: the worker cannot load its own Pdfium" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-entitlement-img"
 fi
 
 echo

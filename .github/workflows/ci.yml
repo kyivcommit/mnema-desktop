@@ -121,6 +121,21 @@ jobs:
       - name: Stage the extraction worker that src-tauri declares as a sidecar
         run: scripts/stage-sidecar.sh debug
       - run: cargo fmt --all -- --check
+      # The second file `src-tauri` will not compile without, and it became one
+      # the day the bundle started shipping Pdfium: `bundle.resources` names
+      # `../vendor/pdfium/lib/libpdfium.dylib`, and `tauri-build` validates
+      # resources from inside the build script exactly the way it validates
+      # `externalBin` above. Measured the same way, by moving `vendor/pdfium`
+      # aside and running `cargo build -p mnema-desktop`:
+      #
+      #   resource path `../vendor/pdfium/lib/libpdfium.dylib` doesn't exist
+      #
+      # So it sits above clippy rather than below it. The reason it used to sit
+      # below — fmt and clippy do not need the library, and reporting a stray
+      # newline should not cost a 7.7 MB download — survives only for fmt, which
+      # compiles nothing and still runs first.
+      - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
+        run: scripts/fetch-pdfium.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # `ui/` has its own test suite (`ui/render.test.js`, pure functions with
       # no browser and no mocked `window.__TAURI__`) — added after a fix round
@@ -150,16 +165,10 @@ jobs:
           node --test ui/render.test.js
       # mnema-extract binds to a prebuilt Pdfium library, which is not committed:
       # it is 7.7 MB and reproducible from a pinned, checksum-verified release.
-      # It has to be here — before the tests, which fail on a missing library
-      # rather than on anything they are about, and after fmt and clippy, which
-      # do not need it and should not cost a download to report a stray newline.
-      #
-      # Both platforms in the matrix have a pin in that script; Linux was added
-      # for this matrix. Pdfium is opened by path at run time and never linked,
-      # so this is a prerequisite of the tests and not of the build — which is
-      # why the bundle job below does not have this step.
-      - name: Vendor the pinned Pdfium build
-        run: scripts/fetch-pdfium.sh
+      # The tests need it too — they fail on a missing library rather than on
+      # anything they are about — and the step that fetches it now runs further
+      # up, because compiling `src-tauri` needs it as well. Both platforms in the
+      # matrix have a pin in that script; Linux was added for this matrix.
       - run: cargo test --workspace
       # `cargo test --workspace` above skips mnema-secrets' one `#[ignore]`d
       # test, and that test is the only thing that checks the platform binding
@@ -237,14 +246,16 @@ jobs:
       # resolution from drifting between runs.
       - name: Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
-      # No Pdfium step here, and that is a finding rather than an omission: the
-      # bundle carries a worker that links the crate which would load the library,
-      # and no reader calls into it, so nothing in the image loads it today. That
-      # is a fact about the worker, and the shell's dependency graph cannot state
-      # it — the graph named nothing even after extraction moved into a bundled
-      # worker that does link Pdfium. verify-bundle.sh asks the worker instead: it
-      # feeds the bundled copy a PDF from inside the mounted image and reddens the
-      # day the answer stops being "unsupported".
+      # This step used to be absent, with a comment explaining that the bundle
+      # linked Pdfium and loaded it nowhere. A reader lands and that inverts: the
+      # library is now `bundle.resources` in tauri.conf.json, so `cargo tauri
+      # build` reads it out of vendor/ and packages it, and without this step the
+      # build fails on a missing resource rather than producing a bundle that
+      # cannot read a PDF. Which of those two it fails as is the point — the old
+      # comment's reasoning ("nothing in the image loads it") was true right up
+      # until it silently was not, and the check below is what noticed.
+      - name: Vendor the pinned Pdfium build, which the bundle now ships
+        run: scripts/fetch-pdfium.sh
       - run: cargo tauri build
       # Never `|| true`, never a grep whose failure is swallowed. The script
       # opens the .dmg and looks at the application inside it; every state it

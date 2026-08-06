@@ -36,9 +36,11 @@ packager needs and is bound to it by a test so the repetition cannot go stale.
   and offered `|| echo "pdfium is statically linked"` as the fallback reading; both
   are wrong, and static linking is not even available — the prebuilt macOS releases
   ship `lib/libpdfium.dylib` and no archive.
-- **The build does not need the library.** `scripts/fetch-pdfium.sh` is a prerequisite
-  of `cargo test`, not of `cargo build` or `cargo tauri build`. This is why the CI
-  bundle job has no vendoring step.
+- **The build did not need the library, and now it does.** `scripts/fetch-pdfium.sh`
+  was a prerequisite of `cargo test` alone, which is why the CI bundle job had no
+  vendoring step. `bundle.resources` changed that: `cargo tauri build` reads the file
+  out of `vendor/` and packages it, so the vendoring step is now in both jobs. Nothing
+  is *linked* against it either way — that part of this section still holds.
 
 ## What a build machine needs
 
@@ -49,7 +51,7 @@ packager needs and is bound to it by a test so the repetition cannot go stale.
 | Xcode command line tools | for the linker, `codesign` and `hdiutil`. |
 | Rust | whatever `rust-toolchain.toml` names; `rustup toolchain install` provisions it. |
 | Tauri CLI | major version 2. |
-| Pdfium | **not needed to build.** Needed to run `cargo test`. |
+| Pdfium | `scripts/fetch-pdfium.sh`, before `cargo test` **and** before `cargo tauri build` — the bundle ships it. |
 
 ## The commands
 
@@ -57,13 +59,16 @@ packager needs and is bound to it by a test so the repetition cannot go stale.
 # Once per machine.
 cargo install tauri-cli --version "^2" --locked
 
-# Once per clone, before anything else. Nothing about `src-tauri` compiles until
-# this file exists, in any profile — `cargo build`, `cargo clippy` and `cargo test`
-# have no hooks that would create it, and `cargo tauri dev` runs its hook without
-# waiting for it to finish. (`cargo tauri build` does wait; only the dev hook is
-# unawaited.) See "A fresh checkout cannot build the shell" below for what it says
-# when it stops, and for why the dev hook is not a substitute.
+# Once per clone, before anything else. `src-tauri` declares both of these as
+# files that must exist, and `tauri-build` checks them from inside the build
+# script — so nothing about `src-tauri` compiles until they do, in any profile.
+# `cargo build`, `cargo clippy` and `cargo test` have no hooks that would create
+# either, and `cargo tauri dev` runs its hook without waiting for it to finish.
+# (`cargo tauri build` does wait; only the dev hook is unawaited.) See "A fresh
+# checkout cannot build the shell" below for what it says when it stops, and for
+# why the dev hook is not a substitute.
 scripts/stage-sidecar.sh debug     # or release; either satisfies the declaration
+scripts/fetch-pdfium.sh            # bundle.resources names it; see "Pdfium in the bundle"
 
 # The package.
 cargo tauri build
@@ -120,12 +125,14 @@ at all, and because it used to work differently:
   quiet rather than turned red. `scripts/verify-bundle.sh` now feeds the bundled
   worker, run from inside the mounted image, one PDF and reads its verdict.
   `refused`/`unsupported` means the library must **not** be in the bundle — present
-  anyway is dead weight, a defect rather than a spare part. `blocks` means the library
-  must be present and must load from inside the image, and that branch fails on
-  purpose today: no reader is implemented for any format but text, so a worker that
-  answers a PDF with blocks proves the check itself has gone stale, which is the day
-  the check is meant to turn red rather than the day packaging broke. Any other
-  answer is unanswered, and unanswered reads as red, not as a pass.
+  anyway is dead weight, a defect rather than a spare part. That branch is no longer
+  reachable from this repository's own configuration, which packages the library
+  unconditionally; it is kept because the rule outlives the configuration, and
+  `scripts/mutations/pdf-refuses-unsupported.sh` is what still reaches it. `blocks`
+  means the library must be present exactly once, and must have been loaded **from
+  inside this image** — established by asking the worker where it loaded from, not by
+  finding a `.dylib` somewhere in the bundle. Any other answer is unanswered, and
+  unanswered reads as red, not as a pass.
 
 ## The acceptance run
 
@@ -142,9 +149,11 @@ expensive and brittle, and this is the one link a human checks anyway.
 6. Ask a question whose answer is in one of those files; a citation comes back,
    and its highlight covers text that is actually in the file.
 
-`.pdf` is not on this list. No reader is implemented for it — D53 — so a PDF in
-that folder comes back refused as unsupported, which is the correct behaviour and
-not a failure of the packaging.
+Add a `.pdf` to that folder too, and expect it to be **read** rather than refused.
+That is the one step of this list that changed when the format readers landed, and it
+is worth doing by hand: it is the only place where the packaged library, the
+entitlement and the loader meet outside a script. A PDF that comes back refused as
+unsupported now means the bundle lost its reader.
 
 ### Why step 1 names the tool
 
@@ -392,44 +401,69 @@ for it:
   which the CI artefact glob deliberately does not match;
 - it needs both `rustup` targets installed and compiles the whole dependency tree twice.
 
-## When Pdfium has to go into the bundle
+## Pdfium in the bundle
 
-Nothing in the shipped application **loads** Pdfium today, but something inside the
-bundle **links** the crate that would: `mnema-extract-worker`, not `mnema-desktop`,
-depends on `mnema-extract`, which depends on `pdfium-render` — `cargo tree -p
-mnema-desktop -e normal` names no such thing, and `cargo tree -p mnema-extract -e
-normal` does (run 2026-08-03). That gap between "linked" and "loaded" is why a check
-that asked the shell's own dependency graph answered the wrong question once a
-sidecar existed (see above); `scripts/verify-bundle.sh` now asks the bundled worker
-directly, by feeding it a PDF, and today's answer is `unsupported` — no reader calls
-into Pdfium yet, so nothing loads the library and the 7.7 MB binary would be dead
-weight if it shipped. That changes the day a PDF reader lands, which is the day the
-following matters.
+The bundle ships Pdfium, and `scripts/fetch-pdfium.sh` is therefore a prerequisite of
+`cargo tauri build` and not only of `cargo test`. Three things had to be settled to get
+there, and each of them was measured wrong first.
 
-Both placements were measured on this repository:
+**Where it lands.** `bundle.resources` in `src-tauri/tauri.conf.json`:
 
-| config | lands at | signed |
-|---|---|---|
-| `bundle.macOS.frameworks: ["../vendor/pdfium/lib/libpdfium.dylib"]` | `Contents/Frameworks/libpdfium.dylib` | yes, individually, ad-hoc; the bundle seal still verifies |
-| `bundle.resources: {"…/libpdfium.dylib": "pdfium/"}` | `Contents/Resources/pdfium` | sealed as a resource |
+```
+Mnema.app/Contents/Resources/pdfium/VERSION
+Mnema.app/Contents/Resources/pdfium/lib/libpdfium.dylib
+```
 
-Note the second row: the map value is a destination **path**, not a directory, so
-`"pdfium/"` renamed the library to `pdfium`. Two resource entries sharing a first path
-component (`pdfium/lib/` and `pdfium/`) fail the build outright with
-`File exists (os error 17)` from `tauri-build`, which creates `target/release/pdfium`
-for the first entry and collides on the second.
+The vendored layout reproduced, not flattened, because `verify_build` requires the
+`VERSION` manifest in the library's directory or its parent — so `pdfium/lib/…` puts the
+manifest at `pdfium/VERSION` with nothing else in that directory to collide with. The
+alternative, `bundle.macOS.frameworks`, lands the library at
+`Contents/Frameworks/libpdfium.dylib` and is unusable for exactly that reason: it accepts
+only `.dylib` and `.framework` entries, so the manifest cannot go there at all.
 
-**Neither placement is reachable by today's loader.**
-`mnema_extract::library_dir` looks in `$MNEMA_PDFIUM_LIB_DIR`, then beside the running
-executable (`Contents/MacOS`), then in the development `vendor/` tree. Neither
-`Contents/Frameworks` nor `Contents/Resources` is on that list, and `verify_build`
-additionally wants a `VERSION` manifest in the library's directory or its parent —
-`frameworks` accepts only `.dylib` and `.framework` entries, so the manifest cannot go
-there at all. Packaging Pdfium is therefore a change to `mnema-extract`'s search order
-plus a decision about where the manifest lives, and it belongs to the packaging or
-extraction spec rather than to a bundler setting. The hardened runtime adds a third
-question on top: a `dlopen`'d library must satisfy library validation, which an ad-hoc
-signature with no Team ID does not obviously do.
+One trap in the map syntax: the value is a destination **path**, not a directory, so
+`{"…/libpdfium.dylib": "pdfium/"}` renames the library to `pdfium`. Two entries sharing a
+first path component in that shortened form fail the build outright with
+`File exists (os error 17)` from `tauri-build`. Three entries whose values are complete
+file paths — which is what is configured — do not.
+
+**How it is found.** `mnema_extract::library_dir` looks in `$MNEMA_PDFIUM_LIB_DIR`, then
+beside the running executable, then in `Contents/Resources/pdfium/lib` derived from the
+executable's directory, then in the development `vendor/` tree. The last branch is an
+absolute path baked in at compile time, and it is why the bundle check does not stop at
+"the worker read a PDF": the first bundle built after the PDF reader landed reached that
+branch and read the *developer's checkout*. It would have read PDFs on one machine on
+earth. `--probe-pdfium` reports the directory the library was actually loaded from and
+`scripts/verify-bundle.sh` compares it against the mounted image.
+
+**Why it loads at all.** `src-tauri/entitlements.plist` grants
+`com.apple.security.cs.disable-library-validation`, and without it the product reads no
+PDFs anywhere. The bundler signs every binary ad-hoc with the hardened runtime
+(`flags=0x10002(adhoc,runtime)`, `TeamIdentifier=not set`), and library validation then
+refuses the `dlopen`:
+
+```
+code signature in <…> '…/libpdfium.dylib' not valid for use in process:
+mapping process and mapped file (non-platform) have different Team IDs
+```
+
+Measured on this repository's own image, twice: refused without the entitlement, and
+`{"loaded":true,"pages":1,"stage":"ok"}` with it. A Developer ID would sign worker and
+library under one Team ID and need no entitlement; that was declined for v1 (D54), so this
+is the cost of ad-hoc signing rather than a preference.
+
+⚠️ **`bundle.macOS.entitlements` does reach `externalBin`** — measured, because it is the
+kind of thing that would be reasonable either way. The worker is the process that loads
+the library, and `codesign -d --entitlements -` on the bundled worker shows the key. No
+separate `codesign` call is needed in `scripts/stage-sidecar.sh`, and one there would be
+overwritten anyway: the bundler re-signs the sidecar in place.
+
+⚠️ And the trap next to it: `codesign --sign - --force --deep` on a copy of the .app
+**drops both the hardened runtime and the entitlements** (`0x10002(adhoc,runtime)` becomes
+`0x2(adhoc)`). A re-signed copy then loads Pdfium happily — because library validation is
+no longer being enforced, not because the entitlement is spare. Every lab bundle in
+`scripts/verify-bundle-controls.sh` is in that state; the shipped configuration is
+reproduced only by the real image and by control 17.
 
 ## Linux
 

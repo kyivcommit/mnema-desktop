@@ -39,9 +39,24 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 3 && args[1] == "--probe-pdfium" {
         let line = match mnema_extract::probe_text_layer(Path::new(&args[2])) {
+            // `library_dir` is the directory the library was loaded FROM, and
+            // it is here because "loaded" alone cannot tell a packaged build
+            // apart from one that reached into the developer's checkout. That
+            // is not hypothetical: this repository's own signed bundle did it,
+            // and only a code-signing refusal made it visible. It is read by
+            // `scripts/verify-bundle.sh`, which compares it against the image
+            // it has mounted — see `mnema_extract::loaded_library_dir` for what
+            // the path is and is not.
             Ok(probes) => format!(
-                "{{\"loaded\":true,\"pages\":{},\"stage\":\"ok\"}}",
-                probes.len()
+                "{{\"loaded\":true,\"pages\":{},\"stage\":\"ok\",\"library_dir\":{}}}",
+                probes.len(),
+                serde_json::to_string(
+                    &mnema_extract::loaded_library_dir()
+                        .expect("the library that just read a page is loaded")
+                        .display()
+                        .to_string()
+                )
+                .expect("a string serialises")
             ),
             // `stage` names which of library_dir/verify_build/bind failed,
             // separately from `error`'s free text: those three collapse onto

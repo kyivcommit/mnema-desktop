@@ -27,7 +27,6 @@ compiling and running.
 | `mnema-pool` | The supervised extraction pool: files handed to worker processes. |
 | `mnema-ingest` | One file on disk becoming a citation someone can read. |
 | `mnema-secrets` | Provider keys in the OS credential store, never in the database. |
-| `mnema-deps-probe` | A compile-and-call probe for crates the skeleton does not otherwise use. |
 
 ## Building
 

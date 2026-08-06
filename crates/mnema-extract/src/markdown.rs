@@ -48,7 +48,7 @@
 //! The output is deliberately not the server's. It runs Python-Markdown with
 //! `extensions=["tables"]` and no `fenced_code` (`app/textdoc/adapters.py:61`),
 //! so a fence there is a paragraph; the divergence is already recorded
-//! (`crates/mnema-deps-probe/src/lib.rs:113-117`) and is part of why byte
+//! (in the deleted dependency probe, and in D39) and is part of why byte
 //! comparison against the server was withdrawn as a criterion (D39).
 
 use comrak::nodes::{AstNode, NodeValue, Sourcepos};

@@ -60,10 +60,10 @@ pub enum StopReason {
     /// stating precisely, because an earlier version of this comment claimed
     /// the opposite in the present tense. There is no embedding call site
     /// anywhere in this crate or in the shell; `insert_vector` and
-    /// `create_space` have no callers outside tests; and the only crate in
-    /// the workspace carrying an HTTP client is `mnema-deps-probe`, which
-    /// nothing depends on. The pipeline currently ends at chunks and the
-    /// full-text index.
+    /// `create_space` have no callers outside tests; and **no crate in the
+    /// workspace carries an HTTP client at all** — the one that did was a
+    /// dependency probe, deleted with the readers it was holding pins for.
+    /// The pipeline currently ends at chunks and the full-text index.
     ///
     /// The refusal is still the right answer, for what D29 makes of the
     /// version this is being built toward: v1 ships no local models, so once

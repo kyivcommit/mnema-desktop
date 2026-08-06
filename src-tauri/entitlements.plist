@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  The extraction worker dlopen()s libpdfium.dylib, and the bundler signs every
+	  binary in this bundle ad-hoc with the hardened runtime on
+	  (`codesign -d -vv` reports `flags=0x10002(adhoc,runtime)`, `TeamIdentifier=not
+	  set`). Library validation then refuses the load: an ad-hoc signature carries no
+	  Team ID, so the process and the library it maps have "different Team IDs" —
+	  which is what dyld actually says, measured on this repository's own bundle.
+
+	  Without this key the worker answers every PDF with Frame::Failed and the
+	  product reads no PDFs at all. With it the same bundle reads them.
+
+	  This is the cost of ad-hoc signing, taken deliberately: a Developer ID would
+	  sign worker and library under one Team ID and need no entitlement, and it was
+	  declined for v1 (D54). Whoever takes a Developer ID should delete this file and
+	  the `entitlements` line beside it rather than carry both — the entitlement
+	  weakens a protection the Team ID would provide for free.
+	-->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>
