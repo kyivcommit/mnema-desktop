@@ -462,14 +462,27 @@ case_ "reader: a document with no text is refused, not stored empty" \
   '    if false {' \
   mnema-extract 'a_document_with_no_text_is_refused_rather_than_stored_empty' --test docx
 
+# ⚠️ Re-aimed by Task 13, and it is the **second** case that one refactor
+# disarmed — `task-11.sh`'s C37 was the first. Reducing the four duplicated
+# `#[error]` literals in `worker.rs` to `e.to_string()` (`69d6151`) left this
+# case matching the literal, so from that commit it applied nothing: neither red
+# nor green, and invisible to `cargo test`, to clippy, and to Task 13's own
+# mutation file. It survived even the round convened to sweep exactly this.
+#
+# The lesson is D63's, and it is why the anchor moved: a case anchored on a
+# *string* is disarmed by the next refactor of that string, silently. This one
+# now names the shape of the arm.
+#
 # C37. The digest dropped from a docx refusal. It is the field that tells the
 # parent whether the file changed or only the rule did, and `every_refusal…` is a
 # hand-written table — which is exactly why a reader that refuses under a new rule
 # and does not add its rows is a branch nothing measures.
 case_ "worker: a docx refused after being read carries the digest it was read on" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{                reason: "no paragraph of this document carries any text"\.to_string\(\),\n                sha256: Some\(sha256\),}{                reason: "no paragraph of this document carries any text".to_string(),\n                sha256: None,}' \
-  'reason: "no paragraph of this document carries any text".to_string(),
+  's~            Err\(e \@ DocxError::NoText\) => vec!\[Frame::Refused \{\n                rule: "no_text_layer"\.to_string\(\),\n                reason: e\.to_string\(\),\n                sha256: Some\(sha256\),~            Err(e \@ DocxError::NoText) => vec![Frame::Refused {\n                rule: "no_text_layer".to_string(),\n                reason: e.to_string(),\n                sha256: None,~' \
+  'Err(e @ DocxError::NoText) => vec![Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: e.to_string(),
                 sha256: None,' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
