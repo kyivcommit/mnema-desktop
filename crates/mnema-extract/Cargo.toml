@@ -86,6 +86,15 @@ ego-tree = "0.11"
 # document — and for nothing else: a chapter is XHTML and is read by the HTML
 # parser, which unlike this one has no failure mode that can lose the rest of a
 # file (see that module's doc).
+#
+# `src/docx.rs` is the second consumer and uses it for *prose*, which is the
+# opposite call and rests on a difference between the two formats: an EPUB
+# chapter is written by whoever made the book and real producers ship chapters
+# with a bare `&` in them, while `word/document.xml` is written by a word
+# processor and one that is not well-formed is one Word will not open either. So
+# there the parser's stopping is a lost book and here it is an honest refusal —
+# and `docx.rs` counts element depth itself, because stopping is exactly what
+# quick-xml does *not* do at the end of a truncated part.
 quick-xml = "0.41"
 
 [dev-dependencies]

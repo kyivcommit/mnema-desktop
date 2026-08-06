@@ -230,6 +230,33 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
         "the archive itself must pass the ceiling, or this row measures the wrong branch"
     );
 
+    // Three documents, for the three ways the docx reader refuses one after
+    // reading it. This table is written out by hand, so a reader that refuses
+    // under a new rule and does not add its rows is a branch nothing measures —
+    // which is exactly how a refusal loses its digest and `displaces` reads the
+    // absence as "the bytes are unknown, displace".
+    let scans = dir.path().join("skany.docx");
+    std::fs::write(&scans, docx_bytes("<w:p/><w:p><w:pPr/></w:p>")).unwrap();
+
+    // A `word/document.xml` whose elements do not close — the shape a copy
+    // interrupted part-way leaves behind, and a file Word will not open either.
+    let cut = dir.path().join("obirvana.docx");
+    std::fs::write(
+        &cut,
+        docx_bytes("<w:p><w:r><w:t>початок</w:t></w:r></w:p><w:p><w:r><w:t>обірвано"),
+    )
+    .unwrap();
+
+    // A `word/document.xml` that inflates past `zip_part::MEMBER_MAX_BYTES` out
+    // of an archive small enough to sail through the request's own ceiling.
+    let huge_docx = dir.path().join("bomba.docx");
+    let huge_body = format!("<w:p><w:r><w:t>{}</w:t></w:r></w:p>", "a".repeat(17 << 20));
+    std::fs::write(&huge_docx, docx_bytes(&huge_body)).unwrap();
+    assert!(
+        std::fs::metadata(&huge_docx).unwrap().len() < 1_048_576,
+        "the archive itself must pass the ceiling, or this row measures the wrong branch"
+    );
+
     for (path, want_rule) in [
         ("tests/fixtures/solid.png", "not_text"),
         // `one-page-text.pdf` used to be this row, under `unsupported`. It is
@@ -275,6 +302,18 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
         // under, because `displaces` decides `TooLarge` on size and mtime and
         // never looks at the digest (`crates/mnema-ingest/src/lib.rs:1200-1202`).
         (bomb.to_str().expect("a temp path is UTF-8"), "too_large"),
+        // **The three rows the docx reader owes.** All three are verdicts about
+        // content — the file was opened — so all three owe the digest they were
+        // reached on.
+        (
+            scans.to_str().expect("a temp path is UTF-8"),
+            "no_text_layer",
+        ),
+        (cut.to_str().expect("a temp path is UTF-8"), "malformed"),
+        (
+            huge_docx.to_str().expect("a temp path is UTF-8"),
+            "too_large",
+        ),
     ] {
         let request = serde_json::json!({ "path": path, "max_bytes": 1_048_576 });
         let out = run_worker(&[&request.to_string()]);
@@ -1146,6 +1185,169 @@ fn a_book_with_no_container_is_refused_as_malformed() {
     assert_eq!(frames.len(), 1);
     match &frames[0] {
         Frame::Refused { rule, .. } => assert_eq!(rule, "malformed"),
+        other => panic!("expected Refused, got {other:?}"),
+    }
+}
+
+// ------------------------------------------------------------------ the docx
+
+/// A `word/document.xml` around a body, and a zip around that.
+///
+/// Built here rather than checked in, for the reason `tests/docx.rs` states —
+/// and separately from that file's builder on purpose: this one has to go
+/// through the *binary*, so what it proves is the branch in `handle_request`
+/// rather than the reader the branch calls.
+fn docx_bytes(body: &str) -> Vec<u8> {
+    use std::io::Cursor;
+
+    let document = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+         <w:body>{body}</w:body></w:document>"
+    );
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("word/document.xml", deflated).unwrap();
+        w.write_all(document.as_bytes()).unwrap();
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+/// The DOCX branch's whole wire shape, at the only place it is produced.
+///
+/// **The frame this test exists for is the summary.** A docx cannot skip a
+/// page, so `skipped_pages` must be an *empty vector* rather than an absent
+/// field or a number: the pool stops the entire job — `PoolError::Protocol`,
+/// which accuses the worker binary of being from another release — when one
+/// number is in both lists (`crates/mnema-pool/src/lib.rs:1338`), and this
+/// reader sends a page for every section it makes.
+///
+/// The literal `"docx"` rather than `manifest::READER_DOCX` on purpose: a test
+/// that asks the code under test what it says and then agrees is not a test.
+/// The constant is the mechanism, this is the value, and `mnema-ingest` matches
+/// the same constant from the other side of D40 to cite a section.
+#[test]
+fn a_docx_is_read_section_by_section_and_its_summary_skips_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("угода.docx");
+    std::fs::write(
+        &path,
+        docx_bytes(
+            "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>\
+             <w:r><w:t>Предмет угоди</w:t></w:r></w:p>\
+             <w:p><w:r><w:t>Виконавець надає послуги.</w:t></w:r></w:p>\
+             <w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>\
+             <w:r><w:t>Ціна</w:t></w:r></w:p>\
+             <w:p><w:r><w:t>Сто гривень.</w:t></w:r></w:p>",
+        ),
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Header {
+        reader,
+        reader_version,
+        pages,
+        mime,
+        ..
+    }) = frames.first()
+    else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "docx");
+    assert_eq!(*reader_version, 1);
+    assert_eq!(
+        mime,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    assert_eq!(*pages, 2);
+
+    let sent: Vec<(u32, Option<String>)> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Page {
+                page_no,
+                section_title,
+            } => Some((*page_no, section_title.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            (1, Some("Предмет угоди".to_string())),
+            (2, Some("Ціна".to_string())),
+        ]
+    );
+
+    let prose: Vec<&str> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Block(block) => Some(block.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    // A heading is a block of its page as well as its name, exactly as in
+    // markdown and HTML — so four blocks, not two.
+    assert_eq!(
+        prose,
+        vec![
+            "Предмет угоди",
+            "Виконавець надає послуги.",
+            "Ціна",
+            "Сто гривень."
+        ]
+    );
+
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    // **Empty, and both halves of that matter.** A number here would name a page
+    // that was also sent, which stops the whole job; an absent field is not a
+    // shape this wire has.
+    assert!(
+        skipped_pages.is_empty(),
+        "a docx cannot skip a page, and this one named {skipped_pages:?}"
+    );
+    // `native:docx` satisfies `page.text_source`'s CHECK
+    // (`crates/mnema-index/src/schema.sql:101-102`) and names the reader rather
+    // than the file.
+    assert_eq!(text_source, "native:docx");
+}
+
+/// A document with nothing readable in it is refused under a rule about content
+/// — not under `unsupported`, which is what a `.docx` got until this branch
+/// existed and which promises a reader that is coming.
+#[test]
+fn a_docx_with_no_text_is_refused_by_content_rather_than_as_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("самі-скани.docx");
+    std::fs::write(&path, docx_bytes("<w:p/><w:p><w:pPr/></w:p>")).unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+    assert_eq!(frames.len(), 1);
+    match &frames[0] {
+        Frame::Refused { rule, reason, .. } => {
+            assert_eq!(rule, "no_text_layer");
+            assert!(reason.contains("paragraph"), "{reason}");
+        }
         other => panic!("expected Refused, got {other:?}"),
     }
 }

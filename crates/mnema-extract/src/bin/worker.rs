@@ -19,8 +19,8 @@ use mnema_extract::manifest;
 use mnema_extract::typing::{Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
 use mnema_extract::{
-    EpubError, PdfError, TEXT_LAYER_MIN_CHARS, extract_epub, extract_html, extract_markdown,
-    extract_pdf, extract_text,
+    DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, extract_docx, extract_epub, extract_html,
+    extract_markdown, extract_pdf, extract_text,
 };
 use sha2::{Digest, Sha256};
 
@@ -483,11 +483,76 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256: Some(sha256),
             }],
         },
-        // None of these three formats has a `Vec<Block>` reader in this crate
+        // The second format that opens an archive, and it takes the mapping
+        // `epub.rs` declared rather than restating it: `TooLarge` → `too_large`,
+        // `Malformed` → `malformed`, and no arm at all for a member that is
+        // simply not there. The difference from a book is which member that is
+        // — `word/document.xml` absent is damage, `word/styles.xml` absent is an
+        // ordinary document, and `extract_docx` settles both before this match.
+        Reader::Docx => match extract_docx(&bytes) {
+            Ok(sections) => {
+                let blocks: usize = sections.iter().map(|s| s.blocks.len()).sum();
+                let mut frames = Vec::with_capacity(blocks + sections.len() + 2);
+                frames.push(Frame::Header {
+                    sha256,
+                    mime: file_type.mime.to_string(),
+                    source_kind: file_type.source_kind,
+                    // The constant, not the literal `"docx"`. `pages_of` on the
+                    // other side of the wire cites a docx chunk by this exact
+                    // string (`crates/mnema-ingest/src/lib.rs:1392`) and may not
+                    // link this crate (D40), so a typo here costs every citation
+                    // into a document its section name and nothing goes red.
+                    reader: manifest::READER_DOCX.to_string(),
+                    reader_version: manifest::DOCX_READER_VERSION,
+                    // From the same vector the Page frames come from, so the
+                    // pool's count check cannot disagree with itself.
+                    pages: sections.len() as u32,
+                });
+                for section in sections {
+                    frames.push(Frame::Page {
+                        page_no: section.page_no,
+                        // A docx section *is* a section, as an HTML page and an
+                        // EPUB chapter are, and it is the whole of what a
+                        // citation into a document points at.
+                        section_title: section.section_title,
+                    });
+                    frames.extend(section.blocks.into_iter().map(Frame::Block));
+                }
+                frames.push(Frame::Summary {
+                    // Empty, not absent: this reader cannot skip a page. It
+                    // makes one per section and keeps every one it makes, so a
+                    // number here would name a page that was also sent — which
+                    // the pool reads as a mismatched worker binary and stops the
+                    // whole job for (`crates/mnema-pool/src/lib.rs:1338`).
+                    skipped_pages: Vec::new(),
+                    text_source: "native:docx".to_string(),
+                });
+                frames
+            }
+            Err(DocxError::TooLarge) => vec![Frame::Refused {
+                rule: "too_large".to_string(),
+                reason: "a part of this document inflates past the cap on one member".to_string(),
+                sha256: Some(sha256),
+            }],
+            Err(DocxError::NoText) => vec![Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: "no paragraph of this document carries any text".to_string(),
+                sha256: Some(sha256),
+            }],
+            // Bound to the one remaining variant rather than to a catch-all
+            // `Err(e)`, for the reason the pdf branch states: a catch-all is how
+            // a later variant arrives silently as "this file is damaged".
+            Err(e @ DocxError::Malformed(_)) => vec![Frame::Refused {
+                rule: "malformed".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+        },
+        // Neither of these two formats has a `Vec<Block>` reader in this crate
         // yet. Reporting them alike as "unsupported" is honestly what is true
-        // today: this worker reads text, markdown, PDF, HTML and EPUB, and
+        // today: this worker reads text, markdown, PDF, HTML, EPUB and DOCX, and
         // nothing else.
-        Reader::Docx | Reader::Xlsx | Reader::Unrecognized => {
+        Reader::Xlsx | Reader::Unrecognized => {
             vec![Frame::Refused {
                 rule: "unsupported".to_string(),
                 reason: format!(

@@ -18,7 +18,9 @@
 // `PageContext::Lines`, every PDF citation loses its page, and nothing goes
 // red. The constant is `mnema-core`'s because neither side of that boundary
 // owns it.
-pub use mnema_core::manifest::{Manifest, READER_EPUB, READER_HTML, READER_PDF, ReaderId};
+pub use mnema_core::manifest::{
+    Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_PDF, ReaderId,
+};
 
 /// Bumped by whoever changes what that reader produces from the same bytes.
 ///
@@ -32,6 +34,7 @@ pub const MARKDOWN_READER_VERSION: u32 = 1;
 pub const PDF_READER_VERSION: u32 = 1;
 pub const HTML_READER_VERSION: u32 = 1;
 pub const EPUB_READER_VERSION: u32 = 1;
+pub const DOCX_READER_VERSION: u32 = 1;
 
 /// Keyed on extension rather than on reader name, and `html` is the entry the
 /// whole mechanism was built for: `.html` was read by the *text* reader and is

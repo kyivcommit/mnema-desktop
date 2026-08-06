@@ -177,6 +177,12 @@ fn the_manifest_names_the_reader_that_identify_actually_picks() {
         // magic bytes and its `mimetype` entry, never by its name, so prose
         // called `book.epub` is text and the map has to agree.
         Some("epub"),
+        // And for task 12's. A docx is decided by the zip signature plus
+        // `word/document.xml`, so prose called `угода.docx` is text — and
+        // `docm`, which this build reads with the same reader, is not in the map
+        // either and for the same reason.
+        Some("docx"),
+        Some("docm"),
     ] {
         let picked = mnema_extract::typing::identify(bytes, ext);
         assert_eq!(
@@ -218,6 +224,13 @@ fn reader_name(reader: mnema_extract::typing::Reader) -> &'static str {
         // remove the cross-check it exists for. No compiler joins the two
         // across D40.
         Reader::Epub => mnema_core::manifest::READER_EPUB,
+        // The constant a fifth time. `mnema-ingest` matches `READER_DOCX` in the
+        // same arm as `READER_HTML` and `READER_EPUB`
+        // (`crates/mnema-ingest/src/lib.rs:1392`) to cite a section, so a
+        // literal `"docx"` here would leave the constant with two users out of
+        // three and remove the cross-check it exists for. No compiler joins the
+        // two across D40.
+        Reader::Docx => mnema_core::manifest::READER_DOCX,
         other => panic!("a reader with no name on the wire yet: {other:?}"),
     }
 }
@@ -305,6 +318,65 @@ fn an_epub_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it()
         mnema_core::manifest::READER_EPUB,
         "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
     );
+}
+
+/// **A DOCX carries the same bill, and it is the entry that looks most obviously
+/// right of the three.**
+///
+/// `.docx` names one format and nothing else uses it, so `docx → docx@1` reads
+/// as a fact rather than a claim. It is a claim, and a false one in both
+/// directions: `identify` reaches this reader through the zip signature plus
+/// `word/document.xml` (`src/typing.rs:285`), so a text file called `угода.docx`
+/// is read by the *text* reader, and a real document called `угода.zip` is read
+/// by the docx one.
+///
+/// **`.docm` is the sharper half.** This build reads a macro-enabled document
+/// with the same reader — the macro is a member of the archive nothing here
+/// opens, and `word/document.xml` inside a `.docm` is the same part. An entry
+/// for it would be as wrong as one for `.docx`, and its absence costs the same
+/// re-read per walk.
+#[test]
+fn a_docx_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
+    let docx = minimal_docx();
+    let manifest = mnema_extract::manifest::manifest();
+
+    // Under its own name, under the macro-enabled one, under a name that lies
+    // about it, and under none: content decides all four.
+    for ext in [Some("docx"), Some("docm"), Some("zip"), None] {
+        assert_eq!(
+            reader_name(mnema_extract::typing::identify(&docx, ext).reader),
+            mnema_core::manifest::READER_DOCX,
+            "{ext:?} named a document's bytes something other than the docx reader"
+        );
+    }
+
+    // And the map predicts none of it, because it cannot.
+    for ext in ["docx", "docm"] {
+        assert!(!manifest.by_extension.contains_key(ext));
+        assert_eq!(manifest.for_extension(Some(ext)), &manifest.default);
+        assert_ne!(
+            manifest.for_extension(Some(ext)).reader,
+            mnema_core::manifest::READER_DOCX,
+            "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+        );
+    }
+}
+
+/// The one thing `typing::identify_zip` checks for a docx: a zip holding
+/// `word/document.xml`.
+fn minimal_docx() -> Vec<u8> {
+    use std::io::{Cursor, Write};
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("word/document.xml", deflated).unwrap();
+        w.write_all(b"<w:document><w:body/></w:document>").unwrap();
+        w.finish().unwrap();
+    }
+    buf.into_inner()
 }
 
 /// The three things `typing::is_epub` checks and nothing more: a first entry
