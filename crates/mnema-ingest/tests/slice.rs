@@ -283,6 +283,30 @@ impl Fixture {
         self.db.conn().query_row(sql, [], |r| r.get(0)).unwrap()
     }
 
+    /// Restamps every skip row already in this index with the format version an
+    /// older build wrote, so the rows read like the ones such a build left
+    /// behind.
+    ///
+    /// Raw SQL because the write surface only ever stamps the current version —
+    /// which is exactly as it should be, and is the same reason
+    /// `chunks_of_two_format_versions_coexist_and_keep_their_own_stamp`
+    /// (`mnema-index/tests/citation.rs`) writes its old chunk by hand.
+    ///
+    /// Every row, with no `WHERE`: this crate has no `rusqlite` of its own to
+    /// bind a parameter with (it is not among `mnema-ingest`'s dependencies, and
+    /// an integration test sees only those), and a path interpolated into SQL
+    /// would be worse than none. The caller's job is to run it while the rows it
+    /// wants aged are the only ones there — which is why the current-version row
+    /// below is written *after* this call, not before it.
+    fn age_every_skip_row(&self) {
+        self.db
+            .conn()
+            .execute_batch(&format!(
+                "UPDATE skipped SET format_version = {VERSION_BEFORE_THE_FORMAT_READERS}"
+            ))
+            .unwrap();
+    }
+
     /// Every chunk of one document, in `ord` order.
     ///
     /// The ids rather than the count: a document cleared and written again has
@@ -2592,6 +2616,143 @@ fn a_raised_ceiling_re_examines_a_file_it_used_to_refuse() {
          excluded: {raised:?}"
     );
     assert!(!fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
+}
+
+// ------------- a refusal an older build remembered, after the readers landed
+
+/// The `format_version` an index carries when the build that wrote it had no
+/// reader for the file it refused.
+///
+/// **A literal, not `INDEX_FORMAT_VERSION - 1`.** `- 1` is satisfied by whatever
+/// the constant happens to hold, including the value that build actually wrote,
+/// so a test built on it is green before the bump and after it and says nothing
+/// about either. This number is measured, not chosen:
+/// `git show fb3a924:crates/mnema-index/src/write.rs` has
+/// `INDEX_FORMAT_VERSION: i64 = 2`, and that same build refused every format
+/// this cycle added — `git show fb3a924:crates/mnema-extract/src/bin/worker.rs`,
+/// the `Reader::Pdf | Reader::Docx | Reader::Xlsx | Reader::Epub |
+/// Reader::Unrecognized` arm, sending `rule: "unsupported"`.
+const VERSION_BEFORE_THE_FORMAT_READERS: i64 = 2;
+
+/// A refusal about the file's content, remembered by a build whose readers were
+/// not these, must not answer for this one — and a refusal this build made must
+/// still answer, or the lever has been swapped for switching the arm off.
+///
+/// **What this adds over the test beside it.**
+/// `a_stale_format_version_is_not_honoured_by_the_second_cheap_arm` (below,
+/// since D51) already holds the *mechanism*, and holds it in the form that
+/// should outlive every bump: it pushes a row to `INDEX_FORMAT_VERSION - 1` and
+/// asserts the arm declines it. Exactly because it is relative, it is green
+/// whatever the constant holds and can never say that the bump **this cycle
+/// owes** was made — the readers could all have landed with the number left at
+/// 2 and it would not have moved. That is the assertion here, and it is why the
+/// version below is a literal. The second thing it adds is breadth: that test
+/// drives one rule, and the arm answers for every rule `is_about_content`
+/// claims.
+///
+/// This is what `INDEX_FORMAT_VERSION` is *for*, and it is the only thing it
+/// reaches in the walk. The first cheap arm compares size, mtime, the recorded
+/// reader and the chunk stage and never looks at the constant at all
+/// (`crates/mnema-ingest/src/lib.rs`, and `ADD_PATH_READER` in
+/// `mnema-index/src/migrations.rs` states it in so many words), so an
+/// *indexed* file is not re-read by moving this number. A **refused** one is,
+/// and nothing else moves it: `repoint` clears the row after a successful
+/// index, and `forget_skips_not_in` clears it when the path leaves the tree,
+/// but a file that is still there and still refused keeps its verdict for the
+/// life of the index.
+///
+/// **Every rule `is_about_content` claims, never a list written here.** The
+/// brief this test came from named three — `Unsupported`, `Malformed`,
+/// `Encrypted` — and the predicate answers `true` for six; the three it left
+/// out are stuck in exactly the same way and for exactly as long. A count is a
+/// definition, and this branch has already paid for one that was short by one.
+/// So the set comes from `SkipRule::every()` through the predicate itself, and
+/// a rule that changes sides changes this test with it.
+#[test]
+fn a_content_refusal_an_older_build_remembered_is_looked_at_again() {
+    let remembered: Vec<SkipRule> = SkipRule::every()
+        .filter(|rule| rule.is_about_content())
+        .collect();
+    // A filter that matched nothing would leave the loop below vacuous and this
+    // test green while asserting nothing whatever.
+    assert!(
+        !remembered.is_empty(),
+        "no rule is remembered across walks, so there is nothing for the version \
+         to release and the loop below asserts nothing"
+    );
+
+    for rule in remembered {
+        // A fixture each, so no `path` row from a previous rule's successful
+        // index is in the way: with one present the arm consults `displaces`
+        // and could fall through for a reason that has nothing to do with the
+        // version.
+        let fx = Fixture::new();
+
+        // What the older build's index holds: a verdict about the content,
+        // against the file's own size and modification time — the second cheap
+        // arm's exact premise — stamped with that build's format version.
+        let older = format!("archive/{}.txt", rule.as_str());
+        let older_path = fx.place_at(&older, CONTRACT.as_bytes(), mtime());
+        fx.db
+            .record_skip(
+                fx.root_id,
+                &older,
+                None,
+                "refused by a build whose readers were not these",
+                rule,
+                mnema_walk::stat(&older_path),
+            )
+            .unwrap();
+        fx.age_every_skip_row();
+
+        // And what this build refused, written after the ageing so that it keeps
+        // the current stamp. Different bytes from the file above, so that a
+        // fall-through here would be an ordinary first index and say so, rather
+        // than `AlreadyIndexed` off the other file's document.
+        let today = format!("today/{}.txt", rule.as_str());
+        let today_path = fx.place_at(
+            &today,
+            "Службова записка про склад у Кременці.\n".as_bytes(),
+            mtime(),
+        );
+        fx.db
+            .record_skip(
+                fx.root_id,
+                &today,
+                None,
+                "refused by this build",
+                rule,
+                mnema_walk::stat(&today_path),
+            )
+            .unwrap();
+
+        let looked_at_again = fx.ingest(&older);
+        assert!(
+            matches!(looked_at_again, Ingested::Indexed { .. }),
+            "a {} refusal stamped {VERSION_BEFORE_THE_FORMAT_READERS} still answered \
+             for a build at {INDEX_FORMAT_VERSION}: {looked_at_again:?}",
+            rule.as_str()
+        );
+        // Not the verdict alone: the point of looking again is that the text
+        // arrives, and a fall-through that spent a worker and wrote nothing
+        // would satisfy the assertion above.
+        assert!(
+            !fx.db.search_lexical("Равелла", 10).unwrap().is_empty(),
+            "the file was looked at again and its text did not reach the index ({})",
+            rule.as_str()
+        );
+
+        // The other direction, and without it every assertion above is satisfied
+        // by deleting the second cheap arm outright — which would cost a worker
+        // process per refused file per walk, for ever, and no test would say so.
+        assert_eq!(
+            fx.ingest(&today),
+            Ingested::Skipped { rule },
+            "this build's own refusal stopped answering, so the journal is being \
+             re-derived by a worker on every walk ({})",
+            rule.as_str()
+        );
+    }
 }
 
 // ------------------- a remembered content verdict must not ask the pool

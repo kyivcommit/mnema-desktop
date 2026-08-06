@@ -413,6 +413,67 @@ mod tests {
         );
     }
 
+    /// The same decision one frame further on, and the one this cycle made:
+    /// `Summary::skipped_pages` became a **list of page numbers** where it used
+    /// to be a count, so a summary from a worker built before that does not
+    /// parse either.
+    ///
+    /// It is written down here because it is the whole of what protects the
+    /// index from a mismatched sidecar, and nothing else in the tree says it.
+    /// `INDEX_FORMAT_VERSION` does not: that lever forces files to be looked at
+    /// again and never compares one binary against another.
+    /// `scripts/verify-bundle.sh` does not either — it proves the file
+    /// `externalBin` would copy is the one cargo built, and states in its own
+    /// comments that identity with the bytes inside a given image cannot be had,
+    /// because the bundler re-signs the sidecar in place. So the guarantee that
+    /// a packaged worker and its application are one build is an argument about
+    /// packaging, and this is the check that says what happens when the argument
+    /// is wrong.
+    ///
+    /// The answer is deliberately loud rather than quiet: the line does not
+    /// parse, `mnema_pool` turns that into `PoolError::Protocol`, and an `Err`
+    /// stops the whole job — which
+    /// `a_line_that_is_not_a_frame_stops_the_job`
+    /// (`crates/mnema-pool/tests/supervision.rs`) pins end to end for any
+    /// unparseable line, this one included. A mismatched binary reported as one
+    /// bad file, ten thousand times, is the failure that shape avoids.
+    #[test]
+    fn a_summary_that_counted_skipped_pages_is_a_protocol_error() {
+        let old = r#"{"frame":"summary","skipped_pages":0,"text_source":"native:txt"}"#;
+        let error = from_line(old).expect_err("a counted summary must not parse");
+        // **The message does not name the field, and that was measured rather
+        // than assumed.** The sibling test above asserts the error contains
+        // `reader`, because serde names a field that is *missing*; a field whose
+        // *type* moved produces `invalid type: integer 0, expected a sequence`
+        // with no field in it, since `from_line` is a plain `from_str` with no
+        // path tracking. Asserting on the field name here passed review and
+        // failed the run.
+        //
+        // What keeps the failure diagnosable is one layer up:
+        // `PoolError::Protocol` renders as "the two binaries do not match" and
+        // carries the offending line verbatim (`crates/mnema-pool/src/lib.rs`),
+        // so `"skipped_pages":0` is in front of whoever reads the error even
+        // though this message has no room for it.
+        assert!(
+            error.to_string().contains("expected a sequence"),
+            "a count where a list belongs must be refused as the wrong shape, got: {error}"
+        );
+
+        // The other direction, without which an implementation that rejected
+        // every summary — or one that accepted the old shape and threw the
+        // numbers away — would satisfy the assertion above. The numbers have to
+        // arrive, and arrive as themselves: they are what the journal writes a
+        // row per page from.
+        let new = r#"{"frame":"summary","skipped_pages":[2,5],"text_source":"native:txt"}"#;
+        assert_eq!(
+            from_line(new).unwrap(),
+            Frame::Summary {
+                skipped_pages: vec![2, 5],
+                text_source: "native:txt".to_string(),
+            }
+        );
+    }
+
     #[test]
     fn a_crlf_terminated_line_still_parses() {
         let line = to_line(&sample_summary()).unwrap();

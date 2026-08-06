@@ -10,7 +10,54 @@ use crate::{Db, DocumentStatus, Error};
 /// before this, a photo refused under `unsupported` left a journal row that
 /// `ingest_file`'s second cheap arm would keep honouring after the worker
 /// learned to refuse it as `not_text` instead (D51).
-pub const INDEX_FORMAT_VERSION: i64 = 2;
+///
+/// **2 → 3: the format readers landed.** A build with no reader for a PDF, a
+/// docx, an xlsx or an epub refused all four as `unsupported` — measured, not
+/// supposed: `git show fb3a924:crates/mnema-extract/src/bin/worker.rs`, the
+/// `Reader::Pdf | Reader::Docx | Reader::Xlsx | Reader::Epub |
+/// Reader::Unrecognized` arm — and that verdict is `is_about_content`, so the
+/// second cheap arm keeps answering from it without spending a worker. Moving
+/// this number is what makes those files be looked at again, and it is the only
+/// thing that does: `repoint` clears a row after a successful index and
+/// `forget_skips_not_in` clears one whose path left the tree, and neither
+/// reaches a file that is still there and still refused.
+///
+/// **Two things it deliberately does not do, both measured.**
+///
+/// * It does not re-read an **indexed** file. The first cheap arm compares
+///   size, mtime, the recorded reader and the chunk stage and never reads this
+///   constant (`ADD_PATH_READER` in `migrations.rs` says so at length). What
+///   re-reads a file whose *reader* changed — `.html` leaving the text reader,
+///   inside this cycle — is `path.reader`/`path.reader_version`, a different
+///   lever with a different owner.
+/// * It does not compare one binary against another. A sidecar from another
+///   release is caught, if at all, by frame parsing:
+///   `Frame::Summary::skipped_pages` became a list this cycle, so an older
+///   worker's summary does not parse, and `PoolError::Protocol` stops the whole
+///   job rather than journalling one bad file
+///   (`a_summary_that_counted_skipped_pages_is_a_protocol_error`,
+///   `mnema-core/src/wire.rs`). That a packaged worker and its application are
+///   one build is an argument about packaging, not something this number or
+///   `scripts/verify-bundle.sh` proves.
+///
+/// **What the bump releases is every rule `is_about_content` claims, not the
+/// one it was raised for.** `Unsupported` is the reason; `NoTextLayer`,
+/// `NotText`, `BinaryTail`, `Malformed` and `Encrypted` are remembered exactly
+/// as long and released by the same move. For the last two that release is
+/// empty today — both were added on this same branch, so no older index holds
+/// one — and the obligation is the other way round, owed by whoever ships the
+/// next release: a reader that survives damage this one gives up on, or a
+/// password prompt, has to move this number, or the files those changes exist
+/// for are the ones they never get asked about. `SkipRule::is_about_content`
+/// carries the same warning per rule.
+///
+/// Read by a second table besides `chunk` and `skipped`: `create_space` makes
+/// the version part of a space's identity (`space.rs`), so a bump means the
+/// next `create_space` mints a new space rather than finding the old one. That
+/// is D14's intent — two formats side by side, each saying which it is — and
+/// today it costs nothing, since nothing outside tests calls it (D29 ships no
+/// local models in v1).
+pub const INDEX_FORMAT_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Citation {
