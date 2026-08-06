@@ -119,18 +119,15 @@ case_ "reader: a paragraph's own outline level is read" \
   'b"outlineLvl" => {},' \
   mnema-extract 'a_paragraphs_own_outline_level_opens_a_section' --test docx
 
-# C9b. The guard that says a `<w:pStyle>` has to be inside `<w:pPr>` to be this
-# paragraph's style. It earns its line for what it costs when it is missing
-# rather than for how often the shape occurs: both properties appear a second
-# time inside `<w:pPrChange>`, and this is the check that holds if the list of
-# skipped subtrees is ever edited.
-case_ "reader: a style declaration outside the paragraph's properties is not its style" \
-  crates/mnema-extract/src/docx.rs \
-  's{    if ppr_depth == 0 \{\n        return;\n    \}}{    if false \{\n        return;\n    \}}' \
-  'if false {
-        return;
-    }' \
-  mnema-extract 'a_style_outside_the_paragraphs_properties_is_not_its_style' --test docx
+# C9b was here and is deliberately gone. It removed a guard in `properties` that
+# refused to read a `<w:pStyle>` outside `<w:pPr>` — and it **stayed green**,
+# which is the whole finding: `parse` resolves `heading` only when a `</w:pPr>`
+# returns the depth to zero, so a property outside one is recorded and never
+# read, and the guard could not change an outcome. It was removed rather than
+# kept with a case that cannot redden.
+# `a_style_outside_the_paragraphs_properties_is_not_its_style` still asserts the
+# behaviour; what no single-line mutation reaches is *where* `heading` is
+# resolved, and that is stated here rather than left as a silent gap.
 
 # C10. **A revision read as the present tense.** `<w:pPrChange>` carries the
 # whole `<w:pPr>` a paragraph used to have, `<w:pStyle>` included, so a document

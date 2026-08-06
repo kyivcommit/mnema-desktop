@@ -391,7 +391,7 @@ fn parse(part: &str, headings: &HashSet<String>) -> Result<Vec<DocxSection>, Doc
                     }
                     b"pPr" => ppr_depth += 1,
                     b"t" => text_depth += 1,
-                    _ => properties(e, ppr_depth, paragraphs.last_mut()),
+                    _ => properties(e, paragraphs.last_mut()),
                 }
             }
             Event::Empty(ref e) => {
@@ -419,7 +419,7 @@ fn parse(part: &str, headings: &HashSet<String>) -> Result<Vec<DocxSection>, Doc
                     // one in text no copy of the document shows.
                     b"noBreakHyphen" => run.push('-'),
                     b"p" => flush(&mut run, paragraphs.last_mut(), &mut sections),
-                    _ => properties(e, ppr_depth, paragraphs.last_mut()),
+                    _ => properties(e, paragraphs.last_mut()),
                 }
             }
             Event::Text(ref e) => {
@@ -534,19 +534,15 @@ fn gives_no_text(name: &[u8]) -> bool {
 
 /// Reads `<w:pStyle>` and `<w:outlineLvl>` into the paragraph now open.
 ///
-/// Guarded on `<w:pPr>` rather than on the element name alone: both appear
-/// inside `<w:pPrChange>` as well, where they describe what the paragraph
-/// **used to be**. That subtree is skipped whole, so this guard is the second
-/// of two — kept because the first is a list and a list is a thing that gets
-/// edited.
-fn properties(
-    e: &quick_xml::events::BytesStart<'_>,
-    ppr_depth: usize,
-    paragraph: Option<&mut Paragraph>,
-) {
-    if ppr_depth == 0 {
-        return;
-    }
+/// **There is deliberately no check that this is inside `<w:pPr>`, and one was
+/// written and then removed.** It read as the obvious second guard — both
+/// elements appear inside `<w:pPrChange>` as well, where they describe what the
+/// paragraph *used to be* — and it could not change an outcome, because
+/// [`parse`] resolves `heading` only when a `</w:pPr>` returns the depth to
+/// zero: a property outside one is recorded and never read. Nor would it have
+/// helped for `<w:pPrChange>`, whose own `<w:pPr>` satisfies it. Measured, by
+/// the mutation case written to redden it staying green.
+fn properties(e: &quick_xml::events::BytesStart<'_>, paragraph: Option<&mut Paragraph>) {
     let Some(paragraph) = paragraph else {
         return;
     };

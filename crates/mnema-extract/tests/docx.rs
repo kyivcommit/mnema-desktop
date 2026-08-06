@@ -253,11 +253,14 @@ fn a_paragraph_that_used_to_be_a_heading_is_not_one_now() {
 /// A style declaration that is not inside `<w:pPr>` is not the paragraph's
 /// style.
 ///
-/// Invalid OOXML, and the guard is worth its line for what it costs when it is
-/// missing rather than for how often the shape occurs: `<w:pStyle>` and
-/// `<w:outlineLvl>` both appear a second time inside `<w:pPrChange>`, where they
-/// describe what a paragraph **used to be**, and this is the check that holds if
-/// the list of skipped subtrees is ever edited.
+/// Invalid OOXML either way, and this test's own history is the interesting
+/// part. It was written to hold a guard in `properties` that refused to read a
+/// property outside `<w:pPr>` — and the mutation case that removed that guard
+/// **stayed green**, which is what says the guard was doing nothing: `docx.rs`
+/// resolves `heading` only when a `</w:pPr>` returns the depth to zero, so a
+/// property outside one is recorded and never read. The guard is gone; this
+/// assertion stays, because the behaviour is still one somebody could change by
+/// moving where `heading` is resolved.
 #[test]
 fn a_style_outside_the_paragraphs_properties_is_not_its_style() {
     let body = "<w:p><w:pStyle w:val=\"Heading1\"/><w:r><w:t>Звичайний абзац</w:t></w:r></w:p>";
