@@ -257,6 +257,35 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
         "the archive itself must pass the ceiling, or this row measures the wrong branch"
     );
 
+    // Three workbooks, for the three ways the xlsx reader refuses one after
+    // reading it — the same table, one format on.
+    let charts = dir.path().join("diagramy.xlsx");
+    std::fs::write(&charts, xlsx_bytes(&[("Порожній", "")], "")).unwrap();
+
+    // A workbook whose only sheet stops inside an element: damaged, not empty,
+    // and the two are different sentences to show and different verdicts
+    // downstream.
+    let cut_sheet = dir.path().join("obirvanyi.xlsx");
+    std::fs::write(&cut_sheet, xlsx_truncated_bytes()).unwrap();
+
+    // A shared-string table that inflates past `zip_part::MEMBER_MAX_BYTES` out
+    // of an archive small enough to sail through the request's own ceiling.
+    // Measured before it was written: calamine has no cap of its own and builds
+    // this table inside `Xlsx::new`, before a cell is read.
+    let huge_xlsx = dir.path().join("bomba.xlsx");
+    std::fs::write(
+        &huge_xlsx,
+        xlsx_bytes(
+            &[("Дані", r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#)],
+            &format!("<si><t>{}</t></si>", "a".repeat(17 << 20)),
+        ),
+    )
+    .unwrap();
+    assert!(
+        std::fs::metadata(&huge_xlsx).unwrap().len() < 1_048_576,
+        "the archive itself must pass the ceiling, or this row measures the wrong branch"
+    );
+
     for (path, want_rule) in [
         ("tests/fixtures/solid.png", "not_text"),
         // `one-page-text.pdf` used to be this row, under `unsupported`. It is
@@ -312,6 +341,23 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
         (cut.to_str().expect("a temp path is UTF-8"), "malformed"),
         (
             huge_docx.to_str().expect("a temp path is UTF-8"),
+            "too_large",
+        ),
+        // **The three rows the xlsx reader owes**, and the row above them is
+        // what makes this table worth writing by hand: a `.xlsx` reached
+        // `unsupported` until this build, which promises a reader that is
+        // coming, and `SkipRule` treats that differently from a verdict about
+        // content.
+        (
+            charts.to_str().expect("a temp path is UTF-8"),
+            "no_text_layer",
+        ),
+        (
+            cut_sheet.to_str().expect("a temp path is UTF-8"),
+            "malformed",
+        ),
+        (
+            huge_xlsx.to_str().expect("a temp path is UTF-8"),
             "too_large",
         ),
     ] {
@@ -1350,4 +1396,344 @@ fn a_docx_with_no_text_is_refused_by_content_rather_than_as_unsupported() {
         }
         other => panic!("expected Refused, got {other:?}"),
     }
+}
+
+// ------------------------------------------------------------------ the xlsx
+
+/// A whole xlsx package: the sheets named, each with the given `<sheetData>`
+/// rows, plus one shared-string table.
+///
+/// Built here rather than checked in, for the reason `tests/xlsx.rs` states —
+/// and separately from that file's builder on purpose: this one has to go
+/// through the *binary*, so what it proves is the branch in `handle_request`
+/// rather than the reader the branch calls.
+fn xlsx_bytes(sheets: &[(&str, &str)], shared: &str) -> Vec<u8> {
+    let declared: String = sheets
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| {
+            format!(
+                r#"<sheet name="{name}" sheetId="{}" r:id="rId{}"/>"#,
+                i + 1,
+                i + 1
+            )
+        })
+        .collect();
+    let relationships: String = (1..=sheets.len())
+        .map(|i| {
+            format!(
+                r#"<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>"#
+            )
+        })
+        .collect();
+
+    let mut members: Vec<(String, Vec<u8>)> = vec![
+        (
+            "_rels/.rels".to_string(),
+            br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "xl/workbook.xml".to_string(),
+            format!(
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{declared}</sheets></workbook>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels".to_string(),
+            format!(
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/sharedStrings.xml".to_string(),
+            format!(
+                r#"<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{shared}</sst>"#
+            )
+            .into_bytes(),
+        ),
+    ];
+    for (i, (_, rows)) in sheets.iter().enumerate() {
+        members.push((
+            format!("xl/worksheets/sheet{}.xml", i + 1),
+            format!(
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData></worksheet>"#
+            )
+            .into_bytes(),
+        ));
+    }
+    zip_of(&members)
+}
+
+/// The same package with its only worksheet cut off inside an element.
+fn xlsx_truncated_bytes() -> Vec<u8> {
+    let mut members: Vec<(String, Vec<u8>)> = Vec::new();
+    for (name, body) in unzip_of(&xlsx_bytes(&[("Обрізаний", "")], "<si><t>початок</t></si>"))
+    {
+        if name == "xl/worksheets/sheet1.xml" {
+            members.push((
+                name,
+                br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row><row r="2"><c r="A2"><v>1"#.to_vec(),
+            ));
+        } else {
+            members.push((name, body));
+        }
+    }
+    zip_of(&members)
+}
+
+fn zip_of(members: &[(String, Vec<u8>)]) -> Vec<u8> {
+    use std::io::Cursor;
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, body) in members {
+            w.start_file(name.as_str(), deflated).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+fn unzip_of(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+    use std::io::{Cursor, Read};
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    (0..archive.len())
+        .map(|i| {
+            let mut member = archive.by_index(i).unwrap();
+            let name = member.name().to_string();
+            let mut body = Vec::new();
+            member.read_to_end(&mut body).unwrap();
+            (name, body)
+        })
+        .collect()
+}
+
+/// The XLSX branch's whole wire shape, at the only place it is produced.
+///
+/// **The frame this test exists for is the summary, and it says the opposite of
+/// the docx one.** A workbook *can* skip a page: a chartsheet, a sheet the
+/// archive does not hold and a sheet whose cells stop parsing all leave the rest
+/// of the workbook readable, so `skipped_pages` carries their numbers — and they
+/// must be disjoint from the pages sent, because one number in both stops the
+/// entire job (`crates/mnema-pool/src/lib.rs:1338`).
+///
+/// The literal `"xlsx"` rather than `manifest::READER_XLSX` on purpose: a test
+/// that asks the code under test what it says and then agrees is not a test. The
+/// constant is the mechanism, this is the value, and `mnema-ingest` matches the
+/// same constant from the other side of D40 to reach `PageContext::Rows`.
+#[test]
+fn an_xlsx_is_read_sheet_by_sheet_and_its_summary_names_what_it_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("кошторис.xlsx");
+    std::fs::write(
+        &path,
+        xlsx_bytes(
+            &[
+                (
+                    "Дані",
+                    concat!(
+                        r#"<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>"#,
+                        r#"<row r="7"><c r="A7" t="s"><v>2</v></c><c r="B7"><v>1500.5</v></c></row>"#,
+                    ),
+                ),
+                // Present, empty: nothing to store, and a number in the summary.
+                ("Чернетка", ""),
+                ("Підсумки", r#"<row r="3"><c r="A3" t="s"><v>3</v></c></row>"#),
+            ],
+            concat!(
+                "<si><t>Назва</t></si><si><t>Сума</t></si>",
+                "<si><t>Оренда</t></si><si><t>Разом</t></si>",
+            ),
+        ),
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Header {
+        reader,
+        reader_version,
+        pages,
+        mime,
+        ..
+    }) = frames.first()
+    else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "xlsx");
+    assert_eq!(*reader_version, 1);
+    assert_eq!(
+        mime,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    // The sheets that were *sent*, which is not the number the workbook
+    // declares: the empty one is named in the summary instead.
+    assert_eq!(*pages, 2);
+
+    let sent: Vec<(u32, Option<String>)> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Page {
+                page_no,
+                section_title,
+            } => Some((*page_no, section_title.clone())),
+            _ => None,
+        })
+        .collect();
+    // Page 3 keeps its own number: the position in the workbook, not the
+    // position among the sheets that came back.
+    assert_eq!(
+        sent,
+        vec![
+            (1, Some("Дані".to_string())),
+            (3, Some("Підсумки".to_string())),
+        ]
+    );
+
+    // **Every block on the wire owes its rows**, and the numbers are the
+    // sheet's: row 7 is row 7 and not "the second block".
+    let blocks: Vec<(&str, Option<u32>, Option<u32>)> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Block(block) => Some((block.text.as_str(), block.line_start, block.line_end)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        blocks,
+        vec![
+            ("Назва\tСума", Some(1), Some(1)),
+            ("Оренда\t1500.5", Some(7), Some(7)),
+            ("Разом", Some(3), Some(3)),
+        ]
+    );
+
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    // The number, not a count — the parent owes a journal row per skipped sheet.
+    assert_eq!(skipped_pages, &vec![2]);
+    // And disjoint from what was sent, asserted rather than assumed: this is the
+    // exact state the pool refuses the whole job over.
+    for no in skipped_pages {
+        assert!(
+            !sent.iter().any(|(page_no, _)| page_no == no),
+            "sheet {no} was sent and reported skipped"
+        );
+    }
+    // `native:xlsx` satisfies `page.text_source`'s CHECK
+    // (`crates/mnema-index/src/schema.sql:107-108`) and names the reader rather
+    // than the file.
+    assert_eq!(text_source, "native:xlsx");
+}
+
+/// **A sheet's name crosses the wire bounded, and bounded once.**
+///
+/// `pages_of` copies `Frame::Page::section_title` straight into
+/// `Coordinate::SheetRows { sheet }` (`crates/mnema-ingest/src/lib.rs:1403-1405`)
+/// — so for this format the page's name and the citation's coordinate are one
+/// string, and a second bounding anywhere would make them two. This asserts the
+/// binary sends what the reader bounded, byte for byte, which is the half of
+/// that claim this side of D40 can hold.
+#[test]
+fn a_sheet_name_crosses_the_wire_bounded_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("довга-назва.xlsx");
+    let long = "Кошторис ".repeat(60);
+    std::fs::write(
+        &path,
+        xlsx_bytes(
+            &[(&long, r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#)],
+            "<si><t>рядок</t></si>",
+        ),
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Page { section_title, .. }) =
+        frames.iter().find(|f| matches!(f, Frame::Page { .. }))
+    else {
+        panic!("expected a page frame, got {frames:?}");
+    };
+    let sent = section_title.clone().expect("a named sheet");
+
+    // The same string the reader produced, and the same bound every other reader
+    // uses — not this branch's own idea of one.
+    let want = mnema_extract::extract_xlsx(&std::fs::read(&path).unwrap())
+        .unwrap()
+        .sheets[0]
+        .section_title
+        .clone()
+        .unwrap();
+    assert_eq!(sent, want);
+    assert_eq!(sent.chars().count(), mnema_extract::SECTION_TITLE_MAX_CHARS);
+    assert!(
+        sent.ends_with('…'),
+        "a cut name must say it was cut: {sent}"
+    );
+}
+
+/// A macro-enabled workbook is the same part read the same way.
+///
+/// The twin of `a_docm_is_read_as_a_docx`, and it holds for the same reason:
+/// `typing::identify` reaches this reader through the zip signature plus
+/// `xl/workbook.xml` (`src/typing.rs:293`), which an `.xlsm` has — the macro is a
+/// member of the archive nothing here opens. What this test stops is the
+/// behaviour being accidental: an extension check added anywhere on this path
+/// would take every macro-enabled workbook out of the index, and the only thing
+/// that would show it is a test naming the extension.
+#[test]
+fn an_xlsm_is_read_by_the_spreadsheet_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("макро.xlsm");
+    std::fs::write(
+        &path,
+        xlsx_bytes(
+            &[("Дані", r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#)],
+            "<si><t>у макросі</t></si>",
+        ),
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Header { reader, mime, .. }) = frames.first() else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "xlsx");
+    assert_eq!(
+        mime, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "an xlsm is recorded under the xlsx mime — the one cost of accepting it here"
+    );
+    // And it really was read, not merely named: the row is on the wire.
+    assert!(
+        frames
+            .iter()
+            .any(|f| matches!(f, Frame::Block(b) if b.text == "у макросі")),
+        "{frames:?}"
+    );
 }

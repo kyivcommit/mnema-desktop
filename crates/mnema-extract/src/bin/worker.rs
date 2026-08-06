@@ -19,8 +19,8 @@ use mnema_extract::manifest;
 use mnema_extract::typing::{Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
 use mnema_extract::{
-    DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, extract_docx, extract_epub, extract_html,
-    extract_markdown, extract_pdf, extract_text,
+    DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, XlsxError, extract_docx, extract_epub,
+    extract_html, extract_markdown, extract_pdf, extract_text, extract_xlsx,
 };
 use sha2::{Digest, Sha256};
 
@@ -464,14 +464,21 @@ fn handle_request(line: &str) -> Vec<Frame> {
             // to the person holding it ("too big for us"), and because
             // `SkipRule::TooLarge` is the one refusal that must not displace a
             // document on a digest it never computed.
-            Err(EpubError::TooLarge) => vec![Frame::Refused {
+            // **`e.to_string()` in every arm, including the two that carry no
+            // data.** Both used to restate their type's `#[error]` message as a
+            // literal here, so the sentence a person is shown lived in two
+            // places that no compiler and no test joins — `worker_cli.rs` binds
+            // `reason: _` on every refusal it checks. Task 13 added a third
+            // reader to this match and reduced all three rather than leaving one
+            // idiom beside another in one `match`.
+            Err(e @ EpubError::TooLarge) => vec![Frame::Refused {
                 rule: "too_large".to_string(),
-                reason: "a member of this EPUB inflates past the cap on one member".to_string(),
+                reason: e.to_string(),
                 sha256: Some(sha256),
             }],
-            Err(EpubError::NoReadableChapter) => vec![Frame::Refused {
+            Err(e @ EpubError::NoReadableChapter) => vec![Frame::Refused {
                 rule: "no_text_layer".to_string(),
-                reason: "no chapter of this EPUB carries any text".to_string(),
+                reason: e.to_string(),
                 sha256: Some(sha256),
             }],
             // Bound to the one remaining variant rather than to a catch-all
@@ -529,14 +536,17 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 });
                 frames
             }
-            Err(DocxError::TooLarge) => vec![Frame::Refused {
+            // `e.to_string()` rather than the literal these two used to repeat —
+            // see the epub arm above for why all three readers were reduced to
+            // one source of the string together.
+            Err(e @ DocxError::TooLarge) => vec![Frame::Refused {
                 rule: "too_large".to_string(),
-                reason: "a part of this document inflates past the cap on one member".to_string(),
+                reason: e.to_string(),
                 sha256: Some(sha256),
             }],
-            Err(DocxError::NoText) => vec![Frame::Refused {
+            Err(e @ DocxError::NoText) => vec![Frame::Refused {
                 rule: "no_text_layer".to_string(),
-                reason: "no paragraph of this document carries any text".to_string(),
+                reason: e.to_string(),
                 sha256: Some(sha256),
             }],
             // Bound to the one remaining variant rather than to a catch-all
@@ -548,11 +558,88 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256: Some(sha256),
             }],
         },
-        // Neither of these two formats has a `Vec<Block>` reader in this crate
-        // yet. Reporting them alike as "unsupported" is honestly what is true
-        // today: this worker reads text, markdown, PDF, HTML, EPUB and DOCX, and
-        // nothing else.
-        Reader::Xlsx | Reader::Unrecognized => {
+        // The third format that opens an archive, and it takes the mapping
+        // `epub.rs` declared rather than restating it: `TooLarge` → `too_large`,
+        // `Malformed` → `malformed`, and no arm at all for a member that is
+        // simply not there. Which member that is differs again — a sheet the
+        // workbook declares and the archive does not hold is skipped by number
+        // inside `extract_xlsx`, and only the package's own structure is damage.
+        Reader::Xlsx => match extract_xlsx(&bytes) {
+            Ok(workbook) => {
+                let blocks: usize = workbook.sheets.iter().map(|s| s.blocks.len()).sum();
+                let mut frames = Vec::with_capacity(blocks + workbook.sheets.len() + 2);
+                frames.push(Frame::Header {
+                    sha256,
+                    mime: file_type.mime.to_string(),
+                    source_kind: file_type.source_kind,
+                    // The constant, not the literal `"xlsx"`, and the cost of
+                    // getting it wrong is worse here than for the other four.
+                    // `pages_of` matches this exact string to reach
+                    // `PageContext::Rows` (`crates/mnema-ingest/src/lib.rs:1403`)
+                    // and may not link this crate (D40). A near-miss falls to
+                    // `PageContext::Lines` — and unlike a docx's, these blocks
+                    // *do* carry numbers, so nothing is empty and nothing goes
+                    // red: every citation becomes a plausible "рядки 10–20" with
+                    // no sheet named on it and nothing saying which.
+                    reader: manifest::READER_XLSX.to_string(),
+                    reader_version: manifest::XLSX_READER_VERSION,
+                    // From the same vector the Page frames come from, so the
+                    // pool's count check cannot disagree with itself. Skipped
+                    // sheets are NOT in this number: they produce no Page frame
+                    // and are named by `skipped_pages` instead.
+                    pages: workbook.sheets.len() as u32,
+                });
+                for sheet in workbook.sheets {
+                    frames.push(Frame::Page {
+                        page_no: sheet.page_no,
+                        // A sheet is not a section and this is not what the
+                        // citation renders: `pages_of` reads it as the *name* of
+                        // the sheet and puts it inside `Coordinate::SheetRows`,
+                        // whose range comes from the blocks each chunk covers.
+                        // Already bounded by the reader, and bounding it again
+                        // here would give the citation and the coordinate two
+                        // different names.
+                        section_title: sheet.section_title,
+                    });
+                    frames.extend(sheet.blocks.into_iter().map(Frame::Block));
+                }
+                frames.push(Frame::Summary {
+                    // The numbers, not their count: the parent owes a journal
+                    // row per skipped sheet, and a count cannot fill one in.
+                    // **Not always empty**, which is where this reader parts
+                    // company with docx and html — a chartsheet, a sheet the
+                    // archive does not hold and a sheet whose cells stop parsing
+                    // are all measured, and all leave the rest of the workbook
+                    // readable. Disjoint from the page frames above by
+                    // construction; the pool stops the whole job over a number
+                    // in both (`crates/mnema-pool/src/lib.rs:1338`).
+                    skipped_pages: workbook.skipped,
+                    text_source: "native:xlsx".to_string(),
+                });
+                frames
+            }
+            Err(e @ XlsxError::TooLarge) => vec![Frame::Refused {
+                rule: "too_large".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+            Err(e @ XlsxError::NoText) => vec![Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+            // Bound to the one remaining variant rather than to a catch-all
+            // `Err(e)`, for the reason the pdf branch states: a catch-all is how
+            // a later variant arrives silently as "this file is damaged".
+            Err(e @ XlsxError::Malformed(_)) => vec![Frame::Refused {
+                rule: "malformed".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+        },
+        // The one verdict left that promises a reader which is coming: a zip
+        // this build recognises as neither a docx, an xlsx nor an epub.
+        Reader::Unrecognized => {
             vec![Frame::Refused {
                 rule: "unsupported".to_string(),
                 reason: format!(

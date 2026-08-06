@@ -1,9 +1,14 @@
 //! Document extraction.
 //!
-//! Plain text, markdown, PDF and HTML, plus the Pdfium binding probe that came
-//! before any of them — enough to prove the library loads and that the binary
-//! matches the bindings compiled against it, which `--probe-pdfium` still asks
-//! of a packaged build (D53, D54).
+//! One module per reader, plus the Pdfium binding probe that came before any of
+//! them — enough to prove the library loads and that the binary matches the
+//! bindings compiled against it, which `--probe-pdfium` still asks of a packaged
+//! build (D53, D54).
+//!
+//! Which readers there are is the `mod` list below and `manifest::manifest()`,
+//! not a sentence here: this line named four of them for two tasks after there
+//! were six, and a stale inventory instructs a fresh reader to look for a module
+//! that exists.
 //!
 //! What a PDF page's text *is* beyond its text layer — reading order across
 //! columns, hyphenation, tables, OCR for the pages `pdf::extract_pdf` skips —
@@ -18,6 +23,7 @@ mod pdf;
 mod pdfium_probe;
 mod text;
 pub mod typing;
+mod xlsx;
 pub mod zip_part;
 
 // The wire format moved to `mnema-core` and is re-exported here under the name
@@ -51,3 +57,4 @@ pub use pdfium_probe::{
     probe_text_layer,
 };
 pub use text::extract_text;
+pub use xlsx::{WORKBOOK_MAX_BYTES, XlsxError, XlsxSheet, XlsxWorkbook, extract_xlsx};

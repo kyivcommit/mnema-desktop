@@ -96,6 +96,21 @@ ego-tree = "0.11"
 # and `docx.rs` counts element depth itself, because stopping is exactly what
 # quick-xml does *not* do at the end of a truncated part.
 quick-xml = "0.41"
+# The spreadsheet reader, at the pin `crates/mnema-deps-probe/Cargo.toml:10`
+# already resolved. xlsx is the one format of the five where the server leans on
+# a library rather than parsing the part itself, and the correction to G7.0 §10
+# took the same route here: a cell of type `s` holds an index into
+# `xl/sharedStrings.xml`, a date is a number plus a style, and a value's rich
+# text is spread across `<r>` runs — three tables to join before a single word
+# comes out.
+#
+# **Default features on purpose.** `dates` would add `chrono`, and it would not
+# even settle the date question: `impl Display for ExcelDateTime` prints the
+# serial number in every configuration (`calamine-0.36.0/src/datatype.rs:986`),
+# so rendering a date needs a display policy as well as the dependency. See
+# `src/xlsx.rs`'s module doc, which records that gap rather than closing it here.
+# `picture` is for embedded images, which this crate does not read.
+calamine = "0.36"
 
 [dev-dependencies]
 tempfile = { workspace = true }

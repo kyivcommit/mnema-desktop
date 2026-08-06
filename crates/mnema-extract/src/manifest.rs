@@ -19,7 +19,7 @@
 // red. The constant is `mnema-core`'s because neither side of that boundary
 // owns it.
 pub use mnema_core::manifest::{
-    Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_PDF, ReaderId,
+    Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_PDF, READER_XLSX, ReaderId,
 };
 
 /// Bumped by whoever changes what that reader produces from the same bytes.
@@ -35,6 +35,7 @@ pub const PDF_READER_VERSION: u32 = 1;
 pub const HTML_READER_VERSION: u32 = 1;
 pub const EPUB_READER_VERSION: u32 = 1;
 pub const DOCX_READER_VERSION: u32 = 1;
+pub const XLSX_READER_VERSION: u32 = 1;
 
 /// Keyed on extension rather than on reader name, and `html` is the entry the
 /// whole mechanism was built for: `.html` was read by the *text* reader and is

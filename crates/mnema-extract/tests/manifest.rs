@@ -183,6 +183,12 @@ fn the_manifest_names_the_reader_that_identify_actually_picks() {
         // either and for the same reason.
         Some("docx"),
         Some("docm"),
+        // And for task 13's. A workbook is decided by the zip signature plus
+        // `xl/workbook.xml`, so prose called `кошторис.xlsx` is text — and
+        // `xlsm`, which this build reads with the same reader, is not in the map
+        // either and for the same reason.
+        Some("xlsx"),
+        Some("xlsm"),
     ] {
         let picked = mnema_extract::typing::identify(bytes, ext);
         assert_eq!(
@@ -231,6 +237,14 @@ fn reader_name(reader: mnema_extract::typing::Reader) -> &'static str {
         // three and remove the cross-check it exists for. No compiler joins the
         // two across D40.
         Reader::Docx => mnema_core::manifest::READER_DOCX,
+        // The constant a sixth time, and the cost of a literal here is worse
+        // than for any of the five above. `mnema-ingest` matches `READER_XLSX`
+        // in an arm of its own (`crates/mnema-ingest/src/lib.rs:1403`) to reach
+        // `PageContext::Rows`; a near-miss falls to `PageContext::Lines`, and
+        // unlike a docx's these blocks *do* carry line numbers — so nothing is
+        // empty and nothing goes red, and every citation into a spreadsheet
+        // becomes "рядки 10–20" with no sheet named on it.
+        Reader::Xlsx => mnema_core::manifest::READER_XLSX,
         other => panic!("a reader with no name on the wire yet: {other:?}"),
     }
 }
@@ -360,6 +374,55 @@ fn a_docx_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() 
             "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
         );
     }
+}
+
+/// The same claim for the spreadsheet reader, and **`.xlsm` is the sharper
+/// half** — the shape Task 12 measured for `.docm`, one format over.
+///
+/// A macro-enabled workbook is read by this reader because `xl/workbook.xml`
+/// inside an `.xlsm` is the same part; the macro is a member of the archive
+/// nothing here opens. So the extension never enters the decision at all, in
+/// either direction: a text file called `кошторис.xlsx` is read by the text
+/// reader, and a real workbook called `кошторис.zip` is read by this one.
+#[test]
+fn an_xlsx_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
+    let xlsx = minimal_xlsx();
+    let manifest = mnema_extract::manifest::manifest();
+
+    for ext in [Some("xlsx"), Some("xlsm"), Some("zip"), None] {
+        assert_eq!(
+            reader_name(mnema_extract::typing::identify(&xlsx, ext).reader),
+            mnema_core::manifest::READER_XLSX,
+            "{ext:?} named a workbook's bytes something other than the xlsx reader"
+        );
+    }
+
+    for ext in ["xlsx", "xlsm"] {
+        assert!(!manifest.by_extension.contains_key(ext));
+        assert_eq!(manifest.for_extension(Some(ext)), &manifest.default);
+        assert_ne!(
+            manifest.for_extension(Some(ext)).reader,
+            mnema_core::manifest::READER_XLSX,
+            "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+        );
+    }
+}
+
+/// The one thing `typing::identify_zip` checks for an xlsx: a zip holding
+/// `xl/workbook.xml`.
+fn minimal_xlsx() -> Vec<u8> {
+    use std::io::{Cursor, Write};
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("xl/workbook.xml", deflated).unwrap();
+        w.write_all(b"<workbook><sheets/></workbook>").unwrap();
+        w.finish().unwrap();
+    }
+    buf.into_inner()
 }
 
 /// The one thing `typing::identify_zip` checks for a docx: a zip holding
