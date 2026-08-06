@@ -1628,8 +1628,14 @@ fn an_xlsx_is_read_sheet_by_sheet_and_its_summary_names_what_it_skipped() {
     };
     // The number, not a count — the parent owes a journal row per skipped sheet.
     assert_eq!(skipped_pages, &vec![2]);
-    // And disjoint from what was sent, asserted rather than assumed: this is the
-    // exact state the pool refuses the whole job over.
+    // And disjoint from what was sent — the exact state the pool refuses the
+    // whole job over.
+    //
+    // **Shadowed today and kept on purpose.** Every mutation that puts a number
+    // in both lists also changes one of the two exact assertions above, so this
+    // loop has never been the one that fired. It is an *invariant* where those
+    // are values, and values are what a later session updates to match whatever
+    // the code now produces: this survives that edit and they do not.
     for no in skipped_pages {
         assert!(
             !sent.iter().any(|(page_no, _)| page_no == no),

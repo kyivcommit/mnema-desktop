@@ -492,6 +492,56 @@ fn a_repeated_sheet_name_is_skipped_rather_than_read_a_second_time() {
     );
 }
 
+/// **A sheet with one value in the far corner is read, and does not kill the
+/// process.**
+///
+/// This is the measurement that decided how this reader talks to calamine, and
+/// the only one whose failure is not a wrong answer but a dead worker. The
+/// convenience API, `worksheet_range`, builds a dense `rows × columns` vector
+/// (`calamine-0.36.0/src/lib.rs:958-961`): on this fixture — under two kilobytes
+/// on disk, two cells in it — that is 16 384 × 1 048 576 cells, and the run went
+/// to 6.99 GB resident and a 200 GB peak footprint before the process was killed
+/// at 50 s. A crafted spreadsheet in a watched folder would take the extraction
+/// worker down on every walk.
+///
+/// **Deliberately not a mutation case.** The mutation would be "use
+/// `worksheet_range` here", and the harness would then run a test that eats the
+/// machine rather than one that fails — which is a worse thing to leave in a
+/// repository than an uncovered line. The property is pinned here instead, where
+/// it runs in milliseconds.
+#[test]
+fn a_value_in_the_far_corner_of_a_sheet_is_read_rather_than_allocated_for() {
+    let bytes = one_sheet(
+        "Кут",
+        concat!(
+            r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#,
+            // The last cell an xlsx can have: XFD is column 16 384, and
+            // 1 048 576 is the last row.
+            r#"<row r="1048576"><c r="XFD1048576" t="s"><v>1</v></c></row>"#,
+        ),
+        "<si><t>початок</t></si><si><t>кінець</t></si>",
+    );
+    assert!(
+        bytes.len() < 2048,
+        "the whole attack is that the file is tiny, and this one is {} bytes",
+        bytes.len()
+    );
+
+    assert_eq!(
+        rows_of(&bytes, 0),
+        vec![
+            ("початок".to_string(), Some(1), Some(1)),
+            // 16 383 empty columns before it, and the row still numbers itself
+            // correctly at the very end of the sheet.
+            (
+                format!("{}кінець", "\t".repeat(16_383)),
+                Some(1_048_576),
+                Some(1_048_576)
+            ),
+        ]
+    );
+}
+
 /// A formula is read by its cached value and never by its source.
 ///
 /// Three assertions, three different answers calamine gives, all measured:
