@@ -785,6 +785,9 @@ struct World {
     walking: bool,
     /// What this run's generator actually produced — see [`Reached`].
     reached: Reached,
+    /// Which content rule the next stricter-rule walk answers with. See
+    /// `stricter_rule_over_an_unchanged_folder` for why it rotates.
+    stricter_rotation: usize,
 }
 
 impl World {
@@ -821,6 +824,7 @@ impl World {
             excluded: BTreeSet::new(),
             walking: false,
             reached: Reached::default(),
+            stricter_rotation: 0,
         }
     }
 
@@ -3369,9 +3373,16 @@ impl World {
             // whole harness green. Writing new bytes cannot reach it — a new
             // body has a new digest — so the rule has to move while the file
             // stands still.
-            let rule = *self
-                .rng
-                .pick(&["not_text", "no_text_layer", "malformed", "encrypted"]);
+            // **Rotated, not drawn.** A one-in-four pick left `malformed`
+            // unreached across the whole default corpus — measured, its
+            // mutation stayed green while the other three reddened — and a rule
+            // the corpus happens not to draw looks exactly like a rule with no
+            // defects. The rotation is per run and deterministic, so four calls
+            // to this operation cover all four rules and a seed still decides
+            // which files they land on.
+            const STRICTER: [&str; 4] = ["not_text", "no_text_layer", "malformed", "encrypted"];
+            let rule = STRICTER[self.stricter_rotation % STRICTER.len()];
+            self.stricter_rotation += 1;
             let stricter = stricter_worker(self.dir.path(), rule);
             self.note(format!(
                 "  walk {relative} past a STRICTER content rule ({rule})"
