@@ -106,3 +106,44 @@ case_ "harness: the corpus really contains a document with an unreadable page" \
   's~            25 => self\.document_with_an_unreadable_page\(\),~            25 => self.run_walk(),~' \
   '25 => self.run_walk(),' \
   mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
+
+# ------------------------------------------ fix round 1: the page NUMBER
+
+# C10. **The half of Task 11's class that counting rows cannot reach.** The gap
+# is generated first, so page 1 is the one that cannot be read; moving it to the
+# end leaves the row count right and the number wrong, which is what a reader
+# that renumbers what came back produces.
+case_ "harness: the gap is reported at the number it is at" \
+  crates/mnema-ingest/tests/randomised.rs \
+  's~                let mut spine = vec!\[gap\];~                let mut spine: Vec<SpineEntry> = Vec::new();\n                let _ = \&gap;~' \
+  'let mut spine: Vec<SpineEntry> = Vec::new();' \
+  mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
+
+# C11. The other arm of 3e: chapters written in reverse, so every page holds
+# some *other* chapter's text. The count is right, every marker is findable,
+# invariant 4 is satisfied — and every citation names the wrong chapter. This is
+# the defect a "sensible" fix produced in Task 11.
+case_ "harness: each page holds its own chapter's text" \
+  crates/mnema-ingest/tests/randomised.rs \
+  's~                for \(i, m\) in markers\.iter\(\)\.enumerate\(\) \{\n                    spine\.push\(SpineEntry::Chapter\(i\)\);~                for (i, m) in markers.iter().rev().enumerate() {\n                    spine.push(SpineEntry::Chapter(i));~' \
+  'for (i, m) in markers.iter().rev().enumerate() {' \
+  mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
+
+# C12. The same member named twice must arrive as two pages. Dropping the second
+# reference loses a page the spine declares.
+case_ "harness: a chapter the spine names twice is two pages" \
+  crates/mnema-ingest/tests/randomised.rs \
+  's~                spine\.push\(SpineEntry::Repeat\(0\)\);~                let _ = SpineEntry::Repeat(0);~' \
+  'let _ = SpineEntry::Repeat(0);' \
+  mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
+
+# C13. The corpus assertion compares **sets**, so a rule classified as
+# unmodelled that the corpus does in fact reach fails just as loudly as one it
+# does not. This is the direction the first version could not see, and the
+# direction that corrected my own classification of `Unreadable` on its first
+# run.
+case_ "harness: the corpus assertion fails in both directions" \
+  crates/mnema-ingest/tests/randomised.rs \
+  's~        SkipRule::Memory => false,~        SkipRule::Memory => true,~' \
+  'SkipRule::Memory => true,' \
+  mnema-ingest 'random_sequences_do_not_lose_data' --test randomised

@@ -258,6 +258,68 @@ fn marker(mut n: u64) -> String {
     s
 }
 
+/// Whether the corpus is expected to contain this rule, and why not when it is
+/// not.
+///
+/// **Exhaustive on purpose: a new `SkipRule` variant fails to compile here.**
+/// That is the half of the corpus assertion that a list cannot give — the list
+/// says what was reached, this says what *ought* to be, and a rule added to the
+/// product without a thought about the harness stops the build rather than
+/// joining the set of things nothing measures.
+fn must_the_corpus_reach(rule: SkipRule) -> bool {
+    match rule {
+        // The five refusals by content and the size ceiling: every one has a
+        // `displaces` arm of its own, and an arm no generator reaches is an arm
+        // judged by nothing.
+        SkipRule::Unsupported
+        | SkipRule::NoTextLayer
+        | SkipRule::NotText
+        | SkipRule::BinaryTail
+        | SkipRule::Malformed
+        | SkipRule::Encrypted
+        | SkipRule::TooLarge => true,
+        // The machine breaking rather than the file being refused. `Crash` and
+        // `Timeout` are drawn by the two sidecar operations, and `Unreadable`
+        // arrives from a file this crate's own `stat` cannot answer for — an
+        // ejected volume, a path that went away under the walk.
+        //
+        // **`Unreadable` is here because the run said so, not because I did.**
+        // I classified it as unmodelled and the very first pass of the
+        // bidirectional assertion reddened on it: the corpus reaches it and my
+        // claim about the corpus was wrong. That is the direction a
+        // containment check could never have caught — it only ever asks
+        // whether the listed things happened, never whether the happened
+        // things were listed.
+        SkipRule::Crash | SkipRule::Timeout | SkipRule::Unreadable => true,
+        // The one rule with no generator here. Named rather than omitted, so
+        // "not modelled" is a decision on the record instead of an absence
+        // somebody has to notice: nothing in this file can make a worker run
+        // out of memory, and a sidecar that merely *said* `memory` would be
+        // testing the string rather than the condition.
+        SkipRule::Memory => false,
+    }
+}
+
+/// Every rule the product can journal, once each.
+///
+/// The same arrangement as [`Shape::EVERY_LABEL`] and the same admission: the
+/// list is hand-written because Rust will not enumerate variants, and what
+/// makes it safe is that `must_the_corpus_reach` above is exhaustive and the
+/// corpus assertion compares sets rather than containment.
+const EVERY_RULE: [SkipRule; 11] = [
+    SkipRule::Crash,
+    SkipRule::Timeout,
+    SkipRule::Memory,
+    SkipRule::Unsupported,
+    SkipRule::NoTextLayer,
+    SkipRule::Unreadable,
+    SkipRule::TooLarge,
+    SkipRule::NotText,
+    SkipRule::BinaryTail,
+    SkipRule::Malformed,
+    SkipRule::Encrypted,
+];
+
 /// A zip of the given members, **stored rather than deflated**.
 ///
 /// Storing is an invariant here, not a preference. `edit_keeping_length` is the
@@ -326,6 +388,22 @@ enum SpineEntry {
     /// broken internal link that must skip one chapter by number rather than
     /// refusing a whole book.
     MissingMember(usize),
+    /// An ordinary chapter whose manifest entry states its media type **with a
+    /// parameter** — `application/xhtml+xml; charset=utf-8`.
+    ///
+    /// A real producer writes this and the standard allows it, so a reader that
+    /// compares the media type as a string instead of parsing it drops the
+    /// chapter and skips a page nothing is wrong with. Measured: it indexes
+    /// exactly like a bare media type, one page, which is why it can be a
+    /// drop-in rather than needing a shape of its own.
+    Parameterised(usize),
+    /// A second spine entry pointing at a chapter **already in the spine**.
+    ///
+    /// Measured: the book comes back with **two pages holding the same text**,
+    /// which is the honest reading — the spine really does say to show that
+    /// chapter twice. What it exercises here is that neither page is lost and
+    /// neither is confused with the other.
+    Repeat(usize),
 }
 
 /// A whole EPUB: `mimetype`, container, package document and the chapters given.
@@ -346,6 +424,16 @@ fn epub_of(spine: &[SpineEntry], chapters: &[(String, Vec<u8>)]) -> Vec<u8> {
                 ));
                 refs.push_str(&format!("<itemref idref=\"c{i}\"/>"));
             }
+            SpineEntry::Parameterised(i) => {
+                manifest.push_str(&format!(
+                    "<item id=\"c{i}\" href=\"ch{i}.xhtml\" \
+                     media-type=\"application/xhtml+xml; charset=utf-8\"/>"
+                ));
+                refs.push_str(&format!("<itemref idref=\"c{i}\"/>"));
+            }
+            // Only a second reference: the manifest item is written by the
+            // `Chapter` entry this one repeats.
+            SpineEntry::Repeat(i) => refs.push_str(&format!("<itemref idref=\"c{i}\"/>")),
             SpineEntry::NoIdref => refs.push_str("<itemref/>"),
             SpineEntry::EmptyId => {
                 manifest.push_str(
@@ -505,6 +593,34 @@ impl Shape {
     /// for reader names: a variant renamed in passing must not silently rename
     /// what the coverage list is looking for and turn the assertion into one
     /// that can never pass.
+    /// Every label [`Shape::label`] can return, exactly once.
+    ///
+    /// **Hand-written, and the `match` below is what keeps it honest.** Rust
+    /// cannot enumerate an enum's variants without a derive, so this list
+    /// cannot be generated — what it can be is *checked*, and it is, twice
+    /// over: adding a `Shape` variant fails to compile in `label`, and the
+    /// corpus assertion compares this list to what a run reached with
+    /// `assert_eq!` on sets rather than by containment. A new label that is
+    /// generated and not listed fails; a listed label that stops being
+    /// generated fails. Neither can go quiet, which is what the first version
+    /// of this list did — it named twelve of the thirteen and `pages-skipped`
+    /// was the one it missed.
+    const EVERY_LABEL: [&'static str; 13] = [
+        "text",
+        "markdown",
+        "html",
+        "epub",
+        "docx",
+        "xlsx",
+        "pages-skipped",
+        "unsupported-container",
+        "photo",
+        "binary-tail",
+        "no-text-layer",
+        "malformed",
+        "encrypted",
+    ];
+
     fn label(self) -> &'static str {
         match self {
             Shape::Text(_) => "text",
@@ -1031,10 +1147,23 @@ impl World {
                         )
                     })
                     .collect();
-                epub_of(
-                    &(0..pages).map(SpineEntry::Chapter).collect::<Vec<_>>(),
-                    &chapters,
-                )
+                // Chapter 0 always states its media type **with a parameter**,
+                // deterministically rather than by dice: it indexes identically
+                // (measured), so it costs nothing and it means every ordinary
+                // book in the corpus carries the case a reader comparing media
+                // types as strings would drop. Deterministic matters —
+                // `edit_keeping_length` needs one shape and unit count to
+                // produce one byte count.
+                let spine: Vec<SpineEntry> = (0..pages)
+                    .map(|i| {
+                        if i == 0 {
+                            SpineEntry::Parameterised(i)
+                        } else {
+                            SpineEntry::Chapter(i)
+                        }
+                    })
+                    .collect();
+                epub_of(&spine, &chapters)
             }
             Format::Docx => {
                 let mut body = String::new();
@@ -1121,6 +1250,12 @@ impl World {
                         .into_bytes(),
                     ));
                 }
+                // **The same member named twice, at the end.** Deterministic
+                // rather than drawn, so the page layout invariant 3e checks
+                // stays knowable: page 1 is the gap, pages 2..=n+1 are the
+                // chapters in order, and the last page is chapter 0 over again.
+                // A spine really is allowed to say "show that chapter here too".
+                spine.push(SpineEntry::Repeat(0));
                 epub_of(&spine, &chapters)
             }
             // Every other format falls back to a workbook, because a sheet the
@@ -1146,11 +1281,6 @@ impl World {
             }
         };
 
-        let format = if matches!(format, Format::Epub) {
-            Format::Epub
-        } else {
-            Format::Xlsx
-        };
         Content {
             bytes,
             markers,
@@ -1201,6 +1331,16 @@ impl World {
             // generated bytes: a password-protected PDF is an encrypted
             // document, and encryption is not something this file can synthesise
             // without becoming a PDF writer. 1 029 bytes, well under `CEILING`.
+            //
+            // **It reaches across a crate boundary into another crate's test
+            // fixtures, and that is a deliberate trade rather than an
+            // oversight.** Copying the file here would put a second binary blob
+            // in the repository whose only relationship to the first is that
+            // somebody remembered to update both; `include_bytes!` binds them,
+            // and it binds them at **compile time** — moving or deleting the
+            // fixture fails the build with the path in the message rather than
+            // making this generator quietly produce something else. A test
+            // layout coupled loudly beats two fixtures drifting quietly.
             Refusal::Encrypted => {
                 include_bytes!("../../mnema-extract/tests/fixtures/password-locked.pdf").to_vec()
             }
@@ -1322,7 +1462,16 @@ impl World {
     /// real, and modelling it wrongly; keeping the extension is what makes the
     /// model true.
     fn extension_of(relative: &str) -> &str {
-        relative.rsplit('.').next().unwrap_or("txt")
+        // `rsplit_once`, not `rsplit().next()`: the latter always yields
+        // something, so its `unwrap_or` was a fallback that could not run — and
+        // for a path with no dot at all it returned the **whole path**, which
+        // would have put a slash inside `backup/copy-{n}.{ext}`. No generated
+        // path is dotless today, so it could not fire; a guard that cannot fire
+        // reads as protection and is not any.
+        match relative.rsplit_once('.') {
+            Some((_, extension)) if !extension.contains('/') => extension,
+            _ => "txt",
+        }
     }
 
     /// Which of the four container readers a path's name asks for, if any.
@@ -1348,6 +1497,16 @@ impl World {
         ) || relative.ends_with(".md");
         if many && self.rng.chance(30) {
             mnema_ingest::PAGES_PER_TRANSACTION + 2
+        } else if Self::format_of(relative) == Some(Format::Html) && self.rng.chance(15) {
+            // **Zero sections — a document that declares nothing.** Measured
+            // rather than assumed, because the answer differs per format and
+            // only one of them is a *new* class: an html page with an empty
+            // body still indexes (one page, no marker), while an epub with an
+            // empty spine is `malformed` and a docx or workbook with nothing in
+            // it is `no_text_layer` — both already generated by
+            // `refused_body`. So the class is reached here for the one format
+            // where it is not another class in disguise.
+            0
         } else {
             1 + self.rng.below(5)
         }
@@ -1424,8 +1583,22 @@ impl World {
             }
             Verdict::Settled => {
                 self.record_reader_of(relative);
-                self.reached.page_skips +=
-                    self.count("SELECT count(*) FROM skipped WHERE page_no IS NOT NULL") as usize;
+                // Scoped to this run's root, which the first version was not:
+                // every `World` has a database of its own today, so an unscoped
+                // count answered the same number — but it was a claim about
+                // every root rather than about this one, and the next test to
+                // put two roots in one database would have inherited it.
+                let rows: i64 = self
+                    .db
+                    .conn()
+                    .query_row(
+                        "SELECT count(*) FROM skipped WHERE watched_root_id = ?1 \
+                         AND page_no IS NOT NULL",
+                        [self.root_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                self.reached.page_skips += rows as usize;
             }
             Verdict::Failed | Verdict::Unoffered => {}
         }
@@ -2299,7 +2472,7 @@ impl World {
         }
 
         match state.shape {
-            Shape::Gappy(_, _) => {
+            Shape::Gappy(_, pages) => {
                 if rows == 0 {
                     self.fail(format!(
                         "invariant 3d — {relative} was just indexed and its reader could not \
@@ -2307,6 +2480,7 @@ impl World {
                          it. The page is missing from the index and nothing anywhere says so"
                     ));
                 }
+                self.check_the_gap_is_at_the_number_it_is_at(relative, pages);
             }
             _ => {
                 if rows > 0 {
@@ -2317,6 +2491,119 @@ impl World {
                          while the journal tells someone it is missing"
                     ));
                 }
+            }
+        }
+    }
+
+    /// **3e. The page that could not be read is the one reported, and every
+    /// other page holds its own text.**
+    ///
+    /// 🔴 **This is the half of Task 11's class that counting rows cannot
+    /// reach.** That cycle found two defects on one book, and they are not the
+    /// same defect: an `<itemref/>` with no `idref` made the entry *vanish* and
+    /// shifted every later chapter up by one, and a "sensible" fix for it put
+    /// **one chapter's text under another chapter's number**. Invariant 3d
+    /// catches the first — a shifted book reports no gap, and `rows == 0`
+    /// fires. Nothing caught the second: the row count is right, every marker
+    /// is findable, invariant 4 asks only that a marker match *some* chunk of
+    /// the *same* document, and the citation quietly names the wrong chapter.
+    ///
+    /// `gappy_body` puts the gap **first** for exactly this reason, and
+    /// `epub_of` already writes down the answer — "its position in this slice
+    /// is that number minus one" — so the expected numbers are known without
+    /// re-deriving anything: the gap is page 1, and the readable pages are
+    /// 2..=pages+1, each carrying the marker it was built with.
+    ///
+    /// Both directions, and they fail differently. The **numbers** catch a
+    /// renumbering that drops the gap; the **text on each page** catches a
+    /// renumbering that keeps the count and slides the content along it.
+    fn check_the_gap_is_at_the_number_it_is_at(&self, relative: &str, pages: usize) {
+        let skipped: Vec<i64> = self
+            .db
+            .conn()
+            .prepare(
+                "SELECT page_no FROM skipped WHERE watched_root_id = ?1 AND relative_path = ?2 \
+                 AND page_no IS NOT NULL ORDER BY page_no",
+            )
+            .unwrap()
+            .query_map((self.root_id, relative), |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        if skipped != vec![1] {
+            self.fail(format!(
+                "invariant 3e — {relative} was built with its unreadable page **first**, so \
+                 page 1 is the one that cannot be read, and the journal names {skipped:?}. \
+                 A reader that renumbers what came back reports a gap that is not where the \
+                 gap is, and every citation after it names the wrong page"
+            ));
+        }
+
+        let Some(document) = self.paths_now().get(relative).cloned() else {
+            return;
+        };
+        let Some(state) = self.files.get(relative) else {
+            return;
+        };
+        // Page 1 is the gap, so the markers start at page 2 in the order they
+        // were written.
+        for (i, expected) in state.markers.iter().enumerate() {
+            let page_no = i as i64 + 2;
+            let text: Option<String> = self
+                .db
+                .conn()
+                .query_row(
+                    "SELECT group_concat(b.text, ' ') FROM block b JOIN page p ON b.page_id = p.id \
+                     WHERE p.document_id = ?1 AND p.page_no = ?2",
+                    (&document, page_no),
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            let Some(text) = text else {
+                self.fail(format!(
+                    "invariant 3e — {relative} declares {pages} readable pages after its gap, \
+                     and the index holds no page {page_no} for the document it built. The \
+                     chapter is gone and the page numbering closed over the hole"
+                ));
+            };
+            if !text.contains(expected.as_str()) {
+                self.fail(format!(
+                    "invariant 3e — page {page_no} of {relative} should hold {expected:?} and \
+                     holds {text:?}. The text of one chapter is stored under another \
+                     chapter's number: every marker is still findable, the row count is \
+                     still right, and the citation names a chapter that does not contain it"
+                ));
+            }
+        }
+
+        // **The same member named twice is two pages, and the second is not the
+        // first.** An epub spine may reference one chapter more than once, and
+        // the generator always ends a gappy book that way. What this asserts is
+        // that the repeat arrived as a page of its own carrying chapter 0's
+        // text — a reader that silently collapsed it would lose a page the
+        // spine declares, and one that mislabelled it would put chapter 0's
+        // words under a number that is not chapter 0's either.
+        if matches!(state.shape, Shape::Gappy(Format::Epub, _))
+            && let Some(first) = state.markers.first()
+        {
+            let repeat_at = pages as i64 + 2;
+            let text: Option<String> = self
+                .db
+                .conn()
+                .query_row(
+                    "SELECT group_concat(b.text, ' ') FROM block b JOIN page p ON b.page_id = p.id \
+                     WHERE p.document_id = ?1 AND p.page_no = ?2",
+                    (&document, repeat_at),
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            match text {
+                Some(text) if text.contains(first.as_str()) => {}
+                other => self.fail(format!(
+                    "invariant 3e — the spine of {relative} names its first chapter a second \
+                     time, so page {repeat_at} should hold {first:?} again, and it holds \
+                     {other:?}. A page the spine declares has been dropped or renumbered"
+                )),
             }
         }
     }
@@ -3999,8 +4286,15 @@ struct Reached {
     rules: BTreeSet<&'static str>,
     /// Every reader that produced a document the index kept.
     readers: BTreeSet<String>,
-    /// Page numbers a reader reported skipped, which is the class Task 9 added
-    /// and this harness had never seen.
+    /// How many times a settled call found the journal holding a per-page row
+    /// **under this run's watched root** — an observation count, not a set of
+    /// page numbers, and the doc comment said the wrong one of those.
+    ///
+    /// Only ever read as `> 0`, and it must stay that way: the same row is
+    /// counted again by every later settled call, so the total is a number
+    /// about the run's shape rather than about the index. Anything sharper —
+    /// "exactly three pages were skipped" — belongs in invariant 3e, which
+    /// reads the numbers themselves.
     page_skips: usize,
 }
 
@@ -4015,10 +4309,10 @@ impl Reached {
 
 /// The harness.
 ///
-/// **What the default run covers.** Twelve seeds of twenty-four steps each,
+/// **What the default run covers.** Twelve seeds of `MNEMA_FUZZ_STEPS` steps each,
 /// from a fixed base, so the default is the same corpus on every machine and in
 /// CI rather than a lottery that is green until it is not. Each step draws one
-/// of the twenty-four operations, applies it, walks whatever it touched — or, for
+/// of the operations in `draw`, applies it, walks whatever it touched — or, for
 /// `RunWalk` and `SimulateEjectedVolume`, runs a real `walk_root` over the
 /// whole folder — and checks every invariant in this file after **each call**,
 /// not merely at the end of the step. About three hundred steps and rather
@@ -4060,7 +4354,19 @@ fn random_sequences_do_not_lose_data() {
     if let Ok(seed) = std::env::var("MNEMA_FUZZ_SEED") {
         let seed = seed.parse().expect("MNEMA_FUZZ_SEED is a number");
         eprintln!("replaying seed {seed} for {steps} steps");
-        run(seed, steps);
+        let reached = run(seed, steps);
+        // **A single seed asserts nothing about the corpus and now says so out
+        // loud.** One run of forty steps has no business meeting every format,
+        // so the coverage assertion below is deliberately skipped here — but
+        // that left the only check on generator rot silent in exactly the mode
+        // a person debugs in. Printing what this seed reached costs nothing and
+        // means a replay can still show that the class being chased was never
+        // generated at all.
+        eprintln!(
+            "seed {seed} reached:\n  shapes:  {:?}\n  readers: {:?}\n  rules:   {:?}\n  \
+             per-page rows seen: {}",
+            reached.shapes, reached.readers, reached.rules, reached.page_skips
+        );
         return;
     }
     let base = setting("MNEMA_FUZZ_BASE", 0x5EED_0000) as u64;
@@ -4076,51 +4382,46 @@ fn random_sequences_do_not_lose_data() {
     // than the product. Both directions are here on purpose: a missing entry is
     // a class nothing measured, and the list is written out rather than counted,
     // because a count is a definition that goes stale one format later.
-    for shape in [
-        "text",
-        "markdown",
-        "html",
-        "epub",
-        "docx",
-        "xlsx",
-        "unsupported-container",
-        "photo",
-        "binary-tail",
-        "no-text-layer",
-        "malformed",
-        "encrypted",
-    ] {
-        assert!(
-            reached.shapes.contains(shape),
-            "the generator wrote no {shape} in {runs} seeds × {steps} steps, so every              invariant that would judge one is untested and passing.
-  it wrote: {:?}",
-            reached.shapes
-        );
-    }
-    for reader in ["text", "markdown", "html", "epub", "docx", "xlsx"] {
-        assert!(
-            reached.readers.contains(reader),
-            "no document the index kept was produced by the {reader} reader, so this              corpus is not evidence about it.
-  it kept: {:?}",
-            reached.readers
-        );
-    }
-    for rule in [
-        "unsupported",
-        "not_text",
-        "binary_tail",
-        "too_large",
-        "no_text_layer",
-        "malformed",
-        "encrypted",
-    ] {
-        assert!(
-            reached.rules.contains(rule),
-            "no worker in this corpus answered {rule}, so `displaces`'s arm for it is \
-             judged by nothing.\n  it answered: {:?}",
-            reached.rules
-        );
-    }
+    // **Compared as sets, in both directions.** The first version of this
+    // asserted only that each listed thing was reached, which is half a claim:
+    // a `Shape` or a `SkipRule` that nobody adds to the list produces exactly
+    // the silence this whole assertion exists to end, one storey up. It had the
+    // hole already — thirteen labels and twelve listed, `pages-skipped` missing
+    // — and it hid nothing only because `page_skips > 0` happened to cover it.
+    //
+    // `assert_eq!` fails in both directions: a class that stops being generated
+    // fails, and a class that starts being generated without anyone deciding it
+    // should be also fails, which is the edit that would otherwise go unnoticed.
+    let want_shapes: BTreeSet<&str> = Shape::EVERY_LABEL.into_iter().collect();
+    assert_eq!(
+        reached.shapes, want_shapes,
+        "the corpus of {runs} seeds × {steps} steps did not write exactly the shapes this \
+         file claims to cover. A shape it did not write is a shape every invariant judges \
+         vacuously; a shape it wrote and does not list is a class nobody decided to add"
+    );
+
+    let want_readers: BTreeSet<String> = ["text", "markdown", "html", "epub", "docx", "xlsx"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    assert_eq!(
+        reached.readers, want_readers,
+        "the corpus did not keep a document from exactly the readers this file claims to \
+         cover. **PDF is deliberately absent** — see `Format`'s doc for why a generated PDF \
+         cannot carry a marker — and it is absent from this list rather than from a comment"
+    );
+
+    let want_rules: BTreeSet<&str> = EVERY_RULE
+        .into_iter()
+        .filter(|rule| must_the_corpus_reach(*rule))
+        .map(SkipRule::as_str)
+        .collect();
+    assert_eq!(
+        reached.rules, want_rules,
+        "the corpus did not answer with exactly the rules `must_the_corpus_reach` says it \
+         should. That function is exhaustive over `SkipRule`, so a rule added to the product \
+         cannot reach this assertion without someone deciding whether the harness models it"
+    );
     assert!(
         reached.page_skips > 0,
         "no reader reported a skipped page in this corpus, so the per-page journal rows          Task 9 added — and the path that removes them — are untested"
