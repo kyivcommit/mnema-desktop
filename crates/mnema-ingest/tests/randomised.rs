@@ -1018,9 +1018,7 @@ impl World {
                     })
                     .collect();
                 epub_of(
-                    &(0..pages)
-                        .map(|i| SpineEntry::Chapter(i))
-                        .collect::<Vec<_>>(),
+                    &(0..pages).map(SpineEntry::Chapter).collect::<Vec<_>>(),
                     &chapters,
                 )
             }
@@ -1315,12 +1313,9 @@ impl World {
 
     /// Which of the four container readers a path's name asks for, if any.
     fn format_of(relative: &str) -> Option<Format> {
-        for format in [Format::Html, Format::Epub, Format::Docx, Format::Xlsx] {
-            if relative.ends_with(format.extension()) {
-                return Some(format);
-            }
-        }
-        None
+        [Format::Html, Format::Epub, Format::Docx, Format::Xlsx]
+            .into_iter()
+            .find(|format| relative.ends_with(format.extension()))
     }
 
     /// A number of units that keeps the file comfortably under the ceiling,
@@ -2132,7 +2127,8 @@ impl World {
                 SkipRule::NotText
                 | SkipRule::Unsupported
                 | SkipRule::Malformed
-                | SkipRule::Encrypted => match last.hash.as_deref() {
+                | SkipRule::Encrypted
+                | SkipRule::NoTextLayer => match last.hash.as_deref() {
                     // The worker saw exactly the bytes the index was built
                     // from. The rule changed, the file did not.
                     Some(sha) if sha == held => {
@@ -2195,11 +2191,23 @@ impl World {
                         ));
                     }
                 }
-                SkipRule::Crash
-                | SkipRule::Timeout
-                | SkipRule::Memory
-                | SkipRule::NoTextLayer
-                | SkipRule::Unreadable => {}
+                // The environment faults, and **only** them: `displaces` answers
+                // an unconditional `false` for all four, and this harness has
+                // nothing to add about a worker that crashed.
+                //
+                // 🔴 `NoTextLayer` used to sit in this list and does not belong
+                // in it. `displaces` gives it the *same* condition as the four
+                // content rules above — `content.is_none_or(|sha| sha !=
+                // recorded.document_id)` (`crates/mnema-ingest/src/lib.rs`) —
+                // while this arm asserted nothing at all about it, and an empty
+                // arm accepts both behaviours. That is the failure this very
+                // function's comment warns about, three lines up, about a
+                // different rule. It went unnoticed because no generator here
+                // could produce the rule: a document that opens and holds no
+                // words needed a reader that opens documents, and until this
+                // cycle there was none. The class and the assertion for it
+                // arrived in opposite orders.
+                SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => {}
             }
         }
     }
@@ -2772,7 +2780,7 @@ impl World {
     fn create(&mut self) {
         let n = self.next_counter();
         let relative = match self.rng.below(8) {
-            0 | 1 | 2 => format!("docs/handbook-{n}.md"),
+            0..=2 => format!("docs/handbook-{n}.md"),
             3 | 4 => format!("docs/file-{n}.txt"),
             5 => format!("docs/page-{n}.html"),
             6 => format!("docs/book-{n}.epub"),
