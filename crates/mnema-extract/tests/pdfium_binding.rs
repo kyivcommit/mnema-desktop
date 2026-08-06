@@ -185,6 +185,77 @@ fn the_worker_reports_whether_pdfium_loaded() {
     assert_eq!(v["stage"], serde_json::json!("ok"));
 }
 
+/// The field that says WHICH Pdfium answered, which is a different question
+/// from whether one did.
+///
+/// A packaged worker that loaded the developer's checkout answers `loaded:true`
+/// and reads PDFs perfectly — on one machine. That is not a scenario invented
+/// for a test: it is what this repository's first bundle with a PDF reader in
+/// it did, and `scripts/verify-bundle.sh` compares this field against the
+/// mounted image because of it.
+///
+/// Both directions, and the second is the one that matters: reporting *a*
+/// directory is satisfied by a constant, so the probe is made to load from a
+/// directory nothing could have guessed — a copy of the vendored tree in a
+/// temporary directory — and has to name that one.
+#[test]
+fn a_successful_probe_names_the_directory_it_loaded_from() {
+    let probe = |lib_dir: Option<&std::path::Path>| -> serde_json::Value {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"));
+        cmd.arg("--probe-pdfium").arg(fixture("one-page-text.pdf"));
+        match lib_dir {
+            Some(d) => cmd.env(mnema_extract::PDFIUM_LIB_DIR_ENV, d),
+            // Removed rather than left alone: a value inherited from whoever
+            // ran the suite would decide the first half of this test.
+            None => cmd.env_remove(mnema_extract::PDFIUM_LIB_DIR_ENV),
+        };
+        let out = cmd.output().expect("the worker binary starts");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("one JSON line")
+    };
+
+    let found = probe(None);
+    assert_eq!(found["loaded"], serde_json::json!(true));
+    let found_dir = found["library_dir"]
+        .as_str()
+        .expect("a successful probe names the directory it loaded from");
+    let found_dir = std::path::Path::new(found_dir);
+    // A directory that really holds the library, not a plausible-looking path:
+    // the whole value of the field is that it can be checked against a place.
+    assert!(found_dir.is_dir(), "{found_dir:?} is not a directory");
+    let library = std::fs::read_dir(found_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|e| e.file_name().to_string_lossy().starts_with("libpdfium"))
+        .unwrap_or_else(|| panic!("{found_dir:?} holds no libpdfium library"));
+
+    // Now somewhere it could not have named by guessing. The tree is rebuilt in
+    // the vendored shape — the library under `lib/`, the manifest one level up —
+    // because that is the shape `verify_build` requires, here and in a bundle.
+    let tmp = tempfile::tempdir().unwrap();
+    let lib_dir = tmp.path().join("lib");
+    std::fs::create_dir(&lib_dir).unwrap();
+    std::fs::copy(library.path(), lib_dir.join(library.file_name())).unwrap();
+    std::fs::copy(
+        found_dir.join("..").join("VERSION"),
+        tmp.path().join("VERSION"),
+    )
+    .unwrap();
+
+    let elsewhere = probe(Some(&lib_dir));
+    assert_eq!(elsewhere["loaded"], serde_json::json!(true));
+    assert_eq!(
+        elsewhere["library_dir"].as_str().map(std::path::Path::new),
+        Some(lib_dir.as_path()),
+        "the probe named {:?} while loading from {lib_dir:?}",
+        elsewhere["library_dir"]
+    );
+}
+
 /// The real negative case Important 2 asked for, not a mutation standing in
 /// for one: `MNEMA_PDFIUM_LIB_DIR` pointed at a directory that exists but
 /// holds neither the library nor a `VERSION` manifest. `library_dir()`

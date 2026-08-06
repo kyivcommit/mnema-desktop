@@ -14,23 +14,48 @@
 # text) and asked the same question of it. These four cases are the missing
 # red runs, one per field the two branches report.
 
+# The `pages` and `stage` fields are matched through the ONE place they are
+# spelled — the format string — rather than through the surrounding `format!`
+# call, which task 16 grew a third argument and a comment block. Three of these
+# cases went BROKEN on that edit, having anchored on the whole expression; what
+# survives an edit is the smallest fragment that still names the thing under
+# test.
 case_ "worker: a successful probe still reports a page count" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{            Ok\(probes\) => format!\(\n                "\{\{\\"loaded\\":true,\\"pages\\":\{\},\\"stage\\":\\"ok\\"\}\}",\n                probes\.len\(\)\n            \),}{            Ok(probes) => { let _ = probes; format!("{{\\"loaded\\":true,\\"stage\\":\\"ok\\"}}") },}' \
-  'let _ = probes; format!("{{\"loaded\":true,\"stage\":\"ok\"}}")' \
+  's{\\"pages\\":\{\},}{}' \
+  '"{{\\"loaded\\":true,\\"stage\\":\\"ok\\",\\"library_dir\\":{}}}"' \
   mnema-extract 'the_worker_reports_whether_pdfium_loaded' --test pdfium_binding
 
 case_ "worker: a successful probe must not say loaded:false" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{"\{\{\\"loaded\\":true,\\"pages\\":\{\},\\"stage\\":\\"ok\\"\}\}"}{"{{\\"loaded\\":false,\\"pages\\":{},\\"stage\\":\\"ok\\"}}"}' \
-  '"{{\"loaded\":false,\"pages\":{},\"stage\":\"ok\"}}"' \
+  's{\\"loaded\\":true,\\"pages\\"}{\\"loaded\\":false,\\"pages\\"}' \
+  '\\"loaded\\":false,\\"pages\\"' \
   mnema-extract 'the_worker_reports_whether_pdfium_loaded' --test pdfium_binding
 
 case_ "worker: a successful probe's stage is ok, not some other word" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{"\{\{\\"loaded\\":true,\\"pages\\":\{\},\\"stage\\":\\"ok\\"\}\}"}{"{{\\"loaded\\":true,\\"pages\\":{},\\"stage\\":\\"loaded\\"}}"}' \
-  '"{{\"loaded\":true,\"pages\":{},\"stage\":\"loaded\"}}"' \
+  's{\\"stage\\":\\"ok\\"}{\\"stage\\":\\"loaded\\"}' \
+  '\\"stage\\":\\"loaded\\"' \
   mnema-extract 'the_worker_reports_whether_pdfium_loaded' --test pdfium_binding
+
+# Task 16. The field that says WHICH library answered, and the two ways it stops
+# meaning that: the consumer's name for it goes away, and the value stops being
+# the place. Not a third case for "recorded at the load rather than re-derived",
+# which is what `loaded_library_dir` is built as — no test here can see that
+# difference, because `library_dir()` is deterministic and would agree with the
+# recording every time it is asked. That is an argument for the shape, not a
+# measured property, and it is left as one.
+case_ "worker: a successful probe names the directory it loaded from" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's{\\"library_dir\\":}{\\"lib_dir\\":}' \
+  '\\"lib_dir\\":' \
+  mnema-extract 'a_successful_probe_names_the_directory_it_loaded_from' --test pdfium_binding
+
+case_ "extract: the reported directory is a place, not a plausible constant" \
+  crates/mnema-extract/src/pdfium_probe.rs \
+  's{    bound_pdfium\(\)\.map\(\|\(_, dir\)\| dir\.as_path\(\)\)}{    bound_pdfium()?;\n    Ok(Path::new("/nowhere"))}' \
+  'Ok(Path::new("/nowhere"))' \
+  mnema-extract 'a_successful_probe_names_the_directory_it_loaded_from' --test pdfium_binding
 
 # Not a text-matching stand-in: the failure branch must report the stage
 # `Error::stage()` actually names, not a constant. This is also the mutation
