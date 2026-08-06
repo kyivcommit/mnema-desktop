@@ -256,6 +256,87 @@ fn a_successful_probe_names_the_directory_it_loaded_from() {
     );
 }
 
+/// With a library in both places a packaged worker could find one, the sealed
+/// copy wins.
+///
+/// The order is a security decision rather than a preference, which is why it
+/// is asserted rather than left to the order the branches happen to sit in.
+/// The bundle carries `disable-library-validation` — it must, or an ad-hoc
+/// signature cannot load the library it ships (D65) — and that entitlement is
+/// not selective: nothing checks the signature of whatever is loaded. So a
+/// `libpdfium.dylib` dropped beside the worker in an installed application must
+/// not be preferred over the one under `Resources/`.
+///
+/// **Both candidates are made fully loadable**, and that is the whole design of
+/// this test. A decoy that merely fails to bind would let it pass for the
+/// weaker reason "the other one did not work"; here each location has a real
+/// library and a `VERSION` manifest where `verify_build` looks for it, so the
+/// only thing that can decide the answer is which branch is consulted first.
+#[test]
+fn the_packaged_library_wins_over_one_dropped_beside_the_executable() {
+    let vendored = {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+            .arg("--probe-pdfium")
+            .arg(fixture("one-page-text.pdf"))
+            .env_remove(mnema_extract::PDFIUM_LIB_DIR_ENV)
+            .output()
+            .expect("the worker binary starts");
+        let v: serde_json::Value =
+            serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+        std::path::PathBuf::from(v["library_dir"].as_str().expect("a library directory"))
+    };
+    let library = std::fs::read_dir(&vendored)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|e| e.file_name().to_string_lossy().starts_with("libpdfium"))
+        .expect("a library to copy");
+    let manifest = std::fs::read_to_string(vendored.join("..").join("VERSION")).unwrap();
+
+    // `exe_dir` stands for Contents/MacOS and `exe_dir/../Resources/pdfium/lib`
+    // for the packaged library. The names are the bundle's; what the code reads
+    // is only the shape.
+    let root = tempfile::tempdir().unwrap();
+    let exe_dir = root.path().join("MacOS");
+    let packaged = root.path().join("Resources/pdfium/lib");
+    std::fs::create_dir_all(&exe_dir).unwrap();
+    std::fs::create_dir_all(&packaged).unwrap();
+
+    let copy_library_to = |dir: &std::path::Path| {
+        std::fs::copy(library.path(), dir.join(library.file_name())).unwrap();
+    };
+    copy_library_to(&packaged);
+    // `verify_build` reads <dir>/VERSION or <dir>/../VERSION, so each location
+    // gets a manifest where its own branch would find it.
+    std::fs::write(packaged.join("..").join("VERSION"), &manifest).unwrap();
+    copy_library_to(&exe_dir);
+    std::fs::write(exe_dir.join("VERSION"), &manifest).unwrap();
+
+    let worker = exe_dir.join("mnema-extract-worker");
+    std::fs::copy(env!("CARGO_BIN_EXE_mnema-extract-worker"), &worker).unwrap();
+
+    let out = std::process::Command::new(&worker)
+        .arg("--probe-pdfium")
+        .arg(fixture("one-page-text.pdf"))
+        .env_remove(mnema_extract::PDFIUM_LIB_DIR_ENV)
+        .output()
+        .expect("the relocated worker starts");
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("one JSON line");
+
+    // Both directions: it loaded at all — otherwise this would pass whenever
+    // the copy was unusable — and it loaded the packaged one.
+    assert_eq!(
+        v["loaded"],
+        serde_json::json!(true),
+        "neither copy loaded, so this proves nothing about which is preferred: {v}"
+    );
+    assert_eq!(
+        v["library_dir"].as_str().map(std::path::Path::new),
+        Some(packaged.as_path()),
+        "the copy beside the executable was preferred over the packaged one: {v}"
+    );
+}
+
 /// The real negative case Important 2 asked for, not a mutation standing in
 /// for one: `MNEMA_PDFIUM_LIB_DIR` pointed at a directory that exists but
 /// holds neither the library nor a `VERSION` manifest. `library_dir()`

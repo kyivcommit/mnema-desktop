@@ -311,24 +311,37 @@ fn library_dir() -> Result<PathBuf, Error> {
         return Ok(PathBuf::from(dir));
     }
 
-    // 2. Beside the running executable — a flat install, and the shape a
-    //    relocated worker takes. NOT where the macOS bundle ships it; that is
-    //    (3), and this branch stays because it is the only one that needs no
-    //    bundle layout and no environment.
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-        && dir.join(Pdfium::pdfium_platform_library_name()).is_file()
-    {
-        return Ok(dir.to_path_buf());
-    }
-
-    // 3. Inside a packaged macOS application. See [`bundled_library_dir`] for
-    //    why the vendored layout is reproduced rather than flattened.
+    // 2. Inside a packaged application, which is checked BEFORE the flat layout
+    //    below and not after. See [`bundled_library_dir`] for why the vendored
+    //    layout is reproduced rather than flattened; the order is its own
+    //    decision, and it is a security one.
+    //
+    //    The bundle grants `com.apple.security.cs.disable-library-validation`,
+    //    because an ad-hoc signature has no Team ID and the loader otherwise
+    //    refuses the library the bundle itself ships (D54, D65). That
+    //    entitlement is not selective: it stops the signature of *any* library
+    //    from being checked. With the flat branch first, a `libpdfium.dylib`
+    //    dropped into `Contents/MacOS/` beside the worker would win over the
+    //    sealed copy under `Resources/`, and be loaded without its signature
+    //    being looked at. Checking the sealed location first does not make that
+    //    impossible — nothing here can — but it stops the easiest spelling of it
+    //    from being the one the search prefers.
     if let Ok(exe) = std::env::current_exe()
         && let Some(exe_dir) = exe.parent()
         && let Some(dir) = bundled_library_dir(exe_dir)
     {
         return Ok(dir);
+    }
+
+    // 3. Beside the running executable — a flat install, and the shape a
+    //    relocated worker takes. It stays because it is the only branch needing
+    //    neither a bundle layout nor an environment, and because a packaged
+    //    build no longer reaches it: (2) matches first.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+        && dir.join(Pdfium::pdfium_platform_library_name()).is_file()
+    {
+        return Ok(dir.to_path_buf());
     }
 
     // 4. The vendored copy in a development checkout. Baked in at compile time

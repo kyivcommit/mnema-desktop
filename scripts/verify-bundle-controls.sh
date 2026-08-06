@@ -479,9 +479,11 @@ echo "### 15. the worker refuses PDFs and the bundle carries Pdfium anyway"
 # every PDF — and `Contents/Resources/pdfium/lib/libpdfium.dylib` was a file this
 # control created. Both halves inverted at once: the worker reads PDFs, and
 # `bundle.resources` puts the library at exactly that path in every build. Left as it
-# was, the `cp` would have overwritten the real library with an identical copy and the
-# control would have gone quietly GREEN — the shape this suite exists to refuse,
-# produced by the suite itself.
+# was, the `cp` would have overwritten the real library with an identical copy, the
+# control would have stopped producing the state it names, and `expect_red` would have
+# counted it STILL GREEN. Loudly, to be exact — the suite prints that and adds it to the
+# tally, which is the one reason it would not have shipped unnoticed. What was lost was
+# the control, not the reporting.
 if must copy_app_out "${LAB}/dead-weight" \
   && must cp "${REPO}/scripts/mutations/pdf-refuses-unsupported.sh" \
        "${LAB}/dead-weight/Mnema.app/Contents/MacOS/mnema-extract-worker" \

@@ -569,6 +569,33 @@ fn a_worker_speaking_a_foreign_protocol_stops_the_job_rather_than_skipping_the_f
     );
 }
 
+/// A worker from a release before `skipped_pages` became a list is a binary
+/// mismatch, not a file that read badly.
+///
+/// This existed as an argument first, and an argument is what it was: the wire
+/// stopped being backward compatible when `Frame::Summary.skipped_pages` went
+/// from `u32` to `Vec<u32>`, and the reasoning was that a sidecar built with
+/// its application can never meet an older one. That is true by construction —
+/// and **nothing proves the construction**, which is exactly the shape this
+/// suite refuses everywhere else. So the behaviour under the assumption is run.
+///
+/// What it must not be is a *file* verdict. `"skipped_pages":0` is not a
+/// malformed document and the pages before it are read correctly; a pool that
+/// answered `Failure::Unreadable` here would blame ten thousand files for one
+/// wrong binary, and a pool that read the frame loosely would index a document
+/// while silently losing which pages it skipped.
+#[test]
+fn a_worker_from_before_the_wire_changed_stops_the_job_rather_than_skipping_the_file() {
+    let _watchdog = Watchdog::new("old summary", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let error = extract(&pool, "old-summary:x").unwrap_err();
+    assert!(
+        matches!(error, PoolError::Protocol { .. }),
+        "an older worker's summary must stop the job as a protocol fault, got {error:?}"
+    );
+}
+
 /// A worker that promises three pages and sends one does not speak this
 /// pool's protocol, and that costs the job rather than the file.
 ///

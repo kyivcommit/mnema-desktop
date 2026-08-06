@@ -57,13 +57,21 @@ git -C "$REPO" worktree add -q --detach "$TREE" HEAD || exit 1
 [ -d "$REPO/vendor" ] && cp -R "$REPO/vendor" "$TREE/vendor"
 # And the staged sidecar, for the same reason and with a sharper edge: it is
 # gitignored too, and `tauri-build` refuses to compile src-tauri at all without
-# it — `resource path binaries/mnema-extract-worker-<triple> doesn't exist`. So
-# from the day the sidecar landed until this line was written, every case in
-# this suite whose test lives in `mnema-desktop` could not run: 23 in task-8.sh
-# and 3 in task-9.sh, reported honestly as "refusing to mutate against N tests
-# that are not green to begin with" and read by nobody. Copied rather than
-# rebuilt — the tests that need it read the workflow and the profile, not the
-# binary, and `tauri-build` only checks the file is there.
+# it — `resource path binaries/mnema-extract-worker-<triple> doesn't exist`.
+#
+# Read what that cost carefully, because the obvious reading is too small. The
+# baseline pass below counts DISTINCT TESTS, not cases, and 23 of task-8.sh's,
+# 3 of task-9.sh's and 2 of branch-review.sh's live in `mnema-desktop`. But a
+# non-zero `baseline_bad` exits 1 for the WHOLE FILE before pass two starts, so
+# what could not run was not those tests' cases — it was every case in each of
+# those files: 34 + 13 + 11 = **58 cases, three files, zero mutations executed**,
+# from the day `externalBin` landed (fb3a924) until this line was written.
+# `branch-review.sh` is the whole-branch file, the one run before a merge; it
+# had never run at all. All of it was reported honestly as "refusing to mutate
+# against N test(s) that are not green to begin with", and read by nobody.
+#
+# Copied rather than rebuilt — the tests that need it read the workflow and the
+# profile, not the binary, and `tauri-build` only checks the file is there.
 [ -d "$REPO/src-tauri/binaries" ] \
   && cp -R "$REPO/src-tauri/binaries" "$TREE/src-tauri/binaries"
 

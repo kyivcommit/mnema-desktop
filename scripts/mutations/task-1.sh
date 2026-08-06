@@ -40,11 +40,18 @@ case_ "worker: a successful probe's stage is ok, not some other word" \
 
 # Task 16. The field that says WHICH library answered, and the two ways it stops
 # meaning that: the consumer's name for it goes away, and the value stops being
-# the place. Not a third case for "recorded at the load rather than re-derived",
-# which is what `loaded_library_dir` is built as — no test here can see that
-# difference, because `library_dir()` is deterministic and would agree with the
-# recording every time it is asked. That is an argument for the shape, not a
-# measured property, and it is left as one.
+# the place.
+#
+# There is no third case for "recorded at the load rather than re-derived",
+# which is what `loaded_library_dir` is built as. The first reason written here
+# was that no test could see the difference, and that was wrong: one can. Load
+# through the vendored branch, then put a library beside the test binary so the
+# flat branch would now win, and ask again — a recording implementation still
+# names the vendored directory, a re-deriving one names the new place. The real
+# reason is stronger and does not depend on that: in no reachable run does
+# anything change the search path between the load and the question, so the two
+# implementations cannot disagree in this code. Recording is the shape that
+# stays correct if that ever stops being true, not a behaviour under test.
 case_ "worker: a successful probe names the directory it loaded from" \
   crates/mnema-extract/src/bin/worker.rs \
   's{\\"library_dir\\":}{\\"lib_dir\\":}' \

@@ -14,10 +14,10 @@
 # is bundled, so nothing is wasted") can no longer be produced from this repository's own
 # configuration at all. Every bundle this repository builds and hands to a worker like
 # this one reddens on dead weight. Control 15 is that run.
-if [ "${1:-}" = "--probe-pdfium" ]; then
-  printf '{"loaded":false,"stage":"library_dir","error":"no reader, so nothing looked"}\n'
-  exit 0
-fi
+#
+# No `--probe-pdfium` arm, deliberately: the `unsupported` branch never runs the probe —
+# only the `blocks` branch does — so an arm here would be a limb nothing can reach, and
+# the next reader would spend a minute working out why it exists.
 while IFS= read -r line; do
   case "${line}" in
     # Matches the whole request line rather than a path, true while a request carries

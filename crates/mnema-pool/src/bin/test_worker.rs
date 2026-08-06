@@ -415,6 +415,25 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
         }
         // A line that is not a frame at all: what a worker binary from a
         // different release would look like.
+        // A worker from before `Frame::Summary.skipped_pages` became a list.
+        //
+        // It is the one shape a stand-in has to write by hand: the field is
+        // `Vec<u32>` now, so no `Frame` value can express the `0` a release
+        // before that one sent, and `write_frame` could not emit this line if
+        // it wanted to. Everything ahead of the summary is a real frame — this
+        // worker reads the file correctly, right up to the moment it describes
+        // what it skipped in the old spelling.
+        //
+        // What it settles is a claim that was an argument until it was run: a
+        // worker from an older release stops the job as a **binary mismatch**,
+        // not as a bad file. For a sidecar built with its application that is
+        // unreachable by construction, and nothing proves the construction —
+        // so the behaviour under the assumption is measured instead.
+        "old-summary" => {
+            answer_without_summary(stdout);
+            println!(r#"{{"frame":"summary","skipped_pages":0,"text_source":"native:pdf"}}"#);
+            let _ = stdout.flush();
+        }
         "garbage" => {
             println!("this is not a frame");
             let _ = stdout.flush();
@@ -439,6 +458,19 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
 /// The shape of a readable document: one header, one page, one block, one
 /// summary.
 fn answer(stdout: &mut io::Stdout) {
+    answer_without_summary(stdout);
+    write_frame(
+        stdout,
+        &Frame::Summary {
+            skipped_pages: Vec::new(),
+            text_source: "native:txt".to_string(),
+        },
+    );
+}
+
+/// The same document with its last frame withheld, for the modes that write
+/// their own summary.
+fn answer_without_summary(stdout: &mut io::Stdout) {
     write_frame(
         stdout,
         &Frame::Header {
@@ -467,13 +499,6 @@ fn answer(stdout: &mut io::Stdout) {
             line_start: Some(1),
             line_end: Some(1),
         }),
-    );
-    write_frame(
-        stdout,
-        &Frame::Summary {
-            skipped_pages: Vec::new(),
-            text_source: "native:txt".to_string(),
-        },
     );
 }
 

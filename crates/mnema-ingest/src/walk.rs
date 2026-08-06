@@ -60,10 +60,18 @@ pub enum StopReason {
     /// stating precisely, because an earlier version of this comment claimed
     /// the opposite in the present tense. There is no embedding call site
     /// anywhere in this crate or in the shell; `insert_vector` and
-    /// `create_space` have no callers outside tests; and **no crate in the
-    /// workspace carries an HTTP client at all** — the one that did was a
-    /// dependency probe, deleted with the readers it was holding pins for.
-    /// The pipeline currently ends at chunks and the full-text index.
+    /// `create_space` have no callers outside tests; and the pipeline
+    /// currently ends at chunks and the full-text index.
+    ///
+    /// What is claimed is that there is no **call**, not that there is no HTTP
+    /// client — and the distinction is not pedantry, it is what makes the claim
+    /// checkable. `mnema-desktop` links `reqwest` through `tauri` itself
+    /// (`cargo tree -i reqwest`), so a search for a client finds one and proves
+    /// nothing either way. An earlier version of this paragraph said no crate
+    /// in the workspace carried one, which was a grep over `Cargo.toml` files
+    /// answering a question about transitive dependencies. A promise about what
+    /// leaves the machine must not rest on a premise gathered with the wrong
+    /// instrument.
     ///
     /// The refusal is still the right answer, for what D29 makes of the
     /// version this is being built toward: v1 ships no local models, so once
