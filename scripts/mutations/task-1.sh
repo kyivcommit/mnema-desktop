@@ -22,7 +22,7 @@
 # test.
 case_ "worker: a successful probe still reports a page count" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{\\"pages\\":\{\},}{}' \
+  's{\\"pages\\":\{\},}{};s{\n                probes\.len\(\),}{}' \
   '"{{\"loaded\":true,\"stage\":\"ok\",\"library_dir\":{}}}"' \
   mnema-extract 'the_worker_reports_whether_pdfium_loaded' --test pdfium_binding
 
