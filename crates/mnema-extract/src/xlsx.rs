@@ -761,10 +761,16 @@ mod tests {
             BROKEN * 2,
             "one local header and one directory entry per member"
         );
-        assert!(
-            EACH * BROKEN > BUDGET && EACH * 2 < BUDGET,
-            "the budget must outlast one member and not all of them"
-        );
+        // A `const` block, so the three numbers above cannot drift into a
+        // fixture that proves nothing without the crate failing to compile —
+        // which is the strongest form this particular guard can take, and what
+        // clippy asks for once it notices the operands are all constants.
+        const {
+            assert!(
+                EACH * BROKEN > BUDGET && EACH * 2 < BUDGET,
+                "the budget must outlast one member and not all of them"
+            )
+        };
 
         // The premise: this member inflates in full and *then* fails. Read
         // uncapped, exactly as the walk reads it while the budget is still
