@@ -155,18 +155,22 @@ fn babbling_worker(dir: &Path) -> PathBuf {
 /// itself. `shasum -a 256` is on every macOS and Linux runner this repository
 /// targets; `sha256sum` is not on macOS.
 #[cfg(unix)]
-fn stricter_worker(dir: &Path) -> PathBuf {
+fn stricter_worker(dir: &Path, rule: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("stricter-worker");
+    // One script per rule, because two operations in one run must not race for
+    // the same file — and because the name is what the trace shows.
+    let path = dir.join(format!("stricter-worker-{rule}"));
     std::fs::write(
         &path,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 while read -r line; do
   file=$(printf '%s' "$line" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')
   sha=$(shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1)
-  printf '{"frame":"refused","rule":"not_text","reason":"the threshold moved","sha256":"%s"}\n' "$sha"
+  printf '{{"frame":"refused","rule":"{rule}","reason":"the threshold moved","sha256":"%s"}}\n' "$sha"
 done
-"#,
+"#
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2244,7 +2248,16 @@ impl World {
         let Some(last) = self.last.get(relative) else {
             return;
         };
-        if !last.indexed {
+        // **Two entrances, and the plan that added this class saw one.** A
+        // fresh index rewrites the rows (`journal_skipped_pages`); a refusal
+        // that leaves no `path` row clears them outright, because `repoint` —
+        // the only other place that maintains them — never runs for this path
+        // again and the rows would go on naming a missing page of a document
+        // the index does not hold. Judging only the first left the second
+        // measurable-but-unmeasured: mutating it away kept every seed green.
+        let refused_and_gone =
+            matches!(last.verdict, Verdict::Skipped(_)) && !self.paths_now().contains_key(relative);
+        if !last.indexed && !refused_and_gone {
             return;
         }
         let Some(state) = self.files.get(relative) else {
@@ -2260,6 +2273,20 @@ impl World {
                 |r| r.get(0),
             )
             .unwrap();
+
+        // A refused path holds no document at all, so the only honest claim is
+        // that no page of it is still being reported as missing.
+        if refused_and_gone {
+            if rows > 0 {
+                self.fail(format!(
+                    "invariant 3d — {relative} was refused and the index holds no document \
+                     for it, and the journal still holds {rows} row(s) about a page of one. \
+                     The window answering \"why is this not in my index?\" names a missing \
+                     page of a document that is not there either"
+                ));
+            }
+            return;
+        }
 
         match state.shape {
             Shape::Gappy(_, _) => {
@@ -3331,8 +3358,24 @@ impl World {
         #[cfg(unix)]
         {
             let relative = self.a_file();
-            let stricter = stricter_worker(self.dir.path());
-            self.note(format!("  walk {relative} past a STRICTER content rule"));
+            // **All four content rules, not just `not_text`.** This is the only
+            // operation in the file that produces "the rule changed and the
+            // file did not" — a refusal whose digest is byte-identical to what
+            // the index built its document from — and that is precisely the
+            // branch of invariant 3c that says the document must be **kept**.
+            // With one rule here, three of `displaces`'s five conditional arms
+            // were judged on their displace side only: measured, mutating
+            // `NoTextLayer`, `Malformed` and `Encrypted` to `true` left the
+            // whole harness green. Writing new bytes cannot reach it — a new
+            // body has a new digest — so the rule has to move while the file
+            // stands still.
+            let rule = *self
+                .rng
+                .pick(&["not_text", "no_text_layer", "malformed", "encrypted"]);
+            let stricter = stricter_worker(self.dir.path(), rule);
+            self.note(format!(
+                "  walk {relative} past a STRICTER content rule ({rule})"
+            ));
             let verdict =
                 self.ingest_with(&relative, PoolConfig::new(&stricter), " [stricter rule]");
             // The refusal is journalled against this file's current size and
@@ -3357,8 +3400,18 @@ impl World {
             // switched off on 29 paths that had never been refused at all —
             // ordinary indexed text files among them, which is the case this
             // harness exists to check.
-            if verdict == Some(Verdict::Skipped(SkipRule::NotText))
-                && let Some(state) = self.files.get_mut(&relative)
+            // On whichever of the four actually came back, and on nothing else:
+            // all four answer `is_about_content`, so all four freeze the path
+            // the same way.
+            if matches!(
+                verdict,
+                Some(Verdict::Skipped(
+                    SkipRule::NotText
+                        | SkipRule::NoTextLayer
+                        | SkipRule::Malformed
+                        | SkipRule::Encrypted
+                ))
+            ) && let Some(state) = self.files.get_mut(&relative)
             {
                 state.refused_by_content = true;
             }
