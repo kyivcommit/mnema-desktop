@@ -198,4 +198,15 @@ mode=mutate
 restore
 echo
 echo "red: $red   still green: $green   broken cases: $broken"
-[ "$green" -eq 0 ] && [ "$broken" -eq 0 ]
+# `red > 0` is not decoration on the other two, it is the condition they cannot
+# express: zero green and zero broken is exactly what a file containing NO CASES
+# reports, and it reported it with exit 0. So `red: 0 / still green: 0` — a
+# result derived from nothing — was a passing result, and a file emptied by an
+# edit would have been reported as success.
+#
+# That is the assertion-satisfied-by-zero failure this branch found eleven times
+# in the code under test, sitting inside the tool built to find it. Seven files
+# in scripts/mutations/ are stand-in workers rather than case files and answer
+# this way today; they now exit non-zero, which is the honest answer to "did
+# this prove anything" and the reason they do not belong in that directory.
+[ "$red" -gt 0 ] && [ "$green" -eq 0 ] && [ "$broken" -eq 0 ]
