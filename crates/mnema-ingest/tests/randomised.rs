@@ -3363,12 +3363,23 @@ impl World {
     /// into edits, copies, renames and deletions rather than tested on its own.
     fn document_with_an_unreadable_page(&mut self) {
         let relative = self.a_file();
-        let format = if Self::format_of(&relative) == Some(Format::Epub) {
+        // **Drawn, not taken from the path's extension.** Both formats that can
+        // skip a page are identified by *content*, so an epub written over
+        // `file-3.txt` is still read as an epub — and keying on the extension
+        // meant a gappy book needed an `.epub` path to exist first, which made
+        // the whole epub half of this class rare. Measured: the mutation that
+        // reverses chapter order stayed green because the conjunction it needs
+        // — a gappy epub, of more than one chapter, that got indexed — did not
+        // come up in the corpus at all.
+        let format = if self.rng.chance(50) {
             Format::Epub
         } else {
             Format::Xlsx
         };
-        let pages = 1 + self.rng.below(3);
+        // **At least two**, because a one-chapter book cannot show a chapter in
+        // the wrong place: with a single page, every ordering is the same
+        // ordering, and an invariant about position has nothing to bite on.
+        let pages = 2 + self.rng.below(2);
         let content = self.gappy_body(format, pages);
         let at = self.next_tick();
         self.note(format!(
