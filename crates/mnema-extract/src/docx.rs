@@ -723,8 +723,14 @@ mod tests {
     /// **Both members are read under the cap, and a stylesheet's failures are
     /// not all alike.**
     ///
-    /// Three assertions doing three different jobs. The first is the one the
-    /// server measured and capped on the stream for
+    /// Three assertions doing three different jobs, and **each one puts exactly
+    /// one member over the cap**. That is not tidiness: this test's first
+    /// version made a document *and* a stylesheet oversized together, and the
+    /// mutation that uncaps the document part stayed green — the stylesheet was
+    /// still refusing the same archive, so the assertion never described the
+    /// member it named. Measured, in `scripts/mutations/task-12.sh`'s first run.
+    ///
+    /// The first is the cap the server measured and capped on the stream for
     /// (`app/textdoc/office.py:41-52`). The second is the hole the first leaves:
     /// a cap on `word/document.xml` alone is not a cap on this reader, because a
     /// stylesheet is a second member out of the same archive and inflates just
@@ -734,8 +740,12 @@ mod tests {
     /// prose.
     #[test]
     fn both_members_are_read_under_the_cap_and_only_absence_is_forgiven() {
-        let both = archive(&[("word/document.xml", 4096), ("word/styles.xml", 4096)]);
-        assert!(matches!(extract(&both, 1024), Err(DocxError::TooLarge)));
+        // The document alone over the cap, with a stylesheet well under it.
+        let fat_document = archive(&[("word/document.xml", 4096), ("word/styles.xml", 16)]);
+        assert!(matches!(
+            extract(&fat_document, 1024),
+            Err(DocxError::TooLarge)
+        ));
 
         // The stylesheet alone over the cap, with a document well under it: the
         // refusal has to come from the second member, so nothing else can be
