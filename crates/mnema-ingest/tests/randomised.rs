@@ -254,6 +254,272 @@ fn marker(mut n: u64) -> String {
     s
 }
 
+/// A zip of the given members, **stored rather than deflated**.
+///
+/// Storing is an invariant here, not a preference. `edit_keeping_length` is the
+/// operation that leaves a file exactly as long as it was, so the size column
+/// cannot see the edit and the modification time carries the whole of the cheap
+/// arm's evidence — and [`MARKER_WIDTH`] exists so that two versions of one body
+/// are the same number of bytes. Deflate breaks that: two markers of equal width
+/// compress to different lengths, so every "edit keeping length" over a zip
+/// format would silently become a length-changing one and the cheap arm's mtime
+/// branch would go untested for four of the six formats. Stored, an archive's
+/// size is a function of its member names and their lengths, and the property
+/// holds again.
+///
+/// It costs nothing else: every archive this file writes is a few kilobytes, and
+/// `zip_part::read_member` and calamine read stored members exactly as they read
+/// deflated ones.
+fn zip_of(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    zip_with_mimetype(None, members)
+}
+
+/// The same, with an optional uncompressed first entry — which is what
+/// `typing::is_epub` requires before it will call anything an EPUB
+/// (`crates/mnema-extract/src/typing.rs`): first entry named `mimetype`, stored,
+/// holding exactly the media type.
+fn zip_with_mimetype(mimetype: Option<&str>, members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    use std::io::{Cursor, Write};
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let stored: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        if let Some(mimetype) = mimetype {
+            w.start_file("mimetype", stored).unwrap();
+            w.write_all(mimetype.as_bytes()).unwrap();
+        }
+        for (name, body) in members {
+            w.start_file(*name, stored).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+/// One entry of a generated book's spine.
+///
+/// **The degenerate variants are the point of this type, and they are here
+/// because measurement said so, not symmetry.** Both defects Task 11 found were
+/// on books that are *valid as structure and degenerate as content* — an
+/// `<itemref/>` with no `idref` made the entry vanish from the spine and shifted
+/// every later chapter up by one, and a manifest declaring `id=""` made a
+/// "sensible" fix put one chapter's text under another's number. A truncated
+/// archive produces neither. Corrupt bytes stay in this file because they are
+/// cheap, not because they are coverage.
+enum SpineEntry {
+    /// Declared in the manifest, present in the archive, read as a page.
+    Chapter(usize),
+    /// `<itemref/>` with no `idref` at all: the entry the spine still counts and
+    /// no manifest item answers.
+    NoIdref,
+    /// A manifest item declaring `id=""`, and a spine entry naming that empty
+    /// id.
+    EmptyId,
+    /// Declared in both manifest and spine, and simply not in the archive — the
+    /// broken internal link that must skip one chapter by number rather than
+    /// refusing a whole book.
+    MissingMember(usize),
+}
+
+/// A whole EPUB: `mimetype`, container, package document and the chapters given.
+///
+/// The spine is written in the order handed in, so a book's `skipped_pages` can
+/// be predicted from the entries: every non-`Chapter` entry is a page number the
+/// reader will report as skipped, and its position in this slice is that number
+/// minus one.
+fn epub_of(spine: &[SpineEntry], chapters: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut manifest = String::new();
+    let mut refs = String::new();
+    for entry in spine {
+        match entry {
+            SpineEntry::Chapter(i) | SpineEntry::MissingMember(i) => {
+                manifest.push_str(&format!(
+                    "<item id=\"c{i}\" href=\"ch{i}.xhtml\" \
+                     media-type=\"application/xhtml+xml\"/>"
+                ));
+                refs.push_str(&format!("<itemref idref=\"c{i}\"/>"));
+            }
+            SpineEntry::NoIdref => refs.push_str("<itemref/>"),
+            SpineEntry::EmptyId => {
+                manifest.push_str(
+                    "<item id=\"\" href=\"nowhere.xhtml\" \
+                     media-type=\"application/xhtml+xml\"/>",
+                );
+                refs.push_str("<itemref idref=\"\"/>");
+            }
+        }
+    }
+    let opf = format!(
+        "<package xmlns=\"http://www.idpf.org/2007/opf\"><manifest>{manifest}</manifest>\
+         <spine>{refs}</spine></package>"
+    );
+    let container = "<container xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\
+                     <rootfiles><rootfile full-path=\"content.opf\" \
+                     media-type=\"application/oebps-package+xml\"/></rootfiles></container>";
+
+    let mut members: Vec<(&str, Vec<u8>)> = vec![
+        ("META-INF/container.xml", container.as_bytes().to_vec()),
+        ("content.opf", opf.into_bytes()),
+    ];
+    for (name, body) in chapters {
+        members.push((name.as_str(), body.clone()));
+    }
+    zip_with_mimetype(Some("application/epub+zip"), &members)
+}
+
+/// A whole DOCX around a `<w:body>`.
+fn docx_of(body: &str) -> Vec<u8> {
+    let document = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+         <w:body>{body}</w:body></w:document>"
+    );
+    zip_of(&[("word/document.xml", document.into_bytes())])
+}
+
+/// A whole XLSX of the sheets given, each `(name, rows)`.
+///
+/// A sheet whose rows are `None` is **declared by the workbook and absent from
+/// the archive** — the spreadsheet twin of `SpineEntry::MissingMember`, and one
+/// of the five measured ways a sheet fails while the rest of a workbook reads.
+fn xlsx_of(sheets: &[(&str, Option<&str>)]) -> Vec<u8> {
+    let declared: String = sheets
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| {
+            format!(
+                "<sheet name=\"{name}\" sheetId=\"{}\" r:id=\"rId{}\"/>",
+                i + 1,
+                i + 1
+            )
+        })
+        .collect();
+    let relationships: String = (1..=sheets.len())
+        .map(|i| {
+            format!(
+                "<Relationship Id=\"rId{i}\" Type=\"http://schemas.openxmlformats.org/\
+                 officeDocument/2006/relationships/worksheet\" \
+                 Target=\"worksheets/sheet{i}.xml\"/>"
+            )
+        })
+        .collect();
+
+    let mut members: Vec<(String, Vec<u8>)> = vec![
+        (
+            "_rels/.rels".to_string(),
+            b"<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>".to_vec(),
+        ),
+        (
+            "xl/workbook.xml".to_string(),
+            format!(
+                "<?xml version=\"1.0\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets>{declared}</sheets></workbook>"
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels".to_string(),
+            format!(
+                "<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{relationships}</Relationships>"
+            )
+            .into_bytes(),
+        ),
+    ];
+    for (i, (_, rows)) in sheets.iter().enumerate() {
+        if let Some(rows) = rows {
+            members.push((
+                format!("xl/worksheets/sheet{}.xml", i + 1),
+                format!(
+                    "<?xml version=\"1.0\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>{rows}</sheetData></worksheet>"
+                )
+                .into_bytes(),
+            ));
+        }
+    }
+    zip_of(
+        &members
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.clone()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// The formats that reach the index through a reader of their own.
+///
+/// One variant per reader that this generator can produce *readable* files for,
+/// which is four of the five G7.1 formats. **PDF is deliberately absent and the
+/// report says so as a gap rather than leaving it to be inferred:** a PDF
+/// carrying a fresh marker per version would mean generating a content stream
+/// and a font, and the checked-in fixtures carry fixed text — a marker that is
+/// not unique to one version of one file breaks the property every findability
+/// check in this file rests on. PDF is reachable here only through its
+/// *refusals*, which is what [`Shape::Refused`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    Html,
+    Epub,
+    Docx,
+    Xlsx,
+}
+
+impl Format {
+    fn extension(self) -> &'static str {
+        match self {
+            Format::Html => "html",
+            Format::Epub => "epub",
+            Format::Docx => "docx",
+            Format::Xlsx => "xlsx",
+        }
+    }
+}
+
+/// A refusal this generator can produce on purpose, named by the rule the
+/// worker answers with.
+///
+/// Every one of these was **measured against the worker binary** rather than
+/// derived from the readers' source: `typing::identify` decides by content, so a
+/// body written to earn one rule can perfectly well land in another reader's
+/// branch. The run that fixed each of them is in the report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// A document that opens and holds no words: an EPUB of plates, a DOCX of
+    /// empty paragraphs, a workbook whose only sheet has no rows.
+    NoTextLayer,
+    /// Structure that does not parse: a `word/document.xml` cut mid-element, an
+    /// EPUB with no container, a workbook with no package relationships.
+    Malformed,
+    /// A password-protected PDF.
+    Encrypted,
+}
+
+impl Shape {
+    /// The name this shape answers to in the corpus-coverage assertion.
+    ///
+    /// A `match` rather than `Debug`, for the reason `tests/manifest.rs` gives
+    /// for reader names: a variant renamed in passing must not silently rename
+    /// what the coverage list is looking for and turn the assertion into one
+    /// that can never pass.
+    fn label(self) -> &'static str {
+        match self {
+            Shape::Text(_) => "text",
+            Shape::Markdown(_) => "markdown",
+            Shape::Rich(Format::Html, _) => "html",
+            Shape::Rich(Format::Epub, _) => "epub",
+            Shape::Rich(Format::Docx, _) => "docx",
+            Shape::Rich(Format::Xlsx, _) => "xlsx",
+            Shape::Gappy(_, _) => "pages-skipped",
+            Shape::Opaque => "unsupported-container",
+            Shape::NotText => "photo",
+            Shape::BinaryTail => "binary-tail",
+            Shape::Refused(Refusal::NoTextLayer) => "no-text-layer",
+            Shape::Refused(Refusal::Malformed) => "malformed",
+            Shape::Refused(Refusal::Encrypted) => "encrypted",
+        }
+    }
+}
+
 /// What kind of thing is at a path, in the only detail this file needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
@@ -278,6 +544,41 @@ enum Shape {
     /// **not** remove anything: the prose is still on disk in front of the
     /// damage, and it is readable nowhere else.
     BinaryTail,
+    /// A file one of the four new readers takes, carrying one marker per page.
+    ///
+    /// Indexed like `Text` and `Markdown`, and separate from them only because
+    /// the bytes are a container: what it costs to write, and what an edit of
+    /// unchanged length has to preserve, are the archive's rules rather than
+    /// prose's.
+    Rich(Format, usize),
+    /// A document one of the four readers takes, some of whose **declared pages
+    /// it cannot read** — so the read succeeds, the readable pages are indexed,
+    /// and the rest come back as numbers in `Frame::Summary.skipped_pages`.
+    ///
+    /// The count is the number of pages that *do* carry a marker; the gaps are
+    /// extra. This is the class Task 9 added and this harness had never
+    /// generated: per-page journal rows, written from those numbers, living in
+    /// the same table as the file-level verdicts and cleared by a **separate**
+    /// path (`Db::forget_page_skips`), because `forget_skip` deliberately leaves
+    /// them alone.
+    ///
+    /// It is also the shape that carries Task 11's own defect class into the
+    /// harness. A book whose spine holds an `<itemref/>` with no `idref` is
+    /// valid as structure and degenerate as content — the entry counts as a page
+    /// and answers to no manifest item — and that is the file on which one
+    /// chapter's text was very nearly stored under another chapter's number.
+    Gappy(Format, usize),
+    /// A file that opens and is refused **by content**, under a rule this shape
+    /// names.
+    ///
+    /// The whole reason the rule is carried rather than lumped into `Opaque`:
+    /// `displaces` gives `NoTextLayer`, `Malformed` and `Encrypted` a decision
+    /// each about whether an already-indexed document survives, and a harness
+    /// that models "refused" without modelling *which* refusal cannot tell a
+    /// rule that moved to the wrong side of that table from one that did not.
+    /// That is the same blindness that left `Unsupported` with no generator at
+    /// all while every seed stayed green.
+    Refused(Refusal),
 }
 
 /// Bytes and the words that must be findable in them once they are indexed.
@@ -372,6 +673,15 @@ struct FileState {
 struct LastCall {
     hash: Option<String>,
     verdict: Verdict,
+    /// The call **read the file and wrote a document** — `Ingested::Indexed`,
+    /// not the two cheap arms beside it.
+    ///
+    /// `Verdict::Settled` folds all three together, which is right for every
+    /// other invariant here and wrong for the per-page journal rows: `Unchanged`
+    /// and `AlreadyIndexed` never open the file, so rows about its pages are
+    /// still true, while a fresh index is exactly the pass after which a page
+    /// that has text again must have no row saying it has none.
+    indexed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -469,6 +779,8 @@ struct World {
     /// widening this to every step would forgive a cascade this invariant
     /// exists to catch.
     walking: bool,
+    /// What this run's generator actually produced — see [`Reached`].
+    reached: Reached,
 }
 
 impl World {
@@ -504,6 +816,7 @@ impl World {
             rules: WalkRules::none(),
             excluded: BTreeSet::new(),
             walking: false,
+            reached: Reached::default(),
         }
     }
 
@@ -560,6 +873,7 @@ impl World {
                 refused_by_content: state.refused_by_content,
             }))
         });
+        self.reached.shapes.insert(content.shape.label());
         let path = self.absolute(relative);
         std::fs::write(&path, &content.bytes).unwrap();
         std::fs::File::options()
@@ -657,23 +971,262 @@ impl World {
         }
     }
 
-    /// ⚠️ **These bytes changed meaning when the PDF reader landed, and this
-    /// harness did not go red.** A `%PDF-` stub used to be refused as
-    /// `unsupported` — "no reader implemented yet". It is now `malformed`: the
-    /// pdf reader runs, pdfium is handed a truncated document and says so.
+    /// One page's worth of prose carrying its own marker, in whichever markup
+    /// the format wants.
     ///
-    /// Nothing here asserts which rule fired — invariant 3c asks only that a
-    /// refused file is not in the index — so `Shape::Opaque` is still a
-    /// truthful model of *a file that is refused by content*, and the harness
-    /// is still measuring something real. What it is no longer measuring is
-    /// `Unsupported`, which is the rule with a `displaces` decision of its own
-    /// and no other generator. Task 14 gives this generator the new formats;
-    /// picking a shape per rule rather than one shape for all refusals is the
-    /// decision it inherits, and it is written here rather than in a report
-    /// because this is where someone will be standing when they need it.
+    /// The marker never goes in a heading alone. A heading is consumed as the
+    /// page's `section_title` by markdown, html, epub and docx alike, so a
+    /// marker that only ever appeared there would be unfindable for a reason
+    /// that has nothing to do with data loss — the trap `markdown_body` already
+    /// names, repeated here because four more readers now walk into it.
+    fn rich_body(&mut self, format: Format, pages: usize) -> Content {
+        let mut markers = Vec::with_capacity(pages);
+        let mut parts: Vec<String> = Vec::with_capacity(pages);
+        for _ in 0..pages {
+            let m = marker(self.next_counter());
+            parts.push(m.clone());
+            markers.push(m);
+        }
+
+        let bytes = match format {
+            Format::Html => {
+                let mut s =
+                    String::from("<!DOCTYPE html><html><head><title>Звіт</title></head><body>");
+                for m in &parts {
+                    s.push_str("<h1>Розділ постачання</h1><p>Положення ");
+                    s.push_str(m);
+                    s.push_str(" про строки приймання робіт.</p>");
+                }
+                s.push_str("</body></html>");
+                s.into_bytes()
+            }
+            Format::Epub => {
+                // One chapter per page, because a chapter *is* a page here — and
+                // that is what makes a missing one nameable in `skipped_pages`.
+                let chapters: Vec<(String, Vec<u8>)> = parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        (
+                            format!("ch{i}.xhtml"),
+                            format!(
+                                "<html><head><title>Розділ {i}</title></head><body><p>Положення \
+                                 {m} про строки приймання робіт.</p></body></html>"
+                            )
+                            .into_bytes(),
+                        )
+                    })
+                    .collect();
+                epub_of(
+                    &(0..pages)
+                        .map(|i| SpineEntry::Chapter(i))
+                        .collect::<Vec<_>>(),
+                    &chapters,
+                )
+            }
+            Format::Docx => {
+                let mut body = String::new();
+                for m in &parts {
+                    body.push_str(
+                        "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>\
+                         <w:r><w:t>Розділ постачання</w:t></w:r></w:p>",
+                    );
+                    body.push_str("<w:p><w:r><w:t>Положення ");
+                    body.push_str(m);
+                    body.push_str(" про строки приймання робіт.</w:t></w:r></w:p>");
+                }
+                docx_of(&body)
+            }
+            Format::Xlsx => {
+                // One sheet per page and one row on it, so `pages` means the
+                // same thing for this format as for the other three.
+                let sheets: Vec<(String, String)> = parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        (
+                            format!("Аркуш{i}"),
+                            format!(
+                                "<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>Положення {m} \
+                                 про строки</t></is></c></row>"
+                            ),
+                        )
+                    })
+                    .collect();
+                xlsx_of(
+                    &sheets
+                        .iter()
+                        .map(|(n, r)| (n.as_str(), Some(r.as_str())))
+                        .collect::<Vec<_>>(),
+                )
+            }
+        };
+
+        Content {
+            bytes,
+            markers,
+            shape: Shape::Rich(format, pages),
+        }
+    }
+
+    /// A document whose reader can read some of its declared pages and not the
+    /// rest.
+    ///
+    /// Two formats reach it, and both were measured against the worker before
+    /// they were written down. A book gets a spine entry that is **valid and
+    /// degenerate** — `<itemref/>` with no `idref`, a manifest item declaring
+    /// `id=""`, or an entry naming a member the archive does not hold — and a
+    /// workbook gets a sheet the workbook declares and the archive does not
+    /// hold. Neither is corrupt bytes, and that is the point: an archive cut in
+    /// half produces this class not at all.
+    ///
+    /// The gap goes **first**, so the readable pages carry numbers above it and
+    /// a reader that quietly renumbered what came back — the exact defect Task
+    /// 11 found — puts its markers at the wrong page numbers.
+    fn gappy_body(&mut self, format: Format, pages: usize) -> Content {
+        let mut markers = Vec::with_capacity(pages);
+        for _ in 0..pages {
+            markers.push(marker(self.next_counter()));
+        }
+
+        let bytes = match format {
+            Format::Epub => {
+                let gap = match self.rng.below(3) {
+                    0 => SpineEntry::NoIdref,
+                    1 => SpineEntry::EmptyId,
+                    _ => SpineEntry::MissingMember(900),
+                };
+                let mut spine = vec![gap];
+                let mut chapters = Vec::with_capacity(pages);
+                for (i, m) in markers.iter().enumerate() {
+                    spine.push(SpineEntry::Chapter(i));
+                    chapters.push((
+                        format!("ch{i}.xhtml"),
+                        format!(
+                            "<html><head><title>Розділ {i}</title></head><body><p>Положення \
+                             {m} про строки приймання робіт.</p></body></html>"
+                        )
+                        .into_bytes(),
+                    ));
+                }
+                epub_of(&spine, &chapters)
+            }
+            // Every other format falls back to a workbook, because a sheet the
+            // workbook declares and the archive does not hold is the only other
+            // measured way to skip a page by number in this build.
+            _ => {
+                let mut sheets: Vec<(String, Option<String>)> = vec![("Немає".to_string(), None)];
+                for (i, m) in markers.iter().enumerate() {
+                    sheets.push((
+                        format!("Аркуш{i}"),
+                        Some(format!(
+                            "<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>Положення {m} \
+                             про строки</t></is></c></row>"
+                        )),
+                    ));
+                }
+                xlsx_of(
+                    &sheets
+                        .iter()
+                        .map(|(n, r)| (n.as_str(), r.as_deref()))
+                        .collect::<Vec<_>>(),
+                )
+            }
+        };
+
+        let format = if matches!(format, Format::Epub) {
+            Format::Epub
+        } else {
+            Format::Xlsx
+        };
+        Content {
+            bytes,
+            markers,
+            shape: Shape::Gappy(format, pages),
+        }
+    }
+
+    /// A file that opens and is refused by content, under the rule asked for.
+    ///
+    /// Every body here was checked against the worker binary before it was
+    /// written down — see the report for the run. Two of the three carry no
+    /// markers for the reason `not_text_body` gives: nothing here is ever
+    /// indexed, and claiming a marker would make a refused file look indexed.
+    fn refused_body(&mut self, refusal: Refusal) -> Content {
+        let bytes = match refusal {
+            // Three formats reach this rule and the generator rotates through
+            // them, because they are three different branches of three readers
+            // answering one rule — a book of plates, a document of empty
+            // paragraphs, a workbook whose sheet has no rows.
+            Refusal::NoTextLayer => match self.rng.below(3) {
+                0 => epub_of(
+                    &[SpineEntry::Chapter(0)],
+                    &[(
+                        "ch0.xhtml".to_string(),
+                        b"<html><body><img src=\"plate.png\"/></body></html>".to_vec(),
+                    )],
+                ),
+                1 => docx_of("<w:p/><w:p><w:pPr/></w:p>"),
+                _ => xlsx_of(&[("Порожній", Some(""))]),
+            },
+            Refusal::Malformed => match self.rng.below(3) {
+                // A `word/document.xml` that stops inside an element.
+                0 => docx_of("<w:p><w:r><w:t>початок"),
+                // An EPUB whose `mimetype` is right and whose container is not
+                // there at all.
+                1 => zip_with_mimetype(
+                    Some("application/epub+zip"),
+                    &[("ch0.xhtml", "<p>розділ</p>".as_bytes().to_vec())],
+                ),
+                // A workbook with `xl/workbook.xml` and no package
+                // relationships, so calamine cannot find where the workbook is.
+                _ => zip_of(&[(
+                    "xl/workbook.xml",
+                    b"<workbook><sheets/></workbook>".to_vec(),
+                )]),
+            },
+            // The one refusal here that is a checked-in fixture rather than
+            // generated bytes: a password-protected PDF is an encrypted
+            // document, and encryption is not something this file can synthesise
+            // without becoming a PDF writer. 1 029 bytes, well under `CEILING`.
+            Refusal::Encrypted => {
+                include_bytes!("../../mnema-extract/tests/fixtures/password-locked.pdf").to_vec()
+            }
+        };
+        Content {
+            bytes,
+            markers: Vec::new(),
+            shape: Shape::Refused(refusal),
+        }
+    }
+
+    /// A zip holding nothing any reader recognises: the one shape in this file
+    /// that still earns `Unsupported`.
+    ///
+    /// **This used to be a `%PDF-` stub, and the note left here by Task 8 was
+    /// right.** Those bytes meant "a format with no reader" only while there was
+    /// no PDF reader; once there was one, pdfium was handed a truncated document
+    /// and said so, and the verdict became `malformed`. Nothing went red,
+    /// because invariant 3c asked only that a refused file stay out of the index
+    /// and not which rule refused it — so `Unsupported`, a rule with a
+    /// `displaces` decision of its own, was left with **no generator at all**
+    /// while the harness stayed green.
+    ///
+    /// The replacement is measured against the binary rather than reasoned from
+    /// `typing.rs`: a zip whose members are none of `word/document.xml`,
+    /// `xl/workbook.xml` or an epub `mimetype` reaches `Reader::Unrecognized`,
+    /// and the worker answers `unsupported` — "no reader implemented yet for
+    /// application/zip". That is the sentence this shape is supposed to model,
+    /// and now does.
+    ///
+    /// It is also the honest one to keep modelling: `Unsupported` is the rule a
+    /// *release* changes without the file changing, which is exactly why
+    /// `displaces` made it conditional (`crates/mnema-ingest/src/lib.rs`), and a
+    /// container format nobody has written a reader for is the ordinary way a
+    /// user meets it.
     fn opaque_body(&self) -> Content {
         Content {
-            bytes: b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n".to_vec(),
+            bytes: zip_of(&[("readme.nfo", b"nothing any reader here knows".to_vec())]),
             markers: Vec::new(),
             shape: Shape::Opaque,
         }
@@ -722,19 +1275,69 @@ impl World {
 
     /// Fresh readable content of the kind the extension implies, of a given
     /// size in pages or paragraphs.
+    ///
+    /// **Keyed on the extension because the product is not.** `typing::identify`
+    /// decides html by extension and the other four by content, so a `.docx`
+    /// holding a workbook is read as a workbook — and this function writing the
+    /// format its own name promises is what keeps the harness's model of "what
+    /// is at this path" true. Every operation that rewrites a file goes through
+    /// here, so a path never changes format under itself except when an
+    /// operation means it to.
     fn body_for(&mut self, relative: &str, units: usize) -> Content {
-        if relative.ends_with(".md") {
-            self.markdown_body(units)
-        } else {
-            self.text_body(units)
+        match Self::format_of(relative) {
+            Some(format) => self.rich_body(format, units),
+            None if relative.ends_with(".md") => self.markdown_body(units),
+            None => self.text_body(units),
         }
+    }
+
+    /// The extension a path already carries, so a copy or a rename keeps it.
+    ///
+    /// **Both of those used to re-derive it as "md, else txt", and it was a
+    /// generator defect the moment a fifth extension existed.** A workbook
+    /// copied to `backup/copy-7.txt` keeps its bytes and its `Shape`, so the
+    /// model says `Rich(Xlsx, 1)` while `body_for` — which keys on the name —
+    /// would rewrite it as prose. The harness caught it itself, on the first
+    /// run, through `edit_keeping_length`'s own assertion that a shape's length
+    /// is reproducible: 1 314 bytes against 242.
+    ///
+    /// It matters beyond that assertion, and this is the part worth keeping in
+    /// mind: four of the five formats are identified by **content**, so a
+    /// workbook called `.txt` is still read as a workbook — but html is
+    /// identified by **extension** (`typing::identify_plain_text`), so renaming
+    /// `page.html` to `page.txt` really does change how the product reads it.
+    /// A generator that renames across formats is therefore modelling something
+    /// real, and modelling it wrongly; keeping the extension is what makes the
+    /// model true.
+    fn extension_of(relative: &str) -> &str {
+        relative.rsplit('.').next().unwrap_or("txt")
+    }
+
+    /// Which of the four container readers a path's name asks for, if any.
+    fn format_of(relative: &str) -> Option<Format> {
+        for format in [Format::Html, Format::Epub, Format::Docx, Format::Xlsx] {
+            if relative.ends_with(format.extension()) {
+                return Some(format);
+            }
+        }
+        None
     }
 
     /// A number of units that keeps the file comfortably under the ceiling,
     /// and that crosses `PAGES_PER_TRANSACTION` often enough for the write
     /// loop's second slice to be reached.
     fn ordinary_units(&mut self, relative: &str) -> usize {
-        if relative.ends_with(".md") && self.rng.chance(30) {
+        // The multi-transaction draw is not markdown's alone any more: an EPUB
+        // of 22 chapters and a workbook of 22 sheets cut the write loop in the
+        // same place, and each does it through a different reader's page
+        // numbering. A book is the sharper of the two — its page numbers come
+        // from the spine rather than from what came back, so a document cut
+        // across transactions is also one whose pages can have gaps in them.
+        let many = matches!(
+            Self::format_of(relative),
+            Some(Format::Epub) | Some(Format::Xlsx)
+        ) || relative.ends_with(".md");
+        if many && self.rng.chance(30) {
             mnema_ingest::PAGES_PER_TRANSACTION + 2
         } else {
             1 + self.rng.below(5)
@@ -742,8 +1345,21 @@ impl World {
     }
 
     /// Enough units to go over [`CEILING`].
+    ///
+    /// Measured per format rather than guessed: a container carries its own
+    /// overhead — an EPUB writes two structure members and one per chapter, a
+    /// workbook four and one per sheet — so the same unit count crosses 8 KiB at
+    /// very different places. `a_file_over_the_ceiling_is_really_over_it` holds
+    /// these numbers to what they claim.
     fn oversized_units(relative: &str) -> usize {
-        if relative.ends_with(".md") { 80 } else { 100 }
+        match Self::format_of(relative) {
+            Some(Format::Html) => 60,
+            Some(Format::Epub) => 26,
+            Some(Format::Docx) => 45,
+            Some(Format::Xlsx) => 22,
+            None if relative.ends_with(".md") => 80,
+            None => 100,
+        }
     }
 
     // ---------------------------------------------------------- the calls
@@ -793,9 +1409,26 @@ impl World {
             Err(e) => format!("Err({e})"),
         };
         self.note(format!("    ingest{how} {relative} -> {rendered}"));
+        match verdict {
+            Verdict::Skipped(rule) => {
+                self.reached.rules.insert(rule.as_str());
+            }
+            Verdict::Settled => {
+                self.record_reader_of(relative);
+                self.reached.page_skips +=
+                    self.count("SELECT count(*) FROM skipped WHERE page_no IS NOT NULL") as usize;
+            }
+            Verdict::Failed | Verdict::Unoffered => {}
+        }
         self.calling = Some(relative.to_string());
-        self.last
-            .insert(relative.to_string(), LastCall { hash, verdict });
+        self.last.insert(
+            relative.to_string(),
+            LastCall {
+                hash,
+                verdict,
+                indexed: matches!(outcome, Ok(Ingested::Indexed { .. })),
+            },
+        );
         verdict
     }
 
@@ -956,6 +1589,39 @@ impl World {
         }
     }
 
+    /// Folds the reader that produced the document now standing at `relative`
+    /// into this run's coverage.
+    ///
+    /// Read out of the `path` row rather than tracked beside it, because the
+    /// model's own idea of what it *offered* is a much weaker claim than the
+    /// product's record of what it *read*: a body this file believes is a
+    /// workbook could be identified as something else entirely, and the whole
+    /// point of the coverage assertion is to catch that.
+    ///
+    /// **Called at the moment a call settles, not at the end of the run**, and
+    /// the first version did the latter. Measured: over the default corpus of
+    /// twelve seeds, no epub and no workbook was still standing at the settle —
+    /// they had been overwritten, excluded or deleted by the sequence — so the
+    /// assertion failed on formats the generator was in fact producing and
+    /// indexing correctly. Survival to the end is not the question; every
+    /// invariant in this file runs after **every call**, so a document that
+    /// existed at any point was judged, and that is what the corpus needs to
+    /// have contained.
+    fn record_reader_of(&mut self, relative: &str) {
+        let reader: Option<String> = self
+            .db
+            .conn()
+            .query_row(
+                "SELECT reader FROM path WHERE watched_root_id = ?1 AND relative_path = ?2",
+                (self.root_id, relative),
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+        if let Some(reader) = reader {
+            self.reached.readers.insert(reader);
+        }
+    }
+
     fn paths_now(&self) -> BTreeMap<String, String> {
         self.db
             .conn()
@@ -1054,6 +1720,7 @@ impl World {
         self.check_nothing_settled_went_missing(&after, &documents);
         self.check_nothing_removed_that_the_disk_still_holds(before, &after);
         self.check_a_refusal_by_content_did_what_its_rule_says(before, &after);
+        self.check_a_page_that_has_text_again_leaves_no_row();
         self.check_stored_is_findable(&after, &documents);
         self.check_chunks_are_searchable();
         self.check_ord_is_dense();
@@ -1537,6 +2204,78 @@ impl World {
         }
     }
 
+    /// **3d. A page that has text again leaves no row saying it has none.**
+    ///
+    /// Per-page journal rows are a class of their own and this harness had never
+    /// seen one. They are written from the numbers in
+    /// `Frame::Summary.skipped_pages`, they live in the same `skip` table as the
+    /// file-level verdicts, and they are cleared by a **separate** path —
+    /// `Db::forget_page_skips` — because `forget_skip` deliberately leaves them
+    /// alone. Two independent call sites maintain them
+    /// (`crates/mnema-ingest/src/lib.rs:741,843`), and a plan that saw only one
+    /// is how the class arrived with a hole in it.
+    ///
+    /// What a stale row costs is not abstract: it is a line in the journal
+    /// telling someone that page 3 of a document could not be read, while the
+    /// index holds page 3's text and answers searches with it. Nothing else in
+    /// this file would notice — the document is complete, every marker is
+    /// findable, and the row sits beside it saying otherwise.
+    ///
+    /// Scoped to a call that **actually read the file**. `Unchanged` and
+    /// `AlreadyIndexed` never open it, so rows about its pages are still true;
+    /// it is the fresh index that owes the clean-up.
+    ///
+    /// **Both directions.** A document whose reader really did skip a page must
+    /// *have* the rows — otherwise the assertion below is satisfied by a build
+    /// that writes no page rows at all, and the whole class would go untested
+    /// while reading as covered.
+    fn check_a_page_that_has_text_again_leaves_no_row(&self) {
+        let Some(relative) = self.calling.as_deref() else {
+            return;
+        };
+        let Some(last) = self.last.get(relative) else {
+            return;
+        };
+        if !last.indexed {
+            return;
+        }
+        let Some(state) = self.files.get(relative) else {
+            return;
+        };
+        let rows: i64 = self
+            .db
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM skipped WHERE watched_root_id = ?1 AND relative_path = ?2 \
+                 AND page_no IS NOT NULL",
+                (self.root_id, relative),
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        match state.shape {
+            Shape::Gappy(_, _) => {
+                if rows == 0 {
+                    self.fail(format!(
+                        "invariant 3d — {relative} was just indexed and its reader could not \
+                         read one of the pages it declares, and the journal holds no row for \
+                         it. The page is missing from the index and nothing anywhere says so"
+                    ));
+                }
+            }
+            _ => {
+                if rows > 0 {
+                    self.fail(format!(
+                        "invariant 3d — {relative} was just indexed and every page it \
+                         declares was read, and the journal still holds {rows} row(s) saying \
+                         a page of it could not be. The index answers with that page's text \
+                         while the journal tells someone it is missing"
+                    ));
+                }
+            }
+        }
+    }
+
     /// **3b. What phase 3 could tell was gone, it actually removed.**
     ///
     /// Invariant 3 only ever proves the negative — a path row still standing
@@ -1923,7 +2662,7 @@ impl World {
         let choice = if self.files.is_empty() {
             0
         } else {
-            self.rng.below(25)
+            self.rng.below(27)
         };
         match choice {
             0 => self.create(),
@@ -1963,6 +2702,15 @@ impl World {
             // do to a folder, and both were invisible here by construction.
             22 => self.restore_a_previous_version(),
             23 => self.rewrite_in_place_under_a_lowered_ceiling(),
+            // The three refusals the five readers of this cycle added. One slot
+            // between them, because each is the same claim on `displaces` and
+            // the corpus-coverage assertion at the end of the file is what says
+            // whether one slot was enough to reach all three.
+            24 => self.refuse_by_reader(),
+            // The per-page journal rows. Their own slot, because they are the
+            // one class in this file whose evidence lives in a *second* table
+            // and is cleared by a path of its own.
+            25 => self.document_with_an_unreadable_page(),
             _ => self.run_walk(),
         }
     }
@@ -2012,12 +2760,24 @@ impl World {
         }
     }
 
+    /// A new file, of one of the six shapes a reader can take.
+    ///
+    /// **The weighting is deliberate and is not uniform.** Text and markdown
+    /// keep half the draws between them because they are what every other
+    /// operation in this file was written against — the cheap arm's two
+    /// branches, the restore, the in-place rewrite — and thinning them out would
+    /// buy the new formats coverage by taking it from the old. The other half
+    /// rotates through the four container readers, so a run of any length meets
+    /// each of them.
     fn create(&mut self) {
         let n = self.next_counter();
-        let relative = if self.rng.chance(35) {
-            format!("docs/handbook-{n}.md")
-        } else {
-            format!("docs/file-{n}.txt")
+        let relative = match self.rng.below(8) {
+            0 | 1 | 2 => format!("docs/handbook-{n}.md"),
+            3 | 4 => format!("docs/file-{n}.txt"),
+            5 => format!("docs/page-{n}.html"),
+            6 => format!("docs/book-{n}.epub"),
+            7 if self.rng.chance(50) => format!("docs/agreement-{n}.docx"),
+            _ => format!("docs/budget-{n}.xlsx"),
         };
         let units = self.ordinary_units(&relative);
         let content = self.body_for(&relative, units);
@@ -2033,12 +2793,22 @@ impl World {
     fn edit_keeping_length(&mut self) {
         let relative = self.a_file();
         let units = match self.files[&relative].shape {
-            Shape::Text(n) | Shape::Markdown(n) => n,
+            Shape::Text(n) | Shape::Markdown(n) | Shape::Rich(_, n) => n,
             // A file that is currently unreadable bytes has no unit count to
             // preserve; rewriting it is a different operation. A photo and a
             // zeroed tail are the same case for the same reason — neither has
-            // paragraphs or sections to keep the length of.
-            Shape::Opaque | Shape::NotText | Shape::BinaryTail => return self.rewrite_small(),
+            // paragraphs or sections to keep the length of, and neither does a
+            // document refused for holding no words.
+            // `Gappy` is here rather than beside `Rich` on purpose: its byte
+            // count depends on how many degenerate entries were drawn, not on
+            // its page count alone, so it has no length an edit could reproduce.
+            Shape::Opaque
+            | Shape::NotText
+            | Shape::BinaryTail
+            | Shape::Refused(_)
+            | Shape::Gappy(_, _) => {
+                return self.rewrite_small();
+            }
         };
         let was = self.on_disk(&relative).map(|b| b.len());
         let content = self.body_for(&relative, units);
@@ -2163,12 +2933,7 @@ impl World {
     fn copy_of(&mut self, relative: &str) -> Option<String> {
         let bytes = self.on_disk(relative)?;
         let n = self.next_counter();
-        let extension = if relative.ends_with(".md") {
-            "md"
-        } else {
-            "txt"
-        };
-        let copy = format!("backup/copy-{n}.{extension}");
+        let copy = format!("backup/copy-{n}.{}", Self::extension_of(relative));
         let state = &self.files[relative];
         let content = Content {
             bytes,
@@ -2184,12 +2949,7 @@ impl World {
     fn rename(&mut self) {
         let relative = self.a_file();
         let n = self.next_counter();
-        let extension = if relative.ends_with(".md") {
-            "md"
-        } else {
-            "txt"
-        };
-        let renamed = format!("docs/renamed-{n}.{extension}");
+        let renamed = format!("docs/renamed-{n}.{}", Self::extension_of(&relative));
         if std::fs::rename(self.absolute(&relative), self.absolute(&renamed)).is_err() {
             return;
         }
@@ -2261,6 +3021,62 @@ impl World {
         self.maybe_ingest(&relative);
     }
 
+    /// A file replaced by a document some of whose pages its reader cannot
+    /// read.
+    ///
+    /// The point is not the document — it is the **journal rows** it leaves: one
+    /// per skipped page, in the same table as the file-level verdicts, cleared
+    /// only by `Db::forget_page_skips`. Every later operation in the sequence
+    /// then runs over a path that has them, which is how the class gets mixed
+    /// into edits, copies, renames and deletions rather than tested on its own.
+    fn document_with_an_unreadable_page(&mut self) {
+        let relative = self.a_file();
+        let format = if Self::format_of(&relative) == Some(Format::Epub) {
+            Format::Epub
+        } else {
+            Format::Xlsx
+        };
+        let pages = 1 + self.rng.below(3);
+        let content = self.gappy_body(format, pages);
+        let at = self.next_tick();
+        self.note(format!(
+            "  replace {relative} with a {format:?} of {pages} readable pages and a gap"
+        ));
+        self.write_at(&relative, content, at);
+        self.maybe_ingest(&relative);
+    }
+
+    /// A file replaced by a document that **opens** and is refused on what is
+    /// inside it.
+    ///
+    /// The three rules here are the ones the five readers of this cycle added,
+    /// and they are one operation rather than three because they differ only in
+    /// which reader says no: `displaces` gives all three the identical condition
+    /// (`content.is_none_or(|sha| sha != recorded.document_id)`), so what
+    /// invariant 3c has to check is the same sentence three times.
+    ///
+    /// **Distinct from `make_opaque`, and the difference is the whole reason
+    /// both exist.** That one writes a container no reader recognises —
+    /// `Unsupported`, "no reader implemented yet", the rule a *release* changes.
+    /// This one writes files the readers do open and then decline: a book of
+    /// plates, a document of empty paragraphs, a workbook with no rows, a
+    /// document cut mid-element, a PDF with a password. Neither is corrupt bytes
+    /// in the sense the old generator meant, and two of the three are
+    /// **structurally valid and degenerate in content** — the class both of Task
+    /// 11's defects lived in, which a truncated archive cannot produce.
+    fn refuse_by_reader(&mut self) {
+        let relative = self.a_file();
+        let refusal =
+            *self
+                .rng
+                .pick(&[Refusal::NoTextLayer, Refusal::Malformed, Refusal::Encrypted]);
+        let content = self.refused_body(refusal);
+        let at = self.next_tick();
+        self.note(format!("  replace {relative} with {refusal:?} content"));
+        self.write_at(&relative, content, at);
+        self.maybe_ingest(&relative);
+    }
+
     /// A text file replaced by a photo — the refusal that **removes**.
     ///
     /// Distinct from `make_opaque`, which writes a PDF header and earns
@@ -2294,7 +3110,23 @@ impl World {
     /// file's own bytes, and they owe the index opposite answers.
     fn interrupt_an_append(&mut self) {
         let relative = self.a_file();
-        let keeping = self.on_disk(&relative);
+        // **Only prose is kept as the prefix, and this cost a red run to
+        // learn.** The shape being modelled is "a note whose append the power
+        // cut short": text on disk, then zeros, refused as `BinaryTail` and
+        // never displacing what the index already holds. Zeros appended to a
+        // *container* are not that at all — a zip's directory is still found by
+        // scanning back from the end, so the archive parses, the reader reads
+        // it, and the file is indexed. The harness said `BinaryTail` and the
+        // product said "an epub"; the product was right, and the model was
+        // asserting a fact about a file it had not actually produced.
+        //
+        // Falling through to `None` makes the body bring its own prose, which is
+        // what this operation has always done for a file too short to clear the
+        // head window.
+        let keeping = match self.files[&relative].shape {
+            Shape::Text(_) | Shape::Markdown(_) => self.on_disk(&relative),
+            _ => None,
+        };
         let content = self.interrupted_append_body(keeping);
         let at = self.next_tick();
         self.note(format!(
@@ -2399,10 +3231,15 @@ impl World {
         let relative = self.a_file();
         let units = match self.files[&relative].shape {
             // The same restriction `edit_keeping_length` carries, for the same
-            // reason: only prose and markdown have a unit count whose length
-            // can be reproduced.
-            Shape::Text(n) | Shape::Markdown(n) => n,
-            Shape::Opaque | Shape::NotText | Shape::BinaryTail => return,
+            // reason: only a shape with a unit count has a length that can be
+            // reproduced. `Rich` has one — and its archives are STORED exactly
+            // so that reproducing it reproduces the byte count too.
+            Shape::Text(n) | Shape::Markdown(n) | Shape::Rich(_, n) => n,
+            Shape::Opaque
+            | Shape::NotText
+            | Shape::BinaryTail
+            | Shape::Refused(_)
+            | Shape::Gappy(_, _) => return,
         };
         let Some(was) = self.on_disk(&relative).map(|b| b.len()) else {
             return;
@@ -2765,6 +3602,10 @@ impl World {
                 LastCall {
                     hash: Some(hash),
                     verdict,
+                    // Synthesised by the harness rather than answered by a
+                    // call: nothing read the file, so nothing owed the
+                    // per-page rows a clean-up.
+                    indexed: false,
                 },
             );
         }
@@ -2801,6 +3642,7 @@ impl World {
                     LastCall {
                         hash: Some(hash),
                         verdict: Verdict::Unoffered,
+                        indexed: false,
                     },
                 );
             }
@@ -2961,10 +3803,17 @@ impl World {
             // against `hash` says. Invariant 3c is what checks the other half
             // — that the earlier document is still there.
             let refused = match state.shape {
-                Shape::Opaque => Some("bytes no reader can take"),
+                Shape::Opaque => Some("a container no reader here recognises"),
                 Shape::NotText => Some("a photo"),
                 Shape::BinaryTail => Some("text that stops being text partway through"),
-                Shape::Text(_) | Shape::Markdown(_) => None,
+                Shape::Refused(Refusal::NoTextLayer) => Some("a document holding no words"),
+                Shape::Refused(Refusal::Malformed) => Some("a document whose structure is damaged"),
+                Shape::Refused(Refusal::Encrypted) => Some("a password-protected document"),
+                // A gappy document *is* indexed — the pages it could read are
+                // there, and the ones it could not are journalled by number.
+                Shape::Text(_) | Shape::Markdown(_) | Shape::Rich(_, _) | Shape::Gappy(_, _) => {
+                    None
+                }
             };
             if refused.is_some() || size > CEILING {
                 if after.get(name) == Some(&hash) {
@@ -3023,12 +3872,50 @@ fn setting(name: &str, fallback: usize) -> usize {
         .unwrap_or(fallback)
 }
 
-fn run(seed: u64, steps: usize) {
+fn run(seed: u64, steps: usize) -> Reached {
     let mut world = World::new(seed);
     for n in 1..=steps {
         world.step(n);
     }
     world.settle();
+    world.reached
+}
+
+/// What a run actually produced, as opposed to what its generator can produce.
+///
+/// **This exists because a class the generator never reaches looks exactly like
+/// a class with no defects.** The whole of `Unsupported` sat unreachable behind
+/// a `%PDF-` stub for two cycles while every seed stayed green, and nothing in
+/// this file could have said so: the invariants only ever judge what happened.
+/// A run that meets no workbook is not evidence about workbooks, and after this
+/// it cannot be mistaken for evidence about workbooks.
+///
+/// It is an assertion about the **corpus**, not about the product, so it is
+/// checked once over all seeds rather than per seed — a single run of forty
+/// steps has no business meeting every format.
+#[derive(Default)]
+struct Reached {
+    /// Every `Shape` the generator wrote to disk, by its own name.
+    shapes: BTreeSet<&'static str>,
+    /// Every rule a worker actually answered with, by the string the journal
+    /// stores — `SkipRule::as_str`, not `Debug`, so the coverage list names the
+    /// same value the `skip` table holds and a renamed variant cannot quietly
+    /// turn this into an assertion that can never pass.
+    rules: BTreeSet<&'static str>,
+    /// Every reader that produced a document the index kept.
+    readers: BTreeSet<String>,
+    /// Page numbers a reader reported skipped, which is the class Task 9 added
+    /// and this harness had never seen.
+    page_skips: usize,
+}
+
+impl Reached {
+    fn merge(&mut self, other: Reached) {
+        self.shapes.extend(other.shapes);
+        self.rules.extend(other.rules);
+        self.readers.extend(other.readers);
+        self.page_skips += other.page_skips;
+    }
 }
 
 /// The harness.
@@ -3083,7 +3970,64 @@ fn random_sequences_do_not_lose_data() {
     }
     let base = setting("MNEMA_FUZZ_BASE", 0x5EED_0000) as u64;
     let runs = setting("MNEMA_FUZZ_RUNS", 12);
+    let mut reached = Reached::default();
     for i in 0..runs as u64 {
-        run(base + i, steps);
+        reached.merge(run(base + i, steps));
     }
+
+    // **The corpus has to have met what it claims to cover.** Everything above
+    // judges what happened; this judges what was allowed to happen, and it is
+    // the only assertion in the file that fails when the *generator* rots rather
+    // than the product. Both directions are here on purpose: a missing entry is
+    // a class nothing measured, and the list is written out rather than counted,
+    // because a count is a definition that goes stale one format later.
+    for shape in [
+        "text",
+        "markdown",
+        "html",
+        "epub",
+        "docx",
+        "xlsx",
+        "unsupported-container",
+        "photo",
+        "binary-tail",
+        "no-text-layer",
+        "malformed",
+        "encrypted",
+    ] {
+        assert!(
+            reached.shapes.contains(shape),
+            "the generator wrote no {shape} in {runs} seeds × {steps} steps, so every              invariant that would judge one is untested and passing.
+  it wrote: {:?}",
+            reached.shapes
+        );
+    }
+    for reader in ["text", "markdown", "html", "epub", "docx", "xlsx"] {
+        assert!(
+            reached.readers.contains(reader),
+            "no document the index kept was produced by the {reader} reader, so this              corpus is not evidence about it.
+  it kept: {:?}",
+            reached.readers
+        );
+    }
+    for rule in [
+        "unsupported",
+        "not_text",
+        "binary_tail",
+        "too_large",
+        "no_text_layer",
+        "malformed",
+        "encrypted",
+    ] {
+        assert!(
+            reached.rules.contains(rule),
+            "no worker in this corpus answered {rule}, so `displaces`'s arm for it is \
+             judged by nothing.\n  it answered: {:?}",
+            reached.rules
+        );
+    }
+    assert!(
+        reached.page_skips > 0,
+        "no reader reported a skipped page in this corpus, so the per-page journal rows          Task 9 added — and the path that removes them — are untested"
+    );
 }
