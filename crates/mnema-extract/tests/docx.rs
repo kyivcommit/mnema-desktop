@@ -223,6 +223,87 @@ fn a_missing_stylesheet_does_not_refuse_the_document() {
     assert_eq!(texts(&sections), vec!["Вступ", "Текст."]);
 }
 
+/// A stylesheet this reader cannot **parse** is not a damaged document either.
+///
+/// The absent case is above; this is the other half the brief asked for, and it
+/// went untested in the first round. `heading_styles` swallows a parse error on
+/// purpose — the stylesheet holds no prose, and the alternative is losing a
+/// document over a part nobody reads — but the cost of that swallow is exactly
+/// what this module warns about: fewer headings, one unnamed page, and every
+/// citation into it naming nothing. So it is asserted rather than assumed.
+///
+/// Both directions. What the broken stylesheet cannot say is still lost (`XX`
+/// is nobody's heading), and what needs no stylesheet still works (`Heading1`).
+#[test]
+fn a_stylesheet_that_will_not_parse_costs_headings_and_not_the_document() {
+    let body = format!(
+        "{}{}{}",
+        styled("Heading1", "Вступ"),
+        p("Текст."),
+        styled("XX", "Не заголовок без таблиці стилів"),
+    );
+    // An end tag closing an element nothing opened: quick-xml refuses this
+    // outright, unlike a truncated part, which it reads up to the cut.
+    let broken = "<?xml version=\"1.0\"?><w:styles><w:style w:type=\"paragraph\" \
+                  w:styleId=\"XX\"><w:name w:val=\"heading 2\"/></w:oops></w:styles>";
+    let archive = zip_of(&[
+        ("word/document.xml", document(&body).into_bytes()),
+        ("word/styles.xml", broken.as_bytes().to_vec()),
+    ]);
+
+    let sections = extract_docx(&archive).expect("a broken stylesheet is not a broken document");
+    assert_eq!(titles(&sections), vec![Some("Вступ")]);
+    assert_eq!(
+        texts(&sections),
+        vec!["Вступ", "Текст.", "Не заголовок без таблиці стилів"]
+    );
+}
+
+/// …and a stylesheet whose *stream* will not decompress says the same.
+///
+/// A different code path from the one above — `zip_part` refuses it before any
+/// XML is seen — and it was folded into the same arm as "not there at all"
+/// without a test saying so. The archive here is intact apart from eight bytes
+/// inside one member's compressed data, which is what a damaged copy looks
+/// like.
+#[test]
+fn a_stylesheet_that_will_not_decompress_costs_headings_and_not_the_document() {
+    let body = format!("{}{}", styled("Heading1", "Вступ"), p("Текст."));
+    let entries = "<w:style w:type=\"paragraph\" w:styleId=\"XX\">\
+                   <w:name w:val=\"heading 2\"/></w:style>";
+    let mut archive = docx_with_styles(&body, entries);
+
+    // The local file header's data begins after the name and the extra field
+    // (PKWARE APPNOTE 4.3.7); flipping bytes there leaves the archive's
+    // structure intact and its deflate stream not.
+    let local = find_local_header(&archive, b"word/styles.xml").expect("a local file header");
+    let name_len = u16::from_le_bytes([archive[local + 26], archive[local + 27]]) as usize;
+    let extra_len = u16::from_le_bytes([archive[local + 28], archive[local + 29]]) as usize;
+    let data = local + 30 + name_len + extra_len;
+    for byte in &mut archive[data..data + 8] {
+        *byte ^= 0xff;
+    }
+
+    let sections = extract_docx(&archive).expect("a damaged stylesheet is not a damaged document");
+    assert_eq!(titles(&sections), vec![Some("Вступ")]);
+    assert_eq!(texts(&sections), vec!["Вступ", "Текст."]);
+}
+
+/// The offset of the local file header whose filename is `name`.
+///
+/// Matched on the name rather than on the signature alone: compressed data can
+/// hold four bytes that look like a header. The same helper `tests/epub.rs`
+/// uses, narrowed to the one signature this file needs.
+fn find_local_header(bytes: &[u8], name: &[u8]) -> Option<usize> {
+    (0..bytes.len().saturating_sub(30)).find(|&at| {
+        if &bytes[at..at + 4] != b"PK\x03\x04" {
+            return false;
+        }
+        let len = u16::from_le_bytes([bytes[at + 26], bytes[at + 27]]) as usize;
+        len == name.len() && at + 30 + len <= bytes.len() && &bytes[at + 30..at + 30 + len] == name
+    })
+}
+
 /// A paragraph may carry its own outline level, overriding whatever its style
 /// says — and then no stylesheet is needed to know it is a heading.
 #[test]
@@ -364,12 +445,51 @@ fn text_in_a_table_is_indexed_and_typed_as_a_table() {
 /// half will not find — the `передпісля` defect `html.rs` measured, reached
 /// through a different element. `<w:tab/>` occurs 394 times across 16 of the 24
 /// files probed, so this is the common case rather than an edge.
+/// **`<w:noBreakHyphen/>` is in this test because it was in no test at all.**
+/// The review found it: one occurrence in the whole tree, the arm that emits
+/// it, and the Task 12 report claimed cases C20–C22 covered it. They cover the
+/// `tab` arm and the `br | cr` arm. Deleting the hyphen arm stayed green, and a
+/// false claim about coverage in an otherwise careful report is the kind that
+/// travels. `<w:softHyphen/>` is the opposite case and needs nothing: it has no
+/// arm, because it is invisible unless the line happens to break there.
 #[test]
 fn a_break_and_a_tab_carry_the_whitespace_they_stand_for() {
     let body = "<w:p><w:r><w:t>перед</w:t><w:tab/><w:t>після</w:t>\
                 <w:br/><w:t>новий рядок</w:t></w:r></w:p>";
     let sections = extract_docx(&docx(body)).unwrap();
     assert_eq!(texts(&sections), vec!["перед\tпісля\nновий рядок"]);
+
+    // A hyphen the document paints, and a hyphen it does not. `будь-який`
+    // written with `<w:noBreakHyphen/>` loses its hyphen without this and
+    // becomes a word in no file; `<w:softHyphen/>` renders as nothing unless
+    // the line breaks there, so a character for it would put one in text no
+    // copy of the document shows. Both directions, in one paragraph.
+    let hyphens = "<w:p><w:r><w:t>будь</w:t><w:noBreakHyphen/><w:t>який</w:t>\
+                   <w:t> над</w:t><w:softHyphen/><w:t>звичайний</w:t></w:r></w:p>";
+    let sections = extract_docx(&docx(hyphens)).unwrap();
+    assert_eq!(texts(&sections), vec!["будь-який надзвичайний"]);
+}
+
+/// **The same characters, written the other way round.**
+///
+/// An empty element has two spellings in XML and quick-xml reports them as two
+/// different things: `<w:br/>` is one `Empty` event, `<w:br></w:br>` is a
+/// `Start` and an `End`. A reader that handles only the first drops the
+/// character in the second — the `передпісля` shape again, reached not through
+/// a missing rule but through a producer's punctuation.
+///
+/// Word, LibreOffice and python-docx all write the self-closing form, so this
+/// is not a shape the probe of 24 files could find. What makes it a defect
+/// rather than a worry is that this reader already treats `<w:p>` in both
+/// spellings, so "our producer does not do that" is an assumption the same
+/// `match` refuses to make one element away.
+#[test]
+fn an_empty_element_written_out_in_full_carries_the_same_character() {
+    let body = "<w:p><w:r><w:t>перед</w:t><w:tab></w:tab><w:t>після</w:t>\
+                <w:br></w:br><w:t>новий</w:t>\
+                <w:noBreakHyphen></w:noBreakHyphen><w:t>рядок</w:t></w:r></w:p>";
+    let sections = extract_docx(&docx(body)).unwrap();
+    assert_eq!(texts(&sections), vec!["перед\tпісля\nновий-рядок"]);
 }
 
 /// **The trap the probe found and no reasoning would have.**
@@ -539,8 +659,17 @@ fn a_truncated_document_part_is_damage_rather_than_half_a_document() {
     );
 }
 
-/// XML that does not parse at all is damage too, and by a different route: an
-/// end tag that closes an element nothing opened.
+/// XML that does not parse at all is damage too, and by a different route from
+/// the truncation above.
+///
+/// **The mechanism, corrected.** This docstring first said "an end tag that
+/// closes an element nothing opened", and the fixture does not reach that:
+/// `</w:p>` here closes `<w:body>`, so what refuses it is quick-xml's
+/// `check_end_names` — `expected </w:body>, but </w:p> was found`. The reader's
+/// own depth counter is not involved, and a tag closing *nothing* never arrives
+/// as an event at all, because `allow_unmatched_ends` is `false` by default.
+/// The test is right; only its explanation was wrong, which is the sort of
+/// error that outlives the code it describes.
 #[test]
 fn a_document_part_that_does_not_parse_is_damage() {
     let archive = zip_of(&[(

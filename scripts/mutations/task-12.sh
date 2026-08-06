@@ -254,6 +254,39 @@ case_ "reader: a break carries the newline it stands for" \
   'b"br" | b"cr" => {},' \
   mnema-extract 'a_break_and_a_tab_carry_the_whitespace_they_stand_for' --test docx
 
+# C22b. **The arm the first round left with no case at all**, while the report
+# claimed C20–C22 covered it. `будь-який` written with `<w:noBreakHyphen/>` loses
+# its hyphen and becomes a word in no file — the same shape as C21, through the
+# one character element nobody measured.
+case_ "reader: a non-breaking hyphen is a character the document paints" \
+  crates/mnema-extract/src/docx.rs \
+  's{                    b"noBreakHyphen" => run\.push\('"'"'-'"'"'\),}{                    b"noBreakHyphen" => \{\},}' \
+  'b"noBreakHyphen" => {},' \
+  mnema-extract 'a_break_and_a_tab_carry_the_whitespace_they_stand_for' --test docx
+
+# C22c. **One spelling of an empty element, because there are two.**
+# `<w:br></w:br>` is a `Start` and an `End`, not an `Empty`; with the config off,
+# every character arm above is reachable only through the self-closing spelling
+# and the other one silently drops the character. Measured in fix round 1: the
+# expanded fixture came back `передпісляновийрядок`.
+case_ "reader: an empty element written out in full is the same element" \
+  crates/mnema-extract/src/docx.rs \
+  's{    reader\.config_mut\(\)\.expand_empty_elements = true;\n    let mut sections = vec!\[DocxSection \{}{    reader.config_mut().expand_empty_elements = false;\n    let mut sections = vec![DocxSection \{}' \
+  'reader.config_mut().expand_empty_elements = false;
+    let mut sections = vec![DocxSection {' \
+  mnema-extract 'an_empty_element_written_out_in_full_carries_the_same_character' --test docx
+
+# C22d. The same config in the stylesheet reader, where it is load-bearing for a
+# different reason: the match there has no `Empty` arm, so without expansion a
+# `<w:name w:val="…"/>` — how every stylesheet writes it — is never read and no
+# style is a heading at all.
+case_ "reader: the stylesheet is read under the same one-spelling rule" \
+  crates/mnema-extract/src/docx.rs \
+  's{    reader\.config_mut\(\)\.expand_empty_elements = true;\n    let mut headings = HashSet::new\(\);}{    reader.config_mut().expand_empty_elements = false;\n    let mut headings = HashSet::new();}' \
+  'reader.config_mut().expand_empty_elements = false;
+    let mut headings = HashSet::new();' \
+  mnema-extract 'a_heading_is_what_styles_xml_says_it_is' --test docx
+
 # C23. **The depth count removed, and this case is what says whether it is doing
 # anything.** quick-xml reaches `Event::Eof` on a part that stops inside an
 # element without reporting an error, so without this the reader stores the prose
@@ -368,6 +401,27 @@ case_ "reader: a stylesheet past the cap is refused rather than ignored" \
   's{        Err\(ZipPartError::TooLarge\) => return Err\(DocxError::TooLarge\),\n        Err\(ZipPartError::Missing \| ZipPartError::Malformed\) => HashSet::new\(\),}{        Err(_) => HashSet::new(),}' \
   'Err(_) => HashSet::new(),' \
   mnema-extract 'docx::tests::both_members_are_read_under_the_cap_and_only_absence_is_forgiven' --lib
+
+# C33b. **The unreadable stylesheet, at the zip level.** Fix round 1's finding:
+# `Malformed` was folded into the same arm as `Missing` with nothing measuring
+# it, so a member whose deflate stream is damaged could have started refusing the
+# whole document and no test would have said so.
+case_ "reader: a stylesheet whose stream will not decompress does not refuse the document" \
+  crates/mnema-extract/src/docx.rs \
+  's{        Err\(ZipPartError::Missing \| ZipPartError::Malformed\) => HashSet::new\(\),}{        Err(ZipPartError::Missing) => HashSet::new(),\n        Err(ZipPartError::Malformed) => return Err(DocxError::Malformed("bad stylesheet".to_string())),}' \
+  'Err(ZipPartError::Malformed) => return Err(DocxError::Malformed("bad stylesheet".to_string())),' \
+  mnema-extract 'a_stylesheet_that_will_not_decompress_costs_headings_and_not_the_document' --test docx
+
+# C33c. **The unreadable stylesheet, at the XML level.** `while let Ok(…)` is what
+# swallows a parse failure, and it swallowed it untested. The mutation makes the
+# reader stop tolerating a stylesheet it cannot parse, which is the shape any
+# later move to a `Result`-returning `heading_styles` would take — this case is
+# what such a change has to confront.
+case_ "reader: a stylesheet that will not parse does not take the document with it" \
+  crates/mnema-extract/src/docx.rs \
+  's{    while let Ok\(event\) = reader\.read_event\(\) \{}{    while let event = reader.read_event().expect("the stylesheet parses") \{}' \
+  'reader.read_event().expect("the stylesheet parses")' \
+  mnema-extract 'a_stylesheet_that_will_not_parse_costs_headings_and_not_the_document' --test docx
 
 # C34. …and the other direction: a stylesheet that is simply not there taking the
 # whole document with it. It holds no prose at all, so refusing costs a document

@@ -47,9 +47,13 @@
 //!   `<w:pPr>` including the `<w:pStyle>` that used to be there. Read as current,
 //!   a document is cut into sections wherever somebody once edited one;
 //! - text an attribute carries — a drawing's `descr`, a content control's alias,
-//!   a field's `w:instr`. The same rule `html.rs` states for `alt` and `title`:
-//!   it is not a text node, and reading attributes needs a per-attribute
-//!   decision about which of them are prose.
+//!   a field's `w:instr`, and `<w:sym w:char="F0B7"/>`, which is the one of them
+//!   that carries a **visible** character. In practice a `<w:sym>` is a bullet
+//!   from a symbol font, so what is lost is a list marker rather than a word;
+//!   reading it would mean mapping a font-specific code point, which is a
+//!   decision of its own. The same rule `html.rs` states for `alt` and `title`:
+//!   an attribute is not a text node, and reading attributes needs a
+//!   per-attribute decision about which of them are prose.
 //!
 //! **What is lost and is not in that list**, because it is a member this reader
 //! does not open at all: footnotes and endnotes (`word/footnotes.xml`,
@@ -200,6 +204,11 @@ fn extract(bytes: &[u8], cap: usize) -> Result<Vec<DocxSection>, DocxError> {
 /// error rather than propagating it.
 fn heading_styles(styles: &str) -> HashSet<String> {
     let mut reader = quick_xml::Reader::from_str(styles);
+    // The same one-spelling rule [`parse`] states, and here it fixes a second
+    // thing: a self-closing `<w:style/>` used to set `in_style` and leave no
+    // `End` to clear it, so a `<w:name>` between two styles could be counted
+    // towards the wrong id. Expanded, every `<w:style/>` has its own `End`.
+    reader.config_mut().expand_empty_elements = true;
     let mut headings = HashSet::new();
     let mut id: Option<String> = None;
     let mut heading = false;
@@ -211,7 +220,13 @@ fn heading_styles(styles: &str) -> HashSet<String> {
     while let Ok(event) = reader.read_event() {
         match event {
             quick_xml::events::Event::Eof => break,
-            quick_xml::events::Event::Start(ref e) | quick_xml::events::Event::Empty(ref e) => {
+            // `Start` only, and there is no `Empty` arm because the config above
+            // means there are no `Empty` events: `<w:name w:val="…"/>` — which is
+            // how every stylesheet writes it — arrives here as a `Start`. Written
+            // this way on purpose rather than matching both, so that removing the
+            // config line reddens `a_heading_is_what_styles_xml_says_it_is`
+            // instead of silently costing a self-closing `<w:style/>` its `End`.
+            quick_xml::events::Event::Start(ref e) => {
                 match e.local_name().as_ref() {
                     b"style" => {
                         id = attribute(e, b"styleId");
@@ -274,9 +289,19 @@ fn is_outline_level(value: &str) -> bool {
 
 /// A style id Word writes for a built-in heading when nothing has renamed it.
 ///
-/// The third signal and the weakest, and it exists for exactly one case: a
-/// document whose `word/styles.xml` this reader could not open. Matched
-/// **exactly and case-sensitively**, as `identify_plain_text` matches an
+/// The third signal and the weakest. It was written for one case — a document
+/// whose `word/styles.xml` this reader could not open — and it is **applied
+/// unconditionally**, which is not the same thing and is the honest description:
+/// [`heading_styles`] answers with a `HashSet`, and a set cannot tell "there was
+/// no stylesheet" from "there was one and it named no heading". Restricting it
+/// to the first would need a type that carries that difference, so the doc says
+/// what the code does rather than what it was for.
+///
+/// The wider behaviour is the better of the two anyway: a document that renamed
+/// `Heading1`'s *name* into another language while leaving its id alone, and
+/// states no outline level, is still read as having headings.
+///
+/// Matched **exactly and case-sensitively**, as `identify_plain_text` matches an
 /// extension, because `Heading1` is a value a producer writes rather than a word
 /// a person types.
 fn is_canonical_heading_id(id: &str) -> bool {
@@ -339,6 +364,18 @@ fn parse(part: &str, headings: &HashSet<String>) -> Result<Vec<DocxSection>, Doc
     use quick_xml::events::Event;
 
     let mut reader = quick_xml::Reader::from_str(part);
+    // **One spelling of an empty element, because there are two and they were
+    // not handled alike.** `<w:br/>` arrives as `Event::Empty` and
+    // `<w:br></w:br>` as a `Start` and an `End`; with the character arms living
+    // only in the `Empty` branch, the second spelling stored `передпісля` —
+    // measured, and the same word-in-no-file `html.rs` paid for once. Expanding
+    // here means every empty element reaches the `Start` arm below and
+    // `Event::Empty` is never produced at all, so a rule can no longer be added
+    // to one spelling and forgotten in the other.
+    //
+    // The counters are unaffected: an expanded empty element is a `Start` and an
+    // `End`, so `depth` and `skip_depth` both return to where they were.
+    reader.config_mut().expand_empty_elements = true;
     let mut sections = vec![DocxSection {
         page_no: 1,
         section_title: None,
@@ -391,18 +428,12 @@ fn parse(part: &str, headings: &HashSet<String>) -> Result<Vec<DocxSection>, Doc
                     }
                     b"pPr" => ppr_depth += 1,
                     b"t" => text_depth += 1,
-                    _ => properties(e, paragraphs.last_mut()),
-                }
-            }
-            Event::Empty(ref e) => {
-                if skip_depth > 0 {
-                    continue;
-                }
-                match e.local_name().as_ref() {
-                    // The characters an element stands for. Dropping any of
-                    // them stores a word that is in no file and that a search
-                    // for either half will not find — `html.rs` measured that
-                    // shape as `передпісля`.
+
+                    // The characters an element stands for. Dropping any of them
+                    // stores a word that is in no file and that a search for
+                    // either half will not find — `html.rs` measured that shape
+                    // as `передпісля`, and this reader measured it again when
+                    // these arms lived in the `Empty` branch alone.
                     //
                     // **`<w:tab/>` only outside `<w:pPr>`**, and that guard is
                     // the whole of this arm's value: the identical element name
@@ -413,12 +444,13 @@ fn parse(part: &str, headings: &HashSet<String>) -> Result<Vec<DocxSection>, Doc
                     // paragraph.
                     b"tab" if ppr_depth == 0 => run.push('\t'),
                     b"br" | b"cr" => run.push('\n'),
-                    // A hyphen the document paints. `<w:softHyphen/>` is
-                    // deliberately not here: it is invisible unless the line
-                    // happens to break there, so a character for it would put
-                    // one in text no copy of the document shows.
+                    // A hyphen the document paints, so `будь-який` keeps its
+                    // hyphen. `<w:softHyphen/>` is deliberately not here: it is
+                    // invisible unless the line happens to break there, so a
+                    // character for it would put one in text no copy of the
+                    // document shows.
                     b"noBreakHyphen" => run.push('-'),
-                    b"p" => flush(&mut run, paragraphs.last_mut(), &mut sections),
+
                     _ => properties(e, paragraphs.last_mut()),
                 }
             }
@@ -470,12 +502,17 @@ fn parse(part: &str, headings: &HashSet<String>) -> Result<Vec<DocxSection>, Doc
                     run.push_str(&text);
                 }
             }
+            // **There is deliberately no check for an `End` at depth zero, and
+            // one was written and then removed.** quick-xml's
+            // `allow_unmatched_ends` is `false` by default
+            // (`quick-xml-0.41.0/src/reader/mod.rs:242`), so a tag closing
+            // nothing comes back from `read_event` as an `Err` — mapped above —
+            // and never as an event. The check could not fire, which is the same
+            // shape `4583938` removed from `properties`, one arm away. The
+            // `depth != 0` test after the loop is the opposite case and stays:
+            // a part that stops *inside* an element reaches `Eof` with no error
+            // at all, which case C23 reddens.
             Event::End(ref e) => {
-                if depth == 0 {
-                    return Err(DocxError::Malformed(format!(
-                        "{DOCUMENT_PART} closes an element nothing opened"
-                    )));
-                }
                 depth -= 1;
                 if skip_depth > 0 {
                     skip_depth -= 1;
@@ -523,8 +560,16 @@ fn parse(part: &str, headings: &HashSet<String>) -> Result<Vec<DocxSection>, Doc
 
 /// Subtrees whose text is not this document's, or is this document's twice.
 ///
-/// Closed, and every member is a measured shape of the format rather than a
-/// guess — see the module doc for what each one costs if it is read.
+/// Closed, and three of the four are shapes that really do carry a text node —
+/// see the module doc for what each one costs if it is read.
+///
+/// `rPrChange` is the fourth and is **not** one of them: its content is a
+/// `<w:rPr>`, which holds no text at all, so listing it changes no outcome
+/// today. It is here so that the two `*Change` elements are treated alike and a
+/// later `<w:rPr>` that gains text does not arrive through the one revision
+/// element nobody thought about. Named as symmetry rather than as measurement,
+/// because the first round's comment called all four measured and only three
+/// were.
 fn gives_no_text(name: &[u8]) -> bool {
     matches!(
         name,
@@ -590,8 +635,15 @@ fn flush(run: &mut String, paragraph: Option<&mut Paragraph>, sections: &mut Vec
         // so unlike `block.text` it is display metadata rather than evidence.
         // **After NFC**, which the line above already ran: normalisation changes
         // the character count, so bounding first would cut in the wrong place.
-        // `None` for a heading whose text is only whitespace — a page named by
-        // the empty string is worse than an unnamed page.
+        //
+        // `bound_section_title`'s `None` is **unreachable from here**, and the
+        // first round's comment claimed otherwise: `flush` has already returned
+        // on `run.trim().is_empty()`, and flattening a string that is not all
+        // whitespace never yields an empty one. A heading with no text at all
+        // therefore never reaches this function, which is what
+        // `a_heading_with_no_text_is_not_a_section` measures. The branch is kept
+        // because it is how one consumes an `Option`, and because the same
+        // function's `None` *is* reachable from `html.rs` (`<h1></h1>`).
         if let Some(title) =
             bound_section_title(text.split_whitespace().collect::<Vec<_>>().join(" "))
         {
