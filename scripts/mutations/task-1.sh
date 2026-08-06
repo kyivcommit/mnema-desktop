@@ -23,19 +23,19 @@
 case_ "worker: a successful probe still reports a page count" \
   crates/mnema-extract/src/bin/worker.rs \
   's{\\"pages\\":\{\},}{}' \
-  '"{{\\"loaded\\":true,\\"stage\\":\\"ok\\",\\"library_dir\\":{}}}"' \
+  '"{{\"loaded\":true,\"stage\":\"ok\",\"library_dir\":{}}}"' \
   mnema-extract 'the_worker_reports_whether_pdfium_loaded' --test pdfium_binding
 
 case_ "worker: a successful probe must not say loaded:false" \
   crates/mnema-extract/src/bin/worker.rs \
   's{\\"loaded\\":true,\\"pages\\"}{\\"loaded\\":false,\\"pages\\"}' \
-  '\\"loaded\\":false,\\"pages\\"' \
+  '\"loaded\":false,\"pages\"' \
   mnema-extract 'the_worker_reports_whether_pdfium_loaded' --test pdfium_binding
 
 case_ "worker: a successful probe's stage is ok, not some other word" \
   crates/mnema-extract/src/bin/worker.rs \
   's{\\"stage\\":\\"ok\\"}{\\"stage\\":\\"loaded\\"}' \
-  '\\"stage\\":\\"loaded\\"' \
+  '\"stage\":\"loaded\"' \
   mnema-extract 'the_worker_reports_whether_pdfium_loaded' --test pdfium_binding
 
 # Task 16. The field that says WHICH library answered, and the two ways it stops
@@ -48,7 +48,7 @@ case_ "worker: a successful probe's stage is ok, not some other word" \
 case_ "worker: a successful probe names the directory it loaded from" \
   crates/mnema-extract/src/bin/worker.rs \
   's{\\"library_dir\\":}{\\"lib_dir\\":}' \
-  '\\"lib_dir\\":' \
+  '\"lib_dir\":' \
   mnema-extract 'a_successful_probe_names_the_directory_it_loaded_from' --test pdfium_binding
 
 case_ "extract: the reported directory is a place, not a plausible constant" \
