@@ -68,18 +68,23 @@ case_ "workflow: the keychain step must not select only ignored tests" \
   'roundtrip -- --ignored' \
   mnema-desktop 'the_check_job_keeps_the_lines_whose_loss_would_not_show' --test packaging_workflow
 
+# The two markers below name the lines LEFT BEHIND by the deletion, and they were
+# re-anchored by task 16 after that task moved the vendoring step above `clippy`:
+# both used to lean on `fetch-pdfium.sh` sitting immediately above
+# `cargo test --workspace`, an adjacency that no longer exists. Anchored now on the
+# comment line each deletion joins to, which neither mutation moves.
 case_ "workflow: the matrix must actually run the tests" \
   .github/workflows/ci.yml \
   's{\n      - run: cargo test --workspace\n}{\n}' \
-  'run: scripts/fetch-pdfium.sh
+  'matrix have a pin in that script; Linux was added for this matrix.
       # `cargo test --workspace` above' \
   mnema-desktop 'the_check_job_keeps_the_lines_whose_loss_would_not_show' --test packaging_workflow
 
 case_ "workflow: the tests need the library vendored first" \
   .github/workflows/ci.yml \
   's{        run: scripts/fetch-pdfium\.sh\n}{}' \
-  '- name: Vendor the pinned Pdfium build
-      - run: cargo test --workspace' \
+  'which src-tauri now needs to compile
+      - run: cargo clippy' \
   mnema-desktop 'the_check_job_keeps_the_lines_whose_loss_would_not_show' --test packaging_workflow
 
 # The line moves out of `check` and into `bundle`, where it does nothing for the
