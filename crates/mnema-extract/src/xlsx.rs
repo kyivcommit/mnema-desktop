@@ -728,27 +728,49 @@ mod tests {
     /// asserts that these members really do inflate and then error, so that a
     /// `zip` release which stopped validating checksums would redden this test
     /// instead of quietly turning it into a test of nothing.
+    ///
+    /// ⚠️ **The budget has to stay well above one member, and the first version
+    /// of this test did not.** With a budget of 3 000 against members of 2 000,
+    /// `Read::take(cap + 1)` truncated each broken member *before* its checksum
+    /// was ever reached — so `io::copy` returned `Ok`, the failing arm never ran,
+    /// and restoring the defect left this test green. It named the right thing
+    /// and measured the truncation path instead. Twenty members against 20 000
+    /// keeps every one of them fully readable when it is reached, so the only
+    /// thing that can stop the walk is the charging.
     #[test]
     fn a_member_whose_stream_breaks_is_still_charged_to_the_budget() {
-        let filler: Vec<(&str, Vec<u8>)> = vec![
-            ("xl/broken-a.xml", vec![b'a'; 2000]),
-            ("xl/broken-b.xml", vec![b'b'; 2000]),
-            ("xl/broken-c.xml", vec![b'c'; 2000]),
-        ];
+        const BROKEN: usize = 20;
+        const EACH: usize = 2000;
+        // Comfortably more than one member and comfortably less than all of
+        // them: the first is what makes each one reachable in full, the second
+        // is what the charging has to run out of.
+        const BUDGET: usize = 20_000;
+
+        let names: Vec<String> = (0..BROKEN).map(|i| format!("xl/broken{i}.xml")).collect();
+        let filler: Vec<(&str, Vec<u8>)> = names
+            .iter()
+            .map(|name| (name.as_str(), vec![b'a'; EACH]))
+            .collect();
         let mut bytes = one_sheet(
             r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#,
             "<si><t>рядок</t></si>",
             &filler,
         );
         assert_eq!(
-            break_streams(&mut bytes, "xl/broken-"),
-            6,
-            "three members, two headers each"
+            break_streams(&mut bytes, "xl/broken"),
+            BROKEN * 2,
+            "one local header and one directory entry per member"
+        );
+        assert!(
+            EACH * BROKEN > BUDGET && EACH * 2 < BUDGET,
+            "the budget must outlast one member and not all of them"
         );
 
-        // The premise: this member inflates in full and *then* fails.
+        // The premise: this member inflates in full and *then* fails. Read
+        // uncapped, exactly as the walk reads it while the budget is still
+        // generous.
         let mut zipped = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
-        let mut member = zipped.by_name("xl/broken-a.xml").unwrap();
+        let mut member = zipped.by_name("xl/broken0.xml").unwrap();
         let mut counted = Inflated(0);
         let outcome = std::io::copy(&mut member, &mut counted);
         assert!(
@@ -756,14 +778,15 @@ mod tests {
             "the fixture is not broken, so this test measures nothing"
         );
         assert_eq!(
-            counted.0, 2000,
+            counted.0, EACH as u64,
             "a broken stream still emitted its whole member"
         );
 
-        // Three broken members of 2 000 bytes against a budget of 3 000: the
-        // first is charged, and the second must not fit. Uncharged, every one of
-        // them measures 2 000 against an unspent 3 000 for ever.
-        assert!(matches!(extract(&bytes, 3000), Err(XlsxError::TooLarge)));
+        // Twenty broken members of 2 000 bytes against 20 000: charged, the
+        // budget runs out part way through. Uncharged, every one of them
+        // measures 2 000 against an unspent 20 000 for ever and the archive is
+        // walked to the end — 40 000 bytes inflated under a 20 000 cap.
+        assert!(matches!(extract(&bytes, BUDGET), Err(XlsxError::TooLarge)));
 
         // And the other direction, so the assertion above is not satisfied by a
         // reader that refuses any damaged archive: the same bytes under a real
