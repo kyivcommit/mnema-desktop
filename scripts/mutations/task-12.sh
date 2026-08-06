@@ -264,16 +264,29 @@ case_ "reader: a non-breaking hyphen is a character the document paints" \
   'b"noBreakHyphen" => {},' \
   mnema-extract 'a_break_and_a_tab_carry_the_whitespace_they_stand_for' --test docx
 
-# C22c. **One spelling of an empty element, because there are two.**
-# `<w:br></w:br>` is a `Start` and an `End`, not an `Empty`; with the config off,
-# every character arm above is reachable only through the self-closing spelling
-# and the other one silently drops the character. Measured in fix round 1: the
-# expanded fixture came back `передпісляновийрядок`.
-case_ "reader: an empty element written out in full is the same element" \
+# C22c. **One spelling of an empty element, because there are two — and this
+# case had to be re-aimed once, for the same reason round 1's cap assertion did.**
+# It first named `an_empty_element_written_out_in_full_carries_the_same_character`
+# and stayed **green**: the character arms live in `Event::Start`, so the
+# spelled-out spelling reaches them whatever the config says. What the config
+# decides is the *self-closing* spelling — without expansion `<w:br/>` is an
+# `Event::Empty`, and there is deliberately no `Empty` arm any more, so the
+# character is dropped. So the case names the test that uses `<w:tab/>`,
+# `<w:br/>` and `<w:noBreakHyphen/>`, and C22e below covers the other spelling.
+case_ "reader: a self-closing empty element still reaches the character arms" \
   crates/mnema-extract/src/docx.rs \
   's{    reader\.config_mut\(\)\.expand_empty_elements = true;\n    let mut sections = vec!\[DocxSection \{}{    reader.config_mut().expand_empty_elements = false;\n    let mut sections = vec![DocxSection \{}' \
   'reader.config_mut().expand_empty_elements = false;
     let mut sections = vec![DocxSection {' \
+  mnema-extract 'a_break_and_a_tab_carry_the_whitespace_they_stand_for' --test docx
+
+# C22e. …and the spelled-out spelling, which needs a case of its own precisely
+# because C22c cannot reach it: the arm removed here is the one both spellings
+# now share, and this measures it through `<w:br></w:br>`.
+case_ "reader: a break written out in full carries its newline too" \
+  crates/mnema-extract/src/docx.rs \
+  's{                    b"br" \| b"cr" => run\.push\('"'"'\\n'"'"'\),}{                    b"br" | b"cr" => \{\},}' \
+  'b"br" | b"cr" => {},' \
   mnema-extract 'an_empty_element_written_out_in_full_carries_the_same_character' --test docx
 
 # C22d. The same config in the stylesheet reader, where it is load-bearing for a
