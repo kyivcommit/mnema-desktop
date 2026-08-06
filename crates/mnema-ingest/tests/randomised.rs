@@ -3361,7 +3361,24 @@ impl World {
     fn stricter_rule_over_an_unchanged_folder(&mut self) {
         #[cfg(unix)]
         {
-            let relative = self.a_file();
+            // **A file the index currently holds, and touched first.** The
+            // keep side of invariant 3c is reached only when the worker reports
+            // a digest byte-identical to what the document was built from —
+            // "the rule changed, the file did not" — and two things kept that
+            // from happening reliably: an arbitrary file may hold no document
+            // at all, and an untouched one is answered by a cheap arm before
+            // any worker runs (measured by an earlier round at 72 refusals in
+            // 186 calls). Touching moves the mtime and leaves the bytes, which
+            // is exactly the shape being modelled. Rotating the rule alone was
+            // not enough — `malformed` and `encrypted` stayed unreached — and a
+            // rule the corpus cannot reach looks like a rule with no defects.
+            let indexed: Vec<String> = self.paths_now().into_keys().collect();
+            let relative = if indexed.is_empty() {
+                self.a_file()
+            } else {
+                self.rng.pick(&indexed).clone()
+            };
+            self.retouch(&relative);
             // **All four content rules, not just `not_text`.** This is the only
             // operation in the file that produces "the rule changed and the
             // file did not" — a refusal whose digest is byte-identical to what
