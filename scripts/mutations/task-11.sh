@@ -395,6 +395,13 @@ case_ "reader: a chapter's name is bounded by the rule every reader shares" \
   'return Some(flattened);' \
   mnema-extract 'a_chapters_name_is_bounded_by_the_rule_every_reader_shares' --test epub
 
+# ⚠️ Re-aimed by Task 13, which rewrote this arm: the four duplicated `#[error]`
+# literals in `worker.rs` were reduced to `e.to_string()`, and this case still
+# matched the literal. It had been silently BROKEN — matching nothing, counting
+# as neither red nor green — from that commit until the next run of this file.
+# A case anchored on a *string* rather than on the shape around it is a case the
+# next refactor of that string disarms without a word.
+#
 # C37. The digest dropped from an epub refusal. It is the field that tells the
 # parent whether the file changed or only the rule did — and this branch is the
 # second way into `too_large`, the one that *did* open the file, so unlike the
@@ -403,8 +410,10 @@ case_ "reader: a chapter's name is bounded by the rule every reader shares" \
 # rule and does not add its rows is a branch nothing measures.
 case_ "worker: an epub refused after being read carries the digest it was read on" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{                reason: "a member of this EPUB inflates past the cap on one member"\.to_string\(\),\n                sha256: Some\(sha256\),}{                reason: "a member of this EPUB inflates past the cap on one member".to_string(),\n                sha256: None,}' \
-  'reason: "a member of this EPUB inflates past the cap on one member".to_string(),
+  's~            Err\(e \@ EpubError::TooLarge\) => vec!\[Frame::Refused \{\n                rule: "too_large"\.to_string\(\),\n                reason: e\.to_string\(\),\n                sha256: Some\(sha256\),~            Err(e \@ EpubError::TooLarge) => vec![Frame::Refused {\n                rule: "too_large".to_string(),\n                reason: e.to_string(),\n                sha256: None,~' \
+  'Err(e @ EpubError::TooLarge) => vec![Frame::Refused {
+                rule: "too_large".to_string(),
+                reason: e.to_string(),
                 sha256: None,' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
