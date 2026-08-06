@@ -50,20 +50,19 @@ case_ "ingest: a document being rebuilt does not still look finished" \
 
 # ----------------------------------------------------------- the generator
 
-# C4. The sidecar stops announcing a different version, so every "the build
-# learned to read better" step becomes an ordinary confirming walk. Every
-# invariant still passes — nothing is wrong, nothing happened — and the corpus
-# assertion is the only thing that can say the class was never reached.
+# C4. The operation stops being drawn at all. Every invariant still passes —
+# nothing is wrong, nothing happened — and the corpus assertion is the only
+# thing that can say the class was never reached.
 #
-# ⚠️ This case was **still green** on its first run, and the fault was in the
-# harness: the class was recorded on `Verdict::Settled`, which folds
-# `AlreadyIndexed` in with `Indexed`, so a confirming walk marked the rebuild as
-# covered. A class recorded when it did not happen is worse than one never
-# recorded — it reports coverage rather than absence.
+# ⚠️ **Written first as "make the sidecar announce version 1" and that case was
+# green**, for a reason worth keeping: the *other* rebuild operation leaves its
+# files recorded at version 2 or above, so offering version 1 over one of those
+# is still a version change and still rebuilds. A mutation aimed at the value
+# tested the arithmetic; aiming it at the draw tests the class.
 case_ "harness: the corpus really drives a rebuild" \
   crates/mnema-ingest/tests/randomised.rs \
-  's~            let version = 2 \+ \(self\.stricter_rotation % 3\) as u32;\n            let better = better_reader_worker\(self\.dir\.path\(\), version\);\n            self\.note\(format!\(\n                "  walk~            let version = 1;\n            let better = better_reader_worker(self.dir.path(), version);\n            self.note(format!(\n                "  walk~' \
-  '            let version = 1;' \
+  's~            26 => self\.the_build_learned_to_read_better\(\),~            26 => self.run_walk(),~' \
+  '26 => self.run_walk(),' \
   mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
 
 # C5. The interruption stops interrupting. Without a trigger that fires on a
