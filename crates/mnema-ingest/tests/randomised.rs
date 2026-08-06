@@ -3999,7 +3999,7 @@ impl World {
             self.note(format!("  create {relative} for a reader handover"));
             self.write_at(&relative, content, at);
             self.ingest(&relative);
-            if self.paths_now().get(&relative).is_none() {
+            if !self.paths_now().contains_key(&relative) {
                 // Excluded, or never offered; there is nothing recorded to go
                 // stale against.
                 return;
