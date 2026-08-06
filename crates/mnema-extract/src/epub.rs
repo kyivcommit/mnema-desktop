@@ -769,6 +769,140 @@ mod tests {
         assert!(extract(&book(1, 4096), 8 << 10).is_ok());
     }
 
+    /// **`extract_epub` spends [`BOOK_MAX_BYTES`], and nothing said so until
+    /// this test.**
+    ///
+    /// Added by Task 13, which found the same hole in its own reader and then in
+    /// this one: measured, replacing the budget in [`extract_epub`] with
+    /// `usize::MAX` left **every** test of this module and of `tests/epub.rs`
+    /// green, and `BOOK_MAX_BYTES` appeared nowhere in either. The test above
+    /// covers the *mechanism* through the private `extract`; what nothing
+    /// covered is the **wiring** — which is the half an edit touches, and the
+    /// half that decides what a real file meets.
+    ///
+    /// The enforcement itself was never in doubt and is not what this adds: a
+    /// 5 421-byte book measured past the real ceiling already refuses.
+    ///
+    /// It is the one assertion here that cannot use a budget of a few
+    /// kilobytes, because the number under test is a quarter of a gigabyte and
+    /// the only way to exceed it is to inflate it — and unlike `xlsx.rs`'s
+    /// equivalent, every member charged here is also **parsed**, so the filler
+    /// decides what the test costs. Measured, on this machine, in the debug
+    /// profile the suite runs:
+    ///
+    /// | 1 MiB of… | `extract_html_chapter` | blocks |
+    /// |---|---|---|
+    /// | a comment | **371 ms** | 0 |
+    /// | a `<p>` of text | 13 ms | 1 |
+    /// | a `<style>` | **6,7 ms** | 0 |
+    ///
+    /// So the chapters are `<style>`: `html.rs` drops that element, which means
+    /// no block, no NFC pass and no quarter-gigabyte of retained `String` — and
+    /// html5ever's raw-text tokenizer scans it 55× faster than it scans a
+    /// comment. **Written as a comment first, on the reasoning that a comment
+    /// builds no nodes; that reasoning was right about nodes and wrong about
+    /// cost, and the first version of this test took 191 s.**
+    ///
+    /// Both directions, and the second is what makes the first mean anything —
+    /// the same bytes with the budget lifted are **read**, so the refusal above
+    /// came from the total rather than from anything else about a seventeen
+    /// chapter book.
+    #[test]
+    fn the_public_entry_spends_the_book_budget() {
+        use std::io::Write;
+
+        // Seventeen chapters of almost exactly `MEMBER_MAX_BYTES`: none is over
+        // the per-member cap on its own, and together they are 272 MiB against a
+        // 256 MiB total.
+        let fat = BOOK_MAX_BYTES / MEMBER_MAX_BYTES + 1;
+        const WRAPPER: usize = "<style>".len() + "</style>".len();
+        let filler = vec![b'a'; MEMBER_MAX_BYTES - WRAPPER];
+
+        // The last chapter is the only one holding a word, so that a book which
+        // is *not* refused has something to come back with.
+        let names: Vec<String> = (0..=fat).map(|n| format!("ch{n}.xhtml")).collect();
+        let manifest: String = names
+            .iter()
+            .enumerate()
+            .map(|(n, href)| {
+                format!("<item id=\"c{n}\" href=\"{href}\" media-type=\"application/xhtml+xml\"/>")
+            })
+            .collect();
+        let spine: String = (0..names.len())
+            .map(|n| format!("<itemref idref=\"c{n}\"/>"))
+            .collect();
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let stored: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            let deflated: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("mimetype", stored).unwrap();
+            w.write_all(b"application/epub+zip").unwrap();
+            w.start_file("META-INF/container.xml", deflated).unwrap();
+            w.write_all(
+                b"<container xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\
+                  <rootfiles><rootfile full-path=\"content.opf\" \
+                  media-type=\"application/oebps-package+xml\"/></rootfiles></container>",
+            )
+            .unwrap();
+            w.start_file("content.opf", deflated).unwrap();
+            w.write_all(
+                format!(
+                    "<package xmlns=\"http://www.idpf.org/2007/opf\">\
+                     <manifest>{manifest}</manifest><spine>{spine}</spine></package>"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            // The first chapter is written once and copied compressed for the
+            // rest: deflating sixteen megabytes seventeen times is most of what
+            // this test would otherwise cost, and every copy is the same bytes.
+            w.start_file(&names[0], deflated).unwrap();
+            w.write_all(b"<style>").unwrap();
+            w.write_all(&filler).unwrap();
+            w.write_all(b"</style>").unwrap();
+            w.finish().unwrap();
+        }
+        let one = buf.into_inner();
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            for name in &names[..fat] {
+                let mut source = zip::ZipArchive::new(std::io::Cursor::new(&one)).unwrap();
+                let index = source.index_for_name(&names[0]).expect("just written");
+                w.raw_copy_file_rename(source.by_index_raw(index).unwrap(), name.clone())
+                    .unwrap();
+            }
+            for other in ["mimetype", "META-INF/container.xml", "content.opf"] {
+                let mut source = zip::ZipArchive::new(std::io::Cursor::new(&one)).unwrap();
+                let index = source.index_for_name(other).expect("just written");
+                w.raw_copy_file(source.by_index_raw(index).unwrap())
+                    .unwrap();
+            }
+            let deflated: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file(names.last().expect("at least one"), deflated)
+                .unwrap();
+            w.write_all("<p>останній розділ</p>".as_bytes()).unwrap();
+            w.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+
+        assert!(matches!(extract_epub(&bytes), Err(EpubError::TooLarge)));
+
+        // With the budget lifted, the per-member cap alone lets all seventeen
+        // through — they hold no text, so they are skipped by number — and the
+        // eighteenth is read.
+        let read = extract(&bytes, usize::MAX).expect("only the total refused it");
+        assert_eq!(read.chapters.len(), 1);
+        assert_eq!(read.chapters[0].blocks[0].text, "останній розділ");
+        assert_eq!(read.skipped.len(), fat);
+    }
+
     /// A path is resolved before it is decoded, so an escape cannot become path
     /// syntax after the fact.
     ///

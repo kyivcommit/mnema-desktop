@@ -461,3 +461,19 @@ case_ "reader: a duplicate manifest id binds the first declaration" \
   's{                            items\.entry\(id\)\.or_insert\(Item \{ href, media_type \}\);}{                            items.insert(id, Item \{ href, media_type \});}' \
   'items.insert(id, Item { href, media_type });' \
   mnema-extract 'a_duplicate_manifest_id_binds_the_first_declaration' --test epub
+
+# ---------------------------------------------- added by Task 13, fix round 2
+
+# C43. **The wiring, not the mechanism** — the hole Task 13 found in its own
+# reader and then here. `a_book_draws_every_member_against_one_budget` covers the
+# budget through the private `extract`; nothing covered the fact that the public
+# entry hands it `BOOK_MAX_BYTES`. Measured before the test was written:
+# replacing it with `usize::MAX` left every epub test green, and the constant
+# appeared nowhere in `tests/epub.rs`. Enforcement was never in doubt — a
+# 5 421-byte book already refuses past the real ceiling — so this is coverage
+# added, not behaviour changed.
+case_ "reader: the public entry spends BOOK_MAX_BYTES" \
+  crates/mnema-extract/src/epub.rs \
+  's~    extract\(bytes, BOOK_MAX_BYTES\)~    extract(bytes, usize::MAX)~' \
+  'extract(bytes, usize::MAX)' \
+  mnema-extract 'epub::tests::the_public_entry_spends_the_book_budget' --lib
