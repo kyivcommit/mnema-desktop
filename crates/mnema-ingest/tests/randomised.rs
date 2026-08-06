@@ -824,7 +824,13 @@ impl World {
             excluded: BTreeSet::new(),
             walking: false,
             reached: Reached::default(),
-            stricter_rotation: 0,
+            // Started from the seed rather than at zero, so twelve runs begin
+            // the rotation at four different places. Starting every run at
+            // `not_text` meant the fourth rule was reached only by a run that
+            // drew this operation four times — measured, `encrypted` stayed
+            // unreached across the whole default corpus while the other three
+            // did not.
+            stricter_rotation: (seed % 4) as usize,
         }
     }
 
