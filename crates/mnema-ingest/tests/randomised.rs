@@ -180,6 +180,16 @@ done
 /// A sidecar that **succeeds**: it reads the file and answers with a valid frame
 /// stream, at whatever `reader_version` it is built with.
 ///
+/// ⚠️ **This file assumes unix, and says so here because nothing else does.**
+/// Every sidecar is a `/bin/sh` script behind `#[cfg(unix)]`, and since Task 14
+/// the corpus assertion has *required* their results: `want_rules` contains
+/// `"crash"`, which only `babbling_sidecar` produces, and `want_states`
+/// contains three states only the sidecars below can reach. So on a platform
+/// without them the assertion cannot pass at all — the harness does not
+/// degrade there, it fails. D64 deepened that assumption rather than creating
+/// it, and the honest thing is one sentence saying so rather than three
+/// `#[cfg(not(unix))]` arms quietly making a broken corpus look green.
+///
 /// **This is the capability the harness did not have.** Every other sidecar here
 /// refuses — `babbling_worker` is not a worker at all, `stricter_worker` answers
 /// one refusal — and refusals can never reach the machinery this cycle added:
@@ -222,8 +232,13 @@ while read -r line; do
   printf '{{"frame":"header","sha256":"%s","mime":"text/plain","source_kind":"document","reader":"{reader}","reader_version":{version},"pages":%s}}
 ' "$sha" "$pages"
   n=0
-  while IFS= read -r text; do
-    [ -z "$text" ] && continue
+  while IFS= read -r raw; do
+    [ -z "$raw" ] && continue
+    # The two characters a JSON string cannot carry raw. No body this
+    # generator writes contains either today — which is exactly why it is worth
+    # doing now rather than after one does and the frame stops parsing for a
+    # reason that looks like a reader defect.
+    text=$(printf '%s' "$raw" | sed 's/\\/\\\\/g; s/"/\\"/g')
     n=$((n+1))
     printf '{{"frame":"page","page_no":%s,"section_title":null}}
 ' "$n"
@@ -968,6 +983,9 @@ struct World {
     /// Which content rule the next stricter-rule walk answers with. See
     /// `stricter_rule_over_an_unchanged_folder` for why it rotates.
     stricter_rotation: usize,
+    /// Which reader version the next rebuild announces. Separate from
+    /// `stricter_rotation` on purpose — see `the_build_learned_to_read_better`.
+    rebuild_rotation: usize,
 }
 
 impl World {
@@ -1011,6 +1029,7 @@ impl World {
             // unreached across the whole default corpus while the other three
             // did not.
             stricter_rotation: (seed % 4) as usize,
+            rebuild_rotation: (seed % 3) as usize,
         }
     }
 
@@ -3934,8 +3953,17 @@ impl World {
             // reader, it is the same one. The **name** half of `stale_reading`
             // is `a_format_changes_hands`, which has to build its own file to
             // reach it — see there.
+            // **Its own counter, advanced here.** This read `stricter_rotation`
+            // — a counter owned by the stricter-rule operation and never
+            // advanced by this one — so within a run the offered version stood
+            // still until that unrelated operation happened to fire. Two draws
+            // over one file then offered a version already recorded, answered
+            // `AlreadyIndexed`, and the operation quietly did nothing. Two
+            // independent operations were tied together through a shared field,
+            // and nothing said so.
+            self.rebuild_rotation += 1;
             let (reader, version, state) =
-                ("text", 2 + (self.stricter_rotation % 3) as u32, "rebuilt");
+                ("text", 2 + (self.rebuild_rotation % 3) as u32, "rebuilt");
             let better = better_reader_worker(self.dir.path(), reader, version);
             self.note(format!(
                 "  walk {relative} past a build whose {reader} reader is at version {version}"
@@ -4049,7 +4077,8 @@ impl World {
             self.ingest(&relative);
 
             self.retouch(&relative);
-            let version = 2 + (self.stricter_rotation % 3) as u32;
+            self.rebuild_rotation += 1;
+            let version = 2 + (self.rebuild_rotation % 3) as u32;
             let better = better_reader_worker(self.dir.path(), "text", version);
 
             // The abort lands on a page the *second* slice writes, so slice 0 is
@@ -4064,7 +4093,7 @@ impl World {
             self.note(format!(
                 "  rebuild {relative} at v{version}, cut between slices"
             ));
-            self.ingest_with(
+            let cut = self.ingest_with(
                 &relative,
                 PoolConfig::new(&better),
                 &format!(" [text reader v{version}, cut]"),
@@ -4088,26 +4117,51 @@ impl World {
                 // there is nothing to assert about what an offer answered.
                 return;
             }
+
+            // **Only when the cut pass really was cut.** The `else` below
+            // accuses the product of leaving an `Unchanged`-able state, and
+            // that accusation is only true if there was an interruption to
+            // leave one — if the trigger never fired, the rebuild simply
+            // finished and `AlreadyIndexed` is the correct answer to the next
+            // offer. Measured: two mutations that stop the interruption
+            // (the trigger's page number, the document's length) reddened
+            // through this `else`, reporting a half-written document when
+            // nothing had been half-written. The honest signal for those is
+            // the corpus assertion finding `rebuild-resumed` unreached, and
+            // this guard is what leaves it to say so.
+            if cut != Some(Verdict::Failed) {
+                return;
+            }
+
             if self.last.get(&relative).is_some_and(|last| last.indexed) {
-                let finished = self
-                    .documents_now()
-                    .values()
-                    .any(|(status, stage)| status == "indexed" && stage.as_deref() == Some("done"));
+                // **This document, not any document.** The first version asked
+                // whether *some* row in the index was finished, which the
+                // corpus almost always has — so `!finished` was never true and
+                // the message reported on something else entirely. An assertion
+                // satisfied by an unrelated row, inside the instrument built to
+                // catch exactly that.
+                let document = self.paths_now().get(&relative).cloned();
+                let finished = document.as_deref().is_some_and(|id| {
+                    self.documents_now().get(id).is_some_and(|(status, stage)| {
+                        status == "indexed" && stage.as_deref() == Some("done")
+                    })
+                });
                 if !finished {
                     self.fail(format!(
                         "D64 invariant 2 — the pass after an interrupted rebuild of {relative} \
-                         settled and left no finished document behind. An interrupted pass \
-                         must not leave a state the next walk reads as done"
+                         settled and the document it names ({document:?}) is still not \
+                         finished. An interrupted pass must not leave a state the next walk \
+                         reads as done"
                     ));
                 }
                 self.reached.states.insert("rebuild-resumed");
             } else {
                 self.fail(format!(
-                    "D64 invariant 2 — the pass after an interrupted rebuild of {relative} \
-                     did not read the file again ({verdict:?}). An interrupted pass must not \
-                     leave a state the next walk answers `Unchanged` from: the document \
-                     would stay half-written for ever, and every later walk would agree it \
-                     was fine"
+                    "D64 invariant 2 — the rebuild of {relative} was cut between slices and \
+                     the pass after it did not read the file again ({verdict:?}). An \
+                     interrupted pass must not leave a state the next walk answers \
+                     `Unchanged` from: the document would stay half-written for ever, and \
+                     every later walk would agree it was fine"
                 ));
             }
         }
@@ -4764,63 +4818,80 @@ fn random_sequences_do_not_lose_data() {
     // than the product. Both directions are here on purpose: a missing entry is
     // a class nothing measured, and the list is written out rather than counted,
     // because a count is a definition that goes stale one format later.
-    // **Compared as sets, in both directions.** The first version of this
-    // asserted only that each listed thing was reached, which is half a claim:
-    // a `Shape` or a `SkipRule` that nobody adds to the list produces exactly
-    // the silence this whole assertion exists to end, one storey up. It had the
-    // hole already — thirteen labels and twelve listed, `pages-skipped` missing
-    // — and it hid nothing only because `page_skips > 0` happened to cover it.
+    // **Compared as sets, in both directions, and every dimension at once.**
     //
-    // `assert_eq!` fails in both directions: a class that stops being generated
+    // Set equality rather than containment: a class that stops being generated
     // fails, and a class that starts being generated without anyone deciding it
-    // should be also fails, which is the edit that would otherwise go unnoticed.
+    // should be also fails. The first version asserted only the first half, and
+    // had the hole already — thirteen shape labels and twelve listed.
+    //
+    // **All four reported together rather than one `assert_eq!` after another**,
+    // because a mutation that removes an operation from the draw table shifts
+    // the whole RNG sequence and therefore the corpus: a case aimed at `states`
+    // was reddening on `shapes` instead, and the log a reader sees named the
+    // wrong claim. It was still a sound case — checked by neutralising the
+    // assertions in front of it — but "which assertion fired" is the evidence
+    // this branch runs on, and a louder neighbour answering first destroys it.
+    let want_states: BTreeSet<&str> = ["rebuilt", "rebuild-resumed", "reader-changed-hands"]
+        .into_iter()
+        .collect();
     let want_shapes: BTreeSet<&str> = Shape::EVERY_LABEL.into_iter().collect();
-    assert_eq!(
-        reached.shapes, want_shapes,
-        "the corpus of {runs} seeds × {steps} steps did not write exactly the shapes this \
-         file claims to cover. A shape it did not write is a shape every invariant judges \
-         vacuously; a shape it wrote and does not list is a class nobody decided to add"
-    );
-
     let want_readers: BTreeSet<String> = ["text", "markdown", "html", "epub", "docx", "xlsx"]
         .into_iter()
         .map(String::from)
         .collect();
-    assert_eq!(
-        reached.readers, want_readers,
-        "the corpus did not keep a document from exactly the readers this file claims to \
-         cover. **PDF is deliberately absent** — see `Format`'s doc for why a generated PDF \
-         cannot carry a marker — and it is absent from this list rather than from a comment"
-    );
-
     let want_rules: BTreeSet<&str> = EVERY_RULE
         .into_iter()
         .filter(|rule| must_the_corpus_reach(*rule))
         .map(SkipRule::as_str)
         .collect();
-    assert_eq!(
-        reached.rules, want_rules,
-        "the corpus did not answer with exactly the rules `must_the_corpus_reach` says it \
-         should. That function is exhaustive over `SkipRule`, so a rule added to the product \
-         cannot reach this assertion without someone deciding whether the harness models it"
-    );
-    // **The dimension whose absence made this a task of its own.** Task 14's
-    // corpus assertion passed at full strength while `shapes`, `rules` and
-    // `readers` held no entry for any rebuild state — so the check written to
-    // expose an unreached class reported success over the riskiest machinery on
-    // the branch. Compared as a set, like the three above it, so a state that
-    // stops being driven fails and a state driven without anyone deciding it
-    // should be fails too.
-    let want_states: BTreeSet<&str> = ["rebuilt", "rebuild-resumed", "reader-changed-hands"]
-        .into_iter()
-        .collect();
-    assert_eq!(
-        reached.states, want_states,
-        "the corpus did not drive the product through exactly the rebuild states this file \
-         claims to cover. A reader-version bump must *rebuild* rather than confirm, and an \
-         interrupted rebuild must be finished by the next pass — neither is reachable \
-         through a sidecar that only refuses, which is why every earlier corpus was silent \
-         about both"
+
+    let mut wrong = String::new();
+    if reached.shapes != want_shapes {
+        let _ = write!(
+            wrong,
+            "\n  shapes:  missing {:?}, unexpected {:?}",
+            want_shapes.difference(&reached.shapes).collect::<Vec<_>>(),
+            reached.shapes.difference(&want_shapes).collect::<Vec<_>>()
+        );
+    }
+    if reached.readers != want_readers {
+        let _ = write!(
+            wrong,
+            "\n  readers: missing {:?}, unexpected {:?}",
+            want_readers
+                .difference(&reached.readers)
+                .collect::<Vec<_>>(),
+            reached
+                .readers
+                .difference(&want_readers)
+                .collect::<Vec<_>>()
+        );
+    }
+    if reached.rules != want_rules {
+        let _ = write!(
+            wrong,
+            "\n  rules:   missing {:?}, unexpected {:?}",
+            want_rules.difference(&reached.rules).collect::<Vec<_>>(),
+            reached.rules.difference(&want_rules).collect::<Vec<_>>()
+        );
+    }
+    if reached.states != want_states {
+        let _ = write!(
+            wrong,
+            "\n  states:  missing {:?}, unexpected {:?}",
+            want_states.difference(&reached.states).collect::<Vec<_>>(),
+            reached.states.difference(&want_states).collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        wrong.is_empty(),
+        "the corpus of {runs} seeds × {steps} steps did not contain exactly what this file \
+         claims to cover. A class it did not reach is a class every invariant judges \
+         vacuously; a class it reached and does not list is one nobody decided to add. \
+         **PDF is deliberately absent from `readers`** — see `Format`'s doc — and `Memory` \
+         from `rules`, by `must_the_corpus_reach`, which is exhaustive so a new `SkipRule` \
+         cannot arrive without that decision being made.{wrong}"
     );
 
     assert!(

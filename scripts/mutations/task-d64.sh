@@ -1,18 +1,3 @@
-# C2. The reader *name* half of the same comparison — the one a format changing
-# hands moves, as `.html` did inside this cycle when it left the text reader.
-#
-# ⚠️ **Green until `a_format_changes_hands` existed.** Every pass that changed
-# the name also changed the version, so deleting this comparison changed no
-# outcome: the version comparison beside it still answered. The case only means
-# something against a corpus that can move one without the other, and reaching
-# that needed a file recorded at exactly `markdown@1` — which needed an
-# operation that builds its own.
-case_ "ingest: a different reader name rebuilds too" \
-  crates/mnema-ingest/src/lib.rs \
-  's~            entry\.reader != document\.reader\n                \|\| entry\.reader_version != i64::from\(document\.reader_version\)~            entry.reader_version != i64::from(document.reader_version) // name ignored~' \
-  'i64::from(document.reader_version) // name ignored' \
-  mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
-
 # Mutation cases for D64: the harness models the rebuild path. Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/task-d64.sh
@@ -43,6 +28,13 @@ case_ "ingest: a different reader version rebuilds instead of confirming" \
 
 # C2. The reader *name* half of the same comparison — the one a format changing
 # hands moves, as `.html` did inside this cycle when it left the text reader.
+#
+# ⚠️ **Green until `a_format_changes_hands` existed.** Every pass that changed
+# the name also changed the version, so deleting this comparison changed no
+# outcome: the version comparison beside it still answered. The case only means
+# something against a corpus that can move one without the other, and reaching
+# that needed a file recorded at exactly `markdown@1` — which needed an
+# operation that builds its own.
 case_ "ingest: a different reader name rebuilds too" \
   crates/mnema-ingest/src/lib.rs \
   's~            entry\.reader != document\.reader\n                \|\| entry\.reader_version != i64::from\(document\.reader_version\)~            entry.reader_version != i64::from(document.reader_version) // name ignored~' \
@@ -105,4 +97,24 @@ case_ "harness: the corpus really moves a format between readers" \
   crates/mnema-ingest/tests/randomised.rs \
   's~            28 => self\.a_format_changes_hands\(\),~            28 => self.run_walk(),~' \
   '28 => self.run_walk(),' \
+  mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
+
+# ------------------------------------------------- the guard on the guard
+
+# C8. 🔴 **The case invariant 3f did not have, and the reason it matters more
+# than a missing case.** C3 above is labelled for 3f and cites it, and what it
+# actually fires is **invariant 5** — the stage/status pair — with or without 3f
+# present. So nothing in any mutation file would have noticed 3f being deleted or
+# weakened, and 3f is the **only** thing in the suite protecting D61's decision
+# that a document being written answers nothing.
+#
+# The guard behind that decision is one clause: `search_lexical` filters
+# `AND document.status = 'indexed'`. Drop it and a document mid-rebuild answers
+# searches with the chunks that happened to land. Measured by the reviewer:
+# without this clause and with 3f disabled the whole suite is **green**; with 3f
+# present it reddens on 3f by name.
+case_ "index: a search does not answer from a document that is not indexed" \
+  crates/mnema-index/src/search.rs \
+  "s~WHERE chunk_fts MATCH \\?1 AND document.status = 'indexed'~WHERE chunk_fts MATCH ?1~" \
+  "WHERE chunk_fts MATCH ?1" \
   mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
