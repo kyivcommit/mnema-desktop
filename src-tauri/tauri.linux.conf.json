@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "../vendor/pdfium/lib/libpdfium.dylib": null,
+      "../vendor/pdfium/lib/libpdfium.so": "pdfium/lib/libpdfium.so"
+    }
+  }
+}

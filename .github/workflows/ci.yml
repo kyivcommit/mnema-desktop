@@ -122,13 +122,21 @@ jobs:
         run: scripts/stage-sidecar.sh debug
       - run: cargo fmt --all -- --check
       # The second file `src-tauri` will not compile without, and it became one
-      # the day the bundle started shipping Pdfium: `bundle.resources` names
-      # `../vendor/pdfium/lib/libpdfium.dylib`, and `tauri-build` validates
-      # resources from inside the build script exactly the way it validates
-      # `externalBin` above. Measured the same way, by moving `vendor/pdfium`
-      # aside and running `cargo build -p mnema-desktop`:
+      # the day the bundle started shipping Pdfium: `bundle.resources` names the
+      # vendored library, and `tauri-build` validates resources from inside the
+      # build script exactly the way it validates `externalBin` above. Measured
+      # the same way, by moving `vendor/pdfium` aside and running
+      # `cargo build -p mnema-desktop`:
       #
       #   resource path `../vendor/pdfium/lib/libpdfium.dylib` doesn't exist
+      #
+      # Which library that is depends on the arm. The name is not written here
+      # because it is not one name: `tauri.linux.conf.json` swaps the macOS
+      # `.dylib` for the `.so` this step installs on Linux, and the first Linux
+      # run this branch ever completed failed on exactly that — the declaration
+      # named one platform's file while this script produced another's.
+      # `src-tauri/tests/vendored_library_resource.rs` now holds the two in step
+      # from any host, so the next one does not wait for a runner.
       #
       # So it sits above clippy rather than below it. The reason it used to sit
       # below — fmt and clippy do not need the library, and reporting a stray
