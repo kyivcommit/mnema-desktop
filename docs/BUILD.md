@@ -427,6 +427,35 @@ first path component in that shortened form fail the build outright with
 `File exists (os error 17)` from `tauri-build`. Three entries whose values are complete
 file paths — which is what is configured — do not.
 
+**And it lands under a different name on every platform**, which is the second trap and
+cost a whole CI leg. `bundle.resources` is not a delivery-time setting: `tauri-build`
+validates every declared path from inside the build script, in every profile, so a
+resource named for one platform stops `cargo check` on the others. The base file names
+macOS's `.dylib` while `scripts/fetch-pdfium.sh` stages `lib/libpdfium.so` on Linux and
+`lib/pdfium.dll` under Git Bash, and `src-tauri` therefore did not compile on either:
+
+```
+resource path `../vendor/pdfium/lib/libpdfium.dylib` doesn't exist
+```
+
+The fix is Tauri's platform-config merge, and the mechanism is worth stating because the
+usual reading of it is wrong. `tauri-build` reads the configuration through
+`tauri_utils::config::parse::read_from(Target::from_triple(&triple), …)`, which merges
+`tauri.<platform>.conf.json` over `tauri.conf.json` as an **RFC 7396 merge patch** — so
+the platform file *adds* keys rather than replacing the map, and the only way to drop the
+`.dylib` entry is to give it the value `null`. That is what `src-tauri/tauri.linux.conf.json`
+and `src-tauri/tauri.windows.conf.json` each do, before adding their own library. Neither
+platform is bundled; both have to compile.
+
+`tauri.conf.json` is deliberately left alone rather than emptied and split three ways: it
+is the file the signed image was verified against, and a `tauri.macos.conf.json` beside it
+would move macOS onto a merged configuration nothing has measured.
+`src-tauri/tests/vendored_library_resource.rs` fails if one appears, and is also what
+holds the other two in step with the fetch script — it reads every platform's effective
+configuration through the same `read_from`, from whatever host it runs on, so this class
+of defect no longer waits for a CI leg to be reached. It was found by the first Linux job
+that ever completed on the branch that introduced it, three commits late.
+
 **How it is found.** `mnema_extract::library_dir` looks in `$MNEMA_PDFIUM_LIB_DIR`, then
 beside the running executable, then in `Contents/Resources/pdfium/lib` derived from the
 executable's directory, then in the development `vendor/` tree. The last branch is an
@@ -481,6 +510,11 @@ same release as the macOS pair; both archives carry `lib/libpdfium.so` and the s
 where a test reads it — repeating it here is how it would go stale, and it did: the
 first version of this paragraph carried a literal that survived a bump in review and
 came to contradict the sentence around it.
+
+That container run predates `bundle.resources`, and the gap showed: it is what made the
+Linux arm look covered while the arm that would have caught the `.dylib` declaration had
+not run. See "Pdfium in the bundle" above for what the declaration now looks like per
+platform.
 
 A Windows x86-64 pin was added on the same reasoning and is worth no more than the
 Linux ones: it lets a Windows machine run the suite, not ship a product. The full
