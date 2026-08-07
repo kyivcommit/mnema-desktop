@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use mnema_index::{Db, open};
-use mnema_ingest::{FrozenReason, StopReason, WalkReport, walk_root};
+use mnema_ingest::{FrozenReason, IngestError, StopReason, WalkReport, walk_root};
 use mnema_pool::{Pool, PoolConfig};
 use mnema_walk::WalkRules;
 use sha2::{Digest, Sha256};
@@ -109,6 +109,12 @@ impl Fixture {
     /// Writes `contents` at `relative` inside the watched root and returns
     /// where.
     fn write(&self, relative: &str, contents: &str) -> PathBuf {
+        self.write_bytes(relative, contents.as_bytes())
+    }
+
+    /// The same, for a fixture whose point is that it is not text —
+    /// `support::NO_READER_FOR_THIS`, which is a zip and cannot be a `&str`.
+    fn write_bytes(&self, relative: &str, contents: &[u8]) -> PathBuf {
         let path = self.dir().join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, contents).unwrap();
@@ -267,6 +273,17 @@ impl Fixture {
     }
 
     fn walk_all(&self, pool: &Pool, rules: &WalkRules) -> WalkReport {
+        self.try_walk_all(pool, rules).unwrap()
+    }
+
+    /// For the one test whose subject is a walk that cannot start — everywhere
+    /// else an `Err` is a failure of the test's premise and `walk` is right.
+    #[cfg(unix)]
+    fn try_walk_with_pool(&self, pool: &Pool) -> Result<WalkReport, IngestError> {
+        self.try_walk_all(pool, &WalkRules::none())
+    }
+
+    fn try_walk_all(&self, pool: &Pool, rules: &WalkRules) -> Result<WalkReport, IngestError> {
         walk_root(
             pool,
             &self.db,
@@ -276,7 +293,13 @@ impl Fixture {
             &AtomicBool::new(false),
             &mut |_| {},
         )
-        .unwrap()
+    }
+
+    fn count(&self, table: &str) -> i64 {
+        self.db
+            .conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
     }
 }
 
@@ -561,6 +584,67 @@ fn rules_not_applied_stops_before_any_file_is_read() {
     );
 }
 
+/// A binary that cannot state its readers stops the walk **before** a file is
+/// opened, rather than being found out one crashed document at a time.
+///
+/// Every file's freshness is decided against the manifest, so a worker that
+/// cannot state one leaves nothing to compare against. The two ways of
+/// answering anyway are both silent and both wrong in bulk: an empty manifest
+/// re-reads the whole index, and the parent's own idea of the defaults declares
+/// it all current — either way from a value nothing measured. This is also the
+/// cheapest possible detection of the mismatched install `StopReason::
+/// BrokenWorker` otherwise finds out about eight crashed files later.
+///
+/// **The stand-in reads files perfectly**, and that is what makes this test
+/// mean anything. It is an older release: the same reading, no `--manifest`.
+/// A stand-in that also broke the frames would stop the walk either way — at
+/// the handshake, or one file later with the identical error over an identical
+/// empty index — and both mutations of this behaviour measured green against
+/// exactly such a test before it was rewritten.
+///
+/// **Three directions, and each rules out a different wrong implementation.**
+/// The `Err` says the walk refused rather than proceeded. The empty
+/// `document`, `path` and skip journal say it refused *before* phase 2 — a
+/// parent that invented a manifest instead of asking would have indexed both
+/// files here, since this worker reads them, and a parent that journalled the
+/// mismatch per file would be recording forty thousand files as damaged over
+/// one mismatched install, which is the distinction `PoolError` exists to
+/// make. The last walk says the folder was always fine.
+#[cfg(unix)]
+#[test]
+fn a_worker_that_cannot_state_its_readers_stops_the_walk_before_any_file() {
+    let f = Fixture::new();
+    f.write("docs/kosto.txt", "Кошторис на ремонт даху.");
+    f.write("docs/notes.md", "# Заголовок\n\nОдин абзац.\n");
+
+    let sidecar = Pool::new(PoolConfig::new(support::worker_from_before_the_manifest(
+        f._index.path(),
+    )))
+    .unwrap();
+    let outcome = f.try_walk_with_pool(&sidecar);
+    assert!(
+        matches!(
+            outcome,
+            Err(IngestError::Pool(mnema_pool::PoolError::Protocol { .. }))
+        ),
+        "a binary that cannot state its readers is not the one this parent \
+         speaks to, and that must stop the job: {outcome:?}"
+    );
+
+    assert_eq!(f.count("document"), 0);
+    assert_eq!(f.count("path"), 0);
+    assert_eq!(
+        f.db.skips_for_root(f.root).unwrap().len(),
+        0,
+        "a binary that does not match is not a fact about any one file, and \
+         must not be journalled as one"
+    );
+
+    // The folder was always fine; it was the binary that was not.
+    let report = f.walk();
+    assert_eq!((report.found, report.indexed), (2, 2));
+}
+
 // ----------------------------------------------------- the broken-worker counter
 
 /// `TooLarge` is a fact about `PoolConfig::max_bytes`, a setting, not about
@@ -602,11 +686,16 @@ fn a_run_of_oversized_files_does_not_look_like_a_broken_worker() {
 /// `indexed`, not a skip, from the real worker — measured directly before
 /// writing this test, not assumed. What the worker actually refuses with
 /// `SkipRule::Unsupported` is a format whose *magic bytes* it recognises but
-/// has no reader for: the five bytes `%PDF-` are matched ahead of the
-/// extension (`identify`, same module) and land on `Reader::Pdf`, which has
-/// no `Vec<Block>` reader in this crate yet (`crates/mnema-extract/src/bin/worker.rs`)
-/// — the file need not be a well-formed PDF beyond that signature, since the
-/// worker refuses it before parsing any further.
+/// has no reader for: a zip signature is matched ahead of the extension
+/// (`identify`, same module), and an archive holding none of the members that
+/// name a docx, an xlsx or an epub lands on `Reader::Unrecognized`, which has
+/// no `Vec<Block>` reader in this crate (`crates/mnema-extract/src/bin/worker.rs`).
+///
+/// It was a `%PDF-` stub until the PDF reader landed, and the swap is not
+/// cosmetic: that stub is now `malformed`, which is on the same side of
+/// `suggests_broken_environment` but is a verdict about damage rather than
+/// about a missing reader — a different claim, remembered under a different
+/// rule. `support::NO_READER_FOR_THIS` carries the rest.
 ///
 /// Twenty files, not the brief's fifty: `broken_after` is 8 for this
 /// fixture's default two-worker pool, so twenty clears it comfortably
@@ -616,10 +705,7 @@ fn a_run_of_oversized_files_does_not_look_like_a_broken_worker() {
 fn a_run_of_unsupported_files_does_not_look_like_a_broken_worker() {
     let f = Fixture::new();
     for i in 0..20 {
-        f.write(
-            &format!("f{i}.pdf"),
-            "%PDF-1.4\nnot a real pdf, just the magic bytes",
-        );
+        f.write_bytes(&format!("f{i}.zip"), support::NO_READER_FOR_THIS);
     }
 
     let report = f.walk();
@@ -1411,7 +1497,7 @@ fn an_edit_that_displaces_a_document_deletes_its_vectors_too() {
 /// own name (already covered by `seen`), but a STALE row for a file that
 /// used to live under the directory before it became a symlink. Measured:
 /// without this, replacing `linked/` with a directory symlink took a skip
-/// row for `linked/skipped.pdf` straight out of the journal on the very
+/// row for `linked/skipped.zip` straight out of the journal on the very
 /// next walk, even though the walk never descended into `linked/` again to
 /// re-confirm it either way — and unlike an ordinarily pruned row, nothing
 /// ever re-creates it, because the walk never visits that name again.
@@ -1424,10 +1510,7 @@ fn a_directory_symlink_protects_journal_rows_too() {
     // A format nothing reads earns a skip row rather than an index entry —
     // same magic-bytes trick as
     // `a_run_of_unsupported_files_does_not_look_like_a_broken_worker`.
-    f.write(
-        "linked/skipped.pdf",
-        "%PDF-1.4\nnot a real pdf, just the magic bytes",
-    );
+    f.write_bytes("linked/skipped.zip", support::NO_READER_FOR_THIS);
     f.walk();
     assert_eq!(f.db.skips_for_root(f.root).unwrap().len(), 1);
 
@@ -1444,7 +1527,7 @@ fn a_directory_symlink_protects_journal_rows_too() {
             .map(|s| s.relative_path)
             .collect();
     assert!(
-        remaining.contains(&"linked/skipped.pdf".to_string()),
+        remaining.contains(&"linked/skipped.zip".to_string()),
         "the stale skip row under the frozen subtree must survive: {remaining:?}"
     );
 }

@@ -1,5 +1,8 @@
-use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
-use mnema_index::{Citation, Db, INDEX_FORMAT_VERSION, open, register_vector_extension};
+use mnema_core::{Block, BlockType, Coordinate, Locator, OnDisk, Segment, SourceKind};
+use mnema_index::{
+    Citation, Db, DocumentStatus, INDEX_FORMAT_VERSION, open, register_vector_extension,
+};
+use rusqlite::{Transaction, TransactionBehavior};
 
 fn fresh(dir: &tempfile::TempDir) -> Db {
     register_vector_extension().unwrap();
@@ -35,8 +38,18 @@ fn a_citation_reads_from_all_four_levels() {
             SourceKind::Document,
         )
         .unwrap();
-    db.insert_path(root, "contracts/q3.pdf", &doc, 1024, 1_700_000_000)
-        .unwrap();
+    db.insert_path(
+        root,
+        "contracts/q3.pdf",
+        &doc,
+        OnDisk {
+            size_bytes: 1024,
+            mtime: 1_700_000_000,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
     let page = db
         .insert_page(&doc, 12, "native:pdf", Some("Розділ 3. Умови постачання"))
         .unwrap();
@@ -208,8 +221,30 @@ fn one_document_can_live_at_several_paths() {
             SourceKind::Document,
         )
         .unwrap();
-    db.insert_path(root, "a/note.txt", &doc, 10, 1).unwrap();
-    db.insert_path(root, "b/note.txt", &doc, 10, 1).unwrap();
+    db.insert_path(
+        root,
+        "a/note.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 10,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+    db.insert_path(
+        root,
+        "b/note.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 10,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
 
     // Deleting the recorded copy must not remove a document that still exists
     // on disk under another path — the failure a single path column would cause.
@@ -393,9 +428,15 @@ fn a_citation_answers_only_through_its_typed_coordinate() {
 
 // -------------------------------------------------------- atomic chunk write
 
-/// One page, one block, document `"doc-1"` already inserted — shared setup for
-/// the tests below, which care only about `insert_chunk` and `search_lexical`,
-/// not about the four-level model itself.
+/// One page, one block, document `"doc-1"` already inserted **and declared
+/// finished** — shared setup for the tests below, which care only about
+/// `insert_chunk` and `search_lexical`, not about the four-level model itself.
+///
+/// Finished, because under D61 a search does not answer with a document that is
+/// still being written, and `insert_document` leaves one at `pending`. It
+/// matters most for the tests here that assert **no** hits: a fixture left
+/// `pending` satisfies them whatever `insert_chunk` did, which is the shape of
+/// coverage that is not coverage.
 struct OnePage {
     db: Db,
     block: i64,
@@ -419,6 +460,8 @@ fn fixture_one_page() -> OnePage {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh(&dir);
     db.insert_document("doc-1", "text/plain", 4, SourceKind::Document)
+        .unwrap();
+    db.set_document_status("doc-1", DocumentStatus::Indexed)
         .unwrap();
     let page = db.insert_page("doc-1", 1, "native:txt", None).unwrap();
     let block = db
@@ -732,12 +775,26 @@ fn a_path_row_reads_back_under_its_own_root_and_name() {
         archive,
         "notes/kosto.txt",
         &doc,
-        40,
-        1_700_000_000_123_456_789,
+        OnDisk {
+            size_bytes: 40,
+            mtime: 1_700_000_000_123_456_789,
+        },
+        "text",
+        1,
     )
     .unwrap();
-    db.insert_path(desktop, "notes/kosto.txt", &doc, 41, 7)
-        .unwrap();
+    db.insert_path(
+        desktop,
+        "notes/kosto.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 41,
+            mtime: 7,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
 
     assert_eq!(
         db.path_entry(archive, "notes/kosto.txt").unwrap(),
@@ -745,6 +802,8 @@ fn a_path_row_reads_back_under_its_own_root_and_name() {
             document_id: doc.clone(),
             size_bytes: 40,
             mtime: 1_700_000_000_123_456_789,
+            reader: "text".to_string(),
+            reader_version: 1,
         }),
         "a nanosecond mtime must survive the round trip intact, not be truncated"
     );
@@ -780,8 +839,30 @@ fn clearing_a_documents_content_empties_the_lexical_index_but_keeps_its_paths() 
     let doc = db
         .insert_document(&"j".repeat(64), "text/plain", 40, SourceKind::Document)
         .unwrap();
-    db.insert_path(root, "a/kosto.txt", &doc, 40, 1).unwrap();
-    db.insert_path(root, "b/kosto.txt", &doc, 40, 1).unwrap();
+    db.insert_path(
+        root,
+        "a/kosto.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 40,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+    db.insert_path(
+        root,
+        "b/kosto.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 40,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
     let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
     let block = db
         .insert_block(page, &paragraph(0, "кошторис на ремонт", Some(1), Some(1)))
@@ -802,6 +883,8 @@ fn clearing_a_documents_content_empties_the_lexical_index_but_keeps_its_paths() 
         SourceKind::Document,
     )
     .unwrap();
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
     assert!(!db.search_lexical("кошторис", 10).unwrap().is_empty());
 
     db.clear_document_content(&doc).unwrap();
@@ -815,10 +898,21 @@ fn clearing_a_documents_content_empties_the_lexical_index_but_keeps_its_paths() 
         0,
         "search rows cascade"
     );
+    // `chunk_fts` directly, not through `search_lexical`, and the difference is
+    // the whole subject of this test. D61 gave `clear_document_content` a second
+    // statement that returns the document to `pending`, and from then on
+    // `search_lexical` answers nothing about it whatever the trigger did — so
+    // asking the search would be asking the predicate, and the trigger that
+    // this test is named for could stop firing without anything going red.
+    assert_eq!(
+        count("SELECT count(*) FROM chunk_fts"),
+        0,
+        "the trigger on chunk_search does not fire on a cascade, so a rebuilt \
+         document would keep its old text in the lexical index"
+    );
     assert!(
         db.search_lexical("кошторис", 10).unwrap().is_empty(),
-        "the lexical index still answers, so the trigger on chunk_search does not \
-         fire on a cascade and a rebuilt document would keep its old text findable"
+        "and the search agrees, for both of the two reasons it now has"
     );
 
     assert!(
@@ -830,6 +924,202 @@ fn clearing_a_documents_content_empties_the_lexical_index_but_keeps_its_paths() 
         2,
         "both copies of the file must keep their place in the index"
     );
+}
+
+/// Emptying a document and taking it out of the search are one write or
+/// neither. D61.
+///
+/// The pair is what makes the fix a fix: content gone with the status still
+/// `indexed` is exactly the state D61 abolishes, and before this it was
+/// reachable by nothing worse than calling the method outside a transaction —
+/// the delete would commit on its own and the status write behind it would not.
+/// One statement was atomic by itself; two are not, so the method opens a
+/// transaction and `clear_document_content_in` is what an orchestrator uses.
+///
+/// Forced with a trigger that aborts the status write, which is the only way
+/// from outside to fail the second of two writes while letting the first run —
+/// the same instrument `tests/slice.rs` uses, and the alternative is a
+/// fault-injection seam in production code.
+///
+/// Both directions: the call fails **and** the document is exactly as it was.
+/// Either alone is satisfied by a method that does nothing at all.
+#[test]
+fn emptying_a_document_and_taking_it_out_of_the_search_are_one_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+
+    let doc = db
+        .insert_document(&"m".repeat(64), "text/plain", 40, SourceKind::Document)
+        .unwrap();
+    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(page, &paragraph(0, "кошторис на ремонт", Some(1), Some(1)))
+        .unwrap();
+    db.insert_chunk(
+        &doc,
+        0,
+        "кошторис на ремонт",
+        &Locator {
+            spans: vec![Segment {
+                block_id: block,
+                start: 0,
+                end: 18,
+                block_start: 0,
+            }],
+            coordinate: Coordinate::Line { start: 1, end: 1 },
+        },
+        SourceKind::Document,
+    )
+    .unwrap();
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
+
+    db.conn()
+        .execute_batch(
+            "CREATE TRIGGER forced_failure BEFORE UPDATE ON document BEGIN
+                 SELECT RAISE(ABORT, 'forced failure');
+             END;",
+        )
+        .unwrap();
+    let outcome = db.clear_document_content(&doc);
+    db.conn()
+        .execute_batch("DROP TRIGGER forced_failure")
+        .unwrap();
+
+    assert!(
+        outcome.is_err(),
+        "the premise is a status write that failed: {outcome:?}"
+    );
+
+    let count = |sql: &str| -> i64 { db.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT count(*) FROM page"),
+        1,
+        "the delete committed without the status write beside it, which leaves \
+         a document with no content still answering searches"
+    );
+    assert_eq!(count("SELECT count(*) FROM chunk_fts"), 1);
+    assert_eq!(
+        db.document_status(&doc).unwrap(),
+        DocumentStatus::Indexed,
+        "nothing happened, so the status is the one the document came in with"
+    );
+    assert_eq!(
+        db.search_lexical("кошторис", 10).unwrap().len(),
+        1,
+        "and the document is still whole, so it still answers — without this the \
+         assertions above are satisfied by a search that returns nothing"
+    );
+}
+
+/// A transaction from another connection is refused, by both `_in` methods.
+///
+/// The doc comments used to say this case punished itself — a foreign
+/// transaction "would deadlock against this one's write lock". It does not:
+/// measured, `clear_document_content_in` with a transaction opened on a second
+/// `Db` over the same file returns `Ok` in 407 µs and the write commits with
+/// that transaction. Nothing on `self` is touched, so there is nothing to block
+/// against, and the pair's atomicity silently becomes somebody else's.
+///
+/// Both directions, and the second half is what stops this from being satisfied
+/// by a method that refuses everything: the same call on this `Db`'s own
+/// transaction goes through and writes.
+mod a_transaction_from_another_connection {
+    use super::*;
+
+    /// Two `Db`s over one file — the arrangement a running walk and a searching
+    /// window are already in (`AppState::open_job_index`).
+    fn two_connections() -> (tempfile::TempDir, Db, Db, String) {
+        let dir = tempfile::tempdir().unwrap();
+        register_vector_extension().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let one = mnema_index::open(&path).unwrap();
+        let two = mnema_index::open(&path).unwrap();
+        let doc = one
+            .insert_document(&"n".repeat(64), "text/plain", 40, SourceKind::Document)
+            .unwrap();
+        one.insert_page(&doc, 1, "native:txt", None).unwrap();
+        (dir, one, two, doc)
+    }
+
+    #[test]
+    #[should_panic(expected = "the transaction belongs to another connection")]
+    fn is_refused_by_clear_document_content_in() {
+        let (_d, one, two, doc) = two_connections();
+        let tx = Transaction::new_unchecked(two.conn(), TransactionBehavior::Immediate).unwrap();
+        let _ = one.clear_document_content_in(&tx, &doc);
+    }
+
+    #[test]
+    #[should_panic(expected = "the transaction belongs to another connection")]
+    fn is_refused_by_insert_chunk_in() {
+        let (_d, one, two, doc) = two_connections();
+        let page: i64 = one
+            .conn()
+            .query_row("SELECT id FROM page", [], |r| r.get(0))
+            .unwrap();
+        let block = one
+            .insert_block(page, &paragraph(0, "кошторис", Some(1), Some(1)))
+            .unwrap();
+        let tx = Transaction::new_unchecked(two.conn(), TransactionBehavior::Immediate).unwrap();
+        let _ = one.insert_chunk_in(
+            &tx,
+            &doc,
+            0,
+            "кошторис",
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block,
+                    start: 0,
+                    end: 8,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        );
+    }
+
+    /// The other direction. Without it both tests above are satisfied by an
+    /// assertion that fires on every call, which would take the product's own
+    /// rebuild with it.
+    #[test]
+    fn but_this_db_s_own_transaction_goes_through() {
+        let (_d, one, _two, doc) = two_connections();
+        let page: i64 = one
+            .conn()
+            .query_row("SELECT id FROM page", [], |r| r.get(0))
+            .unwrap();
+        let block = one
+            .insert_block(page, &paragraph(0, "кошторис", Some(1), Some(1)))
+            .unwrap();
+        one.transaction(|tx| {
+            one.insert_chunk_in(
+                tx,
+                &doc,
+                0,
+                "кошторис",
+                &Locator {
+                    spans: vec![Segment {
+                        block_id: block,
+                        start: 0,
+                        end: 8,
+                        block_start: 0,
+                    }],
+                    coordinate: Coordinate::None,
+                },
+                SourceKind::Document,
+            )?;
+            one.clear_document_content_in(tx, &doc)
+        })
+        .expect("a transaction on this Db's own connection is the ordinary case");
+
+        assert_eq!(
+            one.document_status(&doc).unwrap(),
+            DocumentStatus::Pending,
+            "both writes ran, so the clear's half of the pair landed"
+        );
+    }
 }
 
 /// The reason `clear_document_content` exists rather than a second call to
@@ -848,8 +1138,30 @@ fn deleting_a_document_takes_every_path_that_names_it() {
     let doc = db
         .insert_document(&"k".repeat(64), "text/plain", 40, SourceKind::Document)
         .unwrap();
-    db.insert_path(root, "a/kosto.txt", &doc, 40, 1).unwrap();
-    db.insert_path(root, "b/kosto.txt", &doc, 40, 1).unwrap();
+    db.insert_path(
+        root,
+        "a/kosto.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 40,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+    db.insert_path(
+        root,
+        "b/kosto.txt",
+        &doc,
+        OnDisk {
+            size_bytes: 40,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
 
     db.delete_document(&doc).unwrap();
 

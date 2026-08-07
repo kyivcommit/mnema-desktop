@@ -1,0 +1,460 @@
+//! What the worker says its readers are, asked of the built binary rather than
+//! of the library it links.
+//!
+//! The parent (`mnema-ingest`) may not depend on this crate (D40), so it cannot
+//! read these constants at compile time — it runs the worker and parses this.
+//! Testing the library function instead would prove the map is right and leave
+//! the one thing the parent depends on, the `--manifest` branch of `main`,
+//! untested.
+
+use std::process::Command;
+
+#[test]
+fn the_worker_states_which_reader_takes_each_extension() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .arg("--manifest")
+        .output()
+        .expect("the worker binary starts");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("one JSON object");
+
+    // md has a reader of its own since task 11 of G7.1.
+    assert_eq!(
+        v["by_extension"]["md"]["reader"],
+        serde_json::json!("markdown")
+    );
+    // The default arm is stated, not a gap: identify_plain_text's `_ =>`
+    // (crates/mnema-extract/src/typing.rs:342) is a real answer and the
+    // manifest carries it as one.
+    assert_eq!(v["default"]["reader"], serde_json::json!("text"));
+    // **The entry this whole mechanism was built for.** Until task 10 this
+    // asserted the opposite — that `html` was *absent*, because the text reader
+    // took it — precisely so that the day a reader arrived would be visible
+    // here rather than nowhere. This is that day, and flipping the assertion is
+    // the event, not a weakening of it: every `.html` already in an index is
+    // recorded `text@1`, and only this entry appearing makes the parent read
+    // those files again.
+    assert_eq!(
+        v["by_extension"]["html"]["reader"],
+        serde_json::json!("html")
+    );
+    assert_eq!(v["by_extension"]["html"]["version"], serde_json::json!(1));
+    // Both spellings, and the second is not decoration: `identify_plain_text`
+    // matches `Some("html") | Some("htm")`, so a map carrying only one predicts
+    // the wrong reader for every `.htm` on disk.
+    assert_eq!(
+        v["by_extension"]["htm"]["reader"],
+        serde_json::json!("html")
+    );
+    // And the other direction, which is what the old assertion was doing: an
+    // extension no reader claims must still be absent, or the map stops being
+    // a claim about anything.
+    assert!(v["by_extension"].get("txt").is_none());
+}
+
+#[test]
+fn a_header_names_the_reader_that_produced_it() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            writeln!(
+                c.stdin.as_mut().unwrap(),
+                "{{\"path\":\"tests/fixtures/simple.txt\",\"max_bytes\":1048576}}"
+            )?;
+            c.wait_with_output()
+        })
+        .expect("the worker runs");
+    let first = String::from_utf8(out.stdout).unwrap();
+    let first = first.lines().next().expect("a header").to_string();
+    let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(v["reader"], serde_json::json!("text"));
+    assert_eq!(v["reader_version"], serde_json::json!(1));
+}
+
+/// The markdown branch names itself too — and it needs its own test, because
+/// the two branches in `handle_request` build their headers independently and
+/// nothing makes them agree.
+///
+/// Measured before this existed: writing `reader: "text"` into the markdown
+/// branch left `cargo test --workspace` at **478 passed, 0 failed**. Every
+/// other place a header is read looks past the field — `worker_cli.rs`'s
+/// markdown test destructures `Frame::Header { pages, mime, .. }`, and the
+/// rest of the workspace uses synthetic headers. The two costs of that gap are
+/// opposite and both silent: with the wrong name every `.md` mismatches the
+/// manifest and is re-read on every run for ever, and after a
+/// `MARKDOWN_READER_VERSION` bump under the wrong name no `.md` is re-read at
+/// all. `.md` is the one extension the whole design is arranged around, so it
+/// is the last one that should have been taken on trust.
+///
+/// This test and the one above are the two directions of the same claim: swap
+/// the names between the branches and both go red, not one.
+#[test]
+fn a_markdown_header_names_the_markdown_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("звіт.md");
+    std::fs::write(&path, "вступ\n\n# Розділ перший\n\nтекст\n").unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            writeln!(c.stdin.as_mut().unwrap(), "{request}")?;
+            c.wait_with_output()
+        })
+        .expect("the worker runs");
+    let first = String::from_utf8(out.stdout).unwrap();
+    let first = first.lines().next().expect("a header").to_string();
+    let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+
+    assert_eq!(v["reader"], serde_json::json!("markdown"));
+    assert_eq!(v["reader_version"], serde_json::json!(1));
+    // Proof that the markdown branch is what ran, independent of the name it
+    // reported: the text branch answers 1 page for anything (D37), and this
+    // file has prose before its first heading and one heading after it.
+    assert_eq!(v["pages"], serde_json::json!(2));
+}
+
+/// The manifest is a *claim about* `typing::identify`, and nothing in the type
+/// system holds it to that claim: adding a reader and forgetting its entry
+/// leaves a manifest that answers "text" for a file the worker now reads
+/// differently, and every such file keeps its old indexing for ever. That is
+/// the exact failure this whole mechanism exists to prevent, so it is asserted
+/// rather than assumed.
+///
+/// Both directions, because either alone is satisfied by a mistake. A manifest
+/// that listed every extension in `identify` would pass the first loop; one
+/// with an empty map would pass the second.
+#[test]
+fn the_manifest_names_the_reader_that_identify_actually_picks() {
+    // Plain text, so `identify` reaches the extension-deciding branch at all
+    // rather than being answered by magic bytes.
+    let bytes = b"just some prose\n";
+    let manifest = mnema_extract::manifest::manifest();
+
+    // Every extension the manifest claims for a named reader is one `identify`
+    // really gives to that reader.
+    for (ext, id) in &manifest.by_extension {
+        let picked = mnema_extract::typing::identify(bytes, Some(ext));
+        assert_eq!(
+            reader_name(picked.reader),
+            id.reader,
+            "the manifest gives .{ext} to {}, identify gives it to {:?}",
+            id.reader,
+            picked.reader
+        );
+    }
+
+    // And an extension the manifest does *not* claim really does fall to the
+    // default reader — including no extension at all, and one that is only a
+    // different case of a listed one. `identify_plain_text` matches exactly
+    // (`src/typing.rs:336-343`), so `MD` is text; a manifest lookup that
+    // lowercased would disagree with the worker about a real file.
+    for ext in [
+        None,
+        Some("txt"),
+        Some("rs"),
+        Some("csv"),
+        Some("MD"),
+        // The case rule again, on the extension that changed hands in task 10:
+        // `identify_plain_text` matches `Some("html")` exactly, so `HTML` is
+        // read as text and the map must agree rather than be helpful.
+        Some("HTML"),
+        // The trap on the other side of `pdf` being absent from the map: these
+        // bytes are prose, so a file *named* `notes.pdf` is read by the text
+        // reader. An entry `pdf → pdf@1` would predict otherwise and re-read
+        // this file on every walk for ever.
+        Some("pdf"),
+        // The same, for the format task 11 added. An EPUB is decided by its
+        // magic bytes and its `mimetype` entry, never by its name, so prose
+        // called `book.epub` is text and the map has to agree.
+        Some("epub"),
+        // And for task 12's. A docx is decided by the zip signature plus
+        // `word/document.xml`, so prose called `угода.docx` is text — and
+        // `docm`, which this build reads with the same reader, is not in the map
+        // either and for the same reason.
+        Some("docx"),
+        Some("docm"),
+        // And for task 13's. A workbook is decided by the zip signature plus
+        // `xl/workbook.xml`, so prose called `кошторис.xlsx` is text — and
+        // `xlsm`, which this build reads with the same reader, is not in the map
+        // either and for the same reason.
+        Some("xlsx"),
+        Some("xlsm"),
+    ] {
+        let picked = mnema_extract::typing::identify(bytes, ext);
+        assert_eq!(
+            reader_name(picked.reader),
+            manifest.default.reader,
+            "identify sends {ext:?} to {:?}, which the manifest does not list",
+            picked.reader
+        );
+        assert_eq!(manifest.for_extension(ext), &manifest.default);
+    }
+}
+
+/// The name a reader goes by on the wire. A `match` rather than a `Debug`
+/// string: `Frame::Header::reader` is a stored value that outlives the
+/// enum's spelling, and renaming a variant must not silently rewrite what
+/// every indexed document claims produced it.
+fn reader_name(reader: mnema_extract::typing::Reader) -> &'static str {
+    use mnema_extract::typing::Reader;
+    match reader {
+        Reader::PlainText => "text",
+        Reader::Markdown => "markdown",
+        // The constant, not `"pdf"`. This is one of the three places the name
+        // is written, and the only one on the reading side: `mnema-ingest`
+        // matches the same constant to give a PDF chunk a page number, and no
+        // compiler joins the two across D40.
+        Reader::Pdf => mnema_core::manifest::READER_PDF,
+        // The constant again, and this is the third of the three places the
+        // html name is written: the header the worker sends, the manifest, and
+        // here. A literal `"html"` in this arm would leave the constant with
+        // two users out of three and remove the cross-check it exists for —
+        // `mnema-ingest` matches the same constant to cite an HTML chunk by its
+        // section, and no compiler joins the two across D40.
+        Reader::Html => mnema_core::manifest::READER_HTML,
+        // The constant a fourth time, and the reason it is one symbol is
+        // sharper here than for html: `mnema-ingest` matches `READER_EPUB` to
+        // cite a chapter as `Coordinate::Section`
+        // (`crates/mnema-ingest/src/lib.rs:1392`), and a literal `"epub"` in
+        // this arm would leave the constant with two users out of three and
+        // remove the cross-check it exists for. No compiler joins the two
+        // across D40.
+        Reader::Epub => mnema_core::manifest::READER_EPUB,
+        // The constant a fifth time. `mnema-ingest` matches `READER_DOCX` in the
+        // same arm as `READER_HTML` and `READER_EPUB`
+        // (`crates/mnema-ingest/src/lib.rs:1392`) to cite a section, so a
+        // literal `"docx"` here would leave the constant with two users out of
+        // three and remove the cross-check it exists for. No compiler joins the
+        // two across D40.
+        Reader::Docx => mnema_core::manifest::READER_DOCX,
+        // The constant a sixth time, and the cost of a literal here is worse
+        // than for any of the five above. `mnema-ingest` matches `READER_XLSX`
+        // in an arm of its own (`crates/mnema-ingest/src/lib.rs:1403`) to reach
+        // `PageContext::Rows`; a near-miss falls to `PageContext::Lines`, and
+        // unlike a docx's these blocks *do* carry line numbers — so nothing is
+        // empty and nothing goes red, and every citation into a spreadsheet
+        // becomes "рядки 10–20" with no sheet named on it.
+        Reader::Xlsx => mnema_core::manifest::READER_XLSX,
+        other => panic!("a reader with no name on the wire yet: {other:?}"),
+    }
+}
+
+/// **A PDF is decided by content, so it is absent from the manifest — and that
+/// absence has a bill.**
+///
+/// The three facts are asserted together because separately each looks fine.
+/// `identify` gives real PDF bytes to the pdf reader whatever the file is
+/// called; the manifest predicts by extension and has no `pdf` entry, so it
+/// predicts the *text* reader for `report.pdf`; and the parent's cheap arm
+/// compares the two (`crates/mnema-ingest/src/lib.rs:274-280`). Every real PDF
+/// therefore misses that arm on every walk and is handed to a worker again —
+/// which for this format is a full pdfium parse, serialised process-wide,
+/// rather than a text read.
+///
+/// It is not a defect to fix here. An entry `pdf → pdf@1` would be a false
+/// claim about `identify` — the loop above proves prose named `notes.pdf` is
+/// read as text — and would cost that file the same re-read in the other
+/// direction. What closes it is a stored prediction per path or a manifest that
+/// can say "chosen by content", both of them decisions of their own. This test
+/// exists so the cost is written down where someone changing the map will meet
+/// it, rather than measured a third time.
+#[test]
+fn a_pdf_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
+    let pdf = std::fs::read("tests/fixtures/one-page-text.pdf").expect("the fixture is on disk");
+    let manifest = mnema_extract::manifest::manifest();
+
+    // Under its own name, and under a name that lies about it: content decides,
+    // so both are the pdf reader.
+    for ext in [Some("pdf"), Some("md"), None] {
+        assert_eq!(
+            reader_name(mnema_extract::typing::identify(&pdf, ext).reader),
+            mnema_core::manifest::READER_PDF,
+            "{ext:?} named a PDF's bytes something other than the pdf reader"
+        );
+    }
+
+    // And the manifest predicts none of that, because it cannot.
+    assert!(!manifest.by_extension.contains_key("pdf"));
+    assert_eq!(manifest.for_extension(Some("pdf")), &manifest.default);
+    assert_ne!(
+        manifest.for_extension(Some("pdf")).reader,
+        mnema_core::manifest::READER_PDF,
+        "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+    );
+}
+
+/// **An EPUB is decided by content too, so it carries the same bill as a PDF —
+/// and unlike a PDF, it looks as though it should not.**
+///
+/// `.epub` is an extension nothing else uses, so an entry `epub → epub@1` reads
+/// as obviously correct and is not: `identify` reaches the epub reader through
+/// magic bytes and the archive's uncompressed `mimetype` entry
+/// (`src/typing.rs:312-330`), never through the name. A text file called
+/// `notes.epub` is read by the text reader, and a real book called `book.zip` is
+/// read by the epub one. Either entry in the map would be a false claim about
+/// `identify` in one of those two directions.
+///
+/// What the absence costs is what it costs for PDF: every real `.epub` records
+/// `epub@1`, is predicted `text@1` by the cheap arm
+/// (`crates/mnema-ingest/src/lib.rs:274-280`), and is handed to a worker on
+/// every walk. For this format that is a zip open and one HTML parse per
+/// chapter, not a text read.
+#[test]
+fn an_epub_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
+    let epub = minimal_epub();
+    let manifest = mnema_extract::manifest::manifest();
+
+    // Under its own name, under a name that lies about it, and under none:
+    // content decides all three.
+    for ext in [Some("epub"), Some("zip"), None] {
+        assert_eq!(
+            reader_name(mnema_extract::typing::identify(&epub, ext).reader),
+            mnema_core::manifest::READER_EPUB,
+            "{ext:?} named a book's bytes something other than the epub reader"
+        );
+    }
+
+    // And the map predicts none of it, because it cannot.
+    assert!(!manifest.by_extension.contains_key("epub"));
+    assert_eq!(manifest.for_extension(Some("epub")), &manifest.default);
+    assert_ne!(
+        manifest.for_extension(Some("epub")).reader,
+        mnema_core::manifest::READER_EPUB,
+        "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+    );
+}
+
+/// **A DOCX carries the same bill, and it is the entry that looks most obviously
+/// right of the three.**
+///
+/// `.docx` names one format and nothing else uses it, so `docx → docx@1` reads
+/// as a fact rather than a claim. It is a claim, and a false one in both
+/// directions: `identify` reaches this reader through the zip signature plus
+/// `word/document.xml` (`src/typing.rs:285`), so a text file called `угода.docx`
+/// is read by the *text* reader, and a real document called `угода.zip` is read
+/// by the docx one.
+///
+/// **`.docm` is the sharper half.** This build reads a macro-enabled document
+/// with the same reader — the macro is a member of the archive nothing here
+/// opens, and `word/document.xml` inside a `.docm` is the same part. An entry
+/// for it would be as wrong as one for `.docx`, and its absence costs the same
+/// re-read per walk.
+#[test]
+fn a_docx_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
+    let docx = minimal_docx();
+    let manifest = mnema_extract::manifest::manifest();
+
+    // Under its own name, under the macro-enabled one, under a name that lies
+    // about it, and under none: content decides all four.
+    for ext in [Some("docx"), Some("docm"), Some("zip"), None] {
+        assert_eq!(
+            reader_name(mnema_extract::typing::identify(&docx, ext).reader),
+            mnema_core::manifest::READER_DOCX,
+            "{ext:?} named a document's bytes something other than the docx reader"
+        );
+    }
+
+    // And the map predicts none of it, because it cannot.
+    for ext in ["docx", "docm"] {
+        assert!(!manifest.by_extension.contains_key(ext));
+        assert_eq!(manifest.for_extension(Some(ext)), &manifest.default);
+        assert_ne!(
+            manifest.for_extension(Some(ext)).reader,
+            mnema_core::manifest::READER_DOCX,
+            "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+        );
+    }
+}
+
+/// The same claim for the spreadsheet reader, and **`.xlsm` is the sharper
+/// half** — the shape Task 12 measured for `.docm`, one format over.
+///
+/// A macro-enabled workbook is read by this reader because `xl/workbook.xml`
+/// inside an `.xlsm` is the same part; the macro is a member of the archive
+/// nothing here opens. So the extension never enters the decision at all, in
+/// either direction: a text file called `кошторис.xlsx` is read by the text
+/// reader, and a real workbook called `кошторис.zip` is read by this one.
+#[test]
+fn an_xlsx_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
+    let xlsx = minimal_xlsx();
+    let manifest = mnema_extract::manifest::manifest();
+
+    for ext in [Some("xlsx"), Some("xlsm"), Some("zip"), None] {
+        assert_eq!(
+            reader_name(mnema_extract::typing::identify(&xlsx, ext).reader),
+            mnema_core::manifest::READER_XLSX,
+            "{ext:?} named a workbook's bytes something other than the xlsx reader"
+        );
+    }
+
+    for ext in ["xlsx", "xlsm"] {
+        assert!(!manifest.by_extension.contains_key(ext));
+        assert_eq!(manifest.for_extension(Some(ext)), &manifest.default);
+        assert_ne!(
+            manifest.for_extension(Some(ext)).reader,
+            mnema_core::manifest::READER_XLSX,
+            "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+        );
+    }
+}
+
+/// The one thing `typing::identify_zip` checks for an xlsx: a zip holding
+/// `xl/workbook.xml`.
+fn minimal_xlsx() -> Vec<u8> {
+    use std::io::{Cursor, Write};
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("xl/workbook.xml", deflated).unwrap();
+        w.write_all(b"<workbook><sheets/></workbook>").unwrap();
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+/// The one thing `typing::identify_zip` checks for a docx: a zip holding
+/// `word/document.xml`.
+fn minimal_docx() -> Vec<u8> {
+    use std::io::{Cursor, Write};
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("word/document.xml", deflated).unwrap();
+        w.write_all(b"<w:document><w:body/></w:document>").unwrap();
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+/// The three things `typing::is_epub` checks and nothing more: a first entry
+/// named `mimetype`, stored uncompressed, holding exactly the media type.
+fn minimal_epub() -> Vec<u8> {
+    use std::io::{Cursor, Write};
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let stored: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        w.start_file("mimetype", stored).unwrap();
+        w.write_all(b"application/epub+zip").unwrap();
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}

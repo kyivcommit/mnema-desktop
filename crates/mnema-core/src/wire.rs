@@ -58,6 +58,18 @@ pub enum Frame {
         sha256: String,
         mime: String,
         source_kind: SourceKind,
+        /// Which reader produced the frames that follow, and which version of
+        /// it. Stated by the worker rather than derived by the parent: the
+        /// parent may not link the crate that holds the readers (D40), and the
+        /// answer has to survive the process boundary anyway.
+        ///
+        /// It is the reader that actually ran, not the one
+        /// `manifest::for_extension` predicts — the two agree today, and the
+        /// day they stop, this field is the one that is true. The manifest
+        /// answers "would this file be read differently now"; this answers
+        /// "how was it read".
+        reader: String,
+        reader_version: u32,
         pages: u32,
     },
     /// Opens a page. Every `Block` after it belongs to this page, until the
@@ -78,31 +90,41 @@ pub enum Frame {
     /// needs its `page` row.
     ///
     /// `page_no` is the reader's own numbering, not a counter of these frames:
-    /// a reader that skips a page (`Summary::skipped_pages`) leaves a gap
-    /// here, and the gap is the honest record of it.
+    /// a reader that skips a page (`Summary::skipped_pages` names it) leaves a
+    /// gap here, and the gap is the honest record of it.
     Page {
         page_no: u32,
         section_title: Option<String>,
     },
     /// One source block, in reading order within its page.
     Block(Block),
-    /// Sent once, after the last block. `skipped_pages` counts pages a reader
-    /// dropped mid-document (a scanned PDF page with no text layer, say) —
-    /// zero for every format that cannot skip a page. `text_source` matches
+    /// Sent once, after the last block. `skipped_pages` **names** the pages a
+    /// reader dropped mid-document (a scanned PDF page with no text layer,
+    /// say) — empty for every format that cannot skip a page, and disjoint
+    /// from the `Page` frames that arrived. `text_source` matches
     /// `page.text_source`'s vocabulary (`schema.sql:101-102`); a document
     /// with several pages of different sources is not representable by this
     /// one field, which is fine for the readers this task ships (txt is
     /// always `native:txt`) and is a known limit for whoever adds a
     /// multi-page-source-family reader later.
+    ///
+    /// Numbers rather than a count, because the behaviour requirements ask for
+    /// a journal row per skipped page and a count cannot say which page of the
+    /// contract the scanner missed. The count is `skipped_pages.len()` and is
+    /// **not** carried beside them, for the reason `mnema_pool::Document`
+    /// gives for not keeping the header's page count: two numbers that can
+    /// disagree leave a caller free to trust the wrong one.
     Summary {
-        skipped_pages: u32,
+        skipped_pages: Vec<u32>,
         text_source: String,
     },
     /// The worker looked at the file (or its metadata) and declined to read
-    /// it: today, either its size exceeds the request's `max_bytes` ceiling
-    /// — checked from `stat`, before a byte is loaded — or
-    /// `typing::identify` named a `Reader` this crate does not implement yet
-    /// (`Pdf`, `Docx`, `Xlsx`, `Epub`, or `Reader::Unrecognized` itself).
+    /// it: its size exceeds the request's `max_bytes` ceiling — checked from
+    /// `stat`, before a byte is loaded — or `typing::identify` named a
+    /// `Reader` that crate does not implement yet (`Docx`, `Xlsx`, `Epub`, or
+    /// `Reader::Unrecognized` itself), or a reader ran and refused what it
+    /// found: bytes that are not text, a text file with a binary tail, a PDF
+    /// that is damaged, locked, or carries no text layer on any page.
     ///
     /// `rule` is a plain string rather than `mnema_index::SkipRule`
     /// on purpose: neither this crate nor `mnema-extract` may depend on
@@ -143,17 +165,40 @@ pub enum Frame {
         #[serde(default)]
         sha256: Option<String>,
     },
-    /// The worker could not even obtain the file's bytes to classify: the
-    /// path does not exist, is not a regular file (a directory, say), could
-    /// not be read for permissions, or — the request line itself — was not
-    /// valid JSON. Distinct from `Refused`: a refusal is a decision about
-    /// content the worker did manage to look at, a `Failed` is the world not
-    /// matching what the request claimed.
+    /// The worker could not carry out the request, having learned nothing
+    /// about the file's content in the attempt. Usually because it could not
+    /// obtain the bytes to classify: the path does not exist, is not a regular
+    /// file (a directory, say), could not be read for permissions, or — the
+    /// request line itself — was not valid JSON.
+    ///
+    /// **Also when the reader the file needs could not be brought up at all**,
+    /// which is not a fact about the file and must not be reported as one. A
+    /// dynamic library that is missing, is the wrong build, or is refused by
+    /// code signing (`crates/mnema-extract/src/pdfium_probe.rs` splits those
+    /// three) leaves the worker with bytes it cannot say anything about. The
+    /// alternative — folding it into a content rule — is the failure
+    /// `SkipRule::Malformed`'s own doc comment is written to forbid: every PDF
+    /// journalled as damaged by a walk that reports success, and the rows
+    /// outliving the repair.
+    ///
+    /// Distinct from `Refused`: a refusal is a decision about content the
+    /// worker did manage to look at, a `Failed` is the world not matching what
+    /// the request claimed. That line is what the two have in common across
+    /// both cases above — neither says anything about what is *in* the file,
+    /// which is why both are safe to retry and neither may remove a document.
+    ///
+    /// `message` is the only place the difference survives: the rule this maps
+    /// onto cannot distinguish them, and the reason column can. A worker in
+    /// this state should say which library and why.
     ///
     /// `mnema_index::SkipRule::Unreadable` is the rule this maps
     /// onto; `mnema_pool::Failure` performs the mapping and its doc comment
     /// carries the reasoning. That variant did not exist while task 7 was
     /// written, which is why this comment once said the case had no home.
+    ///
+    /// The rule is **wider than this frame** and should not be read back as its
+    /// definition: three of the ways into it never involve a worker at all, so
+    /// they cannot arrive as a frame. Its own variant enumerates them.
     Failed { message: String },
 }
 
@@ -212,6 +257,8 @@ mod tests {
             sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85".to_string(),
             mime: "text/plain".to_string(),
             source_kind: SourceKind::Document,
+            reader: "text".to_string(),
+            reader_version: 1,
             pages: 1,
         }
     }
@@ -244,9 +291,12 @@ mod tests {
         })
     }
 
+    /// Two skipped pages, not none: an empty vector round-trips through a
+    /// serialiser that drops the field entirely, so a fixture others copy has
+    /// to carry numbers for the round-trip test to be asking anything.
     fn sample_summary() -> Frame {
         Frame::Summary {
-            skipped_pages: 0,
+            skipped_pages: vec![2, 5],
             text_source: "native:txt".to_string(),
         }
     }
@@ -319,6 +369,107 @@ mod tests {
                 rule: "not_text".to_string(),
                 reason: "not text".to_string(),
                 sha256: Some("abc123".to_string()),
+            }
+        );
+    }
+
+    /// The opposite decision to the one above, on purpose, and worth stating
+    /// next to it: a header from a worker that predates `reader` does **not**
+    /// parse. No `#[serde(default)]`.
+    ///
+    /// `Refused::sha256` defaults because `None` is a real answer there — the
+    /// size ceiling refuses from `stat` and there is no digest to send. There
+    /// is no such thing as a document produced by no reader, so a default here
+    /// could only be a placeholder, and a placeholder is worse than a stop:
+    /// every file such a worker read would be recorded as made by the empty
+    /// reader at version 0, which never matches any manifest, so every one of
+    /// them would be re-read on every run for ever. A `PoolError::Protocol`
+    /// stops the job instead and names the mismatch — the same answer this
+    /// crate's parent already gives an unknown `Refused` rule, and for the
+    /// same reason.
+    #[test]
+    fn a_header_from_a_worker_that_predates_the_reader_field_is_a_protocol_error() {
+        let old = r#"{"frame":"header","sha256":"abc","mime":"text/plain","source_kind":"document","pages":1}"#;
+        let error = from_line(old).expect_err("a header with no reader must not parse");
+        assert!(
+            error.to_string().contains("reader"),
+            "the error must name the missing field, got: {error}"
+        );
+
+        // The other direction: a header that carries the fields keeps their
+        // values rather than any default. Without this, an implementation that
+        // rejected every header would pass the assertion above.
+        let new = r#"{"frame":"header","sha256":"abc","mime":"text/markdown","source_kind":"document","reader":"markdown","reader_version":4,"pages":2}"#;
+        assert_eq!(
+            from_line(new).unwrap(),
+            Frame::Header {
+                sha256: "abc".to_string(),
+                mime: "text/markdown".to_string(),
+                source_kind: SourceKind::Document,
+                reader: "markdown".to_string(),
+                reader_version: 4,
+                pages: 2,
+            }
+        );
+    }
+
+    /// The same decision one frame further on, and the one this cycle made:
+    /// `Summary::skipped_pages` became a **list of page numbers** where it used
+    /// to be a count, so a summary from a worker built before that does not
+    /// parse either.
+    ///
+    /// It is written down here because it is the whole of what protects the
+    /// index from a mismatched sidecar, and nothing else in the tree says it.
+    /// `INDEX_FORMAT_VERSION` does not: that lever forces files to be looked at
+    /// again and never compares one binary against another.
+    /// `scripts/verify-bundle.sh` does not either — it proves the file
+    /// `externalBin` would copy is the one cargo built, and states in its own
+    /// comments that identity with the bytes inside a given image cannot be had,
+    /// because the bundler re-signs the sidecar in place. So the guarantee that
+    /// a packaged worker and its application are one build is an argument about
+    /// packaging, and this is the check that says what happens when the argument
+    /// is wrong.
+    ///
+    /// The answer is deliberately loud rather than quiet: the line does not
+    /// parse, `mnema_pool` turns that into `PoolError::Protocol`, and an `Err`
+    /// stops the whole job — which
+    /// `a_line_that_is_not_a_frame_stops_the_job`
+    /// (`crates/mnema-pool/tests/supervision.rs`) pins end to end for any
+    /// unparseable line, this one included. A mismatched binary reported as one
+    /// bad file, ten thousand times, is the failure that shape avoids.
+    #[test]
+    fn a_summary_that_counted_skipped_pages_is_a_protocol_error() {
+        let old = r#"{"frame":"summary","skipped_pages":0,"text_source":"native:txt"}"#;
+        let error = from_line(old).expect_err("a counted summary must not parse");
+        // **The message does not name the field, and that was measured rather
+        // than assumed.** The sibling test above asserts the error contains
+        // `reader`, because serde names a field that is *missing*; a field whose
+        // *type* moved produces `invalid type: integer 0, expected a sequence`
+        // with no field in it, since `from_line` is a plain `from_str` with no
+        // path tracking. Asserting on the field name here passed review and
+        // failed the run.
+        //
+        // What keeps the failure diagnosable is one layer up:
+        // `PoolError::Protocol` renders as "the two binaries do not match" and
+        // carries the offending line verbatim (`crates/mnema-pool/src/lib.rs`),
+        // so `"skipped_pages":0` is in front of whoever reads the error even
+        // though this message has no room for it.
+        assert!(
+            error.to_string().contains("expected a sequence"),
+            "a count where a list belongs must be refused as the wrong shape, got: {error}"
+        );
+
+        // The other direction, without which an implementation that rejected
+        // every summary — or one that accepted the old shape and threw the
+        // numbers away — would satisfy the assertion above. The numbers have to
+        // arrive, and arrive as themselves: they are what the journal writes a
+        // row per page from.
+        let new = r#"{"frame":"summary","skipped_pages":[2,5],"text_source":"native:txt"}"#;
+        assert_eq!(
+            from_line(new).unwrap(),
+            Frame::Summary {
+                skipped_pages: vec![2, 5],
+                text_source: "native:txt".to_string(),
             }
         );
     }

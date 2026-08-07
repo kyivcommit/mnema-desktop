@@ -15,12 +15,78 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
+use mnema_extract::manifest;
 use mnema_extract::typing::{Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
-use mnema_extract::{extract_markdown, extract_text};
+use mnema_extract::{
+    DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, XlsxError, extract_docx, extract_epub,
+    extract_html, extract_markdown, extract_pdf, extract_text, extract_xlsx,
+};
 use sha2::{Digest, Sha256};
 
 fn main() {
+    // A diagnostic branch, not part of the NDJSON protocol: it answers one
+    // question — does this build load Pdfium from where it is installed — and
+    // exits (D53, D54).
+    //
+    // It was written when no reader called the library, so the wire could not
+    // be asked at all. The wire can be asked now: send a PDF and a bundle
+    // whose library will not load answers `Frame::Failed`. The flag stays
+    // because the two answers are not the same one. This branch needs no
+    // readable PDF and no file the caller had to bring, and it names *which*
+    // of the three loading stages failed — while the wire's answer is a
+    // sentence about one file, from a run that had to have a file to send.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 3 && args[1] == "--probe-pdfium" {
+        let line = match mnema_extract::probe_text_layer(Path::new(&args[2])) {
+            // `library_dir` is the directory the library was loaded FROM, and
+            // it is here because "loaded" alone cannot tell a packaged build
+            // apart from one that reached into the developer's checkout. That
+            // is not hypothetical: this repository's own signed bundle did it,
+            // and only a code-signing refusal made it visible. It is read by
+            // `scripts/verify-bundle.sh`, which compares it against the image
+            // it has mounted — see `mnema_extract::loaded_library_dir` for what
+            // the path is and is not.
+            Ok(probes) => format!(
+                "{{\"loaded\":true,\"pages\":{},\"stage\":\"ok\",\"library_dir\":{}}}",
+                probes.len(),
+                serde_json::to_string(
+                    &mnema_extract::loaded_library_dir()
+                        .expect("the library that just read a page is loaded")
+                        .display()
+                        .to_string()
+                )
+                .expect("a string serialises")
+            ),
+            // `stage` names which of library_dir/verify_build/bind failed,
+            // separately from `error`'s free text: those three collapse onto
+            // the same `loaded:false` and a caller reading only the boolean
+            // cannot tell "the library is not where expected" apart from
+            // "code signing refused to load it" — see `Stage`'s own doc for
+            // why that gap is not hypothetical.
+            Err(e) => format!(
+                "{{\"loaded\":false,\"stage\":{},\"error\":{}}}",
+                serde_json::to_string(e.stage()).expect("a string serialises"),
+                serde_json::to_string(&e.to_string()).expect("a string serialises")
+            ),
+        };
+        println!("{line}");
+        return;
+    }
+
+    // The second diagnostic branch, and the one the application actually calls
+    // on every run: it prints what this build's readers are and exits. Not part
+    // of the NDJSON protocol either — the parent needs the answer *before* it
+    // decides which files to send, and it may not link this crate to read the
+    // constants directly (D40). See `mnema_core::manifest`.
+    if args.len() == 2 && args[1] == "--manifest" {
+        println!(
+            "{}",
+            serde_json::to_string(&manifest::manifest()).expect("the manifest serialises")
+        );
+        return;
+    }
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -143,6 +209,12 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256,
                 mime: file_type.mime.to_string(),
                 source_kind: file_type.source_kind,
+                // Named in the branch that ran, not looked up from the
+                // manifest by extension: this is the record of how the file
+                // *was* read, and a lookup here would make the two agree by
+                // construction and hide the day they stop agreeing.
+                reader: "text".to_string(),
+                reader_version: manifest::TEXT_READER_VERSION,
                 pages: 1,
             });
             // One page, always, even for an empty file with no blocks under
@@ -155,7 +227,9 @@ fn handle_request(line: &str) -> Vec<Frame> {
             });
             frames.extend(blocks.into_iter().map(Frame::Block));
             frames.push(Frame::Summary {
-                skipped_pages: 0,
+                // Empty, not absent: a format with one page has no page it
+                // could drop, and the field says so rather than being optional.
+                skipped_pages: Vec::new(),
                 text_source: "native:txt".to_string(),
             });
             frames
@@ -168,6 +242,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256,
                 mime: file_type.mime.to_string(),
                 source_kind: file_type.source_kind,
+                reader: "markdown".to_string(),
+                reader_version: manifest::MARKDOWN_READER_VERSION,
                 // The count the pool checks the page frames against, so it is
                 // taken from the same vector those frames come from rather
                 // than counted a second way.
@@ -181,13 +257,59 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 frames.extend(page.blocks.into_iter().map(Frame::Block));
             }
             frames.push(Frame::Summary {
-                skipped_pages: 0,
+                // Markdown drops no page: `extract_markdown` makes one per
+                // heading and keeps every one it makes.
+                skipped_pages: Vec::new(),
                 // `native:md` satisfies `page.text_source`'s CHECK
                 // (`crates/mnema-index/src/schema.sql:101-102`) and names the
                 // reader rather than the file: text that came out of a
                 // markdown parse is not the same evidence as text that came
                 // out of a plain-text read, even for the same bytes.
                 text_source: "native:md".to_string(),
+            });
+            frames
+        }
+        Reader::Html => {
+            let pages = extract_html(&bytes);
+            let blocks: usize = pages.iter().map(|page| page.blocks.len()).sum();
+            let mut frames = Vec::with_capacity(blocks + pages.len() + 2);
+            frames.push(Frame::Header {
+                sha256,
+                mime: file_type.mime.to_string(),
+                source_kind: file_type.source_kind,
+                // The constant, and `pages_of` matches the **same constant**
+                // (`crates/mnema-ingest/src/lib.rs:1333`) rather than a literal
+                // — so a typo here is not the risk, and saying it was would be
+                // an unchecked claim about the other side of D40. What the two
+                // ends really are is one symbol with a process boundary between
+                // them, and what can still put a different string on the wire
+                // is a *different build* of this binary answering a parent that
+                // expects this one. Whichever way it happens, the parent falls
+                // to `PageContext::Lines`, asks blocks that carry no line
+                // numbers for a line range, and answers `Coordinate::None`: a
+                // citation with no coordinate, silently, everything else green.
+                reader: manifest::READER_HTML.to_string(),
+                reader_version: manifest::HTML_READER_VERSION,
+                // From the same vector the Page frames come from, so the pool's
+                // count check cannot disagree with itself.
+                pages: pages.len() as u32,
+            });
+            for page in pages {
+                frames.push(Frame::Page {
+                    page_no: page.page_no,
+                    // Unlike a PDF's, an HTML page *is* a section, and this is
+                    // the whole of what a citation into it points at.
+                    section_title: page.section_title,
+                });
+                frames.extend(page.blocks.into_iter().map(Frame::Block));
+            }
+            frames.push(Frame::Summary {
+                // Empty, not absent: this reader cannot skip a page. It makes
+                // one per section and keeps every one it makes, so a number
+                // here would name a page that was also sent — which the pool
+                // reads as a mismatched worker binary and stops the job for.
+                skipped_pages: Vec::new(),
+                text_source: "native:html".to_string(),
             });
             frames
         }
@@ -221,12 +343,318 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256: Some(sha256),
             }]
         }
-        // None of these five formats has a `Vec<Block>` reader in this crate
-        // yet — task 6 shipped only plain text, and `pdfium_probe` proves the
-        // binding links without deciding what a page's text *is* (its own
-        // doc comment). Reporting them alike as "unsupported" is honestly
-        // what is true today: this worker can read text and nothing else.
-        Reader::Pdf | Reader::Docx | Reader::Xlsx | Reader::Epub | Reader::Unrecognized => {
+        Reader::Pdf => match extract_pdf(&bytes) {
+            // Every page was below the text-layer threshold, so there is no
+            // document to build — but the file *was* read, and this says so
+            // under a rule about content rather than under `unsupported`,
+            // which promises a reader that is coming. `SkipRule::NoTextLayer`
+            // is what the parent records.
+            Ok(doc) if doc.pages.is_empty() => vec![Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: format!(
+                    "no page of this PDF carries a text layer of at least \
+                     {TEXT_LAYER_MIN_CHARS} characters"
+                ),
+                sha256: Some(sha256),
+            }],
+            Ok(doc) => {
+                let blocks: usize = doc.pages.iter().map(|p| p.blocks.len()).sum();
+                let mut frames = Vec::with_capacity(blocks + doc.pages.len() + 2);
+                frames.push(Frame::Header {
+                    sha256,
+                    mime: file_type.mime.to_string(),
+                    source_kind: file_type.source_kind,
+                    // The constant, not the literal `"pdf"`. `pages_of` on the
+                    // other side of the wire picks a PDF chunk's coordinate by
+                    // this exact string and may not link this crate (D40), so
+                    // a typo here would cost every PDF citation its page
+                    // number and nothing would go red.
+                    reader: manifest::READER_PDF.to_string(),
+                    reader_version: manifest::PDF_READER_VERSION,
+                    // From the same vector the Page frames come from, so the
+                    // pool's count check cannot disagree with itself. Skipped
+                    // pages are NOT in this number: they produce no Page frame
+                    // and are named by `skipped_pages` instead.
+                    pages: doc.pages.len() as u32,
+                });
+                for page in doc.pages {
+                    frames.push(Frame::Page {
+                        page_no: page.page_no,
+                        // A PDF page is not a section. `pages_of` gives this
+                        // reader `Coordinate::Page`, which is what a citation
+                        // into a PDF points at.
+                        section_title: None,
+                    });
+                    frames.extend(page.blocks.into_iter().map(Frame::Block));
+                }
+                frames.push(Frame::Summary {
+                    // The numbers, not their count. This reader is the only
+                    // thing in the product that ever knows *which* page of a
+                    // contract the scanner missed, and the parent owes a
+                    // journal row per page — which a count cannot fill in.
+                    skipped_pages: doc.skipped,
+                    text_source: "native:pdf".to_string(),
+                });
+                frames
+            }
+            Err(PdfError::Encrypted) => vec![Frame::Refused {
+                rule: "encrypted".to_string(),
+                reason: "this PDF is password-protected".to_string(),
+                sha256: Some(sha256),
+            }],
+            // A reader that could not load its own library is NOT a damaged
+            // file, and this arm must not swallow it. Under `malformed` the
+            // walk would not stop (`suggests_broken_environment() == false`)
+            // and the verdict would outlive the repair
+            // (`is_about_content() == true`): every PDF in a folder journalled
+            // as damaged by a green walk, and a fixed install returning
+            // nothing. `crates/mnema-pool/src/lib.rs:300-303` names exactly
+            // that outcome, and a quarantined `libpdfium.dylib` has already
+            // happened on this machine.
+            Err(PdfError::Library(e)) => vec![Frame::Failed {
+                message: format!("pdfium could not be loaded: {e}"),
+            }],
+            // Bound to the one remaining variant rather than written as a
+            // catch-all `Err(e)`. A catch-all is how a later variant — a
+            // timeout, a page limit — would arrive silently as "this file is
+            // damaged", which is the mistake the arm above exists to undo.
+            Err(e @ PdfError::Malformed(_)) => vec![Frame::Refused {
+                rule: "malformed".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+        },
+        // **The first reader that opens an archive, so the mapping from zip
+        // failures to refusal rules is declared here and repeated by docx and
+        // xlsx.** Three errors, three rules, and every one of them reachable —
+        // there is deliberately no arm for "a chapter is missing", because a
+        // chapter the spine names and the archive does not hold is skipped by
+        // number inside `extract_epub` and never reaches this match. Refusing
+        // the file there would take a whole book out of the index over one
+        // broken link (`epub.rs`'s module doc).
+        Reader::Epub => match extract_epub(&bytes) {
+            Ok(book) => {
+                let blocks: usize = book.chapters.iter().map(|c| c.blocks.len()).sum();
+                let mut frames = Vec::with_capacity(blocks + book.chapters.len() + 2);
+                frames.push(Frame::Header {
+                    sha256,
+                    mime: file_type.mime.to_string(),
+                    source_kind: file_type.source_kind,
+                    // The constant, not the literal `"epub"`. `pages_of` on the
+                    // other side of the wire cites an epub chunk by this exact
+                    // string and may not link this crate (D40), so a typo here
+                    // costs every citation into a book its section name and
+                    // nothing goes red.
+                    reader: manifest::READER_EPUB.to_string(),
+                    reader_version: manifest::EPUB_READER_VERSION,
+                    // From the same vector the Page frames come from, so the
+                    // pool's count check cannot disagree with itself. Skipped
+                    // chapters are NOT in this number: they produce no Page
+                    // frame and are named by `skipped_pages` instead.
+                    pages: book.chapters.len() as u32,
+                });
+                for chapter in book.chapters {
+                    frames.push(Frame::Page {
+                        page_no: chapter.page_no,
+                        // A chapter *is* a section, as an HTML page is, and it
+                        // is the whole of what a citation into a book points
+                        // at.
+                        section_title: chapter.section_title,
+                    });
+                    frames.extend(chapter.blocks.into_iter().map(Frame::Block));
+                }
+                frames.push(Frame::Summary {
+                    // The numbers, not their count: the parent owes a journal
+                    // row per skipped chapter, and a count cannot fill one in.
+                    // Disjoint from the page frames above by construction —
+                    // the pool stops the whole job over a number in both.
+                    skipped_pages: book.skipped,
+                    text_source: "native:epub".to_string(),
+                });
+                frames
+            }
+            // The cap on what one member inflates to, which is **not** the
+            // `max_bytes` from the request — the file passed that from `stat`.
+            // The same rule string all the same, because it is the same answer
+            // to the person holding it ("too big for us"), and because
+            // `SkipRule::TooLarge` is the one refusal that must not displace a
+            // document on a digest it never computed.
+            // **`e.to_string()` in every arm, including the two that carry no
+            // data.** Both used to restate their type's `#[error]` message as a
+            // literal here, so the sentence a person is shown lived in two
+            // places that no compiler and no test joins — `worker_cli.rs` binds
+            // `reason: _` on every refusal it checks. Task 13 added a third
+            // reader to this match and reduced all three rather than leaving one
+            // idiom beside another in one `match`.
+            Err(e @ EpubError::TooLarge) => vec![Frame::Refused {
+                rule: "too_large".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+            Err(e @ EpubError::NoReadableChapter) => vec![Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+            // Bound to the one remaining variant rather than to a catch-all
+            // `Err(e)`, for the reason the pdf branch states: a catch-all is
+            // how a later variant arrives silently as "this file is damaged".
+            Err(e @ EpubError::Malformed(_)) => vec![Frame::Refused {
+                rule: "malformed".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+        },
+        // The second format that opens an archive, and it takes the mapping
+        // `epub.rs` declared rather than restating it: `TooLarge` → `too_large`,
+        // `Malformed` → `malformed`, and no arm at all for a member that is
+        // simply not there. The difference from a book is which member that is
+        // — `word/document.xml` absent is damage, `word/styles.xml` absent is an
+        // ordinary document, and `extract_docx` settles both before this match.
+        Reader::Docx => match extract_docx(&bytes) {
+            Ok(sections) => {
+                let blocks: usize = sections.iter().map(|s| s.blocks.len()).sum();
+                let mut frames = Vec::with_capacity(blocks + sections.len() + 2);
+                frames.push(Frame::Header {
+                    sha256,
+                    mime: file_type.mime.to_string(),
+                    source_kind: file_type.source_kind,
+                    // The constant, not the literal `"docx"`. `pages_of` on the
+                    // other side of the wire cites a docx chunk by this exact
+                    // string (`crates/mnema-ingest/src/lib.rs:1392`) and may not
+                    // link this crate (D40), so a typo here costs every citation
+                    // into a document its section name and nothing goes red.
+                    reader: manifest::READER_DOCX.to_string(),
+                    reader_version: manifest::DOCX_READER_VERSION,
+                    // From the same vector the Page frames come from, so the
+                    // pool's count check cannot disagree with itself.
+                    pages: sections.len() as u32,
+                });
+                for section in sections {
+                    frames.push(Frame::Page {
+                        page_no: section.page_no,
+                        // A docx section *is* a section, as an HTML page and an
+                        // EPUB chapter are, and it is the whole of what a
+                        // citation into a document points at.
+                        section_title: section.section_title,
+                    });
+                    frames.extend(section.blocks.into_iter().map(Frame::Block));
+                }
+                frames.push(Frame::Summary {
+                    // Empty, not absent: this reader cannot skip a page. It
+                    // makes one per section and keeps every one it makes, so a
+                    // number here would name a page that was also sent — which
+                    // the pool reads as a mismatched worker binary and stops the
+                    // whole job for (`crates/mnema-pool/src/lib.rs:1338`).
+                    skipped_pages: Vec::new(),
+                    text_source: "native:docx".to_string(),
+                });
+                frames
+            }
+            // `e.to_string()` rather than the literal these two used to repeat —
+            // see the epub arm above for why all three readers were reduced to
+            // one source of the string together.
+            Err(e @ DocxError::TooLarge) => vec![Frame::Refused {
+                rule: "too_large".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+            Err(e @ DocxError::NoText) => vec![Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+            // Bound to the one remaining variant rather than to a catch-all
+            // `Err(e)`, for the reason the pdf branch states: a catch-all is how
+            // a later variant arrives silently as "this file is damaged".
+            Err(e @ DocxError::Malformed(_)) => vec![Frame::Refused {
+                rule: "malformed".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+        },
+        // The third format that opens an archive, and it takes the mapping
+        // `epub.rs` declared rather than restating it: `TooLarge` → `too_large`,
+        // `Malformed` → `malformed`, and no arm at all for a member that is
+        // simply not there. Which member that is differs again — a sheet the
+        // workbook declares and the archive does not hold is skipped by number
+        // inside `extract_xlsx`, and only the package's own structure is damage.
+        Reader::Xlsx => match extract_xlsx(&bytes) {
+            Ok(workbook) => {
+                let blocks: usize = workbook.sheets.iter().map(|s| s.blocks.len()).sum();
+                let mut frames = Vec::with_capacity(blocks + workbook.sheets.len() + 2);
+                frames.push(Frame::Header {
+                    sha256,
+                    mime: file_type.mime.to_string(),
+                    source_kind: file_type.source_kind,
+                    // The constant, not the literal `"xlsx"`, and the cost of
+                    // getting it wrong is worse here than for the other four.
+                    // `pages_of` matches this exact string to reach
+                    // `PageContext::Rows` (`crates/mnema-ingest/src/lib.rs:1403`)
+                    // and may not link this crate (D40). A near-miss falls to
+                    // `PageContext::Lines` — and unlike a docx's, these blocks
+                    // *do* carry numbers, so nothing is empty and nothing goes
+                    // red: every citation becomes a plausible "рядки 10–20" with
+                    // no sheet named on it and nothing saying which.
+                    reader: manifest::READER_XLSX.to_string(),
+                    reader_version: manifest::XLSX_READER_VERSION,
+                    // From the same vector the Page frames come from, so the
+                    // pool's count check cannot disagree with itself. Skipped
+                    // sheets are NOT in this number: they produce no Page frame
+                    // and are named by `skipped_pages` instead.
+                    pages: workbook.sheets.len() as u32,
+                });
+                for sheet in workbook.sheets {
+                    frames.push(Frame::Page {
+                        page_no: sheet.page_no,
+                        // A sheet is not a section and this is not what the
+                        // citation renders: `pages_of` reads it as the *name* of
+                        // the sheet and puts it inside `Coordinate::SheetRows`,
+                        // whose range comes from the blocks each chunk covers.
+                        // Already bounded by the reader, and bounding it again
+                        // here would give the citation and the coordinate two
+                        // different names.
+                        section_title: sheet.section_title,
+                    });
+                    frames.extend(sheet.blocks.into_iter().map(Frame::Block));
+                }
+                frames.push(Frame::Summary {
+                    // The numbers, not their count: the parent owes a journal
+                    // row per skipped sheet, and a count cannot fill one in.
+                    // **Not always empty**, which is where this reader parts
+                    // company with docx and html — a chartsheet, a sheet the
+                    // archive does not hold and a sheet whose cells stop parsing
+                    // are all measured, and all leave the rest of the workbook
+                    // readable. Disjoint from the page frames above by
+                    // construction; the pool stops the whole job over a number
+                    // in both (`crates/mnema-pool/src/lib.rs:1338`).
+                    skipped_pages: workbook.skipped,
+                    text_source: "native:xlsx".to_string(),
+                });
+                frames
+            }
+            Err(e @ XlsxError::TooLarge) => vec![Frame::Refused {
+                rule: "too_large".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+            Err(e @ XlsxError::NoText) => vec![Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+            // Bound to the one remaining variant rather than to a catch-all
+            // `Err(e)`, for the reason the pdf branch states: a catch-all is how
+            // a later variant arrives silently as "this file is damaged".
+            Err(e @ XlsxError::Malformed(_)) => vec![Frame::Refused {
+                rule: "malformed".to_string(),
+                reason: e.to_string(),
+                sha256: Some(sha256),
+            }],
+        },
+        // The one verdict left that promises a reader which is coming: a zip
+        // this build recognises as neither a docx, an xlsx nor an epub.
+        Reader::Unrecognized => {
             vec![Frame::Refused {
                 rule: "unsupported".to_string(),
                 reason: format!(

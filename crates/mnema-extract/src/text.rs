@@ -1,7 +1,7 @@
 //! The plain-text reader: bytes to `Block`s, verbatim after NFC.
 //!
 //! Encoding is guessed with `chardetng`, the configuration the skeleton
-//! already measured (`crates/mnema-deps-probe/src/lib.rs:61-78`): UTF-8 must
+//! already measured, in a probe crate since deleted: UTF-8 must
 //! be `Allow`, since most files this product indexes are unlabelled UTF-8 and
 //! the browser-oriented `Deny` exists so web content cannot come to depend on
 //! unlabelled detection — which is a different audience from ours. Do **not**

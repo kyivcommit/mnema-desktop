@@ -14,6 +14,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use mnema_core::OnDisk;
+use mnema_core::manifest::Manifest;
 use mnema_index::{Db, open, register_vector_extension};
 use mnema_ingest::{Ingested, ingest_file};
 use mnema_pool::{Pool, PoolConfig};
@@ -80,6 +81,12 @@ struct Fixture {
     pool: Pool,
     root_id: i64,
     root: PathBuf,
+    /// The real worker's own reader manifest, asked once. Nothing in this file
+    /// is about which reader takes a file — it is about which *numbers* the
+    /// cheap arm compares — so every call here hands in the manifest of the
+    /// binary that is about to answer, which is what makes the reader condition
+    /// agree and leaves the two numbers as the only thing that can decide.
+    manifest: Manifest,
     _dir: tempfile::TempDir,
 }
 
@@ -99,11 +106,13 @@ impl Fixture {
             ..PoolConfig::new(worker())
         })
         .unwrap();
+        let manifest = pool.manifest().unwrap();
         Fixture {
             db,
             pool,
             root_id,
             root,
+            manifest,
             _dir: dir,
         }
     }
@@ -141,6 +150,7 @@ fn the_handed_in_metadata_is_what_the_cheap_arm_compares() {
         &path,
         "a.txt",
         Some(honest),
+        &fixture.manifest,
     )
     .unwrap();
     assert!(matches!(first, Ingested::Indexed { .. }));
@@ -158,6 +168,7 @@ fn the_handed_in_metadata_is_what_the_cheap_arm_compares() {
         &path,
         "a.txt",
         Some(lying),
+        &fixture.manifest,
     )
     .unwrap();
     assert!(
@@ -202,6 +213,7 @@ fn a_saturated_mtime_hides_a_same_length_edit_forever() {
         &path,
         "a.txt",
         Some(saturated),
+        &fixture.manifest,
     )
     .unwrap();
     assert!(matches!(first, Ingested::Indexed { .. }));
@@ -217,6 +229,7 @@ fn a_saturated_mtime_hides_a_same_length_edit_forever() {
         &path,
         "a.txt",
         Some(saturated),
+        &fixture.manifest,
     )
     .unwrap();
     assert!(

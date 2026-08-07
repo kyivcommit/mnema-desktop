@@ -134,7 +134,7 @@ fn the_crate_root_error_type_is_the_one_probe_text_layer_actually_returns() {
         .expect_err("a path that does not exist is not a document");
 
     match err {
-        mnema_extract::Error::Pdfium(_) | mnema_extract::Error::Library(_) => {}
+        mnema_extract::Error::Pdfium(_) | mnema_extract::Error::Library { .. } => {}
         mnema_extract::Error::BuildMismatch { .. } => {
             panic!("a missing file is not a build mismatch")
         }
@@ -149,6 +149,228 @@ fn a_missing_file_returns_an_error() {
     assert!(
         message.contains("NotFound"),
         "expected the missing path to surface as an I/O error, got: {message}"
+    );
+}
+
+/// The worker binary, not `probe_text_layer` directly. It exists so the
+/// question "can this build load Pdfium at all" can be put to a *packaged*
+/// binary — the wire protocol has no way to ask it (D53, D54) — but this
+/// test itself runs the development binary out of `target/`, under this
+/// process's own ad-hoc-or-absent signature, not the bundle's. What it holds
+/// is the flag's contract: given a good fixture, the answer names both
+/// `loaded` and a page count. Whether the *bundled* worker's answer is the
+/// same is a packaging question, answered separately (task-1-report.md) and
+/// not by this test — the two disagree today.
+#[test]
+fn the_worker_reports_whether_pdfium_loaded() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .arg("--probe-pdfium")
+        .arg(fixture("one-page-text.pdf"))
+        .output()
+        .expect("the worker binary starts");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = String::from_utf8(out.stdout).expect("stdout is UTF-8");
+    let v: serde_json::Value = serde_json::from_str(line.trim()).expect("one JSON line");
+    // Both directions: it must say it loaded AND report pages. A probe that
+    // answers `{"loaded":true}` with no page count proves nothing about the
+    // binding — it proves the flag was parsed.
+    assert_eq!(v["loaded"], serde_json::json!(true));
+    assert!(v["pages"].as_u64().expect("a page count") > 0);
+    // No stage on a success, or `"ok"` — never one of the three failure
+    // stages a caller would otherwise read as a real refusal.
+    assert_eq!(v["stage"], serde_json::json!("ok"));
+}
+
+/// The field that says WHICH Pdfium answered, which is a different question
+/// from whether one did.
+///
+/// A packaged worker that loaded the developer's checkout answers `loaded:true`
+/// and reads PDFs perfectly — on one machine. That is not a scenario invented
+/// for a test: it is what this repository's first bundle with a PDF reader in
+/// it did, and `scripts/verify-bundle.sh` compares this field against the
+/// mounted image because of it.
+///
+/// Both directions, and the second is the one that matters: reporting *a*
+/// directory is satisfied by a constant, so the probe is made to load from a
+/// directory nothing could have guessed — a copy of the vendored tree in a
+/// temporary directory — and has to name that one.
+#[test]
+fn a_successful_probe_names_the_directory_it_loaded_from() {
+    let probe = |lib_dir: Option<&std::path::Path>| -> serde_json::Value {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"));
+        cmd.arg("--probe-pdfium").arg(fixture("one-page-text.pdf"));
+        match lib_dir {
+            Some(d) => cmd.env(mnema_extract::PDFIUM_LIB_DIR_ENV, d),
+            // Removed rather than left alone: a value inherited from whoever
+            // ran the suite would decide the first half of this test.
+            None => cmd.env_remove(mnema_extract::PDFIUM_LIB_DIR_ENV),
+        };
+        let out = cmd.output().expect("the worker binary starts");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("one JSON line")
+    };
+
+    let found = probe(None);
+    assert_eq!(found["loaded"], serde_json::json!(true));
+    let found_dir = found["library_dir"]
+        .as_str()
+        .expect("a successful probe names the directory it loaded from");
+    let found_dir = std::path::Path::new(found_dir);
+    // A directory that really holds the library, not a plausible-looking path:
+    // the whole value of the field is that it can be checked against a place.
+    assert!(found_dir.is_dir(), "{found_dir:?} is not a directory");
+    let library = std::fs::read_dir(found_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|e| e.file_name().to_string_lossy().starts_with("libpdfium"))
+        .unwrap_or_else(|| panic!("{found_dir:?} holds no libpdfium library"));
+
+    // Now somewhere it could not have named by guessing. The tree is rebuilt in
+    // the vendored shape — the library under `lib/`, the manifest one level up —
+    // because that is the shape `verify_build` requires, here and in a bundle.
+    let tmp = tempfile::tempdir().unwrap();
+    let lib_dir = tmp.path().join("lib");
+    std::fs::create_dir(&lib_dir).unwrap();
+    std::fs::copy(library.path(), lib_dir.join(library.file_name())).unwrap();
+    std::fs::copy(
+        found_dir.join("..").join("VERSION"),
+        tmp.path().join("VERSION"),
+    )
+    .unwrap();
+
+    let elsewhere = probe(Some(&lib_dir));
+    assert_eq!(elsewhere["loaded"], serde_json::json!(true));
+    assert_eq!(
+        elsewhere["library_dir"].as_str().map(std::path::Path::new),
+        Some(lib_dir.as_path()),
+        "the probe named {:?} while loading from {lib_dir:?}",
+        elsewhere["library_dir"]
+    );
+}
+
+/// With a library in both places a packaged worker could find one, the sealed
+/// copy wins.
+///
+/// The order is a security decision rather than a preference, which is why it
+/// is asserted rather than left to the order the branches happen to sit in.
+/// The bundle carries `disable-library-validation` — it must, or an ad-hoc
+/// signature cannot load the library it ships (D65) — and that entitlement is
+/// not selective: nothing checks the signature of whatever is loaded. So a
+/// `libpdfium.dylib` dropped beside the worker in an installed application must
+/// not be preferred over the one under `Resources/`.
+///
+/// **Both candidates are made fully loadable**, and that is the whole design of
+/// this test. A decoy that merely fails to bind would let it pass for the
+/// weaker reason "the other one did not work"; here each location has a real
+/// library and a `VERSION` manifest where `verify_build` looks for it, so the
+/// only thing that can decide the answer is which branch is consulted first.
+#[test]
+fn the_packaged_library_wins_over_one_dropped_beside_the_executable() {
+    let vendored = {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+            .arg("--probe-pdfium")
+            .arg(fixture("one-page-text.pdf"))
+            .env_remove(mnema_extract::PDFIUM_LIB_DIR_ENV)
+            .output()
+            .expect("the worker binary starts");
+        let v: serde_json::Value =
+            serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+        std::path::PathBuf::from(v["library_dir"].as_str().expect("a library directory"))
+    };
+    let library = std::fs::read_dir(&vendored)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|e| e.file_name().to_string_lossy().starts_with("libpdfium"))
+        .expect("a library to copy");
+    let manifest = std::fs::read_to_string(vendored.join("..").join("VERSION")).unwrap();
+
+    // `exe_dir` stands for Contents/MacOS and `exe_dir/../Resources/pdfium/lib`
+    // for the packaged library. The names are the bundle's; what the code reads
+    // is only the shape.
+    let root = tempfile::tempdir().unwrap();
+    let exe_dir = root.path().join("MacOS");
+    let packaged = root.path().join("Resources/pdfium/lib");
+    std::fs::create_dir_all(&exe_dir).unwrap();
+    std::fs::create_dir_all(&packaged).unwrap();
+
+    let copy_library_to = |dir: &std::path::Path| {
+        std::fs::copy(library.path(), dir.join(library.file_name())).unwrap();
+    };
+    copy_library_to(&packaged);
+    // `verify_build` reads <dir>/VERSION or <dir>/../VERSION, so each location
+    // gets a manifest where its own branch would find it.
+    std::fs::write(packaged.join("..").join("VERSION"), &manifest).unwrap();
+    copy_library_to(&exe_dir);
+    std::fs::write(exe_dir.join("VERSION"), &manifest).unwrap();
+
+    let worker = exe_dir.join("mnema-extract-worker");
+    std::fs::copy(env!("CARGO_BIN_EXE_mnema-extract-worker"), &worker).unwrap();
+
+    let out = std::process::Command::new(&worker)
+        .arg("--probe-pdfium")
+        .arg(fixture("one-page-text.pdf"))
+        .env_remove(mnema_extract::PDFIUM_LIB_DIR_ENV)
+        .output()
+        .expect("the relocated worker starts");
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("one JSON line");
+
+    // Both directions: it loaded at all — otherwise this would pass whenever
+    // the copy was unusable — and it loaded the packaged one.
+    assert_eq!(
+        v["loaded"],
+        serde_json::json!(true),
+        "neither copy loaded, so this proves nothing about which is preferred: {v}"
+    );
+    assert_eq!(
+        v["library_dir"].as_str().map(std::path::Path::new),
+        Some(packaged.as_path()),
+        "the copy beside the executable was preferred over the packaged one: {v}"
+    );
+}
+
+/// The real negative case Important 2 asked for, not a mutation standing in
+/// for one: `MNEMA_PDFIUM_LIB_DIR` pointed at a directory that exists but
+/// holds neither the library nor a `VERSION` manifest. `library_dir()`
+/// returns that path unconditionally when the override is set — it does not
+/// check the directory holds anything — so this fails one step later, inside
+/// `verify_build()`, which is the same shape a bundle assembled from
+/// mismatched parts takes. It is what a real bundle probe hit first
+/// (task-1-report.md), before ever reaching the code-signature question the
+/// branch exists to answer — the reason `stage` exists at all rather than a
+/// bare boolean.
+#[test]
+fn an_empty_library_directory_fails_at_the_verify_build_stage() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .arg("--probe-pdfium")
+        .arg(fixture("one-page-text.pdf"))
+        .env(mnema_extract::PDFIUM_LIB_DIR_ENV, dir.path())
+        .output()
+        .expect("the worker binary starts");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = String::from_utf8(out.stdout).expect("stdout is UTF-8");
+    let v: serde_json::Value = serde_json::from_str(line.trim()).expect("one JSON line");
+    assert_eq!(v["loaded"], serde_json::json!(false));
+    assert_eq!(v["stage"], serde_json::json!("verify_build"));
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("an error string")
+            .contains("VERSION"),
+        "the message must still say what was missing: {v}"
     );
 }
 

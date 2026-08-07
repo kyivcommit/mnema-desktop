@@ -174,13 +174,68 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 sha256: None,
             },
         ),
-        // A refusal under a rule this pool has never heard of, which is what a
-        // worker from another release looks like.
-        "newrule" => write_frame(
+        // The reader opened the file, it is the format it claims, and it could
+        // not be finished. Distinct from `"unsupported"` on the wire because it
+        // is a distinct answer to the user: no release is coming to read this
+        // file, the file itself is broken.
+        "damaged" => write_frame(
+            stdout,
+            &Frame::Refused {
+                rule: "malformed".to_string(),
+                reason: format!("{rest} ends mid-object"),
+                sha256: None,
+            },
+        ),
+        // The other half of that pair: whole file, right reader, missing key.
+        "locked" => write_frame(
             stdout,
             &Frame::Refused {
                 rule: "encrypted".to_string(),
                 reason: format!("{rest} is password-protected"),
+                sha256: None,
+            },
+        ),
+        // A PDF that is a scan: pages exist, none of them carries text. The
+        // reader ran and there is nothing to index, which is neither
+        // "unsupported" (no reader is coming — one already came) nor
+        // "not_text" (a PDF is a document format this product reads).
+        "scanned" => write_frame(
+            stdout,
+            &Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: format!("no page of {rest} carries a text layer"),
+                sha256: None,
+            },
+        ),
+        // A refusal under a rule this pool has never heard of, which is what a
+        // worker from another release looks like.
+        //
+        // The string was `"encrypted"` until the task that added
+        // `SkipRule::Encrypted` made it a rule this pool does know. A stand-in
+        // for "unknown" has to be a name nobody will later implement, so this
+        // one is deliberately not a word any roadmap contains.
+        //
+        // **It did not go quiet, and not because of anything clever.** This
+        // branch has one caller — `a_refusal_under_an_unknown_rule_stops_the_job`
+        // in `tests/supervision.rs`; the sibling in `mnema-ingest/tests/slice.rs`
+        // models the same thing with its own shell stand-in and never runs this
+        // binary. Both are written against the call *failing*, so a recognised
+        // rule flips the result from `Err` to `Ok` and both go red without
+        // reading any message: `supervision.rs` panics inside `unwrap_err()`,
+        // `slice.rs` never unwraps and fails on its `matches!`.
+        //
+        // The lesson is therefore about what a red *says*, not about whether
+        // one happens: "called `unwrap_err()` on an `Ok` value" reads as a pool
+        // that has stopped rejecting unknown rules, which is a defect in the
+        // code under test, when the real cause is that the test's premise
+        // expired. Each caller now asserts that premise ahead of the call, so
+        // the red names it — which is also why `unwrap_err()` is no longer the
+        // first thing either test would fail on.
+        "newrule" => write_frame(
+            stdout,
+            &Frame::Refused {
+                rule: "rule_from_a_later_release".to_string(),
+                reason: format!("{rest} was refused for a reason this build cannot name"),
                 sha256: None,
             },
         ),
@@ -203,6 +258,8 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                     sha256: "0".repeat(64),
                     mime: "text/markdown".to_string(),
                     source_kind: SourceKind::Document,
+                    reader: "markdown".to_string(),
+                    reader_version: 1,
                     pages: 3,
                 },
             );
@@ -216,8 +273,106 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
             write_frame(
                 stdout,
                 &Frame::Summary {
-                    skipped_pages: 0,
+                    skipped_pages: Vec::new(),
                     text_source: "native:md".to_string(),
+                },
+            );
+        }
+        // A page reported as read *and* as skipped. The counts agree — one page
+        // promised, one page frame sent — so the check above passes it, and
+        // nothing further down ever sees the two lists side by side again. What
+        // it would cost is a journal row saying page 1 has no text layer, in
+        // the window that answers "why is this not in my index?", about a page
+        // the index holds and cites.
+        "both-lists" => {
+            write_frame(
+                stdout,
+                &Frame::Header {
+                    sha256: "0".repeat(64),
+                    mime: "application/pdf".to_string(),
+                    source_kind: SourceKind::Document,
+                    reader: "pdf".to_string(),
+                    reader_version: 1,
+                    pages: 1,
+                },
+            );
+            write_frame(
+                stdout,
+                &Frame::Page {
+                    page_no: 1,
+                    section_title: None,
+                },
+            );
+            write_frame(
+                stdout,
+                &Frame::Summary {
+                    skipped_pages: vec![1],
+                    text_source: "native:pdf".to_string(),
+                },
+            );
+        }
+        // A reader that dropped a page and named it, which is the ordinary
+        // shape of the frame above and has to go through: a pool that refused
+        // every summary carrying numbers would satisfy the test as well.
+        "skipped-page" => {
+            write_frame(
+                stdout,
+                &Frame::Header {
+                    sha256: "0".repeat(64),
+                    mime: "application/pdf".to_string(),
+                    source_kind: SourceKind::Document,
+                    reader: "pdf".to_string(),
+                    reader_version: 1,
+                    pages: 2,
+                },
+            );
+            for page_no in [1, 3] {
+                write_frame(
+                    stdout,
+                    &Frame::Page {
+                        page_no,
+                        section_title: None,
+                    },
+                );
+            }
+            write_frame(
+                stdout,
+                &Frame::Summary {
+                    skipped_pages: vec![2],
+                    text_source: "native:pdf".to_string(),
+                },
+            );
+        }
+        // A header whose reader has no name. Not a hypothetical shape: `""` is
+        // what `#[serde(default)]` on that field would hand the parent, and it
+        // is what any producer writing the frame by hand leaves behind — the
+        // four worker stubs under scripts/ did exactly that until this field
+        // existed. The frame is otherwise complete and parses cleanly, which is
+        // the whole difficulty: nothing downstream would notice.
+        "nameless-reader" => {
+            write_frame(
+                stdout,
+                &Frame::Header {
+                    sha256: "0".repeat(64),
+                    mime: "text/plain".to_string(),
+                    source_kind: SourceKind::Document,
+                    reader: String::new(),
+                    reader_version: 0,
+                    pages: 1,
+                },
+            );
+            write_frame(
+                stdout,
+                &Frame::Page {
+                    page_no: 1,
+                    section_title: None,
+                },
+            );
+            write_frame(
+                stdout,
+                &Frame::Summary {
+                    skipped_pages: Vec::new(),
+                    text_source: "native:txt".to_string(),
                 },
             );
         }
@@ -230,6 +385,8 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                     sha256: "0".repeat(64),
                     mime: "text/plain".to_string(),
                     source_kind: SourceKind::Document,
+                    reader: "text".to_string(),
+                    reader_version: 1,
                     pages: 1,
                 },
             );
@@ -251,13 +408,32 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
             write_frame(
                 stdout,
                 &Frame::Summary {
-                    skipped_pages: 0,
+                    skipped_pages: Vec::new(),
                     text_source: "native:txt".to_string(),
                 },
             );
         }
         // A line that is not a frame at all: what a worker binary from a
         // different release would look like.
+        // A worker from before `Frame::Summary.skipped_pages` became a list.
+        //
+        // It is the one shape a stand-in has to write by hand: the field is
+        // `Vec<u32>` now, so no `Frame` value can express the `0` a release
+        // before that one sent, and `write_frame` could not emit this line if
+        // it wanted to. Everything ahead of the summary is a real frame — this
+        // worker reads the file correctly, right up to the moment it describes
+        // what it skipped in the old spelling.
+        //
+        // What it settles is a claim that was an argument until it was run: a
+        // worker from an older release stops the job as a **binary mismatch**,
+        // not as a bad file. For a sidecar built with its application that is
+        // unreachable by construction, and nothing proves the construction —
+        // so the behaviour under the assumption is measured instead.
+        "old-summary" => {
+            answer_without_summary(stdout);
+            println!(r#"{{"frame":"summary","skipped_pages":0,"text_source":"native:pdf"}}"#);
+            let _ = stdout.flush();
+        }
         "garbage" => {
             println!("this is not a frame");
             let _ = stdout.flush();
@@ -282,12 +458,27 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
 /// The shape of a readable document: one header, one page, one block, one
 /// summary.
 fn answer(stdout: &mut io::Stdout) {
+    answer_without_summary(stdout);
+    write_frame(
+        stdout,
+        &Frame::Summary {
+            skipped_pages: Vec::new(),
+            text_source: "native:txt".to_string(),
+        },
+    );
+}
+
+/// The same document with its last frame withheld, for the modes that write
+/// their own summary.
+fn answer_without_summary(stdout: &mut io::Stdout) {
     write_frame(
         stdout,
         &Frame::Header {
             sha256: "0".repeat(64),
             mime: "text/plain".to_string(),
             source_kind: SourceKind::Document,
+            reader: "text".to_string(),
+            reader_version: 1,
             pages: 1,
         },
     );
@@ -308,13 +499,6 @@ fn answer(stdout: &mut io::Stdout) {
             line_start: Some(1),
             line_end: Some(1),
         }),
-    );
-    write_frame(
-        stdout,
-        &Frame::Summary {
-            skipped_pages: 0,
-            text_source: "native:txt".to_string(),
-        },
     );
 }
 

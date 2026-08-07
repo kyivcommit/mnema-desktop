@@ -15,7 +15,12 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mnema_core::Coordinate;
-use mnema_index::{Db, SkipRule, open, register_vector_extension};
+use mnema_core::manifest::{Manifest, ReaderId};
+#[cfg(unix)]
+use mnema_core::wire::{Frame, to_line};
+#[cfg(unix)]
+use mnema_core::{Block, BlockType, SourceKind};
+use mnema_index::{Db, INDEX_FORMAT_VERSION, SkipRule, open, register_vector_extension};
 use mnema_ingest::{Ingested, ingest_file};
 use mnema_pool::{Pool, PoolConfig};
 use sha2::{Digest, Sha256};
@@ -35,6 +40,16 @@ struct Fixture {
     root_id: i64,
     root: PathBuf,
     index_path: PathBuf,
+    /// What the real worker says its readers are, asked once here rather than
+    /// per call: it costs a process, and every test in this file that does not
+    /// name a manifest of its own means "the manifest of the binary that is
+    /// about to read the file".
+    ///
+    /// Taken from `pool` — the real worker — even for the calls that hand a
+    /// *different* executable to `ingest_with`. That is the shape those tests
+    /// already model: a parent that knows what the product's readers are, and a
+    /// sidecar answering in their place.
+    manifest: Manifest,
     _dir: tempfile::TempDir,
 }
 
@@ -68,12 +83,14 @@ impl Fixture {
             ..PoolConfig::new(support::worker())
         })
         .unwrap();
+        let manifest = pool.manifest().unwrap();
         Fixture {
             db,
             pool,
             root_id,
             root,
             index_path,
+            manifest,
             _dir: dir,
         }
     }
@@ -109,6 +126,16 @@ impl Fixture {
     /// a write — everywhere else, an `Err` is a failure of the test's premise
     /// and `ingest` is the right call.
     fn try_ingest(&self, relative: &str) -> Result<Ingested, mnema_ingest::IngestError> {
+        self.try_ingest_against(relative, &self.manifest)
+    }
+
+    /// The same, against a manifest the caller names — a build with a reader
+    /// this one does not have, or without one it does.
+    fn try_ingest_against(
+        &self,
+        relative: &str,
+        manifest: &Manifest,
+    ) -> Result<Ingested, mnema_ingest::IngestError> {
         let absolute = self.root.join(relative);
         let on_disk = mnema_walk::stat(&absolute);
         ingest_file(
@@ -118,7 +145,13 @@ impl Fixture {
             &absolute,
             relative,
             on_disk,
+            manifest,
         )
+    }
+
+    fn ingest_against(&self, relative: &str, manifest: &Manifest) -> Ingested {
+        self.try_ingest_against(relative, manifest)
+            .expect("a per-file problem must never stop the job")
     }
 
     /// The same index, walked by a pool built differently — a lowered ceiling,
@@ -138,7 +171,15 @@ impl Fixture {
         let pool = Pool::new(config).unwrap();
         let absolute = self.root.join(relative);
         let on_disk = mnema_walk::stat(&absolute);
-        ingest_file(&pool, &self.db, self.root_id, &absolute, relative, on_disk)
+        ingest_file(
+            &pool,
+            &self.db,
+            self.root_id,
+            &absolute,
+            relative,
+            on_disk,
+            &self.manifest,
+        )
     }
 
     fn ingest_under_ceiling(&self, relative: &str, max_bytes: u64) -> Ingested {
@@ -165,6 +206,61 @@ impl Fixture {
         self.ingest_with(relative, PoolConfig::new(worker))
     }
 
+    /// A named worker **and** a named manifest, which the two helpers above
+    /// each give only one of.
+    ///
+    /// Needed by the one test whose subject is a release boundary: the build
+    /// that indexed a file had both an older manifest and an older worker, and
+    /// a test that moved only one of them would describe a build that never
+    /// shipped.
+    fn ingest_with_worker_against(
+        &self,
+        relative: &str,
+        worker: &Path,
+        manifest: &Manifest,
+    ) -> Ingested {
+        self.try_ingest_with_worker_against(relative, worker, manifest)
+            .expect("a per-file problem must never stop the job")
+    }
+
+    /// The same, for the one test whose subject is a write that **fails**
+    /// part-way.
+    fn try_ingest_with_worker_against(
+        &self,
+        relative: &str,
+        worker: &Path,
+        manifest: &Manifest,
+    ) -> Result<Ingested, mnema_ingest::IngestError> {
+        let pool = Pool::new(PoolConfig::new(worker)).unwrap();
+        let absolute = self.root.join(relative);
+        let on_disk = mnema_walk::stat(&absolute);
+        ingest_file(
+            &pool,
+            &self.db,
+            self.root_id,
+            &absolute,
+            relative,
+            on_disk,
+            manifest,
+        )
+    }
+
+    /// Every chunk of one document, as text, in `ord` order.
+    ///
+    /// The text rather than the ids: the question this answers is what a search
+    /// would return and what a citation would show, which is the thing a stale
+    /// reading corrupts.
+    fn chunk_texts(&self, document_id: &str) -> Vec<String> {
+        self.db
+            .conn()
+            .prepare("SELECT text FROM chunk WHERE document_id = ?1 ORDER BY ord")
+            .unwrap()
+            .query_map([document_id], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
     fn try_ingest_with_worker(
         &self,
         relative: &str,
@@ -187,6 +283,46 @@ impl Fixture {
         self.db.conn().query_row(sql, [], |r| r.get(0)).unwrap()
     }
 
+    /// Restamps every skip row already in this index with the format version an
+    /// older build wrote, so the rows read like the ones such a build left
+    /// behind.
+    ///
+    /// Raw SQL because the write surface only ever stamps the current version —
+    /// which is exactly as it should be, and is the same reason
+    /// `chunks_of_two_format_versions_coexist_and_keep_their_own_stamp`
+    /// (`mnema-index/tests/citation.rs`) writes its old chunk by hand.
+    ///
+    /// Every row, with no `WHERE`: this crate has no `rusqlite` of its own to
+    /// bind a parameter with (it is not among `mnema-ingest`'s dependencies, and
+    /// an integration test sees only those), and a path interpolated into SQL
+    /// would be worse than none. The caller's job is to run it while the rows it
+    /// wants aged are the only ones there — which is why the current-version row
+    /// below is written *after* this call, not before it.
+    fn age_every_skip_row(&self) {
+        self.db
+            .conn()
+            .execute_batch(&format!(
+                "UPDATE skipped SET format_version = {VERSION_BEFORE_THE_FORMAT_READERS}"
+            ))
+            .unwrap();
+    }
+
+    /// Every chunk of one document, in `ord` order.
+    ///
+    /// The ids rather than the count: a document cleared and written again has
+    /// the same number of chunks and different ids, and it is the ids that
+    /// every citation and every embedding row points at.
+    fn chunk_ids(&self, document_id: &str) -> Vec<i64> {
+        self.db
+            .conn()
+            .prepare("SELECT id FROM chunk WHERE document_id = ?1 ORDER BY ord")
+            .unwrap()
+            .query_map([document_id], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
     /// Makes the next write to `table` fail, once the trigger is in place.
     ///
     /// A `BEFORE` trigger that always aborts, which is the only way from
@@ -194,10 +330,20 @@ impl Fixture {
     /// writes — the alternative is a fault-injection seam in production code,
     /// which would be a shape the product carries for the tests' sake.
     fn break_writes_to(&self, event: &str, table: &str) {
+        self.break_writes_to_when(event, table, "1");
+    }
+
+    /// The same, firing only on the rows `when` selects.
+    ///
+    /// For the one test that has to fail a *later* transaction of a multi-slice
+    /// write while letting the first one commit — an unconditional trigger
+    /// fails slice 0 and rolls the whole thing back, which is the state that
+    /// recovers on its own and therefore proves nothing.
+    fn break_writes_to_when(&self, event: &str, table: &str, when: &str) {
         self.db
             .conn()
             .execute_batch(&format!(
-                "CREATE TRIGGER forced_failure BEFORE {event} ON {table} BEGIN
+                "CREATE TRIGGER forced_failure BEFORE {event} ON {table} WHEN {when} BEGIN
                      SELECT RAISE(ABORT, 'forced failure');
                  END;"
             ))
@@ -286,6 +432,19 @@ fn char_slice(s: &str, start: u32, end: u32) -> String {
         .skip(start as usize)
         .take((end - start) as usize)
         .collect()
+}
+
+/// The digest of some bytes, in the hex a worker's header carries.
+fn sha256_of(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 // ------------------------------------------------------------------- the slice
@@ -483,6 +642,936 @@ fn a_word_is_found_whichever_way_its_accent_is_spelled() {
 /// modification time is set to a value this test chose, so a pass that read the
 /// file could not fail to be noticed.
 ///
+/// The `path` row credits the reader that really ran, not a constant.
+///
+/// This is the only place in the workspace where that claim is reachable.
+/// `mnema-index`'s tests hand `insert_path` whatever literals they like, so a
+/// `repoint` that wrote `"text"` and `1` for every document — the cheapest way
+/// to make the two new columns compile — leaves every one of those tests green
+/// while the index credits the text reader for work the markdown reader did.
+/// The column then matches the manifest for ever, and the file it names is
+/// never re-read no matter which reader takes it later. Nothing logs any of it.
+///
+/// **Two files, not one, and that is the whole design of the test.** An
+/// implementation that always answers `"text"` satisfies the first half; one
+/// that always answers `"markdown"` satisfies the second; only asserting both
+/// rules out both. A single file constrains neither direction.
+///
+/// The versions are asserted as literals rather than read from
+/// `mnema-extract`'s constants, which this crate does not depend on and must
+/// not start depending on. A reader version bumped later turns this red, and
+/// that is correct: the migration's `DEFAULT 1` is a claim about the same
+/// number, and the two going out of step silently is the failure.
+#[test]
+fn a_path_row_credits_the_reader_the_worker_actually_ran() {
+    let fx = Fixture::new();
+    fx.place("plain.txt", "Кошторис на ремонт даху.".as_bytes());
+    fx.place("notes.md", "# Заголовок\n\nОдин абзац.\n".as_bytes());
+
+    fx.ingest("plain.txt");
+    fx.ingest("notes.md");
+
+    let text = fx
+        .db
+        .path_entry(fx.root_id, "plain.txt")
+        .unwrap()
+        .expect("the txt file is indexed, so it has a path row");
+    assert_eq!(text.reader, "text");
+    assert_eq!(text.reader_version, 1);
+
+    let markdown = fx
+        .db
+        .path_entry(fx.root_id, "notes.md")
+        .unwrap()
+        .expect("the md file is indexed, so it has a path row");
+    assert_eq!(
+        markdown.reader, "markdown",
+        "the markdown branch of the worker ran, so the row must say so rather \
+         than inherit the text reader's name"
+    );
+    assert_eq!(markdown.reader_version, 1);
+}
+
+/// `before`, plus the entry a build that had grown an `.rtf` reader would
+/// carry.
+///
+/// Built from a measured manifest rather than written out whole, so that the
+/// two differ by exactly the one thing the test is about. A pair of literals
+/// would also differ in whatever the product changed since they were written,
+/// and the assertion would then be about the literals.
+///
+/// **This said `html` until task 10 shipped an html reader, and the change is
+/// the event rather than a rename.** These two tests need an extension that
+/// this build reads with the *default* reader and that some later build might
+/// take over; `.html` was that extension and has stopped being one. `.rtf` is
+/// its successor by name: spec §2 puts it in the same class deliberately —
+/// indexed as text today, out of scope for this cycle — so the premise is a
+/// stated decision rather than a gap waiting to close under the test. What
+/// happens on the day an extension really does change hands is measured
+/// against `.html` itself in
+/// `a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was`.
+fn with_rtf_reader(before: &Manifest) -> Manifest {
+    let mut after = before.clone();
+    after
+        .by_extension
+        .insert("rtf".to_string(), ReaderId::new("rtf", 1));
+    after
+}
+
+/// `before`, with the reader that takes `.md` moved one version on — what
+/// bumping `MARKDOWN_READER_VERSION` produces, and nothing else.
+fn with_markdown_one_version_on(before: &Manifest) -> Manifest {
+    let mut after = before.clone();
+    let current = after
+        .by_extension
+        .get("md")
+        .expect("this build gives .md a reader of its own")
+        .clone();
+    after.by_extension.insert(
+        "md".to_string(),
+        ReaderId::new(&current.reader, current.version + 1),
+    );
+    after
+}
+
+/// The version half of the comparison, which the name half cannot stand in
+/// for.
+///
+/// A reader whose output changes without its name changing is the ordinary way
+/// this moves: the markdown reader learning tables produces different blocks
+/// from the same bytes, and every document it already made is a reading no
+/// build performs any more. `MARKDOWN_READER_VERSION` is what says so, and a
+/// condition that compared only the name would leave every such document
+/// exactly as it was — silently, and for the life of the index.
+///
+/// Both directions, against manifests differing in one integer: this build's
+/// own leaves the file alone, and the bumped one does not.
+#[test]
+fn a_bumped_reader_version_is_a_reader_that_changed_too() {
+    let fx = Fixture::new();
+    fx.place_at(
+        "notes.md",
+        "# Заголовок\n\nОдин абзац.\n".as_bytes(),
+        mtime(),
+    );
+    let first = fx.ingest("notes.md");
+    assert!(matches!(first, Ingested::Indexed { .. }), "{first:?}");
+
+    let again = fx.ingest("notes.md");
+    assert!(
+        matches!(again, Ingested::Unchanged { .. }),
+        "the reader that made this file is the one this build has: {again:?}"
+    );
+
+    let bumped = with_markdown_one_version_on(&fx.manifest);
+    let outcome = fx.ingest_against("notes.md", &bumped);
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the same reader at a new version reads the same bytes differently, so \
+         the document it already made is worth replacing: {outcome:?}"
+    );
+}
+
+/// A file is read again when the reader that takes its extension changes hands
+/// — and is not, when nothing changed hands.
+///
+/// `.html` was the case the whole mechanism was built for, and **that day has
+/// come**: task 10 gave it a reader, so it is no longer an extension this build
+/// hands to the default. `.rtf` takes its place here — indexed by the text
+/// reader because `identify_plain_text` has no arm for it, so its `path` row
+/// says `text@1`. A manifest of reader *versions* alone would compare `text@1`
+/// against `text@1` for ever: the day a reader for it arrives, not one
+/// already-indexed page would be read again, and the index would go on
+/// answering out of a reading no part of the build performs any more. Keying
+/// the manifest on the extension is what makes that visible, and this is where
+/// it is asserted.
+///
+/// **Both directions, and neither alone is worth anything.** Without the
+/// unchanged direction the test is satisfied by an arm that re-reads every file
+/// on every walk; without the other, by an arm that never re-reads anything.
+/// The two manifests differ by exactly one entry, and the first of them is the
+/// real worker's own — measured, not written out here — so the unchanged
+/// direction is a claim about this build rather than about a literal that
+/// happens to match it.
+///
+/// The second manifest describes a build this repository does not have, so the
+/// re-read it forces is answered by a worker that still reads the file as text.
+/// That is all this test needs — its subject is whether the file reaches a
+/// worker at all — and what the two disagreeing costs is pinned by the test
+/// below.
+#[test]
+fn a_file_is_reread_when_its_extension_changed_hands() {
+    let fx = Fixture::new();
+    fx.place_at("notes.rtf", "{\\rtf1\\ansi Кошторис}\n".as_bytes(), mtime());
+
+    // The build that indexed it: no rtf reader, so the default took the file.
+    let before = fx.manifest.clone();
+    let first = fx.ingest_against("notes.rtf", &before);
+    assert!(matches!(first, Ingested::Indexed { .. }), "{first:?}");
+    let row = fx
+        .db
+        .path_entry(fx.root_id, "notes.rtf")
+        .unwrap()
+        .expect("the file is indexed, so it has a path row");
+    assert_eq!(
+        (row.reader.as_str(), row.reader_version),
+        ("text", 1),
+        "the premise of this test is that rtf is read by the default reader"
+    );
+
+    // Nothing moved: not the file, not the manifest.
+    let again = fx.ingest_against("notes.rtf", &before);
+    assert!(
+        matches!(again, Ingested::Unchanged { .. }),
+        "an unchanged file under an unchanged manifest must not cost a worker: {again:?}"
+    );
+
+    // The same file, against the manifest of a build that has an rtf reader.
+    let after = with_rtf_reader(&before);
+    let outcome = fx.ingest_against("notes.rtf", &after);
+    assert!(
+        !matches!(outcome, Ingested::Unchanged { .. }),
+        "a reader for this extension arriving must make the file worth re-reading: {outcome:?}"
+    );
+    // And a re-read is what it was, rather than some other way of not being
+    // `Unchanged`: only the arms past the cheap one can answer `AlreadyIndexed`,
+    // and reaching them means the file was handed to a worker. The worker
+    // behind this pool reports `text` for a `.rtf`, exactly as the row already
+    // says, so the reading did not change and nothing is rebuilt — which is the
+    // subject of `a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was`.
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the bytes never moved, so a re-read lands back on the document the \
+         index already holds: {outcome:?}"
+    );
+}
+
+/// A document the index already holds, read again by a **different reader**, is
+/// rebuilt — not left exactly as the old reader made it.
+///
+/// **This is the last step of the mechanism the manifest exists for, and it was
+/// missing.** The cheap arm notices that `.html` changed hands and hands the
+/// file to a worker; the worker reads it as prose; and then step 3 finds the
+/// document already there with its chunk stage `done` and returns
+/// `AlreadyIndexed` **having written nothing**. The document id is the sha256
+/// of the bytes and the bytes did not move, so nothing about it looks stale.
+/// What is stale is every page, block and chunk under it — made by the text
+/// reader, holding `<style>.a{color:red}</style>` as prose (spec §2.1).
+///
+/// And it is worse than a missed opportunity, because `repoint` writes the new
+/// reader into the `path` row in the same transaction: the next walk's cheap
+/// arm then agrees, answers `Unchanged`, and the markup is in that index for
+/// the life of it. `INDEX_FORMAT_VERSION` does not reach it either — that lever
+/// is read only by the *skip journal*'s arm (`ingest_file`, step 2), and an
+/// `.html` file is not a skip. So a build that shipped an html reader would
+/// have cost one worker process per file and changed not one citation.
+///
+/// The rebuild is decided by comparing the reader the `path` row records
+/// against the reader that **just ran**, not against the manifest: the manifest
+/// is a prediction, and what makes the stored rows stale is which reader
+/// actually made them.
+///
+/// Both directions, and the second is what makes the first mean anything: the
+/// markup is gone from the chunks **and** the prose is there, under a page that
+/// now names its section. A test asserting only that something changed is
+/// satisfied by a rebuild that lost the document.
+#[cfg(unix)]
+#[test]
+fn a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was() {
+    let fx = Fixture::new();
+    let bytes = "<style>.a{color:red}</style><h1>Умови постачання</h1>\
+                 <p>Кошторис узгоджено сторонами.</p>\n"
+        .as_bytes();
+    fx.place_at("dovidky/umovy.html", bytes, mtime());
+
+    // The build that indexed it: no html entry in the manifest, and a worker
+    // that read the file as plain text — spec §2.1's measurement as a starting
+    // state rather than as a sentence.
+    let before = {
+        let mut manifest = fx.manifest.clone();
+        manifest.by_extension.remove("html");
+        manifest
+    };
+    // Two directories, because `support::wrong_worker` always writes
+    // `<dir>/wrong-worker`: built in one, these two would be one file and the
+    // second's frames would replace the first's. The test would still pass —
+    // the old worker runs before the new one is built — and it would be passing
+    // for a reason that has nothing to do with its subject.
+    let old_dir = tempfile::tempdir().unwrap();
+    let new_dir = tempfile::tempdir().unwrap();
+    let old_worker = worker_answering_in(
+        old_dir.path(),
+        &[
+            Frame::Header {
+                sha256: sha256_of(bytes),
+                mime: "text/plain".to_string(),
+                source_kind: SourceKind::Document,
+                reader: "text".to_string(),
+                reader_version: 1,
+                pages: 1,
+            },
+            Frame::Page {
+                page_no: 1,
+                section_title: None,
+            },
+            Frame::Block(unlined_block(&String::from_utf8_lossy(bytes))),
+            Frame::Summary {
+                skipped_pages: Vec::new(),
+                text_source: "native:txt".to_string(),
+            },
+        ],
+    );
+    let Ingested::Indexed { document_id, .. } =
+        fx.ingest_with_worker_against("dovidky/umovy.html", &old_worker, &before)
+    else {
+        panic!("expected the old build to index the file")
+    };
+    assert!(
+        fx.chunk_texts(&document_id)
+            .iter()
+            .any(|text| text.contains("color:red")),
+        "the premise of this test is that the markup is in the index"
+    );
+
+    // Today's build: the manifest gives `.html` a reader of its own, and the
+    // worker reads the file as prose under a named section.
+    let new_worker = worker_answering_in(
+        new_dir.path(),
+        &[
+            Frame::Header {
+                sha256: sha256_of(bytes),
+                mime: "text/html".to_string(),
+                source_kind: SourceKind::Document,
+                reader: "html".to_string(),
+                reader_version: 1,
+                pages: 1,
+            },
+            Frame::Page {
+                page_no: 1,
+                section_title: Some("Умови постачання".to_string()),
+            },
+            Frame::Block(unlined_block("Кошторис узгоджено сторонами.")),
+            Frame::Summary {
+                skipped_pages: Vec::new(),
+                text_source: "native:html".to_string(),
+            },
+        ],
+    );
+    let outcome = fx.ingest_with_worker_against("dovidky/umovy.html", &new_worker, &fx.manifest);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "a reading made by a reader this build no longer uses has to be \
+         replaced, not confirmed: {outcome:?}"
+    );
+
+    let chunks = fx.chunk_texts(&document_id);
+    assert!(
+        !chunks.iter().any(|text| text.contains("color:red")),
+        "the old reader's markup survived the re-read: {chunks:?}"
+    );
+    assert!(
+        chunks
+            .iter()
+            .any(|text| text.contains("Кошторис узгоджено сторонами.")),
+        "the new reader's prose is not in the index: {chunks:?}"
+    );
+    // And the citation now points at the section, which is the whole of what a
+    // chunk of this format has to point at.
+    assert_eq!(
+        coordinate_of(&fx, "сторонами"),
+        Coordinate::Section {
+            title: "Умови постачання".to_string()
+        },
+    );
+    // One document, not two: the bytes never moved, so this is the same
+    // document rebuilt rather than a second one beside it.
+    assert_eq!(fx.count("SELECT count(*) FROM document"), 1);
+
+    // …and the next walk is quiet again. Without this the fix would trade a
+    // stale index for a rebuild of every html file on every walk, for ever.
+    let again = fx.ingest_with_worker_against("dovidky/umovy.html", &new_worker, &fx.manifest);
+    assert!(
+        matches!(again, Ingested::Unchanged { .. }),
+        "the reading and the bytes both agree now, so nothing is owed: {again:?}"
+    );
+}
+
+/// A rebuild interrupted between slices is finished by the next walk, rather
+/// than leaving a truncated document every walk from then on calls `Unchanged`.
+///
+/// **The state this guards was opened by the rebuild itself.** Before it,
+/// `rebuild` could only be reached with the chunk stage *unfinished*, which is
+/// what step 5's comment relies on: "a crash before this point costs a re-index
+/// rather than a lie — the cheap arm finds no finished stage". A reader that
+/// changed reaches it with the stage `done`, and `clear_document_content` does
+/// not touch stages — so a failure after slice 0 leaves pages 1..20, a `path`
+/// row already crediting the new reader (`repoint` commits with that slice), and
+/// a `done` stage. All five of the cheap arm's conditions then agree and the
+/// rest of the document is gone for the life of the index.
+///
+/// It needs no crash to reach: `IngestError::Busy` on a later slice sends
+/// `ingest_with_busy_retry` (`walk.rs`) back in at the top, where the cheap arm
+/// now answers.
+///
+/// The failure is injected with a trigger that fires only past
+/// `PAGES_PER_TRANSACTION`, because that is the whole point — an unconditional
+/// one fails slice 0, rolls the entire write back, and leaves the state that
+/// recovers on its own.
+///
+/// Both directions, and the counting one is what makes the other mean anything:
+/// the third pass **writes** (`Indexed`, not `Unchanged`) **and** the document
+/// comes back whole. A pass that answered `Indexed` having written twenty pages
+/// satisfies the first alone.
+#[cfg(unix)]
+#[test]
+fn a_rebuild_interrupted_between_slices_is_finished_by_the_next_walk() {
+    let fx = Fixture::new();
+    // More sections than one transaction writes, so the write really is sliced
+    // and there is a "between" for the failure to fall into.
+    let sections = mnema_ingest::PAGES_PER_TRANSACTION as u32 + 5;
+    let bytes = b"<h1>invented html, never parsed</h1>\n".as_slice();
+    fx.place_at("dovidky/umovy.html", bytes, mtime());
+
+    let old_dir = tempfile::tempdir().unwrap();
+    let new_dir = tempfile::tempdir().unwrap();
+    let old_worker = worker_answering_in(old_dir.path(), &html_frames(bytes, sections, 1));
+    let new_worker = worker_answering_in(new_dir.path(), &html_frames(bytes, sections, 2));
+
+    assert!(matches!(
+        fx.ingest_with_worker_against("dovidky/umovy.html", &old_worker, &fx.manifest),
+        Ingested::Indexed { .. }
+    ));
+    assert_eq!(
+        fx.count("SELECT count(*) FROM page"),
+        i64::from(sections),
+        "the premise is a complete document to interrupt the rebuild of"
+    );
+
+    // The build after it: the same reader at a new version, which is what makes
+    // the document's reading stale, and a write that dies on the second slice.
+    let bumped = {
+        let mut manifest = fx.manifest.clone();
+        manifest
+            .by_extension
+            .insert("html".to_string(), ReaderId::new("html", 2));
+        manifest
+    };
+    fx.break_writes_to_when(
+        "INSERT",
+        "page",
+        &format!("NEW.page_no > {}", mnema_ingest::PAGES_PER_TRANSACTION),
+    );
+    let interrupted = fx.try_ingest_with_worker_against("dovidky/umovy.html", &new_worker, &bumped);
+    assert!(
+        interrupted.is_err(),
+        "the premise is a write that failed part-way: {interrupted:?}"
+    );
+    fx.unbreak_writes();
+
+    // What it left behind: slice 0 committed, the rest did not.
+    assert_eq!(
+        fx.count("SELECT count(*) FROM page"),
+        mnema_ingest::PAGES_PER_TRANSACTION as i64,
+        "the premise is a document truncated at one slice"
+    );
+
+    let outcome = fx.ingest_with_worker_against("dovidky/umovy.html", &new_worker, &bumped);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "an interrupted rebuild has to be finished, not confirmed: {outcome:?}"
+    );
+    assert_eq!(
+        fx.count("SELECT count(*) FROM page"),
+        i64::from(sections),
+        "the pages the interrupted rebuild never wrote are still missing"
+    );
+    // And it settles: nothing is owed once the document and its row agree.
+    let again = fx.ingest_with_worker_against("dovidky/umovy.html", &new_worker, &bumped);
+    assert!(
+        matches!(again, Ingested::Unchanged { .. }),
+        "a finished rebuild must not repeat on every walk: {again:?}"
+    );
+}
+
+/// A document being rebuilt answers no search until it is whole again. D61.
+///
+/// This is the state the test above leaves behind, asked the question a person
+/// asks: pages 1..20 of 25 are committed, the other five are gone, and every
+/// one of the twenty is in `chunk_fts`. A search for a surviving section hits,
+/// a search for a lost one returns nothing, and the window has no way to say
+/// which of the two just happened — so the reader concludes the file does not
+/// contain what it does contain. The document is found and silently short.
+///
+/// Three assertions, and the first alone is worthless. "No hits" is what a
+/// broken search returns and what an empty index returns, so it is pinned from
+/// both sides: `chunk_fts` is asked directly, past the predicate, and must hold
+/// the very rows the search declines to return; a neighbour document that is
+/// whole must keep answering *during* the rebuild; and the same query must come
+/// back the moment the rebuild finishes.
+#[cfg(unix)]
+#[test]
+fn a_document_being_rebuilt_answers_no_search_until_it_is_whole_again() {
+    let fx = Fixture::new();
+    let sections = mnema_ingest::PAGES_PER_TRANSACTION as u32 + 5;
+    let bytes = b"<h1>invented html, never parsed</h1>\n".as_slice();
+    fx.place_at("dovidky/umovy.html", bytes, mtime());
+
+    // The neighbour: a different file, read by the real worker, indexed once and
+    // never touched again. It is what makes "no hits" mean "this document is
+    // being written" rather than "search stopped working".
+    fx.place_at(
+        "dovidky/kadastr.txt",
+        "Кадастровий витяг, урочище Гайворон.".as_bytes(),
+        mtime(),
+    );
+    assert!(matches!(
+        fx.ingest("dovidky/kadastr.txt"),
+        Ingested::Indexed { .. }
+    ));
+
+    let old_dir = tempfile::tempdir().unwrap();
+    let new_dir = tempfile::tempdir().unwrap();
+    let old_worker = worker_answering_in(old_dir.path(), &html_frames(bytes, sections, 1));
+    let new_worker = worker_answering_in(new_dir.path(), &html_frames(bytes, sections, 2));
+
+    let Ingested::Indexed { document_id, .. } =
+        fx.ingest_with_worker_against("dovidky/umovy.html", &old_worker, &fx.manifest)
+    else {
+        panic!("the premise is a complete document to interrupt the rebuild of")
+    };
+    // `html_frames` numbers its sections, and the numbers are what let one query
+    // name one section: the digits of "розділ 3" tokenize apart from those of
+    // "розділ 13", so this asks for section 3 and nothing else.
+    assert_eq!(
+        fx.db.search_lexical("розділ 3", 10).unwrap().len(),
+        1,
+        "the premise is a document that answers before anything is rebuilt"
+    );
+
+    let bumped = {
+        let mut manifest = fx.manifest.clone();
+        manifest
+            .by_extension
+            .insert("html".to_string(), ReaderId::new("html", 2));
+        manifest
+    };
+    fx.break_writes_to_when(
+        "INSERT",
+        "page",
+        &format!("NEW.page_no > {}", mnema_ingest::PAGES_PER_TRANSACTION),
+    );
+    assert!(
+        fx.try_ingest_with_worker_against("dovidky/umovy.html", &new_worker, &bumped)
+            .is_err(),
+        "the premise is a rebuild that failed part-way"
+    );
+    fx.unbreak_writes();
+
+    // The state a person would now search against: twenty sections written, five
+    // missing, and the twenty sitting in the lexical index.
+    // Of *this* document: the neighbour has a page of its own in the same table.
+    let pages_written: i64 = fx
+        .db
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM page WHERE document_id = ?1",
+            [&document_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pages_written,
+        mnema_ingest::PAGES_PER_TRANSACTION as i64,
+        "the premise is a document truncated at one slice"
+    );
+    assert_eq!(
+        fx.count(r#"SELECT count(*) FROM chunk_fts WHERE chunk_fts MATCH '"розділ" "3"'"#),
+        1,
+        "the premise is that the surviving section IS in the lexical index — \
+         otherwise the silence below is about an empty index, not a predicate"
+    );
+
+    assert!(
+        fx.db.search_lexical("розділ 3", 10).unwrap().is_empty(),
+        "a document mid-rebuild must not answer with the part of itself that \
+         happens to be written"
+    );
+    assert!(
+        fx.db.search_lexical("розділ 24", 10).unwrap().is_empty(),
+        "and the lost section is what made answering with the other one a lie"
+    );
+    assert_eq!(
+        fx.db.search_lexical("Гайворон", 10).unwrap().len(),
+        1,
+        "the neighbour is whole and must keep answering: without this, every \
+         assertion above is satisfied by a search that returns nothing at all"
+    );
+
+    let outcome = fx.ingest_with_worker_against("dovidky/umovy.html", &new_worker, &bumped);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "an interrupted rebuild has to be finished: {outcome:?}"
+    );
+    assert_eq!(
+        fx.db.document_status(&document_id).unwrap(),
+        mnema_index::DocumentStatus::Indexed
+    );
+    assert_eq!(
+        fx.db.search_lexical("розділ 3", 10).unwrap().len(),
+        1,
+        "the document is whole again, so it answers again"
+    );
+    assert_eq!(
+        fx.db.search_lexical("розділ 24", 10).unwrap().len(),
+        1,
+        "including the section the interrupted rebuild never wrote"
+    );
+    assert_eq!(fx.db.search_lexical("Гайворон", 10).unwrap().len(), 1);
+}
+
+/// The same question of a **first** indexing, through `ingest_file` rather than
+/// through a fixture. D61.
+///
+/// The test above interrupts a rebuild; this one interrupts a document that has
+/// never been indexed at all, which is the other write path and the one whose
+/// silence rests on `insert_document` leaving the row at the column's DEFAULT.
+/// `visibility.rs` pins that DEFAULT, and pinning it is not the same as pinning
+/// this: a change that set `Indexed` anywhere before step 5 would leave every
+/// unit test in that file green while a half-written document went back to
+/// answering searches. Nothing in the suite crossed that gap until here.
+///
+/// Same three assertions as above, and for the same reason: `chunk_fts` holds
+/// the rows the search declines, a whole neighbour keeps answering throughout,
+/// and the query comes back when the document is finished.
+#[cfg(unix)]
+#[test]
+fn a_document_being_indexed_for_the_first_time_answers_no_search() {
+    let fx = Fixture::new();
+    let sections = mnema_ingest::PAGES_PER_TRANSACTION as u32 + 5;
+    let bytes = b"<h1>invented html, never parsed</h1>\n".as_slice();
+    fx.place_at("dovidky/umovy.html", bytes, mtime());
+
+    fx.place_at(
+        "dovidky/kadastr.txt",
+        "Кадастровий витяг, урочище Гайворон.".as_bytes(),
+        mtime(),
+    );
+    assert!(matches!(
+        fx.ingest("dovidky/kadastr.txt"),
+        Ingested::Indexed { .. }
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let worker = worker_answering_in(dir.path(), &html_frames(bytes, sections, 1));
+
+    // No previous pass over this file: the interruption falls inside the first
+    // indexing there has ever been of it.
+    fx.break_writes_to_when(
+        "INSERT",
+        "page",
+        &format!("NEW.page_no > {}", mnema_ingest::PAGES_PER_TRANSACTION),
+    );
+    assert!(
+        fx.try_ingest_with_worker_against("dovidky/umovy.html", &worker, &fx.manifest)
+            .is_err(),
+        "the premise is a first indexing that failed part-way"
+    );
+    fx.unbreak_writes();
+
+    let document_id: String = fx
+        .db
+        .conn()
+        .query_row(
+            "SELECT id FROM document WHERE id <> (SELECT document_id FROM path
+                WHERE relative_path = 'dovidky/kadastr.txt')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        fx.db.document_status(&document_id).unwrap(),
+        mnema_index::DocumentStatus::Pending,
+        "a first indexing spends its whole write at the column's own DEFAULT"
+    );
+    let pages_written: i64 = fx
+        .db
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM page WHERE document_id = ?1",
+            [&document_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pages_written,
+        mnema_ingest::PAGES_PER_TRANSACTION as i64,
+        "the premise is a document truncated at one slice"
+    );
+    assert_eq!(
+        fx.count(r#"SELECT count(*) FROM chunk_fts WHERE chunk_fts MATCH '"розділ" "3"'"#),
+        1,
+        "the premise is that the written section IS in the lexical index"
+    );
+
+    assert!(
+        fx.db.search_lexical("розділ 3", 10).unwrap().is_empty(),
+        "a document being indexed for the first time must not answer with the \
+         part of itself that happens to be written"
+    );
+    assert_eq!(
+        fx.db.search_lexical("Гайворон", 10).unwrap().len(),
+        1,
+        "the neighbour is whole and must keep answering: without this the \
+         assertion above is satisfied by a search that returns nothing at all"
+    );
+
+    let outcome = fx.ingest_with_worker_against("dovidky/umovy.html", &worker, &fx.manifest);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "an unfinished first indexing has to be finished: {outcome:?}"
+    );
+    assert_eq!(
+        fx.db.document_status(&document_id).unwrap(),
+        mnema_index::DocumentStatus::Indexed
+    );
+    assert_eq!(fx.db.search_lexical("розділ 3", 10).unwrap().len(), 1);
+    assert_eq!(
+        fx.db.search_lexical("розділ 24", 10).unwrap().len(),
+        1,
+        "including the section the interrupted pass never wrote"
+    );
+    assert_eq!(fx.db.search_lexical("Гайворон", 10).unwrap().len(), 1);
+}
+
+/// A path that comes to name a document **this** reader made is not rebuilt.
+///
+/// The reader on a `path` row describes the document that path *named*, which is
+/// not always the one just read: replace a file's bytes with content the index
+/// already holds, and the row still credits whatever made the document it used
+/// to point at. Read as a statement about the new document, that row makes a
+/// perfectly current reading look stale — `clear_document_content` and a full
+/// rewrite where the correct answer is that there is nothing to do, with every
+/// `chunk.id` moving out from under every citation into it, and under D29 the
+/// embeddings recomputed.
+///
+/// Narrow — it needs a duplicate already in the index — and one condition, the
+/// same one the branch below computes as `renaming`.
+///
+/// Both directions: the outcome is `AlreadyIndexed`, **and** the chunk ids of
+/// the document being pointed at are the ones it already had. Either alone is
+/// satisfied by a mistake — a pass that rebuilt and answered `AlreadyIndexed`
+/// would pass the first.
+#[cfg(unix)]
+#[test]
+fn a_path_that_comes_to_name_a_document_this_reader_made_is_not_rebuilt() {
+    let fx = Fixture::new();
+
+    // A markdown document, made by the reader its row credits.
+    fx.place_at(
+        "notes.md",
+        "# Заголовок\n\nОдин абзац.\n".as_bytes(),
+        mtime(),
+    );
+    assert!(matches!(fx.ingest("notes.md"), Ingested::Indexed { .. }));
+
+    // And an html document beside it, made by the html reader.
+    let html = b"<h1>invented html, never parsed</h1>\n".as_slice();
+    let dir = tempfile::tempdir().unwrap();
+    let worker = worker_answering_in(dir.path(), &html_frames(html, 2, 1));
+    fx.place_at("dovidky/umovy.html", html, mtime());
+    let Ingested::Indexed { document_id, .. } =
+        fx.ingest_with_worker_against("dovidky/umovy.html", &worker, &fx.manifest)
+    else {
+        panic!("expected the html document to index")
+    };
+    let ids_before = fx.chunk_ids(&document_id);
+    assert!(
+        !ids_before.is_empty(),
+        "the premise is chunks that can move"
+    );
+
+    // Now `notes.md` comes to hold those same bytes. Its row still says
+    // `markdown@1`; the reader that just ran is `html@1`; and the document it
+    // is coming to name was made by exactly that reader.
+    fx.place_at("notes.md", html, mtime_just_after());
+    let outcome = fx.ingest_with_worker_against("notes.md", &worker, &fx.manifest);
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the document under this path's new content was made by the reader that \
+         just ran, so there is nothing to replace: {outcome:?}"
+    );
+    assert_eq!(
+        fx.chunk_ids(&document_id),
+        ids_before,
+        "the document was rebuilt under new chunk ids, which invalidates every \
+         citation into it"
+    );
+}
+
+/// What a `path` row that neither the manifest nor the worker will ever agree
+/// with costs — per walk, for ever.
+///
+/// The condition compares a stored fact, which reader made this row, against a
+/// prediction keyed on the extension. Where the two cannot converge the file is
+/// handed to a worker on every walk and the row is rewritten to the value it
+/// already had. That is not a loop inside one call; it is one process and one
+/// path row per walk, for as long as the disagreement lasts.
+///
+/// Pinned here rather than left as prose in a comment, so that a change which
+/// makes it worse — a document rebuilt, chunk ids moved out from under every
+/// citation into them, a skip journalled, the path lost — goes red instead of
+/// disappearing into "that file is read a lot". `ingest_file`'s own comment on
+/// the condition has why no such row can arise in this build, and what makes
+/// one arise later.
+#[test]
+fn a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that() {
+    let fx = Fixture::new();
+    fx.place_at("notes.rtf", "{\\rtf1\\ansi Кошторис}\n".as_bytes(), mtime());
+
+    // A manifest this pool's worker will never satisfy: it promises an rtf
+    // reader, and the binary behind the pool has none.
+    let disagreeing = with_rtf_reader(&fx.manifest);
+    let Ingested::Indexed {
+        document_id,
+        chunks,
+    } = fx.ingest_against("notes.rtf", &disagreeing)
+    else {
+        panic!("expected the first pass to index the file")
+    };
+
+    // A second document, indexed **after** this one, and the whole reason it is
+    // here is the `chunk.id` assertion at the end. `chunk.id` is an `INTEGER
+    // PRIMARY KEY` with no `AUTOINCREMENT` (`crates/mnema-index/src/
+    // schema.sql:149`), so SQLite allocates one past the largest rowid in the
+    // table — and over a table holding one document, a rebuild that empties it
+    // hands back the very ids it just deleted. Measured, on this table's shape:
+    // one document gives `1,2,3` before and `1,2,3` after, while a second
+    // document's rows sitting above them give `1,2,3` before and `7,8,9` after.
+    // Without this file the assertion is satisfied by the rebuild it names, and
+    // the sentence under it describes something it cannot see. Measured here
+    // too: this document's chunk ids are `[1]` against a table whose largest is
+    // `2`, so a rebuild has to allocate past it.
+    //
+    // After, not before: indexed first, this document's chunks are still the
+    // top of the table and a rebuild reuses their ids anyway.
+    fx.place_at("other.txt", CONTRACT.as_bytes(), mtime());
+    assert!(matches!(fx.ingest("other.txt"), Ingested::Indexed { .. }));
+
+    let ids = fx.chunk_ids(&document_id);
+    assert_eq!(ids.len(), chunks, "every chunk written has a row");
+
+    for pass in 1..=3 {
+        let outcome = fx.ingest_against("notes.rtf", &disagreeing);
+        let Ingested::AlreadyIndexed { document_id: again } = &outcome else {
+            panic!("pass {pass}: expected the file to be read again, got {outcome:?}")
+        };
+        assert_eq!(
+            again, &document_id,
+            "pass {pass}: the bytes never moved, so it is the same document"
+        );
+    }
+
+    // …and that is the whole bill. Nothing was rebuilt, nothing was journalled,
+    // and the path still names the document every citation into it names.
+    //
+    // Two documents: this file, and the one indexed above it to give the
+    // `chunk.id` comparison something to be sensitive to.
+    assert_eq!(fx.count("SELECT count(*) FROM document"), 2);
+    assert_eq!(
+        fx.chunk_ids(&document_id),
+        ids,
+        "the document was rebuilt under new chunk ids, which invalidates every \
+         citation into it"
+    );
+    assert_eq!(
+        fx.db.skips_for_root(fx.root_id).unwrap().len(),
+        0,
+        "a file that was read successfully is not a skip"
+    );
+    assert_eq!(
+        fx.db
+            .path_entry(fx.root_id, "notes.rtf")
+            .unwrap()
+            .expect("the path row survives being rewritten")
+            .document_id,
+        document_id
+    );
+}
+
+/// The one-off this condition costs the first index it meets, and the proof
+/// that it is a one-off.
+///
+/// Migration 3 credits every `path` row already on disk to `text@1`. It could
+/// not do better — nothing was recorded about who made them — but the markdown
+/// reader shipped in `fb3a924`, so on the first walk after the upgrade every
+/// markdown row disagrees with the manifest and is handed to a worker. That is
+/// the migration's bill, it is paid once, and this is where "once" is asserted
+/// rather than assumed: a mistake that made the reader condition compare
+/// something derived instead of something stored would re-read the same file on
+/// every walk from then on, and only the third pass here would notice.
+///
+/// **The bill is a re-*build*, not only a re-read, and that is deliberate.**
+/// The row says `text@1` and the markdown reader is what ran, so step 3 cannot
+/// tell a document the markdown reader really made from one indexed as plain
+/// text before `fb3a924` — and in the second case the stored reading is wrong:
+/// no sections, so every citation into it names lines of a document that has
+/// sections. Rebuilding repairs that and costs the first walk one re-chunk per
+/// markdown file, with the chunk ids moving. What would make the distinction
+/// possible is a migration that wrote "unknown" instead of a plausible value;
+/// `text@1` is already on disk in migrated indexes, so that is a decision of
+/// its own rather than a line here.
+///
+/// The row is rewritten to what the migration leaves behind rather than an
+/// upgrade being staged, because the shape is the whole content of the case —
+/// a real document, made by the markdown reader, under a row that credits the
+/// text one.
+#[test]
+fn a_row_the_migration_credited_to_text_is_read_again_once_and_then_settles() {
+    let fx = Fixture::new();
+    fx.place_at(
+        "notes.md",
+        "# Заголовок\n\nОдин абзац.\n".as_bytes(),
+        mtime(),
+    );
+    let first = fx.ingest("notes.md");
+    assert!(matches!(first, Ingested::Indexed { .. }), "{first:?}");
+
+    // What an index migrated from before Task 3 looks like: every row credited
+    // to the text reader, because the column had nothing else to be filled with.
+    fx.db
+        .conn()
+        .execute("UPDATE path SET reader = 'text', reader_version = 1", [])
+        .unwrap();
+
+    let second = fx.ingest("notes.md");
+    assert!(
+        matches!(second, Ingested::Indexed { .. }),
+        "a row crediting a reader the manifest does not give .md must be read \
+         again — and the rows it credits to that reader replaced, since nothing \
+         says the markdown reader made them: {second:?}"
+    );
+    let row = fx
+        .db
+        .path_entry(fx.root_id, "notes.md")
+        .unwrap()
+        .expect("the path row survives the re-read");
+    assert_eq!(
+        (row.reader.as_str(), row.reader_version),
+        ("markdown", 1),
+        "the re-read is what repairs the row, and it must write the reader that \
+         actually ran"
+    );
+
+    // And once, not on every walk: nothing about the file or the manifest has
+    // moved since, so the third pass must cost nothing.
+    let third = fx.ingest("notes.md");
+    assert!(
+        matches!(third, Ingested::Unchanged { .. }),
+        "the migration's re-read is a one-off, not a state the index stays in: \
+         {third:?}"
+    );
+}
+
 /// **Every modification time here is set explicitly**, in both directions, and
 /// that is what makes the phases mean anything. Left to the wall clock, phase 3
 /// distinguishes a nanosecond mtime from a whole-second one only when a second
@@ -707,12 +1796,14 @@ fn the_same_content_under_two_paths_is_one_document() {
 #[test]
 fn a_file_the_worker_refuses_is_recorded_and_the_walk_continues() {
     let fx = Fixture::new();
-    // A PDF header is enough: typing decides by content, and there is no PDF
-    // reader yet, so the worker refuses the file as unsupported.
-    fx.place("scans/tender.pdf", b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n");
+    // An empty zip: typing decides by content, and a zip carrying none of the
+    // members that make it a docx, an xlsx or an epub is a format no reader
+    // takes. It was a `%PDF-` stub until the PDF reader landed, which is a
+    // different verdict now — see `support::NO_READER_FOR_THIS`.
+    fx.place("scans/tender.zip", support::NO_READER_FOR_THIS);
     fx.place("contracts/ravella.txt", CONTRACT.as_bytes());
 
-    let refused = fx.ingest("scans/tender.pdf");
+    let refused = fx.ingest("scans/tender.zip");
     assert_eq!(
         refused,
         Ingested::Skipped {
@@ -722,7 +1813,7 @@ fn a_file_the_worker_refuses_is_recorded_and_the_walk_continues() {
 
     let skips = fx.db.skips_for_root(fx.root_id).unwrap();
     assert_eq!(skips.len(), 1);
-    assert_eq!(skips[0].relative_path, "scans/tender.pdf");
+    assert_eq!(skips[0].relative_path, "scans/tender.zip");
     assert_eq!(skips[0].rule, "unsupported");
     // The worker's own sentence, not one this crate invented. It names the
     // format rather than the file — `Frame::Refused` for an unsupported reader
@@ -730,7 +1821,7 @@ fn a_file_the_worker_refuses_is_recorded_and_the_walk_continues() {
     // (`crates/mnema-extract/src/bin/worker.rs:98-104,149-156`) — and the row's
     // own `relative_path` column is what says which file it was.
     assert!(
-        skips[0].reason.contains("application/pdf"),
+        skips[0].reason.contains("application/zip"),
         "the worker's own reason must survive into the journal: {}",
         skips[0].reason
     );
@@ -765,13 +1856,9 @@ fn a_file_replaced_by_content_no_reader_can_take_stops_answering() {
     };
     assert!(!fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
 
-    // The user saves a PDF over it. The worker reads the bytes and declines
-    // them: there is no PDF reader yet.
-    set_bytes_and_mtime(
-        &path,
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
-        mtime_just_after(),
-    );
+    // The user saves an archive over it. The worker reads the bytes and
+    // declines them: no reader takes that format.
+    set_bytes_and_mtime(&path, support::NO_READER_FOR_THIS, mtime_just_after());
     assert_eq!(
         fx.ingest("contracts/ravella.txt"),
         Ingested::Skipped {
@@ -1162,11 +2249,7 @@ fn a_skip_that_could_not_displace_is_not_journalled_either() {
     let path = fx.place_at("contracts/ravella.txt", CONTRACT.as_bytes(), mtime());
     fx.ingest("contracts/ravella.txt");
 
-    set_bytes_and_mtime(
-        &path,
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
-        mtime_just_after(),
-    );
+    set_bytes_and_mtime(&path, support::NO_READER_FOR_THIS, mtime_just_after());
     // The displacement's own delete is what fails here.
     fx.break_writes_to("DELETE", "document");
     let outcome = fx.try_ingest("contracts/ravella.txt");
@@ -1535,6 +2618,143 @@ fn a_raised_ceiling_re_examines_a_file_it_used_to_refuse() {
     assert!(!fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
 }
 
+// ------------- a refusal an older build remembered, after the readers landed
+
+/// The `format_version` an index carries when the build that wrote it had no
+/// reader for the file it refused.
+///
+/// **A literal, not `INDEX_FORMAT_VERSION - 1`.** `- 1` is satisfied by whatever
+/// the constant happens to hold, including the value that build actually wrote,
+/// so a test built on it is green before the bump and after it and says nothing
+/// about either. This number is measured, not chosen:
+/// `git show fb3a924:crates/mnema-index/src/write.rs` has
+/// `INDEX_FORMAT_VERSION: i64 = 2`, and that same build refused every format
+/// this cycle added — `git show fb3a924:crates/mnema-extract/src/bin/worker.rs`,
+/// the `Reader::Pdf | Reader::Docx | Reader::Xlsx | Reader::Epub |
+/// Reader::Unrecognized` arm, sending `rule: "unsupported"`.
+const VERSION_BEFORE_THE_FORMAT_READERS: i64 = 2;
+
+/// A refusal about the file's content, remembered by a build whose readers were
+/// not these, must not answer for this one — and a refusal this build made must
+/// still answer, or the lever has been swapped for switching the arm off.
+///
+/// **What this adds over the test beside it.**
+/// `a_stale_format_version_is_not_honoured_by_the_second_cheap_arm` (below,
+/// since D51) already holds the *mechanism*, and holds it in the form that
+/// should outlive every bump: it pushes a row to `INDEX_FORMAT_VERSION - 1` and
+/// asserts the arm declines it. Exactly because it is relative, it is green
+/// whatever the constant holds and can never say that the bump **this cycle
+/// owes** was made — the readers could all have landed with the number left at
+/// 2 and it would not have moved. That is the assertion here, and it is why the
+/// version below is a literal. The second thing it adds is breadth: that test
+/// drives one rule, and the arm answers for every rule `is_about_content`
+/// claims.
+///
+/// This is what `INDEX_FORMAT_VERSION` is *for*, and it is the only thing it
+/// reaches in the walk. The first cheap arm compares size, mtime, the recorded
+/// reader and the chunk stage and never looks at the constant at all
+/// (`crates/mnema-ingest/src/lib.rs`, and `ADD_PATH_READER` in
+/// `mnema-index/src/migrations.rs` states it in so many words), so an
+/// *indexed* file is not re-read by moving this number. A **refused** one is,
+/// and nothing else moves it: `repoint` clears the row after a successful
+/// index, and `forget_skips_not_in` clears it when the path leaves the tree,
+/// but a file that is still there and still refused keeps its verdict for the
+/// life of the index.
+///
+/// **Every rule `is_about_content` claims, never a list written here.** The
+/// brief this test came from named three — `Unsupported`, `Malformed`,
+/// `Encrypted` — and the predicate answers `true` for six; the three it left
+/// out are stuck in exactly the same way and for exactly as long. A count is a
+/// definition, and this branch has already paid for one that was short by one.
+/// So the set comes from `SkipRule::every()` through the predicate itself, and
+/// a rule that changes sides changes this test with it.
+#[test]
+fn a_content_refusal_an_older_build_remembered_is_looked_at_again() {
+    let remembered: Vec<SkipRule> = SkipRule::every()
+        .filter(|rule| rule.is_about_content())
+        .collect();
+    // A filter that matched nothing would leave the loop below vacuous and this
+    // test green while asserting nothing whatever.
+    assert!(
+        !remembered.is_empty(),
+        "no rule is remembered across walks, so there is nothing for the version \
+         to release and the loop below asserts nothing"
+    );
+
+    for rule in remembered {
+        // A fixture each, so no `path` row from a previous rule's successful
+        // index is in the way: with one present the arm consults `displaces`
+        // and could fall through for a reason that has nothing to do with the
+        // version.
+        let fx = Fixture::new();
+
+        // What the older build's index holds: a verdict about the content,
+        // against the file's own size and modification time — the second cheap
+        // arm's exact premise — stamped with that build's format version.
+        let older = format!("archive/{}.txt", rule.as_str());
+        let older_path = fx.place_at(&older, CONTRACT.as_bytes(), mtime());
+        fx.db
+            .record_skip(
+                fx.root_id,
+                &older,
+                None,
+                "refused by a build whose readers were not these",
+                rule,
+                mnema_walk::stat(&older_path),
+            )
+            .unwrap();
+        fx.age_every_skip_row();
+
+        // And what this build refused, written after the ageing so that it keeps
+        // the current stamp. Different bytes from the file above, so that a
+        // fall-through here would be an ordinary first index and say so, rather
+        // than `AlreadyIndexed` off the other file's document.
+        let today = format!("today/{}.txt", rule.as_str());
+        let today_path = fx.place_at(
+            &today,
+            "Службова записка про склад у Кременці.\n".as_bytes(),
+            mtime(),
+        );
+        fx.db
+            .record_skip(
+                fx.root_id,
+                &today,
+                None,
+                "refused by this build",
+                rule,
+                mnema_walk::stat(&today_path),
+            )
+            .unwrap();
+
+        let looked_at_again = fx.ingest(&older);
+        assert!(
+            matches!(looked_at_again, Ingested::Indexed { .. }),
+            "a {} refusal stamped {VERSION_BEFORE_THE_FORMAT_READERS} still answered \
+             for a build at {INDEX_FORMAT_VERSION}: {looked_at_again:?}",
+            rule.as_str()
+        );
+        // Not the verdict alone: the point of looking again is that the text
+        // arrives, and a fall-through that spent a worker and wrote nothing
+        // would satisfy the assertion above.
+        assert!(
+            !fx.db.search_lexical("Равелла", 10).unwrap().is_empty(),
+            "the file was looked at again and its text did not reach the index ({})",
+            rule.as_str()
+        );
+
+        // The other direction, and without it every assertion above is satisfied
+        // by deleting the second cheap arm outright — which would cost a worker
+        // process per refused file per walk, for ever, and no test would say so.
+        assert_eq!(
+            fx.ingest(&today),
+            Ingested::Skipped { rule },
+            "this build's own refusal stopped answering, so the journal is being \
+             re-derived by a worker on every walk ({})",
+            rule.as_str()
+        );
+    }
+}
+
 // ------------------- a remembered content verdict must not ask the pool
 
 /// A refusal the journal remembers must not answer for a `path` row it would
@@ -1625,13 +2845,9 @@ fn a_remembered_refusal_does_not_answer_for_a_document_it_would_remove() {
 #[test]
 fn indexing_a_file_forgets_the_refusal_that_kept_it_out() {
     let fx = Fixture::new();
-    let path = fx.place_at(
-        "scans/tender.pdf",
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
-        mtime(),
-    );
+    let path = fx.place_at("scans/tender.zip", support::NO_READER_FOR_THIS, mtime());
     assert_eq!(
-        fx.ingest("scans/tender.pdf"),
+        fx.ingest("scans/tender.zip"),
         Ingested::Skipped {
             rule: SkipRule::Unsupported
         }
@@ -1643,13 +2859,13 @@ fn indexing_a_file_forgets_the_refusal_that_kept_it_out() {
             .iter()
             .map(|s| s.relative_path.clone())
             .collect::<Vec<_>>(),
-        vec!["scans/tender.pdf".to_string()],
+        vec!["scans/tender.zip".to_string()],
         "a refusal that records nothing leaves the user with no answer at all"
     );
 
     set_bytes_and_mtime(&path, CONTRACT.as_bytes(), mtime_just_after());
     assert!(matches!(
-        fx.ingest("scans/tender.pdf"),
+        fx.ingest("scans/tender.zip"),
         Ingested::Indexed { .. }
     ));
     assert!(
@@ -1660,16 +2876,16 @@ fn indexing_a_file_forgets_the_refusal_that_kept_it_out() {
     // The same for the branch that writes no document of its own: a second path
     // onto content already chunked repoints and nothing else, and that is
     // exactly where a refusal for the new name would otherwise survive.
-    let other = fx.place_at("scans/copy.pdf", b"%PDF-1.7\n<<>>\nendobj\n", mtime());
+    let other = fx.place_at("scans/copy.zip", support::NO_READER_FOR_THIS, mtime());
     assert_eq!(
-        fx.ingest("scans/copy.pdf"),
+        fx.ingest("scans/copy.zip"),
         Ingested::Skipped {
             rule: SkipRule::Unsupported
         }
     );
     set_bytes_and_mtime(&other, CONTRACT.as_bytes(), mtime_just_after());
     assert!(matches!(
-        fx.ingest("scans/copy.pdf"),
+        fx.ingest("scans/copy.zip"),
         Ingested::AlreadyIndexed { .. }
     ));
     assert!(
@@ -1693,13 +2909,9 @@ fn indexing_a_file_forgets_the_refusal_that_kept_it_out() {
 #[test]
 fn a_remembered_content_skip_is_answered_without_asking_the_pool() {
     let fx = Fixture::new();
-    fx.place_at(
-        "scans/tender.pdf",
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
-        mtime(),
-    );
+    fx.place_at("scans/tender.zip", support::NO_READER_FOR_THIS, mtime());
     assert_eq!(
-        fx.ingest("scans/tender.pdf"),
+        fx.ingest("scans/tender.zip"),
         Ingested::Skipped {
             rule: SkipRule::Unsupported
         }
@@ -1707,7 +2919,7 @@ fn a_remembered_content_skip_is_answered_without_asking_the_pool() {
 
     let broken = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
     assert_eq!(
-        fx.ingest_with_worker("scans/tender.pdf", &broken),
+        fx.ingest_with_worker("scans/tender.zip", &broken),
         Ingested::Skipped {
             rule: SkipRule::Unsupported
         },
@@ -1983,13 +3195,13 @@ fn a_text_file_overwritten_by_a_format_with_no_reader_stops_answering() {
         "the premise fails if the text was never searchable"
     );
 
-    // A PDF header with nothing readable behind it. `identify` answers
-    // `Reader::Pdf` on the magic alone, and no reader for that format is built
-    // — task 6 shipped plain text and markdown — so the worker refuses the
-    // file as `unsupported` after reading and hashing its bytes.
+    // An archive with nothing readable in it. `identify` answers
+    // `Reader::Unrecognized` from the zip signature and the absence of any
+    // member that names a format, so the worker refuses the file as
+    // `unsupported` after reading and hashing its bytes.
     fx.place_at(
         "notes/protokol.txt",
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
+        support::NO_READER_FOR_THIS,
         mtime_just_after(),
     );
     assert_eq!(
@@ -2036,15 +3248,7 @@ fn a_file_no_reader_can_take_keeps_its_document_when_only_the_rule_changed() {
 
     // The same bytes, a later mtime — and a build that has no reader for them.
     fx.place_at("notes/dovidka.txt", prose.as_bytes(), mtime_just_after());
-    let mut hasher = Sha256::new();
-    hasher.update(prose.as_bytes());
-    let sha256 = hasher
-        .finalize()
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        });
+    let sha256 = sha256_of(prose.as_bytes());
     let without_the_reader = support::wrong_worker(
         fx.root.parent().unwrap(),
         &format!(
@@ -2064,6 +3268,660 @@ fn a_file_no_reader_can_take_keeps_its_document_when_only_the_rule_changed() {
         !fx.db.search_lexical("комісією", 10).unwrap().is_empty(),
         "the bytes are identical to what the index was built from, so the \
          document must survive a build that lost the reader"
+    );
+}
+
+/// The state neither `Unsupported` nor `Unreadable` could say: the file **is**
+/// the format its magic claims, this product **has** a reader for it, and the
+/// reader could not finish — a PDF that ends mid-object, a zip whose central
+/// directory does not parse.
+///
+/// It lands on the same side of `displaces` as `Unsupported`, and for the same
+/// argument rather than by analogy. What a reader survives is what a release
+/// changes: a folder indexed by a build whose reader recovers from the damage
+/// and walked again by one that does not — a rollback, a second machine, a
+/// vendored library at a different version — would lose a document per file,
+/// with the bytes never having moved. The stand-in worker is that other build,
+/// and it carries the file's real digest because a reader that opened a file
+/// and gave up part-way through still hashed the bytes it was handed.
+///
+/// **Both directions, and the second is what makes the first mean anything.**
+/// "Does not displace when the digest matches" is satisfied by a rule that
+/// never displaces at all — the one-sided shape this file has been caught in
+/// before.
+#[cfg(unix)]
+#[test]
+fn a_damaged_file_keeps_its_document_when_the_bytes_did_not_move() {
+    let fx = Fixture::new();
+    let prose = "Акт приймання робіт, складений у двох примірниках.\n".repeat(50);
+    fx.place_at("акти/акт.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("акти/акт.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("примірниках", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    // The same bytes, a later mtime — and a build whose reader gives up on
+    // them.
+    fx.place_at("акти/акт.txt", prose.as_bytes(), mtime_just_after());
+    let unchanged = sha256_of(prose.as_bytes());
+    let gives_up = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"malformed","reason":"the document ends mid-object","sha256":"{unchanged}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("акти/акт.txt", &gives_up),
+        Ingested::Skipped {
+            rule: SkipRule::Malformed
+        },
+        "the premise fails unless the wire string arrives as this rule and no other"
+    );
+    assert!(
+        !fx.db.search_lexical("примірниках", 10).unwrap().is_empty(),
+        "the bytes are identical to what the index was built from, so a build \
+         whose reader cannot finish them must not take the document away"
+    );
+
+    // The other direction, which is the whole point of the digest: the same
+    // rule over bytes that are *not* the indexed ones is a file replaced by a
+    // broken one, and the old text has to stop answering under a name it is no
+    // longer in.
+    let broken = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog\nendo".as_slice();
+    fx.place_at(
+        "акти/акт.txt",
+        broken,
+        mtime_just_after() + Duration::from_millis(250),
+    );
+    let replaced = sha256_of(broken);
+    let gives_up_on_a_replacement = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"malformed","reason":"the document ends mid-object","sha256":"{replaced}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("акти/акт.txt", &gives_up_on_a_replacement),
+        Ingested::Skipped {
+            rule: SkipRule::Malformed
+        }
+    );
+    assert!(
+        fx.db.search_lexical("примірниках", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+}
+
+/// The other half of the pair, and a separate test rather than a second
+/// assertion in the one above, because `displaces` gives the two rules
+/// separate arms — a mutation of either has to have something of its own to
+/// redden.
+///
+/// A password is not damage. The file is whole and the reader is the right
+/// one; what is missing is a key, and the two are different things to the
+/// person reading the skip list — one is fixed by supplying a password and the
+/// other is not fixed at all. Same conditional displacement, same reason: a
+/// build that learns to ask for passwords must not have deleted the documents
+/// of every locked file the build before it met.
+#[cfg(unix)]
+#[test]
+fn a_locked_file_keeps_its_document_when_the_bytes_did_not_move() {
+    let fx = Fixture::new();
+    let prose = "Довідка про доходи, видана на вимогу заявника.\n".repeat(50);
+    fx.place_at("довідки/довідка.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("довідки/довідка.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("заявника", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    fx.place_at("довідки/довідка.txt", prose.as_bytes(), mtime_just_after());
+    let unchanged = sha256_of(prose.as_bytes());
+    let asks_for_a_password = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"encrypted","reason":"this document is password-protected","sha256":"{unchanged}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("довідки/довідка.txt", &asks_for_a_password),
+        Ingested::Skipped {
+            rule: SkipRule::Encrypted
+        },
+        "the premise fails unless the wire string arrives as this rule and no other"
+    );
+    assert!(
+        !fx.db.search_lexical("заявника", 10).unwrap().is_empty(),
+        "the bytes are identical to what the index was built from, so a build \
+         that cannot open them must not take the document away"
+    );
+
+    let locked = b"%PDF-1.7\n1 0 obj\n<< /Encrypt 2 0 R >>\n".as_slice();
+    fx.place_at(
+        "довідки/довідка.txt",
+        locked,
+        mtime_just_after() + Duration::from_millis(250),
+    );
+    let replaced = sha256_of(locked);
+    let asks_about_a_replacement = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"encrypted","reason":"this document is password-protected","sha256":"{replaced}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("довідки/довідка.txt", &asks_about_a_replacement),
+        Ingested::Skipped {
+            rule: SkipRule::Encrypted
+        }
+    );
+    assert!(
+        fx.db.search_lexical("заявника", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+}
+
+/// The third of the pair's pattern, and the one whose rule used to displace
+/// outright.
+///
+/// A scan is not damage and not a password either: the file is whole, the
+/// reader is the right one, and what is missing is a text layer above a
+/// threshold this product chose. `TEXT_LAYER_MIN_CHARS` is a product decision
+/// someone may argue with, and a reader is a thing releases improve — so the
+/// same folder of scans walked once by a build that found text on the page and
+/// once by a build that did not is a document lost per file, with the bytes
+/// never having moved. That is the loss `Unsupported`'s arm was corrected for,
+/// arriving from a third direction.
+///
+/// A `.txt` under a stand-in worker, like the two tests above and for their
+/// reason: the script answers with this rule whatever it is handed, so the
+/// fixture does not have to be a PDF the real reader would have to agree
+/// about.
+#[cfg(unix)]
+#[test]
+fn a_scanned_file_keeps_its_document_when_the_bytes_did_not_move() {
+    let fx = Fixture::new();
+    let prose = "Опис майна, переданого на відповідальне зберігання.\n".repeat(50);
+    fx.place_at("описи/опис.txt", prose.as_bytes(), mtime());
+    assert!(matches!(
+        fx.ingest("описи/опис.txt"),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        !fx.db.search_lexical("зберігання", 10).unwrap().is_empty(),
+        "the premise fails if the text was never searchable"
+    );
+
+    fx.place_at("описи/опис.txt", prose.as_bytes(), mtime_just_after());
+    let unchanged = sha256_of(prose.as_bytes());
+    let finds_no_text_layer = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"no_text_layer","reason":"no page of this PDF carries a text layer of at least 48 characters","sha256":"{unchanged}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("описи/опис.txt", &finds_no_text_layer),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        },
+        "the premise fails unless the wire string arrives as this rule and no other"
+    );
+    assert!(
+        !fx.db.search_lexical("зберігання", 10).unwrap().is_empty(),
+        "the bytes are identical to what the index was built from, so a build \
+         that finds no text layer on them must not take the document away"
+    );
+
+    // The other direction, and it is what stops this arm from being satisfied
+    // by a constant `false`: the same rule over bytes that are *not* the
+    // indexed ones is a document replaced by a photograph of one, and the old
+    // text has to stop answering under a name it is no longer in.
+    let scanned = b"%PDF-1.7\n1 0 obj\n<< /Type /Page /Contents 3 0 R >>\n".as_slice();
+    fx.place_at(
+        "описи/опис.txt",
+        scanned,
+        mtime_just_after() + Duration::from_millis(250),
+    );
+    let replaced = sha256_of(scanned);
+    let finds_none_on_a_replacement = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"no_text_layer","reason":"no page of this PDF carries a text layer of at least 48 characters","sha256":"{replaced}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("описи/опис.txt", &finds_none_on_a_replacement),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert!(
+        fx.db.search_lexical("зберігання", 10).unwrap().is_empty(),
+        "the old text still answers for a file that no longer contains it"
+    );
+}
+
+/// A page the reader dropped gets a journal row of its own, and the row goes
+/// away when it stops being true.
+///
+/// The first half is the requirement: a count crossing the wire could say a
+/// page was lost and never which one, so nobody reading "why is this not in my
+/// index?" could be told that page 2 of a three-page contract is the page
+/// missing.
+///
+/// **The second half is the one that needed building.** `forget_skip`
+/// deliberately leaves per-page rows alone, and `forget_skips_not_in` only
+/// fires for paths a walk did not see — so without a removal of its own a row
+/// saying "page 2 has no text layer" outlives the file it was about. The pass
+/// that takes it back here is the one that returns `AlreadyIndexed` and leaves
+/// before any content is written, which is the branch where a row is easiest
+/// to leave behind: the path comes to name a document that was indexed under
+/// another name, and nothing about that write touches this path's journal.
+///
+/// **Two documents, each missing a different page**, because a row belongs to
+/// one path and nothing else in the test could tell a removal scoped to the
+/// path from one scoped to the whole watched root — which would empty the
+/// journal of every other file on every ingest.
+///
+/// `#[cfg(unix)]` for the reason the section below gives: the reader that
+/// skips a page is the PDF one, and reaching it from this crate means a
+/// stand-in worker, which is a shell script.
+#[cfg(unix)]
+#[test]
+fn a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back() {
+    let fx = Fixture::new();
+    // Neither is ever parsed: the workers below are scripts, and what makes
+    // these two files is that their digests differ.
+    let scanned = b"%PDF-1.7\ninvented: a contract whose middle page is a photograph\n".as_slice();
+    let clean = b"%PDF-1.7\ninvented: an amendment, one page of it a photograph\n".as_slice();
+
+    let amendment = pdf_frames(clean, &[1, 3], vec![2], "Додаткова угода про постачання");
+    let contract = pdf_frames(scanned, &[1, 2, 3], vec![7], "Договір оренди приміщення");
+    let named = |fx: &Fixture| -> Vec<(String, Option<i64>, String)> {
+        fx.db
+            .skips_for_root(fx.root_id)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.relative_path, r.page_no, r.rule))
+            .collect()
+    };
+    let row = |path: &str, page: i64| (path.to_string(), Some(page), "no_text_layer".to_string());
+
+    // The amendment goes in first, under its own name, so that the pass at the
+    // end of this test finds its content already in the index and takes the
+    // `AlreadyIndexed` branch rather than writing anything.
+    //
+    // `worker_answering` is called again for every pass rather than once per
+    // script: `support::wrong_worker` writes to one fixed name, so two of them
+    // held at the same time are one file, and the second overwrites the first
+    // without either `PathBuf` changing. Measured — this test passed for the
+    // wrong reason until it did.
+    fx.place_at("архів/додаток.pdf", clean, mtime());
+    assert!(matches!(
+        fx.ingest_with_worker("архів/додаток.pdf", &worker_answering(&fx, &amendment)),
+        Ingested::Indexed { .. }
+    ));
+
+    // The contract, whose page 7 is a photograph of one.
+    fx.place_at("договори/договір.pdf", scanned, mtime());
+    assert!(matches!(
+        fx.ingest_with_worker("договори/договір.pdf", &worker_answering(&fx, &contract)),
+        Ingested::Indexed { .. }
+    ));
+
+    assert_eq!(
+        named(&fx),
+        vec![row("архів/додаток.pdf", 2), row("договори/договір.pdf", 7),],
+        "each document's skipped page is named, under its own path, no page \
+         that was read has a row, and none of them is a whole-file row — which \
+         `skip_entry` would read and answer for the document with"
+    );
+    assert!(
+        !fx.db.search_lexical("оренди", 10).unwrap().is_empty(),
+        "the pages that did have text are in the index all the same"
+    );
+    // The file's own measurement is deliberately not stamped on a page's row:
+    // `skip_entry` reads `page_no IS NULL`, so `size_bytes` and `mtime` would
+    // be written there, never read, and left to go stale. Those two and no
+    // others — `format_version` comes from the same statement whether or not a
+    // measurement was passed, and the second clause below is what says so
+    // rather than a comment claiming it.
+    //
+    // Counted as "how many page rows carry neither", not as "how many carry
+    // one": a `= 0` is satisfied by an empty table, and would then be resting
+    // on the row-set assertion above to know there are any rows at all.
+    assert_eq!(
+        fx.count(&format!(
+            "SELECT count(*) FROM skipped
+              WHERE page_no IS NOT NULL
+                AND size_bytes IS NULL AND mtime IS NULL
+                AND format_version = {INDEX_FORMAT_VERSION}"
+        )),
+        2,
+        "both page rows are there, neither carries a measurement of the file it \
+         is a page of, and both carry this build's format version all the same"
+    );
+
+    // The contract's name comes to hold the amendment's bytes — content this
+    // index already has under another path, so the write is skipped entirely.
+    fx.place_at("договори/договір.pdf", clean, mtime_just_after());
+    let outcome = fx.ingest_with_worker("договори/договір.pdf", &worker_answering(&fx, &amendment));
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the premise is the branch that leaves before the write, got {outcome:?}"
+    );
+    assert_eq!(
+        named(&fx),
+        vec![row("архів/додаток.pdf", 2), row("договори/договір.pdf", 2),],
+        "page 7 stopped being missing from what this path holds and its row is \
+         gone; the page missing from what it holds now has one; and the other \
+         file's row is not this path's to remove"
+    );
+}
+
+/// A pass that wrote no page does **not** rewrite the account of which pages
+/// are missing.
+///
+/// The pass this is about writes nothing. The document is already in the index,
+/// its chunking is finished, the reader that just ran is the one the `path` row
+/// already records, and `ingest_file` answers `AlreadyIndexed` before a single
+/// page row is touched — so the pages the index holds are the ones the earlier
+/// pass put there, whatever this worker says about the same bytes. Rewriting
+/// the journal from today's account there deletes a true row: page 2's text is
+/// still absent from the index, and the only record that said so is gone.
+///
+/// **This test used to describe a release upgrade — a reader that learns to
+/// read page 2 — and that is no longer this branch.** Step 3 now compares the
+/// reader that ran against the one the row records, so a version bump
+/// re-extracts the document instead of confirming it, and the note goes because
+/// the page comes back:
+/// `a_reader_version_bump_re_extracts_the_document_rather_than_confirming_it`
+/// is that half, and it is the outcome `PDF_READER_VERSION` exists to produce.
+/// What is left here is the branch itself, reached by the ordinary way a
+/// re-read costs nothing — a file whose mtime moved and whose bytes did not.
+///
+/// **The direction that stops "never touch anything" from satisfying this** is
+/// `a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back`,
+/// where the same branch is reached with the path coming to name a *different*
+/// document and the old rows must go. A separate test rather than a second
+/// assertion here, so that a mutation of either side has something of its own
+/// to redden.
+#[cfg(unix)]
+#[test]
+fn a_pass_that_wrote_no_page_does_not_rewrite_the_account_of_missing_ones() {
+    let fx = Fixture::new();
+    let contract = b"%PDF-1.7\ninvented: a contract read twice by two releases\n".as_slice();
+    fx.place_at("договори/постачання.pdf", contract, mtime());
+
+    // Release one: page 2 is a photograph, and the index gets pages 1 and 3.
+    let older = pdf_frames_from(contract, &[1, 3], vec![2], "Договір постачання", 1);
+    assert!(matches!(
+        fx.ingest_with_worker("договори/постачання.pdf", &worker_answering(&fx, &older)),
+        Ingested::Indexed { .. }
+    ));
+    let named = |fx: &Fixture| -> Vec<Option<i64>> {
+        fx.db
+            .skips_for_root(fx.root_id)
+            .unwrap()
+            .iter()
+            .map(|r| r.page_no)
+            .collect()
+    };
+    assert_eq!(named(&fx), vec![Some(2)], "the premise is a row to lose");
+
+    // The same reader, at the same version, over bytes that did not move — only
+    // the mtime did, which is what makes the cheap arm miss and the worker run
+    // at all. Its account of the skipped pages differs from the journal's, and
+    // that is what this branch must not act on: it wrote no page, so it has
+    // nothing to say about which ones are missing.
+    fx.place_at("договори/постачання.pdf", contract, mtime_just_after());
+    let newer = pdf_frames_from(contract, &[1, 2, 3], Vec::new(), "Договір постачання", 1);
+    let outcome = fx.ingest_with_worker("договори/постачання.pdf", &worker_answering(&fx, &newer));
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the premise is the branch that writes no pages, got {outcome:?}"
+    );
+
+    // The set, not its size. `len() == 2` is satisfied by `[1, 2]`, and under
+    // *that* index the row this test goes on to require would be false — so a
+    // premise counting pages would let the whole test pass while asserting the
+    // opposite of what it says. Measured: with the fixture altered to leave
+    // pages 1 and 2 indexed, the counting version passed green.
+    assert_eq!(
+        fx.db.indexed_page_numbers(&sha256_of(contract)).unwrap(),
+        vec![1, 3],
+        "the premise fails unless the index still holds the older extraction — \
+         pages 1 and 3, with the gap where page 2 is not"
+    );
+    assert_eq!(
+        named(&fx),
+        vec![Some(2)],
+        "page 2 is still not in the index, so the row that says so is still true"
+    );
+}
+
+/// A release that learns to read a page **delivers** it, and the note saying it
+/// was missing goes because the page stopped being missing.
+///
+/// **This is what a reader version is for, and until step 3 compared readers it
+/// bought nothing.** `PDF_READER_VERSION`'s own doc says it is "the thing the
+/// parent compares to decide whether a document already in the index was made
+/// by today's code" — and the comparison reached only the *cheap arm*, which
+/// decides whether to run a worker. Past it, the document was found under the
+/// same content hash with its chunking finished and the pass returned having
+/// written nothing. So a release that fixed a reader re-read every affected
+/// file, at full cost, and changed not one page of what the index answers with.
+/// Measured: before the reader comparison was added to step 3, this test's
+/// second pass came back `AlreadyIndexed` with pages 1 and 3 in the index and
+/// the row for page 2 still standing.
+///
+/// Three assertions rather than one, because each is satisfied by a different
+/// mistake: the pass wrote (`Indexed`), the page it learned to read is in the
+/// index (not "some pages are"), and the journal row is gone **because** of
+/// that rather than by a sweep — the other test in this pair is where a row
+/// that is still true has to survive.
+#[cfg(unix)]
+#[test]
+fn a_reader_version_bump_re_extracts_the_document_rather_than_confirming_it() {
+    let fx = Fixture::new();
+    let contract = b"%PDF-1.7\ninvented: a contract read twice by two releases\n".as_slice();
+    fx.place_at("договори/постачання.pdf", contract, mtime());
+
+    // Release one: page 2 is a photograph, and the index gets pages 1 and 3.
+    let older = pdf_frames_from(contract, &[1, 3], vec![2], "Договір постачання", 1);
+    assert!(matches!(
+        fx.ingest_with_worker("договори/постачання.pdf", &worker_answering(&fx, &older)),
+        Ingested::Indexed { .. }
+    ));
+    assert_eq!(
+        fx.db.indexed_page_numbers(&sha256_of(contract)).unwrap(),
+        vec![1, 3],
+        "the premise is a document with a page missing from it"
+    );
+
+    // Release two reads what release one could not, and says so with its
+    // version. The bytes are the same, so this is the same document — the one
+    // thing that must not follow is that it is therefore the same reading.
+    let newer = pdf_frames_from(contract, &[1, 2, 3], Vec::new(), "Договір постачання", 2);
+    let outcome = fx.ingest_with_worker("договори/постачання.pdf", &worker_answering(&fx, &newer));
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "a reader that says it reads these bytes differently has to be believed \
+         about the document it already made: {outcome:?}"
+    );
+    assert_eq!(
+        fx.db.indexed_page_numbers(&sha256_of(contract)).unwrap(),
+        vec![1, 2, 3],
+        "the page the new reader learned to read is what the upgrade was for"
+    );
+    assert!(
+        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
+        "no page of this document is missing any more, so no row may say one is"
+    );
+}
+
+/// And the mirror: no row is written for a page the index holds and cites.
+///
+/// A path comes to hold content this index already has, read this time by a
+/// build whose reader drops a page the earlier one kept. The write is skipped —
+/// the document is already there, complete — so a row taken from today's
+/// account would name a page that is in the index, findable, and citable on
+/// demand. That is the contradiction `mnema_pool`'s `run_one` stops the whole
+/// job over when a worker sends it in one frame
+/// (`a_page_that_arrived_and_was_reported_skipped_stops_the_job`), arriving
+/// through the database instead.
+///
+/// **The direction that stops a filter from simply dropping everything** is the
+/// last pass of
+/// `a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back`,
+/// which reaches this same branch with a page the index does *not* hold and
+/// requires the row to be written.
+#[cfg(unix)]
+#[test]
+fn no_row_is_written_for_a_page_the_index_holds() {
+    let fx = Fixture::new();
+    let report = b"%PDF-1.7\ninvented: a report typed on every one of its pages\n".as_slice();
+    let whole = pdf_frames(report, &[1, 2, 3], Vec::new(), "Звіт про виконання");
+
+    fx.place_at("звіти/оригінал.pdf", report, mtime());
+    assert!(matches!(
+        fx.ingest_with_worker("звіти/оригінал.pdf", &worker_answering(&fx, &whole)),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
+        "the premise fails if the first pass journalled anything"
+    );
+
+    // The same bytes under a second name, read by a build that drops page 2.
+    let drops_a_page = pdf_frames(report, &[1, 3], vec![2], "Звіт про виконання");
+    fx.place_at("звіти/копія.pdf", report, mtime());
+    let outcome = fx.ingest_with_worker("звіти/копія.pdf", &worker_answering(&fx, &drops_a_page));
+    assert!(
+        matches!(outcome, Ingested::AlreadyIndexed { .. }),
+        "the premise is content already in the index, got {outcome:?}"
+    );
+
+    assert!(
+        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
+        "page 2 of this document is in the index; a row calling it missing is \
+         the pool's stop-the-job contradiction arriving by another road"
+    );
+    // The set, for the reason the test above states: a count of three is
+    // satisfied by an index holding pages 1, 3 and 4, and page 2 — the one this
+    // test is about — would not be in it.
+    assert_eq!(
+        fx.db.indexed_page_numbers(&sha256_of(report)).unwrap(),
+        vec![1, 2, 3],
+        "and the premise fails unless the index really does hold that page"
+    );
+}
+
+/// The other way a per-page row can outlive its document, and it is not the
+/// pass above: a refusal writes no `path` row, so `repoint` never runs.
+///
+/// A file that stops being readable altogether has the index's copy of it
+/// removed when the bytes moved (`displaces`), and the rows naming its missing
+/// pages have to go with it — otherwise the skip window says "page 2 of
+/// договір.pdf has no text layer" about a document that is not in the index at
+/// all, for ever, since nothing re-reads a path a walk keeps finding.
+///
+/// **Both directions, and the second is the one that stops the removal from
+/// being unconditional.** An environmental refusal — a worker that died, a
+/// deadline the machine missed — deliberately keeps the document, and the rows
+/// belong to the document: taking them away on a crash would delete the
+/// explanation of a document that is still there, on the one event that says
+/// nothing about the file at all.
+#[cfg(unix)]
+#[test]
+fn a_refusal_that_takes_the_document_away_takes_its_page_rows_with_it() {
+    let fx = Fixture::new();
+    let scanned = b"%PDF-1.7\ninvented: a lease whose middle page is a photograph\n".as_slice();
+
+    fx.place_at("договори/оренда.pdf", scanned, mtime());
+    assert!(matches!(
+        fx.ingest_with_worker(
+            "договори/оренда.pdf",
+            &worker_answering(
+                &fx,
+                &pdf_frames(scanned, &[1, 3], vec![2], "Договір оренди приміщення")
+            )
+        ),
+        Ingested::Indexed { .. }
+    ));
+    let named_page = |fx: &Fixture| -> Vec<Option<i64>> {
+        fx.db
+            .skips_for_root(fx.root_id)
+            .unwrap()
+            .iter()
+            .map(|r| r.page_no)
+            .collect()
+    };
+    assert_eq!(
+        named_page(&fx),
+        vec![Some(2)],
+        "the premise fails if the row was never written"
+    );
+
+    // A worker that died. It keeps the document, so it keeps the account of
+    // what is missing from it.
+    fx.place_at("договори/оренда.pdf", scanned, mtime_just_after());
+    let died = support::wrong_worker(fx.root.parent().unwrap(), r"printf '\377\376\n'");
+    assert_eq!(
+        fx.ingest_with_worker("договори/оренда.pdf", &died),
+        Ingested::Skipped {
+            rule: SkipRule::Crash
+        }
+    );
+    assert!(
+        !fx.db.search_lexical("оренди", 10).unwrap().is_empty(),
+        "the premise fails unless this rule kept the document"
+    );
+    assert_eq!(
+        named_page(&fx),
+        vec![Some(2), None],
+        "the file's own verdict is added — after the page's row, which is older \
+         and is left standing"
+    );
+
+    // The file is replaced by bytes no reader takes. The document goes, and
+    // the row that named a page of it has nothing left to be about.
+    let photo = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".as_slice();
+    fx.place_at(
+        "договори/оренда.pdf",
+        photo,
+        mtime_just_after() + Duration::from_millis(250),
+    );
+    let replaced = sha256_of(photo);
+    let refuses = support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            r#"printf '{{"frame":"refused","rule":"not_text","reason":"this file is not text","sha256":"{replaced}"}}\n'"#
+        ),
+    );
+    assert_eq!(
+        fx.ingest_with_worker("договори/оренда.pdf", &refuses),
+        Ingested::Skipped {
+            rule: SkipRule::NotText
+        }
+    );
+    assert!(
+        fx.db.search_lexical("оренди", 10).unwrap().is_empty(),
+        "the premise fails unless this rule took the document away"
+    );
+    assert_eq!(
+        named_page(&fx),
+        vec![None],
+        "the file's verdict is the only thing left: no page of a document the \
+         index no longer holds is still being reported missing from it"
     );
 }
 
@@ -2477,6 +4335,21 @@ fn a_deadline_the_machine_could_not_meet_does_not_delete_the_document() {
 /// would remove the indexed content of every file it named. The pool's own
 /// test pins the `Err`; this pins what the index looks like afterwards, which
 /// is the half that matters here.
+///
+/// The rule string was `"encrypted"` until this build learned that word: a
+/// stand-in for "unknown" that is only unknown for a while tests the opposite
+/// of what it claims, so the replacement is deliberately one no roadmap
+/// contains.
+///
+/// **This test reddened when that happened, and it does not name the rule
+/// anywhere** — the `matches!` below asks only for a `Protocol` error. It went
+/// red because a recognised rule makes the call return `Ok`, and it would have
+/// gone red a second time over regardless: the stand-in worker sends a refusal
+/// with no `sha256`, `Frame::Refused` gives that field `#[serde(default)]`
+/// (`crates/mnema-core/src/wire.rs`), and `displaces` treats an unknown digest
+/// as displacing — so the document these assertions expect to still be there
+/// would have been deleted. What was missing was never redness; it was a red
+/// that points at the premise instead of at the pool. Hence the `parse` check.
 #[cfg(unix)]
 #[test]
 fn a_worker_from_another_release_stops_the_job_and_leaves_the_index_alone() {
@@ -2486,9 +4359,14 @@ fn a_worker_from_another_release_stops_the_job_and_leaves_the_index_alone() {
         panic!("expected the file to index")
     };
 
+    assert_eq!(
+        SkipRule::parse("rule_from_a_later_release"),
+        None,
+        "the stand-in for an unknown rule has become a rule this build knows"
+    );
     let broken = support::wrong_worker(
         fx.root.parent().unwrap(),
-        r#"printf '{"frame":"refused","rule":"encrypted","reason":"password"}\n'"#,
+        r#"printf '{"frame":"refused","rule":"rule_from_a_later_release","reason":"unnameable"}\n'"#,
     );
     set_mtime(&path, mtime_just_after());
     let outcome = fx.try_ingest_with_worker("contracts/ravella.txt", &broken);
@@ -2596,8 +4474,14 @@ fn a_document_with_no_pages_is_still_written() {
         fx.root.parent().unwrap(),
         &format!(
             "printf '{}\\n{}\\n'",
-            r#"{"frame":"header","sha256":"'"$(printf %064d 7)"'","mime":"application/pdf","source_kind":"document","pages":0}"#,
-            r#"{"frame":"summary","skipped_pages":0,"text_source":"native:pdf"}"#
+            // `reader`/`reader_version` are filled in with a reader this build
+            // does not have, which is what a worker of another version would
+            // send and costs this test nothing: its subject is the page count
+            // of nought, and a header missing a required field would fail it
+            // for the wrong reason — as a protocol error, before the empty
+            // document was ever written.
+            r#"{"frame":"header","sha256":"'"$(printf %064d 7)"'","mime":"application/pdf","source_kind":"document","reader":"pdf","reader_version":1,"pages":0}"#,
+            r#"{"frame":"summary","skipped_pages":[],"text_source":"native:pdf"}"#
         ),
     );
     set_mtime(&path, mtime_just_after());
@@ -2758,11 +4642,7 @@ fn content_that_comes_back_finds_no_checkpoint_waiting_for_it() {
     };
 
     // Dropped: a PDF saved over it, which the worker reads and declines.
-    set_bytes_and_mtime(
-        &path,
-        b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n",
-        mtime_just_after(),
-    );
+    set_bytes_and_mtime(&path, support::NO_READER_FOR_THIS, mtime_just_after());
     assert_eq!(
         fx.ingest("contracts/ravella.txt"),
         Ingested::Skipped {
@@ -2812,4 +4692,559 @@ fn content_that_comes_back_finds_no_checkpoint_waiting_for_it() {
         mnema_index::DocumentStatus::Indexed
     );
     assert!(!fx.db.search_lexical("Равелла", 10).unwrap().is_empty());
+}
+
+// ------------------------------------------- a coordinate for every reader
+
+// Every test below is `cfg(unix)` for one reason: the stand-in worker is a
+// shell script (`support::wrong_worker`), and none of the five readers these
+// coordinates belong to exists yet — pdf, html, docx, epub and xlsx arrive in
+// later tasks of this cycle. Until they do, a worker that *states* it is one of
+// them is the only way to reach `pages_of`'s new arms at all, and on Windows
+// they are unreached. What holds them there is `mnema-chunk`'s own suite, which
+// is platform-independent and covers the half that computes a range.
+
+/// A stand-in worker that answers every request with exactly these frames,
+/// whatever file it is handed.
+///
+/// The frames are typed [`Frame`] values put through the wire's own `to_line`
+/// rather than JSON written out by hand: a literal would be a second copy of
+/// the protocol, green until the day a field moves. A quoted heredoc carries
+/// them into the script, so nothing inside them is expanded by the shell.
+#[cfg(unix)]
+fn worker_answering(fx: &Fixture, frames: &[Frame]) -> PathBuf {
+    worker_answering_in(fx.root.parent().unwrap(), frames)
+}
+
+/// The same, in a directory the caller names — for the tests that need **two**
+/// stand-in workers alive at once.
+///
+/// `support::wrong_worker` always writes `<dir>/wrong-worker`, so two calls with
+/// the same directory are one file and the second call's frames replace the
+/// first's. Measured, after a review asked: two calls returned the same path,
+/// and reading the "first" worker got the second one's frames. The test that
+/// needs both — a document indexed by one build and re-read by another — was
+/// correct only because its statements happened to run in the order that hid
+/// it, which is not a property a test about two builds should have.
+#[cfg(unix)]
+fn worker_answering_in(dir: &Path, frames: &[Frame]) -> PathBuf {
+    let lines: String = frames
+        .iter()
+        .map(|frame| to_line(frame).expect("a frame serialises"))
+        .collect();
+    support::wrong_worker(dir, &format!("cat <<'MNEMA_FRAMES'\n{lines}MNEMA_FRAMES"))
+}
+
+/// What an html reader sends for a document of `pages` sections.
+///
+/// `reader_version` is a parameter because the tests that use this are about a
+/// release boundary: the same bytes, read by two builds that say so.
+#[cfg(unix)]
+fn html_frames(bytes: &[u8], pages: u32, reader_version: u32) -> Vec<Frame> {
+    let mut frames = vec![Frame::Header {
+        sha256: sha256_of(bytes),
+        mime: "text/html".to_string(),
+        source_kind: SourceKind::Document,
+        reader: "html".to_string(),
+        reader_version,
+        pages,
+    }];
+    for page_no in 1..=pages {
+        frames.push(Frame::Page {
+            page_no,
+            section_title: Some(format!("Розділ {page_no}")),
+        });
+        frames.push(Frame::Block(unlined_block(&format!(
+            "Комісія розглянула звернення, розділ {page_no}."
+        ))));
+    }
+    frames.push(Frame::Summary {
+        skipped_pages: Vec::new(),
+        text_source: "native:html".to_string(),
+    });
+    frames
+}
+
+/// What a PDF reader sends for a document whose pages `sent` carried a text
+/// layer and whose pages `skipped` did not.
+///
+/// The header's count is `sent.len()` rather than the document's page count,
+/// which is the pool's own integrity check: a reader that announced the pages
+/// it *has* would stop the job on every PDF with a scan in it.
+#[cfg(unix)]
+fn pdf_frames(bytes: &[u8], sent: &[u32], skipped: Vec<u32>, text: &str) -> Vec<Frame> {
+    pdf_frames_from(bytes, sent, skipped, text, 1)
+}
+
+/// The same, from a named release of the reader — for the tests whose subject
+/// is what a reader upgrade does to an already-indexed document.
+#[cfg(unix)]
+fn pdf_frames_from(
+    bytes: &[u8],
+    sent: &[u32],
+    skipped: Vec<u32>,
+    text: &str,
+    reader_version: u32,
+) -> Vec<Frame> {
+    let mut frames = vec![Frame::Header {
+        sha256: sha256_of(bytes),
+        mime: "application/pdf".to_string(),
+        source_kind: SourceKind::Document,
+        reader: "pdf".to_string(),
+        reader_version,
+        pages: sent.len() as u32,
+    }];
+    for page_no in sent {
+        frames.push(Frame::Page {
+            page_no: *page_no,
+            section_title: None,
+        });
+        frames.push(Frame::Block(unlined_block(&format!(
+            "{text}, сторінка {page_no}."
+        ))));
+    }
+    frames.push(Frame::Summary {
+        skipped_pages: skipped,
+        text_source: "native:pdf".to_string(),
+    });
+    frames
+}
+
+/// A block of a format that has no lines of its own — which is what every one
+/// of these readers produces except xlsx.
+#[cfg(unix)]
+fn unlined_block(text: &str) -> Block {
+    Block {
+        block_type: BlockType::Paragraph,
+        reading_order: 0,
+        language: Some("uk".to_string()),
+        text: text.to_string(),
+        line_start: None,
+        line_end: None,
+    }
+}
+
+/// The coordinate of the one chunk a word is found in.
+#[cfg(unix)]
+fn coordinate_of(fx: &Fixture, word: &str) -> Coordinate {
+    let hits = fx.db.search_lexical(word, 10).unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the fixture is only readable if {word:?} sits in exactly one chunk"
+    );
+    fx.db
+        .citation(hits[0])
+        .unwrap()
+        .expect("a chunk that was found has a citation")
+        .coordinate
+}
+
+/// A PDF's citation names the page it came from.
+///
+/// The whole reason `pages_of` asks which reader made a document. A PDF block
+/// carries no line numbers, and `PageContext::Lines` turns that into
+/// `Coordinate::None` — every page of every PDF cited with no coordinate at
+/// all, silently and without an error anywhere (spec §2.6).
+///
+/// **Two pages, numbered 7 and 9**, and neither number is the page's position
+/// in the document. A coordinate taken from a counter instead of from the page
+/// frame passes a one-page fixture and fails here, and so does one that copies
+/// the first page's number onto the rest.
+#[cfg(unix)]
+#[test]
+fn a_pdf_chunk_cites_its_page_not_nothing() {
+    let fx = Fixture::new();
+    let bytes = b"%PDF-1.7\ninvented, and never parsed: the worker below is a script\n";
+    fx.place("zvity/richnyi.pdf", bytes);
+
+    let worker = worker_answering(
+        &fx,
+        &[
+            Frame::Header {
+                sha256: sha256_of(bytes),
+                mime: "application/pdf".to_string(),
+                source_kind: SourceKind::Document,
+                reader: "pdf".to_string(),
+                reader_version: 1,
+                pages: 2,
+            },
+            Frame::Page {
+                page_no: 7,
+                section_title: None,
+            },
+            Frame::Block(unlined_block(
+                "Річний звіт про виконання кошторису за минулий період.",
+            )),
+            Frame::Page {
+                page_no: 9,
+                section_title: None,
+            },
+            Frame::Block(unlined_block(
+                "Додаток до звіту: перелік придбаного обладнання для філії.",
+            )),
+            Frame::Summary {
+                skipped_pages: Vec::new(),
+                text_source: "native:pdf".to_string(),
+            },
+        ],
+    );
+
+    let outcome = fx.ingest_with_worker("zvity/richnyi.pdf", &worker);
+    let Ingested::Indexed { chunks, .. } = &outcome else {
+        panic!("expected the pdf to index, got {outcome:?}")
+    };
+    assert_eq!(*chunks, 2, "one chunk per page");
+
+    assert_eq!(
+        coordinate_of(&fx, "кошторису"),
+        Coordinate::Page { number: 7 },
+        "a PDF block has no line numbers, and `Lines` turns that into \
+         Coordinate::None"
+    );
+    assert_eq!(
+        coordinate_of(&fx, "обладнання"),
+        Coordinate::Page { number: 9 },
+        "the second page's coordinate must come from its own page frame"
+    );
+}
+
+/// The whole chain for HTML, with the real worker: bytes on disk to a citation.
+///
+/// Spec §6 invariant 1 asks every format for a non-empty coordinate, and the two
+/// ends of this one are joined only by a string on a wire: `manifest::READER_HTML`
+/// written by the worker, and the same constant matched by `pages_of`
+/// (`crates/mnema-ingest/src/lib.rs:33` imports it, `:1333` matches it) — one
+/// symbol, with a process boundary and D40 between the two ends rather than a
+/// compiler. **Not** a literal on the parent's side, which an earlier version of
+/// this comment claimed: what can still put a different string on the wire is a
+/// different build of the worker, not a typo. Every other test of this format
+/// stands on one side or the other — `mnema-extract/tests/html.rs` on the
+/// reader, `worker_cli.rs` on the frames it sends, and the loop below on
+/// `pages_of` with a scripted worker. This is the one that runs the real binary
+/// over a real file and reads the citation back out of the database.
+///
+/// Both directions, and the second is the defect this format had: the section is
+/// named **and** the stylesheet is not searchable.
+#[cfg(unix)]
+#[test]
+fn an_html_file_indexed_by_the_real_worker_cites_its_section() {
+    let fx = Fixture::new();
+    fx.place(
+        "dovidky/umovy.html",
+        "<html><head><title>Умови постачання</title>\
+         <style>.a{color:red}</style></head>\
+         <body><h1>Розділ 3. Приймання</h1>\
+         <p>Комісія розглянула звернення щодо строків.</p>\
+         <script>var x=1;</script></body></html>"
+            .as_bytes(),
+    );
+    let outcome = fx.ingest("dovidky/umovy.html");
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "expected the real worker to index the file, got {outcome:?}"
+    );
+
+    assert_eq!(
+        coordinate_of(&fx, "звернення"),
+        Coordinate::Section {
+            title: "Розділ 3. Приймання".to_string()
+        },
+    );
+    assert!(
+        fx.db.search_lexical("color", 10).unwrap().is_empty(),
+        "the stylesheet reached the lexical index, which is the defect spec §2.1 \
+         measured in a shipped build"
+    );
+}
+
+/// html, docx and epub have sections where a PDF has pages, and none of the
+/// three has a line number to fall back on.
+///
+/// One title per reader, all three different: a coordinate hard-coded to any
+/// one of them, or taken from the first page indexed, fails on the other two.
+#[cfg(unix)]
+#[test]
+fn html_docx_and_epub_cite_the_section_their_page_names() {
+    let fx = Fixture::new();
+    // The reader, the file it made, the section its page names, a sentence to
+    // find it by, and the word to search — one word per document, or
+    // `coordinate_of` cannot tell the three apart.
+    let readers = [
+        (
+            "html",
+            "dovidky/umovy.html",
+            "Розділ 3. Умови постачання",
+            "Комісія розглянула звернення щодо умов постачання.",
+            "звернення",
+        ),
+        (
+            "docx",
+            "dovidky/koshtorys.docx",
+            "Додаток Б. Кошторис робіт",
+            "Кошторис складено за формою, узгодженою сторонами.",
+            "формою",
+        ),
+        (
+            "epub",
+            "dovidky/pryimannia.epub",
+            "Глава друга. Приймання",
+            "Приймання виконаних робіт підтверджується актом.",
+            "актом",
+        ),
+    ];
+
+    for (reader, relative, title, prose, word) in readers {
+        let bytes = format!("invented bytes for {reader}, never parsed\n").into_bytes();
+        fx.place(relative, &bytes);
+        let worker = worker_answering(
+            &fx,
+            &[
+                Frame::Header {
+                    sha256: sha256_of(&bytes),
+                    mime: format!("application/x-invented-{reader}"),
+                    source_kind: SourceKind::Document,
+                    reader: reader.to_string(),
+                    reader_version: 1,
+                    pages: 1,
+                },
+                Frame::Page {
+                    page_no: 1,
+                    section_title: Some(title.to_string()),
+                },
+                Frame::Block(unlined_block(prose)),
+                Frame::Summary {
+                    skipped_pages: Vec::new(),
+                    text_source: format!("native:{reader}"),
+                },
+            ],
+        );
+
+        let outcome = fx.ingest_with_worker(relative, &worker);
+        assert!(
+            matches!(outcome, Ingested::Indexed { .. }),
+            "expected {reader} to index, got {outcome:?}"
+        );
+        assert_eq!(
+            coordinate_of(&fx, word),
+            Coordinate::Section {
+                title: title.to_string()
+            },
+            "{reader} must cite the section its own page names"
+        );
+    }
+}
+
+/// A page of one of those three formats that names **no** section carries an
+/// empty one, not `Coordinate::None` — and that is a decision rather than a
+/// leftover.
+///
+/// The two render identically: `Coordinate::Section { title: "" }` and
+/// `Coordinate::None` are both the empty string, so on screen this is not a
+/// choice at all. In the database it is. A section with no title says "this
+/// document has sections and this page was not given one", which is a reader
+/// with a hole in it; `None` says "this format has no coordinate to give",
+/// which is what a bare text file is. Collapsing the first into the second
+/// makes a defect indistinguishable from a design.
+///
+/// Naming a section is therefore the reader's obligation (spec §6, invariant
+/// 1), not this loop's to paper over — and this test is where that obligation
+/// is written down, so that whoever writes `html.rs` meets it here rather than
+/// in a citation.
+#[cfg(unix)]
+#[test]
+fn a_page_that_names_no_section_carries_an_empty_one_rather_than_none() {
+    let fx = Fixture::new();
+    let bytes = b"invented html, never parsed\n";
+    fx.place("dovidky/bez-zagolovka.html", bytes);
+
+    let worker = worker_answering(
+        &fx,
+        &[
+            Frame::Header {
+                sha256: sha256_of(bytes),
+                mime: "text/html".to_string(),
+                source_kind: SourceKind::Document,
+                reader: "html".to_string(),
+                reader_version: 1,
+                pages: 1,
+            },
+            // What a page with no heading above it looks like on the wire.
+            Frame::Page {
+                page_no: 1,
+                section_title: None,
+            },
+            Frame::Block(unlined_block(
+                "Текст, який не має над собою жодного заголовка.",
+            )),
+            Frame::Summary {
+                skipped_pages: Vec::new(),
+                text_source: "native:html".to_string(),
+            },
+        ],
+    );
+
+    let outcome = fx.ingest_with_worker("dovidky/bez-zagolovka.html", &worker);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "expected the untitled page to index, got {outcome:?}"
+    );
+    assert_eq!(
+        coordinate_of(&fx, "заголовка"),
+        Coordinate::Section {
+            title: String::new()
+        },
+    );
+}
+
+/// A spreadsheet chunk cites the rows it covers, not the sheet it sits on.
+///
+/// This is the one the other tests here cannot stand in for, and the reason
+/// `PageContext::Rows` exists at all. A sheet is one page, so a *fixed*
+/// coordinate would give every chunk of this document the same answer — "аркуш
+/// Кошторис, рядки 1–480" — for a chunk that covers forty of them. Non-empty,
+/// plausible, and pointing at twelve times too much: an assertion that the
+/// coordinate merely *exists* is satisfied by exactly that defect, so the
+/// assertions below are that each chunk's range equals the rows of the blocks
+/// it actually names, and that not every chunk carries the same one.
+///
+/// The expected range is read back out of the `block` table rather than
+/// computed from the fixture, so a chunk whose spans name blocks other than the
+/// ones its coordinate was built from fails here too.
+#[cfg(unix)]
+#[test]
+fn an_xlsx_chunk_cites_the_rows_it_covers_not_the_whole_sheet() {
+    let fx = Fixture::new();
+    let bytes = b"PK\x03\x04 invented, and never unzipped\n";
+    fx.place("koshtorysy/biudzhet.xlsx", bytes);
+
+    // Twelve blocks of forty sheet rows each: one sheet spanning rows 1–480.
+    let mut frames = vec![
+        Frame::Header {
+            sha256: sha256_of(bytes),
+            mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string(),
+            source_kind: SourceKind::Data,
+            reader: "xlsx".to_string(),
+            reader_version: 1,
+            pages: 1,
+        },
+        Frame::Page {
+            page_no: 1,
+            section_title: Some("Кошторис".to_string()),
+        },
+    ];
+    frames.extend((0..12u32).map(|i| {
+        Frame::Block(Block {
+            block_type: BlockType::Table,
+            reading_order: i64::from(i),
+            language: Some("uk".to_string()),
+            text: (0..3)
+                .map(|row| {
+                    format!(
+                        "Позиція {i}.{row}: закупівля лабораторного обладнання для філії, \
+                         сума узгоджена комісією.\n"
+                    )
+                })
+                .collect(),
+            // The rows this block occupies in the sheet, which is what the
+            // xlsx reader owes every block it emits (spec §2.6).
+            line_start: Some(i * 40 + 1),
+            line_end: Some(i * 40 + 40),
+        })
+    }));
+    frames.push(Frame::Summary {
+        skipped_pages: Vec::new(),
+        text_source: "native:xlsx".to_string(),
+    });
+
+    let worker = worker_answering(&fx, &frames);
+    let outcome = fx.ingest_with_worker("koshtorysy/biudzhet.xlsx", &worker);
+    let Ingested::Indexed {
+        document_id,
+        chunks,
+    } = &outcome
+    else {
+        panic!("expected the spreadsheet to index, got {outcome:?}")
+    };
+    assert!(
+        *chunks >= 3,
+        "a sheet that becomes one chunk cannot tell a narrowed coordinate from \
+         a fixed one, and this fixture produced {chunks}"
+    );
+
+    // The premise: the sheet really does span 480 rows, so a coordinate naming
+    // all of them is a visibly different answer from one naming a chunk's.
+    let sheet: (i64, i64) = fx
+        .db
+        .conn()
+        .query_row(
+            "SELECT min(line_start), max(line_end) FROM block",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(sheet, (1, 480), "the fixture's own rows");
+
+    let mut ranges = Vec::new();
+    for id in fx.chunk_ids(document_id) {
+        let citation = fx
+            .db
+            .citation(id)
+            .unwrap()
+            .expect("a chunk that was written has a citation");
+        let Coordinate::SheetRows {
+            sheet: name,
+            start,
+            end,
+        } = citation.coordinate
+        else {
+            panic!("chunk {id} carries {:?}", citation.coordinate)
+        };
+        assert_eq!(name, "Кошторис", "the sheet's name, from its page");
+
+        let covered: Vec<i64> = citation.spans.iter().map(|s| s.block_id).collect();
+        assert_eq!(
+            (start, end),
+            rows_of(&fx, &covered),
+            "chunk {id} cites rows {start}–{end} while covering blocks {covered:?}"
+        );
+        assert_ne!(
+            (start, end),
+            (1, 480),
+            "chunk {id} cites the whole sheet — which is what `Fixed` would give \
+             it, and what this variant exists to prevent"
+        );
+        ranges.push((start, end));
+    }
+    ranges.dedup();
+    assert!(
+        ranges.len() > 1,
+        "every chunk carries the same range, so nothing here distinguishes a \
+         narrowed coordinate from a fixed one: {ranges:?}"
+    );
+}
+
+/// The row range of a set of blocks, read back out of the database.
+#[cfg(unix)]
+fn rows_of(fx: &Fixture, block_ids: &[i64]) -> (u32, u32) {
+    let mut start = u32::MAX;
+    let mut end = 0;
+    for id in block_ids {
+        let rows: (Option<i64>, Option<i64>) = fx
+            .db
+            .conn()
+            .query_row(
+                "SELECT line_start, line_end FROM block WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let (a, b) = (
+            rows.0.expect("the fixture gives every block its rows"),
+            rows.1.expect("the fixture gives every block its rows"),
+        );
+        start = start.min(a as u32);
+        end = end.max(b as u32);
+    }
+    (start, end)
 }

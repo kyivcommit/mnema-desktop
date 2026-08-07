@@ -29,7 +29,10 @@
 use std::path::Path;
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
-use mnema_core::{Block, BlockType, OnDisk, SourceKind};
+use mnema_core::manifest::{
+    Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_PDF, READER_XLSX,
+};
+use mnema_core::{Block, BlockType, Coordinate, OnDisk, SourceKind};
 use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipRule};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
 
@@ -46,6 +49,24 @@ pub const STAGE_CHUNK: &str = "chunk";
 
 /// What `ingest_stage.status` says about a stage that finished.
 pub const STATUS_DONE: &str = "done";
+
+/// What it says while a **finished** stage is being replaced.
+///
+/// A rebuild is the one write that starts from a `done` stage: the document is
+/// complete and a reader that reads it differently has arrived, so its rows are
+/// cleared and written again. Between the first slice and step 5 the stage
+/// would otherwise still claim `done` over a document holding twenty pages, and
+/// the cheap arm — which reads exactly that stage — would answer `Unchanged`
+/// for the life of the index. Writing this instead, in the same transaction
+/// that clears the rows, puts an interrupted rebuild back on the path that
+/// finishes it.
+///
+/// A third value rather than reusing "the stage is absent", because the two say
+/// different things to anyone reading the journal: never started, against
+/// started again and not finished. `ingest_stage.status` has no CHECK
+/// (`crates/mnema-index/src/schema.sql:257-263`), so adding one costs no
+/// migration; nothing reads it but the comparison against [`STATUS_DONE`].
+pub const STATUS_REBUILDING: &str = "rebuilding";
 
 /// How many pages are written under one transaction.
 ///
@@ -137,7 +158,8 @@ impl From<mnema_index::Error> for IngestError {
 /// step before it is expensive:
 ///
 /// 1. The `path` row, on `(root_id, relative)`. Size and mtime both matching
-///    the file on disk, **and** its document's chunking recorded as finished,
+///    the file on disk, the reader that made it still the one `manifest` gives
+///    its extension, **and** its document's chunking recorded as finished,
 ///    means the file was not touched and no worker process is started at all.
 /// 2. The pool. A skip is recorded and returned; only a broken pool is an
 ///    `Err`.
@@ -165,6 +187,14 @@ impl From<mnema_index::Error> for IngestError {
 /// reintroduces exactly the defect this parameter exists to close, one level
 /// up: the cheap arm answers `Unchanged` for a file that has since changed, and
 /// the index keeps text the file no longer contains, with nothing logged.
+///
+/// `manifest` is what the *worker binary* says its readers are, not a constant
+/// this crate could link — D40 forbids depending on `mnema-extract`, which is
+/// the whole reason the answer arrives as data. It must come from the same
+/// executable the `pool` sends files to (`Pool::manifest` asks that one), and
+/// it must be one answer for the whole pass: a caller that re-asked between
+/// files would let the parent disagree with itself about which build it is
+/// running. Step 1 has what it decides and what it cannot.
 pub fn ingest_file(
     pool: &Pool,
     db: &Db,
@@ -172,6 +202,7 @@ pub fn ingest_file(
     absolute: &Path,
     relative: &str,
     on_disk: Option<OnDisk>,
+    manifest: &Manifest,
 ) -> Result<Ingested, IngestError> {
     // 1. The cheap arm. A failure to stat is not decided here: the pool names
     //    an unreadable file properly, with the rule and the reason the journal
@@ -198,11 +229,73 @@ pub fn ingest_file(
     //
     //    It costs one lookup on a `WITHOUT ROWID` primary key per unchanged
     //    file, against the worker process it is here to avoid.
+    //
+    //    The fourth condition is the one that is not about the file at all.
+    //    The other three ask whether the bytes moved; this asks whether the
+    //    code that read them did. Without it, a document made by a reader this
+    //    build no longer has — or by the default arm, before its format got a
+    //    reader of its own — answers `Unchanged` for the life of the index. The
+    //    case it was built for is `.html`: it is read by the text reader today,
+    //    because `identify_plain_text` has no arm for it, so a manifest of
+    //    reader *versions* would compare `text@1` against `text@1` and never
+    //    re-read a single already-indexed page on the day an html reader
+    //    arrives. That is why the manifest is keyed on the extension.
+    //
+    //    It is checked before the stage, which costs a query, and after the two
+    //    numbers, which are already in hand.
+    //
+    //    **Its first pass over an existing index re-reads every `.md` once.**
+    //    Migration 3 credits every row it finds to `text@1` — it cannot do
+    //    better, because nothing was recorded about who made them — while the
+    //    markdown reader shipped in `fb3a924`, so every markdown row disagrees
+    //    with the manifest exactly once and then agrees for ever. That is the
+    //    migration's cost, not a fault in this condition, and lowering the
+    //    condition to hide it would give up the whole mechanism.
+    //
+    //    **What it cannot do is tell "the prediction changed" from "the
+    //    prediction was never right for this file", and that is a residual with
+    //    a name.** `manifest.for_extension` predicts from the extension, while
+    //    the row records what actually ran; for a file whose content
+    //    contradicts its extension those are two different readers, and the
+    //    condition then misses on every walk — the file is handed to a worker,
+    //    the worker reports the same reader again, and the next walk asks the
+    //    same question. No logic here separates the two cases: the row holds
+    //    the truth, and the prediction it should be compared against was never
+    //    stored.
+    //
+    //    Unreachable in this build, and not by luck: every reader `identify`
+    //    picks by magic bytes is refused by the worker today (`Unsupported`,
+    //    `NotText`, `BinaryTail`), and a refusal writes no `path` row at all —
+    //    so every row that exists was made by the extension-deciding branch,
+    //    which is exactly what the manifest predicts. The two branches of the
+    //    worker are held to agreeing by
+    //    `the_manifest_names_the_reader_that_identify_actually_picks`
+    //    (`crates/mnema-extract/tests/manifest.rs`), and a sidecar that is not
+    //    this worker answers `--manifest` for its own readers, so even a
+    //    mismatched binary agrees with itself.
+    //
+    //    It becomes reachable with the first reader chosen by content — a PDF
+    //    under the name `report.md` is then indexed by the pdf reader while the
+    //    manifest predicts markdown for it. What that costs is one worker
+    //    process and one path-row rewrite per walk, and nothing else: the
+    //    document is content-addressed, so the re-read lands on `AlreadyIndexed`
+    //    with no rebuild, no chunk id moved and nothing journalled
+    //    (`a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that`
+    //    in `tests/slice.rs` is that bill, measured). It is not silent either —
+    //    such a file counts as `indexed` in every `WalkReport`, on a folder
+    //    where nothing changed. What would close it is a fact stored per path
+    //    saying what the prediction was when the row was written, or a manifest
+    //    that can say "this reader is chosen by content, not by extension":
+    //    a column or a wire field, and a decision of its own rather than a line
+    //    in this arm.
     let recorded = db.path_entry(root_id, relative)?;
+    let expected = manifest.for_extension(extension_of(relative));
     if let Some(disk) = on_disk
         && let Some(recorded) = &recorded
         && recorded.size_bytes == disk.size_bytes
         && recorded.mtime == disk.mtime
+        && recorded.reader == expected.reader
+        && recorded.reader_version == i64::from(expected.version)
         && db
             .stage_status(&recorded.document_id, STAGE_CHUNK)?
             .as_deref()
@@ -312,9 +405,81 @@ pub fn ingest_file(
     // creates it or empties it. Read here and used inside the transaction
     // below, so the whole recovery is one atomic unit — see `rebuild` there.
     let mut rebuild = false;
+    // **Whether the rows under this document were made by the reader that just
+    // ran**, which is a different question from whether the bytes moved — and
+    // the one the content address cannot answer. `document.id` is the sha256 of
+    // the file, so a release that gives an extension a new reader changes every
+    // page, block and chunk of it while leaving the id exactly where it was.
+    //
+    // Without this the manifest's whole mechanism stopped one step short. The
+    // cheap arm above notices that `.html` changed hands and hands the file to a
+    // worker; the worker reads it as prose; and the branch below then finds the
+    // document present with its chunk stage `done` and returns having written
+    // nothing — so the text reader's markup stays in the index. Worse, `repoint`
+    // writes the new reader into the `path` row in the same transaction, the
+    // next walk's cheap arm agrees, and the stale reading is there for the life
+    // of that index. `INDEX_FORMAT_VERSION` does not reach it either: that lever
+    // is read only by the skip journal's arm, and an indexed file is not a skip.
+    // Measured before this line existed, in
+    // `a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was`.
+    //
+    // Compared against the reader that **ran**, not against
+    // `manifest.for_extension`: the manifest is a prediction, and what makes the
+    // stored rows stale is which reader actually made them. That also keeps the
+    // arm quiet in the case the manifest cannot predict — a reader chosen by
+    // content disagrees with the map on every walk and would otherwise rebuild
+    // the document, and move every chunk id, on every walk.
+    //
+    // **What it cannot see is a document reached by a path with no row of its
+    // own, and that blindness is permanent rather than temporary.** Two paths to
+    // identical bytes are one document (D33), and the reader is recorded per
+    // path — so walking a copy that was never indexed answers "nothing to
+    // compare". Measured: a file indexed as `a.html` by the text reader and
+    // *renamed* to `b.html` before the first walk of a build with an html reader
+    // comes back `AlreadyIndexed` with `<style>.a{color:red}</style>` still in
+    // its chunk, `search_lexical("color")` still finding it, and every later
+    // walk answering `Unchanged`. The row that could have said otherwise went
+    // with the old name. Renaming a file between two releases is ordinary, so
+    // this is not a corner: for those files the defect this whole reader exists
+    // to fix survives it.
+    //
+    // Closing it properly needs the reader recorded on the `document` row — a
+    // column and a migration, not a line here. What could narrow it without one
+    // is a query for the readers recorded on **any** path naming this document,
+    // since the old row does still exist at the moment the new name is walked
+    // (`repoint` only deletes the row for the path it is rewriting); that is a
+    // new index on `path.document_id` and a decision about which of several
+    // disagreeing rows wins, so it is stated here rather than done.
+    //
+    // `!renaming`, because the recorded reader describes the document that path
+    // **named**, not the one just read. A path whose bytes are replaced by
+    // content already in the index under a different reader would otherwise
+    // clear and rewrite a document that today's reader made, moving every
+    // `chunk.id` under every citation into it for nothing.
+    let renaming = displaced.as_deref() != Some(id.as_str());
+    let stale_reading = !renaming
+        && recorded.as_ref().is_some_and(|entry| {
+            entry.reader != document.reader
+                || entry.reader_version != i64::from(document.reader_version)
+        });
     if db.document_exists(&id)? {
-        if db.stage_status(&id, STAGE_CHUNK)?.as_deref() == Some(STATUS_DONE) {
-            db.transaction(|_| repoint(db, root_id, relative, &id, disk, displaced.as_deref()))?;
+        if !stale_reading && db.stage_status(&id, STAGE_CHUNK)?.as_deref() == Some(STATUS_DONE) {
+            // Nothing is written here, and that governs the journal too. The
+            // path's account of its missing pages is rewritten **only when the
+            // path is coming to name a different document**: this pass extracted
+            // the file but wrote none of its pages, so for a path that already
+            // named this document neither the pages nor the pages missing from
+            // them have moved, and the rows that are there were written by the
+            // pass that did write them. `journal_skipped_pages` has what
+            // rewriting them anyway costs — a true row deleted, silently, on a
+            // release that improves a reader.
+            db.transaction(|_| {
+                repoint(db, root_id, relative, &document, disk, displaced.as_deref())?;
+                if renaming {
+                    journal_skipped_pages(db, root_id, relative, &document)?;
+                }
+                Ok(())
+            })?;
             return Ok(Ingested::AlreadyIndexed { document_id: id });
         }
         rebuild = true;
@@ -344,11 +509,35 @@ pub fn ingest_file(
                     // Inside this transaction rather than before it, so a
                     // second interruption during the recovery rolls the clear
                     // back instead of leaving the document empty.
-                    db.clear_document_content(&id)?;
+                    //
+                    // **The stage goes first, and it is what makes step 5's
+                    // recovery true for this path.** That comment says a crash
+                    // before the checkpoint costs a re-index because "the cheap
+                    // arm finds no finished stage" — which held while `rebuild`
+                    // could only be reached with the stage already unfinished.
+                    // A reader that changed reaches it with the stage `done`,
+                    // and `clear_document_content` does not touch stages: any
+                    // failure after slice 0 would leave pages 1..20, a `path`
+                    // row already crediting the new reader (`repoint`, below,
+                    // commits with this slice), and a `done` stage — all five
+                    // of the cheap arm's conditions satisfied, `Unchanged` for
+                    // ever, and the rest of the document gone. It needs no
+                    // crash: `IngestError::Busy` on a later slice's transaction
+                    // is retried by calling this function again from the top
+                    // (`crates/mnema-ingest/src/walk.rs:930-940`), where the
+                    // cheap arm now answers — so ordinary write contention is
+                    // enough to truncate a document silently.
+                    db.record_stage(&id, STAGE_CHUNK, STATUS_REBUILDING)?;
+                    db.clear_document_content_in(tx, &id)?;
                 } else {
                     db.insert_document(&id, &document.mime, disk.size_bytes, document.source_kind)?;
                 }
-                repoint(db, root_id, relative, &id, disk, displaced.as_deref())?;
+                repoint(db, root_id, relative, &document, disk, displaced.as_deref())?;
+                // Unconditional here, unlike the `AlreadyIndexed` branch: this
+                // pass is the one writing the pages, so its account of which
+                // ones are missing is the account, whatever the path named
+                // before and whichever reader wrote the rows that are there.
+                journal_skipped_pages(db, root_id, relative, &document)?;
             }
             let mut written = 0usize;
             for page in slice {
@@ -393,7 +582,9 @@ pub fn ingest_file(
     //    Outside the write, and the two of them **together**. Outside, because
     //    a document is searchable once its rows are there and a crash before
     //    this point costs a re-index rather than a lie — the cheap arm finds no
-    //    finished stage, and step 3 rebuilds.
+    //    finished stage, and step 3 rebuilds. That is true of a rebuild only
+    //    because slice 0 writes `STATUS_REBUILDING` over the `done` it started
+    //    from; see the comment there for what it cost when it did not.
     //
     //    Together, because that recovery is reached by finding no finished
     //    stage. Written as two autocommit statements, a crash between them
@@ -451,16 +642,39 @@ pub fn ingest_file(
 /// own modification time and the stale row matched the disk again, answering
 /// for a file no worker had looked at since — under a `path` row now naming
 /// something else entirely.
+/// **The fourth thing it writes is which reader made this document**, and it
+/// takes the whole [`Document`] rather than a content hash so that the reader
+/// and the hash cannot come from two different extractions. Spread out as
+/// arguments they are three strings in a row that a caller is free to pair
+/// wrongly, and nothing downstream would notice: the row would name a real
+/// document and credit a reader that never touched it, which reads as
+/// "unchanged" against a manifest for ever. It is the argument
+/// `Db::insert_block` already makes for taking a `Block`, one level up.
+///
+/// The pages missing from the document it now names are the other half of the
+/// third fact, and they are **not** settled here — [`journal_skipped_pages`] is
+/// where, and its doc comment has why the two could not be one call.
 fn repoint(
     db: &Db,
     root_id: i64,
     relative: &str,
-    id: &str,
+    document: &Document,
     disk: OnDisk,
     displaced: Option<&str>,
 ) -> Result<(), mnema_index::Error> {
     db.delete_path(root_id, relative)?;
-    db.insert_path(root_id, relative, id, disk.size_bytes, disk.mtime)?;
+    db.insert_path(
+        root_id,
+        relative,
+        &document.sha256,
+        disk,
+        // What the worker said, never a value derived here. `mnema-pool`
+        // has already refused a header naming no reader, so this is the one
+        // place the column's meaning is established — the `NOT NULL` on it
+        // is satisfied by `""` and would establish nothing.
+        &document.reader,
+        i64::from(document.reader_version),
+    )?;
     db.forget_skip(root_id, relative)?;
     if let Some(displaced) = displaced {
         // No `displaced != id` guard, and it is not an omission: the insert
@@ -469,6 +683,92 @@ fn repoint(
         // that cannot change an outcome reads like a case someone thought
         // about, which is worse than no condition at all.
         forget_if_unnamed(db, displaced)?;
+    }
+    Ok(())
+}
+
+/// Rewrites the skip journal's account of which pages are missing from the
+/// document `relative` now names.
+///
+/// Delete-then-write rather than an upsert per page: an upsert leaves behind
+/// exactly the rows this exists to remove — the ones the current account does
+/// *not* name. Nothing else in the tree reaches a per-page row for a path a
+/// walk still finds (`Db::forget_page_skips` carries the case), so a row left
+/// standing here is left standing for the life of the index.
+///
+/// **A row is written only for a page the index does not hold**, and that
+/// filter is the whole reason this is a function rather than four lines inside
+/// [`repoint`]. `document.skipped_pages` is what the reader that just ran said
+/// about these bytes; the pages in the index were put there by whatever reader
+/// ran when the document was first extracted, and a release can change one
+/// without changing the other. Written unfiltered, a build whose reader newly
+/// drops a page would journal "page 5 has no text layer" about a page this
+/// index holds and cites on demand — which is the contradiction `mnema_pool`'s
+/// `run_one` stops the whole job over when a worker sends it, arriving through
+/// the database door instead and accepted in silence.
+///
+/// On the write path the filter cannot fire and is not there for that path: the
+/// pages are inserted *after* this runs, a rebuild has just cleared them, and
+/// the pool has already refused a summary naming a page that also arrived. It
+/// is the `AlreadyIndexed` caller it exists for.
+///
+/// **Its other half is the caller's**, because this function cannot see it:
+/// `ingest_file` calls it on the `AlreadyIndexed` branch **only when the path
+/// did not already name this document**. A path that keeps naming the same
+/// document over a pass that wrote nothing has had neither its pages nor its
+/// missing pages changed by that pass, and rewriting the rows from a newer
+/// reader's account would delete a true one — a reader that learns to read page
+/// 2 makes the row for page 2 disappear while page 2 is still absent from the
+/// index, and `repoint` writes the new `reader_version` into the `path` row in
+/// the same transaction, so the cheap arm agrees from then on and nothing ever
+/// re-reads the file. That is a true fact deleted silently on an ordinary
+/// release upgrade, and it is why the branch that writes no pages writes no
+/// rows about them either.
+///
+/// What is left over is named rather than hidden: a path that comes to hold
+/// content **already** in the index under another name gets rows from today's
+/// reader for the pages the index lacks, and if today's reader reads a page the
+/// old extraction dropped, nothing under this path records that the index is
+/// still missing it. That is under-reporting where the alternative is a false
+/// row, and the choice is not close. Both are cleared by the re-extraction
+/// `INDEX_FORMAT_VERSION` forces.
+fn journal_skipped_pages(
+    db: &Db,
+    root_id: i64,
+    relative: &str,
+    document: &Document,
+) -> Result<(), mnema_index::Error> {
+    db.forget_page_skips(root_id, relative)?;
+    let held = db.indexed_page_numbers(&document.sha256)?;
+    for page_no in &document.skipped_pages {
+        let page_no = i64::from(*page_no);
+        if held.contains(&page_no) {
+            continue;
+        }
+        db.record_skip(
+            root_id,
+            relative,
+            Some(page_no),
+            // Written here rather than carried on the wire: `Frame::Summary`
+            // sends numbers, and the threshold that decided them belongs to
+            // `mnema-extract`, which this crate may not depend on (D40). So the
+            // sentence says which page and what is missing, and does not invent
+            // a number it cannot see.
+            &format!(
+                "page {page_no} of this document carries no text layer, so it \
+                 was read as a scan and left out"
+            ),
+            SkipRule::NoTextLayer,
+            // **No measurement, although the rule is one `record_skip` stores
+            // one for.** What this drops is `size_bytes` and `mtime`, and
+            // nothing else: `format_version` is in that statement's `params!`
+            // unconditionally and is written either way. Both describe the file
+            // the walk stat'ed, and their only reader is `skip_entry`, which
+            // takes `page_no IS NULL` — so on a page's row they would be
+            // written, never read, and left to go stale, in two columns that
+            // read as though they described the page.
+            None,
+        )?;
     }
     Ok(())
 }
@@ -527,6 +827,20 @@ fn record_skip(
         {
             db.delete_path(root_id, relative)?;
             forget_if_unnamed(db, &recorded.document_id)?;
+            // The pages that were missing from the document this path held are
+            // a fact about that document, so they go when it does — and only
+            // then. `displaces` is the condition rather than a second rule of
+            // its own: on the keeping side the document is still in the index
+            // and still missing those pages, and removing the rows would delete
+            // the explanation over an event that says nothing about the file.
+            //
+            // Without it the rows are unreachable. A refusal writes no `path`
+            // row, so `repoint` — the only other place that maintains them —
+            // never runs for this path again, and `forget_skips_not_in` fires
+            // only for paths a walk stops finding. The window answering "why is
+            // this not in my index?" would go on naming a missing page of a
+            // document the index does not hold.
+            db.forget_page_skips(root_id, relative)?;
         }
         Ok(())
     })
@@ -581,19 +895,31 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// silently, while the progress bar advances: a worker binary that does not
 /// match its parent answers the same way for all forty thousand of them.
 ///
-/// **Displace, but only when the bytes moved** — `NotText` and `Unsupported`.
-/// The worker read the file and determined something about its bytes: they are
-/// not text at all, or no reader in this product can take that format. Run it
-/// again on the same bytes and it says the same thing, so what the index holds
-/// is a previous version of a file that has since become unindexable — *if*
-/// the bytes are not the ones the index was built from. When they are, the rule
-/// changed and the file did not, and deleting the document loses text that is
-/// still on disk. The digest the worker refused on is what tells the two apart;
-/// the arms below carry the reasoning, and D51 the measurement.
+/// **Displace, but only when the bytes moved** — `NotText`, `Unsupported`,
+/// `Malformed`, `Encrypted` and `NoTextLayer`. The worker read the file and
+/// determined something about its bytes: they are not text at all, no reader in
+/// this product can take that format, the right reader could not finish them,
+/// they are behind a password, or no page of them carries a text layer worth
+/// indexing. Run it again on the same bytes and it says the same thing, so what
+/// the index holds is a previous version of a file that has since become
+/// unindexable — *if* the bytes are not the ones the index was built from. When
+/// they are, the rule changed and the file did not, and deleting the document
+/// loses text that is still on disk. The digest the worker refused on is what
+/// tells the two apart; the arms below carry the reasoning, and D51 the
+/// measurement.
 ///
-/// **Displace outright** — `NoTextLayer`. A rule about one page rather than a
-/// file, which no reader in this product can produce yet. Its arm below says
-/// why it is not folded in with the two above.
+/// Four of those five are refusals a *release* can reverse — a reader arrives,
+/// a reader gets better at damage, a password prompt is built, a threshold
+/// moves — and that is what puts them here rather than on the unconditional
+/// side. `NotText` is the exception that shows the condition is not free: it
+/// promises the opposite, that no release makes a photo into prose, and it is
+/// conditional anyway, because the file under the path can be replaced by one
+/// whose bytes the index never saw.
+///
+/// **Nothing displaces outright.** `NoTextLayer` did, on the strength of being
+/// dormant — no wire string reached it and no reader could earn it. The PDF
+/// reader earns it now, and it turned out to belong with the four above rather
+/// than apart from them; its arm carries why.
 ///
 /// **Keep** — `Crash`, `Timeout`, `Memory`, `Unreadable`, and `BinaryTail`.
 /// The first four are not statements about the file at all; the fifth is one,
@@ -614,9 +940,17 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 ///   quiet.
 /// * `Memory` — the out-of-memory killer chooses by size, so it keeps choosing
 ///   the worker, over and over, on a machine under pressure.
-/// * `Unreadable` — the file could not be opened at all: missing, not a
-///   regular file, refused by permissions, on a volume that is not there. A
-///   share that drops mid-walk reports it for everything on the volume.
+/// * `Unreadable` — nothing was learned about the content, for a reason that is
+///   not about the content. Usually the file could not be opened at all:
+///   missing, not a regular file, refused by permissions, on a volume that is
+///   not there. A share that drops mid-walk reports it for everything on the
+///   volume. It also covers a reader that could not be started, and cases where
+///   no worker ran at all — including the arm in this very function that
+///   refuses a file the walk could not measure. `SkipRule::Unreadable`
+///   enumerates them, and deliberately neither summarises nor counts them,
+///   since every summary so far has been narrower than the rule and the first
+///   count was short. What they share is what puts them on this side: one
+///   condition outside the file, answering for every file alike.
 ///
 ///   **This one is only half safe, and the other half is not built yet.**
 ///   Nothing anywhere removes a `path` row for a file that was renamed or
@@ -813,22 +1147,46 @@ fn displaces(
         // by one that does not, is a document lost per file — with the bytes
         // never having moved.
         SkipRule::Unsupported => content.is_none_or(|sha| sha != recorded.document_id),
-        // Unconditional, and deliberately not folded into the arm above even
-        // though the two would behave alike today.
+        // The same condition again, and again on lines of their own rather
+        // than folded in above, for the reason `Unsupported` gives: each is
+        // refused by a different branch of a reader and each is worth being
+        // able to break on its own.
         //
-        // Nothing in this product produces this rule: no wire string maps to
-        // it, and the only reader that could earn it — a PDF reader that opens
-        // a scanned page and finds no text layer — is not built. It is
-        // dormant, so it has no digest to compare against and `is_none_or`
-        // would displace on every one of them anyway.
+        // They are here for the *same argument* as `Unsupported` rather than by
+        // analogy with it, and the argument is the one the ordering above
+        // records: a rule belongs on the conditional side when a release can
+        // change the verdict without the file changing. Damage is exactly that
+        // — what a reader survives is what a vendored library's next version
+        // alters — and so is a password, because "cannot open this" becomes
+        // "ask for a key" the day a prompt is built. A folder walked once by a
+        // build whose reader recovers and once by a build whose reader gives up
+        // would otherwise be a document lost per file, with the bytes never
+        // having moved: the identical loss `Unsupported`'s own arm was
+        // corrected for, arriving from two more directions.
+        SkipRule::Malformed => content.is_none_or(|sha| sha != recorded.document_id),
+        SkipRule::Encrypted => content.is_none_or(|sha| sha != recorded.document_id),
+        // The same condition once more, and on a line of its own for the same
+        // reason as the two above.
         //
-        // What the separate branch buys is that whoever builds that reader has
-        // to decide this rather than inherit it. And the decision is not the
-        // same one: this rule is about a *page*, not a file, so "the bytes did
-        // not change" would not even mean what it means above — a document
-        // whose pages are readable except one is not a file that stopped being
-        // indexable.
-        SkipRule::NoTextLayer => true,
+        // The comment this replaces asked whoever built the PDF reader to
+        // decide this rather than inherit it, because the rule was dormant —
+        // no wire string mapped to it and nothing could earn it. The reader is
+        // built now, and the decision is that it belongs on this side.
+        //
+        // As a *file-level* verdict this rule means every page of the document
+        // fell below `TEXT_LAYER_MIN_CHARS`, which is a threshold this product
+        // picked and may move, read by a library a release may improve. So it
+        // is the least stable verdict of the four, not the most: a folder of
+        // scans walked once by a build that found text on the page and once by
+        // a build that did not is a document lost per file, with the bytes
+        // never having moved.
+        //
+        // It is a rule about a page as well as about a file, and the two
+        // meanings do not conflict here. This function is only ever asked
+        // about the whole-file row: a page's own row carries `page_no` and is
+        // never a verdict on the path (`Db::skip_entry` reads `page_no IS
+        // NULL`, `Db::forget_page_skips` is what maintains the others).
+        SkipRule::NoTextLayer => content.is_none_or(|sha| sha != recorded.document_id),
         // Something that happened, and that happens to every file alike.
         SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => false,
         // The one refusal by content that keeps: the file still opens with the
@@ -938,6 +1296,23 @@ fn slices<'p, 'a>(pages: &'p [PageOf<'a>]) -> impl Iterator<Item = &'p [PageOf<'
     std::iter::once(first).chain(chunks)
 }
 
+/// The extension the manifest is keyed on.
+///
+/// Taken from `relative`, although the worker takes its own from the absolute
+/// path it was handed: `absolute` is the root joined to `relative`, so the two
+/// share a last component, and `relative` is the string the row itself is keyed
+/// on. `Path::extension` on both sides rather than a hand-rolled split, so a
+/// name with no dot, a dotfile, and a name ending in a dot are answered here
+/// exactly as the worker answers them.
+///
+/// `Option`, and the `None` is not a gap: `Manifest::for_extension` sends it to
+/// the same default arm an unlisted extension goes to, mirroring
+/// `identify_plain_text`, where a file with no extension and a file with an
+/// unrecognised one fall to one `_ =>`.
+fn extension_of(relative: &str) -> Option<&str> {
+    Path::new(relative).extension().and_then(|ext| ext.to_str())
+}
+
 /// One page's worth of what the writer needs: the blocks on it, and what the
 /// chunker cannot see about it.
 struct PageOf<'a> {
@@ -949,18 +1324,51 @@ struct PageOf<'a> {
 
 /// The extracted document's own pages, in the form the write loop wants.
 ///
-/// A straight map, and it is only that because the wire carries a page marker:
-/// until it did, this function had to refuse anything with more than one page
-/// rather than guess which block belonged to which — every block of a
-/// thousand-page document on page 1 is a state the schema accepts without
-/// complaint and no test would notice.
+/// **The `PageContext` is chosen by the reader that made the document**, and
+/// until it was, a citation from any format without line numbers carried no
+/// coordinate at all.
 ///
-/// `PageContext::Lines` for every reader that exists today: txt and markdown
-/// both have line numbers, and the chunker computes each chunk's coordinate
-/// from the blocks it actually covers. A PDF page will want
-/// `PageContext::Fixed(Coordinate::Page …)` and will therefore have to decide
-/// this per reader — the information is `document.mime`'s to give, not this
-/// loop's to assume, and there is nothing to decide between yet.
+/// `PageContext::Lines` used to go on every page unconditionally, which is
+/// right for exactly the two readers that existed then: txt and markdown both
+/// have line numbers, and the chunker computes each chunk's range from the
+/// blocks it actually covers. For a block *without* them the chunker answers
+/// `Coordinate::None` (`crates/mnema-chunk/src/lib.rs`'s `line_range`) — so
+/// pdf, html, docx and epub, none of which has a line to name, would every one
+/// of them have been cited with nothing, silently and without an error
+/// anywhere. No test would have seen it either: they are all over txt and md.
+///
+/// `document.reader` rather than `document.mime`, which is what this comment
+/// used to promise. The reader is the record of how the file *was* read — the
+/// worker states it in the header, in the branch that ran
+/// (`crates/mnema-extract/src/bin/worker.rs`) — while a mime can be shared by
+/// two readings and is derived from the same decision anyway. It is also the
+/// string the `path` row stores, so a document and the coordinates of its
+/// chunks are keyed on one fact rather than two that can disagree.
+///
+/// **A reader whose name is not among the arms falls to `Lines` without
+/// complaint.** That is the right default — a build that adds a text-shaped
+/// reader gets line numbers, which is what such a reader emits — and it is also
+/// where a name that does not match is spent. For the four page-shaped formats
+/// that is `Coordinate::None`, the defect this function was written to fix,
+/// back again. For xlsx it is worse and quieter: those blocks *do* carry row
+/// numbers, so the default answers `Coordinate::Line { start: 10, end: 20 }` —
+/// "рядки 10–20", with no sheet on them and nothing saying which.
+///
+/// The names are `mnema_core::manifest`'s constants rather than literals, so
+/// that this arm and the reader that will emit the name are one symbol.
+/// **That is a shared name, not a check.** Nothing here can verify that the pdf
+/// reader calls itself `READER_PDF`: D40 forbids depending on the crate that
+/// holds it, and the end-to-end tests cannot close that gap either — the
+/// stand-in worker they run against states whatever string the test wrote, so
+/// both sides of that assertion are written in one place. What those tests do
+/// pin is this mapping, name to context, and — because they state the literals
+/// rather than the constants — the values of the constants themselves.
+///
+/// A straight map otherwise, and it is only that because the wire carries a
+/// page marker: until it did, this function had to refuse anything with more
+/// than one page rather than guess which block belonged to which — every block
+/// of a thousand-page document on page 1 is a state the schema accepts without
+/// complaint and no test would notice.
 fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
     document
         .pages
@@ -969,7 +1377,36 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
             page_no: i64::from(page.page_no),
             section_title: page.section_title.as_deref(),
             blocks: &page.blocks,
-            context: PageContext::Lines,
+            context: match document.reader.as_str() {
+                // The page number the reader gave this page, not its position
+                // among the pages that arrived: a reader that drops a page it
+                // cannot read leaves a gap, and the gap is the honest record.
+                READER_PDF => PageContext::Fixed(Coordinate::Page {
+                    number: page.page_no,
+                }),
+                // A section is the whole of what these three have to point at,
+                // and it is identical for every chunk of the page — which is
+                // what `Fixed` means. An untitled page therefore cites an empty
+                // section, and the obligation to name one is the reader's
+                // (spec §6, invariant 1), not this loop's to paper over.
+                READER_HTML | READER_DOCX | READER_EPUB => {
+                    PageContext::Fixed(Coordinate::Section {
+                        title: page.section_title.clone().unwrap_or_default(),
+                    })
+                }
+                // **Not `Fixed`.** A sheet is one page, so a fixed coordinate
+                // would repeat the sheet's whole extent onto every chunk of it
+                // — rows 10–20 cited as "аркуш Дані, рядки 1–500". The range
+                // has to come from the blocks each chunk covers, which is what
+                // `PageContext::Rows` computes; the page supplies only the
+                // sheet's name.
+                READER_XLSX => PageContext::Rows {
+                    sheet: page.section_title.clone().unwrap_or_default(),
+                },
+                // text, markdown, and anything a future build adds without
+                // deciding: line numbers are what those readers emit.
+                _ => PageContext::Lines,
+            },
         })
         .collect()
 }

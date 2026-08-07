@@ -4,6 +4,8 @@
 //! `grep "INTO skipped"` over the crates returned nothing but the schema
 //! itself.
 
+use std::collections::HashSet;
+
 use mnema_core::{OnDisk, SourceKind};
 use mnema_index::{Db, DocumentStatus, SkipRule, open, register_vector_extension};
 
@@ -76,6 +78,45 @@ fn a_page_without_a_text_layer_is_recorded_against_that_page() {
     )
     .unwrap();
     assert_eq!(db.skips_for_root(1).unwrap()[0].page_no, Some(4));
+}
+
+/// A file that left the tree takes its page rows with it, and a file that is
+/// still there keeps its own.
+///
+/// Reconciliation's `forget_skips_not_in` is the only thing that reaps a path
+/// nobody re-reads, and until a reader could skip a page there was nothing of
+/// this kind for it to reap — so the behaviour was reachable by nothing and
+/// asserted nowhere. What it costs to get wrong is a page of a deleted file
+/// still being reported missing from the index, for the life of the index,
+/// under a filename that no longer exists.
+///
+/// Both directions in one test: a removal that spared page rows would fail the
+/// first assertion, and one that took every root's page rows would fail the
+/// second.
+#[test]
+fn a_path_that_left_the_tree_takes_its_page_rows_with_it() {
+    let db = fixture_empty();
+    for (path, page) in [
+        ("архів/зниклий.pdf", None),
+        ("архів/зниклий.pdf", Some(2)),
+        ("архів/наявний.pdf", Some(5)),
+    ] {
+        db.record_skip(1, path, page, "no text layer", SkipRule::NoTextLayer, None)
+            .unwrap();
+    }
+
+    let seen = HashSet::from(["архів/наявний.pdf"]);
+    assert_eq!(db.forget_skips_not_in(1, &seen, &[]).unwrap(), 2);
+    assert_eq!(
+        db.skips_for_root(1)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.relative_path, r.page_no))
+            .collect::<Vec<_>>(),
+        vec![("архів/наявний.pdf".to_string(), Some(5))],
+        "the vanished path's rows go, both of them, and the surviving path's \
+         page row is not swept up with them"
+    );
 }
 
 // ------------------------------------------------- what every rule answers
@@ -158,6 +199,21 @@ fn expected(rule: SkipRule) -> Expected {
         // one level up, in `mnema_ingest`'s `displaces`, not here.
         SkipRule::BinaryTail => Expected {
             string: "binary_tail",
+            about_content: true,
+            broken_environment: false,
+        },
+        // Both are readings of the file: the same damage stops the same reader
+        // again, and the same password is still missing. Neither says anything
+        // about the machine — a folder holding several interrupted downloads is
+        // an ordinary folder, which is the mistake `TooLarge`'s own row exists
+        // to keep out of the other column.
+        SkipRule::Malformed => Expected {
+            string: "malformed",
+            about_content: true,
+            broken_environment: false,
+        },
+        SkipRule::Encrypted => Expected {
+            string: "encrypted",
             about_content: true,
             broken_environment: false,
         },
@@ -290,6 +346,40 @@ fn every_skip_rule_is_sorted_onto_its_side_of_suggests_broken_environment() {
             "{rule:?} is on the wrong side of suggests_broken_environment"
         );
     }
+}
+
+/// The two states the vocabulary had no word for until now, and the two it
+/// must not be mistaken for.
+///
+/// A file that *is* the format its magic claims, that this product *has* a
+/// reader for, and that the reader could not finish — a truncated PDF, a zip
+/// whose central directory does not parse — used to have only `Unsupported` to
+/// go under, which promises a reader that will arrive when one already has;
+/// and a file whose text sits behind a password used to have the same. Neither
+/// is `Unreadable` either: that rule collects the cases where nothing was
+/// learned about the content at all — its own variant enumerates them — and it
+/// is on the keeping side of `displaces`. These two are the opposite: a reader
+/// that ran, on bytes it had.
+///
+/// Both are determinations about the bytes — the same damaged bytes damage the
+/// same reader again, and the same encrypted bytes stay encrypted — so both are
+/// `is_about_content`, and neither says anything about the machine: a folder
+/// holding several broken downloads is not a dying worker.
+#[test]
+fn a_damaged_file_is_not_the_same_verdict_as_an_unread_one() {
+    assert!(SkipRule::Malformed.is_about_content());
+    assert!(SkipRule::Encrypted.is_about_content());
+    assert_eq!(SkipRule::parse("malformed"), Some(SkipRule::Malformed));
+    assert_eq!(SkipRule::parse("encrypted"), Some(SkipRule::Encrypted));
+
+    assert!(!SkipRule::Malformed.suggests_broken_environment());
+    assert!(!SkipRule::Encrypted.suggests_broken_environment());
+
+    // The pair is only worth two variants if the journal can tell them apart,
+    // which is the whole of why `Encrypted` is not folded into `Malformed`:
+    // one of the two is fixed with a password and the other is not fixed.
+    assert_ne!(SkipRule::Malformed, SkipRule::Encrypted);
+    assert_ne!(SkipRule::Malformed.as_str(), SkipRule::Encrypted.as_str());
 }
 
 /// D51. A refusal by content is not the same promise as "no reader yet".

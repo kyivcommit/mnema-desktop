@@ -51,8 +51,29 @@ trap cleanup EXIT
 git -C "$REPO" worktree add -q --detach "$TREE" HEAD || exit 1
 # Vendored native libraries are gitignored, so the worktree has none. Tests that
 # need them would otherwise fail for a reason that has nothing to do with the
-# mutation.
+# mutation. `vendor/` also holds the Pdfium the bundle now ships, which
+# `bundle.resources` makes a compile-time requirement of src-tauri and not only
+# a run-time one.
 [ -d "$REPO/vendor" ] && cp -R "$REPO/vendor" "$TREE/vendor"
+# And the staged sidecar, for the same reason and with a sharper edge: it is
+# gitignored too, and `tauri-build` refuses to compile src-tauri at all without
+# it — `resource path binaries/mnema-extract-worker-<triple> doesn't exist`.
+#
+# Read what that cost carefully, because the obvious reading is too small. The
+# baseline pass below counts DISTINCT TESTS, not cases, and 23 of task-8.sh's,
+# 3 of task-9.sh's and 2 of branch-review.sh's live in `mnema-desktop`. But a
+# non-zero `baseline_bad` exits 1 for the WHOLE FILE before pass two starts, so
+# what could not run was not those tests' cases — it was every case in each of
+# those files: 34 + 13 + 11 = **58 cases, three files, zero mutations executed**,
+# from the day `externalBin` landed (fb3a924) until this line was written.
+# `branch-review.sh` is the whole-branch file, the one run before a merge; it
+# had never run at all. All of it was reported honestly as "refusing to mutate
+# against N test(s) that are not green to begin with", and read by nobody.
+#
+# Copied rather than rebuilt — the tests that need it read the workflow and the
+# profile, not the binary, and `tauri-build` only checks the file is there.
+[ -d "$REPO/src-tauri/binaries" ] \
+  && cp -R "$REPO/src-tauri/binaries" "$TREE/src-tauri/binaries"
 
 cd "$TREE" || exit 1
 
@@ -143,7 +164,11 @@ case_() {
     broken=$((broken + 1))
   elif [ $status -ne 0 ]; then
     echo "   red"
-    printf '%s' "$out" | grep -E "panicked at|assertion|left:|right:|not found" | head -4 | sed 's/^/     /'
+    # `missing`/`unexpected` are here because an assertion that compares sets
+    # puts its detail on continuation lines carrying none of the other words:
+    # without them a corpus case prints its location and nothing about which
+    # dimension diverged, which is most of what the case is for.
+    printf '%s' "$out" | grep -E "panicked at|assertion|left:|right:|not found|missing|unexpected" | head -6 | sed 's/^/     /'
     red=$((red + 1))
   else
     echo "   *** STILL GREEN: $test does not protect what it names ***"
@@ -173,4 +198,15 @@ mode=mutate
 restore
 echo
 echo "red: $red   still green: $green   broken cases: $broken"
-[ "$green" -eq 0 ] && [ "$broken" -eq 0 ]
+# `red > 0` is not decoration on the other two, it is the condition they cannot
+# express: zero green and zero broken is exactly what a file containing NO CASES
+# reports, and it reported it with exit 0. So `red: 0 / still green: 0` — a
+# result derived from nothing — was a passing result, and a file emptied by an
+# edit would have been reported as success.
+#
+# That is the assertion-satisfied-by-zero failure this branch found eleven times
+# in the code under test, sitting inside the tool built to find it. Seven files
+# in scripts/mutations/ are stand-in workers rather than case files and answer
+# this way today; they now exit non-zero, which is the honest answer to "did
+# this prove anything" and the reason they do not belong in that directory.
+[ "$red" -gt 0 ] && [ "$green" -eq 0 ] && [ "$broken" -eq 0 ]

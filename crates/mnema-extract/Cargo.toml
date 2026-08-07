@@ -46,23 +46,72 @@ serde_json = { workspace = true }
 # (`src/bin/worker.rs`). Same idiom as `crates/mnema-index/src/write.rs`'s
 # chunk content hash, not a shared dependency between the two crates.
 sha2 = { workspace = true }
-# Same pins as crates/mnema-deps-probe/Cargo.toml, which measured the
-# configuration this crate's `text::decode` uses — kept identical rather than
-# re-resolved independently, so the two crates cannot drift onto different
-# chardetng behaviour.
+# The pins the skeleton's dependency probe resolved and measured for the
+# configuration this crate's `text::decode` uses. That probe crate — the whole
+# of `crates/mnema-deps-probe/` — was deleted the day the last of its formats
+# landed a real reader; the versions are what it leaves behind, and moving one
+# is now a decision this crate's own tests have to survive.
 chardetng = "1"
 encoding_rs = "0.8"
-# Same pin as crates/mnema-deps-probe/Cargo.toml's `zip` probe: task 6a's
+# The pin the deleted dependency probe resolved for `zip`: task 6a's
 # `typing::identify` opens a candidate docx/xlsx/epub as a zip archive to check
 # for its required member, and the fixtures in tests/typing.rs write one with
-# the same crate. `default-features = false` + `deflate` only, for the same
-# reason the probe states it: the defaults drag in six compressors that no
-# OOXML or EPUB file uses.
+# the same crate. Task 6's `zip_part::read_member` is the second consumer —
+# it reads the member `typing::identify` only checked for — and reuses the
+# same pin rather than asking for a second one. `default-features = false` +
+# `deflate` only, for the same reason the probe states it: the defaults drag
+# in six compressors that no OOXML or EPUB file uses.
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # The markdown parser. Only its parse tree and `sourcepos` are used — nothing
 # here renders anything, and `src/markdown.rs`'s module doc says why that is
 # not a stylistic preference.
 comrak = { workspace = true }
+# The HTML parser, at the pins the deleted dependency probe already resolved
+# and built together. `scraper` is the tree; `html5ever` is
+# under it and is named here only for `ns!(html)`, which is how `src/html.rs`
+# tells an HTML `<title>` (a document's name) from an SVG one (a tooltip).
+#
+# `ego-tree` is `scraper`'s own tree type and is not a version this crate
+# chooses: `scraper 0.27` requires `ego-tree 0.11.0` exactly
+# (`scraper-0.27.0/Cargo.toml:70-71`), and a different one would not unify with
+# the tree `Html::parse_document` returns. It is named because `src/html.rs`
+# walks that tree with `Edge::Open`/`Edge::Close` rather than recursively —
+# measured, an HTML file can nest 100,000 elements deep, and recursion over it
+# is a stack overflow rather than a refusal.
+scraper = "0.27"
+html5ever = "0.39"
+ego-tree = "0.11"
+# The XML pull parser, at the pin the deleted dependency probe already
+# resolved. `src/epub.rs` uses it for the two documents in a book that are
+# *structure* rather than prose — `META-INF/container.xml` and the package
+# document — and for nothing else: a chapter is XHTML and is read by the HTML
+# parser, which unlike this one has no failure mode that can lose the rest of a
+# file (see that module's doc).
+#
+# `src/docx.rs` is the second consumer and uses it for *prose*, which is the
+# opposite call and rests on a difference between the two formats: an EPUB
+# chapter is written by whoever made the book and real producers ship chapters
+# with a bare `&` in them, while `word/document.xml` is written by a word
+# processor and one that is not well-formed is one Word will not open either. So
+# there the parser's stopping is a lost book and here it is an honest refusal —
+# and `docx.rs` counts element depth itself, because stopping is exactly what
+# quick-xml does *not* do at the end of a truncated part.
+quick-xml = "0.41"
+# The spreadsheet reader, at the pin the deleted dependency probe already
+# resolved. xlsx is the one format of the five where the server leans on
+# a library rather than parsing the part itself, and the correction to G7.0 §10
+# took the same route here: a cell of type `s` holds an index into
+# `xl/sharedStrings.xml`, a date is a number plus a style, and a value's rich
+# text is spread across `<r>` runs — three tables to join before a single word
+# comes out.
+#
+# **Default features on purpose.** `dates` would add `chrono`, and it would not
+# even settle the date question: `impl Display for ExcelDateTime` prints the
+# serial number in every configuration (`calamine-0.36.0/src/datatype.rs:986`),
+# so rendering a date needs a display policy as well as the dependency. See
+# `src/xlsx.rs`'s module doc, which records that gap rather than closing it here.
+# `picture` is for embedded images, which this crate does not read.
+calamine = "0.36"
 
 [dev-dependencies]
 tempfile = { workspace = true }

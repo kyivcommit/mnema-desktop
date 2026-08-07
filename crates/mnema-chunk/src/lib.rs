@@ -69,6 +69,21 @@ pub enum PageContext {
     /// The page's own coordinate, identical for every chunk on it
     /// (`Coordinate::Page` for a PDF, `Coordinate::None` when there is none).
     Fixed(Coordinate),
+    /// A spreadsheet sheet: the row range is computed from the blocks each
+    /// chunk actually covers, exactly as `Lines` does, and only the rendering
+    /// differs — `Coordinate::SheetRows` instead of `Coordinate::Line`.
+    ///
+    /// **`Fixed` would be wrong here, and not by a little.** A sheet is one
+    /// page, so a fixed coordinate is the sheet's whole extent repeated onto
+    /// every chunk of it: a chunk of rows 10–20 citing "аркуш Дані, рядки
+    /// 1–500", which is non-empty, plausible, and points at fifty times too
+    /// much. That is the defect this variant exists to prevent rather than a
+    /// nicety — the coordinate is what makes an answer checkable.
+    ///
+    /// The reader owes every block it emits the sheet rows that block occupies;
+    /// one block without them makes the whole range a guess, and `coordinate`
+    /// then answers `Coordinate::None` rather than inventing a sheet range.
+    Rows { sheet: String },
 }
 
 /// Chunks one page's blocks, each paired with the rowid `insert_block`
@@ -142,6 +157,20 @@ fn coordinate(page: &PageContext, segs: &[Seg], views: &[View]) -> Coordinate {
     match page {
         PageContext::Fixed(c) => c.clone(),
         PageContext::Lines => line_range(segs, views),
+        // The same computation as `Lines`, wrapped in the sheet's name: the
+        // rows a chunk covers, never the sheet's own extent.
+        PageContext::Rows { sheet } => match line_range(segs, views) {
+            Coordinate::Line { start, end } => Coordinate::SheetRows {
+                sheet: sheet.clone(),
+                start,
+                end,
+            },
+            // `line_range` has exactly one other answer — `Coordinate::None`,
+            // for a block with no rows and for a chunk with no segments — and
+            // it is passed through rather than dressed up as a sheet range
+            // starting at zero.
+            other => other,
+        },
     }
 }
 

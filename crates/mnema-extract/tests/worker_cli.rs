@@ -139,7 +139,13 @@ fn a_photo_is_refused_by_the_real_worker() {
 }
 
 /// Every refusal this worker reaches **by reading the file** carries the digest
-/// of what it read — all three of them, not the one that happened to get a test.
+/// of what it read — every one of them, not the one that happened to get a test.
+///
+/// **Deliberately not "all six", although it said that until the epub reader
+/// arrived and made it nine.** A count is a definition, and a definition written
+/// in a doc comment goes stale silently while the table below it is the thing
+/// anyone actually reads. What binds is the rule in the last paragraph, not a
+/// number.
 ///
 /// The digest was pinned on the `not_text` branch alone, and the blindness that
 /// left behind is structural rather than an oversight. Both of the parent's
@@ -156,15 +162,22 @@ fn a_photo_is_refused_by_the_real_worker() {
 /// indexed by a build that has the reader and walked by a build that does not
 /// would lose a document per file, with the bytes never having moved.
 ///
-/// `too_large` is deliberately not in this table and has the opposite assertion
-/// of its own, above: that branch answers from `stat` without opening the file,
-/// so a digest there could only have come from reading what the ceiling exists
-/// not to read.
+/// **`too_large` is reached two ways, and only one of them belongs here.** The
+/// ceiling branch answers from `stat` without opening the file and has the
+/// opposite assertion of its own, above: a digest there could only have come
+/// from reading what the ceiling exists not to read. The epub reader's cap on
+/// what one *member* inflates to is the other way in — the archive passed the
+/// ceiling comfortably, the file really was read, and that row is in the table.
+/// The rule string is the same because it is the same answer to the person
+/// holding the file; the evidence behind it is not, and this is where the two
+/// are told apart.
 ///
 /// The table is written out by hand, which is the one thing this test cannot
-/// fix: a seventh `Reader` variant refusing under a new rule has to be added
-/// here by whoever adds it. What it does close is that no branch reachable
-/// today is judged by nothing.
+/// fix: a reader refusing under a new rule has to be added here by whoever adds
+/// it. What it does close is that no branch reachable today is judged by
+/// nothing. The three PDF rows arrived that way — the pdf reader turned one row
+/// (`one-page-text.pdf`, then `unsupported`) into three refusals by content,
+/// and a row left behind would have been a branch nothing measured.
 #[test]
 fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
     let dir = tempfile::tempdir().unwrap();
@@ -180,12 +193,172 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
     bytes.extend(std::iter::repeat_n(0u8, 64));
     std::fs::write(&interrupted, &bytes).unwrap();
 
+    // A PDF by its magic bytes and nothing else after them. Built here for the
+    // same reason as the file above: it is derived from a rule already stated
+    // (`typing::identify` decides a PDF on `%PDF-`), and a blob in `fixtures`
+    // would be one more thing to believe.
+    let damaged = dir.path().join("zvit.pdf");
+    std::fs::write(&damaged, b"%PDF-1.4\nthis document ends mid-object").unwrap();
+
+    // Three books, for the three ways this reader refuses one after reading it.
+    // Built here for the same reason as the two files above: each is derived
+    // from a rule this repository already states.
+    let pictures = dir.path().join("albom.epub");
+    std::fs::write(
+        &pictures,
+        epub_bytes(&[(
+            "cover.xhtml",
+            Some("<html><head><title>Обкладинка</title></head><body><img src=\"c.jpg\"/></body></html>"),
+        )]),
+    )
+    .unwrap();
+
+    // A book whose package document declares an empty spine: the container and
+    // the package document are both there, and neither names a chapter. The
+    // refusal comes from the empty-spine check, not from a missing container —
+    // `epub_bytes(&[])` writes both structure members.
+    let not_a_book = dir.path().join("nedokniga.epub");
+    std::fs::write(&not_a_book, epub_bytes(&[])).unwrap();
+
+    // A chapter that inflates past `zip_part::MEMBER_MAX_BYTES` out of an
+    // archive small enough to sail through the request's own ceiling.
+    let bomb = dir.path().join("bomba.epub");
+    let huge = "a".repeat(20 << 20);
+    std::fs::write(&bomb, epub_bytes(&[("ch1.xhtml", Some(&huge))])).unwrap();
+    assert!(
+        std::fs::metadata(&bomb).unwrap().len() < 1_048_576,
+        "the archive itself must pass the ceiling, or this row measures the wrong branch"
+    );
+
+    // Three documents, for the three ways the docx reader refuses one after
+    // reading it. This table is written out by hand, so a reader that refuses
+    // under a new rule and does not add its rows is a branch nothing measures —
+    // which is exactly how a refusal loses its digest and `displaces` reads the
+    // absence as "the bytes are unknown, displace".
+    let scans = dir.path().join("skany.docx");
+    std::fs::write(&scans, docx_bytes("<w:p/><w:p><w:pPr/></w:p>")).unwrap();
+
+    // A `word/document.xml` whose elements do not close — the shape a copy
+    // interrupted part-way leaves behind, and a file Word will not open either.
+    let cut = dir.path().join("obirvana.docx");
+    std::fs::write(
+        &cut,
+        docx_bytes("<w:p><w:r><w:t>початок</w:t></w:r></w:p><w:p><w:r><w:t>обірвано"),
+    )
+    .unwrap();
+
+    // A `word/document.xml` that inflates past `zip_part::MEMBER_MAX_BYTES` out
+    // of an archive small enough to sail through the request's own ceiling.
+    let huge_docx = dir.path().join("bomba.docx");
+    let huge_body = format!("<w:p><w:r><w:t>{}</w:t></w:r></w:p>", "a".repeat(17 << 20));
+    std::fs::write(&huge_docx, docx_bytes(&huge_body)).unwrap();
+    assert!(
+        std::fs::metadata(&huge_docx).unwrap().len() < 1_048_576,
+        "the archive itself must pass the ceiling, or this row measures the wrong branch"
+    );
+
+    // Three workbooks, for the three ways the xlsx reader refuses one after
+    // reading it — the same table, one format on.
+    let charts = dir.path().join("diagramy.xlsx");
+    std::fs::write(&charts, xlsx_bytes(&[("Порожній", "")], "")).unwrap();
+
+    // A workbook whose only sheet stops inside an element: damaged, not empty,
+    // and the two are different sentences to show and different verdicts
+    // downstream.
+    let cut_sheet = dir.path().join("obirvanyi.xlsx");
+    std::fs::write(&cut_sheet, xlsx_truncated_bytes()).unwrap();
+
+    // A shared-string table that inflates past `zip_part::MEMBER_MAX_BYTES` out
+    // of an archive small enough to sail through the request's own ceiling.
+    // Measured before it was written: calamine has no cap of its own and builds
+    // this table inside `Xlsx::new`, before a cell is read.
+    let huge_xlsx = dir.path().join("bomba.xlsx");
+    std::fs::write(
+        &huge_xlsx,
+        xlsx_bytes(
+            &[("Дані", r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#)],
+            &format!("<si><t>{}</t></si>", "a".repeat(17 << 20)),
+        ),
+    )
+    .unwrap();
+    assert!(
+        std::fs::metadata(&huge_xlsx).unwrap().len() < 1_048_576,
+        "the archive itself must pass the ceiling, or this row measures the wrong branch"
+    );
+
     for (path, want_rule) in [
         ("tests/fixtures/solid.png", "not_text"),
-        ("tests/fixtures/one-page-text.pdf", "unsupported"),
+        // `one-page-text.pdf` used to be this row, under `unsupported`. It is
+        // not refused at all any more — the pdf reader reads it — so the row
+        // moved to the PDFs that *are* refused after being read, which is
+        // three rules rather than one. Each is a verdict about content, so
+        // each owes the digest it was reached on: without it `displaces`
+        // reads a missing digest as "the bytes are unknown, displace", and a
+        // folder of scans walked by a build whose Pdfium is a version behind
+        // loses a document per file with the bytes never having moved.
+        ("tests/fixtures/all-scanned.pdf", "no_text_layer"),
+        ("tests/fixtures/password-locked.pdf", "encrypted"),
+        (damaged.to_str().expect("a temp path is UTF-8"), "malformed"),
+        // The second way into `malformed`, and it is not the first one over
+        // again: this file *is* a document — pdfium loaded it, read page 1 and
+        // declined page 2. It reached the refusal from the middle of a page
+        // loop rather than from the load, which is a different branch and owes
+        // the same digest.
+        ("tests/fixtures/unloadable-middle-page.pdf", "malformed"),
         (
             interrupted.to_str().expect("a temp path is UTF-8"),
             "binary_tail",
+        ),
+        // **The three rows the epub reader owes**, because this table is
+        // written out by hand and a branch left out of it is a branch nothing
+        // measures. All three are verdicts about content — the file was opened
+        // — so all three owe the digest they were reached on.
+        (
+            pictures.to_str().expect("a temp path is UTF-8"),
+            "no_text_layer",
+        ),
+        (
+            not_a_book.to_str().expect("a temp path is UTF-8"),
+            "malformed",
+        ),
+        // **`too_large` reached a second way, and this is the row that says so.**
+        // The branch above `not_text` decides from `stat` without opening the
+        // file, and carries no digest precisely because of it. This one is a cap
+        // on what a *member* inflates to: the archive is a few kilobytes and
+        // passes the request's ceiling comfortably, one chapter inside it does
+        // not, and the file really was read. Same rule string, because it is the
+        // same answer to the person holding it — and harmless to carry a digest
+        // under, because `displaces` decides `TooLarge` on size and mtime and
+        // never looks at the digest (`crates/mnema-ingest/src/lib.rs:1200-1202`).
+        (bomb.to_str().expect("a temp path is UTF-8"), "too_large"),
+        // **The three rows the docx reader owes.** All three are verdicts about
+        // content — the file was opened — so all three owe the digest they were
+        // reached on.
+        (
+            scans.to_str().expect("a temp path is UTF-8"),
+            "no_text_layer",
+        ),
+        (cut.to_str().expect("a temp path is UTF-8"), "malformed"),
+        (
+            huge_docx.to_str().expect("a temp path is UTF-8"),
+            "too_large",
+        ),
+        // **The three rows the xlsx reader owes**, and the row above them is
+        // what makes this table worth writing by hand: a `.xlsx` reached
+        // `unsupported` until this build, which promises a reader that is
+        // coming, and `SkipRule` treats that differently from a verdict about
+        // content.
+        (
+            charts.to_str().expect("a temp path is UTF-8"),
+            "no_text_layer",
+        ),
+        (
+            cut_sheet.to_str().expect("a temp path is UTF-8"),
+            "malformed",
+        ),
+        (
+            huge_xlsx.to_str().expect("a temp path is UTF-8"),
+            "too_large",
         ),
     ] {
         let request = serde_json::json!({ "path": path, "max_bytes": 1_048_576 });
@@ -350,6 +523,163 @@ fn a_markdown_file_announces_one_page_per_section_and_sends_that_many() {
     // produced the text, and the same bytes read two ways are not the same
     // evidence.
     assert_eq!(text_source, "native:md");
+}
+
+/// The PDF branch's whole wire shape, at the only place it is produced.
+///
+/// `reader` is the assertion that matters most here and the one nothing else
+/// in the workspace can make. `mnema_ingest::pages_of` picks a PDF chunk's
+/// coordinate by matching this exact string, across a process boundary and
+/// across D40 — so there is no compiler between the two, and a header saying
+/// `"pdf-2"` would send every PDF citation to `PageContext::Lines`, which
+/// answers `Coordinate::None` for a block with no line numbers. Plausible,
+/// silent, and green everywhere else.
+///
+/// The literal `"pdf"` rather than `manifest::READER_PDF`: a test that asks
+/// the code under test what it says and agrees is not a test. The constant is
+/// the mechanism, this is the value, and `mnema-ingest/tests/slice.rs` states
+/// the same literal from the other side.
+#[test]
+fn a_pdf_is_read_and_its_header_names_the_pdf_reader() {
+    let request = serde_json::json!({
+        "path": "tests/fixtures/one-page-text.pdf",
+        "max_bytes": 1_048_576,
+    });
+    let frames = frames_of(&run_worker(&[&request.to_string()]));
+
+    let Some(Frame::Header {
+        reader,
+        reader_version,
+        pages,
+        mime,
+        ..
+    }) = frames.first()
+    else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "pdf");
+    assert_eq!(*reader_version, 1);
+    assert_eq!(*pages, 1);
+    assert_eq!(mime, "application/pdf");
+
+    match &frames[1] {
+        Frame::Page {
+            page_no,
+            section_title,
+        } => {
+            assert_eq!(*page_no, 1);
+            // A PDF page is not a section: `pages_of` cites `Coordinate::Page`
+            // for this reader, and a title here would be furniture nobody
+            // asked for.
+            assert_eq!(*section_title, None);
+        }
+        other => panic!("expected a page frame, got {other:?}"),
+    }
+
+    match &frames[2] {
+        Frame::Block(block) => {
+            assert!(
+                block.text.contains("Northwind Depot"),
+                "the fixture's own words must survive the wire: {:?}",
+                block.text
+            );
+            // Not `is_none()` on one of them: a reader that filled in a line
+            // range would be cited as rows of a page that has none.
+            assert_eq!((block.line_start, block.line_end), (None, None));
+        }
+        other => panic!("expected a block frame, got {other:?}"),
+    }
+
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    assert!(skipped_pages.is_empty());
+    // `native:pdf`, satisfying `page.text_source`'s CHECK and naming the
+    // reader rather than the file — the same rule `native:md` follows.
+    assert_eq!(text_source, "native:pdf");
+}
+
+/// A PDF that lost a page in the middle: the gap reaches the wire, the header
+/// counts what arrived, and the summary **names** what did not.
+///
+/// This is the pool's own integrity check exercised at its producer: it
+/// requires `Header::pages` to equal the number of `Page` frames, and it does
+/// **not** look at the largest `page_no`. A reader that announced 3 because the
+/// document has three pages would stop the job.
+///
+/// The summary assertion is the whole vector, and it constrains both
+/// directions: the page that was skipped is named, and the two that were not
+/// are absent. `skipped_pages.len() == 1` is satisfied by `[1]`, which would be
+/// a journal row against a page the index holds and cites.
+#[test]
+fn a_skipped_pdf_page_leaves_a_gap_and_is_named_rather_than_announced() {
+    let request = serde_json::json!({
+        "path": "tests/fixtures/text-stamp-text.pdf",
+        "max_bytes": 1_048_576,
+    });
+    let frames = frames_of(&run_worker(&[&request.to_string()]));
+
+    let Some(Frame::Header { pages, .. }) = frames.first() else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    let sent: Vec<u32> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Page { page_no, .. } => Some(*page_no),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        sent,
+        vec![1, 3],
+        "the skipped page leaves a gap, which `Frame::Page`'s doc calls the honest record"
+    );
+    assert_eq!(
+        *pages,
+        sent.len() as u32,
+        "the header counts the page frames that arrive, not the document's pages"
+    );
+
+    let Some(Frame::Summary { skipped_pages, .. }) = frames.last() else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    assert_eq!(
+        skipped_pages,
+        &vec![2],
+        "the middle page is the one without a text layer, and the summary is \
+         the only place its number can leave this process"
+    );
+}
+
+/// A scan of a paper document is refused after being read, under a rule about
+/// content — not `unsupported`, which promises a reader that is coming when
+/// the reader is already here and found no text.
+#[test]
+fn a_pdf_with_no_text_layer_on_any_page_is_refused_under_its_own_rule() {
+    let request = serde_json::json!({
+        "path": "tests/fixtures/all-scanned.pdf",
+        "max_bytes": 1_048_576,
+    });
+    let frames = frames_of(&run_worker(&[&request.to_string()]));
+
+    match frames.as_slice() {
+        [Frame::Refused { rule, reason, .. }] => {
+            assert_eq!(rule, "no_text_layer");
+            // The threshold it failed, in the sentence a person reads: "no
+            // text" alone does not distinguish a scan from an empty file, and
+            // the number is the product decision they may want to argue with.
+            assert!(
+                reason.contains(&mnema_extract::TEXT_LAYER_MIN_CHARS.to_string()),
+                "the refusal must name the threshold it applied: {reason}"
+            );
+        }
+        other => panic!("expected exactly one refusal, got {other:?}"),
+    }
 }
 
 #[test]
@@ -536,4 +866,887 @@ fn a_bare_zip_with_no_recognizable_member_is_refused_as_unsupported() {
         Frame::Refused { rule, .. } => assert_eq!(rule, "unsupported"),
         other => panic!("expected Refused, got {other:?}"),
     }
+}
+
+/// The HTML branch's whole wire shape, at the only place it is produced.
+///
+/// **The one format that was answered wrongly rather than refused.** Before
+/// this branch existed, `.html` reached `Reader::PlainText` and the worker sent
+/// `reader: "text"`, `mime: "text/plain"`, `native:txt` and one block holding
+/// the file's markup — measured in spec §2.1 against a shipped build. Every
+/// field below is one of the four things that changed, and each is checked at
+/// its value rather than against the code that produces it.
+///
+/// `reader` is the assertion that matters most and the one nothing else in the
+/// workspace can make. `mnema_ingest::pages_of` matches this exact string to
+/// cite an HTML chunk as `Coordinate::Section`, across a process boundary and
+/// across D40 — a header saying `"html-2"` falls to `PageContext::Lines`, which
+/// asks blocks that carry no line numbers for a line range and answers
+/// `Coordinate::None`. The literal `"html"` rather than `manifest::READER_HTML`
+/// on purpose: a test that asks the code under test what it says and then
+/// agrees is not a test. The constant is the mechanism, this is the value, and
+/// `mnema-ingest/tests/slice.rs` states the same literal from the other side.
+#[test]
+fn an_html_file_is_read_as_prose_and_its_header_names_the_html_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("звіт.html");
+    std::fs::write(
+        &path,
+        "<html><head><title>Річний звіт</title><style>.a{color:red}</style></head>\
+         <body><p>Вступ до звіту.</p><h1>Розділ перший</h1><p>Виторг зріс.</p>\
+         <script>var x=1;</script></body></html>",
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Header {
+        reader,
+        reader_version,
+        pages,
+        mime,
+        ..
+    }) = frames.first()
+    else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "html");
+    assert_eq!(*reader_version, 1);
+    // Not `text/plain`, which is what this file used to be called.
+    assert_eq!(mime, "text/html");
+    // Two sections: the document's title names the first, the heading the
+    // second. The pool checks this count against the page frames that arrive.
+    assert_eq!(*pages, 2);
+
+    let sent: Vec<&Frame> = frames
+        .iter()
+        .filter(|f| matches!(f, Frame::Page { .. }))
+        .collect();
+    assert_eq!(
+        sent.len(),
+        2,
+        "the header's count must be the frames' count"
+    );
+    assert!(
+        matches!(
+            sent[1],
+            Frame::Page {
+                page_no: 2,
+                section_title: Some(title),
+            } if title == "Розділ перший"
+        ),
+        // Unlike a PDF's, an HTML page carries a section title: it is the whole
+        // of what a citation into this format points at.
+        "{:?}",
+        sent[1]
+    );
+
+    let prose: String = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Block(block) => Some(block.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Both directions across the wire: the markup is gone and the prose is not.
+    assert!(!prose.contains("color:red"), "{prose:?}");
+    assert!(!prose.contains("var x"), "{prose:?}");
+    assert!(prose.contains("Виторг зріс."), "{prose:?}");
+    assert!(prose.contains("Вступ до звіту."), "{prose:?}");
+
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    // Empty rather than absent: this reader cannot skip a page, and a number
+    // here naming a page that was also sent stops the whole job.
+    assert!(skipped_pages.is_empty(), "{skipped_pages:?}");
+    // `native:html`, satisfying `page.text_source`'s CHECK and naming the
+    // reader rather than the file — the same rule `native:md` follows.
+    assert_eq!(text_source, "native:html");
+}
+
+/// A book of the shape every book has: `mimetype` first and uncompressed, a
+/// container, a package document, and `chapters` as `(member name, body)`
+/// pairs — the spine naming every id in order, whether the archive holds the
+/// member or not.
+fn epub_bytes(chapters: &[(&str, Option<&str>)]) -> Vec<u8> {
+    use std::io::Cursor;
+
+    let manifest: String = chapters
+        .iter()
+        .enumerate()
+        .map(|(n, (href, _))| {
+            format!("<item id=\"c{n}\" href=\"{href}\" media-type=\"application/xhtml+xml\"/>")
+        })
+        .collect();
+    let spine: String = (0..chapters.len())
+        .map(|n| format!("<itemref idref=\"c{n}\"/>"))
+        .collect();
+    let opf = format!(
+        "<package xmlns=\"http://www.idpf.org/2007/opf\">\
+         <manifest>{manifest}</manifest><spine>{spine}</spine></package>"
+    );
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let stored: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("mimetype", stored).unwrap();
+        w.write_all(b"application/epub+zip").unwrap();
+        w.start_file("META-INF/container.xml", deflated).unwrap();
+        w.write_all(
+            b"<container xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\
+              <rootfiles><rootfile full-path=\"content.opf\" \
+              media-type=\"application/oebps-package+xml\"/></rootfiles></container>",
+        )
+        .unwrap();
+        w.start_file("content.opf", deflated).unwrap();
+        w.write_all(opf.as_bytes()).unwrap();
+        for (href, body) in chapters {
+            if let Some(body) = body {
+                w.start_file(*href, deflated).unwrap();
+                w.write_all(body.as_bytes()).unwrap();
+            }
+        }
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+/// The EPUB branch's whole wire shape, at the only place it is produced.
+///
+/// **The frame this test exists for is the summary, not the header.** A book is
+/// the first format on this wire that both sends pages and names pages it did
+/// not send, and the pool stops the entire job — `PoolError::Protocol`, which
+/// accuses the worker binary of being from another release — when one number is
+/// in both lists (`crates/mnema-pool/src/lib.rs:1338`). The natural way to write
+/// "skip this chapter" is to send an empty page for it and count it as well,
+/// and that shape passes every assertion about prose in this file.
+///
+/// The literal `"epub"` rather than `manifest::READER_EPUB` on purpose: a test
+/// that asks the code under test what it says and then agrees is not a test.
+/// The constant is the mechanism, this is the value, and `mnema-ingest` matches
+/// the same constant from the other side of D40 to cite a chapter by its
+/// section.
+#[test]
+fn an_epub_is_read_chapter_by_chapter_and_its_summary_names_what_it_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("книжка.epub");
+    std::fs::write(
+        &path,
+        epub_bytes(&[
+            (
+                "ch1.xhtml",
+                Some(
+                    "<html><head><title>Розділ перший</title></head>\
+                     <body><p>Виторг зріс.</p></body></html>",
+                ),
+            ),
+            // In the spine, in the manifest, and not in the archive.
+            ("ch2.xhtml", None),
+            (
+                "ch3.xhtml",
+                Some(
+                    "<html><head><title>Розділ третій</title></head>\
+                     <body><p>А потім впав.</p></body></html>",
+                ),
+            ),
+        ]),
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Header {
+        reader,
+        reader_version,
+        pages,
+        mime,
+        ..
+    }) = frames.first()
+    else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "epub");
+    assert_eq!(*reader_version, 1);
+    assert_eq!(mime, "application/epub+zip");
+    // Two, not three: a chapter that was skipped produces no page frame, and
+    // the pool checks this count against the frames that arrive.
+    assert_eq!(*pages, 2);
+
+    let sent: Vec<(u32, Option<String>)> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Page {
+                page_no,
+                section_title,
+            } => Some((*page_no, section_title.clone())),
+            _ => None,
+        })
+        .collect();
+    // The numbers are the spine's, so the gap where chapter 2 was is kept
+    // rather than closed — the same honest record a PDF's skipped page leaves.
+    assert_eq!(
+        sent,
+        vec![
+            (1, Some("Розділ перший".to_string())),
+            (3, Some("Розділ третій".to_string())),
+        ]
+    );
+
+    let prose: Vec<&str> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Block(block) => Some(block.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    // Both directions across the wire: the chapters' prose is there, and the
+    // tab labels their `<title>` elements carry are not.
+    assert_eq!(prose, vec!["Виторг зріс.", "А потім впав."]);
+
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    assert_eq!(skipped_pages, &vec![2]);
+    // And the pair the pool stops the whole job over, asserted here because
+    // nothing downstream ever sees the two lists side by side again.
+    assert!(
+        !sent
+            .iter()
+            .any(|(page_no, _)| skipped_pages.contains(page_no)),
+        "a chapter was both sent as a page and reported skipped: {sent:?} / {skipped_pages:?}"
+    );
+    // `native:epub` satisfies `page.text_source`'s CHECK
+    // (`crates/mnema-index/src/schema.sql:101-102`) and names the reader rather
+    // than the file.
+    assert_eq!(text_source, "native:epub");
+}
+
+/// A book with nothing readable in it is refused under a rule about content —
+/// and not under `unsupported`, which is what an EPUB got until this branch
+/// existed and which promises a reader that is coming.
+///
+/// `no_text_layer` rather than `malformed`: the archive is intact and this
+/// reader has nothing to say about what is in it, which is the same sentence
+/// `pdf.rs` says about a scan.
+#[test]
+fn a_book_with_no_readable_chapter_is_refused_by_content_rather_than_as_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("самі-картинки.epub");
+    let bytes = epub_bytes(&[(
+        "cover.xhtml",
+        Some(
+            "<html><head><title>Обкладинка</title></head><body><img src=\"c.jpg\"/></body></html>",
+        ),
+    )]);
+    std::fs::write(&path, &bytes).unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+    assert_eq!(frames.len(), 1);
+    let Frame::Refused {
+        rule,
+        sha256,
+        reason,
+    } = &frames[0]
+    else {
+        panic!("expected Refused, got {:?}", frames[0]);
+    };
+    // `no_text_layer`, and the name of this test is the claim: not
+    // `unsupported`, which is what an EPUB got before this branch existed and
+    // which promises a reader that is still coming. Asserting both would be one
+    // assertion — `assert_ne!` against a different string cannot fail once the
+    // line above has passed.
+    assert_eq!(rule, "no_text_layer");
+    // The digest of the bytes this verdict was reached on: the file *was* read,
+    // unlike the `too_large` branch that decides from `stat`, so the parent can
+    // tell whether the file changed or only the rule did.
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let expected = hasher.finalize();
+    assert_eq!(
+        sha256.as_deref(),
+        Some(
+            expected
+                .iter()
+                .fold(String::new(), |mut s, b| {
+                    let _ = write!(s, "{b:02x}");
+                    s
+                })
+                .as_str()
+        )
+    );
+    assert!(reason.contains("chapter"), "{reason}");
+}
+
+/// A book whose structure is broken is refused as damaged, which is a different
+/// rule and a different sentence to the person holding it than "no text here".
+#[test]
+fn a_book_with_no_container_is_refused_as_malformed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("побита.epub");
+    {
+        use std::io::Cursor;
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let stored: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            w.start_file("mimetype", stored).unwrap();
+            w.write_all(b"application/epub+zip").unwrap();
+            w.finish().unwrap();
+        }
+        std::fs::write(&path, buf.into_inner()).unwrap();
+    }
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+    assert_eq!(frames.len(), 1);
+    match &frames[0] {
+        Frame::Refused { rule, .. } => assert_eq!(rule, "malformed"),
+        other => panic!("expected Refused, got {other:?}"),
+    }
+}
+
+// ------------------------------------------------------------------ the docx
+
+/// A `word/document.xml` around a body, and a zip around that.
+///
+/// Built here rather than checked in, for the reason `tests/docx.rs` states —
+/// and separately from that file's builder on purpose: this one has to go
+/// through the *binary*, so what it proves is the branch in `handle_request`
+/// rather than the reader the branch calls.
+fn docx_bytes(body: &str) -> Vec<u8> {
+    use std::io::Cursor;
+
+    let document = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+         <w:body>{body}</w:body></w:document>"
+    );
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("word/document.xml", deflated).unwrap();
+        w.write_all(document.as_bytes()).unwrap();
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+/// The DOCX branch's whole wire shape, at the only place it is produced.
+///
+/// **The frame this test exists for is the summary.** A docx cannot skip a
+/// page, so `skipped_pages` must be an *empty vector* rather than an absent
+/// field or a number: the pool stops the entire job — `PoolError::Protocol`,
+/// which accuses the worker binary of being from another release — when one
+/// number is in both lists (`crates/mnema-pool/src/lib.rs:1338`), and this
+/// reader sends a page for every section it makes.
+///
+/// The literal `"docx"` rather than `manifest::READER_DOCX` on purpose: a test
+/// that asks the code under test what it says and then agrees is not a test.
+/// The constant is the mechanism, this is the value, and `mnema-ingest` matches
+/// the same constant from the other side of D40 to cite a section.
+#[test]
+fn a_docx_is_read_section_by_section_and_its_summary_skips_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("угода.docx");
+    std::fs::write(
+        &path,
+        docx_bytes(
+            "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>\
+             <w:r><w:t>Предмет угоди</w:t></w:r></w:p>\
+             <w:p><w:r><w:t>Виконавець надає послуги.</w:t></w:r></w:p>\
+             <w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>\
+             <w:r><w:t>Ціна</w:t></w:r></w:p>\
+             <w:p><w:r><w:t>Сто гривень.</w:t></w:r></w:p>",
+        ),
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Header {
+        reader,
+        reader_version,
+        pages,
+        mime,
+        ..
+    }) = frames.first()
+    else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "docx");
+    assert_eq!(*reader_version, 1);
+    assert_eq!(
+        mime,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    assert_eq!(*pages, 2);
+
+    let sent: Vec<(u32, Option<String>)> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Page {
+                page_no,
+                section_title,
+            } => Some((*page_no, section_title.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            (1, Some("Предмет угоди".to_string())),
+            (2, Some("Ціна".to_string())),
+        ]
+    );
+
+    let prose: Vec<&str> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Block(block) => Some(block.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    // A heading is a block of its page as well as its name, exactly as in
+    // markdown and HTML — so four blocks, not two.
+    assert_eq!(
+        prose,
+        vec![
+            "Предмет угоди",
+            "Виконавець надає послуги.",
+            "Ціна",
+            "Сто гривень."
+        ]
+    );
+
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    // **Empty, and both halves of that matter.** A number here would name a page
+    // that was also sent, which stops the whole job; an absent field is not a
+    // shape this wire has.
+    assert!(
+        skipped_pages.is_empty(),
+        "a docx cannot skip a page, and this one named {skipped_pages:?}"
+    );
+    // `native:docx` satisfies `page.text_source`'s CHECK
+    // (`crates/mnema-index/src/schema.sql:101-102`) and names the reader rather
+    // than the file.
+    assert_eq!(text_source, "native:docx");
+}
+
+/// A document with nothing readable in it is refused under a rule about content
+/// — not under `unsupported`, which is what a `.docx` got until this branch
+/// existed and which promises a reader that is coming.
+#[test]
+fn a_docx_with_no_text_is_refused_by_content_rather_than_as_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("самі-скани.docx");
+    std::fs::write(&path, docx_bytes("<w:p/><w:p><w:pPr/></w:p>")).unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+    assert_eq!(frames.len(), 1);
+    match &frames[0] {
+        Frame::Refused { rule, reason, .. } => {
+            assert_eq!(rule, "no_text_layer");
+            assert!(reason.contains("paragraph"), "{reason}");
+        }
+        other => panic!("expected Refused, got {other:?}"),
+    }
+}
+
+// ------------------------------------------------------------------ the xlsx
+
+/// A whole xlsx package: the sheets named, each with the given `<sheetData>`
+/// rows, plus one shared-string table.
+///
+/// Built here rather than checked in, for the reason `tests/xlsx.rs` states —
+/// and separately from that file's builder on purpose: this one has to go
+/// through the *binary*, so what it proves is the branch in `handle_request`
+/// rather than the reader the branch calls.
+fn xlsx_bytes(sheets: &[(&str, &str)], shared: &str) -> Vec<u8> {
+    let declared: String = sheets
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| {
+            format!(
+                r#"<sheet name="{name}" sheetId="{}" r:id="rId{}"/>"#,
+                i + 1,
+                i + 1
+            )
+        })
+        .collect();
+    let relationships: String = (1..=sheets.len())
+        .map(|i| {
+            format!(
+                r#"<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>"#
+            )
+        })
+        .collect();
+
+    let mut members: Vec<(String, Vec<u8>)> = vec![
+        (
+            "_rels/.rels".to_string(),
+            br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "xl/workbook.xml".to_string(),
+            format!(
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{declared}</sheets></workbook>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels".to_string(),
+            format!(
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/sharedStrings.xml".to_string(),
+            format!(
+                r#"<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{shared}</sst>"#
+            )
+            .into_bytes(),
+        ),
+    ];
+    for (i, (_, rows)) in sheets.iter().enumerate() {
+        members.push((
+            format!("xl/worksheets/sheet{}.xml", i + 1),
+            format!(
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData></worksheet>"#
+            )
+            .into_bytes(),
+        ));
+    }
+    zip_of(&members)
+}
+
+/// The same package with its only worksheet cut off inside an element.
+fn xlsx_truncated_bytes() -> Vec<u8> {
+    let mut members: Vec<(String, Vec<u8>)> = Vec::new();
+    for (name, body) in unzip_of(&xlsx_bytes(&[("Обрізаний", "")], "<si><t>початок</t></si>"))
+    {
+        if name == "xl/worksheets/sheet1.xml" {
+            members.push((
+                name,
+                br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row><row r="2"><c r="A2"><v>1"#.to_vec(),
+            ));
+        } else {
+            members.push((name, body));
+        }
+    }
+    zip_of(&members)
+}
+
+fn zip_of(members: &[(String, Vec<u8>)]) -> Vec<u8> {
+    use std::io::Cursor;
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, body) in members {
+            w.start_file(name.as_str(), deflated).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+fn unzip_of(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+    use std::io::{Cursor, Read};
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    (0..archive.len())
+        .map(|i| {
+            let mut member = archive.by_index(i).unwrap();
+            let name = member.name().to_string();
+            let mut body = Vec::new();
+            member.read_to_end(&mut body).unwrap();
+            (name, body)
+        })
+        .collect()
+}
+
+/// The XLSX branch's whole wire shape, at the only place it is produced.
+///
+/// **The frame this test exists for is the summary, and it says the opposite of
+/// the docx one.** A workbook *can* skip a page: a chartsheet, a sheet the
+/// archive does not hold and a sheet whose cells stop parsing all leave the rest
+/// of the workbook readable, so `skipped_pages` carries their numbers — and they
+/// must be disjoint from the pages sent, because one number in both stops the
+/// entire job (`crates/mnema-pool/src/lib.rs:1338`).
+///
+/// The literal `"xlsx"` rather than `manifest::READER_XLSX` on purpose: a test
+/// that asks the code under test what it says and then agrees is not a test. The
+/// constant is the mechanism, this is the value, and `mnema-ingest` matches the
+/// same constant from the other side of D40 to reach `PageContext::Rows`.
+#[test]
+fn an_xlsx_is_read_sheet_by_sheet_and_its_summary_names_what_it_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("кошторис.xlsx");
+    std::fs::write(
+        &path,
+        xlsx_bytes(
+            &[
+                (
+                    "Дані",
+                    concat!(
+                        r#"<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>"#,
+                        r#"<row r="7"><c r="A7" t="s"><v>2</v></c><c r="B7"><v>1500.5</v></c></row>"#,
+                    ),
+                ),
+                // Present, empty: nothing to store, and a number in the summary.
+                ("Чернетка", ""),
+                ("Підсумки", r#"<row r="3"><c r="A3" t="s"><v>3</v></c></row>"#),
+            ],
+            concat!(
+                "<si><t>Назва</t></si><si><t>Сума</t></si>",
+                "<si><t>Оренда</t></si><si><t>Разом</t></si>",
+            ),
+        ),
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Header {
+        reader,
+        reader_version,
+        pages,
+        mime,
+        ..
+    }) = frames.first()
+    else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "xlsx");
+    assert_eq!(*reader_version, 1);
+    assert_eq!(
+        mime,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    // The sheets that were *sent*, which is not the number the workbook
+    // declares: the empty one is named in the summary instead.
+    assert_eq!(*pages, 2);
+
+    let sent: Vec<(u32, Option<String>)> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Page {
+                page_no,
+                section_title,
+            } => Some((*page_no, section_title.clone())),
+            _ => None,
+        })
+        .collect();
+    // Page 3 keeps its own number: the position in the workbook, not the
+    // position among the sheets that came back.
+    assert_eq!(
+        sent,
+        vec![
+            (1, Some("Дані".to_string())),
+            (3, Some("Підсумки".to_string())),
+        ]
+    );
+
+    // **Every block on the wire owes its rows**, and the numbers are the
+    // sheet's: row 7 is row 7 and not "the second block".
+    let blocks: Vec<(&str, Option<u32>, Option<u32>)> = frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Block(block) => Some((block.text.as_str(), block.line_start, block.line_end)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        blocks,
+        vec![
+            ("Назва\tСума", Some(1), Some(1)),
+            ("Оренда\t1500.5", Some(7), Some(7)),
+            ("Разом", Some(3), Some(3)),
+        ]
+    );
+
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    // The number, not a count — the parent owes a journal row per skipped sheet.
+    assert_eq!(skipped_pages, &vec![2]);
+    // And disjoint from what was sent — the exact state the pool refuses the
+    // whole job over.
+    //
+    // **It cannot fire while the two exact assertions above stand, and it is
+    // kept anyway.** Not "shadowed today" — that wording said "one day it will",
+    // and it will not: `assert_eq!(sent, …)` and `assert_eq!(skipped_pages, …)`
+    // pin both lists completely, so this condition is already decided before the
+    // loop runs. Measured, not reasoned: C22 reddens on `*pages` above, and no
+    // mutation in the set reddens disjointness itself.
+    //
+    // It stays because it is an *invariant* where those two are *values*, and a
+    // value is what a later session edits to match whatever the code now
+    // produces. This survives that edit; they do not. That is insurance against
+    // the test rotting, not against the code — which is what separates it from
+    // the two dead guards this branch removed from production code.
+    for no in skipped_pages {
+        assert!(
+            !sent.iter().any(|(page_no, _)| page_no == no),
+            "sheet {no} was sent and reported skipped"
+        );
+    }
+    // `native:xlsx` satisfies `page.text_source`'s CHECK
+    // (`crates/mnema-index/src/schema.sql:107-108`) and names the reader rather
+    // than the file.
+    assert_eq!(text_source, "native:xlsx");
+}
+
+/// **A sheet's name crosses the wire bounded, and bounded once.**
+///
+/// `pages_of` copies `Frame::Page::section_title` straight into
+/// `Coordinate::SheetRows { sheet }` (`crates/mnema-ingest/src/lib.rs:1403-1405`)
+/// — so for this format the page's name and the citation's coordinate are one
+/// string, and a second bounding anywhere would make them two. This asserts the
+/// binary sends what the reader bounded, byte for byte, which is the half of
+/// that claim this side of D40 can hold.
+#[test]
+fn a_sheet_name_crosses_the_wire_bounded_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("довга-назва.xlsx");
+    let long = "Кошторис ".repeat(60);
+    std::fs::write(
+        &path,
+        xlsx_bytes(
+            &[(&long, r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#)],
+            "<si><t>рядок</t></si>",
+        ),
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Page { section_title, .. }) =
+        frames.iter().find(|f| matches!(f, Frame::Page { .. }))
+    else {
+        panic!("expected a page frame, got {frames:?}");
+    };
+    let sent = section_title.clone().expect("a named sheet");
+
+    // The same string the reader produced, and the same bound every other reader
+    // uses — not this branch's own idea of one.
+    let want = mnema_extract::extract_xlsx(&std::fs::read(&path).unwrap())
+        .unwrap()
+        .sheets[0]
+        .section_title
+        .clone()
+        .unwrap();
+    assert_eq!(sent, want);
+    assert_eq!(sent.chars().count(), mnema_extract::SECTION_TITLE_MAX_CHARS);
+    assert!(
+        sent.ends_with('…'),
+        "a cut name must say it was cut: {sent}"
+    );
+}
+
+/// A macro-enabled workbook is the same part read the same way.
+///
+/// The twin of `a_docm_is_read_as_a_docx`, and it holds for the same reason:
+/// `typing::identify` reaches this reader through the zip signature plus
+/// `xl/workbook.xml` (`src/typing.rs:293`), which an `.xlsm` has — the macro is a
+/// member of the archive nothing here opens. What this test stops is the
+/// behaviour being accidental: an extension check added anywhere on this path
+/// would take every macro-enabled workbook out of the index, and the only thing
+/// that would show it is a test naming the extension.
+#[test]
+fn an_xlsm_is_read_by_the_spreadsheet_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("макро.xlsm");
+    std::fs::write(
+        &path,
+        xlsx_bytes(
+            &[("Дані", r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#)],
+            "<si><t>у макросі</t></si>",
+        ),
+    )
+    .unwrap();
+
+    let request = format!(
+        "{{\"path\":{:?},\"max_bytes\":1048576}}",
+        path.display().to_string()
+    );
+    let frames = frames_of(&run_worker(&[&request]));
+
+    let Some(Frame::Header { reader, mime, .. }) = frames.first() else {
+        panic!("expected a header, got {:?}", frames.first());
+    };
+    assert_eq!(reader, "xlsx");
+    assert_eq!(
+        mime, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "an xlsm is recorded under the xlsx mime — the one cost of accepting it here"
+    );
+    // And it really was read, not merely named: the row is on the wire.
+    assert!(
+        frames
+            .iter()
+            .any(|f| matches!(f, Frame::Block(b) if b.text == "у макросі")),
+        "{frames:?}"
+    );
 }

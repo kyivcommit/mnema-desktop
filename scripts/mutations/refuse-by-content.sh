@@ -214,13 +214,22 @@ case_ "wire: the worker sends the digest for a format it has no reader for" \
 # rather than through the parent. It is the evidence a future rule about that
 # path would be decided on, and nothing downstream would notice it going
 # missing.
+#
+# Re-aimed by task 16. The marker used to end on the comment `// None of these
+# five formats`, which task 8 (`79b3a61`) removed while adding the PDF reader —
+# after which this case matched nothing, and the cycle recorded it as inherited
+# breakage because it was reproduced at `3f73ab5`, a commit *inside* this
+# branch. Reproducing inside a branch cannot tell "inherited" from "broken by an
+# earlier task of the same branch". Anchored now on the arm's closing structure
+# and the arm that follows it: code, not prose, and the two lines the mutation
+# itself leaves adjacent.
 case_ "wire: the worker sends the digest for a note that stopped being text" \
   crates/mnema-extract/src/bin/worker.rs \
   's{("binary_tail".*?)sha256: Some\(sha256\)}{$1sha256: None}s' \
   '                sha256: None,
             }]
         }
-        // None of these five formats' \
+        Reader::Pdf => match extract_pdf(&bytes) {' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
 # The digest has to survive two hops inside the pool, and each is a separate
@@ -351,9 +360,14 @@ case_ "journal: a rule that keeps still answers without a worker" \
 # A file indexed after a refusal kept that refusal for the life of the index —
 # listed in the window as "not indexed" while it was, and left standing as a
 # live verdict for the arm above.
+# Re-aimed by task 16, for the same reason and by the same measurement as the
+# `binary_tail` case above: the marker named `db.insert_path(root_id, relative,
+# id, disk.size_bytes, disk.mtime)?;`, a call task 3 (`0dcedd7`) grew two
+# arguments and wrapped over several lines. What the deletion actually leaves
+# adjacent is the end of that call and the line after it, and neither is prose.
 case_ "journal: indexing a file forgets the refusal that kept it out" \
   crates/mnema-ingest/src/lib.rs \
   's{    db\.forget_skip\(root_id, relative\)\?;\n}{}' \
-  'db.insert_path(root_id, relative, id, disk.size_bytes, disk.mtime)?;
+  '    )?;
     if let Some(displaced) = displaced {' \
   mnema-ingest 'indexing_a_file_forgets_the_refusal_that_kept_it_out' --test slice

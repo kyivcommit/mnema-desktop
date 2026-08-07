@@ -1,8 +1,8 @@
-use mnema_core::{Block, Coordinate, Locator, Segment, SourceKind};
+use mnema_core::{Block, Coordinate, Locator, OnDisk, Segment, SourceKind};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 
-use crate::{Db, Error};
+use crate::{Db, DocumentStatus, Error};
 
 /// Bumped whenever text preparation or the chunking constants change, so a
 /// database holding two formats can tell them apart. D14. Bumped to 2: which
@@ -10,7 +10,54 @@ use crate::{Db, Error};
 /// before this, a photo refused under `unsupported` left a journal row that
 /// `ingest_file`'s second cheap arm would keep honouring after the worker
 /// learned to refuse it as `not_text` instead (D51).
-pub const INDEX_FORMAT_VERSION: i64 = 2;
+///
+/// **2 → 3: the format readers landed.** A build with no reader for a PDF, a
+/// docx, an xlsx or an epub refused all four as `unsupported` — measured, not
+/// supposed: `git show fb3a924:crates/mnema-extract/src/bin/worker.rs`, the
+/// `Reader::Pdf | Reader::Docx | Reader::Xlsx | Reader::Epub |
+/// Reader::Unrecognized` arm — and that verdict is `is_about_content`, so the
+/// second cheap arm keeps answering from it without spending a worker. Moving
+/// this number is what makes those files be looked at again, and it is the only
+/// thing that does: `repoint` clears a row after a successful index and
+/// `forget_skips_not_in` clears one whose path left the tree, and neither
+/// reaches a file that is still there and still refused.
+///
+/// **Two things it deliberately does not do, both measured.**
+///
+/// * It does not re-read an **indexed** file. The first cheap arm compares
+///   size, mtime, the recorded reader and the chunk stage and never reads this
+///   constant (`ADD_PATH_READER` in `migrations.rs` says so at length). What
+///   re-reads a file whose *reader* changed — `.html` leaving the text reader,
+///   inside this cycle — is `path.reader`/`path.reader_version`, a different
+///   lever with a different owner.
+/// * It does not compare one binary against another. A sidecar from another
+///   release is caught, if at all, by frame parsing:
+///   `Frame::Summary::skipped_pages` became a list this cycle, so an older
+///   worker's summary does not parse, and `PoolError::Protocol` stops the whole
+///   job rather than journalling one bad file
+///   (`a_summary_that_counted_skipped_pages_is_a_protocol_error`,
+///   `mnema-core/src/wire.rs`). That a packaged worker and its application are
+///   one build is an argument about packaging, not something this number or
+///   `scripts/verify-bundle.sh` proves.
+///
+/// **What the bump releases is every rule `is_about_content` claims, not the
+/// one it was raised for.** `Unsupported` is the reason; `NoTextLayer`,
+/// `NotText`, `BinaryTail`, `Malformed` and `Encrypted` are remembered exactly
+/// as long and released by the same move. For the last two that release is
+/// empty today — both were added on this same branch, so no older index holds
+/// one — and the obligation is the other way round, owed by whoever ships the
+/// next release: a reader that survives damage this one gives up on, or a
+/// password prompt, has to move this number, or the files those changes exist
+/// for are the ones they never get asked about. `SkipRule::is_about_content`
+/// carries the same warning per rule.
+///
+/// Read by a second table besides `chunk` and `skipped`: `create_space` makes
+/// the version part of a space's identity (`space.rs`), so a bump means the
+/// next `create_space` mints a new space rather than finding the old one. That
+/// is D14's intent — two formats side by side, each saying which it is — and
+/// today it costs nothing, since nothing outside tests calls it (D29 ships no
+/// local models in v1).
+pub const INDEX_FORMAT_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Citation {
@@ -47,6 +94,30 @@ pub struct PathEntry {
     pub document_id: String,
     pub size_bytes: i64,
     pub mtime: i64,
+    /// Which reader made this document, and which version of it — the worker's
+    /// own words, carried through `mnema_pool::Document` unchanged.
+    ///
+    /// Here so the cheap arm can ask a question `size_bytes` and `mtime` cannot
+    /// answer: not "did the file move?" but "did the code that read it move?".
+    /// See `ADD_PATH_READER` in `migrations.rs` for what goes wrong without it.
+    ///
+    /// **Neither field is guaranteed meaningful by the schema**, and the two are
+    /// guarded unequally. `NOT NULL` is satisfied by `""` and by `0`;
+    /// `mnema-pool` refuses a header whose reader is blank
+    /// (`crates/mnema-pool/src/lib.rs:1080`) and says nothing about the version.
+    /// A `reader_version` of 0 is out of reach today only because the field is
+    /// required on the wire and every worker branch sends a published constant —
+    /// a fact about the workers that exist, not a check.
+    ///
+    /// A row that did get here holding a value no manifest names is re-read
+    /// **once**, not for ever: the mismatch sends the file to a worker and
+    /// `repoint` then overwrites both columns with what the worker said. It is
+    /// only a *writer* stuck on a wrong constant that never converges.
+    pub reader: String,
+    /// `i64` rather than the `u32` the wire carries, because that is what
+    /// SQLite stores and reads back; the comparison against a manifest widens
+    /// the manifest's `u32` rather than narrowing this.
+    pub reader_version: i64,
 }
 
 impl Db {
@@ -88,18 +159,46 @@ impl Db {
         Ok(content_hash.to_string())
     }
 
+    /// `reader` and `reader_version` are what the worker said produced this
+    /// document, and are not defaulted here on purpose. The migration's
+    /// `DEFAULT 'text'` is a one-off admission about rows written before the
+    /// columns existed; a *new* row taking it would credit the text reader for
+    /// work it did not do, and — unlike the migrated rows, which converge on the
+    /// next walk — nothing would ever correct it. A `.md` written as `text`
+    /// mismatches the manifest, is re-read, and is written as `text` again: a
+    /// worker process per markdown file per walk, permanently, with no error.
+    ///
+    /// The size and the modification time arrive as one [`OnDisk`] rather than
+    /// as two `i64`s. Loose, they sat between `root` and `reader_version` in a
+    /// run of four bare integers that the compiler cannot tell apart, so
+    /// transposing them was a silent wrong row rather than an error — and it is
+    /// the pair the cheap arm compares, so the wrong way round it answers
+    /// "changed" for every file on every walk. `OnDisk`'s own doc comment
+    /// already calls it "the two numbers `path` records", and [`Db::record_skip`]
+    /// takes the same type for the same two columns on `skipped`.
     pub fn insert_path(
         &self,
         root: i64,
         relative_path: &str,
         document_id: &str,
-        size_bytes: i64,
-        mtime: i64,
+        disk: OnDisk,
+        reader: &str,
+        reader_version: i64,
     ) -> Result<(), Error> {
         self.conn().execute(
-            "INSERT INTO path (watched_root_id, relative_path, document_id, size_bytes, mtime)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![root, relative_path, document_id, size_bytes, mtime],
+            "INSERT INTO path
+                (watched_root_id, relative_path, document_id, size_bytes, mtime,
+                 reader, reader_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                root,
+                relative_path,
+                document_id,
+                disk.size_bytes,
+                disk.mtime,
+                reader,
+                reader_version
+            ],
         )?;
         Ok(())
     }
@@ -113,11 +212,18 @@ impl Db {
     /// a reader the two columns were written and never consulted, which makes
     /// them decoration on a table whose comment (`schema.sql:83`) calls them
     /// "cheap reconciliation without hashing".
+    ///
+    /// `reader` and `reader_version` come back beside them because those two
+    /// columns answer the half of "has anything changed?" that the disk cannot:
+    /// the file is untouched, and the code that read it is not the code that
+    /// would read it now. Selected here rather than through a call of its own so
+    /// that the arm asking the question gets all four facts from the one lookup
+    /// it already pays for.
     pub fn path_entry(&self, root: i64, relative_path: &str) -> Result<Option<PathEntry>, Error> {
         Ok(self
             .conn()
             .query_row(
-                "SELECT document_id, size_bytes, mtime FROM path
+                "SELECT document_id, size_bytes, mtime, reader, reader_version FROM path
                   WHERE watched_root_id = ?1 AND relative_path = ?2",
                 params![root, relative_path],
                 |r| {
@@ -125,6 +231,8 @@ impl Db {
                         document_id: r.get(0)?,
                         size_bytes: r.get(1)?,
                         mtime: r.get(2)?,
+                        reader: r.get(3)?,
+                        reader_version: r.get(4)?,
                     })
                 },
             )
@@ -226,6 +334,30 @@ impl Db {
             |r| r.get(0),
         )?;
         Ok(n == 1)
+    }
+
+    /// The page numbers this index actually holds for one document, ascending.
+    ///
+    /// The reader's own numbering, not positions — a document that lost its
+    /// page 2 comes back as `[1, 3]`, and the gap is what `Frame::Page`'s doc
+    /// comment calls the honest record.
+    ///
+    /// It exists because "what did the reader that just ran say?" and "what is
+    /// in the index?" are two different questions, and `mnema_ingest`'s
+    /// `journal_skipped_pages` may only answer the second. A document already
+    /// in the index was extracted by whatever reader ran at the time, and a
+    /// later reader disagreeing with it does not change a single row — so a
+    /// journal row written from the later reader's account can name a page this
+    /// table holds and every citation of it can be produced on demand. That is
+    /// the contradiction `mnema_pool`'s `run_one` stops the whole job over when
+    /// it arrives on the wire, and this is the door it would otherwise come in
+    /// through.
+    pub fn indexed_page_numbers(&self, document_id: &str) -> Result<Vec<i64>, Error> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT page_no FROM page WHERE document_id = ?1 ORDER BY page_no")?;
+        let rows = stmt.query_map(params![document_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn insert_page(
@@ -334,12 +466,39 @@ impl Db {
     /// file, which is a rebuild of one document losing another path's place in
     /// the index.
     ///
-    /// One statement, so that a caller running it inside a transaction with the
-    /// rebuild gets the whole recovery atomically. `chunk_search` needs no
-    /// statement of its own: it cascades from `chunk`, and its `AFTER DELETE`
-    /// trigger keeps `chunk_fts` in step even though the delete arrives through
-    /// a cascade rather than directly — measured, and pinned by
-    /// `tests/citation.rs`.
+    /// **The row does go back to `pending`, and that is the point of the second
+    /// statement.** `status` answers one question — may this document be
+    /// searched (`schema.sql:68-70`) — and `search_lexical` is the caller that
+    /// asks it. A document whose content has just been emptied cannot honestly
+    /// answer `indexed`: the rebuild writes its pages back one slice at a time,
+    /// and between the clear and the checkpoint the document is searchable and
+    /// silently short — a query for a section already rewritten hits, a query
+    /// for one not yet rewritten returns nothing, and the two are
+    /// indistinguishable from the window. Measured on an interrupted rebuild of
+    /// twenty-five sections, where twenty answered and five did not. D61.
+    ///
+    /// Here rather than at the call site, and that is the whole of the fix:
+    /// `insert_document` leaves a first indexing at `pending` through the
+    /// column's own DEFAULT, so a document being built has never been
+    /// searchable. This is the same fact for a document being *re*built, and
+    /// putting it in the method that empties the content makes the two the same
+    /// by construction instead of a rule the next rebuild path has to remember.
+    ///
+    /// Two statements now, not one, and this method opens a transaction over
+    /// them rather than asking to be called inside somebody else's. Before D61
+    /// it was a single statement and atomic by itself; the pair is not, and a
+    /// caller running it outside a transaction would leave the content gone and
+    /// the status still `indexed` — precisely the state D61 exists to abolish,
+    /// reintroduced by the fix for it. Stated in prose it is a rule the next
+    /// caller can miss, so it is stated in the types instead:
+    /// [`Db::clear_document_content_in`] is the form an orchestrator uses, and
+    /// this one is the standalone wrapper, exactly as `insert_chunk` /
+    /// `insert_chunk_in` are.
+    ///
+    /// `chunk_search` needs no statement of its own: it cascades from `chunk`,
+    /// and its `AFTER DELETE` trigger keeps `chunk_fts` in step even though the
+    /// delete arrives through a cascade rather than directly — measured, and
+    /// pinned by `tests/citation.rs`.
     ///
     /// **What it does not reach: the vectors.** `chunk_embedding_state`
     /// cascades from `chunk` and goes; the `vec_emb_<space_id>` tables are
@@ -357,9 +516,21 @@ impl Db {
     /// regression — it is written down here because this is the method a
     /// rebuild goes through.
     pub fn clear_document_content(&self, id: &str) -> Result<(), Error> {
-        self.conn()
-            .execute("DELETE FROM page WHERE document_id = ?1", params![id])?;
-        Ok(())
+        self.transaction(|tx| self.clear_document_content_in(tx, id))
+    }
+
+    /// [`Db::clear_document_content`] under a transaction the caller already
+    /// opened — what a rebuild uses, since SQLite has no nested `BEGIN` and the
+    /// clear has to land with the pages written after it.
+    ///
+    /// The same split, and for the same reason, as `insert_chunk` /
+    /// `insert_chunk_in`: the atomicity of the pair is not weakened here, it is
+    /// widened to the caller's transaction. `tx` must be a transaction on
+    /// **this** `Db`'s connection, which [`same_connection`] is what enforces.
+    pub fn clear_document_content_in(&self, tx: &Transaction<'_>, id: &str) -> Result<(), Error> {
+        same_connection(self, tx);
+        tx.execute("DELETE FROM page WHERE document_id = ?1", params![id])?;
+        crate::journal::write_document_status(tx, id, DocumentStatus::Pending)
     }
 
     /// Runs `f` inside one IMMEDIATE transaction, committing if it succeeds and
@@ -424,8 +595,7 @@ impl Db {
     ///
     /// `tx` must be a transaction on **this** `Db`'s connection. Nothing in the
     /// type system says so — `Transaction` borrows a `Connection`, not a `Db` —
-    /// and a transaction from another connection would deadlock against this
-    /// one's write lock rather than fail cleanly.
+    /// so [`same_connection`] says it at run time.
     pub fn insert_chunk_in(
         &self,
         tx: &Transaction<'_>,
@@ -435,6 +605,7 @@ impl Db {
         locator: &Locator,
         kind: SourceKind,
     ) -> Result<i64, Error> {
+        same_connection(self, tx);
         validate_locator(locator, text)?;
         let block_id = locator.spans[0].block_id;
         let span = serde_json::to_string(&locator.spans).map_err(Error::Json)?;
@@ -498,6 +669,44 @@ impl Db {
             relative_path: row.get(4)?,
         }))
     }
+}
+
+/// Panics unless `tx` is a transaction on `db`'s own connection.
+///
+/// The `_in` methods widen their atomicity to a transaction the caller opened,
+/// and that is only true of a transaction on **this** connection. `Transaction`
+/// borrows a `Connection`, not a `Db`, so the type system cannot say it — and
+/// the doc comments used to say the mistake was self-punishing: a foreign
+/// transaction "would deadlock against this one's write lock". **It does not.**
+/// Measured: `one.clear_document_content_in(&tx_of_two, id)` returns `Ok` in
+/// 407 µs, the foreign transaction commits, and the write lands. Nothing on
+/// `self` is touched, so there is nothing to block against.
+///
+/// What actually happens is worse than a deadlock, which is why this is a check
+/// and not a corrected sentence: the pair commits atomically with somebody
+/// else's unit of work. The caller's rollback silently takes these rows with
+/// it, or its commit silently keeps them — a document emptied without being
+/// taken out of the search, or the reverse. That is the split D61 exists to
+/// close, reached through a different door and just as quiet.
+///
+/// `assert!` rather than `debug_assert!`, deliberately. The comparison is one
+/// pointer against another next to a SQL statement, so its cost is not
+/// measurable; and what it prevents is silent in release, which is exactly
+/// where `debug_assert!` is compiled out. A programming error that panics is a
+/// bug report; the same error shipped is an index that answers with a document
+/// it should not, and nobody finds out.
+///
+/// Pointer equality is sound here rather than approximate: `Db::conn` returns
+/// `&self.conn`, and a transaction on it borrows that same field, so the
+/// addresses are equal exactly when the connection is the same one. Measured
+/// both ways — `true` for a transaction on this `Db`, `false` for one on
+/// another `Db` over the same file.
+fn same_connection(db: &Db, tx: &Transaction<'_>) {
+    assert!(
+        std::ptr::eq(db.conn(), &**tx),
+        "the transaction belongs to another connection: these writes would \
+         commit or roll back with somebody else's unit of work"
+    );
 }
 
 /// Refuses a locator whose spans are empty, out of order, overlapping, or

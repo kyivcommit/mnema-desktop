@@ -293,7 +293,7 @@ fn a_search_through_the_ipc_finds_what_another_connection_wrote() {
                 },
             )
             .unwrap();
-        writer
+        let chunk = writer
             .insert_chunk(
                 &doc,
                 0,
@@ -309,7 +309,16 @@ fn a_search_through_the_ipc_finds_what_another_connection_wrote() {
                 },
                 SourceKind::Document,
             )
-            .unwrap()
+            .unwrap();
+        // The last act of an indexing job, and the fixture owes it. Without it
+        // this writes a document that is still being assembled, and under D61 a
+        // search does not answer with one of those. The subject here is the seam
+        // between two connections on one file, not the lifecycle, so the writer
+        // finishes what it started rather than stopping one statement short.
+        writer
+            .set_document_status(&doc, mnema_index::DocumentStatus::Indexed)
+            .unwrap();
+        chunk
     };
 
     let hits = call(&webview, "search", json!({ "query": "звірки" })).expect("search was rejected");

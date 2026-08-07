@@ -292,16 +292,76 @@ ask_worker "${pdf_fixture}"
   UNANSWERED. It said:
   $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 
+packaged_pdfium_count="$(find "${app}" -name 'libpdfium*.dylib' | wc -l | tr -d ' ')"
 packaged_pdfium="$(find "${app}" -name 'libpdfium*.dylib' | head -1)"
 
 if printf '%s\n' "${answer}" | grep -q '"frame":"block"'; then
-  fail "the bundled worker reads PDFs, and this branch is deliberately unimplemented.
-  It has to prove the library came from INSIDE the bundle, and it cannot be written
-  from a machine that has a vendored copy: the third branch of the library search
-  (crates/mnema-extract/src/pdfium_probe.rs:174-186) is an absolute path into the
-  source checkout, baked in at compile time, so a local run and a CI run would prove
-  different things. Whoever lands the reader closes this. See D54 and the packaging
-  spec §4. Found in the bundle: ${packaged_pdfium:-nothing}."
+  # The bundle reads PDFs, so the library loaded. Three things then have to hold,
+  # and only the last of them is about this image rather than about some image.
+  #
+  # This branch used to be a `fail` saying it could not be written, because the
+  # third branch of the library search is an absolute path into the source
+  # checkout baked in at compile time — so a bundle that reached it would read
+  # PDFs on the machine that built it and fail everywhere else, and nothing here
+  # could tell that apart from a correct bundle. That is not a hypothetical: the
+  # first bundle built after the reader landed did exactly that, and the only
+  # reason anyone saw it is that code signing refused the load and turned a
+  # silent wrong answer into a visible one. What closes it is that the worker
+  # now reports the directory it loaded from (`--probe-pdfium`), recorded by the
+  # call that loaded it rather than re-derived, and this compares that against
+  # the image it has mounted.
+  case "${packaged_pdfium_count}" in
+    0) fail "the bundled worker reads PDFs and ${product}.app carries no libpdfium*.dylib.
+  It is loading one from somewhere else on this machine — the developer's vendor/ tree
+  is the usual one — and a user's copy would have nothing to load. bundle.resources in
+  src-tauri/tauri.conf.json is what puts it there." ;;
+    1) : ;;
+    # Two copies is the dead-weight defect of the branch below wearing a
+    # different hat: one of them is what loaded and the other is 7.7 MB of
+    # nothing. Which is which cannot be told by sorting, so it is not guessed.
+    *) fail "${packaged_pdfium_count} copies of libpdfium*.dylib in ${product}.app. One of them
+  is dead weight and this check will not pick whichever sorted first, the same reason
+  ${dmg_dir} rejects two images. Found: $(find "${app}" -name 'libpdfium*.dylib' | tr '\n' ' ')" ;;
+  esac
+
+  probe=""
+  probe_status=0
+  probe="$(env -u MNEMA_PDFIUM_LIB_DIR "${worker}" --probe-pdfium "${pdf_fixture}" 2>&1)" \
+    || probe_status=$?
+  [ "${probe_status}" -eq 0 ] \
+    || fail "the bundled worker exited ${probe_status} on --probe-pdfium, having just read a PDF
+  through the same library. It said:
+  $(printf '%s' "${probe}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+  # Both halves, because either alone is satisfied by the wrong thing: `loaded`
+  # without the directory is the claim this branch existed to refuse, and a
+  # directory without `loaded` would be read out of a failure message.
+  printf '%s\n' "${probe}" | grep -q '"loaded":true' \
+    || fail "the bundled worker read a PDF over the wire and then said it cannot load Pdfium:
+  $(printf '%s' "${probe}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+  loaded_dir="$(printf '%s\n' "${probe}" | sed -n 's/.*"library_dir":"\([^"]*\)".*/\1/p')"
+  [ -n "${loaded_dir}" ] \
+    || fail "the bundled worker's --probe-pdfium named no library_dir, so WHERE it loaded
+  Pdfium from is UNANSWERED — which is not the answer 'from inside the bundle'. It said:
+  $(printf '%s' "${probe}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+
+  # Both paths go through `pwd -P` rather than being compared as strings: the
+  # image mounts under /var/folders/… and `current_exe()` reports the same place
+  # as /private/var/folders/…, so a string comparison of two correct answers
+  # fails. Derived from the image rather than written out, so that moving the
+  # library inside the bundle does not need an edit here.
+  expected_dir="$(cd "$(dirname "${packaged_pdfium}")" && pwd -P)"
+  loaded_real=""
+  loaded_real="$(cd "${loaded_dir}" 2>/dev/null && pwd -P)" || loaded_real=""
+  # The whole verdict on the first physical line, because that is the only line
+  # carrying the `verify-bundle:` prefix and therefore the only one control 16f
+  # can assert on — wrapping it after "with a Pdfium" would leave the control
+  # matching nothing and reporting a correct check as WRONG REASON.
+  [ "${loaded_real}" = "${expected_dir}" ] || fail "the bundled worker loaded Pdfium from OUTSIDE this image.
+  It loaded ${loaded_dir}, and the image carries ${packaged_pdfium}. A bundle in this
+  state reads PDFs on the machine that built it and on no other, which is what this
+  branch exists to refuse. See D54 and the packaging spec §4."
+
+  echo "verify-bundle: the bundled worker reads a PDF, loading Pdfium from inside the image"
 elif printf '%s\n' "${answer}" | grep -q '"rule":"unsupported"'; then
   [ -z "${packaged_pdfium}" ] || fail "the bundled worker refuses PDFs as unsupported,
   so nothing in this bundle can load Pdfium — and ${packaged_pdfium} is in it anyway.

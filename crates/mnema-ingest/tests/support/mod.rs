@@ -19,6 +19,28 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+// -------------------------------------------------- a format with no reader
+
+/// A file the worker refuses under `SkipRule::Unsupported`: a zip archive with
+/// no member any reader recognises. `typing::identify` answers
+/// `Reader::Unrecognized` for it, and the worker's `unsupported` branch is
+/// "no reader implemented yet" — a promise that one is coming.
+///
+/// Twenty-two bytes: an end-of-central-directory record and nothing else,
+/// which is what an empty zip is. Written out rather than produced with the
+/// `zip` crate so that this crate does not take a dependency to make a file
+/// whose whole content is a constant.
+///
+/// **It used to be `%PDF-1.7…`, and every test using it silently changed
+/// subject when the PDF reader landed.** A `%PDF-` stub is now refused as
+/// `malformed` — a verdict about *damage*, which is remembered until
+/// `INDEX_FORMAT_VERSION` moves — where these tests need `unsupported`, whose
+/// whole point is that it is the least stable verdict this product gives.
+/// Seven tests went red on the rule and were fixed here rather than by
+/// lowering each assertion to whatever the new answer happened to be.
+pub const NO_READER_FOR_THIS: &[u8] = b"PK\x05\x06\
+    \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
 // ------------------------------------------------------------ the real worker
 
 /// The extraction worker binary.
@@ -111,15 +133,74 @@ pub fn worker() -> &'static Path {
 /// `dir` should never be a watched root: `enumerate` would then list the
 /// script itself as a found file, and every caller of this function passes a
 /// scratch directory that is not walked for exactly that reason.
+///
+/// **It states the real worker's readers, and only its reading is wrong.**
+/// `--manifest` is delegated to the binary `worker()` names rather than
+/// answered from a literal here, for two reasons. The narrow one: a literal
+/// would be a second copy of the product's manifest, green until the day a
+/// reader is added and then wrong in a file nobody would think to look in.
+/// The load-bearing one: a parent asks its worker for the manifest before it
+/// sends a single file (`Pool::manifest`), so a stand-in that cannot answer
+/// stops the walk *there* — and every test whose subject is what happens to
+/// files afterwards would be measuring the handshake instead. The shape this
+/// models is the one D44 was written for and is the commoner one anyway: the
+/// binary is the right binary, and the library it loads is not.
+///
+/// Use [`worker_from_before_the_manifest`] for the other shape — a binary that
+/// reads files perfectly and cannot answer the handshake.
 #[cfg(unix)]
 pub fn wrong_worker(dir: &Path, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("wrong-worker");
-    std::fs::write(
-        &path,
-        format!("#!/bin/sh\nwhile read -r _line; do\n{body}\ndone\n"),
+    // Quoted, not interpolated bare: a target directory can hold a space. It
+    // cannot hold a double quote or a `$` in any environment this repository
+    // builds in, which is the assumption `sh` leaves standing here.
+    let manifest = format!(
+        "if [ \"$1\" = \"--manifest\" ]; then\n  exec \"{}\" --manifest\nfi\n",
+        worker().display()
+    );
+    write_script(
+        dir,
+        "wrong-worker",
+        &format!("{manifest}while read -r _line; do\n{body}\ndone\n"),
     )
-    .unwrap();
+}
+
+/// A release from before `--manifest` existed: it reads every file exactly as
+/// the current worker does, and answers the manifest question with nothing.
+///
+/// The exact inverse of [`wrong_worker`], and deliberately so. **A stand-in
+/// that fails the handshake *and* the frames cannot show which of the two
+/// stopped a walk** — measured, and it is why this function is shaped the way
+/// it is: an earlier version of it printed rubbish for every request, and a
+/// walk that invented its own manifest instead of asking then stopped anyway,
+/// one file later, with the same `PoolError::Protocol` and the same empty
+/// index. Both mutation cases stayed green against a test that read as though
+/// it asserted the handshake. Delegating the files with `exec` — so the real
+/// worker inherits this process's stdin and stdout and the protocol runs
+/// untouched — leaves the handshake as the only thing that can fail, and a
+/// parent that skipped it indexes the folder instead.
+///
+/// `dead_code` is allowed because this module is compiled into **every** test
+/// binary that declares `mod support;`, and only `walk.rs` has a use for this
+/// one — the same shape that would make any fixture added here for one file
+/// warn in the others.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn worker_from_before_the_manifest(dir: &Path) -> PathBuf {
+    write_script(
+        dir,
+        "worker-without-a-manifest",
+        &format!(
+            "if [ \"$1\" = \"--manifest\" ]; then\n  exit 0\nfi\nexec \"{}\" \"$@\"\n",
+            worker().display()
+        ),
+    )
+}
+
+#[cfg(unix)]
+fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
 }

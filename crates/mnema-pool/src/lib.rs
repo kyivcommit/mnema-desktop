@@ -8,8 +8,9 @@
 //! frames it parses live in `mnema_core::wire`, so the crate that binds Pdfium
 //! stays out of the application's dependency graph entirely.
 //!
-//! A worker's life ends in one of eight ways, and the supervisor owes a
-//! different answer to each:
+//! A worker's life ends in one of the ways below, and the supervisor owes a
+//! different answer to each. [`Failure::every`] is the list that cannot go
+//! stale; this table is here to be read:
 //!
 //! | how it ended                          | what the file gets       |
 //! |---------------------------------------|--------------------------|
@@ -17,7 +18,9 @@
 //! | answered `Refused` (over the ceiling) | [`Failure::TooLarge`]    |
 //! | answered `Refused` (not text)         | [`Failure::NotText`]     |
 //! | answered `Refused` (text, then not)   | [`Failure::BinaryTail`]  |
-//! | answered `Failed` (I/O)               | [`Failure::Unreadable`]  |
+//! | answered `Refused` (damaged)          | [`Failure::Malformed`]   |
+//! | answered `Refused` (password)         | [`Failure::Encrypted`]   |
+//! | answered `Failed` (I/O, or no reader) | [`Failure::Unreadable`]  |
 //! | said nothing before the deadline      | [`Failure::Timeout`]     |
 //! | died on a signal                      | [`Failure::Crash`]       |
 //! | killed by the out-of-memory killer    | [`Failure::Memory`]      |
@@ -52,6 +55,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use mnema_core::manifest::Manifest;
 use mnema_core::wire::{Frame, Request, from_line, to_request_line};
 use mnema_core::{Block, SourceKind};
 use mnema_index::SkipRule;
@@ -89,12 +93,18 @@ macro_rules! declare_failures {
         /// Why a file did not make it into the index. Maps onto
         /// [`SkipRule`](mnema_index::SkipRule), the vocabulary the journal
         /// records, but is a smaller set: it names only the ways a *whole
-        /// document* can fail, where `SkipRule` also covers a single PDF page
-        /// with no text layer.
+        /// document* can fail, where `SkipRule` also covers a single page.
+        ///
+        /// [`Failure::NoTextLayer`] is where that distinction is easiest to
+        /// misread. The rule reaches this enum only for a PDF where **every**
+        /// page fell below the threshold — a file with nothing to cite. A PDF
+        /// that lost some of its pages is a document that arrived, and its
+        /// skipped pages are named in `Document::skipped_pages` — and journalled
+        /// a row each by the parent — rather than refused here.
         ///
         /// **The mapping lives in this crate**, as `impl From<Failure> for
         /// SkipRule`, for three reasons. The pool is the only code that
-        /// observes all eight outcomes — a worker that dies on a signal reports
+        /// observes every outcome — a worker that dies on a signal reports
         /// nothing itself, so no other crate could name that case.
         /// `mnema-extract` may not depend on `mnema-index` at all (a worker
         /// that links the database library it is forbidden from opening would
@@ -166,8 +176,23 @@ declare_failures! {
     /// is [`SkipRule::TooLarge`](mnema_index::SkipRule::TooLarge) and
     /// `mnema_ingest`'s `displaces`.
     TooLarge,
-    /// The file could not be read at all: missing, not a regular file, refused
-    /// by permissions, or a path this protocol cannot carry.
+    /// Nothing was learned about the file's content, for a reason that is not
+    /// about its content: missing, not a regular file, refused by permissions,
+    /// **or the reader the file needs could not be brought up** — a library
+    /// absent, the wrong build, or refused by code signing.
+    ///
+    /// Not always a worker's answer, which is why it is not phrased as one:
+    /// [`Pool::extract`] returns this variant itself, before starting anything,
+    /// for a path that is not valid UTF-8 and so cannot be put in a request.
+    /// [`SkipRule::Unreadable`](mnema_index::SkipRule::Unreadable) enumerates
+    /// every way in, including two more that never reach this crate.
+    ///
+    /// The last one is not a fact about the file, and it is here rather than on
+    /// a content rule for exactly that reason: this variant keeps the document
+    /// and counts towards a broken environment, which is what a half-finished
+    /// install needs. `SkipRule::Malformed`'s doc comment has what routing it
+    /// anywhere else costs. Which of the causes fired survives only in
+    /// [`Skip::reason`], carried verbatim from the worker's own message.
     Unreadable,
     /// The worker looked at the bytes and they are not text (D51):
     /// `Frame::Refused { rule: "not_text" }`.
@@ -184,6 +209,47 @@ declare_failures! {
     /// [`SkipRule::BinaryTail`](mnema_index::SkipRule::BinaryTail) carries the
     /// rest.
     BinaryTail,
+    /// A reader opened the file, found it to be the format it claims, and could
+    /// not finish it: `Frame::Refused { rule: "malformed" }`.
+    ///
+    /// Not [`Failure::Unsupported`], which promises a reader that will arrive
+    /// when one already has, and not [`Failure::Unreadable`], whose own
+    /// docstring twenty lines up says what that one holds — deliberately not
+    /// paraphrased again here, because every paraphrase of that variant written
+    /// so far has claimed more completeness than it had, this one included.
+    /// This variant is the narrow, positive case: a reader that ran, on bytes
+    /// it had.
+    /// [`SkipRule::Malformed`](mnema_index::SkipRule::Malformed) carries why the
+    /// distinction costs a document, and why a reader whose library will not
+    /// load must take [`Failure::Unreadable`] rather than this.
+    Malformed,
+    /// A reader opened the file and the text is behind a password:
+    /// `Frame::Refused { rule: "encrypted" }`.
+    ///
+    /// Not folded into [`Failure::Malformed`] although the parent treats the
+    /// two alike today — see
+    /// [`SkipRule::Encrypted`](mnema_index::SkipRule::Encrypted). A password and
+    /// damage are one answer to this pool and two answers to the person reading
+    /// the skip list.
+    Encrypted,
+    /// A PDF was read and **no** page of it carried a text layer above the
+    /// threshold: `Frame::Refused { rule: "no_text_layer" }`. A scan of a paper
+    /// document, in other words — pages that exist and hold no characters a
+    /// search could ever match.
+    ///
+    /// [`SkipRule::NoTextLayer`](mnema_index::SkipRule::NoTextLayer) has
+    /// existed since the skeleton and had no way to arrive: nothing sent the
+    /// string. The gap this closes was the expensive kind — parsing is strict,
+    /// so the *first* scanned PDF in a folder would have answered
+    /// `PoolError::Protocol` and **stopped the whole walk**, reading as a
+    /// mismatched worker binary rather than as a missing arm.
+    ///
+    /// Not [`Failure::Unsupported`], which promises a reader that is coming:
+    /// the reader is here, it ran, and the file has no text in it. Not
+    /// [`Failure::NotText`] either — a PDF *is* a document format this product
+    /// reads, and OCR is the answer to this one (D29 removed it from v1),
+    /// where nothing will ever make a photograph prose.
+    NoTextLayer,
 }
 
 impl From<Failure> for SkipRule {
@@ -197,6 +263,9 @@ impl From<Failure> for SkipRule {
             Failure::TooLarge => SkipRule::TooLarge,
             Failure::NotText => SkipRule::NotText,
             Failure::BinaryTail => SkipRule::BinaryTail,
+            Failure::Malformed => SkipRule::Malformed,
+            Failure::Encrypted => SkipRule::Encrypted,
+            Failure::NoTextLayer => SkipRule::NoTextLayer,
         }
     }
 }
@@ -212,8 +281,9 @@ pub struct Skip {
     ///
     /// `None` for every outcome the worker did not decide by reading: the size
     /// ceiling (refused from `stat`), a crash, a timeout, an out-of-memory
-    /// kill, an unreadable path, and any answer this pool synthesised without
-    /// a worker at all. The parent uses it to tell a file that *changed* into
+    /// kill, anything reaching [`Failure::Unreadable`] — a path that could not
+    /// be opened, or a reader that could not be started over one that could —
+    /// and any answer this pool synthesised without a worker at all. The parent uses it to tell a file that *changed* into
     /// something unindexable from a file that did not change while the rule
     /// under it did — see `mnema_ingest`'s `displaces`, which is where the
     /// difference costs a document.
@@ -225,7 +295,7 @@ pub struct Skip {
 ///
 /// `page_no` is the reader's own numbering rather than this page's index in the
 /// vector, and the two can differ — a reader that drops a page it cannot read
-/// leaves a gap, which `Summary::skipped_pages` counts and this preserves.
+/// leaves a gap, which `Document::skipped_pages` names and this preserves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedPage {
     pub page_no: u32,
@@ -237,8 +307,8 @@ pub struct ExtractedPage {
 /// their blocks in reading order, and the summary's.
 ///
 /// Carries more than the blocks because the wire already does, and the schema
-/// needs all of it — `document.mime`, `page.text_source`, and the count of pages
-/// a reader dropped mid-document. Returning only the blocks would mean
+/// needs all of it — `document.mime`, `page.text_source`, and the numbers of the
+/// pages a reader dropped mid-document. Returning only the blocks would mean
 /// extracting the file twice.
 ///
 /// The header's page *count* is not kept: it has been checked against
@@ -250,8 +320,28 @@ pub struct Document {
     pub sha256: String,
     pub mime: String,
     pub source_kind: SourceKind,
+    /// Which reader produced this document, and which version of it — carried
+    /// through from the header unchanged. The pool does not interpret either:
+    /// it is the parent that stores them beside the path and later compares
+    /// them against a worker's manifest to decide whether the file must be read
+    /// again. Carried here rather than re-derived from `mime` because the pool
+    /// is deliberately the side of the boundary that knows no formats.
+    pub reader: String,
+    pub reader_version: u32,
     pub pages: Vec<ExtractedPage>,
-    pub skipped_pages: u32,
+    /// The pages the reader dropped mid-document, by their own numbers, in the
+    /// order the summary sent them. Empty for every format that cannot skip a
+    /// page.
+    ///
+    /// Numbers rather than a count for the reason the parent has: it owes the
+    /// skip journal a row per skipped page, and "how many" cannot say which
+    /// page of a contract the scanner missed. The count is `.len()`, and
+    /// keeping it beside them would be the second number this type refuses
+    /// above.
+    ///
+    /// Disjoint from `pages` by the check in `run_one`: a page announced as
+    /// both read and skipped is a worker that does not speak this protocol.
+    pub skipped_pages: Vec<u32>,
     pub text_source: String,
 }
 
@@ -642,7 +732,7 @@ impl Pool {
                     }
                     return Ok(Outcome::Extracted(document));
                 }
-                // Refusals and I/O failures retire the worker too: the batch
+                // Refusals and failures retire the worker too: the batch
                 // counter is reset only by success, so that a file which upset a
                 // parser never shares a process with the next one. The cost is
                 // one process per refused file — 4 ms — which a folder of
@@ -720,6 +810,89 @@ impl Pool {
     /// the moment a caller has not yet extracted anything.
     pub fn configured_workers(&self) -> usize {
         self.config.workers
+    }
+
+    /// What this pool's worker says its readers are: which reader takes which
+    /// extension, and at what version.
+    ///
+    /// A process rather than a constant, and that is D40 rather than a
+    /// preference: the parent may not link `mnema-extract`, so the only way to
+    /// learn what this build reads is to ask the binary. It is asked of
+    /// `config.worker` — the same executable every file goes to — which is the
+    /// property the parent's freshness check rests on: the manifest and the
+    /// headers come from one binary, or from neither.
+    ///
+    /// Outside the NDJSON protocol and outside the slots entirely. `--manifest`
+    /// prints one line and exits, so there is no worker to lease, no batch to
+    /// count against and nothing to poison; a caller asks once per walk, before
+    /// deciding which files to send. Not cached here either: a `Pool` may
+    /// outlive the walk that built it (see `poisoned`), and a cached manifest
+    /// would be a second thing that could then answer for a binary that has
+    /// since been replaced.
+    ///
+    /// The pipe this one *does* use is safe where the ones in `spawn` are not:
+    /// `Command::output` drains stdout and stderr concurrently, so the
+    /// 65,536-byte deadlock the module doc describes has nothing to fill. The
+    /// worker's own stderr is folded into the error below rather than sent to
+    /// the diagnostics file, because a binary that cannot state its readers is
+    /// a fault the caller is about to be told about and its complaint belongs
+    /// in that sentence.
+    ///
+    /// An `Err` stops the job, and it is the same class as a `Protocol` error
+    /// on a frame: a binary that cannot state its readers is not the one this
+    /// parent speaks to. There is deliberately no fallback — an empty manifest,
+    /// or the parent's own idea of what the defaults are, would decide the
+    /// freshness of every file in the index from a value nothing measured, and
+    /// it would do it silently.
+    pub fn manifest(&self) -> Result<Manifest, PoolError> {
+        let out = Command::new(&self.config.worker)
+            .arg("--manifest")
+            // Nothing is written to this child: it answers an argument, not a
+            // request. Null rather than inherited, so a worker built to read
+            // stdin cannot sit waiting on the parent's own terminal.
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|source| PoolError::Spawn {
+                worker: self.config.worker.clone(),
+                source,
+            })?;
+        if !out.status.success() {
+            return Err(protocol(
+                &String::from_utf8_lossy(&out.stderr),
+                &format!(
+                    "{:?} --manifest ended with {} instead of stating this build's readers",
+                    self.config.worker, out.status
+                ),
+            ));
+        }
+        let manifest: Manifest = serde_json::from_slice(&out.stdout).map_err(|source| {
+            protocol(
+                &String::from_utf8_lossy(&out.stdout),
+                &format!("--manifest did not answer with a reader manifest: {source}"),
+            )
+        })?;
+        // The other end of the argument `run_one` makes about a header naming
+        // no reader: it refuses one *because* no manifest ever names the empty
+        // reader. This is the line that keeps that sentence true, and it is not
+        // symmetry for its own sake — were it false, every `path` row would
+        // mismatch a manifest entry nothing can equal, and the whole index
+        // would be handed to workers on every walk, for ever, with nothing
+        // anywhere saying so. `NOT NULL` catches neither end of it, and
+        // `serde` is happy with `""`.
+        //
+        // Every reader the manifest publishes, not only the default: an empty
+        // name under one extension re-reads only that extension's files, which
+        // is the same defect at a size nobody notices.
+        if std::iter::once(&manifest.default)
+            .chain(manifest.by_extension.values())
+            .any(|id| id.reader.trim().is_empty())
+        {
+            return Err(protocol(
+                &String::from_utf8_lossy(&out.stdout),
+                "a manifest naming no reader",
+            ));
+        }
+        Ok(manifest)
     }
 
     fn poisoned(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Skip>> {
@@ -964,7 +1137,8 @@ fn read_lines(stdout: ChildStdout, lines: SyncSender<io::Result<String>>) {
 
 enum Answer {
     Document(Document),
-    /// The worker answered with a refusal or an I/O failure: one frame, no
+    /// The worker answered with a refusal or a failure — a file it declined on
+    /// content, or a request it could not carry out at all: one frame, no
     /// document, and a rule already chosen.
     Skipped {
         failure: Failure,
@@ -1049,9 +1223,28 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
         })?;
 
         match frame {
-            Frame::Header { .. } => {
+            Frame::Header { ref reader, .. } => {
                 if header.is_some() {
                     return Err(protocol(&line, "a second header inside one document"));
+                }
+                // `reader` being a required field stops a header that omits it,
+                // and stops nothing else: `""` is a perfectly good `String` and
+                // parses without complaint. That leaves the placeholder the
+                // required field exists to prevent reachable by another road —
+                // and `NOT NULL` on the column that stores it will not catch an
+                // empty string either.
+                //
+                // What it would cost is not a bad name in a row. The parent
+                // compares this value against a worker's manifest to decide
+                // whether a file must be read again; no manifest ever names the
+                // empty reader, so every document from such a worker mismatches
+                // for ever and is re-extracted on every run — a job that never
+                // settles, over a folder nobody is watching. Refused here,
+                // where the other "this worker does not speak our protocol"
+                // checks live, rather than deeper in, so that no document is
+                // built from it at all.
+                if reader.trim().is_empty() {
+                    return Err(protocol(&line, "a header naming no reader"));
                 }
                 header = Some(frame);
             }
@@ -1091,6 +1284,8 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                     sha256,
                     mime,
                     source_kind,
+                    reader,
+                    reader_version,
                     pages: promised,
                 }) = header
                 else {
@@ -1117,16 +1312,50 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                         ),
                     ));
                 }
+                // The same accusation, about the pair this summary is the only
+                // frame to carry both halves of. A page cannot be both read
+                // and skipped, and the two answers are not merely redundant:
+                // the parent writes a journal row saying "this page has no
+                // text layer" for every number here, so a page in both lists
+                // is the skip window telling someone a page is missing while
+                // the index holds it and cites it. Checked here rather than
+                // trusted, because nothing further down ever sees the two
+                // lists side by side again.
+                //
+                // **A contradiction between two things this frame states, and
+                // deliberately nothing more.** A duplicate in `skipped_pages`,
+                // or a `0`, is a number that is merely implausible on its own,
+                // and this pool is not the place that judges those: it knows no
+                // formats, `Frame::Page.page_no` arrives just as unchecked (and
+                // `page.page_no` carries no CHECK either), and a duplicate
+                // collapses on the journal's own conflict key while a zero
+                // costs one misleading row. Refusing them here would spend
+                // `PoolError::Protocol` — which stops the whole job and accuses
+                // the worker binary of being from another release — on
+                // something no part of the system can ever detect again, which
+                // is the price the check above is worth paying and this one is
+                // not.
+                if let Some(both) = skipped_pages
+                    .iter()
+                    .find(|no| pages.iter().any(|page| page.page_no == **no))
+                {
+                    return Err(protocol(
+                        &line,
+                        &format!("page {both} arrived and was reported skipped"),
+                    ));
+                }
                 return Ok(Answer::Document(Document {
                     sha256,
                     mime,
                     source_kind,
+                    reader,
+                    reader_version,
                     pages,
                     skipped_pages,
                     text_source,
                 }));
             }
-            // A refusal or an I/O failure is the whole answer, so one arriving
+            // A refusal or a failure is the whole answer, so one arriving
             // after a header means the two binaries disagree about the
             // protocol.
             Frame::Refused {
@@ -1143,6 +1372,9 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                     "binary_tail" => Failure::BinaryTail,
                     "unreadable" => Failure::Unreadable,
                     "too_large" => Failure::TooLarge,
+                    "malformed" => Failure::Malformed,
+                    "encrypted" => Failure::Encrypted,
+                    "no_text_layer" => Failure::NoTextLayer,
                     // Strict on purpose. A rule this pool does not know means
                     // the worker is from another release, and answering ten
                     // thousand files with a guess would bury that.
@@ -1161,13 +1393,16 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
             }
             Frame::Failed { message } => {
                 if header.is_some() {
-                    return Err(protocol(&line, "an I/O failure after a header"));
+                    return Err(protocol(&line, "a failure frame after a header"));
                 }
                 return Ok(Answer::Skipped {
                     failure: Failure::Unreadable,
                     reason: message,
-                    // `Failed` means the worker could not obtain the bytes at
-                    // all, so there is nothing to have hashed.
+                    // The frame carries no digest field, and nothing here needs
+                    // one: a worker that could not obtain the bytes has nothing
+                    // to have hashed, and one whose reader would not come up
+                    // learned nothing it could attest to. `Unreadable` never
+                    // consults a digest — it keeps the document either way.
                     sha256: None,
                 });
             }

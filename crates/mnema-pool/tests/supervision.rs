@@ -330,6 +330,58 @@ fn a_file_over_the_ceiling_is_named_apart_from_a_format_with_no_reader() {
     assert_eq!(unsupported.failure, Failure::Unsupported);
 }
 
+/// The two rules a reader that can fail *part-way* needs, driven across the
+/// wire the way `a_refusal_by_content_crosses_the_wire` drives `"not_text"` —
+/// and for a sharper reason than that one had.
+///
+/// Nothing in this build sends either string yet. The first reader that meets a
+/// truncated document or a password-protected one will, and frame parsing is
+/// strict: a pool that does not know the word answers `PoolError::Protocol` and
+/// **stops the whole job**, on a file that should have been one skipped row.
+/// That failure would read as a mismatched worker binary rather than as a
+/// missing match arm, which is the most expensive way for this to be wrong.
+///
+/// `From<Failure>` is asserted here as well as in
+/// `every_failure_maps_onto_its_own_skip_rule` because the two answer different
+/// questions: that one asks whether every failure has a rule, this one asks
+/// whether the *string a worker actually sends* reaches that rule. The mapping
+/// can be right and the parse arm missing.
+#[test]
+fn a_damaged_file_and_a_locked_one_cross_the_wire_apart() {
+    let _watchdog = Watchdog::new("malformed and encrypted", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let damaged = skip(extract(&pool, "damaged:zvit.pdf").unwrap());
+    assert_eq!(damaged.failure, Failure::Malformed);
+    assert_eq!(SkipRule::from(damaged.failure), SkipRule::Malformed);
+    // The worker's own wording, absent from the request this pool sent, so its
+    // presence proves the answer came back over the wire rather than being
+    // invented locally — the same guard `a_refusal_by_content_crosses_the_wire`
+    // uses, and for the same reason.
+    assert!(
+        damaged.reason.contains("ends mid-object"),
+        "the worker's own words must survive into the journal: {}",
+        damaged.reason
+    );
+
+    let locked = skip(extract(&pool, "locked:vidomist.pdf").unwrap());
+    assert_eq!(locked.failure, Failure::Encrypted);
+    assert_eq!(SkipRule::from(locked.failure), SkipRule::Encrypted);
+    assert!(
+        locked.reason.contains("password-protected"),
+        "the worker's own words must survive into the journal: {}",
+        locked.reason
+    );
+
+    // Both directions of the split, because a single-sided assertion here is
+    // satisfied by an arm that maps every unknown-ish rule onto one failure.
+    assert_ne!(
+        damaged.failure, locked.failure,
+        "damage and a password must not collapse onto one failure — the journal \
+         is the only place a user can be told which of the two their file is"
+    );
+}
+
 #[test]
 fn a_pool_with_no_workers_and_a_batch_of_none_are_both_refused_at_construction() {
     // Not pedantry about zero. A pool with no slots would block its first
@@ -353,6 +405,45 @@ fn a_pool_with_no_workers_and_a_batch_of_none_are_both_refused_at_construction()
     ));
 }
 
+/// The wire string a scanned PDF is refused under reaches its rule.
+///
+/// **This is the arm whose absence would have stopped a walk on the first
+/// scanned PDF in a folder.** `SkipRule::NoTextLayer` has existed since the
+/// skeleton — declared, judged `is_about_content`, given a `displaces` answer —
+/// and nothing sent the string, so nothing needed the parse arm. Frame parsing
+/// is strict by design: an unknown rule is `PoolError::Protocol` and stops the
+/// whole job, reading as "this worker binary is from another release" rather
+/// than as a missing match arm. The first PDF reader is what makes it
+/// reachable, and this is the test that says it arrived.
+///
+/// Both directions, in the shape `a_damaged_file_and_a_locked_one_cross_the_wire_apart`
+/// established: the rule must be `NoTextLayer` **and** must not be whichever
+/// neighbour a careless arm would fold it into. `Unsupported` is the near miss
+/// — both are refusals about a format — and they are opposite promises: one
+/// says a reader is coming, this one says the reader came and there is no text.
+#[test]
+fn a_scanned_pdf_crosses_the_wire_as_its_own_rule() {
+    let _watchdog = Watchdog::new("no text layer", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let scanned = skip(extract(&pool, "scanned:dohovir.pdf").unwrap());
+    assert_eq!(scanned.failure, Failure::NoTextLayer);
+    assert_eq!(SkipRule::from(scanned.failure), SkipRule::NoTextLayer);
+    assert_ne!(
+        scanned.failure,
+        Failure::Unsupported,
+        "a reader that ran and found no text is not a format waiting for a reader"
+    );
+    // The worker's own wording, absent from the request this pool sent, so its
+    // presence proves the answer came back over the wire rather than being
+    // invented locally.
+    assert!(
+        scanned.reason.contains("carries a text layer"),
+        "the worker's own words must survive into the journal: {}",
+        scanned.reason
+    );
+}
+
 /// What this file expects one failure to be journalled as, written here rather
 /// than read out of `impl From<Failure> for SkipRule` — a test that asks the
 /// code under test what it does and agrees is not a test.
@@ -372,6 +463,16 @@ fn journalled_as(failure: Failure) -> SkipRule {
         // journalled unlike it, because `mnema_ingest::displaces` reads the
         // rule and one of the two deletes a document.
         Failure::BinaryTail => SkipRule::BinaryTail,
+        // Two rules that behave alike in `displaces` and must still not share a
+        // journal row: "this file is broken" and "this file is locked" are the
+        // same instruction to the index and different instructions to the
+        // person holding the file.
+        Failure::Malformed => SkipRule::Malformed,
+        Failure::Encrypted => SkipRule::Encrypted,
+        // The rule that existed for a whole skeleton with no way to arrive:
+        // `SkipRule::NoTextLayer` was declared, judged and given a `displaces`
+        // answer before anything could send the string.
+        Failure::NoTextLayer => SkipRule::NoTextLayer,
     }
 }
 
@@ -468,6 +569,33 @@ fn a_worker_speaking_a_foreign_protocol_stops_the_job_rather_than_skipping_the_f
     );
 }
 
+/// A worker from a release before `skipped_pages` became a list is a binary
+/// mismatch, not a file that read badly.
+///
+/// This existed as an argument first, and an argument is what it was: the wire
+/// stopped being backward compatible when `Frame::Summary.skipped_pages` went
+/// from `u32` to `Vec<u32>`, and the reasoning was that a sidecar built with
+/// its application can never meet an older one. That is true by construction —
+/// and **nothing proves the construction**, which is exactly the shape this
+/// suite refuses everywhere else. So the behaviour under the assumption is run.
+///
+/// What it must not be is a *file* verdict. `"skipped_pages":0` is not a
+/// malformed document and the pages before it are read correctly; a pool that
+/// answered `Failure::Unreadable` here would blame ten thousand files for one
+/// wrong binary, and a pool that read the frame loosely would index a document
+/// while silently losing which pages it skipped.
+#[test]
+fn a_worker_from_before_the_wire_changed_stops_the_job_rather_than_skipping_the_file() {
+    let _watchdog = Watchdog::new("old summary", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let error = extract(&pool, "old-summary:x").unwrap_err();
+    assert!(
+        matches!(error, PoolError::Protocol { .. }),
+        "an older worker's summary must stop the job as a protocol fault, got {error:?}"
+    );
+}
+
 /// A worker that promises three pages and sends one does not speak this
 /// pool's protocol, and that costs the job rather than the file.
 ///
@@ -495,6 +623,89 @@ fn a_page_count_that_disagrees_with_the_frames_stops_the_job() {
         detail.contains('3') && detail.contains('1'),
         "the detail must name both counts, or nobody can tell which side lied: {detail}"
     );
+}
+
+/// A page reported as read **and** as skipped stops the job, and a page
+/// reported only as skipped goes through.
+///
+/// The summary is the one frame carrying both lists, and this is the only
+/// place they are ever side by side: `Document` hands the parent a vector of
+/// pages and a vector of numbers, and the parent writes a journal row for
+/// every number without being able to ask whether the page is also in the
+/// index. So the contradiction has to be caught here or not at all, and what
+/// it costs is the skip window telling someone page 1 of their contract is
+/// missing while a search cites it.
+///
+/// **Both directions, and the second is not decoration.** A pool that refused
+/// every summary carrying numbers at all would satisfy the first assertion and
+/// stop every walk over a folder with one scanned page in it — which is the
+/// same outcome `SkipRule::NoTextLayer`'s missing parse arm had.
+#[test]
+fn a_page_that_arrived_and_was_reported_skipped_stops_the_job() {
+    let _watchdog = Watchdog::new("page in both lists", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let error = extract(&pool, "both-lists:x").unwrap_err();
+    let PoolError::Protocol { detail, .. } = &error else {
+        panic!("expected a protocol error, got {error:?}");
+    };
+    assert!(
+        detail.contains("page 1"),
+        "the detail must name the page that was in both lists: {detail}"
+    );
+
+    let document = document(extract(&pool, "skipped-page:x").unwrap());
+    assert_eq!(
+        document.skipped_pages,
+        vec![2],
+        "the ordinary shape — a gap, and the number that fills it — still \
+         reaches the parent"
+    );
+    assert_eq!(
+        document
+            .pages
+            .iter()
+            .map(|page| page.page_no)
+            .collect::<Vec<_>>(),
+        vec![1, 3],
+        "and the pages that did arrive are not disturbed by the check"
+    );
+}
+
+/// A header whose reader has no name stops the job, and one that names a
+/// reader goes through.
+///
+/// Both halves in one test, because either alone is satisfied by a mistake: a
+/// pool that rejected every header would pass the first, and the pool as it
+/// stood — which checked nothing — passed the second.
+///
+/// The gap this closes is narrow and was reachable. Making `reader` a required
+/// field on the wire stops a header that *omits* it; it does nothing about
+/// `""`, which parses as a valid `String` and travelled all the way into
+/// `Document` unexamined. That is the same placeholder the required field was
+/// chosen to prevent, arriving by another road — and the column that will hold
+/// it is `NOT NULL`, which an empty string satisfies. Its cost is not a bad
+/// name in a row: no manifest names the empty reader, so every document from
+/// such a worker mismatches for ever and is re-extracted on every run.
+#[test]
+fn a_header_that_names_no_reader_stops_the_job_and_a_named_one_does_not() {
+    let _watchdog = Watchdog::new("nameless reader", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let error = extract(&pool, "nameless-reader:x").unwrap_err();
+    let PoolError::Protocol { detail, .. } = &error else {
+        panic!("expected a protocol error, got {error:?}");
+    };
+    assert!(
+        detail.contains("reader"),
+        "the detail must name what was missing: {detail}"
+    );
+
+    // The other direction, through the same pool: an ordinary header still
+    // produces a document, and the name it carried is the one that arrives.
+    let document = document(extract(&pool, "x").unwrap());
+    assert_eq!(document.reader, "text");
+    assert_eq!(document.reader_version, 1);
 }
 
 /// A block with no page open before it is the older protocol still speaking,
@@ -826,23 +1037,47 @@ fn this_macos_still_refuses_an_address_space_rlimit() {
 ///
 /// The strictness is load-bearing far outside this crate, which its own
 /// comment understates. Every rule this pool *does* know maps onto a
-/// `SkipRule`, and `mnema-ingest` removes what the index holds under a path
-/// for three of them — unconditionally for `Unsupported` and `NotText`,
-/// conditionally for `TooLarge` (only when the size on disk changed). So a
-/// worker from another release refusing under, say,
-/// `"encrypted"` would — if this arm guessed `Unsupported` — delete the
+/// `SkipRule`, and `mnema-ingest` removes what the index holds under a path for
+/// most of them — conditionally on the digest for `Unsupported`, `NotText`,
+/// `Malformed` and `Encrypted`, and on the size and time on disk for
+/// `TooLarge`. So a worker from another release refusing under a name this
+/// build has never seen would — if this arm guessed `Unsupported` — delete the
 /// indexed content of every file it named, returning `Ok` each time and
 /// stopping nothing. `crates/mnema-ingest/tests/slice.rs` asserts the other
 /// half, that the index is untouched.
+///
+/// **The stand-in rule used to be `"encrypted"`, and it stopped being unknown.**
+/// The task that added `SkipRule::Encrypted` made this test fail, and the
+/// failure was not subtle: `extract` returns `Ok` for a rule the pool now
+/// recognises, so `unwrap_err()` below panics before `detail` is read at all.
+/// Nothing about the assertion on the message saved it, and no weaker form of
+/// this test would have gone quiet either — the sibling in
+/// `mnema-ingest/tests/slice.rs` does not name the rule and reddened just the
+/// same, because it too asserts an `Err`.
+///
+/// What that leaves is a lesson about what a red *says* rather than whether one
+/// happens. "called `Result::unwrap_err()` on an `Ok` value" reads as this pool
+/// having stopped rejecting unknown rules — a defect in the code under test —
+/// when what actually happened is that the test's own premise expired. An
+/// unasserted premise fails in the voice of the thing it was holding up, which
+/// is why the premise is now asserted first, on its own line.
 #[test]
 fn a_refusal_under_an_unknown_rule_stops_the_job() {
     let _watchdog = Watchdog::new("unknown rule", Duration::from_secs(30));
     let pool = Pool::new(config()).unwrap();
 
+    // The premise, asserted rather than assumed, and first so that it is what
+    // fails when it stops holding. The last stand-in expired without a line
+    // like this one, and the red that followed accused the pool instead.
+    assert_eq!(
+        SkipRule::parse("rule_from_a_later_release"),
+        None,
+        "the stand-in for an unknown rule has become a rule this build knows"
+    );
     let error = extract(&pool, "newrule:sealed.docx").unwrap_err();
     match &error {
         PoolError::Protocol { detail, .. } => assert!(
-            detail.contains("encrypted"),
+            detail.contains("rule_from_a_later_release"),
             "the error must name the rule nobody recognised: {detail}"
         ),
         other => panic!("expected a protocol error, got {other:?}"),

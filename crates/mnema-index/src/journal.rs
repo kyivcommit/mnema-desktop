@@ -19,7 +19,7 @@ use crate::{Db, Error, INDEX_FORMAT_VERSION};
 /// exist without being enumerated, because the enumeration is generated from
 /// the declaration rather than written beside it.
 ///
-/// A macro for a nine-variant enum is a heavy instrument, and it is here
+/// A macro for an enum this small is a heavy instrument, and it is here
 /// because the lighter ones were measured failing. The list was first an array
 /// of pairs in the tests, then a hand-written `after()` chain here that
 /// `every()` walked. Both looked like coverage:
@@ -61,22 +61,83 @@ declare_skip_rules! {
     Memory,
     Unsupported,
     NoTextLayer,
-    /// The file could not be read at all: the path did not exist, was not a
-    /// regular file, or permissions refused it. Added by the pool (task 8),
-    /// which is the first code that had to name this outcome: the extraction
-    /// worker reports it as `wire::Frame::Failed` and none of the five rules
-    /// above covers it — a file that was never there is not a crash, not a
-    /// timeout, not a memory kill, and not an unsupported format.
+    /// Nothing was learned about this file's content, for a reason that is not
+    /// about its content.
     ///
-    /// It earns a rule of its own rather than being folded into `Unsupported`
-    /// because the two demand different things of the user. An unsupported
-    /// format is a limit of this product and stays skipped until the product
-    /// grows a reader; an unreadable file is a fact about the user's disk that
-    /// may well be transient (a file moved mid-scan, a permission fixed
-    /// afterwards) and is worth retrying on the next pass.
+    /// **Defined by the list below rather than by a sentence or a count, and
+    /// that is the point.** Successive rounds of review each replaced one short
+    /// definition with another — "a fact about the user's disk", "no reader saw
+    /// a byte", "what the worker came back with" — and each was falsified by a
+    /// case already in the tree, because the cases do not sit at one level: some
+    /// are what a worker reported, some happen with no worker involved, and one
+    /// can follow an extraction that succeeded outright. A phrase narrow enough
+    /// to be informative is narrower than the rule.
+    ///
+    /// The first attempt to fix that by enumerating still said "three ways in",
+    /// and there were four. **A count is a definition too** — it claims closure
+    /// the same way a phrase claims coverage, and a case already in the tree
+    /// refutes it the same way. So the list is deliberately unnumbered at the
+    /// level where it grows, and what governs admission is the test below it,
+    /// not the length. A new case is added as an entry, and is not expected to
+    /// fit anything written before it.
+    ///
+    /// 1. **The worker was asked and could not obtain the bytes.** The path did
+    ///    not exist, was not a regular file, permissions refused it, or the
+    ///    request line was not valid JSON. Reported as `wire::Frame::Failed`;
+    ///    this is the case the rule was added for.
+    /// 2. **The worker was asked and the reader could not be started.** The
+    ///    library it needs missing, the wrong build, or refused by code signing
+    ///    (`crates/mnema-extract/src/pdfium_probe.rs` splits those three). The
+    ///    bytes may well have been readable; nothing read them.
+    ///    [`Malformed`](Self::Malformed) carries what routing this onto a
+    ///    content rule would cost, which is a folder at a time.
+    /// 3. **No worker was asked at all.** Each of these writes the rule
+    ///    directly, without a pool answer to map:
+    ///    * the walk refused the entry before any worker — every `PreSkipRule`
+    ///      lands here (`mnema_walk`'s five: an unrepresentable name, a cloud
+    ///      placeholder, an unreadable entry, a non-file, a size that does not
+    ///      fit), in `walk_root` (`crates/mnema-ingest/src/walk.rs:362`);
+    ///    * the path is not valid UTF-8, so the extraction request cannot
+    ///      express it at all (`Pool::extract`,
+    ///      `crates/mnema-pool/src/lib.rs:619`);
+    ///    * the caller had **no measurement** of the file to hand — `on_disk`
+    ///      was `None`, which `ingest_file` documents as "the walk could not
+    ///      stat the file at all" and refuses on before spending a worker
+    ///      (`crates/mnema-ingest/src/lib.rs:339`). Unreachable from the
+    ///      product as it stands, because `walk_root` always passes `Some`
+    ///      (`crates/mnema-ingest/src/walk.rs:937`) — but `ingest_file` is
+    ///      `pub` and the parameter is `Option` with a documented meaning, so
+    ///      it is an entry in this list rather than a branch that cannot fire;
+    ///    * the **journal write itself** kept failing — the index was still busy
+    ///      under someone else's write after every retry
+    ///      (`ingest_with_busy_retry`, `crates/mnema-ingest/src/walk.rs:963`).
+    ///      Note what this one is not: the worker may have run perfectly and
+    ///      produced a whole document. It is the clearest case that this rule
+    ///      cannot be defined by what a worker reported.
+    ///
+    /// What the entries share, and the only test for admitting a new one: the
+    /// verdict says nothing about the file's bytes, and it may stop being true
+    /// on the very next walk. That is what earns all three of this rule's
+    /// answers — keep the document (`mnema_ingest`'s `displaces`), count
+    /// towards a broken environment, and do **not** remember the verdict, so
+    /// the pass after the repair asks again.
+    ///
+    /// It is not folded into `Unsupported` because the two demand different
+    /// things of the user: an unsupported format is a limit of this product and
+    /// stays skipped until the product grows a reader, while everything above
+    /// is worth retrying and may need nothing from the product at all.
+    ///
+    /// **The name is coarser than the list**, and `reason` is where the
+    /// difference lives — carried through unchanged from whoever recorded it,
+    /// so "could not load libpdfium", "no such file" and "the index was still
+    /// busy" are one rule and three sentences. A window grouping by rule alone
+    /// shows them together. That is a known limit of this vocabulary rather
+    /// than an oversight; the alternative, a rule per cause, is a decision of
+    /// its own and has not been taken.
     ///
     /// `skipped.rule` is a plain `TEXT` column with no CHECK constraint
-    /// (`schema.sql:233`), so adding this value needed no migration and no
+    /// (`skipped.rule`, `schema.sql:271`), so adding this value needed no
+    /// migration and no
     /// `SCHEMA_VERSION` bump.
     Unreadable,
     /// The file is larger than the ceiling the pool was configured with, and
@@ -147,6 +208,119 @@ declare_skip_rules! {
     /// user still has under that path is the document they had before rather
     /// than an absence.
     BinaryTail,
+    /// The file is the format its magic claims and this product has a reader
+    /// for it, and the bytes are damaged: a PDF that ends mid-object, a zip
+    /// whose central directory does not parse.
+    ///
+    /// **Not `Unsupported`** — that one promises a reader that will arrive, and
+    /// for this file one already has. The two answer the user differently:
+    /// "this product cannot read that format yet" is a limit of the product,
+    /// and "this file is broken" is a fact about the file, which is the answer
+    /// someone looking at the skip list needs in order to go and fetch the file
+    /// again.
+    ///
+    /// **Not `Unreadable`** — that rule holds the cases where nothing was
+    /// learned about the content at all, and it is defined by the list on its
+    /// own variant rather than paraphrased here, because every paraphrase of it
+    /// so far has been narrower than the rule. Here a reader ran, on bytes it
+    /// had, and could not finish. The two part company where it costs a
+    /// document:
+    /// `Unreadable` never displaces, because a share that drops mid-walk would
+    /// otherwise empty the index, and this rule displaces when the digest says
+    /// the file is not the one the index was built from.
+    ///
+    /// A determination about the bytes, so `is_about_content` is true and the
+    /// next walk answers from `stat` without spending a worker. That carries
+    /// `NotText`'s consequence with it: a file refused here is not looked at
+    /// again for the life of the index unless `INDEX_FORMAT_VERSION` moves — so
+    /// a release whose reader survives damage this one gives up on must bump
+    /// it, or the files it could now read stay refused forever.
+    ///
+    /// ⚠️ **The limit that makes both of those answers correct: this rule means
+    /// the *content* is damaged, and a reader that never got as far as the
+    /// content does not belong here.** A reader whose library would not load —
+    /// missing, the wrong build, or refused by code signing, three causes
+    /// `crates/mnema-extract/src/pdfium_probe.rs` already separates as
+    /// `Stage::LibraryDir`, `Stage::VerifyBuild` and `Stage::Bind` — has learned
+    /// nothing whatever about the file it was handed. Routing that here is the
+    /// failure `mnema_pool`'s `PoolError` names in its own doc comment, arriving
+    /// one layer lower: "ten thousand files as damaged when the real fault is a
+    /// half-finished install". The shape it takes is a reader that folds every
+    /// error it can produce into this rule with one catch-all arm.
+    ///
+    /// **The limit binds [`Encrypted`](Self::Encrypted) identically**, and is
+    /// written once, here, rather than twice. That rule's three answers are the
+    /// same three, so a reader reporting "locked" because its library never came
+    /// up buys the same silent folder — and a reader that cannot start cannot
+    /// have found a password either.
+    ///
+    /// It costs more here than there, because all three of this rule's other
+    /// answers are tuned for damage and all three are wrong for a broken
+    /// install.
+    ///
+    /// * `suggests_broken_environment` is false — right for a folder of
+    ///   truncated downloads, and it means a run of these will **not** stop the
+    ///   walk.
+    /// * Worse than not stopping it: `walk_root` **resets**
+    ///   `consecutive_environmental` to zero on any rule that answers false
+    ///   (`crates/mnema-ingest/src/walk.rs`, the `else` beside the counter). So
+    ///   a folder holding PDFs among other files does not merely fail to raise
+    ///   the alarm — it wipes the count of a genuine environmental run passing
+    ///   through at the same time, and the walk that should have stopped
+    ///   carries on.
+    /// * `is_about_content` is true, so every one of those rows outlives the
+    ///   repair: quarantine a library, walk a folder, fix the installation, and
+    ///   nothing comes back until `INDEX_FORMAT_VERSION` moves.
+    ///
+    /// A whole library of PDFs journalled as broken files, by a walk that
+    /// reports success and has had its one alarm silenced.
+    ///
+    /// **The way out is `Frame::Failed`**, which the pool reads as
+    /// `Unreadable`: the document is kept, the run counts as evidence about the
+    /// environment, and nothing is remembered, so the walk after the repair
+    /// asks again. Its `message` is carried into `skipped.reason` verbatim,
+    /// which is what makes a quarantined library diagnosable — the rule says
+    /// `unreadable` and the reason says which library and why. Both
+    /// `wire::Frame::Failed` and `SkipRule::Unreadable` say so on their own
+    /// side; this is the same agreement read from here.
+    ///
+    /// Dying instead lands on `Crash`, which has the same two flags and is
+    /// honest as far as it goes, but the cause then survives only in the
+    /// worker's stderr file: the user is told the worker died, not that a
+    /// library would not load. Note also that `"crash"` is not among the rule
+    /// strings the pool's wire `match` accepts, so a worker cannot ask for that
+    /// one by name.
+    Malformed,
+    /// The file is whole, the reader is the right one, and the text is behind a
+    /// password.
+    ///
+    /// **Not `Malformed`**, although both arrive from a reader that opened the
+    /// file and produced nothing, and although `displaces` gives them the
+    /// identical condition today. They are different things to the person
+    /// reading the skip list: one is fixed by supplying a password and the
+    /// other is not fixed. "Which of my documents are locked?" is a question
+    /// this journal can only answer while the two have separate rules, and it
+    /// is the question that decides whether a password prompt is worth
+    /// building.
+    ///
+    /// **Not `Unsupported`** either, for a sharper reason than `Malformed`'s: a
+    /// locked file is not a format this product lacks a reader for. Folding it
+    /// there would say a future release might read it, when what is missing is
+    /// not code but a key the user has.
+    ///
+    /// `is_about_content` for the same reason as `Malformed` and with the same
+    /// consequence: the same bytes stay locked, so the journal answers for them
+    /// until `INDEX_FORMAT_VERSION` moves. Whoever builds a password prompt has
+    /// to move it, or the files the prompt exists for are the ones it never
+    /// gets asked about.
+    ///
+    /// ⚠️ **It inherits [`Malformed`](Self::Malformed)'s limit whole**, and that
+    /// is the one thing to read there before reporting this rule: it means a
+    /// reader looked at the content and found a lock. A reader whose library
+    /// never came up has not looked at anything, cannot have found a password,
+    /// and must take `Unreadable` — for reasons that cost a folder, spelled out
+    /// once beside the other rule rather than copied here to drift.
+    Encrypted,
 }
 
 impl SkipRule {
@@ -161,6 +335,8 @@ impl SkipRule {
             SkipRule::TooLarge => "too_large",
             SkipRule::NotText => "not_text",
             SkipRule::BinaryTail => "binary_tail",
+            SkipRule::Malformed => "malformed",
+            SkipRule::Encrypted => "encrypted",
         }
     }
 
@@ -180,6 +356,8 @@ impl SkipRule {
             "too_large" => SkipRule::TooLarge,
             "not_text" => SkipRule::NotText,
             "binary_tail" => SkipRule::BinaryTail,
+            "malformed" => SkipRule::Malformed,
+            "encrypted" => SkipRule::Encrypted,
             _ => return None,
         })
     }
@@ -188,7 +366,7 @@ impl SkipRule {
     ///
     /// A test that means "every rule" iterates this instead of writing its own
     /// list, so that adding a variant cannot leave one of them quietly covering
-    /// eight rules out of nine. What makes that true is not this function but
+    /// every rule except the new one. What makes that true is not this function but
     /// [`declare_skip_rules`]: the slice it reads is generated from the same
     /// list that declares the variants, so there is no step at which a variant
     /// can be declared and left out. The chain of `after()` links this replaced
@@ -216,12 +394,15 @@ impl SkipRule {
     /// verdict that *can* change look permanent, and the file is never looked
     /// at again for the life of the index.
     ///
-    /// Only `Unsupported`, `NoTextLayer`, `NotText` and `BinaryTail` qualify.
+    /// Only `Unsupported`, `NoTextLayer`, `NotText`, `BinaryTail`, `Malformed`
+    /// and `Encrypted` qualify — the last two because damage and a password are
+    /// both properties of the bytes: the same truncated file truncates the same
+    /// reader again, and the same locked file stays locked.
     /// `Crash`, `Timeout` and `Memory` are readings of the environment that
     /// apply to every file in the walk alike — `displaces` draws the same line
-    /// for the same reason (D44) — and `Unreadable` is a fact about the disk,
-    /// not the bytes, that may well be transient (a file moved mid-scan, a
-    /// permission fixed afterwards).
+    /// for the same reason (D44) — and `Unreadable` is a fact about everything
+    /// except the bytes, which may well be transient (a file moved mid-scan, a
+    /// permission fixed afterwards, an installation repaired).
     ///
     /// `BinaryTail` is the one variant where this predicate and `displaces` no
     /// longer answer alike, and that is not a slip. The verdict *is* about the
@@ -266,7 +447,9 @@ impl SkipRule {
             SkipRule::Unsupported
             | SkipRule::NoTextLayer
             | SkipRule::NotText
-            | SkipRule::BinaryTail => true,
+            | SkipRule::BinaryTail
+            | SkipRule::Malformed
+            | SkipRule::Encrypted => true,
             SkipRule::Crash
             | SkipRule::Timeout
             | SkipRule::Memory
@@ -285,7 +468,7 @@ impl SkipRule {
     /// worth trusting on its own, without spending a worker on the file a
     /// second time. This asks whether a run of them means a walker should
     /// stop asking a worker to do more work at all. The two questions split
-    /// the same nine variants differently, and `TooLarge` is the case that
+    /// the same variants differently, and `TooLarge` is the case that
     /// proves it has to: it answers **no** to both. It is not a fact about
     /// the bytes (`is_about_content` — a setting can move the ceiling out
     /// from under a file that never changed), and it is not a fact about the
@@ -313,6 +496,15 @@ impl SkipRule {
     /// them is dying, and ending the walk would leave the rest of the folder
     /// unindexed over it.
     ///
+    /// `Malformed` and `Encrypted` answer **no** on exactly that reasoning, and
+    /// their answers depend on a limit held somewhere else rather than on
+    /// anything visible here. [`SkipRule::Malformed`](Self::Malformed) states it
+    /// for both rules and [`SkipRule::Encrypted`](Self::Encrypted) points back
+    /// at it: a reader that could not load its library at all must report
+    /// neither, because a broken install then produces a long run of them and
+    /// this predicate — correctly, for damage and for a password — declines to
+    /// stop the walk, and `walk_root` clears the counter besides.
+    ///
     /// An exhaustive `match`, matching `is_about_content`'s own reasoning for
     /// being one: a variant added to the enum with no line here would
     /// otherwise answer silently, and neither default is safe to assume —
@@ -326,7 +518,9 @@ impl SkipRule {
             | SkipRule::NoTextLayer
             | SkipRule::TooLarge
             | SkipRule::NotText
-            | SkipRule::BinaryTail => false,
+            | SkipRule::BinaryTail
+            | SkipRule::Malformed
+            | SkipRule::Encrypted => false,
         }
     }
 }
@@ -511,13 +705,45 @@ impl Db {
     ///
     /// Only whole-file rows (`page_no IS NULL`), matching what `skip_entry`
     /// reads and what `ingest_file` writes for a file. A per-page row belongs to
-    /// one page of one document and is not this path's verdict; the reader that
-    /// will produce those does not exist yet, and folding them in here would
-    /// silently erase them the moment it does.
+    /// one page of one document and is not this path's verdict: it must not
+    /// answer for the file, and it must not be erased by a pass that only
+    /// settles the file. [`forget_page_skips`](Db::forget_page_skips) is the one
+    /// that maintains those, and the two are called together wherever a path
+    /// comes to name a document.
     pub fn forget_skip(&self, root_id: i64, relative_path: &str) -> Result<(), Error> {
         self.conn().execute(
             "DELETE FROM skipped
               WHERE watched_root_id = ?1 AND relative_path = ?2 AND page_no IS NULL",
+            params![root_id, relative_path],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets every per-page row recorded against one path.
+    ///
+    /// The exact complement of [`forget_skip`](Db::forget_skip), and it exists
+    /// because a per-page row is otherwise **immortal**. Nothing else in the
+    /// tree removes one for a path a walk still finds: `forget_skip` excludes
+    /// them by the clause above, and `forget_skips_not_in` fires only for paths
+    /// a complete walk did not see. So a file read once by a reader that
+    /// skipped its page 7, read again after the page was replaced by typed
+    /// text, would keep a row saying page 7 carries no text layer — in the very
+    /// window that answers "why is this not in my index?", about a page that is
+    /// in it.
+    ///
+    /// Its caller is `mnema_ingest`'s `repoint`, which calls it immediately
+    /// before writing the rows the current extraction reported, inside the same
+    /// transaction as the `path` row. Delete-then-write rather than an upsert
+    /// per page: an upsert leaves behind exactly the rows this is here to
+    /// remove — the ones the new extraction does *not* name.
+    ///
+    /// `page_no IS NOT NULL`, and the file's own verdict is left alone: the two
+    /// are different facts with different lifetimes, and a pass that finishes by
+    /// writing a document removes both, each through its own call.
+    pub fn forget_page_skips(&self, root_id: i64, relative_path: &str) -> Result<(), Error> {
+        self.conn().execute(
+            "DELETE FROM skipped
+              WHERE watched_root_id = ?1 AND relative_path = ?2 AND page_no IS NOT NULL",
             params![root_id, relative_path],
         )?;
         Ok(())
@@ -594,11 +820,7 @@ impl Db {
 
     /// Sets a document's lifecycle status.
     pub fn set_document_status(&self, id: &str, status: DocumentStatus) -> Result<(), Error> {
-        self.conn().execute(
-            "UPDATE document SET status = ?1 WHERE id = ?2",
-            params![status.as_str(), id],
-        )?;
-        Ok(())
+        write_document_status(self.conn(), id, status)
     }
 
     pub fn document_status(&self, id: &str) -> Result<DocumentStatus, Error> {
@@ -662,6 +884,25 @@ impl Db {
             )
             .optional()?)
     }
+}
+
+/// Writes one document's lifecycle status.
+///
+/// Takes `&rusqlite::Connection` rather than `&Db` for the same reason
+/// `write_search_row` does (`search.rs`): `Transaction` derefs to `Connection`,
+/// so one statement serves both a standalone write and a caller's transaction
+/// — and `clear_document_content_in` needs the second form, since the status it
+/// writes has to land with the delete beside it or not at all.
+pub(crate) fn write_document_status(
+    conn: &rusqlite::Connection,
+    id: &str,
+    status: DocumentStatus,
+) -> Result<(), Error> {
+    conn.execute(
+        "UPDATE document SET status = ?1 WHERE id = ?2",
+        params![status.as_str(), id],
+    )?;
+    Ok(())
 }
 
 /// Whether `relative` names something inside the subtree `prefix` names —

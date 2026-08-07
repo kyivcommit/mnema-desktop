@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use mnema_core::nfc;
 use pdfium_render::prelude::*;
 
 /// Minimum characters on a page for its text layer to count as usable.
@@ -35,14 +36,60 @@ pub struct PageProbe {
     pub has_text_layer: bool,
 }
 
+/// Which step of loading Pdfium an [`Error`] surfaced from, as a value a caller
+/// can match on rather than infer from prose.
+///
+/// It exists because `pdfium()` (below) runs three steps in sequence —
+/// `library_dir`, `verify_build`, `bind_to_library` — and, before this type,
+/// all three reported failure through the same `Error::Library(String)`
+/// variant. `--probe-pdfium` (`src/bin/worker.rs`) answers exactly one
+/// question, "can this build load Pdfium at all", and a caller reading only
+/// its boolean `loaded` field could not tell "the .dylib is not where
+/// expected" apart from "code signing refused to load it" — two failures with
+/// completely different fixes. Measured on a real signed bundle: the first
+/// failure hit was a missing `VERSION` manifest, not the code-signature
+/// question the branch exists to answer; reading only `loaded` would have
+/// recorded the wrong one of the two as settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// No shared library file was found at any of the three candidate
+    /// locations [`library_dir`] checks.
+    LibraryDir,
+    /// The `VERSION` manifest beside the library was missing, unreadable, or
+    /// named a build these bindings were not compiled for. Two different
+    /// causes share this stage — a missing manifest and a build mismatch —
+    /// because both are found inside [`verify_build`], before the library
+    /// itself is ever asked to load; the full cause is still in `Error`'s own
+    /// message.
+    VerifyBuild,
+    /// The library file was found and its `VERSION` verified, but
+    /// `Pdfium::bind_to_library` itself failed. This is the shape a
+    /// code-signing refusal takes: the file is present and named the right
+    /// build, and the dynamic loader still declines it.
+    Bind,
+}
+
+impl Stage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage::LibraryDir => "library_dir",
+            Stage::VerifyBuild => "verify_build",
+            Stage::Bind => "bind",
+        }
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
     #[error("pdfium: {0}")]
     Pdfium(String),
 
-    /// The library, or the version manifest beside it, could not be found or read.
-    #[error("pdfium library: {0}")]
-    Library(String),
+    /// The library, or the version manifest beside it, could not be found or
+    /// read, or the library itself failed to bind. `stage` names which of the
+    /// three — see [`Stage`] for why the distinction matters and
+    /// [`Error::stage`] for how to read it without matching on this variant.
+    #[error("pdfium library ({}): {message}", stage.as_str())]
+    Library { stage: Stage, message: String },
 
     /// The shipped binary is not the build the compiled bindings describe.
     #[error(
@@ -58,6 +105,22 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// The stage this error surfaced from, as a string a wire consumer can
+    /// match on directly rather than parse out of `Display`'s prose.
+    /// `"document"` for [`Error::Pdfium`] — a fault in the file itself, after
+    /// the library has already loaded — is not one of `Stage`'s three
+    /// variants because it is not a step of *loading* Pdfium at all, but a
+    /// probe reading this field must still get an answer rather than a gap.
+    pub fn stage(&self) -> &'static str {
+        match self {
+            Error::Pdfium(_) => "document",
+            Error::Library { stage, .. } => stage.as_str(),
+            Error::BuildMismatch { .. } => Stage::VerifyBuild.as_str(),
+        }
+    }
+}
+
 /// Reports, per page, how much text the layer carries and whether that clears
 /// the threshold. Extracting the text itself belongs to the extraction spec;
 /// this exists so the skeleton proves the binding links and runs.
@@ -66,14 +129,49 @@ pub fn probe_text_layer(path: &Path) -> Result<Vec<PageProbe>, Error> {
         .into_iter()
         .enumerate()
         .map(|(i, text)| {
-            let count = text.chars().filter(|c| !c.is_whitespace()).count();
+            let count = text_layer_chars(&text);
             PageProbe {
                 page_no: (i + 1) as u32,
                 char_count: count,
-                has_text_layer: count >= TEXT_LAYER_MIN_CHARS,
+                has_text_layer: has_text_layer(count),
             }
         })
         .collect())
+}
+
+/// How many characters of text layer a page carries, for the purpose of
+/// [`TEXT_LAYER_MIN_CHARS`].
+///
+/// **NFC first, and that is not tidying.** The string a page's text becomes in
+/// the index is `nfc::normalise`d (D32, D38), and normalisation changes the
+/// character count: a Ukrainian `й` written decomposed is two characters before
+/// it and one after. Counting the raw string would let a page of forty
+/// decomposed letters count as eighty, clear the threshold, and be stored as
+/// forty — below the minimum the threshold exists to enforce, in the alphabet
+/// this product is built for.
+///
+/// Whitespace does not count, because a scanned page's furniture is a handful
+/// of glyphs spread over a page and the amount of space between them says
+/// nothing about how much text there is.
+pub(crate) fn text_layer_chars(text: &str) -> usize {
+    nfc::normalise(text)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .count()
+}
+
+/// The threshold decision itself, taken from a count that
+/// [`text_layer_chars`] produced.
+///
+/// One function rather than a comparison at each call site: `probe_text_layer`
+/// publishes the answer as a diagnostic and `pdf::extract_pdf` acts on it by
+/// dropping a page, and those two must not be able to disagree about which
+/// pages of a document have a text layer. Splitting it from the counting is
+/// what lets the boundary itself be asserted against the constant rather than
+/// against a fixture — see `the_threshold_is_inclusive_at_the_constant`, which
+/// is the only thing in this crate that can tell `>=` from `>`.
+pub(crate) fn has_text_layer(char_count: usize) -> bool {
+    char_count >= TEXT_LAYER_MIN_CHARS
 }
 
 /// The text layer of every page, in document order.
@@ -90,8 +188,19 @@ pub(crate) fn page_texts(path: &Path) -> Result<Vec<String>, Error> {
         .load_pdf_from_file(path, None)
         .map_err(|e| Error::Pdfium(e.to_string()))?;
 
+    // By index over `FPDF_GetPageCount`, for the reason `pdf::extract_pdf`
+    // spells out at length: `pages().iter()` swallows the first page
+    // `FPDF_LoadPage` declines and ends there, so a short list is returned for
+    // a long document with nothing to say it happened. Here that answer is what
+    // `--probe-pdfium` reports to a packaging check — a probe that under-counts
+    // pages says a bundle is fine when it is not — and the probe and the reader
+    // must not disagree about which pages a document has.
+    let all_pages = document.pages();
     let mut out = Vec::new();
-    for page in document.pages().iter() {
+    for index in 0..all_pages.len() {
+        let page = all_pages
+            .get(index)
+            .map_err(|e| Error::Pdfium(format!("page {} could not be loaded: {e}", index + 1)))?;
         let text = page.text().map_err(|e| Error::Pdfium(e.to_string()))?;
         out.push(text.all());
     }
@@ -117,7 +226,12 @@ pub(crate) fn page_texts(path: &Path) -> Result<Vec<String>, Error> {
 /// makes PDF extraction sequential across the process. Recovering the throughput
 /// means separate processes, which is the extraction spec's decision, not this
 /// probe's.
-fn lock_pdfium() -> std::sync::MutexGuard<'static, ()> {
+///
+/// `pub(crate)` so that `pdf::extract_pdf` serialises through **this** lock.
+/// A second mutex would be the same segfault with two names: what has to be
+/// exclusive is the FFI, not any one caller's use of it, and two locks each
+/// held correctly protect nothing from each other.
+pub(crate) fn lock_pdfium() -> std::sync::MutexGuard<'static, ()> {
     static PDFIUM_IN_USE: Mutex<()> = Mutex::new(());
 
     // The guarded value is `()`; there is no state for a panicking thread to have
@@ -135,18 +249,52 @@ fn lock_pdfium() -> std::sync::MutexGuard<'static, ()> {
 /// second call from failing with an error about the library instead of about the
 /// document. Holding it in a `static` is what the `thread_safe` feature's `Sync`
 /// impl permits; what makes it *safe* is [`lock_pdfium`], not that feature.
-fn pdfium() -> Result<&'static Pdfium, Error> {
-    static PDFIUM: OnceLock<Result<Pdfium, Error>> = OnceLock::new();
+///
+/// **Every error this returns is the reader failing to come up, never a fact
+/// about a document**, and `pdf::extract_pdf` relies on exactly that to route
+/// it to `Frame::Failed` rather than to a content rule. It holds by
+/// construction rather than by care: the closure below runs `library_dir`,
+/// `verify_build` and `bind_to_library` and nothing else, and no file has been
+/// named at this point, let alone opened.
+pub(crate) fn pdfium() -> Result<&'static Pdfium, Error> {
+    bound_pdfium().map(|(pdfium, _)| pdfium)
+}
+
+/// The directory the loaded library was loaded **from**, recorded by the call
+/// that loaded it.
+///
+/// Not `library_dir()` called a second time. That would re-derive an answer
+/// from the same inputs and agree with itself by construction, which is what a
+/// packaging check must not accept: `library_dir` has three branches, one of
+/// them an absolute path baked into the binary at compile time
+/// (`CARGO_MANIFEST_DIR`), and a bundle that reached that branch is loading the
+/// developer's checkout while looking identical from the outside. Measured on
+/// this repository's own image: the bundled worker did exactly that, and the
+/// only reason it was visible at all is that code signing then refused the
+/// load. `scripts/verify-bundle.sh` compares this against the mounted image, so
+/// it must be the path that was handed to the loader on the run that succeeded.
+///
+/// The scope is that and no more: this is the path `bind_to_library` was
+/// given, not a reading of dyld's loaded-image table. The two can differ only
+/// if the same library is already mapped in the process under that install
+/// name, and the worker loads nothing else.
+pub fn loaded_library_dir() -> Result<&'static Path, Error> {
+    bound_pdfium().map(|(_, dir)| dir.as_path())
+}
+
+fn bound_pdfium() -> Result<&'static (Pdfium, PathBuf), Error> {
+    static PDFIUM: OnceLock<Result<(Pdfium, PathBuf), Error>> = OnceLock::new();
 
     PDFIUM
         .get_or_init(|| {
             let dir = library_dir()?;
             let library = Pdfium::pdfium_platform_library_name_at_path(&dir);
             verify_build(&dir)?;
-            let bindings = Pdfium::bind_to_library(&library).map_err(|e| {
-                Error::Library(format!("{} could not be loaded: {e}", library.display()))
+            let bindings = Pdfium::bind_to_library(&library).map_err(|e| Error::Library {
+                stage: Stage::Bind,
+                message: format!("{} could not be loaded: {e}", library.display()),
             })?;
-            Ok(Pdfium::new(bindings))
+            Ok((Pdfium::new(bindings), dir))
         })
         .as_ref()
         .map_err(Clone::clone)
@@ -163,7 +311,32 @@ fn library_dir() -> Result<PathBuf, Error> {
         return Ok(PathBuf::from(dir));
     }
 
-    // 2. Beside the running executable — where a bundled application will ship it.
+    // 2. Inside a packaged application, which is checked BEFORE the flat layout
+    //    below and not after. See [`bundled_library_dir`] for why the vendored
+    //    layout is reproduced rather than flattened; the order is its own
+    //    decision, and it is a security one.
+    //
+    //    The bundle grants `com.apple.security.cs.disable-library-validation`,
+    //    because an ad-hoc signature has no Team ID and the loader otherwise
+    //    refuses the library the bundle itself ships (D54, D65). That
+    //    entitlement is not selective: it stops the signature of *any* library
+    //    from being checked. With the flat branch first, a `libpdfium.dylib`
+    //    dropped into `Contents/MacOS/` beside the worker would win over the
+    //    sealed copy under `Resources/`, and be loaded without its signature
+    //    being looked at. Checking the sealed location first does not make that
+    //    impossible — nothing here can — but it stops the easiest spelling of it
+    //    from being the one the search prefers.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+        && let Some(dir) = bundled_library_dir(exe_dir)
+    {
+        return Ok(dir);
+    }
+
+    // 3. Beside the running executable — a flat install, and the shape a
+    //    relocated worker takes. It stays because it is the only branch needing
+    //    neither a bundle layout nor an environment, and because a packaged
+    //    build no longer reaches it: (2) matches first.
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
         && dir.join(Pdfium::pdfium_platform_library_name()).is_file()
@@ -171,9 +344,14 @@ fn library_dir() -> Result<PathBuf, Error> {
         return Ok(dir.to_path_buf());
     }
 
-    // 3. The vendored copy in a development checkout. Baked in at compile time
-    //    because a library cannot ask where the workspace was; a packaged build
-    //    never reaches this branch, having matched (2).
+    // 4. The vendored copy in a development checkout. Baked in at compile time
+    //    because a library cannot ask where the workspace was.
+    //
+    //    A packaged build must never reach this branch, and "must never" is not
+    //    "cannot": before Pdfium was put into the bundle, a signed image on the
+    //    machine that built it reached exactly here and loaded the checkout —
+    //    which is why `loaded_library_dir` exists and why
+    //    `scripts/verify-bundle.sh` asserts on it rather than on this comment.
     let vendored = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../vendor/pdfium/lib"
@@ -185,11 +363,42 @@ fn library_dir() -> Result<PathBuf, Error> {
         return Ok(vendored.to_path_buf());
     }
 
-    Err(Error::Library(format!(
-        "no {} found. Set {PDFIUM_LIB_DIR_ENV}, or run scripts/fetch-pdfium.sh to \
-         vendor Pdfium build {PDFIUM_API_BUILD}.",
-        Pdfium::pdfium_platform_library_name().to_string_lossy(),
-    )))
+    Err(Error::Library {
+        stage: Stage::LibraryDir,
+        message: format!(
+            "no {} found. Set {PDFIUM_LIB_DIR_ENV}, or run scripts/fetch-pdfium.sh to \
+             vendor Pdfium build {PDFIUM_API_BUILD}.",
+            Pdfium::pdfium_platform_library_name().to_string_lossy(),
+        ),
+    })
+}
+
+/// Where a packaged macOS application keeps the library, derived from the
+/// directory its executables run in — `Contents/MacOS` becomes
+/// `Contents/Resources/pdfium/lib`.
+///
+/// **The vendored layout is reproduced, not flattened, and that is the whole
+/// design.** `verify_build` requires a `VERSION` manifest in the library's
+/// directory or its parent, so `pdfium/lib/libpdfium.dylib` puts the manifest
+/// at `pdfium/VERSION` — the same two paths `scripts/fetch-pdfium.sh`
+/// installs. Flattening the library into `Contents/Resources` would leave the
+/// manifest with nowhere to sit that is not shared with every other resource.
+/// `Contents/Frameworks` — the conventional home for a `.dylib` — was measured
+/// and rejected for the same reason: Tauri's `bundle.macOS.frameworks` accepts
+/// only `.dylib` and `.framework` entries, so the manifest cannot go there at
+/// all (docs/BUILD.md).
+///
+/// Returns `None` unless the library is really there, so that a caller cannot
+/// mistake "this is where it would be" for "this is where it is".
+fn bundled_library_dir(exe_dir: &Path) -> Option<PathBuf> {
+    let dir = exe_dir
+        .parent()?
+        .join("Resources")
+        .join("pdfium")
+        .join("lib");
+    dir.join(Pdfium::pdfium_platform_library_name())
+        .is_file()
+        .then_some(dir)
 }
 
 /// Refuses to go on unless the `VERSION` manifest vendored beside the library
@@ -217,17 +426,23 @@ fn verify_build(library_dir: &Path) -> Result<(), Error> {
         library_dir.join("VERSION"),
         library_dir.join("..").join("VERSION"),
     ];
-    let manifest = candidates.iter().find(|p| p.is_file()).ok_or_else(|| {
-        Error::Library(format!(
-            "no VERSION manifest beside {}. The build of Pdfium cannot be \
+    let manifest = candidates
+        .iter()
+        .find(|p| p.is_file())
+        .ok_or_else(|| Error::Library {
+            stage: Stage::VerifyBuild,
+            message: format!(
+                "no VERSION manifest beside {}. The build of Pdfium cannot be \
              confirmed, and an unconfirmed build is the failure this check exists \
              for. Run scripts/fetch-pdfium.sh.",
-            library_dir.display()
-        ))
-    })?;
+                library_dir.display()
+            ),
+        })?;
 
-    let contents = std::fs::read_to_string(manifest)
-        .map_err(|e| Error::Library(format!("{} could not be read: {e}", manifest.display())))?;
+    let contents = std::fs::read_to_string(manifest).map_err(|e| Error::Library {
+        stage: Stage::VerifyBuild,
+        message: format!("{} could not be read: {e}", manifest.display()),
+    })?;
 
     build_from_version_manifest(&contents, &manifest.display().to_string()).map(|_| ())
 }
@@ -238,11 +453,14 @@ fn build_from_version_manifest(contents: &str, path: &str) -> Result<u32, Error>
     let found = contents
         .lines()
         .find_map(|line| line.trim().strip_prefix("BUILD="))
-        .ok_or_else(|| Error::Library(format!("{path} declares no BUILD= line")))?;
-    let found: u32 = found
-        .trim()
-        .parse()
-        .map_err(|e| Error::Library(format!("{path} has an unreadable BUILD= line: {e}")))?;
+        .ok_or_else(|| Error::Library {
+            stage: Stage::VerifyBuild,
+            message: format!("{path} declares no BUILD= line"),
+        })?;
+    let found: u32 = found.trim().parse().map_err(|e| Error::Library {
+        stage: Stage::VerifyBuild,
+        message: format!("{path} has an unreadable BUILD= line: {e}"),
+    })?;
 
     if found == PDFIUM_API_BUILD {
         Ok(found)
@@ -287,6 +505,63 @@ mod tests {
     // whichever number it had hard-coded as "some other build". Moving the pin is
     // supposed to be a decision, not a fight with the suite.
 
+    /// The one place `>=` can be told from `>`.
+    ///
+    /// No fixture can do it. `tests/pdf.rs` runs against pages of 119 and 8
+    /// characters — seventy-one clear on one side and forty short on the
+    /// other — so every assertion over them survives moving the comparison by
+    /// one, and a fixture cut to exactly 48 would pin the constant's value
+    /// into a `.pdf` blob that nobody could re-derive after a product decision
+    /// moved it. Stated against the constant instead, both directions, so a
+    /// bump costs nothing and an off-by-one costs this test.
+    #[test]
+    fn the_threshold_is_inclusive_at_the_constant() {
+        assert!(
+            has_text_layer(TEXT_LAYER_MIN_CHARS),
+            "a page carrying exactly the minimum has a text layer"
+        );
+        assert!(
+            !has_text_layer(TEXT_LAYER_MIN_CHARS - 1),
+            "one character short of the minimum is a stamp"
+        );
+    }
+
+    /// Counting after NFC, asserted on the alphabet it matters for.
+    ///
+    /// `й` decomposed is `и` + U+0306: two characters that become one. A
+    /// counter that ran before normalisation would answer twice the truth for
+    /// a page written that way, and the page stored would be half the size the
+    /// threshold admitted. Both spellings, because a counter that normalised
+    /// nothing and a counter that normalised everything agree on the composed
+    /// input alone.
+    ///
+    /// The second letter's base is **U+0456, the Cyrillic `і`** — `ї` is
+    /// U+0457 and decomposes to U+0456 + U+0308. It was written with a Latin
+    /// `i` at first, which composes to `ï` and made this string `йïщ`. The
+    /// arithmetic was right and the sentence above it was not: a test that
+    /// says "the alphabet this product is built for" while measuring Latin
+    /// text is the kind of confidently wrong comment a later task reads and
+    /// takes a decision from.
+    #[test]
+    fn characters_are_counted_after_normalisation_not_before() {
+        let composed = "йїщ";
+        let decomposed = "и\u{0306}\u{0456}\u{0308}щ";
+        // The premise, not assumed: these two really are the same three
+        // letters, spelled apart and together. Without it the assertions below
+        // would still pass on two unrelated strings that happen to normalise
+        // to the same length.
+        assert_eq!(nfc::normalise(decomposed), composed);
+        assert_eq!(text_layer_chars(composed), 3);
+        assert_eq!(
+            text_layer_chars(decomposed),
+            3,
+            "the decomposed spelling of the same three letters must not count as five"
+        );
+        // Whitespace is not text: a scanner footer spread across a page is
+        // still a scanner footer.
+        assert_eq!(text_layer_chars(" й \r\n ї\tщ "), 3);
+    }
+
     #[test]
     fn a_manifest_for_another_build_is_refused() {
         let another_build = PDFIUM_API_BUILD + 1;
@@ -323,7 +598,18 @@ mod tests {
         // unconfirmed, which is the state this check exists to reject.
         let err = build_from_version_manifest("MAJOR=151\nMINOR=0\nPATCH=0\n", "/vendor/VERSION")
             .expect_err("a manifest with no BUILD= line confirms nothing");
-        assert!(matches!(err, Error::Library(_)));
+        // Both the variant AND the stage it carries: a missing BUILD= line is
+        // discovered inside verify_build, not while looking for the library
+        // itself or while binding it, and `--probe-pdfium` reports exactly
+        // this field to a caller that never sees this match arm.
+        assert!(matches!(
+            err,
+            Error::Library {
+                stage: Stage::VerifyBuild,
+                ..
+            }
+        ));
+        assert_eq!(err.stage(), "verify_build");
     }
 
     #[test]
@@ -331,5 +617,72 @@ mod tests {
         // The accept branch against the real file on disk, not a string literal.
         let dir = library_dir().expect("the vendored library is present");
         verify_build(&dir).expect("the vendored build matches the bindings");
+    }
+
+    /// The bundle layout, asserted through the check that actually reads it.
+    ///
+    /// The derived path alone would be worth little: comparing
+    /// `bundled_library_dir`'s answer against a second spelling of the same
+    /// join proves the two spellings agree. What has to hold is that the
+    /// layout satisfies `verify_build`, whose manifest search is `<dir>/VERSION`
+    /// and `<dir>/../VERSION` and is written in a different file. So the tree is
+    /// built the way the bundler builds it and `verify_build` is run on the
+    /// result — which is what fails if either side of that pair moves.
+    #[test]
+    fn a_bundle_shaped_tree_yields_a_library_dir_whose_manifest_verify_build_finds() {
+        let root = tempfile::tempdir().unwrap();
+        let macos = root.path().join("Mnema.app/Contents/MacOS");
+        let lib = root.path().join("Mnema.app/Contents/Resources/pdfium/lib");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        // Contents, not bytes: nothing here loads it, and a real 7.7 MB library
+        // in a unit test would be measuring the fixture.
+        std::fs::write(lib.join(Pdfium::pdfium_platform_library_name()), b"x").unwrap();
+        std::fs::write(
+            lib.parent().unwrap().join("VERSION"),
+            format!("MAJOR=151\nMINOR=0\nBUILD={PDFIUM_API_BUILD}\nPATCH=0\n"),
+        )
+        .unwrap();
+
+        let found = bundled_library_dir(&macos).expect("a bundle-shaped tree has a library");
+        assert_eq!(found, lib);
+        verify_build(&found).expect("the manifest one directory up is the one verify_build reads");
+    }
+
+    /// The other direction, and it is not symmetry for its own sake: the
+    /// function is what tells a packaged application apart from a development
+    /// one, and an answer of "yes, here" for a tree with no library in it would
+    /// send `bind_to_library` at a path that does not exist and report the
+    /// failure as a *binding* fault rather than as a missing library.
+    #[test]
+    fn a_tree_with_no_library_in_it_is_not_a_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let macos = root.path().join("Mnema.app/Contents/MacOS");
+        // The directory exists and is empty: the near miss, not the easy one.
+        std::fs::create_dir_all(root.path().join("Mnema.app/Contents/Resources/pdfium/lib"))
+            .unwrap();
+        std::fs::create_dir_all(&macos).unwrap();
+        assert!(
+            bundled_library_dir(&macos).is_none(),
+            "an empty pdfium/lib is not a packaged library"
+        );
+        // And a path with no parent at all, which is the branch `?` covers.
+        assert!(bundled_library_dir(Path::new("/")).is_none());
+    }
+
+    #[test]
+    fn a_directory_with_no_version_manifest_fails_at_the_verify_build_stage() {
+        // The real filesystem failure a bundle probe hit first
+        // (task-1-report.md): not a signature refusal, a missing VERSION
+        // file. This drives verify_build() itself, not the string-based
+        // build_from_version_manifest helper above, so it also exercises the
+        // "no candidate path is a file" branch that helper never reaches.
+        let dir = tempfile::tempdir().unwrap();
+        let err = verify_build(dir.path()).expect_err("an empty directory has no VERSION");
+        assert_eq!(err.stage(), "verify_build");
+        assert!(
+            err.to_string().contains("no VERSION manifest"),
+            "the message must still say what verify_build() itself found: {err}"
+        );
     }
 }

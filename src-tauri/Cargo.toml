@@ -46,5 +46,14 @@ anyhow = { workspace = true }
 # `test` brings in the mock runtime. Declared here rather than as a feature of
 # the crate so the shipped binary can never contain it.
 tauri = { version = "2.11", features = ["test"] }
+# What `tauri-build` reads tauri.conf.json with. `tests/vendored_library_resource.rs`
+# asks it for the Linux and Windows configurations while running on macOS, which
+# is the only way one host can see the platform-file merge every other host gets.
+# Reimplementing that merge in the test would check the reimplementation.
+#
+# Already in the tree — `tauri` and `tauri-build` both depend on it — and a
+# dev-dependency at that, so `tests/dependency_boundary.rs` is unaffected: it
+# asks `cargo tree -e normal`, which excludes dev- and build-dependencies.
+tauri-utils = "2.9"
 serde_json = { workspace = true }
 tempfile = { workspace = true }
