@@ -80,7 +80,12 @@ impl MockServer {
     /// made one call too many to either hang or pass for a reason that had
     /// nothing to do with what it claimed to test. Past the end, the server
     /// answers with a status no real provider or proxy sends and a body that
-    /// names the mistake, so that test fails loudly instead.
+    /// names the mistake, so that test fails loudly instead — and then the
+    /// accept loop ends (Task 2 review round 2, G4): answering the sentinel
+    /// and looping back to `listener.incoming()` would keep the thread alive
+    /// forever, never dropping `tx`, so every mock server outlived the test
+    /// that created it and `request()` with nothing left to report waited out
+    /// the full 10 s `recv_timeout` instead of failing right away.
     pub fn new(replies: Vec<Reply>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a port");
         let port = listener.local_addr().expect("read the port").port();
@@ -97,16 +102,22 @@ impl MockServer {
                         thread::sleep(reply.delay);
                         write_reply(&mut stream, reply.status, &reply.body, reply.declared_extra);
                     }
-                    None => write_reply(
-                        &mut stream,
-                        599,
-                        &format!(
-                            "mnema-mock-provider: request #{index} arrived with no Reply \
-                             configured for it — the test sent more requests than it prepared \
-                             replies for"
-                        ),
-                        0,
-                    ),
+                    None => {
+                        write_reply(
+                            &mut stream,
+                            599,
+                            &format!(
+                                "mnema-mock-provider: request #{index} arrived with no Reply \
+                                 configured for it — the test sent more requests than it \
+                                 prepared replies for"
+                            ),
+                            0,
+                        );
+                        // End the loop here (Task 2 review round 2, G4):
+                        // looping back to accept another connection would
+                        // keep this thread — and `tx` — alive forever.
+                        break;
+                    }
                 }
             }
         });

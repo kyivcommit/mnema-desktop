@@ -35,14 +35,20 @@ pub fn list_models(base: &str, key: Option<&str>, role: Role) -> Result<Catalogu
     let (status, body) = http::get(base, &path, key)?;
     match status {
         200 => models_from_json(role, &body),
-        // A key that was sent and refused is a different fact from an
-        // endpoint that now demands one nobody sent (Task 2 review round 1,
-        // F2): the first names the credential, the second names a change on
-        // the provider's side that has nothing to do with what the user
-        // typed. `list_models` is the one place that knows whether a key was
-        // sent at all, so the split has to happen here, not in `Error`.
-        401 | 403 if key.is_some() => Err(Error::Unauthorised),
-        401 | 403 => Err(Error::KeyRequired),
+        // Four combinations, four true statements (Task 2 review round 2,
+        // G1). 401 means the request was not authenticated: with no key sent,
+        // this endpoint now requires one; with a key, that key was refused.
+        // 403 means the request WAS authenticated (or none was needed) and
+        // still refused: with a key, that key is not permitted to do this;
+        // with none, something between this machine and the provider refused
+        // an anonymous request — on a public endpoint that is most often a
+        // proxy or a gateway, not an account. `list_models` is the one place
+        // that knows whether a key was sent at all, so the split happens
+        // here, not in `Error`.
+        401 if key.is_none() => Err(Error::KeyRequired),
+        401 => Err(Error::Unauthorised),
+        403 if key.is_some() => Err(Error::Forbidden),
+        403 => Err(Error::AnonymousBlocked),
         429 => Err(Error::RateLimited),
         other => Err(Error::Provider { status: other }),
     }
@@ -58,13 +64,28 @@ pub fn list_models(base: &str, key: Option<&str>, role: Role) -> Result<Catalogu
 pub enum Error {
     #[error("the provider could not be reached: {0}")]
     Transport(String),
+    /// 401 with a key sent: the request was authenticated, and refused.
     #[error("the key was refused")]
     Unauthorised,
-    /// 401/403 on a call that sent no key at all (Task 2 review round 1, F2):
-    /// not a credential problem, since there was no credential — the
-    /// provider now requires one for an endpoint this build calls anonymously.
+    /// 401 on a call that sent no key at all (Task 2 review round 1, F2): not
+    /// a credential problem, since there was no credential — the provider now
+    /// requires one for an endpoint this build calls anonymously.
     #[error("this endpoint now requires a key, and none was sent")]
     KeyRequired,
+    /// 403 with a key sent: the request was understood, the key is real, and
+    /// it is not permitted to do this (Task 2 review round 2, G1) — a
+    /// different fact from `Unauthorised`, which means the key itself was
+    /// rejected outright.
+    #[error("the key is not permitted to do this")]
+    Forbidden,
+    /// 403 on a call that sent no key at all (Task 2 review round 2, G1).
+    /// Not naming an account: on a public, key-less endpoint this is most
+    /// often something between this machine and the provider — a proxy or a
+    /// gateway — refusing an anonymous request, which `Unauthorised` and
+    /// `KeyRequired` would both misname as a credential problem when there
+    /// was no credential to begin with.
+    #[error("something between this machine and the provider refused an anonymous request")]
+    AnonymousBlocked,
     #[error("no model named {0}, or it does not make embeddings")]
     NoSuchModel(String),
     /// Deliberately does not say "this key" (Task 2 review round 1, F2):
@@ -77,14 +98,28 @@ pub enum Error {
     Provider { status: u16 },
     #[error("the provider's answer was not the shape this code expects: {0}")]
     Malformed(&'static str),
-    /// The status was read successfully, but the body that came with it did
-    /// not finish — the real wire shape of a connection that stops
-    /// mid-transfer (Task 2 review round 1, F1). Kept apart from `Transport`,
-    /// which means the opposite: no answer was ever read at all. `detail` is
-    /// `ureq`'s own protocol-error text, not provider bytes.
-    #[error(
-        "the provider answered {status}, but the response body stopped before it was complete: {detail}"
-    )]
+    /// The status was read successfully, but reading the rest of the
+    /// response failed — kept apart from `Transport`, which means the
+    /// opposite: no answer was ever read at all. `detail` is `ureq`'s own
+    /// protocol-error text, not provider bytes.
+    ///
+    /// The top-level sentence says nothing about *why* the read failed on
+    /// purpose (Task 2 review round 2, G2): a genuine truncation is the
+    /// provider's connection stopping, but `ureq` raises the same error for
+    /// `BodyExceedsLimit` (`read_to_string` caps at 10 MB) and for a global
+    /// timeout during the body read, and in both of those the provider did
+    /// nothing wrong — this build did. `detail` carries whichever of the
+    /// three it actually was.
+    ///
+    /// This bypasses the status table in `list_models` entirely (Task 2
+    /// review round 2, G3, deliberately not fixed here): a 401 whose body
+    /// happens to be truncated arrives as `BodyUnreadable { status: 401, .. }`,
+    /// not `Unauthorised`, and will not open a key dialog that keys off that
+    /// variant. Reinterpreting the status inside the body-read failure would
+    /// rebuild F1 — a status and a body-read outcome flattened back into one
+    /// answer — so whoever matches on `Error` for that dialog must check
+    /// `BodyUnreadable`'s `status` field too, not only `Unauthorised`.
+    #[error("the provider answered {status}, but reading the response body failed: {detail}")]
     BodyUnreadable { status: u16, detail: String },
     /// The trap this whole subsystem exists to catch (spec §2.6): two texts in
     /// one request came back as a single vector, so the model averages a batch

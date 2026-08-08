@@ -1,12 +1,14 @@
 //! Exercises `list_models` against a real socket (`mnema_mock_provider`)
 //! instead of calling `models_from_json` directly, so what is tested is the
-//! whole path: which URL the role builds, what travels in which header, how a
-//! silent server is told from a slow one, and — the two pairs of tests the
-//! Task 1 review demanded — that the role a request was built for is the same
-//! role its answer is parsed under, and that a 200 with an unusable body says
-//! which of three different problems it was.
+//! whole path: which URL the role builds, what travels in which header, and —
+//! the two pairs of tests the Task 1 review demanded — that the role a
+//! request was built for is the same role its answer is parsed under, and
+//! that a 200 with an unusable body says which of three different problems it
+//! was. The timeout itself (does it fire, is it configured) is a unit test in
+//! `src/http.rs` instead of a 30-second integration test here (Task 2 review
+//! round 2, G5).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mnema_mock_provider::{MockServer, Reply};
 use mnema_provider::{Error, MIN_CONTEXT_TOKENS, Refusal, Role, list_models};
@@ -51,27 +53,6 @@ fn the_chat_list_is_asked_without_a_filter() {
     assert!(
         !server.request().contains("output_modalities"),
         "filtering chat by output modality drops the models that also draw or speak"
-    );
-}
-
-#[test]
-fn silence_becomes_a_transport_error_rather_than_a_hang() {
-    let server = MockServer::new(vec![Reply::slow(60)]);
-    let started = std::time::Instant::now();
-    let err = list_models(server.base(), None, Role::Rerank).expect_err("must give up");
-    assert!(matches!(err, Error::Transport(_)), "got {err:?}");
-    // Both sides matter (Task 2 review round 1, cheap correction): an upper
-    // bound alone is satisfied by a timeout of 100 ms, which would give up
-    // long before the 30 s this crate promises and would still pass here.
-    assert!(
-        started.elapsed() > Duration::from_secs(25),
-        "a timeout much shorter than the configured 30 s would still pass the upper-bound \
-         check alone, took {:?}",
-        started.elapsed()
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(45),
-        "the timeout must be shorter than the user's patience"
     );
 }
 
@@ -222,12 +203,27 @@ fn a_401_without_a_key_says_the_endpoint_now_requires_one() {
     assert!(matches!(err, Error::KeyRequired), "got {err:?}");
 }
 
+/// Task 2 review round 2, G1: a 403 with a key sent means the key is real and
+/// simply not permitted to do this — a different fact from `Unauthorised`
+/// (the key itself refused) and from `KeyRequired`/`AnonymousBlocked` (no key
+/// was sent at all).
 #[test]
-fn a_403_with_a_key_says_the_key_was_refused() {
+fn a_403_with_a_key_says_the_key_is_not_permitted() {
     let server = MockServer::new(vec![Reply::status(403, "")]);
     let err = list_models(server.base(), Some("test-key-not-a-real-one"), Role::Chat)
         .expect_err("403 must fail");
-    assert!(matches!(err, Error::Unauthorised), "got {err:?}");
+    assert!(matches!(err, Error::Forbidden), "got {err:?}");
+}
+
+/// Task 2 review round 2, G1: a 403 on a call that sent no key at all does
+/// not name an account — this build never offered one to refuse. On a
+/// public, key-less endpoint this is most often a proxy or gateway between
+/// this machine and the provider, not the provider itself.
+#[test]
+fn a_403_without_a_key_names_something_between_this_machine_and_the_provider() {
+    let server = MockServer::new(vec![Reply::status(403, "")]);
+    let err = list_models(server.base(), None, Role::Chat).expect_err("403 must fail");
+    assert!(matches!(err, Error::AnonymousBlocked), "got {err:?}");
 }
 
 /// Task 2 review round 1, F2: anonymous rate limiting on a public endpoint is
@@ -264,13 +260,96 @@ fn a_500_is_a_provider_error_naming_its_status() {
 fn a_body_that_stops_mid_transfer_is_named_with_its_status_preserved() {
     let server = MockServer::new(vec![Reply::truncated(r#"{"data":[{"id":"vendor/x""#)]);
     let err = list_models(server.base(), None, Role::Chat).expect_err("body never completed");
-    match err {
+    match &err {
         Error::BodyUnreadable { status, .. } => {
             assert_eq!(
-                status, 200,
+                *status, 200,
                 "the status was read successfully before the body failed"
             )
         }
         other => panic!("expected BodyUnreadable, got {other:?}"),
     }
+    // Task 2 review round 2, G2: the same error also fires for
+    // `BodyExceedsLimit` and a timeout during the body read, neither of which
+    // is the provider's connection stopping. The top-level sentence must stay
+    // neutral about the cause and let `detail` carry it, not assert that the
+    // body "stopped" — which is only true for this one of the three.
+    assert!(
+        err.to_string().contains("reading the response body failed"),
+        "the top-level sentence must not claim a specific cause: {err}"
+    );
+}
+
+/// Task 2 review round 2, G4: once the accept loop started answering
+/// past-the-end requests with the `599` sentinel, it never ended — `tx` was
+/// never dropped, so every mock server's thread and listening port outlived
+/// the test that created it, and `request()` with nothing left to report
+/// waited out the full 10-second `recv_timeout` before panicking instead of
+/// failing right away. A `break` after the sentinel ends the loop and drops
+/// `tx`, so a `request()` call with no third request to see now panics
+/// almost immediately.
+#[test]
+fn the_accept_loop_ends_after_answering_past_the_end() {
+    let server = MockServer::new(vec![Reply::ok(r#"{"data":[]}"#)]);
+    list_models(server.base(), None, Role::Chat).expect("the one configured reply");
+    // Past the end: triggers the 599 sentinel and, with the fix, ends the loop.
+    let _ = list_models(server.base(), None, Role::Chat);
+    // Drain the two requests already made before asking for a third that was
+    // never sent — otherwise this would just read the first of those two back.
+    server.request();
+    server.request();
+
+    let started = Instant::now();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.request()));
+    assert!(panicked.is_err(), "there is no third request to report");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the accept loop must end once it answers past-the-end, or this call waits out the \
+         full 10 s recv_timeout instead of failing right away: took {:?}",
+        started.elapsed()
+    );
+}
+
+/// The `Error` doc comment promises this scan; before this round it only
+/// covered the failure paths in Task 1's original plan. Task 2 review round 1
+/// (F2) and round 2 (G1) added five more ways to fail, none of them checked
+/// against it. Every path reachable from `list_models` today that could
+/// plausibly carry the key, called with a real key present wherever a key
+/// can be present at all, is checked here in one place.
+#[test]
+fn no_error_message_ever_contains_the_key() {
+    const KEY: &str = "test-key-not-a-real-one";
+
+    let assert_key_absent = |err: Error| {
+        assert!(
+            !err.to_string().contains(KEY),
+            "an error message must never contain the key it was given: {err}"
+        );
+    };
+
+    for status in [401, 403, 429, 500] {
+        let server = MockServer::new(vec![Reply::status(status, "")]);
+        assert_key_absent(
+            list_models(server.base(), Some(KEY), Role::Chat)
+                .expect_err("a non-200 status must fail"),
+        );
+    }
+
+    let malformed = MockServer::new(vec![Reply::ok("<html></html>")]);
+    assert_key_absent(
+        list_models(malformed.base(), Some(KEY), Role::Chat).expect_err("not JSON must fail"),
+    );
+
+    let truncated = MockServer::new(vec![Reply::truncated(r#"{"data":[{"id":"x""#)]);
+    assert_key_absent(
+        list_models(truncated.base(), Some(KEY), Role::Chat)
+            .expect_err("a truncated body must fail"),
+    );
+
+    // A host nothing listens on, rather than a slow one: a real `Transport`
+    // error without paying out this crate's 30 s global timeout (G5).
+    assert_key_absent(
+        list_models("http://127.0.0.1:1", Some(KEY), Role::Chat)
+            .expect_err("an unreachable host must fail"),
+    );
 }
