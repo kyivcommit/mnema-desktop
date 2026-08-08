@@ -133,16 +133,123 @@ fn a_stated_limit_this_build_cannot_read_is_not_the_same_as_no_limit_at_all() {
     // `None` an absent field produces, so a limit the provider DID state
     // greyed out with "no limit stated" — a sentence false about the
     // provider.
+    //
+    // The assertion checks the variant and that `raw` names the number, not
+    // the exact string serde_json renders a fraction as: that rendering is
+    // serde_json's choice, not this crate's, and pinning it would turn a
+    // routine `cargo update` into a false red (review round 3, I4).
     let json = r#"{"data":[{"id":"vendor/fractional-limit","name":"Fractional",
         "context_length":8192.0,"architecture":{"output_modalities":["embeddings"]}}]}"#;
     let catalogue = models_from_json(Role::Embedding, json).expect("parses");
+    match &find(&catalogue.entries, "vendor/fractional-limit").refusal {
+        Some(Refusal::LimitNotUnderstood { raw }) => {
+            assert!(
+                raw.contains("8192"),
+                "the raw text should name the number that confused this build, got {raw:?}"
+            );
+        }
+        other => panic!(
+            "a limit that was stated, just not in a shape this build parses, must not read \
+             as though nothing was stated at all: got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn a_stated_limit_as_a_non_numeric_string_is_reported_without_its_json_quotes() {
+    // The string arm of `Stated::deserialize` was not exercised anywhere else
+    // under `Role::Embedding` — closing that hole (review round 3, I5).
+    // `value.to_string()` on a JSON string re-serializes it WITH its quotes
+    // ("8k" -> `"8k"`), which would make the reason look different depending
+    // on whether the provider stated a number or a string; unlike the
+    // fraction above, a plain string's own rendering is fully this crate's
+    // choice, so this one IS pinned exactly.
+    let json = r#"{"data":[{"id":"vendor/unit-suffixed-limit","name":"Suffixed",
+        "context_length":"8k","architecture":{"output_modalities":["embeddings"]}}]}"#;
+    let catalogue = models_from_json(Role::Embedding, json).expect("parses");
     assert_eq!(
-        find(&catalogue.entries, "vendor/fractional-limit").refusal,
+        find(&catalogue.entries, "vendor/unit-suffixed-limit").refusal,
         Some(Refusal::LimitNotUnderstood {
-            raw: "8192.0".to_string()
+            raw: "8k".to_string()
         }),
-        "a limit that was stated, just not in a shape this build parses, must not read as \
-         though nothing was stated at all"
+        "a non-integer string must be reported without its JSON quotes"
+    );
+}
+
+#[test]
+fn a_very_long_unreadable_value_is_capped_before_it_becomes_a_label() {
+    // Provider text is untrusted and unbounded; a 200-byte (or 200 KB)
+    // context_length must not become a label of that size in a model picker
+    // (review round 3, I2).
+    let long = "9".repeat(200);
+    let json = format!(
+        r#"{{"data":[{{"id":"vendor/huge-unreadable-limit","name":"Huge",
+        "context_length":"{long}","architecture":{{"output_modalities":["embeddings"]}}}}]}}"#
+    );
+    let catalogue = models_from_json(Role::Embedding, &json).expect("parses");
+    match &find(&catalogue.entries, "vendor/huge-unreadable-limit").refusal {
+        Some(Refusal::LimitNotUnderstood { raw }) => {
+            assert!(
+                raw.len() <= 64,
+                "a value this build cannot read must be capped before it is stored anywhere, \
+                 got {} bytes",
+                raw.len()
+            );
+        }
+        other => panic!("expected LimitNotUnderstood, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unreadable_sibling_refuses_even_next_to_a_readable_number() {
+    // The direction review round 1's F5 test never exercised: with one side
+    // unreadable, `combined_limit` cannot keep its promise ("the narrower of
+    // what the provider stated"), so it must not fall back to the more
+    // permissive number just because the other side happened to parse
+    // (review round 3, I1). Accepting the readable 32000 here would silently
+    // let a chunk through to a model whose real limit — stated, just not in a
+    // shape this build reads — might be far smaller.
+    let json = r#"{"data":[
+        {"id":"vendor/optimistic-with-unreadable-sibling","name":"Optimistic",
+         "context_length":32000,"top_provider":{"context_length":4000.0},
+         "architecture":{"output_modalities":["embeddings"]}}
+    ]}"#;
+    let catalogue = models_from_json(Role::Embedding, json).expect("parses");
+    assert!(
+        matches!(
+            find(
+                &catalogue.entries,
+                "vendor/optimistic-with-unreadable-sibling"
+            )
+            .refusal,
+            Some(Refusal::LimitNotUnderstood { .. })
+        ),
+        "an unreadable top_provider.context_length must refuse the record, not be silently \
+         outvoted by the larger, readable context_length"
+    );
+}
+
+#[test]
+fn an_absent_sibling_still_lets_the_readable_number_through() {
+    // The other direction of I1: `Unreadable` must trigger narrowly, on a
+    // field that is genuinely unreadable — not merely absent, which is the
+    // ordinary shape of every record with no `top_provider` block at all.
+    // Otherwise this rule would quietly become "refuse anything without a
+    // top_provider block" (review round 3, I1).
+    let json = r#"{"data":[
+        {"id":"vendor/no-top-provider-at-all","name":"Plain","context_length":32000,
+         "architecture":{"output_modalities":["embeddings"]}}
+    ]}"#;
+    let catalogue = models_from_json(Role::Embedding, json).expect("parses");
+    let entry = find(&catalogue.entries, "vendor/no-top-provider-at-all");
+    assert_eq!(
+        entry.refusal, None,
+        "an absent top_provider must not refuse anything"
+    );
+    assert_eq!(
+        entry.context_length,
+        Some(32000),
+        "with no top_provider stated at all, the one readable number must still be used"
     );
 }
 

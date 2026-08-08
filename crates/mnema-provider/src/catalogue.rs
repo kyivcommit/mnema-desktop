@@ -83,8 +83,16 @@ pub enum Refusal {
     /// existed, a value here was read exactly like an absent one, so an
     /// embedding model whose limit the provider stated — just not in a shape
     /// this build parsed — greyed out with a reason that was false about the
-    /// provider (N1, review round 2). Carries the raw text so the shape that
-    /// confused this build is visible rather than swallowed.
+    /// provider (N1, review round 2).
+    ///
+    /// This wins even next to a sibling field that parsed fine (I1, review
+    /// round 3): see `combined_limit` for why refusing is the honest answer
+    /// and not the more permissive of the two candidates.
+    ///
+    /// `raw` is the one payload in this enum the crate did not compute — it is
+    /// provider text, capped to `MAX_RAW_LEN` so a malformed value cannot
+    /// become an unbounded label in a picker (I2, review round 3), and
+    /// whoever renders it downstream must treat it as untrusted.
     LimitNotUnderstood {
         raw: String,
     },
@@ -192,14 +200,37 @@ impl<'de> Deserialize<'de> for Stated {
             Value::Number(n) => n
                 .as_i64()
                 .map(Stated::Number)
-                .unwrap_or_else(|| Stated::Unreadable(value.to_string())),
+                .unwrap_or_else(|| Stated::Unreadable(cap_raw(value.to_string()))),
+            // `s.clone()`, not `value.to_string()`: the latter re-serializes a
+            // JSON string with its surrounding quotes ("8k" -> `"8k"`), which
+            // would make the reason look different depending on whether the
+            // provider stated a number or a string in the same broken shape
+            // (I5, review round 3).
             Value::String(s) => s
                 .parse::<i64>()
                 .map(Stated::Number)
-                .unwrap_or_else(|_| Stated::Unreadable(value.to_string())),
-            _ => Stated::Unreadable(value.to_string()),
+                .unwrap_or_else(|_| Stated::Unreadable(cap_raw(s.clone()))),
+            _ => Stated::Unreadable(cap_raw(value.to_string())),
         })
     }
+}
+
+/// How much of a value this build could not read is worth keeping. Provider
+/// text, unbounded and untrusted, must not become an unbounded label in a
+/// model picker (I2, review round 3); 64 characters is generous for a number
+/// that failed to parse. Truncation lands on a `char` boundary so a multi-byte
+/// character is never split into invalid UTF-8.
+const MAX_RAW_LEN: usize = 64;
+
+fn cap_raw(mut raw: String) -> String {
+    if raw.len() > MAX_RAW_LEN {
+        let mut end = MAX_RAW_LEN;
+        while !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        raw.truncate(end);
+    }
+    raw
 }
 
 /// The `f64` counterpart of the numeric half of [`Stated`], kept separate and
@@ -219,11 +250,9 @@ where
 }
 
 /// What `context_length` and `top_provider.context_length`, taken together,
-/// say about a record's actual input limit. A number either field could
-/// actually be read as always wins over reporting a problem — an unreadable
-/// sibling next to a real number costs nothing, the same leniency F4 already
-/// gives every other field — and `Unreadable` is reported only when nothing at
-/// all could be read but something was stated.
+/// say about a record's actual input limit. `Unreadable` wins even next to a
+/// sibling that parsed fine — see `combined_limit` for why that is the honest
+/// answer and not a defect (I1, review round 3).
 enum Limit {
     NotStated,
     Known(i64),
@@ -234,26 +263,39 @@ enum Limit {
 /// `top_provider.context_length`, and does not promise they agree. Measured
 /// 2026-08-08 on the live list: among 400 chat models the two disagree in 31,
 /// `top_provider` the smaller every time; among the 33 embedding models and 6
-/// rerank models they agree in all of them. The optimistic number is the one
-/// that would let a chunk through to a model that then truncates it, so this
-/// takes whichever of the two is smaller, or whichever exists when only one
-/// does (F5, review round 1).
+/// rerank models they agree in all of them. Where both sides are readable, the
+/// narrower one wins, for the same reason (F5, review round 1): the optimistic
+/// number is the one that would let a chunk through to a model that then
+/// truncates it.
+///
+/// If either side is `Unreadable`, the whole result is `Unreadable`, even next
+/// to a sibling that parsed fine (I1, review round 3). This function's promise
+/// is "the narrower of what the provider stated", and with one side unreadable
+/// it cannot keep that promise — the honest answer to "does this model hold
+/// our chunk?" is "this build cannot tell", not the more permissive of the two
+/// candidates. The two ways this can be wrong are not symmetric: refusing a
+/// model that would have been fine is visible and recoverable, the user sees
+/// the reason and picks another; accepting one that truncates is silent —
+/// chunks go out, vectors come back, the index looks full, and answers cite
+/// text the vector never saw. This triggers narrowly: only `Unreadable`
+/// counts, never `Absent` — an ordinary record with no `top_provider` block
+/// still uses whichever side is readable, exactly as before.
 fn combined_limit(context_length: &Stated, top_provider_context_length: &Stated) -> Limit {
+    for stated in [context_length, top_provider_context_length] {
+        if let Stated::Unreadable(raw) = stated {
+            return Limit::Unreadable(raw.clone());
+        }
+    }
     let numbers = [context_length, top_provider_context_length]
         .into_iter()
         .filter_map(|s| match s {
             Stated::Number(n) => Some(*n),
             _ => None,
         });
-    if let Some(min) = numbers.min() {
-        return Limit::Known(min);
+    match numbers.min() {
+        Some(min) => Limit::Known(min),
+        None => Limit::NotStated,
     }
-    for stated in [context_length, top_provider_context_length] {
-        if let Stated::Unreadable(raw) = stated {
-            return Limit::Unreadable(raw.clone());
-        }
-    }
-    Limit::NotStated
 }
 
 /// Parses the provider's answer and applies this product's own rules.
