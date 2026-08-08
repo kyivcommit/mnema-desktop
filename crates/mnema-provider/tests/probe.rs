@@ -10,8 +10,11 @@
 
 use std::time::{Duration, Instant};
 
-use mnema_mock_provider::{MockServer, Reply};
-use mnema_provider::{Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_key, list_models};
+use mnema_mock_provider::{MockServer, Reply, two_vectors};
+use mnema_provider::{
+    Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_embedding_model, check_key,
+    list_models,
+};
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 /// Shared by every `check_key` test below — hoisted here rather than
@@ -941,6 +944,338 @@ fn a_forbidden_key_also_carries_the_providers_own_explanation() {
 fn a_body_that_never_finishes_on_a_500_keeps_its_detail() {
     let server = MockServer::new(vec![Reply::truncated_status(500, r#"{"error":"#)]);
     let err = check_key(server.base(), KEY).expect_err("must fail");
+    match &err {
+        Error::BodyUnreadable { status, detail } => {
+            assert_eq!(*status, 500, "got {err:?}");
+            assert!(
+                !detail.is_empty(),
+                "detail must not be thrown away: {err:?}"
+            );
+        }
+        other => panic!("expected BodyUnreadable to survive a 500, got {other:?}"),
+    }
+}
+
+// --- check_embedding_model ---------------------------------------------
+//
+// Task 4: the second of the two calls at entry (spec §2.6). `check_key`
+// above answers "does this key work"; this one answers "will this model fill
+// an index with numbers that mean something". Every case below is a refusal
+// this build makes before a three-hour indexing run, not after it.
+
+#[test]
+fn the_dimension_is_measured_from_the_answer() {
+    let server = MockServer::new(vec![Reply::ok(&two_vectors(1024))]);
+    let check = check_embedding_model(server.base(), KEY, "baai/bge-m3").expect("usable");
+    assert_eq!(check.dim, 1024, "nobody types this number; it is measured");
+}
+
+#[test]
+fn two_texts_are_sent_in_one_request() {
+    let server = MockServer::new(vec![Reply::ok(&two_vectors(8))]);
+    check_embedding_model(server.base(), KEY, "m").expect("usable");
+    let request = server.request();
+    let body = request.rsplit("\r\n\r\n").next().expect("a body");
+    let parsed: serde_json::Value = serde_json::from_str(body).expect("the body is JSON");
+    assert_eq!(
+        parsed["input"].as_array().map(Vec::len),
+        Some(2),
+        "one text cannot reveal an averaging model: {body}"
+    );
+    assert_eq!(parsed["model"], "m");
+}
+
+#[test]
+fn a_model_that_averages_a_batch_is_refused_by_name() {
+    // Google's embedder, measured 2026-07-25 (skeleton §6.2): several texts in
+    // one request come back as ONE averaged vector.
+    let one_vector = r#"{"data":[{"embedding":[1.0,0.0,0.0,0.0],"index":0}]}"#;
+    let server = MockServer::new(vec![Reply::ok(one_vector)]);
+    let err = check_embedding_model(server.base(), KEY, "averages/things").expect_err("refused");
+    assert!(matches!(err, Error::AveragedBatch), "got {err:?}");
+}
+
+#[test]
+fn two_identical_vectors_for_two_different_texts_are_refused_too() {
+    let same = r#"{"data":[{"embedding":[1.0,0.0],"index":0},{"embedding":[1.0,0.0],"index":1}]}"#;
+    let server = MockServer::new(vec![Reply::ok(same)]);
+    let err = check_embedding_model(server.base(), KEY, "constant/model").expect_err("refused");
+    assert!(
+        matches!(err, Error::AveragedBatch),
+        "counting the vectors is not enough: a model can return two copies of one answer"
+    );
+}
+
+#[test]
+fn a_missing_model_says_so_instead_of_blaming_the_key() {
+    let server = MockServer::new(vec![Reply::status(404, r#"{"error":{"message":"no"}}"#)]);
+    let err = check_embedding_model(server.base(), KEY, "vendor/gone").expect_err("refused");
+    match err {
+        Error::NoSuchModel(name) => assert_eq!(name, "vendor/gone"),
+        other => panic!("got {other:?}"),
+    }
+}
+
+#[test]
+fn an_empty_vector_is_refused() {
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"data":[{"embedding":[],"index":0},{"embedding":[],"index":1}]}"#,
+    )]);
+    let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
+    assert!(matches!(err, Error::EmptyVector), "got {err:?}");
+}
+
+#[test]
+fn a_vector_that_is_not_quite_normalised_is_accepted_and_its_norm_reported() {
+    // `codestral-embed-2505` measured at 0.9946 (skeleton §6.2). The space uses
+    // cosine (`crates/mnema-index/src/space.rs:12`), which normalises on its
+    // own, so this is information — not a reason to refuse.
+    let body = r#"{"data":[{"embedding":[0.6,0.6],"index":0},{"embedding":[0.0,0.9],"index":1}]}"#;
+    let server = MockServer::new(vec![Reply::ok(body)]);
+    let check = check_embedding_model(server.base(), KEY, "m").expect("accepted");
+    assert!(
+        (check.norm - 0.8485).abs() < 0.001,
+        "norm was {}",
+        check.norm
+    );
+}
+
+/// Controller's order, item 4: `data.len() != 2` is one-sided, and zero rows
+/// satisfy it. Refusing an empty answer as `AveragedBatch` states a fact
+/// about the provider — "this model returns one averaged vector for a batch"
+/// — that is false about an answer with no vector in it at all. Only one row
+/// is the measured Google case.
+#[test]
+fn no_vectors_at_all_is_not_a_claim_that_the_model_averages_a_batch() {
+    let server = MockServer::new(vec![Reply::ok(r#"{"data":[]}"#)]);
+    let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
+    match err {
+        Error::Malformed(reason) => assert!(
+            reason.contains("no vectors at all"),
+            "an empty answer must be named for what it is, not as averaging: {reason}"
+        ),
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+/// The other side of the same one-sided test: more rows than texts sent is
+/// equally not an averaging model. Three vectors for two texts is a shape
+/// this build does not understand, and saying "it averages a batch" would be
+/// false in the opposite direction.
+#[test]
+fn more_vectors_than_texts_is_not_a_claim_that_the_model_averages_a_batch() {
+    let three = r#"{"data":[{"embedding":[1.0,0.0],"index":0},{"embedding":[0.0,1.0],"index":1},
+        {"embedding":[0.5,0.5],"index":2}]}"#;
+    let server = MockServer::new(vec![Reply::ok(three)]);
+    let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
+    match err {
+        Error::Malformed(reason) => assert!(
+            reason.contains("more vectors"),
+            "more rows than texts must be named for what it is, not as averaging: {reason}"
+        ),
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+/// Controller's order, item 2: hand-rolling the status table — which the
+/// brief did — compiles, passes a variant check, and silently drops the
+/// provider's own explanation on every failure. A revoked key on
+/// `/embeddings` would print "the key was refused" and throw away the
+/// sentence saying why. Both halves are asserted here: the right variant AND
+/// the provider's sentence, for every status `error_for_status` gives this
+/// call a `reason` field to carry.
+#[test]
+fn every_refusing_status_keeps_both_its_verdict_and_the_providers_own_sentence() {
+    for status in [401, 403, 429, 500] {
+        let sentence = format!("the provider's own sentence about {status}");
+        let body = format!(r#"{{"error":{{"message":"{sentence}"}}}}"#);
+        let server = MockServer::new(vec![Reply::status(status, &body)]);
+        let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
+        let right_variant = match status {
+            401 => matches!(err, Error::Unauthorised { .. }),
+            403 => matches!(err, Error::Forbidden { .. }),
+            429 => matches!(err, Error::RateLimited { .. }),
+            _ => matches!(err, Error::Provider { status: 500, .. }),
+        };
+        assert!(right_variant, "status {status}: got {err:?}");
+        assert!(
+            err.to_string().contains(&sentence),
+            "status {status}: the provider's own explanation is the one sentence that says what \
+             to do, and a hand-rolled status table drops it: {err}"
+        );
+    }
+}
+
+/// The same scan `no_transformation_of_the_key_reaches_a_failure_message`
+/// runs over `check_key`, now over the second call — a new family of failure
+/// paths that renders a provider's body, and nothing held it to the rule
+/// before this. `assert_a_defence_fired` is the positive half: not "the key
+/// is absent" (which a call that never rendered anything satisfies) but "the
+/// defence I am testing is the one that acted".
+#[test]
+fn no_transformation_of_the_key_reaches_a_model_check_failure() {
+    for (label, transformed, needle) in key_transformations(KEY) {
+        let body = format!(r#"{{"error":{{"message":"invalid credential: {transformed}"}}}}"#);
+        let server = MockServer::new(vec![Reply::status(401, &body)]);
+        let err = check_embedding_model(server.base(), KEY, "m").expect_err("must fail");
+        let rendered = format!("{err} / {err:?}");
+        let visually = strip_for_test_oracle(&rendered).to_ascii_lowercase();
+        assert!(
+            !visually.contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak from the model check, even to a reader who \
+             cannot see an invisible character: {rendered}"
+        );
+        assert_a_defence_fired(label, &rendered);
+    }
+}
+
+/// The key travels in a header on the POST path too. `post_json` had no
+/// caller at all until this task (`src/http.rs`), so nothing had ever checked
+/// where the key ends up on a request with a body — and a URL is the one part
+/// of a request a proxy writes to its own log without being asked.
+#[test]
+fn the_model_check_posts_to_the_embeddings_endpoint_with_the_key_only_in_a_header() {
+    let server = MockServer::new(vec![Reply::ok(&two_vectors(4))]);
+    check_embedding_model(server.base(), KEY, "vendor/m").expect("usable");
+    let request = server.request();
+    let request_line = request.lines().next().unwrap_or_default();
+    assert!(
+        request_line.starts_with("POST /embeddings "),
+        "the model check is a POST to /embeddings: {request_line}"
+    );
+    assert!(
+        request.to_ascii_lowercase().contains(&format!(
+            "authorization: bearer {}",
+            KEY.to_ascii_lowercase()
+        )),
+        "the key must travel in the header: {request}"
+    );
+    assert!(
+        !request_line.contains(KEY),
+        "the key must travel only in the header, never in the request line/query string: \
+         {request_line}"
+    );
+}
+
+/// The three shapes of unreadable 200, told apart the same way
+/// `models_from_json` tells them apart for the model list: a captive portal
+/// page is not JSON at all, a body that stops before the JSON closes is a
+/// truncation, and a provider error envelope on a 200 is valid JSON that
+/// simply is not this shape. One `Malformed` text for all three would be the
+/// difference between "check your network" and "check your account" thrown
+/// away.
+#[test]
+fn a_200_this_build_cannot_read_is_named_for_which_of_three_problems_it_is() {
+    let cases = [
+        (
+            "<html><body>Sign in to the network</body></html>",
+            "not JSON",
+        ),
+        (r#"{"data":[{"embedding":[1.0"#, "stopped in the middle"),
+        (r#"{"error":{"message":"quota"}}"#, "not the shape"),
+    ];
+    for (body, expected) in cases {
+        let server = MockServer::new(vec![Reply::ok(body)]);
+        let err = check_embedding_model(server.base(), KEY, "m").expect_err("unreadable");
+        match err {
+            Error::Malformed(reason) => assert!(
+                reason.contains(expected),
+                "body {body:?} must be named as {expected:?}, got {reason:?}"
+            ),
+            other => panic!("body {body:?}: expected Malformed, got {other:?}"),
+        }
+    }
+}
+
+/// Two vectors of different widths state no dimensionality at all. Taking the
+/// first one's length would put a number into `model_config.dim` that the
+/// answer did not support — and `create_space` then pins the whole index to
+/// it (`crates/mnema-index/src/space.rs:47-75`).
+#[test]
+fn two_vectors_of_different_widths_state_no_dimensionality() {
+    let body =
+        r#"{"data":[{"embedding":[1.0,0.0],"index":0},{"embedding":[0.0,1.0,0.0],"index":1}]}"#;
+    let server = MockServer::new(vec![Reply::ok(body)]);
+    let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
+    match err {
+        Error::Malformed(reason) => assert!(reason.contains("different widths"), "got {reason:?}"),
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+/// JSON has no `NaN` or `Infinity` literal, but `1e39` is an ordinary JSON
+/// number that becomes `f32::INFINITY` on the way into a `Vec<f32>`. Nothing
+/// downstream would notice: the row count is right, the widths match, the two
+/// vectors differ, and the check would hand back a dimensionality measured
+/// from a vector whose numbers are not numbers. The same distinction
+/// `Stated::finite_or_unreadable` already draws for a balance, one screen up.
+#[test]
+fn a_vector_component_that_is_not_a_finite_number_is_refused() {
+    let body = r#"{"data":[{"embedding":[1e39,0.0],"index":0},{"embedding":[0.0,1.0],"index":1}]}"#;
+    let server = MockServer::new(vec![Reply::ok(body)]);
+    let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
+    match err {
+        Error::Malformed(reason) => assert!(
+            reason.contains("finite"),
+            "an infinite component must be named, not measured: {reason:?}"
+        ),
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+/// The trade `check_key` makes for a body-read failure (Task 3 review, item
+/// 2) transfers to the three statuses where the status alone is the whole
+/// verdict: a 401 whose body was merely cut off still means the key was
+/// refused.
+#[test]
+fn a_body_that_never_finishes_on_a_401_still_says_the_key_was_refused_on_the_model_check() {
+    let server = MockServer::new(vec![Reply::truncated_status(401, r#"{"error":"#)]);
+    let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
+    assert!(matches!(err, Error::Unauthorised { .. }), "got {err:?}");
+}
+
+/// 404 is on that list too, and it is the one status where this call's own
+/// table — not `error_for_status` — holds the verdict. The model is not there
+/// whether or not the sentence explaining that arrived intact.
+#[test]
+fn a_body_that_never_finishes_on_a_404_still_names_the_model() {
+    let server = MockServer::new(vec![Reply::truncated_status(404, r#"{"error":"#)]);
+    let err = check_embedding_model(server.base(), KEY, "vendor/gone").expect_err("refused");
+    match err {
+        Error::NoSuchModel(name) => assert_eq!(name, "vendor/gone"),
+        other => panic!("got {other:?}"),
+    }
+}
+
+/// Where this call parts company with `check_key` (inheritance item 5). A 200
+/// whose body could not be read is not a check that passed with a detail
+/// missing: on this endpoint the body IS the answer, and this build learned
+/// nothing at all about the model. It must stay a failure carrying the reason
+/// the read failed, not become a verdict of any kind.
+#[test]
+fn a_200_whose_body_never_finishes_is_a_failed_check_not_a_passed_one() {
+    let server = MockServer::new(vec![Reply::truncated(r#"{"data":[{"embedding":[1.0"#)]);
+    let err = check_embedding_model(server.base(), KEY, "m").expect_err("nothing was measured");
+    match &err {
+        Error::BodyUnreadable { status, detail } => {
+            assert_eq!(*status, 200, "got {err:?}");
+            assert!(
+                !detail.is_empty(),
+                "detail must not be thrown away: {err:?}"
+            );
+        }
+        other => panic!("expected BodyUnreadable to survive a 200, got {other:?}"),
+    }
+}
+
+/// The other bound on that guard, the same one `check_key` keeps: a 500 gains
+/// nothing from trading `BodyUnreadable`'s `detail` — which names *why* the
+/// read failed — for the generic `Provider { status }` this crate already
+/// gives a 500 whose body it read just fine.
+#[test]
+fn a_body_that_never_finishes_on_a_500_keeps_its_detail_on_the_model_check_too() {
+    let server = MockServer::new(vec![Reply::truncated_status(500, r#"{"error":"#)]);
+    let err = check_embedding_model(server.base(), KEY, "m").expect_err("must fail");
     match &err {
         Error::BodyUnreadable { status, detail } => {
             assert_eq!(*status, 500, "got {err:?}");

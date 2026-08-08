@@ -20,10 +20,16 @@ const GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// This builder and the `GET` path — `get()`, below — were verified against
 /// the live endpoint 2026-08-08. That is a measurement recorded in the plan,
 /// not a claim this crate's own gate holds: no test here calls the live
-/// endpoint, and none should. The `POST` path (`post_json`) has no caller
-/// until Task 4, so its own verification arrives with that caller, not here
-/// (Task 2 review round 3, H4) — a docstring that claims more than the gate
-/// holds is how a later session inherits a false premise.
+/// endpoint, and none should. The `POST` path (`post_json`) has a caller as of
+/// Task 4 (`check_embedding_model`), and what arrived with it is *not* a live
+/// verification (Task 2 review round 3, H4) — a docstring that claims more
+/// than the gate holds is how a later session inherits a false premise. What
+/// the gate holds is the whole `POST` path against `mnema_mock_provider` over
+/// a real socket: the request line, the headers and the body it sends, and
+/// every status and body shape it reads back. The provider behaviour that path
+/// was designed against — a 404 for a missing embedding model, one averaged
+/// vector for a two-text batch — is the skeleton's live measurement of
+/// 2026-07-25 (§6.2), cited in the design document, not run here.
 fn agent() -> ureq::Agent {
     agent_with(GLOBAL_TIMEOUT)
 }
@@ -51,11 +57,10 @@ pub(crate) fn get(base: &str, path: &str, key: Option<&str>) -> Result<(u16, Str
     finish(request.call())
 }
 
-/// Not called yet — `list_models` only ever `GET`s. It exists now because the
-/// probe design in Task 3–4 sends a request body (a real embedding call) over
-/// the same agent configuration, and that design depends on `finish` reading a
-/// non-2xx body rather than losing it to a transport error.
-#[allow(dead_code)]
+/// The one `POST` in the product: `check_embedding_model` sends a real
+/// embedding call over the same agent configuration `get` uses, and depends on
+/// `finish` reading a non-2xx body rather than losing it to a transport error
+/// — a refused key's own explanation arrives in the body of a 401.
 pub(crate) fn post_json(
     base: &str,
     path: &str,

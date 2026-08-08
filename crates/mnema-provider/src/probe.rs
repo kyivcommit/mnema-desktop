@@ -727,6 +727,248 @@ fn sanitised_balance_summary(data: &Value, key: &str) -> ProviderMessage {
     }
 }
 
+// --- the embedding-model check -----------------------------------------
+//
+// The second of the two calls (spec §2.6). `check_key` above answers "does
+// this key work"; this one answers "will this model fill an index with
+// numbers that mean something". It exists for one measured trap: §6.2 of the
+// skeleton measured, 2026-07-25, that Google's embedder answers several texts
+// in one request with ONE averaged vector — plausible numbers that are simply
+// wrong, with no message anywhere, the same class of defect as D14's two
+// tokenizer files.
+
+/// The two texts the probe sends. Short, distinct, and different in meaning —
+/// a model that averages a batch, or answers with a constant, must not be able
+/// to look right on them. Different scripts as well as different meanings, so
+/// that a model collapsing the batch has no ordinary route to two answers that
+/// still differ.
+const PROBE_TEXTS: [&str; 2] = ["a paragraph about rivers", "інший абзац, про податки"];
+
+/// The row-count match in `check_embedding_model` enumerates the cases for
+/// exactly two probe texts, and a count is a definition too: with three texts,
+/// "one row means the model averaged the batch" stays compiling, stays
+/// clippy-clean, and becomes a false statement about the provider without a
+/// single line of that match changing. This is the line that goes red instead.
+const _: () = assert!(
+    PROBE_TEXTS.len() == 2,
+    "the row-count match in check_embedding_model is written for exactly two probe texts"
+);
+
+/// What the probe measured about a model that passed (spec §2.6).
+///
+/// Deliberately not `Serialize`, unlike `KeyCheck` above: this type does not
+/// cross to the shell. Task 8's command reads `dim` here and hands the window
+/// a `ModelSettings`, so pinning a wire shape for this struct would pin bytes
+/// nothing ever sends.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbeddingCheck {
+    /// Measured, never typed, and not an `Option` (spec §2.4): the model list
+    /// states no dimensionality in any field — measured 2026-08-08 — and the
+    /// same model name answers with 1536 or 1024 depending on a parameter the
+    /// provider may also refuse outright with a 422 (skeleton §6.2). An
+    /// optional dimensionality would put `unwrap_or(0)` one call away, and a
+    /// vector space created at zero dimensions is a worse outcome than any
+    /// refusal this function can return; every path that cannot name a width
+    /// returns `Err` instead.
+    pub dim: usize,
+    /// The length of the first vector. Recorded, not enforced: the space's
+    /// metric is cosine (`crates/mnema-index/src/space.rs:12`), which
+    /// normalises on its own, and `codestral-embed-2505` was measured at
+    /// 0.9946 (skeleton §6.2) without that making it unusable.
+    pub norm: f32,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingsBody {
+    data: Vec<EmbeddingRow>,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingRow {
+    embedding: Vec<f32>,
+}
+
+/// The status table for `/embeddings`: `error_for_status`'s, plus the one
+/// status that means something here it does not mean at the other two
+/// endpoints. A 404 from `/models` or `/credits` is a URL nobody expected, so
+/// `error_for_status` sends it to `Error::Provider`; a 404 from `/embeddings`
+/// is the provider saying this model is not there, or does not make embeddings
+/// (spec §2.6) — the one sentence that keeps a mistyped model from reading as
+/// a bad key.
+///
+/// A function rather than an arm written inline, because there are two call
+/// sites: the body-read failure below reaches the same table with no body to
+/// read at all, and the two must not drift.
+///
+/// `model` is interpolated into `Error::NoSuchModel` through a plain format
+/// string — see `check_embedding_model`'s doc comment for the constraint on
+/// the caller that keeps that safe, and for why this function is where the
+/// provider's own explanation is deliberately dropped for a 404.
+fn status_error(status: u16, model: &str) -> Error {
+    match status {
+        404 => Error::NoSuchModel(model.to_string()),
+        other => error_for_status(other, KeySent::Yes),
+    }
+}
+
+/// Sends two texts and refuses everything that would fill an index with
+/// numbers that look right (spec §2.6). `dim` is measured from the answer,
+/// because it is stated nowhere else (spec §2.4).
+///
+/// **`model` must be safe to render.** It is the one value this function
+/// interpolates through a plain format string (`Error::NoSuchModel`), which is
+/// the rule the rest of this module exists to keep: no provider bytes reach
+/// rendered text except through [`ProviderMessage`]. That holds only while
+/// `model` is the user's own model id. Today it is — no caller outside this
+/// crate's tests exists yet — but the id a user picks comes from
+/// `ModelEntry::id` (`catalogue.rs:56`), which `models_from_json` copies
+/// verbatim out of the provider's own body (`catalogue.rs:412`), and nothing
+/// sanitises it on the way. Whoever wires the two together owes this call a
+/// model id that is safe to put in a log line.
+pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<EmbeddingCheck, Error> {
+    let request = serde_json::json!({ "model": model, "input": PROBE_TEXTS }).to_string();
+    let (status, answer) = match http::post_json(base, "/embeddings", key, &request) {
+        Ok(pair) => pair,
+        // The same trade `check_key` makes for a body-read failure (Task 3
+        // review, item 2), narrowed differently because this call asks a
+        // different question. For 401/403/429 the status alone is the whole
+        // verdict — the request was refused before any model was consulted,
+        // and a body that was merely cut off carried an explanation, not the
+        // answer. 404 joins them here, and only here: this call's own table
+        // above, not `error_for_status`, is what turns it into a verdict.
+        //
+        // A 200 is deliberately NOT on that list, and that is the line where
+        // this function parts company with `check_key`: there, a 200 whose
+        // shape this build could not read still answered the question the
+        // screen asked ("does the key work"), which is why `Balance` has four
+        // states instead of an error. Here the body IS the answer — a 200 this
+        // build cannot read means nothing whatsoever was measured about the
+        // model — so it stays `BodyUnreadable`, carrying why the read failed.
+        // Every other status keeps `BodyUnreadable` too, for `check_key`'s own
+        // reason: `Provider { status, .. }` is what this crate says about a
+        // 500 whose body it read just fine, so trading `detail` away for it
+        // buys nothing back.
+        Err(Error::BodyUnreadable { status, .. }) if matches!(status, 401 | 403 | 404 | 429) => {
+            return Err(status_error(status, model));
+        }
+        Err(other) => return Err(other),
+    };
+    match status {
+        200 => {}
+        // `attach_reason`, not a hand-rolled match: every variant
+        // `error_for_status` can hand this call carries a `reason` field, and
+        // dropping it would print "the key was refused" for a revoked key
+        // while throwing away the sentence saying why. `NoSuchModel` has no
+        // such field and passes through `attach_reason` untouched — a 404's
+        // own explanation is the one this call does not repeat, because that
+        // variant renders through a plain format string and has nowhere safe
+        // to put provider bytes.
+        other => {
+            return Err(attach_reason(status_error(other, model), &answer, key));
+        }
+    }
+
+    // A 200 this build cannot read is a failure of the check, not a check that
+    // passed with a detail missing. The opposite precedent is right next door
+    // and deeply rooted — `balance_from` turns three different shape problems
+    // into `Balance` variants rather than errors, and a whole recursive
+    // function exists to render a broken one nicely — because there the key
+    // works whether or not the balance parsed. Here there is no such
+    // remainder: the body is the entire answer.
+    //
+    // Three shapes reach this, and they are three different user problems, the
+    // same three `models_from_json` tells apart for the model list: an HTML
+    // page from a captive portal or a proxy is not JSON at all (`Syntax`); a
+    // body that stops before the JSON closes is a truncation that still
+    // arrived in full on the wire (`Eof`, distinct from `BodyUnreadable`
+    // above, where the bytes never arrived); and a provider error envelope
+    // answered with a 200 is valid JSON that simply is not this shape
+    // (`Data`).
+    let parsed: EmbeddingsBody = serde_json::from_str(&answer).map_err(|e| {
+        Error::Malformed(match e.classify() {
+            serde_json::error::Category::Syntax => {
+                "the embeddings answer is not JSON at all — likely a proxy or gateway page, \
+                 not the provider itself"
+            }
+            serde_json::error::Category::Eof => {
+                "the embeddings answer stopped in the middle of the JSON — a truncated response"
+            }
+            serde_json::error::Category::Data | serde_json::error::Category::Io => {
+                "the embeddings answer is JSON, but not the shape this code expects"
+            }
+        })
+    })?;
+
+    // Two texts in, two vectors out. Split three ways rather than tested as
+    // `len() != 2`: `AveragedBatch` states a fact about the provider — "this
+    // model returns one averaged vector for a batch" — and that sentence is
+    // true of exactly one row and false of every other count. Zero rows and
+    // three rows are shapes this build does not understand, and saying they
+    // average a batch would be false in two opposite directions.
+    match parsed.data.len() {
+        0 => {
+            return Err(Error::Malformed(
+                "two texts were sent and the provider answered with no vectors at all",
+            ));
+        }
+        1 => return Err(Error::AveragedBatch),
+        2 => {}
+        _ => {
+            return Err(Error::Malformed(
+                "the provider answered with more vectors than the two texts this check sent",
+            ));
+        }
+    }
+    let (first, second) = (&parsed.data[0].embedding, &parsed.data[1].embedding);
+    if first.is_empty() || second.is_empty() {
+        return Err(Error::EmptyVector);
+    }
+    // Two widths state no width. Taking the first one's length anyway would
+    // put a number into the space's dimensionality that the answer never
+    // supported, and `create_space` pins the whole index to it
+    // (`crates/mnema-index/src/space.rs:47-75`).
+    if first.len() != second.len() {
+        return Err(Error::Malformed(
+            "the two vectors came back with different widths, so neither states a dimensionality",
+        ));
+    }
+    // JSON has no `NaN` or `Infinity` literal, so nothing here can be NaN —
+    // but `1e39` is an ordinary JSON number that becomes `f32::INFINITY` on
+    // the way into a `Vec<f32>`, and every check above passes on a vector full
+    // of them: the count is right, the widths match, the two rows differ. The
+    // dimensionality would then be measured off a vector whose numbers are not
+    // numbers. The same distinction `Stated` draws for a balance
+    // (`finite_or_unreadable`), for the same reason.
+    if first.iter().chain(second).any(|v| !v.is_finite()) {
+        return Err(Error::Malformed(
+            "a vector component is not a finite number, so these are not usable coordinates",
+        ));
+    }
+    // The trap, and the reason the request sends two texts instead of one: two
+    // identical answers to two different texts mean this model cannot tell
+    // them apart, so every document in the archive would land on the same
+    // point and retrieval would be random. Counting the rows does not catch
+    // it — a model that averages a batch can echo the average once per input.
+    if first == second {
+        return Err(Error::AveragedBatch);
+    }
+
+    Ok(EmbeddingCheck {
+        dim: first.len(),
+        // Accumulated in `f64` and narrowed once at the end. Every component
+        // is finite by the check above, but an `f32` square of a
+        // large-but-finite component overflows to infinity long before the
+        // sum of a thousand of them would in `f64` — and an infinite norm
+        // reported here would be this build's own arithmetic, not anything
+        // the provider said.
+        norm: first
+            .iter()
+            .map(|v| f64::from(*v) * f64::from(*v))
+            .sum::<f64>()
+            .sqrt() as f32,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
