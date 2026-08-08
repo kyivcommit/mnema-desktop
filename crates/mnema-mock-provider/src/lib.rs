@@ -58,8 +58,19 @@ impl Reply {
     /// out on the read rather than returning the partial bytes (see
     /// `mnema_provider::Error::BodyUnreadable`).
     pub fn truncated(body: &str) -> Self {
+        Self::truncated_status(200, body)
+    }
+
+    /// Same wire shape as `truncated` — a `content-length` that promises more
+    /// bytes than the connection ever sends — but at a status other than 200.
+    /// `mnema-provider`'s `check_key` needs to prove that a body cut off on a
+    /// non-200 reply still gives the verdict its status implies
+    /// (`Error::BodyUnreadable { status, .. }` carries the status precisely so
+    /// a caller like that one can use it instead of losing it), and nothing
+    /// before this could produce that shape at any status but 200.
+    pub fn truncated_status(status: u16, body: &str) -> Self {
         Self {
-            status: 200,
+            status,
             body: body.to_string(),
             delay: Duration::ZERO,
             declared_extra: 64,

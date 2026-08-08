@@ -11,7 +11,12 @@
 use std::time::{Duration, Instant};
 
 use mnema_mock_provider::{MockServer, Reply};
-use mnema_provider::{Error, MIN_CONTEXT_TOKENS, Refusal, Role, list_models};
+use mnema_provider::{Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_key, list_models};
+
+/// Shared by every `check_key` test below — hoisted here rather than
+/// repeated per test or left local to `no_error_message_ever_contains_the_key`
+/// (which used to declare its own copy of the same literal).
+const KEY: &str = "test-key-not-a-real-one";
 
 #[test]
 fn the_role_decides_the_query_and_the_key_travels_in_a_header() {
@@ -190,7 +195,7 @@ fn a_401_with_a_key_says_the_key_was_refused() {
     let server = MockServer::new(vec![Reply::status(401, "")]);
     let err = list_models(server.base(), Some("test-key-not-a-real-one"), Role::Chat)
         .expect_err("401 must fail");
-    assert!(matches!(err, Error::Unauthorised), "got {err:?}");
+    assert!(matches!(err, Error::Unauthorised { .. }), "got {err:?}");
 }
 
 /// Task 2 review round 1, F2: a 401 on a call that sent no key is not a
@@ -341,8 +346,6 @@ fn a_second_surplus_request_still_gets_the_sentinel_not_a_connection_refusal() {
 /// can be present at all, is checked here in one place.
 #[test]
 fn no_error_message_ever_contains_the_key() {
-    const KEY: &str = "test-key-not-a-real-one";
-
     let assert_key_absent = |err: Error| {
         assert!(
             !err.to_string().contains(KEY),
@@ -384,4 +387,127 @@ fn no_error_message_ever_contains_the_key() {
         "got {unreachable:?}"
     );
     assert_key_absent(unreachable);
+}
+
+// --- check_key ---------------------------------------------------------
+//
+// Task 3: the cheap call at entry that answers "does this key work" before a
+// long indexing run starts (spec §4.5). `list_models`'s tests above exercise
+// `error_for_status` through the model list; these exercise the same table
+// through `/credits`, plus what `check_key` adds on top of it — the
+// account balance and the provider's own refusal text.
+
+#[test]
+fn a_good_key_comes_back_with_what_is_left_on_the_account() {
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"data":{"total_credits":10.0,"total_usage":3.5}}"#,
+    )]);
+    let check = check_key(server.base(), KEY).expect("accepted");
+    assert_eq!(check.credits_remaining, Some(6.5));
+}
+
+#[test]
+fn a_refused_key_is_its_own_answer_and_not_a_generic_failure() {
+    let server = MockServer::new(vec![Reply::status(401, r#"{"error":{"message":"nope"}}"#)]);
+    let err = check_key(server.base(), KEY).expect_err("refused");
+    assert!(matches!(err, Error::Unauthorised { .. }), "got {err:?}");
+}
+
+#[test]
+fn a_key_check_that_cannot_read_the_balance_still_accepts_the_key() {
+    let server = MockServer::new(vec![Reply::ok(r#"{"data":{"unexpected":true}}"#)]);
+    let check = check_key(server.base(), KEY).expect("accepted");
+    assert_eq!(
+        check.credits_remaining, None,
+        "a balance we cannot read is unknown, not zero, and not a reason to refuse a working key"
+    );
+}
+
+#[test]
+fn no_failure_path_puts_the_key_into_the_message() {
+    let failures = vec![
+        Reply::status(401, r#"{"error":{"message":"nope"}}"#),
+        Reply::status(429, "{}"),
+        Reply::status(500, "{}"),
+        Reply::ok("{ this is not json"),
+    ];
+    for reply in failures {
+        let server = MockServer::new(vec![reply]);
+        let err = check_key(server.base(), KEY).expect_err("must fail");
+        let rendered = format!("{err} / {err:?}");
+        assert!(
+            !rendered.contains(KEY),
+            "an error message is a log line, and this one carries the key: {rendered}"
+        );
+    }
+}
+
+/// Task 3 review, item 1: a plain `#[serde(default)] Option<f64>` field only
+/// falls back when the *key* is absent. `total_credits` stated as `"$10.00"`
+/// is present, so a naive field would fail to deserialize it, taking the
+/// *whole* body down and turning a working key into a parse error — the
+/// user reads "the credits answer is not the object this code expects" for
+/// an account that is perfectly fine. `check_key` must still accept the key
+/// and simply not know the balance.
+#[test]
+fn a_credits_field_in_a_shape_this_build_cannot_read_still_accepts_the_key() {
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"data":{"total_credits":"$10.00","total_usage":3.5}}"#,
+    )]);
+    let check = check_key(server.base(), KEY).expect("a working key must still be accepted");
+    assert_eq!(
+        check.credits_remaining, None,
+        "a balance stated in a shape this build cannot read is unknown, not a reason to fail \
+         the whole key check"
+    );
+}
+
+/// Task 3 review, item 2: `Error::BodyUnreadable` bypasses the status table
+/// by design (Task 2 review round 2, G3), because it carries the status
+/// precisely so a caller does not lose it. This screen's only job is "does
+/// the key work", so a 401 whose body was cut off must give the same
+/// verdict a clean 401 would — not "reading the response body failed" for a
+/// key that was, in fact, refused.
+#[test]
+fn a_body_that_never_finishes_on_a_401_still_says_the_key_was_refused() {
+    let server = MockServer::new(vec![Reply::truncated_status(401, r#"{"error":"#)]);
+    let err = check_key(server.base(), KEY).expect_err("refused");
+    assert!(matches!(err, Error::Unauthorised { .. }), "got {err:?}");
+}
+
+/// Task 3 review, item 4: `error_for_status` cannot carry the response body,
+/// so the provider's own explanation used to die on the floor — the screen
+/// said only "the key was refused", true and useless for a revoked key. The
+/// real case named in review: a 401 whose body names the reason.
+#[test]
+fn a_refused_key_carries_the_providers_own_explanation() {
+    let server = MockServer::new(vec![Reply::status(
+        401,
+        r#"{"error":{"message":"This key was disabled on 2026-08-01"}}"#,
+    )]);
+    let err = check_key(server.base(), KEY).expect_err("refused");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("This key was disabled on 2026-08-01"),
+        "the provider's own explanation must reach the message, not just \"the key was \
+         refused\": {rendered}"
+    );
+}
+
+/// Task 3 review, item 5: `Unauthorised` is load-bearing here — it is the
+/// whole point of this screen — and nothing pinned its wording before this,
+/// unlike the two 403 messages hedged after review (see
+/// `a_403_with_a_key_says_the_key_is_not_permitted` and its sibling, above).
+/// A property, not a literal sentence, the same style
+/// `a_429_is_rate_limited_without_naming_a_key` and
+/// `a_body_that_stops_mid_transfer_is_named_with_its_status_preserved` above
+/// already use.
+#[test]
+fn a_refused_key_says_it_was_refused() {
+    let server = MockServer::new(vec![Reply::status(401, "")]);
+    let err = check_key(server.base(), KEY).expect_err("refused");
+    assert!(
+        err.to_string().contains("refused"),
+        "a refused key's message must say so: {err}"
+    );
 }

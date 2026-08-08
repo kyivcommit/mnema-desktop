@@ -7,11 +7,13 @@
 
 mod catalogue;
 mod http;
+mod probe;
 
 pub use catalogue::{
     Catalogue, MIN_CONTEXT_TOKENS, ModelEntry, RecordId, Refusal, Role, UnreadableRecord,
     models_from_json,
 };
+pub use probe::{KeyCheck, ProviderMessage, check_key};
 
 /// Where v1 goes. Not a configuration: v1 has one provider (spec §2.2).
 pub const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
@@ -36,22 +38,46 @@ pub fn list_models(base: &str, key: Option<&str>, role: Role) -> Result<Catalogu
     if status == 200 {
         return models_from_json(role, &body);
     }
-    Err(error_for_status(status, key.is_some()))
+    let key_sent = if key.is_some() {
+        KeySent::Yes
+    } else {
+        KeySent::No
+    };
+    Err(error_for_status(status, key_sent))
 }
 
-/// The non-2xx status table, pulled out of `list_models` (Task 2 review
+/// Whether a call sent a credential, spelled out as a type rather than a bare
+/// `bool` (Task 3 review, item 3). `error_for_status`'s `key_sent` parameter
+/// used to be a positional `bool`, with a single existing caller
+/// (`list_models`) that always passed the right value in by construction —
+/// `key.is_some()`, computed right next to the call — with nothing checking
+/// that a *new* caller would too. A stray `false` at a new call site would
+/// silently print "this endpoint now requires a key, and none was sent" on a
+/// screen where the user has just typed one. `check_key` always sends a key,
+/// so it always passes `KeySent::Yes`; naming it makes that fact readable at
+/// the call site instead of a bare `true` that means nothing on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeySent {
+    Yes,
+    No,
+}
+
+/// The non-200 status table, pulled out of `list_models` (Task 2 review
 /// round 3, H3): Task 3's key check answers the same statuses — always with
 /// a key sent — and would otherwise copy this match arm for arm, carrying
 /// two branches (`401 if !key_sent`, `403 if !key_sent`) it can never reach.
 /// This repository has already paid for exactly that shape of copy: a change
 /// in one task silently disarming a test case anchored in another, with
-/// every gate staying clean. `list_models` is the only caller for now — this
-/// task does not add a second one.
+/// every gate staying clean. `list_models` and `check_key` are the only two
+/// callers.
 ///
 /// Never called for `200`: a 200 means something different to every caller
 /// (a model list here, an account check elsewhere), so only the caller knows
-/// what a 200 is worth.
-fn error_for_status(status: u16, key_sent: bool) -> Error {
+/// what a 200 is worth. Written as "non-200" rather than "non-2xx" on
+/// purpose (Task 3 review, item 6) — both callers branch on `status == 200`,
+/// not on `is_success()`, so a `204` with no body reaches this function too,
+/// and the old wording read as a promise that it would not.
+fn error_for_status(status: u16, key_sent: KeySent) -> Error {
     // Four combinations, four true statements (Task 2 review round 2, G1).
     // 401 means the request was not authenticated: with no key sent, this
     // endpoint now requires one; with a key, that key was refused. 403 means
@@ -61,9 +87,9 @@ fn error_for_status(status: u16, key_sent: bool) -> Error {
     // anonymous request — on a public endpoint that is most often a proxy or
     // a gateway, not an account.
     match status {
-        401 if !key_sent => Error::KeyRequired,
-        401 => Error::Unauthorised,
-        403 if key_sent => Error::Forbidden,
+        401 if key_sent == KeySent::No => Error::KeyRequired,
+        401 => Error::Unauthorised { reason: None },
+        403 if key_sent == KeySent::Yes => Error::Forbidden,
         403 => Error::AnonymousBlocked,
         429 => Error::RateLimited,
         other => Error::Provider { status: other },
@@ -81,8 +107,20 @@ pub enum Error {
     #[error("the provider could not be reached: {0}")]
     Transport(String),
     /// 401 with a key sent: the request was authenticated, and refused.
-    #[error("the key was refused")]
-    Unauthorised,
+    /// `reason` is the provider's own explanation, when the failed body said
+    /// one and this build could read it (Task 3 review, item 4) — e.g. "the
+    /// key was refused: This key was disabled on 2026-08-01" for a revoked
+    /// key, instead of the bare sentence, which is true and useless on its
+    /// own in that case. `None` when the body carried no such message, or
+    /// none this build could parse; `list_models` passes `None`
+    /// unconditionally today, since it never reads a failure body for a
+    /// message. [`crate::ProviderMessage`] guarantees whatever it holds is
+    /// safe to interpolate here — see its own doc comment for why.
+    #[error(
+        "the key was refused{}",
+        reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default()
+    )]
+    Unauthorised { reason: Option<ProviderMessage> },
     /// 401 on a call that sent no key at all (Task 2 review round 1, F2): not
     /// a credential problem, since there was no credential — the provider now
     /// requires one for an endpoint this build calls anonymously.
