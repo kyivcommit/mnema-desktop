@@ -65,8 +65,21 @@ pub struct ModelEntry {
     pub refusal: Option<Refusal>,
 }
 
+/// `rename_all_fields = "camelCase"` alongside `rename_all` (Task 3 review
+/// round 4, K6, `mnema-provider`): `rename_all` alone renames variant names
+/// for the tag value, not the *fields inside* a struct variant — a separate
+/// attribute serde added for exactly that gap, verified in `serde_derive`
+/// 1.0.229 sources (`rename_all_fields_rules` defaults to none, independent
+/// of `rename_all_rule`). `limit` and `floor` are both one word, so the
+/// convention has never been exercised here and nothing would go red
+/// without this attribute — kept ahead of the first multi-word field this
+/// enum ever gets.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum Refusal {
     InputTooSmall {
         limit: i64,
@@ -154,8 +167,16 @@ pub struct UnreadableRecord {
 /// accepts, and reporting that record as "stated no id" would be false about
 /// the provider. The same distinction `Stated` draws for `context_length`,
 /// one field over.
+/// `rename_all_fields = "camelCase"` alongside `rename_all` (Task 3 review
+/// round 4, K6) — see `Refusal`'s own doc comment for why it is here even
+/// though `raw`/`id` are one word each and the attribute changes nothing
+/// today.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum RecordId {
     /// No `id` key in the record, or an explicit JSON `null` — the same
     /// "nothing was said" this crate reads a missing key as everywhere else.

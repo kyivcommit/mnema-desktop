@@ -11,9 +11,8 @@
 use std::time::{Duration, Instant};
 
 use mnema_mock_provider::{MockServer, Reply};
-use mnema_provider::{
-    Balance, Error, MIN_CONTEXT_TOKENS, ProviderMessage, Refusal, Role, check_key, list_models,
-};
+use mnema_provider::{Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_key, list_models};
+use unicode_general_category::{GeneralCategory, get_general_category};
 
 /// Shared by every `check_key` test below — hoisted here rather than
 /// repeated per test or left local to `no_error_message_ever_contains_the_key`
@@ -522,6 +521,30 @@ fn key_transformations(key: &str) -> Vec<(&'static str, String, String)> {
             key.to_string(),
         ),
         (
+            // Task 3 review round 4, K1: the reviewer's measured attack —
+            // two C0 insertions, spaced so neither surviving segment reaches
+            // FRAGMENT_LEN, defeated both the exact-substring redaction and
+            // the fragment net on the success path, where the sanitiser used
+            // to be handed `data.to_string()` — a *re-serialised* form in
+            // which a decoded control character comes back as six ordinary
+            // ASCII characters, no longer anything `unsafe_for_display`
+            // recognises. The single-insertion case above does not catch
+            // this: with a 24-character key, one split always leaves a
+            // run of twelve or more for the fragment net to catch; two
+            // splits do not.
+            "two C0 control characters spaced within the fragment window",
+            {
+                let c0 = json_escape('\u{1F}');
+                let chunk = (key.len() / 3).max(1);
+                key.as_bytes()
+                    .chunks(chunk)
+                    .map(|part| std::str::from_utf8(part).expect("KEY is ASCII"))
+                    .collect::<Vec<_>>()
+                    .join(&c0)
+            },
+            key.to_string(),
+        ),
+        (
             // Task 3 review round 3, J5: the reviewer's measured attack —
             // three U+2060 WORD JOINER insertions, spaced no more than
             // eleven characters apart, rendered the key verbatim past both
@@ -553,16 +576,82 @@ fn key_transformations(key: &str) -> Vec<(&'static str, String, String)> {
     ]
 }
 
-/// Reuses `ProviderMessage`'s own stripping pipeline (an empty key disables
-/// its redaction step, and an empty key can never reach the fragment check
-/// either) so "what would a human actually see" tracks production's strip
-/// list automatically (Task 3 review round 3, J4) instead of restating part
-/// of it by hand — a hand-restated subset stays green the day production's
-/// list changes and the test's own copy does not.
-fn strip_like_production(text: &str) -> String {
-    ProviderMessage::new(text, "")
-        .map(|m| m.to_string())
-        .unwrap_or_default()
+/// Unicode's `Default_Ignorable_Code_Point` is a DERIVED property, not
+/// fully covered by the general categories below — no dependency available
+/// to this crate exposes it directly (Task 3 review round 4, K2/K4). Named
+/// explicitly, and only here, in a test's own deliberately over-inclusive
+/// oracle: U+FE0F VARIATION SELECTOR-16 and U+034F COMBINING GRAPHEME
+/// JOINER are already caught by `NonspacingMark` below and listed again
+/// only as a direct pin; U+3164 HANGUL FILLER and U+FFA0 HALFWIDTH HANGUL
+/// FILLER are `General_Category=Lo` (letters) and need to be named, since
+/// stripping all letters would defeat the point. Being wider than strictly
+/// necessary is exactly what a test oracle should be — unlike production's
+/// own strip list, which stays a category rather than a list on purpose
+/// (K4/round 3's J5) precisely because *production* cannot afford to be
+/// wrong in the other direction.
+fn is_unsafe_for_test_oracle(c: char) -> bool {
+    if matches!(
+        get_general_category(c),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+            | GeneralCategory::NonspacingMark
+    ) {
+        return true;
+    }
+    matches!(c, '\u{034F}' | '\u{3164}' | '\u{FFA0}' | '\u{FE0F}')
+}
+
+/// The leak scans' own definition of "safe to render", independent of
+/// production (Task 3 review round 4, K2). Round 3's fix for J4 called
+/// production's own sanitiser here instead — the reviewer named that the
+/// weaker half of the fix: it stopped the test and production drifting
+/// apart, but it also meant the test narrowed whenever production narrowed,
+/// which is the exact failure the derivation was meant to prevent. An
+/// oracle must not share a defect with the thing it checks — confirmed by
+/// K1 below, where an actual production gap left this exact style of check
+/// unable to tell a real leak from a merely-obfuscated substring.
+///
+/// No length cap either, unlike production's `MAX_MESSAGE_LEN`: that cap is
+/// a display choice, not a security boundary, and reusing it here made a
+/// leaked key positioned past it in a long message invisible to this exact
+/// check — measured: the "was the key redacted at all" mutation is caught
+/// for provider messages of 34, 84 and 144 bytes, and not caught from
+/// roughly 180 bytes upward, inside the length this crate documents as an
+/// ordinary explanation.
+fn strip_for_test_oracle(text: &str) -> String {
+    text.chars()
+        .filter(|c| !is_unsafe_for_test_oracle(*c))
+        .collect()
+}
+
+/// Whether a `key_transformations` entry represents the *whole* key,
+/// obfuscated some way — expected outcome: `redact_key` finds it, and the
+/// rendered text shows the `[redacted]` placeholder — versus a genuine
+/// *fragment* of it, which the fragment net withholds entirely instead.
+/// Only "truncated to a fragment" is the second kind.
+fn expects_full_key_redaction(label: &str) -> bool {
+    label != "truncated to a fragment"
+}
+
+/// Confirms a defence actually fired, rather than the substring check above
+/// merely failing to match by accident (Task 3 review round 4, K1: a key
+/// broken up by literal escape text — not an invisible character, six
+/// ordinary ASCII characters — defeats an exact-substring "is the key
+/// present" check without `redact_key` or the fragment net having done
+/// anything about it at all).
+fn assert_a_defence_fired(label: &str, rendered: &str) {
+    let defended = if expects_full_key_redaction(label) {
+        rendered.contains("[redacted]")
+    } else {
+        rendered.contains("Withheld")
+    };
+    assert!(
+        defended,
+        "transformation {label:?} must show a visible defence fired, not merely fail to match \
+         a substring check: {rendered}"
+    );
 }
 
 /// Task 3 review round 2: six hand-picked bodies (the previous version of
@@ -578,12 +667,13 @@ fn no_transformation_of_the_key_reaches_a_failure_message() {
         let server = MockServer::new(vec![Reply::status(401, &body)]);
         let err = check_key(server.base(), KEY).expect_err("must fail");
         let rendered = format!("{err} / {err:?}");
-        let visually = strip_like_production(&rendered).to_ascii_lowercase();
+        let visually = strip_for_test_oracle(&rendered).to_ascii_lowercase();
         assert!(
             !visually.contains(&needle.to_ascii_lowercase()),
             "transformation {label:?} must not leak, even to a reader who cannot see an \
              invisible character: {rendered}"
         );
+        assert_a_defence_fired(label, &rendered);
     }
 }
 
@@ -603,11 +693,12 @@ fn no_transformation_of_the_key_reaches_a_successful_balance() {
         let server = MockServer::new(vec![Reply::ok(&body)]);
         let check = check_key(server.base(), KEY).expect("a 200 means the key works");
         let rendered = format!("{:?}", check.balance);
-        let visually = strip_like_production(&rendered).to_ascii_lowercase();
+        let visually = strip_for_test_oracle(&rendered).to_ascii_lowercase();
         assert!(
             !visually.contains(&needle.to_ascii_lowercase()),
             "transformation {label:?} must not leak on the success path: {rendered}"
         );
+        assert_a_defence_fired(label, &rendered);
     }
 }
 

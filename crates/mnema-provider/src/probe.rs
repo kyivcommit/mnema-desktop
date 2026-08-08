@@ -32,8 +32,24 @@ pub struct KeyCheck {
 /// and then fails at runtime, because serde cannot serialise a tagged
 /// newtype variant whose payload is not itself a map. The window expects
 /// `{"kind":"known","amount":6.5}`.
+///
+/// `rename_all_fields = "camelCase"` alongside `rename_all` (Task 3 review
+/// round 4, K6): `rename_all` alone renames variant names for the tag
+/// value, not the *fields inside* a struct variant — a separate attribute
+/// serde added for exactly that gap, verified in `serde_derive` 1.0.229
+/// sources (`rename_all_fields_rules` defaults to none, independent of
+/// `rename_all_rule`). Every field in this crate's struct variants today is
+/// one word (`amount`, `raw`, `text`, `limit`, `floor`, `id`), so the
+/// convention has never been exercised and nothing here would go red
+/// without this attribute — it is here so the first multi-word field this
+/// crate ever gets (Task 4's) serialises under the name the window uses
+/// instead of silently falling back to snake_case.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum Balance {
     /// The provider stated a number, and it was read.
     Known { amount: f64 },
@@ -83,8 +99,16 @@ pub enum Balance {
 /// serialisation reason `Balance` is struct variants throughout (Task 3
 /// review round 3, J3): a newtype variant does not serialise under
 /// `#[serde(tag = "kind")]`.
+///
+/// `rename_all_fields` alongside `rename_all` (Task 3 review round 4, K6) —
+/// see `Balance`'s own doc comment for why it is here even though `text` is
+/// one word and the attribute changes nothing today.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum ProviderMessage {
     /// Sanitised and safe to render — see `SanitisedText` for what enforces
     /// that.
@@ -184,22 +208,58 @@ impl ProviderMessage {
         }
     }
 
-    /// `key` is the credential `check_key` sent — see `from_provider_text`
-    /// for the pipeline and why its order matters. `None` when the sanitised
-    /// result is empty: "the provider said nothing worth showing" is decided
-    /// here, not inside `from_provider_text`, which every other caller needs
-    /// to NOT decide for it (see that method's own doc comment).
+    /// `redaction` says what to redact — see `Redaction`'s own doc comment
+    /// for why this is a type and not a bare `&str`. `None` when the
+    /// sanitised result is empty: "the provider said nothing worth showing"
+    /// is decided here, not inside `from_provider_text`, which every other
+    /// caller needs to NOT decide for it (see that method's own doc
+    /// comment).
     ///
-    /// `pub` on purpose (Task 3 review round 3, J4/J2): this is the
-    /// controlled front door `SanitisedText` has no other way in through, so
-    /// exposing it does not reopen the door J2 closed — it is the door.
-    /// `tests/probe.rs`'s leak scans call it to run text through the exact
-    /// same pipeline production uses, rather than keeping their own partial
-    /// copy of what counts as "unsafe to render" in sync by hand.
-    pub fn new(raw: &str, key: &str) -> Option<Self> {
-        match Self::from_provider_text(raw, key) {
+    /// `pub(crate)` (Task 3 review round 4, K3, narrowing round 3's `pub`):
+    /// this is the controlled front door `SanitisedText` has no other way in
+    /// through, so a caller elsewhere in this crate — Task 4's own module,
+    /// say — reaching for it instead of copying a narrower version is the
+    /// intended path, the same reasoning that keeps it `pub(crate)` rather
+    /// than private outright. Not `pub`: nothing outside this crate has a
+    /// reason to sanitise arbitrary text through this exact pipeline, and
+    /// the previous round's only real caller (`tests/probe.rs`) now has its
+    /// own independent oracle instead (K2) and does not call this at all.
+    pub(crate) fn new(raw: &str, redaction: Redaction<'_>) -> Option<Self> {
+        match Self::from_provider_text(raw, redaction.as_str()) {
             ProviderMessage::Text { text } if text.as_str().is_empty() => None,
             other => Some(other),
+        }
+    }
+}
+
+/// Whether `ProviderMessage::new` should try to redact a credential,
+/// spelled out as a type rather than an ordinary `&str` that happens to be
+/// empty (Task 3 review round 4, K3). `new` used to take `key: &str`
+/// directly, and the one worked example anywhere in this repository of
+/// calling it passed `""` — compiling, clippy-clean, and silently disabling
+/// both `redact_key` and `contains_key_fragment` for whoever reached for it
+/// as a template outside a test. `Redaction::None` says the same thing in a
+/// way a reader — and a future caller copying an example — has to notice
+/// instead of skim past.
+pub(crate) enum Redaction<'a> {
+    /// Redact this credential — the shape every real call site (`check_key`
+    /// and everything it threads a key through) reaches for.
+    Key(&'a str),
+    /// Explicitly opt out of redaction. This crate's own tests are the only
+    /// legitimate caller: sanitising arbitrary text with no credential at
+    /// stake, to exercise the strip step on its own. `#[allow(dead_code)]`:
+    /// every constructor of this variant lives under `#[cfg(test)]`, so the
+    /// lib target alone (no test code compiled in) has none — the variant
+    /// exists for testing, not despite being unreachable outside it.
+    #[allow(dead_code)]
+    None,
+}
+
+impl<'a> Redaction<'a> {
+    fn as_str(&self) -> &'a str {
+        match self {
+            Redaction::Key(k) => k,
+            Redaction::None => "",
         }
     }
 }
@@ -273,13 +333,26 @@ fn contains_key_fragment(text: &str, key: &str) -> bool {
 /// JOINER insertions, spaced no more than eleven characters apart, rendered
 /// a key verbatim past both the strip list and the fragment check, because
 /// `Cf` has far more members than the ones this file had happened to name.
-/// `Control` (`Cc`) and `Format` (`Cf`) together close the category instead
-/// of the list — every invisible or bidi-affecting character named in
-/// rounds 1 and 2 is `Cf`, and so is U+2060, and so is whatever the next one
-/// turns out to be. `LineSeparator` (`Zl`, U+2028) and `ParagraphSeparator`
-/// (`Zp`, U+2029) stay named separately: they are category `Z`, not `C`, and
-/// stripping all of `Z` would also strip an ordinary space (`Zs`), which
-/// this function must not do.
+/// `Control` (`Cc`) and `Format` (`Cf`) together close that specific
+/// category: every invisible or bidi-affecting character named in rounds 1
+/// and 2 is `Cf`, and so is U+2060. `LineSeparator` (`Zl`, U+2028) and
+/// `ParagraphSeparator` (`Zp`, U+2029) stay named separately: they are
+/// category `Z`, not `C`, and stripping all of `Z` would also strip an
+/// ordinary space (`Zs`), which this function must not do.
+///
+/// **What this does NOT close, measured rather than assumed (Task 3 review
+/// round 4, K4):** Unicode's broader `Default_Ignorable_Code_Point`
+/// property is not the same set as `Cc ∪ Cf ∪ Zl ∪ Zp`, and this function
+/// stops at the latter. U+FE0F VARIATION SELECTOR-16, U+3164 HANGUL FILLER,
+/// U+FFA0 HALFWIDTH HANGUL FILLER and U+034F COMBINING GRAPHEME JOINER are
+/// all members of the derived property and none is `Cc` or `Cf` — the
+/// reviewer reproduced round 2's spaced-filler attack with U+FE0F and the
+/// key still renders. Left open on purpose, judged the same way round 2
+/// judged an equivalently narrow gap: three evenly spaced filler characters
+/// is not provider behaviour. `tests/probe.rs`'s own leak-scan oracle is
+/// deliberately wider than this function (K2) precisely so it does not
+/// share this specific gap while this function stays a category rather
+/// than a list.
 fn unsafe_for_display(c: char) -> bool {
     matches!(
         get_general_category(c),
@@ -392,7 +465,7 @@ struct ProviderErrorDetail {
 /// to answer.
 fn extract_provider_message(body: &str, key: &str) -> Option<ProviderMessage> {
     let envelope: ProviderErrorEnvelope = serde_json::from_str(body).ok()?;
-    ProviderMessage::new(&envelope.error.message?, key)
+    ProviderMessage::new(&envelope.error.message?, Redaction::Key(key))
 }
 
 /// `error_for_status` cannot carry the response body — on purpose, since it
@@ -410,7 +483,15 @@ fn extract_provider_message(body: &str, key: &str) -> Option<ProviderMessage> {
 /// only checked the one variant it had a test for. `KeyRequired` and
 /// `AnonymousBlocked` are absent on purpose, not an oversight — `check_key`
 /// always sends a key, so `error_for_status` never returns either to it.
-fn attach_reason(err: Error, body: &str, key: &str) -> Error {
+///
+/// `pub(crate)` (Task 3 review round 4, K3, "while you are there"): this
+/// function is not specific to `check_key` — it matches on `Error` itself,
+/// which Task 4's embedding-model check also returns failures as — and
+/// round 1's own doc comment already told Task 4 to reuse it, which a
+/// module-private `fn` made impossible to act on. Reachable from elsewhere
+/// in the crate now, so that recommendation is executable as written
+/// instead of only in a comment nobody could follow.
+pub(crate) fn attach_reason(err: Error, body: &str, key: &str) -> Error {
     let reason = || extract_provider_message(body, key);
     match err {
         Error::Unauthorised { reason: None } => Error::Unauthorised { reason: reason() },
@@ -510,9 +591,62 @@ fn balance_from(body: &str, key: &str) -> Result<Balance, Error> {
         },
         (Stated::Absent, Stated::Absent) => Balance::NotStated,
         _ => Balance::Unreadable {
-            raw: ProviderMessage::from_provider_text(&data.to_string(), key),
+            raw: sanitised_balance_summary(data, key),
         },
     })
+}
+
+/// Builds a human-readable summary of `data`'s two known fields, sanitising
+/// each field's own *decoded* text directly (Task 3 review round 4, K1) —
+/// not `data.to_string()`'s re-serialised form, which is what this function
+/// replaces. `serde_json::Value::to_string()` re-escapes a decoded control
+/// character back into six printable ASCII characters (a literal
+/// backslash, "u", and four hex digits), which
+/// `unsafe_for_display` no longer recognises as anything unsafe: the
+/// character the strip step exists to remove has already been turned back
+/// into ordinary text by the time a whole-object dump would reach it. Once
+/// enough of those escapes sit inside a key, neither the exact-substring
+/// redaction (the escape text breaks the match) nor the fragment net
+/// (checking a segment shorter than it, between two escapes) catches what
+/// is left — measured: two insertions into a 24-character key leave three
+/// segments short enough that the whole key still reaches the screen, in
+/// order, with the escapes as the only sign anything happened to it.
+///
+/// Reading each field's `Value` directly instead gets the text exactly as
+/// the provider's JSON encoder produced it, decoded once and never
+/// re-encoded, which is what `from_provider_text`'s first step (strip)
+/// assumes. `field` is only ever `total_credits`/`total_usage` from
+/// `balance_from`'s own `data.get(..)`.
+fn sanitised_balance_summary(data: &Value, key: &str) -> ProviderMessage {
+    fn field_text(value: Option<&Value>, key: &str) -> Option<String> {
+        match value {
+            Some(Value::String(s)) => match ProviderMessage::from_provider_text(s, key) {
+                ProviderMessage::Text { text } => Some(text.as_str().to_string()),
+                ProviderMessage::Withheld => None,
+            },
+            // Numbers, booleans, null, arrays and objects cannot smuggle a
+            // key character-wise the way a string leaf can — JSON's own
+            // number grammar has no room for arbitrary text — so these pass
+            // through their own `Display` unchanged.
+            Some(other) => Some(other.to_string()),
+            None => Some("absent".to_string()),
+        }
+    }
+    let (Some(credits), Some(usage)) = (
+        field_text(data.get("total_credits"), key),
+        field_text(data.get("total_usage"), key),
+    ) else {
+        // Either field alone surviving a fragment is still a fragment of
+        // the key — withholding the whole summary rather than showing the
+        // one field that happened to come back clean.
+        return ProviderMessage::Withheld;
+    };
+    ProviderMessage::Text {
+        text: SanitisedText(cap(
+            format!("total_credits: {credits}, total_usage: {usage}"),
+            MAX_MESSAGE_LEN,
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -533,7 +667,7 @@ mod tests {
     #[test]
     fn a_message_past_the_cap_is_truncated_to_it() {
         let long = "x".repeat(MAX_MESSAGE_LEN + 50);
-        let message = ProviderMessage::new(&long, "").expect("non-empty input");
+        let message = ProviderMessage::new(&long, Redaction::None).expect("non-empty input");
         assert_eq!(
             text_of(message).len(),
             MAX_MESSAGE_LEN,
@@ -546,7 +680,7 @@ mod tests {
     #[test]
     fn control_characters_and_newlines_are_stripped() {
         let raw = "line one\nline two\r\ttabbed\u{7}bell";
-        let message = ProviderMessage::new(raw, "").expect("non-empty input");
+        let message = ProviderMessage::new(raw, Redaction::None).expect("non-empty input");
         let text = text_of(message);
         assert!(
             !text.chars().any(|c| c.is_control()),
@@ -563,7 +697,7 @@ mod tests {
     #[test]
     fn line_and_paragraph_separators_and_bidi_overrides_are_stripped_too() {
         let raw = "before\u{2028}mid\u{2029}mid2\u{202E}after";
-        let message = ProviderMessage::new(raw, "").expect("non-empty input");
+        let message = ProviderMessage::new(raw, Redaction::None).expect("non-empty input");
         let text = text_of(message);
         for forbidden in ['\u{2028}', '\u{2029}', '\u{202E}'] {
             assert!(
@@ -583,7 +717,7 @@ mod tests {
     #[test]
     fn zero_width_and_invisible_characters_are_stripped_too() {
         let raw = "before\u{200B}mid\u{FEFF}mid2\u{00AD}after";
-        let message = ProviderMessage::new(raw, "").expect("non-empty input");
+        let message = ProviderMessage::new(raw, Redaction::None).expect("non-empty input");
         let text = text_of(message);
         for forbidden in ['\u{200B}', '\u{FEFF}', '\u{00AD}'] {
             assert!(
@@ -600,7 +734,7 @@ mod tests {
     #[test]
     fn word_joiner_is_stripped_by_category_not_by_name() {
         let raw = "before\u{2060}after";
-        let message = ProviderMessage::new(raw, "").expect("non-empty input");
+        let message = ProviderMessage::new(raw, Redaction::None).expect("non-empty input");
         let text = text_of(message);
         assert!(
             !text.contains('\u{2060}'),
@@ -615,7 +749,7 @@ mod tests {
     #[test]
     fn a_message_that_is_only_control_characters_becomes_nothing() {
         assert_eq!(
-            ProviderMessage::new("\n\r\t\u{7}", ""),
+            ProviderMessage::new("\n\r\t\u{7}", Redaction::None),
             None,
             "an empty label is worse than none at all"
         );
@@ -632,7 +766,7 @@ mod tests {
         let mut raw = "x".repeat(MAX_MESSAGE_LEN - 1);
         raw.push('€'); // 3-byte character straddling the cap
         raw.push_str("tail text past the cap");
-        let message = ProviderMessage::new(&raw, "").expect("non-empty input");
+        let message = ProviderMessage::new(&raw, Redaction::None).expect("non-empty input");
         let text = text_of(message);
         assert_eq!(
             text.len(),
@@ -654,7 +788,7 @@ mod tests {
         let key = "test-key-not-a-real-one";
         let fragment = &key[4..16]; // twelve characters, taken from the key
         let raw = format!("invalid credential: {fragment}");
-        let message = ProviderMessage::new(&raw, key).expect("non-empty input");
+        let message = ProviderMessage::new(&raw, Redaction::Key(key)).expect("non-empty input");
         assert_eq!(
             message,
             ProviderMessage::Withheld,
@@ -670,7 +804,7 @@ mod tests {
         let key = "test-key-not-a-real-one";
         let short_prefix = &key[..8]; // shorter than FRAGMENT_LEN
         let raw = format!("keys from this provider start with {short_prefix}");
-        let message = ProviderMessage::new(&raw, key).expect("non-empty input");
+        let message = ProviderMessage::new(&raw, Redaction::Key(key)).expect("non-empty input");
         assert!(
             matches!(message, ProviderMessage::Text { .. }),
             "a fragment shorter than the window must not withhold: {message:?}"
@@ -692,7 +826,7 @@ mod tests {
     fn strip_then_redact_matters_even_when_the_fragment_net_cannot_help() {
         let key = "shortkey"; // shorter than FRAGMENT_LEN
         let raw = "invalid key: short\u{1F}key";
-        let message = ProviderMessage::new(raw, key).expect("non-empty input");
+        let message = ProviderMessage::new(raw, Redaction::Key(key)).expect("non-empty input");
         let text = text_of(message);
         assert!(
             !text.to_ascii_lowercase().contains(key),
@@ -723,7 +857,7 @@ mod tests {
             r#"{"kind":"envelopeNotUnderstood"}"#
         );
         let unreadable = Balance::Unreadable {
-            raw: ProviderMessage::new("odd shape", "").expect("non-empty input"),
+            raw: ProviderMessage::new("odd shape", Redaction::None).expect("non-empty input"),
         };
         assert_eq!(
             serde_json::to_string(&unreadable).unwrap(),
@@ -732,6 +866,20 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ProviderMessage::Withheld).unwrap(),
             r#"{"kind":"withheld"}"#
+        );
+    }
+
+    /// Task 3 review round 4, K5: `Balance`'s four states are pinned above,
+    /// but `KeyCheck` — the struct that actually carries one to the window
+    /// — was not, and the window receives `KeyCheck`, not a bare `Balance`.
+    #[test]
+    fn key_check_serialises_with_the_balance_nested_under_its_own_field() {
+        let check = KeyCheck {
+            balance: Balance::Known { amount: 6.5 },
+        };
+        assert_eq!(
+            serde_json::to_string(&check).unwrap(),
+            r#"{"balance":{"kind":"known","amount":6.5}}"#
         );
     }
 }
