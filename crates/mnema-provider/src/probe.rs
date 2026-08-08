@@ -887,6 +887,19 @@ fn status_error(status: u16, model: &str, key: &str) -> Error {
     }
 }
 
+/// The sum of squares in the width the index sums it in, and the reason it is
+/// a named function rather than an inline fold (fix round 2, item 2).
+///
+/// `f32`, matching `check_rankable` (`crates/mnema-index/src/space.rs:404`),
+/// whose own doc comment says that width is load-bearing rather than
+/// incidental. A wider sum here would not be a more careful version of the
+/// same test — it would be a *different* test, waving through the vectors the
+/// index refuses, which is the one thing this check must not do. Anyone
+/// tempted to widen it should change `check_rankable` first.
+fn squared_norm_as_the_index_sums_it(v: &[f32]) -> f32 {
+    v.iter().map(|c| c * c).sum()
+}
+
 /// A 200 this build could not read as an embeddings answer, named for which of
 /// four problems it was.
 ///
@@ -1035,8 +1048,41 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
     // numbers. The same distinction `Stated` draws for a balance
     // (`finite_or_unreadable`), for the same reason.
     if first.iter().chain(second).any(|v| !v.is_finite()) {
-        return Err(Error::Malformed(
-            "a vector component is not a finite number, so these are not usable coordinates",
+        return Err(Error::UnusableVector(
+            "a vector component is not a finite number",
+        ));
+    }
+    // The same refusal the index makes at insert time, in the same arithmetic,
+    // on both vectors (fix round 2, item 2).
+    //
+    // `check_rankable` (`crates/mnema-index/src/space.rs:395-409`) sums the
+    // squares in **f32** and refuses a squared norm that is not finite —
+    // deliberately, and its own doc comment says the width is load-bearing
+    // rather than incidental, because that is the width vec0 divides in. This
+    // call summed in `f64` and checked the narrowed *root*, which is a
+    // different test: an f32 square overflows at a component around 1.84e19,
+    // while the narrowed root only reaches infinity around 2.4e38. Measured:
+    // `[1e20, 1e20]` was accepted here and refused at insert — nineteen orders
+    // of magnitude where the comment promised a parity that did not exist, and
+    // the failure it invoked as its reason for existing is exactly what it let
+    // through.
+    //
+    // Both vectors, because the finiteness check above already walks both and
+    // the answer is refused as a whole either way: `[[1.0,0.0],[3e38,3e38]]`
+    // used to pass everything, since the norm was taken from the first vector
+    // alone.
+    //
+    // This mirrors one half of `check_rankable`'s cosine guard. The other —
+    // a squared norm below `f32::MIN_POSITIVE`, which includes an all-zero
+    // vector — is a measured entry/insert mismatch of the same kind, deferred
+    // to the whole-branch review rather than fixed here, and named so this is
+    // not read as a complete mirror.
+    if [first, second]
+        .into_iter()
+        .any(|v| !squared_norm_as_the_index_sums_it(v).is_finite())
+    {
+        return Err(Error::UnusableVector(
+            "a vector's squared length overflows the arithmetic the index ranks with",
         ));
     }
     // The trap, and the reason the request sends two texts instead of one: two
@@ -1055,38 +1101,21 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
 
     // The length of the first vector, accumulated in `f64` and narrowed once.
     //
-    // The narrowing is where an overflow happens, not the sum: `[3.0e38,
-    // 3.0e38]` has two ordinary, finite `f32` components, sums to 1.8e77 in
-    // `f64`, takes a root of 4.24e38 — and comes back `inf` from `as f32`.
-    // Measured; an earlier version of this comment offered the `f64`
-    // accumulation as closing that, which moves the threshold and does not
-    // remove it (fix round 1, item 5).
+    // Finite by construction rather than by a check of its own: the guard
+    // above refuses any vector whose squared length is not finite in `f32`, so
+    // the true sum here is at most `f32::MAX` and its root at most about
+    // 1.85e19 — far inside `f32`. Round 1 checked the narrowed root instead,
+    // which was the weaker of the two tests and is what item 2 replaced.
     //
-    // So the narrowed value is checked rather than reported. An infinity in an
-    // `f32` field is not a length the provider stated; it is a number this
-    // build's own type could not hold, and reporting it as a measurement is
-    // the same fabrication `Stated::finite_or_unreadable` refuses one screen
-    // up. Refusing is also what this call is for: `check_rankable`
-    // (`crates/mnema-index/src/space.rs:405`) refuses a vector whose squared
-    // norm is not finite at *insert* time, so a model accepted here and
-    // refused there is exactly the failure three hours into indexing that
-    // §4.5 asks the entry check to prevent.
-    //
-    // The other half of that guard — a squared norm below `f32::MIN_POSITIVE`,
-    // which includes an all-zero vector — is deliberately NOT mirrored here.
-    // It is a deferred finding from this review, left for the whole-branch
-    // pass, and named so this is not read as a complete mirror of
-    // `check_rankable`.
+    // `f64` for the accumulation is not a second opinion on that guard. It is
+    // the more accurate sum of a thousand small squares, and this value is
+    // *reported*, not compared: the comparison that must match the index is
+    // the one above, in the index's own width.
     let norm = first
         .iter()
         .map(|v| f64::from(*v) * f64::from(*v))
         .sum::<f64>()
         .sqrt() as f32;
-    if !norm.is_finite() {
-        return Err(Error::Malformed(
-            "the vector is longer than this build can measure, so the index could not rank it",
-        ));
-    }
 
     Ok(EmbeddingCheck {
         dim: first.len(),

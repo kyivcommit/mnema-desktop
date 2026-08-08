@@ -1240,6 +1240,74 @@ fn a_200_error_envelope_with_no_readable_message_stays_a_shape_problem() {
     }
 }
 
+/// The defence assertion in the form a person reads, for the paths whose
+/// rendered sentence — not their `Debug` shape — is what carries a withheld
+/// value (fix round 2, item 1).
+///
+/// `assert_a_defence_fired` above reads `{err:?}` and keys the withheld case
+/// on the literal word `Withheld`, which a derived `Debug` prints whatever the
+/// `Display` says. That is exactly what left round 1's first attempt at the
+/// withheld-model-id test green, and it is the reason this crate's standing
+/// rule says an oracle must not share a defect with the thing it checks. A
+/// separate, stricter helper rather than widening that one: adding an
+/// alternative to its withheld branch would make it easier to satisfy for the
+/// three scans that already depend on it.
+fn assert_a_defence_is_visible_to_a_reader(label: &str, rendered: &str) {
+    let defended = if expects_full_key_redaction(label) {
+        rendered.contains("[redacted]")
+    } else {
+        rendered.contains("could not be shown safely")
+    };
+    assert!(
+        defended,
+        "transformation {label:?} must show a defence a person can see in the sentence itself, \
+         not only in a Debug dump: {rendered}"
+    );
+}
+
+/// Fix round 2, item 1 (re-review Important 1). `unreadable_embeddings_answer`
+/// is the second place in this crate that turns a response body into rendered
+/// text — `attach_reason` is the first — and nothing scanned it. The crate's
+/// existing scan runs at 401, through `attach_reason`; both of round 1's
+/// 200-path tests use bodies with no key in them.
+///
+/// The re-review measured the gap: a mutation confined to
+/// `unreadable_embeddings_answer`, parsing the envelope in place and building
+/// a `SanitisedText` directly — legal inside `probe.rs`, since the type is
+/// sealed from outside the crate and not from within it — leaves the whole
+/// suite green with the key rendered. This is the same shape Task 3 round 3
+/// (J1) measured for the balance success path.
+///
+/// The status is **200**, which is what makes this a different path from the
+/// scan above rather than a second spelling of it.
+#[test]
+fn no_transformation_of_the_key_reaches_a_message_through_a_200_body() {
+    for (label, transformed, needle) in key_transformations(KEY) {
+        let body = format!(r#"{{"error":{{"message":"invalid credential: {transformed}"}}}}"#);
+        let server = MockServer::new(vec![Reply::ok(&body)]);
+        let err = check_embedding_model(server.base(), KEY, "m").expect_err("must fail");
+        let sentence = err.to_string();
+        assert!(
+            !strip_for_test_oracle(&sentence)
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak into the sentence a person reads on a 200: \
+             {sentence}"
+        );
+        // The Debug form as well, separately: it is what a bug report carries,
+        // and a leak visible only there is still a leak. Asserted apart from
+        // the sentence so neither form can hide the other.
+        let debug = format!("{err:?}");
+        assert!(
+            !strip_for_test_oracle(&debug)
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak into the Debug form either: {debug}"
+        );
+        assert_a_defence_is_visible_to_a_reader(label, &sentence);
+    }
+}
+
 /// Fix round 1, item 3 (review finding 3). The model id is not the user's own
 /// text: it is copied verbatim out of the provider's body
 /// (`catalogue.rs:412`) and the user only *picks* it from the list. Rendering
@@ -1327,26 +1395,89 @@ fn a_withheld_model_id_does_not_borrow_the_sentence_written_for_an_explanation()
     );
 }
 
-/// Fix round 1, item 5 (review finding, Minor 1). Both components are ordinary
-/// finite `f32` values and ordinary JSON numbers, so the component check waves
-/// them through; the true length is 4.24e38, which does not fit in the `f32`
-/// this call reports it in, and `as f32` produces `inf`. `check_rankable`
-/// (`crates/mnema-index/src/space.rs:405`) refuses such a vector at insert
-/// time, so accepting it here is precisely the failure three hours into
-/// indexing that this call exists to prevent.
+/// Fix round 2, item 3. The pipeline that fills `NoSuchModel` has three
+/// outcomes, not two: `status_error` calls `from_provider_text`, which never
+/// returns `None`, so an id made only of characters `unsafe_for_display`
+/// removes arrives as `Text { text: "" }`. Round 1's two-arm sentence rendered
+/// it as "no model named , or it does not make embeddings" — a name shown,
+/// with no name in it.
 #[test]
-fn a_vector_whose_length_does_not_fit_the_reported_type_is_refused() {
-    let body =
-        r#"{"data":[{"embedding":[3.0e38,3.0e38],"index":0},{"embedding":[0.0,1.0],"index":1}]}"#;
-    let server = MockServer::new(vec![Reply::ok(body)]);
-    let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
-    match err {
-        Error::Malformed(reason) => assert!(
-            reason.contains("longer than this build can measure"),
-            "got {reason:?}"
+fn a_model_id_that_sanitises_to_nothing_does_not_render_as_a_name_that_is_not_there() {
+    let server = MockServer::new(vec![Reply::status(404, "{}")]);
+    let err = check_embedding_model(server.base(), KEY, "\u{1}\u{2}\u{200B}").expect_err("refused");
+    let sentence = err.to_string();
+    assert!(
+        !sentence.contains("named ,"),
+        "an empty name must not be rendered as a name: {sentence}"
+    );
+    assert!(
+        sentence.contains("nothing was left of the name"),
+        "the third outcome needs its own sentence, not the one written for a readable name: \
+         {sentence}"
+    );
+}
+
+/// Fix round 2, item 2. `check_rankable`
+/// (`crates/mnema-index/src/space.rs:404-406`) sums the squares in `f32` and
+/// refuses a squared norm that is not finite, at *insert* time. Every case
+/// below is a vector that would reach that refusal after the archive had
+/// already begun indexing — the failure §4.5 asks this call to catch at entry
+/// instead, and the very failure round 1's comment invoked as its reason for
+/// existing.
+///
+/// The first two are what round 1's guard let through, measured by the
+/// re-review: it summed in `f64` and checked the narrowed *root*, so it only
+/// tripped near 2.4e38, while an `f32` square overflows around 1.84e19. The
+/// third is the other half of the same finding — the norm was read from the
+/// first vector alone, while the answer is refused as a whole either way.
+#[test]
+fn a_vector_the_index_would_refuse_at_insert_is_refused_at_entry() {
+    let cases = [
+        (
+            "an f32 square overflows, nineteen orders below the old guard",
+            r#"{"data":[{"embedding":[1e20,1e20],"index":0},{"embedding":[0.0,1.0],"index":1}]}"#,
         ),
-        other => panic!("expected Malformed, got {other:?}"),
+        (
+            "a single component past the f32 square limit",
+            r#"{"data":[{"embedding":[2e19,0.0],"index":0},{"embedding":[0.0,1.0],"index":1}]}"#,
+        ),
+        (
+            "the second vector, which the reported norm never looks at",
+            r#"{"data":[{"embedding":[1.0,0.0],"index":0},{"embedding":[3e38,3e38],"index":1}]}"#,
+        ),
+    ];
+    for (label, body) in cases {
+        let server = MockServer::new(vec![Reply::ok(body)]);
+        // Not `expect_err`: its own message carries no label, so a failure in
+        // one of three cases would not say which.
+        match check_embedding_model(server.base(), KEY, "m") {
+            Err(Error::UnusableVector(reason)) => assert!(
+                reason.contains("squared length overflows"),
+                "{label}: got {reason:?}"
+            ),
+            Err(other) => panic!("{label}: expected UnusableVector, got {other:?}"),
+            Ok(check) => panic!(
+                "{label}: the index refuses this vector at insert time, so entry must refuse it \
+                 too, got {check:?}"
+            ),
+        }
     }
+}
+
+/// The bound on the other side of that guard. Without it, summing the squares
+/// in `f32` could be narrowed to "refuse everything large" and the test above
+/// would not notice: a one-sided assertion is satisfied by refusing too much
+/// just as readily as by refusing the right set.
+#[test]
+fn a_vector_the_index_can_rank_is_still_accepted_with_its_norm() {
+    let body = r#"{"data":[{"embedding":[0.6,0.6],"index":0},{"embedding":[0.0,1e19],"index":1}]}"#;
+    let server = MockServer::new(vec![Reply::ok(body)]);
+    let check = check_embedding_model(server.base(), KEY, "m").expect("accepted");
+    assert!(
+        (check.norm - 0.8485).abs() < 0.001,
+        "a large but still rankable second vector must not refuse the answer, norm was {}",
+        check.norm
+    );
 }
 
 /// Two vectors of different widths state no dimensionality at all. Taking the
@@ -1376,13 +1507,27 @@ fn a_vector_component_that_is_not_a_finite_number_is_refused() {
     let body = r#"{"data":[{"embedding":[1e39,0.0],"index":0},{"embedding":[0.0,1.0],"index":1}]}"#;
     let server = MockServer::new(vec![Reply::ok(body)]);
     let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
-    match err {
-        Error::Malformed(reason) => assert!(
+    match &err {
+        // `UnusableVector`, not `Malformed` (fix round 2, item 4): the shape of
+        // this answer is exactly what this code expects — two rows, equal
+        // widths — and `Malformed`'s own sentence would have told the provider
+        // it sent the wrong shape when it did not.
+        Error::UnusableVector(reason) => assert!(
             reason.contains("finite"),
             "an infinite component must be named, not measured: {reason:?}"
         ),
-        other => panic!("expected Malformed, got {other:?}"),
+        other => panic!("expected UnusableVector, got {other:?}"),
     }
+    // The variant alone does not hold this: `Malformed` renders "the
+    // provider's answer was not the shape this code expects: {0}", and the
+    // shape here is exactly what this code expects. Asserting on the rendered
+    // sentence is what makes the split visible to a reader rather than only to
+    // a `match`.
+    assert!(
+        !err.to_string().contains("not the shape this code expects"),
+        "the sentence must not blame the answer's shape for a limit of this build's own \
+         arithmetic: {err}"
+    );
 }
 
 /// The trade `check_key` makes for a body-read failure (Task 3 review, item

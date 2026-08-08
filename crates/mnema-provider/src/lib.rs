@@ -117,17 +117,33 @@ fn reason_suffix(reason: &Option<ProviderMessage>) -> String {
         .unwrap_or_default()
 }
 
-/// Two facts, two sentences (fix round 1, item 3). A model id this build can
-/// show and one it cannot are different things to say, and `ProviderMessage`'s
-/// own `Display` cannot serve both here: substituted into the first sentence,
-/// `Withheld` would read "no model named the provider's explanation could not
-/// be shown safely" — a sentence about an explanation, on an error that is
-/// about a name. `Withheld` on a model id means the id carried a run of the
-/// key's own characters (see `probe::contains_key_fragment`), which is not a
-/// shape this provider is expected to produce, but the rendering has to be
-/// true when it does.
+/// **Three** facts, three sentences. Round 1 wrote two of them, and two is a
+/// definition as surely as a name is (fix round 2, item 3): the pipeline that
+/// fills this field has three outcomes, not two, because `status_error` calls
+/// `ProviderMessage::from_provider_text` rather than `ProviderMessage::new`,
+/// and `from_provider_text` never returns `None` — the least it produces is
+/// `Text { text: "" }`.
+///
+/// - A name this build can show.
+/// - A name that survived stripping as nothing at all: an id made only of
+///   characters `unsafe_for_display` removes. Round 1's two-arm version read
+///   "no model named , or it does not make embeddings" — a name shown, with no
+///   name in it.
+/// - A name withheld, because the id carried a run of the key's own characters
+///   (`probe::contains_key_fragment`). `ProviderMessage`'s own `Display`
+///   cannot serve this one: substituted into the first sentence it reads "no
+///   model named the provider's explanation could not be shown safely" — a
+///   sentence about an explanation, on an error that is about a name.
+///
+/// Neither of the last two is reachable from a real provider catalogue. Both
+/// cost one arm.
 fn no_such_model_sentence(model: &ProviderMessage) -> String {
     match model {
+        ProviderMessage::Text { text } if text.as_str().is_empty() => {
+            "no model by that name, or it does not make embeddings — and nothing was left of the \
+             name once what cannot be shown was removed from it"
+                .to_string()
+        }
         ProviderMessage::Text { text } => {
             format!("no model named {text}, or it does not make embeddings")
         }
@@ -235,6 +251,22 @@ pub enum Error {
     },
     #[error("the provider's answer was not the shape this code expects: {0}")]
     Malformed(&'static str),
+    /// The answer's shape was right and its numbers are not coordinates this
+    /// product can index (fix round 2, item 4).
+    ///
+    /// Split off from `Malformed` because that variant's own sentence states a
+    /// cause: "the provider's answer was not the shape this code expects".
+    /// For two rows of equal width whose components are simply unusable, the
+    /// shape is exactly what this code expects, and the limit being hit is
+    /// this build's own arithmetic — the provider is told it sent the wrong
+    /// shape when it did not. A stated cause nobody asserted, in the crate
+    /// that pays for those most.
+    ///
+    /// Both arms that reach this were written by this task: a non-finite
+    /// component, and a squared length that overflows the arithmetic the index
+    /// ranks with. Neither is a shape problem, and both used to say they were.
+    #[error("the provider's answer is the right shape, but its numbers cannot be indexed: {0}")]
+    UnusableVector(&'static str),
     /// A 200 whose body is not an embeddings answer at all, but the provider's
     /// own error envelope (fix round 1, item 2; review finding 2). A gateway —
     /// or the provider itself — answering `200` with
