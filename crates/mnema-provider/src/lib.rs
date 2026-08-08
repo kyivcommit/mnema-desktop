@@ -89,11 +89,29 @@ fn error_for_status(status: u16, key_sent: KeySent) -> Error {
     match status {
         401 if key_sent == KeySent::No => Error::KeyRequired,
         401 => Error::Unauthorised { reason: None },
-        403 if key_sent == KeySent::Yes => Error::Forbidden,
+        403 if key_sent == KeySent::Yes => Error::Forbidden { reason: None },
         403 => Error::AnonymousBlocked,
-        429 => Error::RateLimited,
-        other => Error::Provider { status: other },
+        429 => Error::RateLimited { reason: None },
+        other => Error::Provider {
+            status: other,
+            reason: None,
+        },
     }
+}
+
+/// Renders `reason` as a `": <text>"` suffix when the provider stated one,
+/// or nothing when it did not — shared by every variant below that carries a
+/// `reason` (Task 3 review round 1, Minor: `check_key`'s explanation used to
+/// reach only `Unauthorised`, so a 403 or a 500 carrying the same
+/// `{"error":{"message":…}}` shape dropped the one sentence that would have
+/// told the user what to do; `check_key` now attaches it wherever the
+/// provider sent one, and Task 4 inherits this helper instead of copying the
+/// narrower version).
+fn reason_suffix(reason: &Option<ProviderMessage>) -> String {
+    reason
+        .as_ref()
+        .map(|r| format!(": {r}"))
+        .unwrap_or_default()
 }
 
 /// What a call to the provider can fail with.
@@ -115,11 +133,10 @@ pub enum Error {
     /// none this build could parse; `list_models` passes `None`
     /// unconditionally today, since it never reads a failure body for a
     /// message. [`crate::ProviderMessage`] guarantees whatever it holds is
-    /// safe to interpolate here — see its own doc comment for why.
-    #[error(
-        "the key was refused{}",
-        reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default()
-    )]
+    /// safe to interpolate here — see its own doc comment for why, and see
+    /// `reason_suffix` for the format shared with the other three variants
+    /// below that carry the same field.
+    #[error("the key was refused{}", reason_suffix(reason))]
     Unauthorised { reason: Option<ProviderMessage> },
     /// 401 on a call that sent no key at all (Task 2 review round 1, F2): not
     /// a credential problem, since there was no credential — the provider now
@@ -134,9 +151,13 @@ pub enum Error {
     /// answered it — a corporate proxy in front of the provider can return
     /// 403 on its own, regardless of whether the key behind it was ever
     /// checked, and a bare "the key is not permitted" would be false about
-    /// the actual cause in that case.
-    #[error("the key is probably not permitted to do this")]
-    Forbidden,
+    /// the actual cause in that case. `reason` — see `Unauthorised` — the
+    /// provider's own explanation, when `check_key` could read one.
+    #[error(
+        "the key is probably not permitted to do this{}",
+        reason_suffix(reason)
+    )]
+    Forbidden { reason: Option<ProviderMessage> },
     /// 403 on a call that sent no key at all (Task 2 review round 2, G1).
     /// Not naming an account: on a public, key-less endpoint this is most
     /// often something between this machine and the provider — a proxy or a
@@ -156,11 +177,21 @@ pub enum Error {
     /// Deliberately does not say "this key" (Task 2 review round 1, F2):
     /// `list_models`'s public list is called with no key at all, and
     /// anonymous rate limiting on a public endpoint is real — the sentence
-    /// would be false exactly when the user is not signed in.
-    #[error("the provider is rate-limiting requests")]
-    RateLimited,
-    #[error("the provider answered {status}")]
-    Provider { status: u16 },
+    /// would be false exactly when the user is not signed in. `reason` — see
+    /// `Unauthorised` — the provider's own explanation, when `check_key`
+    /// could read one (a retry-after note, say).
+    #[error("the provider is rate-limiting requests{}", reason_suffix(reason))]
+    RateLimited { reason: Option<ProviderMessage> },
+    /// `reason` — see `Unauthorised` — the provider's own explanation, when
+    /// `check_key` could read one. The catch-all for every status the four
+    /// variants above do not name, so this is also where an unanticipated
+    /// status (a `5xx` this crate has no specific story for) keeps whatever
+    /// the provider said about it.
+    #[error("the provider answered {status}{}", reason_suffix(reason))]
+    Provider {
+        status: u16,
+        reason: Option<ProviderMessage>,
+    },
     #[error("the provider's answer was not the shape this code expects: {0}")]
     Malformed(&'static str),
     /// The status was read successfully, but reading the rest of the

@@ -176,7 +176,7 @@ fn a_request_past_the_configured_replies_fails_loudly_instead_of_hanging() {
     let err = list_models(server.base(), None, Role::Chat)
         .expect_err("a second call with no reply configured must not succeed");
     assert!(
-        matches!(err, Error::Provider { status: 599 }),
+        matches!(err, Error::Provider { status: 599, .. }),
         "got {err:?}"
     );
 }
@@ -217,7 +217,7 @@ fn a_403_with_a_key_says_the_key_is_not_permitted() {
     let server = MockServer::new(vec![Reply::status(403, "")]);
     let err = list_models(server.base(), Some("test-key-not-a-real-one"), Role::Chat)
         .expect_err("403 must fail");
-    assert!(matches!(err, Error::Forbidden), "got {err:?}");
+    assert!(matches!(err, Error::Forbidden { .. }), "got {err:?}");
 }
 
 /// Task 2 review round 2, G1: a 403 on a call that sent no key at all does
@@ -237,7 +237,7 @@ fn a_403_without_a_key_names_something_between_this_machine_and_the_provider() {
 fn a_429_is_rate_limited_without_naming_a_key() {
     let server = MockServer::new(vec![Reply::status(429, "")]);
     let err = list_models(server.base(), None, Role::Chat).expect_err("429 must fail");
-    assert!(matches!(err, Error::RateLimited), "got {err:?}");
+    assert!(matches!(err, Error::RateLimited { .. }), "got {err:?}");
     assert!(
         !err.to_string().to_ascii_lowercase().contains("key"),
         "a rate limit with no key sent must not blame one: {err}"
@@ -249,7 +249,7 @@ fn a_500_is_a_provider_error_naming_its_status() {
     let server = MockServer::new(vec![Reply::status(500, "")]);
     let err = list_models(server.base(), None, Role::Chat).expect_err("500 must fail");
     assert!(
-        matches!(err, Error::Provider { status: 500 }),
+        matches!(err, Error::Provider { status: 500, .. }),
         "got {err:?}"
     );
 }
@@ -333,7 +333,7 @@ fn a_second_surplus_request_still_gets_the_sentinel_not_a_connection_refusal() {
     list_models(server.base(), None, Role::Chat).expect_err("the first surplus request");
     let err = list_models(server.base(), None, Role::Chat).expect_err("the second surplus request");
     assert!(
-        matches!(err, Error::Provider { status: 599 }),
+        matches!(err, Error::Provider { status: 599, .. }),
         "a second surplus request must still get the sentinel, not {err:?}"
     );
 }
@@ -425,21 +425,63 @@ fn a_key_check_that_cannot_read_the_balance_still_accepts_the_key() {
 
 #[test]
 fn no_failure_path_puts_the_key_into_the_message() {
+    // Task 3 review round 1, C1: a provider that rejects a malformed
+    // credential commonly echoes it back inside its own error message — the
+    // one path into this scan that used to be unguarded, because every case
+    // below it was chosen to satisfy the property rather than to break it.
+    // Re-cased too (`to_ascii_uppercase`), since a case-sensitive
+    // `contains(KEY)` would silently pass a leak that changed case, and a
+    // provider is under no obligation to echo a credential back verbatim.
     let failures = vec![
         Reply::status(401, r#"{"error":{"message":"nope"}}"#),
         Reply::status(429, "{}"),
         Reply::status(500, "{}"),
         Reply::ok("{ this is not json"),
+        Reply::status(
+            401,
+            &format!(r#"{{"error":{{"message":"invalid Authorization header: Bearer {KEY}"}}}}"#),
+        ),
+        Reply::status(
+            403,
+            &format!(
+                r#"{{"error":{{"message":"key {} is not permitted"}}}}"#,
+                KEY.to_ascii_uppercase()
+            ),
+        ),
     ];
     for reply in failures {
         let server = MockServer::new(vec![reply]);
         let err = check_key(server.base(), KEY).expect_err("must fail");
-        let rendered = format!("{err} / {err:?}");
+        let rendered = format!("{err} / {err:?}").to_ascii_lowercase();
         assert!(
-            !rendered.contains(KEY),
+            !rendered.contains(&KEY.to_ascii_lowercase()),
             "an error message is a log line, and this one carries the key: {rendered}"
         );
     }
+}
+
+/// Task 3 review round 1, C1 — the positive half of the property above: not
+/// just "the key is absent", but "the provider's explanation still arrives,
+/// with the key's own place in it marked rather than silently dropped".
+#[test]
+fn a_key_echoed_back_by_the_provider_is_redacted_not_dropped() {
+    let server = MockServer::new(vec![Reply::status(
+        401,
+        &format!(r#"{{"error":{{"message":"invalid Authorization header: Bearer {KEY}"}}}}"#),
+    )]);
+    let err = check_key(server.base(), KEY).expect_err("refused");
+    let rendered = err.to_string();
+    assert!(
+        !rendered
+            .to_ascii_lowercase()
+            .contains(&KEY.to_ascii_lowercase()),
+        "the key must not appear: {rendered}"
+    );
+    assert!(
+        rendered.contains("invalid Authorization header") && rendered.contains("[redacted]"),
+        "the rest of the provider's sentence must survive redaction, with the key's place in \
+         it marked rather than the whole message being dropped: {rendered}"
+    );
 }
 
 /// Task 3 review, item 1: a plain `#[serde(default)] Option<f64>` field only
@@ -510,4 +552,92 @@ fn a_refused_key_says_it_was_refused() {
         err.to_string().contains("refused"),
         "a refused key's message must say so: {err}"
     );
+}
+
+/// Task 3 review round 1, I3: `data: null` is valid JSON and a 200 — the
+/// provider accepted the key, and simply did not (or could not) state a
+/// balance in this reply. That must not fail the whole call the way it used
+/// to, over a shape problem one level below the fact this screen answers.
+#[test]
+fn a_null_data_on_a_successful_status_still_accepts_the_key() {
+    let server = MockServer::new(vec![Reply::ok(r#"{"data":null}"#)]);
+    let check = check_key(server.base(), KEY).expect("a 200 means the key works");
+    assert_eq!(check.credits_remaining, None);
+}
+
+/// Task 3 review round 1, I3, the other example named in review: an envelope
+/// whose `data` key is missing or renamed entirely — not just a field
+/// inside it — must read the same as `data: null` above, not as a reason to
+/// fail the call.
+#[test]
+fn a_missing_data_key_on_a_successful_status_still_accepts_the_key() {
+    let server = MockServer::new(vec![Reply::ok(r#"{"credits":{"total_credits":10.0}}"#)]);
+    let check = check_key(server.base(), KEY).expect("a 200 means the key works");
+    assert_eq!(check.credits_remaining, None);
+}
+
+/// Task 3 review round 1, Minor: `f64::from_str` accepts `"NaN"` and
+/// `"inf"`/`"infinity"` in any case, reachable here because the provider
+/// stated the balance as a JSON *string* — a number token this extreme
+/// (`1e999`) is not used below because `serde_json` itself refuses to parse
+/// it at all ("number out of range"), which already fails the whole body as
+/// `Malformed` and never reaches `Stated`; a string is the one shape that
+/// gets a non-finite value past JSON syntax and into `f64::from_str`. Both
+/// cases must read as "stated in a shape this build cannot use", the same as
+/// any other unreadable value — not as a balance that was successfully
+/// read, which would also make `KeyCheck`'s derived `PartialEq` stop being
+/// reflexive for a `NaN` balance (`NaN != NaN`).
+#[test]
+fn a_non_finite_balance_is_unreadable_not_a_number() {
+    for body in [
+        r#"{"data":{"total_credits":"NaN","total_usage":0}}"#,
+        r#"{"data":{"total_credits":"inf","total_usage":0}}"#,
+    ] {
+        let server = MockServer::new(vec![Reply::ok(body)]);
+        let check = check_key(server.base(), KEY).expect("a working key must still be accepted");
+        assert_eq!(
+            check.credits_remaining, None,
+            "a non-finite balance must read as unreadable, not as a number: body {body}"
+        );
+    }
+}
+
+/// Task 3 review round 1, Minor: the first cut at attaching the provider's
+/// explanation only ever checked it against `Unauthorised`, so a 403 —
+/// which can carry the exact same `{"error":{"message":…}}` shape as a 401
+/// — dropped the one sentence that would have told the user what to do.
+#[test]
+fn a_forbidden_key_also_carries_the_providers_own_explanation() {
+    let server = MockServer::new(vec![Reply::status(
+        403,
+        r#"{"error":{"message":"this key is scoped to a different organisation"}}"#,
+    )]);
+    let err = check_key(server.base(), KEY).expect_err("forbidden");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("this key is scoped to a different organisation"),
+        "a 403's explanation must reach the message too, not only a 401's: {rendered}"
+    );
+}
+
+/// Task 3 review round 1, Minor: `BodyUnreadable` is only worth trading away
+/// for a status `error_for_status` turns into a *specific* verdict for a key
+/// check (401/403/429). A 500 gains nothing from that trade — `Provider`
+/// is already the generic fallback whether or not the body could be read —
+/// so it must keep `detail`, which names *why* the read failed (a size cap
+/// or a timeout, say), rather than being silently discarded.
+#[test]
+fn a_body_that_never_finishes_on_a_500_keeps_its_detail() {
+    let server = MockServer::new(vec![Reply::truncated_status(500, r#"{"error":"#)]);
+    let err = check_key(server.base(), KEY).expect_err("must fail");
+    match &err {
+        Error::BodyUnreadable { status, detail } => {
+            assert_eq!(*status, 500, "got {err:?}");
+            assert!(
+                !detail.is_empty(),
+                "detail must not be thrown away: {err:?}"
+            );
+        }
+        other => panic!("expected BodyUnreadable to survive a 500, got {other:?}"),
+    }
 }
