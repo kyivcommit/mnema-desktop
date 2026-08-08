@@ -7,7 +7,7 @@
 
 mod catalogue;
 
-pub use catalogue::{MIN_CONTEXT_TOKENS, ModelEntry, Refusal, Role, models_from_json};
+pub use catalogue::{Catalogue, MIN_CONTEXT_TOKENS, ModelEntry, Refusal, Role, models_from_json};
 
 /// Where v1 goes. Not a configuration: v1 has one provider (spec §2.2).
 pub const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
