@@ -22,10 +22,11 @@ const FORBIDDEN: [&str; 2] = ["mnema-index", "mnema-secrets"];
 #[test]
 fn the_provider_crate_reaches_neither_the_database_nor_the_keychain() {
     // `-e normal` excludes dev- and build-dependencies, which is the right
-    // question here too: this crate's own tests may reasonably want something
-    // neither `mnema-index` nor `mnema-secrets` should be reached through
-    // `models_from_json` or whatever Task 2 adds. `--prefix none` gives one
-    // package per line, the same form the sibling test in `src-tauri` reads.
+    // question here: a dev-dependency — something this crate's own tests
+    // reasonably want, that neither `models_from_json` nor whatever Task 2
+    // adds ever compiles against — is not linked into anything that ships, so
+    // it must not trip this check. `--prefix none` gives one package per
+    // line, the same form the sibling test in `src-tauri` reads.
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)

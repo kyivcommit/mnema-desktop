@@ -10,7 +10,10 @@
 //! counted in `Catalogue::unreadable` rather than taking the rest of the list
 //! down with it. The point of `Refusal` is to show what cannot be used instead
 //! of hiding it; a parse failure that hides the whole page would undo that on
-//! the first odd record the provider ever sends.
+//! the first odd record the provider ever sends — and the same rule applies one
+//! level down, to a single field: a value this build cannot read must say so,
+//! never be folded into the same `None` a field that was simply never
+//! mentioned would produce (N1, review round 2).
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -69,15 +72,33 @@ pub enum Refusal {
         limit: i64,
         floor: i64,
     },
+    /// Neither `context_length` nor `top_provider.context_length` was present.
     NoStatedLimit,
-    /// The provider's answer had no `architecture` field at all — this code
-    /// was never told whether the model writes text, so it must not claim that
-    /// text is absent. Kept apart from `NoTextOutput` so that a provider who
-    /// renames or drops the field cannot make this code state, as a fact about
-    /// the model, something the provider never said (F3, review round 1).
+    /// At least one of `context_length` / `top_provider.context_length` was
+    /// present, but in a shape this build does not understand — a JSON number
+    /// with a fraction (`8192.0`, which `Number::as_i64` refuses even though it
+    /// is a whole number), a string that is not an integer, or anything else
+    /// neither field normally carries. Kept apart from `NoStatedLimit`, which
+    /// means the opposite: nothing was said at all. Before this variant
+    /// existed, a value here was read exactly like an absent one, so an
+    /// embedding model whose limit the provider stated — just not in a shape
+    /// this build parsed — greyed out with a reason that was false about the
+    /// provider (N1, review round 2). Carries the raw text so the shape that
+    /// confused this build is visible rather than swallowed.
+    LimitNotUnderstood {
+        raw: String,
+    },
+    /// Neither `architecture` nor, inside it, `output_modalities` was present
+    /// — this code was never told whether the model writes text, so it must
+    /// not claim that text is absent. Kept apart from `NoTextOutput` so that a
+    /// provider who renames or drops either field cannot make this code state,
+    /// as a fact about the model, something the provider never said (F3,
+    /// review round 1). The line is drawn at `output_modalities` itself, not
+    /// at `architecture`: a provider that states `architecture` but renames
+    /// `output_modalities` to something else must still read as "did not say",
+    /// not as "said, and text was not among it" (N2, review round 2).
     NoStatedOutputModalities,
-    /// The provider's `architecture.output_modalities` was stated, and text is
-    /// not among them.
+    /// `output_modalities` was stated, and text is not among them.
     NoTextOutput,
 }
 
@@ -110,8 +131,8 @@ struct Raw {
     id: String,
     #[serde(default)]
     name: Option<String>,
-    #[serde(default, deserialize_with = "flexible_i64")]
-    context_length: Option<i64>,
+    #[serde(default)]
+    context_length: Stated,
     #[serde(default)]
     pricing: Option<Pricing>,
     #[serde(default)]
@@ -128,34 +149,64 @@ struct Pricing {
 
 #[derive(Deserialize)]
 struct Architecture {
+    /// `Option`, not a bare `Vec` defaulting to empty: the empty case must be
+    /// told apart from the missing one, or a provider that renames this field
+    /// reads as "stated, and empty" instead of "never said" (N2, review round
+    /// 2). An explicit JSON `null` deserializes to `None` here for free — the
+    /// same as a missing key — where the old `Vec<String>` field failed to
+    /// deserialize `null` at all and took the whole record down with it.
     #[serde(default)]
-    output_modalities: Vec<String>,
+    output_modalities: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 struct TopProvider {
-    #[serde(default, deserialize_with = "flexible_i64")]
-    context_length: Option<i64>,
+    #[serde(default)]
+    context_length: Stated,
 }
 
-/// Reads a JSON number or a numeric string as an integer; any other shape —
-/// an object, an array, a bool, or a string that does not parse — becomes
-/// `None` rather than a deserialize error, so this field's odd shape does not
-/// take the whole record down with it (F4, review round 1).
-fn flexible_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(match Value::deserialize(deserializer)? {
-        Value::Number(n) => n.as_i64(),
-        Value::String(s) => s.parse::<i64>().ok(),
-        _ => None,
-    })
+/// A single field's own answer, before it is combined with a sibling field's:
+/// never mentioned, mentioned and read successfully, or mentioned in a shape
+/// this build does not understand. `context_length` and
+/// `top_provider.context_length` both deserialize into this rather than into
+/// a bare `Option<i64>`, so that "the provider said nothing" and "the provider
+/// said something this build could not parse" — a stray fraction, a unit
+/// suffix, anything past `i64` — are not silently folded into the same `None`
+/// (N1, review round 2).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum Stated {
+    #[default]
+    Absent,
+    Number(i64),
+    Unreadable(String),
 }
 
-/// The `f64` counterpart of [`flexible_i64`], for `pricing.prompt`, which the
-/// provider states as a string today but is not promised to keep stating that
-/// way.
+impl<'de> Deserialize<'de> for Stated {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        Ok(match &value {
+            Value::Null => Stated::Absent,
+            Value::Number(n) => n
+                .as_i64()
+                .map(Stated::Number)
+                .unwrap_or_else(|| Stated::Unreadable(value.to_string())),
+            Value::String(s) => s
+                .parse::<i64>()
+                .map(Stated::Number)
+                .unwrap_or_else(|_| Stated::Unreadable(value.to_string())),
+            _ => Stated::Unreadable(value.to_string()),
+        })
+    }
+}
+
+/// The `f64` counterpart of the numeric half of [`Stated`], kept separate and
+/// unchanged: N1 is scoped to the input limit, not to `pricing.prompt`, whose
+/// own honesty question (an unparseable price also reads as "price unknown"
+/// today) is recorded in the ledger for the final review rather than fixed
+/// here.
 fn flexible_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -167,9 +218,19 @@ where
     })
 }
 
-/// The input limit this product trusts.
-///
-/// The provider states this number twice per record, `context_length` and
+/// What `context_length` and `top_provider.context_length`, taken together,
+/// say about a record's actual input limit. A number either field could
+/// actually be read as always wins over reporting a problem — an unreadable
+/// sibling next to a real number costs nothing, the same leniency F4 already
+/// gives every other field — and `Unreadable` is reported only when nothing at
+/// all could be read but something was stated.
+enum Limit {
+    NotStated,
+    Known(i64),
+    Unreadable(String),
+}
+
+/// The provider states the input limit twice per record, `context_length` and
 /// `top_provider.context_length`, and does not promise they agree. Measured
 /// 2026-08-08 on the live list: among 400 chat models the two disagree in 31,
 /// `top_provider` the smaller every time; among the 33 embedding models and 6
@@ -177,15 +238,22 @@ where
 /// that would let a chunk through to a model that then truncates it, so this
 /// takes whichever of the two is smaller, or whichever exists when only one
 /// does (F5, review round 1).
-fn narrowest_limit(
-    context_length: Option<i64>,
-    top_provider_context_length: Option<i64>,
-) -> Option<i64> {
-    match (context_length, top_provider_context_length) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) | (None, Some(a)) => Some(a),
-        (None, None) => None,
+fn combined_limit(context_length: &Stated, top_provider_context_length: &Stated) -> Limit {
+    let numbers = [context_length, top_provider_context_length]
+        .into_iter()
+        .filter_map(|s| match s {
+            Stated::Number(n) => Some(*n),
+            _ => None,
+        });
+    if let Some(min) = numbers.min() {
+        return Limit::Known(min);
     }
+    for stated in [context_length, top_provider_context_length] {
+        if let Stated::Unreadable(raw) = stated {
+            return Limit::Unreadable(raw.clone());
+        }
+    }
+    Limit::NotStated
 }
 
 /// Parses the provider's answer and applies this product's own rules.
@@ -209,26 +277,39 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
             }
         };
 
-        let context_length = narrowest_limit(
-            raw.context_length,
-            raw.top_provider.as_ref().and_then(|tp| tp.context_length),
-        );
-        let architecture_stated = raw.architecture.is_some();
-        let writes_text = raw
+        let top_provider_limit: Stated = raw
+            .top_provider
+            .as_ref()
+            .map(|tp| tp.context_length.clone())
+            .unwrap_or_default();
+        let limit = combined_limit(&raw.context_length, &top_provider_limit);
+        let context_length = match &limit {
+            Limit::Known(n) => Some(*n),
+            Limit::NotStated | Limit::Unreadable(_) => None,
+        };
+
+        // The line "did the provider say?" is drawn at `output_modalities`
+        // itself (N2, review round 2): a provider that states `architecture`
+        // but drops or renames `output_modalities` must read the same as one
+        // that never mentioned `architecture` at all.
+        let output_modalities = raw
             .architecture
             .as_ref()
-            .is_some_and(|a| a.output_modalities.iter().any(|m| m == "text"));
+            .and_then(|a| a.output_modalities.as_ref());
+        let output_modalities_stated = output_modalities.is_some();
+        let writes_text = output_modalities.is_some_and(|m| m.iter().any(|x| x == "text"));
 
         let refusal = match role {
-            Role::Embedding => match context_length {
-                Some(limit) if limit < MIN_CONTEXT_TOKENS => Some(Refusal::InputTooSmall {
+            Role::Embedding => match limit {
+                Limit::Known(limit) if limit < MIN_CONTEXT_TOKENS => Some(Refusal::InputTooSmall {
                     limit,
                     floor: MIN_CONTEXT_TOKENS,
                 }),
-                None => Some(Refusal::NoStatedLimit),
-                Some(_) => None,
+                Limit::Known(_) => None,
+                Limit::NotStated => Some(Refusal::NoStatedLimit),
+                Limit::Unreadable(raw) => Some(Refusal::LimitNotUnderstood { raw }),
             },
-            Role::Chat if !architecture_stated => Some(Refusal::NoStatedOutputModalities),
+            Role::Chat if !output_modalities_stated => Some(Refusal::NoStatedOutputModalities),
             Role::Chat if !writes_text => Some(Refusal::NoTextOutput),
             Role::Chat | Role::Rerank => None,
         };

@@ -126,6 +126,66 @@ fn a_chat_model_with_no_stated_architecture_is_refused_for_not_saying_not_for_no
 }
 
 #[test]
+fn a_stated_limit_this_build_cannot_read_is_not_the_same_as_no_limit_at_all() {
+    // 8192.0 is a JSON number with a fraction; serde_json stores that as an
+    // f64, and Number::as_i64 refuses it even though 8192.0 is a whole number.
+    // Before this fix (review round 2, N1) that shape fell into the same
+    // `None` an absent field produces, so a limit the provider DID state
+    // greyed out with "no limit stated" — a sentence false about the
+    // provider.
+    let json = r#"{"data":[{"id":"vendor/fractional-limit","name":"Fractional",
+        "context_length":8192.0,"architecture":{"output_modalities":["embeddings"]}}]}"#;
+    let catalogue = models_from_json(Role::Embedding, json).expect("parses");
+    assert_eq!(
+        find(&catalogue.entries, "vendor/fractional-limit").refusal,
+        Some(Refusal::LimitNotUnderstood {
+            raw: "8192.0".to_string()
+        }),
+        "a limit that was stated, just not in a shape this build parses, must not read as \
+         though nothing was stated at all"
+    );
+}
+
+#[test]
+fn an_architecture_present_with_no_output_modalities_field_is_not_stated_either() {
+    // The line "did the provider say?" belongs to `output_modalities` itself,
+    // not to its container. A provider that states `architecture` but renames
+    // or drops `output_modalities` must read the same as one that never
+    // mentioned `architecture` at all (review round 2, N2) — not as "said,
+    // and text was not among it", which `#[serde(default)]` on a bare `Vec`
+    // used to produce here.
+    let json = r#"{"data":[{"id":"vendor/half-stated","name":"Half",
+        "architecture":{"modality":"text->text"}}]}"#;
+    let catalogue = models_from_json(Role::Chat, json).expect("parses");
+    assert_eq!(
+        find(&catalogue.entries, "vendor/half-stated").refusal,
+        Some(Refusal::NoStatedOutputModalities),
+        "architecture was stated, but output_modalities inside it was not — that must read \
+         as unstated, not as stated-and-empty"
+    );
+}
+
+#[test]
+fn an_explicit_null_output_modalities_is_unstated_rather_than_unreadable() {
+    // Closes a Minor the same fix uncovers: with output_modalities typed as a
+    // bare `Vec<String>`, an explicit JSON null failed to deserialize into it
+    // at all and took the whole record down to `unreadable`. `Option<Vec<_>>`
+    // reads null as None for free.
+    let json = r#"{"data":[{"id":"vendor/nulled","name":"Nulled",
+        "architecture":{"output_modalities":null}}]}"#;
+    let catalogue = models_from_json(Role::Chat, json).expect("parses");
+    assert_eq!(
+        catalogue.unreadable, 0,
+        "a null output_modalities must not cost the record"
+    );
+    assert_eq!(
+        find(&catalogue.entries, "vendor/nulled").refusal,
+        Some(Refusal::NoStatedOutputModalities),
+        "an explicit null says the same as an absent field: nothing was stated"
+    );
+}
+
+#[test]
 fn an_unknown_field_is_ignored_and_a_missing_price_is_not_an_error() {
     let json = r#"{"data":[
         {"id":"vendor/new","name":"New","context_length":32000,
