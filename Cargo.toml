@@ -8,6 +8,7 @@ members = [
     "crates/mnema-extract",
     "crates/mnema-index",
     "crates/mnema-ingest",
+    "crates/mnema-mock-provider",
     "crates/mnema-pool",
     "crates/mnema-provider",
     "crates/mnema-secrets",
@@ -67,3 +68,14 @@ tempfile = "3"
 # every node's line and column range in the source, so a block's text can be a
 # slice of the file rather than a re-rendering of the parse tree (D38).
 comrak = "0.54.0"
+# The one HTTP client in the product, and the first (D68 removed the last
+# transitive one). Measured 2026-08-08 against `reqwest` 0.13 on this machine,
+# release build, stripped: +1.86 MB and 39 crates against +5.01 MB and 96, for
+# an installer D21 budgeted at ~15 MB.
+#
+# `platform-verifier` is not a preference: it takes the trust roots from the
+# operating system. With roots compiled into the binary, a user behind a
+# TLS-inspecting corporate proxy gets a handshake failure and no way to act on
+# it, which is a support case this product cannot answer.
+ureq = { version = "3.3", features = ["json", "platform-verifier"] }
+mnema-mock-provider = { path = "crates/mnema-mock-provider" }

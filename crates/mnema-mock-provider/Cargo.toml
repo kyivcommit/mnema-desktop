@@ -1,0 +1,10 @@
+[package]
+name = "mnema-mock-provider"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# Test support, and only ever a dev-dependency of the two packages that use it
+# (`mnema-provider`, `mnema-desktop`). Nothing depends on it normally, so it
+# never reaches a shipped binary and never appears in `cargo tree -e normal`.
+[dependencies]

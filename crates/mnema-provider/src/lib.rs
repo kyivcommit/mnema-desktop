@@ -6,11 +6,39 @@
 //! base URL rather than as another code path.
 
 mod catalogue;
+mod http;
 
-pub use catalogue::{Catalogue, MIN_CONTEXT_TOKENS, ModelEntry, Refusal, Role, models_from_json};
+pub use catalogue::{
+    Catalogue, MIN_CONTEXT_TOKENS, ModelEntry, Refusal, Role, UnreadableRecord, models_from_json,
+};
 
 /// Where v1 goes. Not a configuration: v1 has one provider (spec §2.2).
 pub const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
+
+/// Asks the provider for one role's models. The key is optional because this
+/// endpoint is public — measured 2026-08-08 — which is what lets the choice be
+/// shown before an account exists (spec §2.3).
+///
+/// An empty catalogue (`{"data":[]}`) is a success, not a failure. Whether
+/// zero selectable models is actionable is a question for whoever renders the
+/// result — the shell sees the full `Catalogue`, including `unreadable`, and
+/// can tell "the provider genuinely has none" from "something upstream ate
+/// them" far better than this function can guess. Turning an otherwise
+/// well-formed, on-topic answer into an error here would hide it instead of
+/// reporting it (Task 2 review, item 3).
+pub fn list_models(base: &str, key: Option<&str>, role: Role) -> Result<Catalogue, Error> {
+    let path = match role.query() {
+        Some(filter) => format!("/models?output_modalities={filter}"),
+        None => "/models".to_string(),
+    };
+    let (status, body) = http::get(base, &path, key)?;
+    match status {
+        200 => models_from_json(role, &body),
+        401 | 403 => Err(Error::Unauthorised),
+        429 => Err(Error::RateLimited),
+        other => Err(Error::Provider { status: other }),
+    }
+}
 
 /// What a call to the provider can fail with.
 ///

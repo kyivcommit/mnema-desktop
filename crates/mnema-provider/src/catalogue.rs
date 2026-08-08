@@ -119,6 +119,29 @@ pub enum Refusal {
 pub struct Catalogue {
     pub entries: Vec<ModelEntry>,
     pub unreadable: usize,
+    /// One entry per record counted in `unreadable`, in the order the provider
+    /// sent them. `unreadable` is unchanged and stays a plain count; this is
+    /// what turns it from a bare number into something a bug report can act
+    /// on (Task 2 review, item 4) — 400 live models and "3 records
+    /// unreadable" names nothing to go look at without it.
+    pub unreadable_records: Vec<UnreadableRecord>,
+}
+
+/// Identifies one record `models_from_json` could not turn into a `ModelEntry`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreadableRecord {
+    /// The record's own `id`, when it carried one as a JSON string even though
+    /// some other field kept it from becoming a `ModelEntry`. Read directly off
+    /// the raw value before the failed decode, so a broken `pricing` or
+    /// `architecture` block does not also cost the one field that would have
+    /// named the record.
+    pub id: Option<String>,
+    /// The record's position in the provider's list (0-based). Kept even when
+    /// `id` could not be read — "something better than nothing": a position at
+    /// least narrows a live list of hundreds down to one (Task 2 review, item
+    /// 4).
+    pub index: usize,
 }
 
 #[derive(Deserialize)]
@@ -304,17 +327,45 @@ fn combined_limit(context_length: &Stated, top_provider_context_length: &Stated)
 /// telling anyone — while a *missing* field this code reads is a `None` the
 /// rules then have to answer for, never a silent default.
 pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
-    let listing: Listing = serde_json::from_str(json)
-        .map_err(|_| Error::Malformed("the model list is not the object this code expects"))?;
+    let listing: Listing = serde_json::from_str(json).map_err(|e| {
+        // Three shapes reach this from the network, and they are three
+        // different user problems (Task 2 review, item 2): an HTML error page
+        // from a captive portal or a proxy is not JSON at all (`Syntax`); a
+        // response cut off mid-transfer stops before the JSON closes (`Eof`);
+        // and a provider error envelope (`{"error":{"message":"..."}}`) is
+        // valid JSON that simply is not this shape, because it has no `data`
+        // field (`Data`). Telling them apart is the difference between "check
+        // your network" and "check your account".
+        Error::Malformed(match e.classify() {
+            serde_json::error::Category::Syntax => {
+                "the provider's answer is not JSON at all — likely a proxy or gateway page, \
+                 not the provider itself"
+            }
+            serde_json::error::Category::Eof => {
+                "the provider's answer stopped in the middle of the JSON — a truncated response"
+            }
+            serde_json::error::Category::Data | serde_json::error::Category::Io => {
+                "the provider's answer is JSON, but not the model-list shape this code expects"
+            }
+        })
+    })?;
 
     let mut entries = Vec::with_capacity(listing.data.len());
     let mut unreadable = 0usize;
+    let mut unreadable_records = Vec::new();
 
-    for value in listing.data {
+    for (index, value) in listing.data.into_iter().enumerate() {
+        // Read `id` off the raw value before it is consumed below: a record
+        // that fails to become a `Raw` because of some other field (a
+        // `pricing` or `architecture` block in an unexpected shape) still had
+        // a perfectly good id, and that id is worth keeping (Task 2 review,
+        // item 4).
+        let id = value.get("id").and_then(Value::as_str).map(str::to_string);
         let raw: Raw = match serde_json::from_value(value) {
             Ok(raw) => raw,
             Err(_) => {
                 unreadable += 1;
+                unreadable_records.push(UnreadableRecord { id, index });
                 continue;
             }
         };
@@ -368,5 +419,6 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
     Ok(Catalogue {
         entries,
         unreadable,
+        unreadable_records,
     })
 }

@@ -1,7 +1,9 @@
 //! Розбір списку моделей провайдера. Фікстури — справжні відповіді від
 //! 2026-08-08; команди, якими їх знято, у Task 1 плану.
 
-use mnema_provider::{MIN_CONTEXT_TOKENS, ModelEntry, Refusal, Role, models_from_json};
+use mnema_provider::{
+    Error, MIN_CONTEXT_TOKENS, ModelEntry, Refusal, Role, UnreadableRecord, models_from_json,
+};
 
 const EMBEDDINGS: &str = include_str!("fixtures/embeddings-2026-08-08.json");
 const RERANK: &str = include_str!("fixtures/rerank-2026-08-08.json");
@@ -342,6 +344,74 @@ fn a_record_with_no_usable_id_is_counted_as_unreadable_rather_than_dropped_silen
         None,
         "an odd-shaped context_length must only cost that field, not the whole record"
     );
+    assert_eq!(
+        catalogue.unreadable_records,
+        vec![UnreadableRecord { id: None, index: 2 }],
+        "the one record that could not be read at all has no id, so its position is the only \
+         identity left to keep"
+    );
+}
+
+#[test]
+fn an_unreadable_record_that_still_states_an_id_is_identified_by_it_not_only_by_position() {
+    // Task 2 review, item 4, the other direction: `pricing` here is a string,
+    // not the object `Raw::pricing` requires, so the whole record fails to
+    // deserialize — but its `id` was read straight off the raw JSON before
+    // that failure, so a genuinely readable id must not be thrown away along
+    // with the rest of a record that happened to be broken elsewhere.
+    let json = r#"{"data":[
+        {"id":"vendor/bad-shape","name":"Bad","pricing":"not an object",
+         "architecture":{"output_modalities":["text"]}}
+    ]}"#;
+    let catalogue = models_from_json(Role::Chat, json).expect("parses");
+    assert_eq!(
+        catalogue.entries.len(),
+        0,
+        "the record could not be turned into a model"
+    );
+    assert_eq!(catalogue.unreadable, 1);
+    assert_eq!(
+        catalogue.unreadable_records,
+        vec![UnreadableRecord {
+            id: Some("vendor/bad-shape".to_string()),
+            index: 0
+        }],
+        "the id survives even though the record as a whole did not parse"
+    );
+}
+
+#[test]
+fn an_html_error_page_a_json_error_envelope_and_a_truncated_body_are_told_apart() {
+    // Task 2 review, item 2: three shapes reach `models_from_json` through the
+    // network, and each is a different problem for the user. An HTML error
+    // page is a proxy or captive portal answering instead of the provider; a
+    // JSON error envelope is the provider itself, just not with a model list;
+    // a truncated body is a connection that ended before the JSON closed.
+    // Before this fix all three fell into the same one sentence, discarding
+    // exactly the distinction a bug report needs.
+    let html = malformed_reason("<html><body>502 Bad Gateway</body></html>");
+    let envelope = malformed_reason(r#"{"error":{"message":"invalid api key"}}"#);
+    let truncated = malformed_reason(r#"{"data":[{"id":"vendor/x""#);
+
+    assert_ne!(
+        html, envelope,
+        "a proxy's HTML page is not the provider's own error envelope"
+    );
+    assert_ne!(
+        html, truncated,
+        "a proxy's HTML page is not a body that stopped mid-transfer"
+    );
+    assert_ne!(
+        envelope, truncated,
+        "the provider's own error envelope is not a body that stopped mid-transfer"
+    );
+}
+
+fn malformed_reason(body: &str) -> String {
+    match models_from_json(Role::Chat, body) {
+        Err(Error::Malformed(reason)) => reason.to_string(),
+        other => panic!("expected Malformed, got {other:?}"),
+    }
 }
 
 #[test]
