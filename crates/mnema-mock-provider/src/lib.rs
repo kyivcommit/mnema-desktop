@@ -15,6 +15,12 @@ pub struct Reply {
     pub body: String,
     /// Answer this late. `Duration::ZERO` for everything except the timeout case.
     pub delay: Duration,
+    /// Bytes to add to the declared `content-length` beyond `body.len()`,
+    /// without ever writing them (spec review round 1, item A). Zero for
+    /// every constructor except `truncated`, which is the one reply that
+    /// lies about its own length on purpose — the real wire shape of a
+    /// connection that stops mid-transfer.
+    declared_extra: usize,
 }
 
 impl Reply {
@@ -23,6 +29,7 @@ impl Reply {
             status: 200,
             body: body.to_string(),
             delay: Duration::ZERO,
+            declared_extra: 0,
         }
     }
     pub fn status(status: u16, body: &str) -> Self {
@@ -30,6 +37,7 @@ impl Reply {
             status,
             body: body.to_string(),
             delay: Duration::ZERO,
+            declared_extra: 0,
         }
     }
     pub fn slow(seconds: u64) -> Self {
@@ -37,6 +45,24 @@ impl Reply {
             status: 200,
             body: "{}".into(),
             delay: Duration::from_secs(seconds),
+            declared_extra: 0,
+        }
+    }
+
+    /// A `200` whose `content-length` promises more bytes than the connection
+    /// ever sends before closing — the real wire shape of a response cut off
+    /// mid-transfer (spec review round 1, item A). This is not the same thing
+    /// as a `body` that merely fails to parse as JSON: that shape is fully
+    /// received and only wrong in content, while this one is never fully
+    /// received at all, and a client reading a length-delimited body errors
+    /// out on the read rather than returning the partial bytes (see
+    /// `mnema_provider::Error::BodyUnreadable`).
+    pub fn truncated(body: &str) -> Self {
+        Self {
+            status: 200,
+            body: body.to_string(),
+            delay: Duration::ZERO,
+            declared_extra: 64,
         }
     }
 }
@@ -47,26 +73,41 @@ pub struct MockServer {
 }
 
 impl MockServer {
-    /// Answers `replies` in order, one per connection.
+    /// Answers `replies` in order, one per connection. A request past the end
+    /// of `replies` does not hang and does not go unanswered (Task 2 review
+    /// round 1): `listener.incoming().zip(replies)` used to simply stop
+    /// accepting once `replies` ran out, which left a test that accidentally
+    /// made one call too many to either hang or pass for a reason that had
+    /// nothing to do with what it claimed to test. Past the end, the server
+    /// answers with a status no real provider or proxy sends and a body that
+    /// names the mistake, so that test fails loudly instead.
     pub fn new(replies: Vec<Reply>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a port");
         let port = listener.local_addr().expect("read the port").port();
         let (tx, seen): (Sender<String>, Receiver<String>) = channel();
 
         thread::spawn(move || {
-            for (stream, reply) in listener.incoming().zip(replies) {
+            let mut replies = replies.into_iter();
+            for (index, stream) in listener.incoming().enumerate() {
                 let mut stream = stream.expect("accept");
                 let request = read_request(&mut stream);
                 let _ = tx.send(request);
-                thread::sleep(reply.delay);
-                let head = format!(
-                    "HTTP/1.1 {} MOCK\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\nconnection: close\r\n\r\n",
-                    reply.status,
-                    reply.body.len()
-                );
-                let _ = stream.write_all(head.as_bytes());
-                let _ = stream.write_all(reply.body.as_bytes());
+                match replies.next() {
+                    Some(reply) => {
+                        thread::sleep(reply.delay);
+                        write_reply(&mut stream, reply.status, &reply.body, reply.declared_extra);
+                    }
+                    None => write_reply(
+                        &mut stream,
+                        599,
+                        &format!(
+                            "mnema-mock-provider: request #{index} arrived with no Reply \
+                             configured for it — the test sent more requests than it prepared \
+                             replies for"
+                        ),
+                        0,
+                    ),
+                }
             }
         });
 
@@ -87,6 +128,22 @@ impl MockServer {
             .recv_timeout(Duration::from_secs(10))
             .expect("the client made no request")
     }
+}
+
+/// Writes a status line, headers and `body`, declaring `content-length` as
+/// `body.len() + declared_extra` — but only ever writing `body`. When
+/// `declared_extra` is nonzero, the promised bytes never arrive and the
+/// connection simply closes when this function returns, which is what a
+/// response cut off mid-transfer looks like on the wire (spec review round 1,
+/// item A).
+fn write_reply(stream: &mut TcpStream, status: u16, body: &str, declared_extra: usize) {
+    let head = format!(
+        "HTTP/1.1 {status} MOCK\r\ncontent-type: application/json\r\n\
+         content-length: {}\r\nconnection: close\r\n\r\n",
+        body.len() + declared_extra
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
 }
 
 fn read_request(stream: &mut TcpStream) -> String {

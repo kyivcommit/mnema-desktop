@@ -92,7 +92,10 @@ pub enum Refusal {
     /// `raw` is the one payload in this enum the crate did not compute — it is
     /// provider text, capped to `MAX_RAW_LEN` so a malformed value cannot
     /// become an unbounded label in a picker (I2, review round 3), and
-    /// whoever renders it downstream must treat it as untrusted.
+    /// whoever renders it downstream must treat it as untrusted. If this ever
+    /// reaches a log line, format it with `{:?}`, never `{}` (Task 2 review
+    /// round 1, spec item B): a newline inside it would cut the line in half
+    /// and let provider text impersonate a log entry.
     LimitNotUnderstood {
         raw: String,
     },
@@ -131,17 +134,39 @@ pub struct Catalogue {
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnreadableRecord {
-    /// The record's own `id`, when it carried one as a JSON string even though
-    /// some other field kept it from becoming a `ModelEntry`. Read directly off
-    /// the raw value before the failed decode, so a broken `pricing` or
-    /// `architecture` block does not also cost the one field that would have
-    /// named the record.
-    pub id: Option<String>,
+    /// The record's own `id`, read directly off the raw value before the
+    /// failed decode, so a broken `pricing` or `architecture` block elsewhere
+    /// in the record does not also cost the one field that would have named
+    /// it.
+    pub id: RecordId,
     /// The record's position in the provider's list (0-based). Kept even when
-    /// `id` could not be read — "something better than nothing": a position at
-    /// least narrows a live list of hundreds down to one (Task 2 review, item
-    /// 4).
+    /// `id` is `RecordId::Absent` — "something better than nothing": a
+    /// position at least narrows a live list of hundreds down to one (Task 2
+    /// review, item 4).
     pub index: usize,
+}
+
+/// What a record's `id` field said about itself, before the record's shape
+/// decided whether it could become a `ModelEntry`. Three states, not folded
+/// together (Task 2 review round 1, F4): no `id` key at all is a different
+/// fact from an `id` key that named something which was not a JSON string —
+/// `{"id":12345}` did say something, just not in the one shape `Raw::id`
+/// accepts, and reporting that record as "stated no id" would be false about
+/// the provider. The same distinction `Stated` draws for `context_length`,
+/// one field over.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum RecordId {
+    /// No `id` key in the record, or an explicit JSON `null` — the same
+    /// "nothing was said" this crate reads a missing key as everywhere else.
+    Absent,
+    /// An `id` key was present, but its value was not a JSON string. `raw` is
+    /// capped the same way `Stated::Unreadable` caps a value it cannot read
+    /// (`MAX_RAW_LEN`), and it is provider text: format it with `{:?}`, never
+    /// `{}`, if it is ever logged (Task 2 review round 1, spec item B).
+    NotAString { raw: String },
+    /// The record carried an `id` this build could read.
+    Known { id: String },
 }
 
 #[derive(Deserialize)]
@@ -359,8 +384,15 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
         // that fails to become a `Raw` because of some other field (a
         // `pricing` or `architecture` block in an unexpected shape) still had
         // a perfectly good id, and that id is worth keeping (Task 2 review,
-        // item 4).
-        let id = value.get("id").and_then(Value::as_str).map(str::to_string);
+        // item 4). `null` reads as `Absent`, matching `Stated`'s own rule for
+        // an explicit null a few fields over.
+        let id = match value.get("id") {
+            None | Some(Value::Null) => RecordId::Absent,
+            Some(Value::String(s)) => RecordId::Known { id: s.clone() },
+            Some(other) => RecordId::NotAString {
+                raw: cap_raw(other.to_string()),
+            },
+        };
         let raw: Raw = match serde_json::from_value(value) {
             Ok(raw) => raw,
             Err(_) => {

@@ -22,15 +22,25 @@ fn the_role_decides_the_query_and_the_key_travels_in_a_header() {
     .expect("call");
 
     let request = server.request();
+    let request_line = request.lines().next().unwrap_or_default();
     assert!(
-        request.contains("output_modalities=embeddings"),
+        request_line.contains("output_modalities=embeddings"),
         "the embedding list is a different query from the chat list: {request}"
     );
     assert!(
         request
             .to_ascii_lowercase()
             .contains("authorization: bearer test-key-not-a-real-one"),
-        "the key must travel in the header, not in the query string: {request}"
+        "the key must travel in the header: {request}"
+    );
+    // The header assertion above passes whether or not the key ALSO leaked
+    // into the query string — it only checks the header is present (Task 2
+    // review round 1, cheap correction). The request line is the one place a
+    // query-string leak would show up.
+    assert!(
+        !request_line.contains("test-key-not-a-real-one"),
+        "the key must travel only in the header, never in the request line/query string: \
+         {request_line}"
     );
 }
 
@@ -50,6 +60,15 @@ fn silence_becomes_a_transport_error_rather_than_a_hang() {
     let started = std::time::Instant::now();
     let err = list_models(server.base(), None, Role::Rerank).expect_err("must give up");
     assert!(matches!(err, Error::Transport(_)), "got {err:?}");
+    // Both sides matter (Task 2 review round 1, cheap correction): an upper
+    // bound alone is satisfied by a timeout of 100 ms, which would give up
+    // long before the 30 s this crate promises and would still pass here.
+    assert!(
+        started.elapsed() > Duration::from_secs(25),
+        "a timeout much shorter than the configured 30 s would still pass the upper-bound \
+         check alone, took {:?}",
+        started.elapsed()
+    );
     assert!(
         started.elapsed() < Duration::from_secs(45),
         "the timeout must be shorter than the user's patience"
@@ -153,5 +172,105 @@ fn a_captive_portal_page_reaches_parsing_and_is_named_for_what_it_is() {
              {reason}"
         ),
         other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+/// Task 2 review round 1, mock crate: `listener.incoming().zip(replies)` used
+/// to simply stop accepting once `replies` ran out, so a test that
+/// accidentally made one call too many either hung waiting for a connection
+/// nothing would ever accept, or — depending on OS timing — got a fast
+/// connection failure that could be mistaken for the test's own expected
+/// error. `599` is a status no real provider or proxy sends, so a call past
+/// the end of the configured replies now fails in a way that cannot be
+/// mistaken for anything else.
+#[test]
+fn a_request_past_the_configured_replies_fails_loudly_instead_of_hanging() {
+    let server = MockServer::new(vec![Reply::ok(r#"{"data":[]}"#)]);
+    list_models(server.base(), None, Role::Chat).expect("the one configured reply");
+    let err = list_models(server.base(), None, Role::Chat)
+        .expect_err("a second call with no reply configured must not succeed");
+    assert!(
+        matches!(err, Error::Provider { status: 599 }),
+        "got {err:?}"
+    );
+}
+
+/// Task 2 review round 1, F3: before this round, no test in the whole
+/// workspace ever sent a non-200 through `list_models`. `Reply::status` was
+/// unused; swapping the `Unauthorised` and `RateLimited` arms, or deleting
+/// `http_status_as_error(false)` entirely, both left the suite green. This
+/// test doubles as the pin the review asked for: with
+/// `http_status_as_error(false)` removed, `ureq` treats a non-2xx as a
+/// transport error, so `matches!(err, Error::Unauthorised)` — not a looser
+/// check that would also accept `Error::Transport` — is what turns red on
+/// that mutation (recorded in the report).
+#[test]
+fn a_401_with_a_key_says_the_key_was_refused() {
+    let server = MockServer::new(vec![Reply::status(401, "")]);
+    let err = list_models(server.base(), Some("test-key-not-a-real-one"), Role::Chat)
+        .expect_err("401 must fail");
+    assert!(matches!(err, Error::Unauthorised), "got {err:?}");
+}
+
+/// Task 2 review round 1, F2: a 401 on a call that sent no key is not a
+/// credential being refused — there was no credential — it is the provider
+/// now requiring one for an endpoint this build calls anonymously.
+#[test]
+fn a_401_without_a_key_says_the_endpoint_now_requires_one() {
+    let server = MockServer::new(vec![Reply::status(401, "")]);
+    let err = list_models(server.base(), None, Role::Chat).expect_err("401 must fail");
+    assert!(matches!(err, Error::KeyRequired), "got {err:?}");
+}
+
+#[test]
+fn a_403_with_a_key_says_the_key_was_refused() {
+    let server = MockServer::new(vec![Reply::status(403, "")]);
+    let err = list_models(server.base(), Some("test-key-not-a-real-one"), Role::Chat)
+        .expect_err("403 must fail");
+    assert!(matches!(err, Error::Unauthorised), "got {err:?}");
+}
+
+/// Task 2 review round 1, F2: anonymous rate limiting on a public endpoint is
+/// real, so the message must not claim a key was involved when none was sent.
+#[test]
+fn a_429_is_rate_limited_without_naming_a_key() {
+    let server = MockServer::new(vec![Reply::status(429, "")]);
+    let err = list_models(server.base(), None, Role::Chat).expect_err("429 must fail");
+    assert!(matches!(err, Error::RateLimited), "got {err:?}");
+    assert!(
+        !err.to_string().to_ascii_lowercase().contains("key"),
+        "a rate limit with no key sent must not blame one: {err}"
+    );
+}
+
+#[test]
+fn a_500_is_a_provider_error_naming_its_status() {
+    let server = MockServer::new(vec![Reply::status(500, "")]);
+    let err = list_models(server.base(), None, Role::Chat).expect_err("500 must fail");
+    assert!(
+        matches!(err, Error::Provider { status: 500 }),
+        "got {err:?}"
+    );
+}
+
+/// Spec review round 1, item A: inherited item 2's third case — a truncated
+/// response — was closed at the parser (`models_from_json`'s `Eof` branch)
+/// but never reached on the real wire, because a length-delimited body that
+/// stops early fails during the body read itself (F1), before parsing ever
+/// starts. `Reply::truncated` gives the mock server the ability to produce
+/// that shape for real: a `content-length` that promises more bytes than the
+/// connection ever sends before closing.
+#[test]
+fn a_body_that_stops_mid_transfer_is_named_with_its_status_preserved() {
+    let server = MockServer::new(vec![Reply::truncated(r#"{"data":[{"id":"vendor/x""#)]);
+    let err = list_models(server.base(), None, Role::Chat).expect_err("body never completed");
+    match err {
+        Error::BodyUnreadable { status, .. } => {
+            assert_eq!(
+                status, 200,
+                "the status was read successfully before the body failed"
+            )
+        }
+        other => panic!("expected BodyUnreadable, got {other:?}"),
     }
 }

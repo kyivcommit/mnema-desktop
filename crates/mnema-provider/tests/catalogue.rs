@@ -2,7 +2,8 @@
 //! 2026-08-08; команди, якими їх знято, у Task 1 плану.
 
 use mnema_provider::{
-    Error, MIN_CONTEXT_TOKENS, ModelEntry, Refusal, Role, UnreadableRecord, models_from_json,
+    Error, MIN_CONTEXT_TOKENS, ModelEntry, RecordId, Refusal, Role, UnreadableRecord,
+    models_from_json,
 };
 
 const EMBEDDINGS: &str = include_str!("fixtures/embeddings-2026-08-08.json");
@@ -346,7 +347,10 @@ fn a_record_with_no_usable_id_is_counted_as_unreadable_rather_than_dropped_silen
     );
     assert_eq!(
         catalogue.unreadable_records,
-        vec![UnreadableRecord { id: None, index: 2 }],
+        vec![UnreadableRecord {
+            id: RecordId::Absent,
+            index: 2
+        }],
         "the one record that could not be read at all has no id, so its position is the only \
          identity left to keep"
     );
@@ -373,11 +377,42 @@ fn an_unreadable_record_that_still_states_an_id_is_identified_by_it_not_only_by_
     assert_eq!(
         catalogue.unreadable_records,
         vec![UnreadableRecord {
-            id: Some("vendor/bad-shape".to_string()),
+            id: RecordId::Known {
+                id: "vendor/bad-shape".to_string()
+            },
             index: 0
         }],
         "the id survives even though the record as a whole did not parse"
     );
+}
+
+#[test]
+fn an_unreadable_record_whose_id_is_present_but_not_a_string_is_told_apart_from_no_id_at_all() {
+    // Task 2 review round 1, F4: `{"id":12345}` is not the same fact as "no
+    // id key at all". The provider did name something for this record, just
+    // not in the one shape `Raw::id: String` accepts — folding it into
+    // `RecordId::Absent` would report "record 0 stated no id", which is false
+    // about the provider, the same fold review round 2's N1 refused one field
+    // over for `context_length`.
+    let json = r#"{"data":[
+        {"id":12345,"name":"Numeric id","architecture":{"output_modalities":["text"]}}
+    ]}"#;
+    let catalogue = models_from_json(Role::Chat, json).expect("parses");
+    assert_eq!(
+        catalogue.entries.len(),
+        0,
+        "an id that is not a string cannot name a model"
+    );
+    assert_eq!(catalogue.unreadable, 1);
+    match &catalogue.unreadable_records[0].id {
+        RecordId::NotAString { raw } => {
+            assert_eq!(
+                raw, "12345",
+                "the id that confused this build should still be nameable"
+            )
+        }
+        other => panic!("expected NotAString, got {other:?}"),
+    }
 }
 
 #[test]

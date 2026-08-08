@@ -9,7 +9,8 @@ mod catalogue;
 mod http;
 
 pub use catalogue::{
-    Catalogue, MIN_CONTEXT_TOKENS, ModelEntry, Refusal, Role, UnreadableRecord, models_from_json,
+    Catalogue, MIN_CONTEXT_TOKENS, ModelEntry, RecordId, Refusal, Role, UnreadableRecord,
+    models_from_json,
 };
 
 /// Where v1 goes. Not a configuration: v1 has one provider (spec §2.2).
@@ -34,7 +35,14 @@ pub fn list_models(base: &str, key: Option<&str>, role: Role) -> Result<Catalogu
     let (status, body) = http::get(base, &path, key)?;
     match status {
         200 => models_from_json(role, &body),
-        401 | 403 => Err(Error::Unauthorised),
+        // A key that was sent and refused is a different fact from an
+        // endpoint that now demands one nobody sent (Task 2 review round 1,
+        // F2): the first names the credential, the second names a change on
+        // the provider's side that has nothing to do with what the user
+        // typed. `list_models` is the one place that knows whether a key was
+        // sent at all, so the split has to happen here, not in `Error`.
+        401 | 403 if key.is_some() => Err(Error::Unauthorised),
+        401 | 403 => Err(Error::KeyRequired),
         429 => Err(Error::RateLimited),
         other => Err(Error::Provider { status: other }),
     }
@@ -52,14 +60,32 @@ pub enum Error {
     Transport(String),
     #[error("the key was refused")]
     Unauthorised,
+    /// 401/403 on a call that sent no key at all (Task 2 review round 1, F2):
+    /// not a credential problem, since there was no credential — the
+    /// provider now requires one for an endpoint this build calls anonymously.
+    #[error("this endpoint now requires a key, and none was sent")]
+    KeyRequired,
     #[error("no model named {0}, or it does not make embeddings")]
     NoSuchModel(String),
-    #[error("the provider is rate-limiting this key")]
+    /// Deliberately does not say "this key" (Task 2 review round 1, F2):
+    /// `list_models`'s public list is called with no key at all, and
+    /// anonymous rate limiting on a public endpoint is real — the sentence
+    /// would be false exactly when the user is not signed in.
+    #[error("the provider is rate-limiting requests")]
     RateLimited,
     #[error("the provider answered {status}")]
     Provider { status: u16 },
     #[error("the provider's answer was not the shape this code expects: {0}")]
     Malformed(&'static str),
+    /// The status was read successfully, but the body that came with it did
+    /// not finish — the real wire shape of a connection that stops
+    /// mid-transfer (Task 2 review round 1, F1). Kept apart from `Transport`,
+    /// which means the opposite: no answer was ever read at all. `detail` is
+    /// `ureq`'s own protocol-error text, not provider bytes.
+    #[error(
+        "the provider answered {status}, but the response body stopped before it was complete: {detail}"
+    )]
+    BodyUnreadable { status: u16, detail: String },
     /// The trap this whole subsystem exists to catch (spec §2.6): two texts in
     /// one request came back as a single vector, so the model averages a batch
     /// instead of embedding each text. Measured on Google's embedder,

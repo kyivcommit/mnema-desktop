@@ -62,9 +62,19 @@ fn finish(
 ) -> Result<(u16, String), Error> {
     let mut response = result.map_err(|e| Error::Transport(e.to_string()))?;
     let status = response.status().as_u16();
+    // The status is already known here, and it must not be thrown away just
+    // because reading the rest of the connection failed (Task 2 review round
+    // 1, F1): `ureq` 3.3.0 errors out of a length-delimited body read rather
+    // than returning the partial bytes it got, which is the normal wire shape
+    // of a response that stopped mid-transfer. A 200 cut short and a host
+    // that was never reachable are different problems, and only `Transport`
+    // used to name the second one — this used to collapse both into it.
     let body = response
         .body_mut()
         .read_to_string()
-        .map_err(|e| Error::Transport(e.to_string()))?;
+        .map_err(|e| Error::BodyUnreadable {
+            status,
+            detail: e.to_string(),
+        })?;
     Ok((status, body))
 }
