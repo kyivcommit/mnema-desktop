@@ -117,6 +117,26 @@ fn reason_suffix(reason: &Option<ProviderMessage>) -> String {
         .unwrap_or_default()
 }
 
+/// Two facts, two sentences (fix round 1, item 3). A model id this build can
+/// show and one it cannot are different things to say, and `ProviderMessage`'s
+/// own `Display` cannot serve both here: substituted into the first sentence,
+/// `Withheld` would read "no model named the provider's explanation could not
+/// be shown safely" — a sentence about an explanation, on an error that is
+/// about a name. `Withheld` on a model id means the id carried a run of the
+/// key's own characters (see `probe::contains_key_fragment`), which is not a
+/// shape this provider is expected to produce, but the rendering has to be
+/// true when it does.
+fn no_such_model_sentence(model: &ProviderMessage) -> String {
+    match model {
+        ProviderMessage::Text { text } => {
+            format!("no model named {text}, or it does not make embeddings")
+        }
+        ProviderMessage::Withheld => "no model by that name, or it does not make embeddings — \
+                                      and the name itself could not be shown safely"
+            .to_string(),
+    }
+}
+
 /// What a call to the provider can fail with.
 ///
 /// **No variant may carry the key**, and `tests/probe.rs` holds this to it by
@@ -175,8 +195,26 @@ pub enum Error {
         "something between this machine and the provider probably refused an anonymous request"
     )]
     AnonymousBlocked,
-    #[error("no model named {0}, or it does not make embeddings")]
-    NoSuchModel(String),
+    /// The model the user chose is not there, or does not make embeddings —
+    /// a 404 from `/embeddings` (spec §2.6).
+    ///
+    /// `model` is a [`ProviderMessage`], not a `String` (fix round 1, item 3;
+    /// review finding 3). The dispatch order that specified this variant held
+    /// it safe "only because it is filled from the user's own model id", and
+    /// that premise is false: the user *selects* from the provider's list, and
+    /// `ModelEntry::id` (`catalogue.rs:56`) is copied verbatim out of the
+    /// provider's own body (`catalogue.rs:412`) with nothing sanitising it on
+    /// the way. This was the last variant interpolating an unbounded string
+    /// through a plain format, and a newline inside a model id would cut a log
+    /// line in half and let provider text pass for a separate entry.
+    ///
+    /// A `String` field holding a string that happens to have been sanitised
+    /// would not close it: that is a store that only *promises* to be safe,
+    /// with the promise living in a comment. This field cannot hold anything
+    /// else, because `ProviderMessage`'s only constructor is the sanitising
+    /// pipeline itself.
+    #[error("{}", no_such_model_sentence(model))]
+    NoSuchModel { model: ProviderMessage },
     /// Deliberately does not say "this key" (Task 2 review round 1, F2):
     /// `list_models`'s public list is called with no key at all, and
     /// anonymous rate limiting on a public endpoint is real — the sentence
@@ -197,6 +235,27 @@ pub enum Error {
     },
     #[error("the provider's answer was not the shape this code expects: {0}")]
     Malformed(&'static str),
+    /// A 200 whose body is not an embeddings answer at all, but the provider's
+    /// own error envelope (fix round 1, item 2; review finding 2). A gateway —
+    /// or the provider itself — answering `200` with
+    /// `{"error":{"message":"quota exceeded"}}` used to read as `Malformed`'s
+    /// "JSON, but not the shape this code expects": true, and it threw away the
+    /// one sentence that says what to do about it. The same defect the status
+    /// path had before `attach_reason`, on the 200 path instead.
+    ///
+    /// Scoped to `check_embedding_model`'s 200 path on purpose. The obvious
+    /// alternative — giving `Malformed` a `reason` field — would reach
+    /// `balance_from` and `models_from_json`, where a body that does not fit is
+    /// deliberately not a problem worth surfacing, and would put an
+    /// `Option<ProviderMessage>` that is `None` on almost every construction
+    /// into two subsystems that never read a failure body at all.
+    ///
+    /// `reason` is not an `Option`, unlike the four variants above: this
+    /// variant exists *because* a message was found and survived sanitising.
+    /// A 200 with no readable message stays `Malformed`, which is the fact
+    /// that was true about it all along.
+    #[error("the provider answered 200 with an error instead of embeddings: {reason}")]
+    ErrorInsteadOfEmbeddings { reason: ProviderMessage },
     /// The status was read successfully, but reading the rest of the
     /// response failed — kept apart from `Transport`, which means the
     /// opposite: no answer was ever read at all. `detail` is `ureq`'s own
@@ -224,8 +283,30 @@ pub enum Error {
     /// one request came back as a single vector, so the model averages a batch
     /// instead of embedding each text. Measured on Google's embedder,
     /// 2026-07-25, skeleton §6.2.
+    ///
+    /// Exactly one row, and nothing else (fix round 1, item 4): zero rows and
+    /// more rows than texts are `Malformed`, and two identical rows are
+    /// `IdenticalVectors` below. This sentence names a mechanism, and it is
+    /// false about every one of those.
     #[error("this model returns one averaged vector for a batch, so it cannot embed an archive")]
     AveragedBatch,
+    /// Two different texts came back as two copies of the same vector (fix
+    /// round 1, item 4; review finding 4). Kept apart from `AveragedBatch`,
+    /// whose sentence names a mechanism this does not observe: a model
+    /// answering with a constant, or ignoring the second input, returned two
+    /// vectors and averaged nothing. The consequence for the user is the same
+    /// and the stated cause is not — and a support conversation started from
+    /// the wrong cause is the class this crate has paid for most.
+    ///
+    /// Deliberately says what was seen rather than why. "A constant model"
+    /// would be a third mechanism this build has not measured either: two
+    /// identical answers to two texts do not establish what a third text would
+    /// get.
+    #[error(
+        "this model answered two different texts with the same vector, so it cannot tell \
+         documents apart"
+    )]
+    IdenticalVectors,
     #[error("the provider returned an empty vector")]
     EmptyVector,
 }

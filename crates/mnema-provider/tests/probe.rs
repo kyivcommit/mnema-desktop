@@ -995,14 +995,23 @@ fn a_model_that_averages_a_batch_is_refused_by_name() {
     assert!(matches!(err, Error::AveragedBatch), "got {err:?}");
 }
 
+/// The brief asserted `Error::AveragedBatch` here; fix round 1, item 4 gave
+/// this case its own error. A model that answers with a constant, or ignores
+/// the second input, returned two vectors and averaged nothing — the refusal
+/// is right either way, the stated cause was not.
 #[test]
 fn two_identical_vectors_for_two_different_texts_are_refused_too() {
     let same = r#"{"data":[{"embedding":[1.0,0.0],"index":0},{"embedding":[1.0,0.0],"index":1}]}"#;
     let server = MockServer::new(vec![Reply::ok(same)]);
     let err = check_embedding_model(server.base(), KEY, "constant/model").expect_err("refused");
     assert!(
-        matches!(err, Error::AveragedBatch),
-        "counting the vectors is not enough: a model can return two copies of one answer"
+        matches!(err, Error::IdenticalVectors),
+        "counting the vectors is not enough: a model can return two copies of one answer, and \
+         that is not the same fact as averaging a batch — got {err:?}"
+    );
+    assert!(
+        !err.to_string().contains("averag"),
+        "the sentence must not name a mechanism this build did not observe: {err}"
     );
 }
 
@@ -1011,7 +1020,7 @@ fn a_missing_model_says_so_instead_of_blaming_the_key() {
     let server = MockServer::new(vec![Reply::status(404, r#"{"error":{"message":"no"}}"#)]);
     let err = check_embedding_model(server.base(), KEY, "vendor/gone").expect_err("refused");
     match err {
-        Error::NoSuchModel(name) => assert_eq!(name, "vendor/gone"),
+        Error::NoSuchModel { model } => assert_eq!(model.to_string(), "vendor/gone"),
         other => panic!("got {other:?}"),
     }
 }
@@ -1160,10 +1169,14 @@ fn the_model_check_posts_to_the_embeddings_endpoint_with_the_key_only_in_a_heade
 /// The three shapes of unreadable 200, told apart the same way
 /// `models_from_json` tells them apart for the model list: a captive portal
 /// page is not JSON at all, a body that stops before the JSON closes is a
-/// truncation, and a provider error envelope on a 200 is valid JSON that
-/// simply is not this shape. One `Malformed` text for all three would be the
-/// difference between "check your network" and "check your account" thrown
-/// away.
+/// truncation, and anything else valid but foreign is simply not this shape.
+/// One `Malformed` text for all three would be the difference between "check
+/// your network" and "check your account" thrown away.
+///
+/// The third case used to be `{"error":{"message":"quota"}}`; fix round 1,
+/// item 2 moved that body out of `Malformed` entirely — see the test below —
+/// so the `Data` branch is pinned here with a body that carries no message to
+/// keep.
 #[test]
 fn a_200_this_build_cannot_read_is_named_for_which_of_three_problems_it_is() {
     let cases = [
@@ -1172,7 +1185,10 @@ fn a_200_this_build_cannot_read_is_named_for_which_of_three_problems_it_is() {
             "not JSON",
         ),
         (r#"{"data":[{"embedding":[1.0"#, "stopped in the middle"),
-        (r#"{"error":{"message":"quota"}}"#, "not the shape"),
+        (
+            r#"{"object":"list","usage":{"total_tokens":8}}"#,
+            "not the shape",
+        ),
     ];
     for (body, expected) in cases {
         let server = MockServer::new(vec![Reply::ok(body)]);
@@ -1184,6 +1200,152 @@ fn a_200_this_build_cannot_read_is_named_for_which_of_three_problems_it_is() {
             ),
             other => panic!("body {body:?}: expected Malformed, got {other:?}"),
         }
+    }
+}
+
+/// Fix round 1, item 2 (review finding 2). A gateway — or the provider itself
+/// — answering `200` with its own error envelope used to read as "JSON, but
+/// not the shape this code expects": true, and it threw away the only sentence
+/// that says what to do. The same defect the status path had before
+/// `attach_reason`, on the 200 path instead.
+#[test]
+fn a_200_carrying_the_providers_error_envelope_keeps_the_providers_sentence() {
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"error":{"message":"quota exceeded for this account"}}"#,
+    )]);
+    let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
+    assert!(
+        matches!(err, Error::ErrorInsteadOfEmbeddings { .. }),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("quota exceeded for this account"),
+        "the provider's own sentence is the difference between \"check your network\" and \
+         \"check your account\": {err}"
+    );
+}
+
+/// The other side of that branch: the envelope shape is what buys the
+/// provider's sentence, and a body with no readable message must stay
+/// `Malformed`, which is the fact that was true about it all along.
+#[test]
+fn a_200_error_envelope_with_no_readable_message_stays_a_shape_problem() {
+    for body in [r#"{"error":{}}"#, r#"{"error":{"message":""}}"#] {
+        let server = MockServer::new(vec![Reply::ok(body)]);
+        let err = check_embedding_model(server.base(), KEY, "m").expect_err("unreadable");
+        assert!(
+            matches!(err, Error::Malformed(_)),
+            "body {body:?}: got {err:?}"
+        );
+    }
+}
+
+/// Fix round 1, item 3 (review finding 3). The model id is not the user's own
+/// text: it is copied verbatim out of the provider's body
+/// (`catalogue.rs:412`) and the user only *picks* it from the list. Rendering
+/// it through a plain format string is how a newline inside it cuts a log line
+/// in half and lets provider text pass for a separate entry.
+#[test]
+fn a_model_id_is_sanitised_before_it_reaches_the_message() {
+    let server = MockServer::new(vec![Reply::status(404, "{}")]);
+    let err = check_embedding_model(
+        server.base(),
+        KEY,
+        "vendor/gone\nWARN this line was never logged by this build",
+    )
+    .expect_err("refused");
+    let rendered = format!("{err} / {err:?}");
+    assert!(
+        !rendered.contains('\n'),
+        "a newline inside a model id must not reach a rendered message: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("vendor/gone"),
+        "the rest of the id must survive, not be dropped whole: {rendered}"
+    );
+}
+
+/// The same scan the failure path already runs, through the one value that
+/// reaches a message without coming from a response body. The key is applied
+/// *decoded* here rather than as a JSON escape, because that is the shape a
+/// model id arrives in: `models_from_json` has already parsed it out of the
+/// provider's JSON by the time anyone can select it.
+#[test]
+fn no_transformation_of_the_key_reaches_a_message_through_the_model_id() {
+    let mid = KEY.len() / 2;
+    let fragment = KEY[mid - 6..mid + 6].to_string();
+    let cases = [
+        ("verbatim", KEY.to_string(), KEY.to_string()),
+        ("re-cased", KEY.to_ascii_uppercase(), KEY.to_string()),
+        (
+            "a decoded C0 control character inserted",
+            format!("{}\u{1F}{}", &KEY[..mid], &KEY[mid..]),
+            KEY.to_string(),
+        ),
+        (
+            "a decoded word joiner inserted",
+            format!("{}\u{2060}{}", &KEY[..mid], &KEY[mid..]),
+            KEY.to_string(),
+        ),
+        ("truncated to a fragment", fragment.clone(), fragment),
+    ];
+    for (label, transformed, needle) in cases {
+        let server = MockServer::new(vec![Reply::status(404, "{}")]);
+        let err = check_embedding_model(server.base(), KEY, &format!("vendor/{transformed}"))
+            .expect_err("refused");
+        let rendered = format!("{err} / {err:?}");
+        let visually = strip_for_test_oracle(&rendered).to_ascii_lowercase();
+        assert!(
+            !visually.contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak through the model id, even to a reader who \
+             cannot see an invisible character: {rendered}"
+        );
+        assert_a_defence_fired(label, &rendered);
+    }
+}
+
+/// The half of that scan a Debug-shape check cannot see. `ProviderMessage`'s
+/// own `Display` is written for an explanation, and substituting it into
+/// "no model named {}" produces a sentence about an explanation on an error
+/// that is about a name — two facts, one message, in the fix for two facts,
+/// one message. The Debug form says `Withheld` either way, so only the
+/// rendered sentence can hold this.
+#[test]
+fn a_withheld_model_id_does_not_borrow_the_sentence_written_for_an_explanation() {
+    let fragment = &KEY[4..16]; // twelve characters, taken from the key
+    let server = MockServer::new(vec![Reply::status(404, "{}")]);
+    let err = check_embedding_model(server.base(), KEY, &format!("vendor/{fragment}"))
+        .expect_err("refused");
+    let rendered = err.to_string();
+    assert!(
+        !rendered.contains("explanation"),
+        "a model id withheld is a name that could not be shown, not an explanation: {rendered}"
+    );
+    assert!(
+        rendered.contains("name itself could not be shown safely"),
+        "the sentence must say what actually happened: {rendered}"
+    );
+}
+
+/// Fix round 1, item 5 (review finding, Minor 1). Both components are ordinary
+/// finite `f32` values and ordinary JSON numbers, so the component check waves
+/// them through; the true length is 4.24e38, which does not fit in the `f32`
+/// this call reports it in, and `as f32` produces `inf`. `check_rankable`
+/// (`crates/mnema-index/src/space.rs:405`) refuses such a vector at insert
+/// time, so accepting it here is precisely the failure three hours into
+/// indexing that this call exists to prevent.
+#[test]
+fn a_vector_whose_length_does_not_fit_the_reported_type_is_refused() {
+    let body =
+        r#"{"data":[{"embedding":[3.0e38,3.0e38],"index":0},{"embedding":[0.0,1.0],"index":1}]}"#;
+    let server = MockServer::new(vec![Reply::ok(body)]);
+    let err = check_embedding_model(server.base(), KEY, "m").expect_err("refused");
+    match err {
+        Error::Malformed(reason) => assert!(
+            reason.contains("longer than this build can measure"),
+            "got {reason:?}"
+        ),
+        other => panic!("expected Malformed, got {other:?}"),
     }
 }
 
@@ -1242,7 +1404,7 @@ fn a_body_that_never_finishes_on_a_404_still_names_the_model() {
     let server = MockServer::new(vec![Reply::truncated_status(404, r#"{"error":"#)]);
     let err = check_embedding_model(server.base(), KEY, "vendor/gone").expect_err("refused");
     match err {
-        Error::NoSuchModel(name) => assert_eq!(name, "vendor/gone"),
+        Error::NoSuchModel { model } => assert_eq!(model.to_string(), "vendor/gone"),
         other => panic!("got {other:?}"),
     }
 }

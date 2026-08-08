@@ -737,11 +737,10 @@ fn sanitised_balance_summary(data: &Value, key: &str) -> ProviderMessage {
 // wrong, with no message anywhere, the same class of defect as D14's two
 // tokenizer files.
 
-/// The two texts the probe sends. Short, distinct, and different in meaning —
-/// a model that averages a batch, or answers with a constant, must not be able
-/// to look right on them. Different scripts as well as different meanings, so
-/// that a model collapsing the batch has no ordinary route to two answers that
-/// still differ.
+/// The two texts the probe sends. Two properties are load-bearing, and both
+/// are pinned below at compile time: the texts **differ**, and one is ASCII
+/// while the other is not. Being short is a cost choice, nothing rests on it,
+/// and nothing holds it.
 const PROBE_TEXTS: [&str; 2] = ["a paragraph about rivers", "інший абзац, про податки"];
 
 /// The row-count match in `check_embedding_model` enumerates the cases for
@@ -753,6 +752,63 @@ const _: () = assert!(
     PROBE_TEXTS.len() == 2,
     "the row-count match in check_embedding_model is written for exactly two probe texts"
 );
+
+/// **The property the whole function rests on** (fix round 1, item 1; review
+/// finding 1). Two equal probe texts make every well-behaved model answer with
+/// two equal vectors, which `check_embedding_model` then refuses as
+/// `IdenticalVectors` — every good model accused of a defect it does not have,
+/// with the gate green and clippy clean.
+///
+/// A compile-time pin rather than a unit test, deliberately: **no test built on
+/// `mnema_mock_provider` can catch this at all**, because the mock answers with
+/// a canned body whatever it is sent — `two_vectors(n)` returns two differing
+/// vectors for one text as readily as for two. A test would have to name the
+/// constant directly, and a `const` assertion that names it directly cannot be
+/// filtered out, skipped, or left un-run.
+///
+/// The comparison is spelled out over bytes because `str`'s own `PartialEq` is
+/// not a `const fn`; `as_bytes`, slice indexing and `while` all are, so the
+/// pin is possible in a `const` context after all.
+const _: () = assert!(
+    differ(PROBE_TEXTS[0], PROBE_TEXTS[1]),
+    "the two probe texts must differ, or every working model is refused as IdenticalVectors"
+);
+
+/// The second claim the doc comment above makes, held the same way. Not a
+/// full "different scripts" check — it says exactly what it pins, that one text
+/// is ASCII and the other is not, which is what makes it hard for a model that
+/// collapses a batch to produce two answers that still differ.
+const _: () = assert!(
+    is_ascii_only(PROBE_TEXTS[0]) != is_ascii_only(PROBE_TEXTS[1]),
+    "one probe text must be ASCII and the other must not, as PROBE_TEXTS claims"
+);
+
+const fn differ(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return true;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+const fn is_ascii_only(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] >= 0x80 {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 
 /// What the probe measured about a model that passed (spec §2.6).
 ///
@@ -771,10 +827,15 @@ pub struct EmbeddingCheck {
     /// refusal this function can return; every path that cannot name a width
     /// returns `Err` instead.
     pub dim: usize,
-    /// The length of the first vector. Recorded, not enforced: the space's
-    /// metric is cosine (`crates/mnema-index/src/space.rs:12`), which
-    /// normalises on its own, and `codestral-embed-2505` was measured at
+    /// The length of the first vector. Its *value* is recorded, not enforced:
+    /// the space's metric is cosine (`crates/mnema-index/src/space.rs:12`),
+    /// which normalises on its own, and `codestral-embed-2505` was measured at
     /// 0.9946 (skeleton §6.2) without that making it unusable.
+    ///
+    /// Always finite, which is a different statement from the one above and
+    /// not a judgement on the value (fix round 1, item 5): a vector whose
+    /// length does not fit in an `f32` cannot be reported in this field at
+    /// all, so it is refused rather than reported as `inf`.
     pub norm: f32,
 }
 
@@ -800,31 +861,80 @@ struct EmbeddingRow {
 /// sites: the body-read failure below reaches the same table with no body to
 /// read at all, and the two must not drift.
 ///
-/// `model` is interpolated into `Error::NoSuchModel` through a plain format
-/// string — see `check_embedding_model`'s doc comment for the constraint on
-/// the caller that keeps that safe, and for why this function is where the
-/// provider's own explanation is deliberately dropped for a 404.
-fn status_error(status: u16, model: &str) -> Error {
+/// `model` goes through the sanitising pipeline before it reaches
+/// `Error::NoSuchModel` (fix round 1, item 3): the id the user picked is a
+/// string this crate copied verbatim out of the provider's body
+/// (`catalogue.rs:412`), so it is provider bytes and gets what provider bytes
+/// get. The guarantee is carried by the field's type, not by this call site —
+/// see `Error::NoSuchModel`'s own doc comment for why a sanitised `String` in
+/// a `String` field would not have been the fix.
+///
+/// `key` is here for that one call. A model id has no ordinary reason to
+/// contain the credential, and `from_provider_text` is the only pipeline this
+/// crate has, so it is called the way every other caller calls it rather than
+/// with redaction quietly switched off — the shape `Redaction::None` exists to
+/// make visible.
+///
+/// The 404's own explanation is still dropped, deliberately: whether this
+/// provider states one, and whether a 404 here ever means something other than
+/// a missing model, is the open question left for the live run in Task 11.
+fn status_error(status: u16, model: &str, key: &str) -> Error {
     match status {
-        404 => Error::NoSuchModel(model.to_string()),
+        404 => Error::NoSuchModel {
+            model: ProviderMessage::from_provider_text(model, key),
+        },
         other => error_for_status(other, KeySent::Yes),
     }
+}
+
+/// A 200 this build could not read as an embeddings answer, named for which of
+/// four problems it was.
+///
+/// The first is what fix round 1 (item 2) added: a body that is the provider's
+/// own error envelope. That shape is valid JSON and simply not this shape, so
+/// it used to arrive as `Malformed`'s "JSON, but not the shape this code
+/// expects" — true, and it threw away the one sentence that says what to do.
+/// The same defect the status path had before `attach_reason`, one path over.
+/// `extract_provider_message` reads exactly that shape and sanitises what it
+/// finds; it is the same call `attach_reason` makes for a non-200, so nothing
+/// new renders provider bytes here.
+///
+/// The remaining three are the ones `models_from_json` tells apart for the
+/// model list, and they are three different user problems: an HTML page from a
+/// captive portal or a proxy is not JSON at all (`Syntax`); a body that stops
+/// before the JSON closes is a truncation that still arrived in full on the
+/// wire (`Eof`, distinct from `Error::BodyUnreadable`, where the bytes never
+/// arrived); and anything else valid but foreign is `Data`.
+fn unreadable_embeddings_answer(body: &str, key: &str, error: &serde_json::Error) -> Error {
+    if let Some(reason) = extract_provider_message(body, key) {
+        return Error::ErrorInsteadOfEmbeddings { reason };
+    }
+    Error::Malformed(match error.classify() {
+        serde_json::error::Category::Syntax => {
+            "the embeddings answer is not JSON at all — likely a proxy or gateway page, \
+             not the provider itself"
+        }
+        serde_json::error::Category::Eof => {
+            "the embeddings answer stopped in the middle of the JSON — a truncated response"
+        }
+        serde_json::error::Category::Data | serde_json::error::Category::Io => {
+            "the embeddings answer is JSON, but not the shape this code expects"
+        }
+    })
 }
 
 /// Sends two texts and refuses everything that would fill an index with
 /// numbers that look right (spec §2.6). `dim` is measured from the answer,
 /// because it is stated nowhere else (spec §2.4).
 ///
-/// **`model` must be safe to render.** It is the one value this function
-/// interpolates through a plain format string (`Error::NoSuchModel`), which is
-/// the rule the rest of this module exists to keep: no provider bytes reach
-/// rendered text except through [`ProviderMessage`]. That holds only while
-/// `model` is the user's own model id. Today it is — no caller outside this
-/// crate's tests exists yet — but the id a user picks comes from
-/// `ModelEntry::id` (`catalogue.rs:56`), which `models_from_json` copies
-/// verbatim out of the provider's own body (`catalogue.rs:412`), and nothing
-/// sanitises it on the way. Whoever wires the two together owes this call a
-/// model id that is safe to put in a log line.
+/// **`model` is treated as provider bytes, and the caller owes nothing.** The
+/// id a user picks comes from `ModelEntry::id` (`catalogue.rs:56`), which
+/// `models_from_json` copies verbatim out of the provider's own body
+/// (`catalogue.rs:412`) with nothing sanitising it on the way — so this call
+/// sanitises it, in `status_error`, and `Error::NoSuchModel` carries the result
+/// in a field that cannot hold anything else. The first version of this
+/// function stated the requirement here instead and left it to whoever wired
+/// Task 8; a doc comment is not a gate (fix round 1, item 3).
 pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<EmbeddingCheck, Error> {
     let request = serde_json::json!({ "model": model, "input": PROBE_TEXTS }).to_string();
     let (status, answer) = match http::post_json(base, "/embeddings", key, &request) {
@@ -849,7 +959,7 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
         // 500 whose body it read just fine, so trading `detail` away for it
         // buys nothing back.
         Err(Error::BodyUnreadable { status, .. }) if matches!(status, 401 | 403 | 404 | 429) => {
-            return Err(status_error(status, model));
+            return Err(status_error(status, model, key));
         }
         Err(other) => return Err(other),
     };
@@ -860,11 +970,11 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
         // dropping it would print "the key was refused" for a revoked key
         // while throwing away the sentence saying why. `NoSuchModel` has no
         // such field and passes through `attach_reason` untouched — a 404's
-        // own explanation is the one this call does not repeat, because that
-        // variant renders through a plain format string and has nowhere safe
-        // to put provider bytes.
+        // own explanation is the one this call does not repeat, and whether
+        // this provider states one at all is the open question Task 11's live
+        // run answers.
         other => {
-            return Err(attach_reason(status_error(other, model), &answer, key));
+            return Err(attach_reason(status_error(other, model, key), &answer, key));
         }
     }
 
@@ -876,28 +986,13 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
     // works whether or not the balance parsed. Here there is no such
     // remainder: the body is the entire answer.
     //
-    // Three shapes reach this, and they are three different user problems, the
-    // same three `models_from_json` tells apart for the model list: an HTML
-    // page from a captive portal or a proxy is not JSON at all (`Syntax`); a
-    // body that stops before the JSON closes is a truncation that still
-    // arrived in full on the wire (`Eof`, distinct from `BodyUnreadable`
-    // above, where the bytes never arrived); and a provider error envelope
-    // answered with a 200 is valid JSON that simply is not this shape
-    // (`Data`).
-    let parsed: EmbeddingsBody = serde_json::from_str(&answer).map_err(|e| {
-        Error::Malformed(match e.classify() {
-            serde_json::error::Category::Syntax => {
-                "the embeddings answer is not JSON at all — likely a proxy or gateway page, \
-                 not the provider itself"
-            }
-            serde_json::error::Category::Eof => {
-                "the embeddings answer stopped in the middle of the JSON — a truncated response"
-            }
-            serde_json::error::Category::Data | serde_json::error::Category::Io => {
-                "the embeddings answer is JSON, but not the shape this code expects"
-            }
-        })
-    })?;
+    // Which of four problems it was is `unreadable_embeddings_answer`'s job,
+    // including the one that is not a shape problem at all: a 200 whose body
+    // is the provider's own error envelope, which keeps the provider's
+    // sentence instead of being flattened into "not the shape this code
+    // expects" (fix round 1, item 2).
+    let parsed: EmbeddingsBody = serde_json::from_str(&answer)
+        .map_err(|e| unreadable_embeddings_answer(&answer, key, &e))?;
 
     // Two texts in, two vectors out. Split three ways rather than tested as
     // `len() != 2`: `AveragedBatch` states a fact about the provider — "this
@@ -949,23 +1044,53 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
     // them apart, so every document in the archive would land on the same
     // point and retrieval would be random. Counting the rows does not catch
     // it — a model that averages a batch can echo the average once per input.
+    //
+    // Its own error, not `AveragedBatch` (fix round 1, item 4): that variant's
+    // sentence names a mechanism, and a model that answers with a constant, or
+    // ignores the second input, returned two vectors and averaged nothing. The
+    // same argument that split the row count fifteen lines up.
     if first == second {
-        return Err(Error::AveragedBatch);
+        return Err(Error::IdenticalVectors);
+    }
+
+    // The length of the first vector, accumulated in `f64` and narrowed once.
+    //
+    // The narrowing is where an overflow happens, not the sum: `[3.0e38,
+    // 3.0e38]` has two ordinary, finite `f32` components, sums to 1.8e77 in
+    // `f64`, takes a root of 4.24e38 — and comes back `inf` from `as f32`.
+    // Measured; an earlier version of this comment offered the `f64`
+    // accumulation as closing that, which moves the threshold and does not
+    // remove it (fix round 1, item 5).
+    //
+    // So the narrowed value is checked rather than reported. An infinity in an
+    // `f32` field is not a length the provider stated; it is a number this
+    // build's own type could not hold, and reporting it as a measurement is
+    // the same fabrication `Stated::finite_or_unreadable` refuses one screen
+    // up. Refusing is also what this call is for: `check_rankable`
+    // (`crates/mnema-index/src/space.rs:405`) refuses a vector whose squared
+    // norm is not finite at *insert* time, so a model accepted here and
+    // refused there is exactly the failure three hours into indexing that
+    // §4.5 asks the entry check to prevent.
+    //
+    // The other half of that guard — a squared norm below `f32::MIN_POSITIVE`,
+    // which includes an all-zero vector — is deliberately NOT mirrored here.
+    // It is a deferred finding from this review, left for the whole-branch
+    // pass, and named so this is not read as a complete mirror of
+    // `check_rankable`.
+    let norm = first
+        .iter()
+        .map(|v| f64::from(*v) * f64::from(*v))
+        .sum::<f64>()
+        .sqrt() as f32;
+    if !norm.is_finite() {
+        return Err(Error::Malformed(
+            "the vector is longer than this build can measure, so the index could not rank it",
+        ));
     }
 
     Ok(EmbeddingCheck {
         dim: first.len(),
-        // Accumulated in `f64` and narrowed once at the end. Every component
-        // is finite by the check above, but an `f32` square of a
-        // large-but-finite component overflows to infinity long before the
-        // sum of a thousand of them would in `f64` — and an infinite norm
-        // reported here would be this build's own arithmetic, not anything
-        // the provider said.
-        norm: first
-            .iter()
-            .map(|v| f64::from(*v) * f64::from(*v))
-            .sum::<f64>()
-            .sqrt() as f32,
+        norm,
     })
 }
 
