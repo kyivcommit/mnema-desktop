@@ -60,10 +60,21 @@ pub enum Balance {
     /// `data` parsed into the shape this build knows, but the two fields
     /// together do not name a clean balance — one or both stated something
     /// in a form `Stated` could not read, or one was stated and the other
-    /// was not. This build's own defect, worth a bug report: `raw` is the
-    /// provider's own `data` object, sanitised the same way any other
-    /// provider bytes reaching this crate are (see
-    /// `ProviderMessage::from_provider_text`).
+    /// was not. This build's own defect, worth a bug report.
+    ///
+    /// `raw` is **not** the `data` object: it is a summary naming what
+    /// those two fields held (`sanitised_balance_summary`), so a third
+    /// field the provider adds beyond them does not appear in it at all —
+    /// a real cost to a bug report, paid deliberately in round 4 and named
+    /// here rather than left to be discovered. Every string inside it, at
+    /// any depth and including an object's own field names, has been
+    /// through the same pipeline any other provider bytes this crate keeps
+    /// go through (`ProviderMessage::from_provider_text`, walked by
+    /// `sanitised_leaves`); numbers, booleans and null are rendered as they
+    /// stand, having no text to sanitise. Round 4's version of this comment
+    /// claimed the object itself and claimed the pipeline for every leaf;
+    /// both were false — the second one measurably so, which is what fix
+    /// round 5 was called for (L1/L2).
     Unreadable { raw: ProviderMessage },
     /// The answer's shape was not one this build knows at all — `data` was
     /// missing, `null`, or not an object — so it cannot even be said
@@ -596,6 +607,79 @@ fn balance_from(body: &str, key: &str) -> Result<Balance, Error> {
     })
 }
 
+/// Renders one `Value` as text with **every string leaf inside it**
+/// sanitised, however deep it sits (Task 3 review round 4, Critical 1) —
+/// object field names included, since a field name is provider bytes the
+/// same way its value is. `None` when any one of those leaves came back
+/// `Withheld`: a fragment surviving anywhere in the subtree withholds the
+/// whole thing, the same rule the two top-level fields already keep
+/// between themselves.
+///
+/// Round 4 read only `Value::String` and handed everything else to
+/// `Value`'s own `Display`, on the stated ground that a non-string leaf
+/// "cannot smuggle a key". True of numbers, booleans and null — JSON's own
+/// number grammar has no room for arbitrary text — and false of arrays and
+/// objects, which are made of strings: a body of
+/// `{"total_credits":{"note":"key <KEY> is exhausted"}}` rendered the key
+/// verbatim, with no redaction marker anywhere, on a body the round before
+/// it had redacted. Walking the tree is what that round declined to do,
+/// and declining is what left those leaves outside the pipeline.
+///
+/// Nothing here re-serialises: `to_string()` is reached only for the three
+/// scalar kinds that carry no text, so a decoded control character is never
+/// turned back into the six printable ASCII characters that defeated the
+/// sanitiser before K1 (see `sanitised_balance_summary`). Recursion is
+/// bounded by `serde_json`'s own parse-time nesting limit, since this
+/// `Value` exists only because `from_str` accepted it — measured through
+/// `check_key` with a `/credits` body nesting arrays inside
+/// `data.total_credits`: 125 levels parse and are sanitised, 126 fail the
+/// whole call as `Malformed` before this function is ever reached. A body
+/// deep enough to threaten the stack is refused two steps upstream.
+///
+/// **What this does not close, named rather than assumed:** a key split
+/// across two *separate* leaves (`["test-key", "-not-a-r", "eal-one"]`)
+/// with no piece long enough for the fragment net. Each piece is sanitised;
+/// the assembled line shows them with `, ` between. Unchanged from round 3
+/// and round 4, which have the same gap between the two top-level fields,
+/// and not what Critical 1 measured — recorded here so the next reader does
+/// not have to re-derive whether it was considered.
+fn sanitised_leaves(value: &Value, key: &str) -> Option<String> {
+    fn leaf(text: &str, key: &str) -> Option<String> {
+        match ProviderMessage::from_provider_text(text, key) {
+            ProviderMessage::Text { text } => Some(text.as_str().to_string()),
+            ProviderMessage::Withheld => None,
+        }
+    }
+    match value {
+        Value::String(s) => leaf(s, key),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .map(|item| sanitised_leaves(item, key))
+                .collect::<Option<Vec<_>>>()?
+                .join(", ");
+            Some(format!("[{parts}]"))
+        }
+        Value::Object(fields) => {
+            let parts = fields
+                .iter()
+                .map(|(name, value)| {
+                    Some(format!(
+                        "{}: {}",
+                        leaf(name, key)?,
+                        sanitised_leaves(value, key)?
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?
+                .join(", ");
+            Some(format!("{{{parts}}}"))
+        }
+        // Numbers, booleans and null cannot smuggle a key character-wise the
+        // way a string can, and hold no string leaf to walk into.
+        scalar => Some(scalar.to_string()),
+    }
+}
+
 /// Builds a human-readable summary of `data`'s two known fields, sanitising
 /// each field's own *decoded* text directly (Task 3 review round 4, K1) —
 /// not `data.to_string()`'s re-serialised form, which is what this function
@@ -608,27 +692,21 @@ fn balance_from(body: &str, key: &str) -> Result<Balance, Error> {
 /// enough of those escapes sit inside a key, neither the exact-substring
 /// redaction (the escape text breaks the match) nor the fragment net
 /// (checking a segment shorter than it, between two escapes) catches what
-/// is left — measured: two insertions into a 24-character key leave three
-/// segments short enough that the whole key still reaches the screen, in
-/// order, with the escapes as the only sign anything happened to it.
+/// is left — measured on this crate's own 23-character test key: three
+/// insertions leave four segments, none of them reaching the fragment
+/// window, and the whole key still reaches the screen in order, with the
+/// escapes as the only sign anything happened to it.
 ///
 /// Reading each field's `Value` directly instead gets the text exactly as
 /// the provider's JSON encoder produced it, decoded once and never
 /// re-encoded, which is what `from_provider_text`'s first step (strip)
 /// assumes. `field` is only ever `total_credits`/`total_usage` from
-/// `balance_from`'s own `data.get(..)`.
+/// `balance_from`'s own `data.get(..)`; whatever shape either one turns out
+/// to hold is walked to its string leaves by `sanitised_leaves`.
 fn sanitised_balance_summary(data: &Value, key: &str) -> ProviderMessage {
     fn field_text(value: Option<&Value>, key: &str) -> Option<String> {
         match value {
-            Some(Value::String(s)) => match ProviderMessage::from_provider_text(s, key) {
-                ProviderMessage::Text { text } => Some(text.as_str().to_string()),
-                ProviderMessage::Withheld => None,
-            },
-            // Numbers, booleans, null, arrays and objects cannot smuggle a
-            // key character-wise the way a string leaf can — JSON's own
-            // number grammar has no room for arbitrary text — so these pass
-            // through their own `Display` unchanged.
-            Some(other) => Some(other.to_string()),
+            Some(value) => sanitised_leaves(value, key),
             None => Some("absent".to_string()),
         }
     }

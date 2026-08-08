@@ -522,17 +522,21 @@ fn key_transformations(key: &str) -> Vec<(&'static str, String, String)> {
         ),
         (
             // Task 3 review round 4, K1: the reviewer's measured attack —
-            // two C0 insertions, spaced so neither surviving segment reaches
+            // C0 insertions, spaced so no surviving segment reaches
             // FRAGMENT_LEN, defeated both the exact-substring redaction and
             // the fragment net on the success path, where the sanitiser used
             // to be handed `data.to_string()` — a *re-serialised* form in
             // which a decoded control character comes back as six ordinary
             // ASCII characters, no longer anything `unsafe_for_display`
             // recognises. The single-insertion case above does not catch
-            // this: with a 24-character key, one split always leaves a
-            // run of twelve or more for the fragment net to catch; two
-            // splits do not.
-            "two C0 control characters spaced within the fragment window",
+            // this: `KEY` is 23 characters, and any one split leaves a run
+            // of at least twelve for the fragment net to catch. This case
+            // splits at `23 / 3 = 7`, which is four segments and three
+            // insertions — the count the label and this comment both had
+            // wrong until fix round 5 (L3), against a key they called 24
+            // characters long. The substance was right either way: no
+            // segment reaches twelve, so the net has nothing to catch.
+            "three C0 control characters spaced within the fragment window",
             {
                 let c0 = json_escape('\u{1F}');
                 let chunk = (key.len() / 3).max(1);
@@ -700,6 +704,92 @@ fn no_transformation_of_the_key_reaches_a_successful_balance() {
         );
         assert_a_defence_fired(label, &rendered);
     }
+}
+
+/// Task 3 review round 4, Critical 1 (fix round 5, L1): the shared
+/// transformation set above embeds the key in a *string* leaf, always — both
+/// loops build `total_credits` as one string of fixed shape, so a `data`
+/// whose leaf is an array or an object never reaches the summary builder at
+/// all. That branch rendered its value straight through `Value`'s own
+/// `Display`, outside the sanitiser: the key came back verbatim, with no
+/// redaction marker anywhere, on a body round 3 had redacted. Kept out of
+/// `key_transformations` on purpose — that set cannot express "the key sits
+/// one level down" without distorting the seven cases that share its one
+/// string.
+///
+/// The fourth case names the shape that is a leaf without being a *value*:
+/// an object's own field name is provider bytes too, and reaches the screen
+/// the same way its value does.
+#[test]
+fn a_key_inside_a_non_string_leaf_is_sanitised_too() {
+    let bodies = [
+        (
+            "an object in total_credits",
+            format!(
+                r#"{{"data":{{"total_credits":{{"note":"key {KEY} is exhausted"}},"total_usage":0}}}}"#
+            ),
+        ),
+        (
+            "an array in total_credits",
+            format!(r#"{{"data":{{"total_credits":["key {KEY} is exhausted"],"total_usage":0}}}}"#),
+        ),
+        (
+            "an object in total_usage",
+            format!(
+                r#"{{"data":{{"total_credits":10.0,"total_usage":{{"note":"key {KEY} is exhausted"}}}}}}"#
+            ),
+        ),
+        (
+            "the key as an object's own field name",
+            format!(r#"{{"data":{{"total_credits":{{"{KEY}":1}},"total_usage":0}}}}"#),
+        ),
+    ];
+    for (label, body) in bodies {
+        let server = MockServer::new(vec![Reply::ok(&body)]);
+        let check = check_key(server.base(), KEY).expect("a 200 means the key works");
+        assert!(
+            matches!(check.balance, Balance::Unreadable { .. }),
+            "{label}: a leaf this build cannot read as a number must still reach the summary: \
+             {:?}",
+            check.balance
+        );
+        let rendered = format!("{:?}", check.balance);
+        let visually = strip_for_test_oracle(&rendered).to_ascii_lowercase();
+        assert!(
+            !visually.contains(&KEY.to_ascii_lowercase()),
+            "{label}: a non-string leaf must not carry the key to the screen: {rendered}"
+        );
+        assert_a_defence_fired(label, &rendered);
+    }
+}
+
+/// The other direction of the same recursion (fix round 5, L1): a
+/// *fragment* of the key surviving inside a nested leaf must withhold the
+/// whole summary, not just the leaf it sat in — the rule the two top-level
+/// fields already keep between themselves, now reaching however deep the
+/// leaf sits. The test above would stay green if a nested `Withheld` were
+/// rendered as its own raw text, because a fragment is not the whole key
+/// and its `contains(KEY)` check would not match it.
+#[test]
+fn a_key_fragment_inside_a_nested_leaf_withholds_the_whole_summary() {
+    let fragment = &KEY[4..16]; // twelve characters, taken from the key
+    let body = format!(
+        r#"{{"data":{{"total_credits":{{"note":"key {fragment} is exhausted"}},"total_usage":0}}}}"#
+    );
+    let server = MockServer::new(vec![Reply::ok(&body)]);
+    let check = check_key(server.base(), KEY).expect("a 200 means the key works");
+    let rendered = format!("{:?}", check.balance);
+    assert!(
+        rendered.contains("Withheld"),
+        "a fragment one level down must withhold the whole summary, not only its own leaf: \
+         {rendered}"
+    );
+    assert!(
+        !strip_for_test_oracle(&rendered)
+            .to_ascii_lowercase()
+            .contains(&fragment.to_ascii_lowercase()),
+        "the fragment itself must not survive anywhere in the summary: {rendered}"
+    );
 }
 
 /// Task 3 review, item 1: a plain `#[serde(default)] Option<f64>` field only
