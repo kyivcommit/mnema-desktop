@@ -17,8 +17,13 @@ use crate::Error;
 /// round 2, G5) — see `agent_with` and the tests at the bottom of this file.
 const GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Verified against the live endpoint 2026-08-08: this builder, these calls,
-/// `POST` with a JSON body and a bearer header, and a 401 read as a body.
+/// This builder and the `GET` path — `get()`, below — were verified against
+/// the live endpoint 2026-08-08. That is a measurement recorded in the plan,
+/// not a claim this crate's own gate holds: no test here calls the live
+/// endpoint, and none should. The `POST` path (`post_json`) has no caller
+/// until Task 4, so its own verification arrives with that caller, not here
+/// (Task 2 review round 3, H4) — a docstring that claims more than the gate
+/// holds is how a later session inherits a false premise.
 fn agent() -> ureq::Agent {
     agent_with(GLOBAL_TIMEOUT)
 }
@@ -119,6 +124,25 @@ mod tests {
             !config.http_status_as_error(),
             "a non-2xx must arrive as a body to read, not a transport error that has lost \
              the status"
+        );
+    }
+
+    /// A separate claim from the test above (Task 2 review round 3, H1): that
+    /// test only proves the agent is built FROM `GLOBAL_TIMEOUT` — both sides
+    /// move together, so mutating the constant itself is invisible to it, and
+    /// the mechanism test below picks its own 300 ms and never reads the
+    /// constant either. Nothing pinned the constant's own value once the
+    /// 30-second integration test (G5) was gone: mutating `GLOBAL_TIMEOUT` to
+    /// 100 ms left the whole workspace green, and on a healthy network every
+    /// provider response slower than 100 ms would arrive as "the provider
+    /// could not be reached". This is the lower bound the deleted test used
+    /// to hold.
+    #[test]
+    fn the_global_timeout_itself_is_a_plausible_wait_for_a_person_at_a_window() {
+        assert!(
+            GLOBAL_TIMEOUT >= Duration::from_secs(20) && GLOBAL_TIMEOUT <= Duration::from_secs(60),
+            "GLOBAL_TIMEOUT must be a plausible wait for a person at a window, got \
+             {GLOBAL_TIMEOUT:?}"
         );
     }
 

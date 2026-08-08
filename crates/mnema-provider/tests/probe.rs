@@ -285,14 +285,20 @@ fn a_body_that_stops_mid_transfer_is_named_with_its_status_preserved() {
 /// never dropped, so every mock server's thread and listening port outlived
 /// the test that created it, and `request()` with nothing left to report
 /// waited out the full 10-second `recv_timeout` before panicking instead of
-/// failing right away. A `break` after the sentinel ends the loop and drops
-/// `tx`, so a `request()` call with no third request to see now panics
-/// almost immediately.
+/// failing right away.
+///
+/// Round 2's fix was a `break`, which round 3's review caught trading one
+/// bug for another: ending the loop meant a *second* surplus request got a
+/// connection refusal (`Error::Transport`) instead of the sentinel — exactly
+/// the shape the sentinel exists to keep a test from mistaking for something
+/// else. The loop now runs forever; only the channel send stops after the
+/// first surplus request, which is what this test actually needs to hold.
 #[test]
-fn the_accept_loop_ends_after_answering_past_the_end() {
+fn request_fails_fast_once_the_first_surplus_request_has_been_reported() {
     let server = MockServer::new(vec![Reply::ok(r#"{"data":[]}"#)]);
     list_models(server.base(), None, Role::Chat).expect("the one configured reply");
-    // Past the end: triggers the 599 sentinel and, with the fix, ends the loop.
+    // Past the end: triggers the 599 sentinel and, with the fix, stops the
+    // channel send — the accept loop itself keeps running.
     let _ = list_models(server.base(), None, Role::Chat);
     // Drain the two requests already made before asking for a third that was
     // never sent — otherwise this would just read the first of those two back.
@@ -304,9 +310,26 @@ fn the_accept_loop_ends_after_answering_past_the_end() {
     assert!(panicked.is_err(), "there is no third request to report");
     assert!(
         started.elapsed() < Duration::from_secs(5),
-        "the accept loop must end once it answers past-the-end, or this call waits out the \
-         full 10 s recv_timeout instead of failing right away: took {:?}",
+        "the channel must stop taking requests once the first surplus one is reported, or \
+         this call waits out the full 10 s recv_timeout instead of failing right away: took \
+         {:?}",
         started.elapsed()
+    );
+}
+
+/// The other half of Task 2 review round 3's Minor: a *third* request beyond
+/// the configured replies must still get the unmistakable `599` sentinel,
+/// not a connection refusal that could pass for a real network failure. This
+/// is exactly the property round 2's `break` traded away.
+#[test]
+fn a_second_surplus_request_still_gets_the_sentinel_not_a_connection_refusal() {
+    let server = MockServer::new(vec![Reply::ok(r#"{"data":[]}"#)]);
+    list_models(server.base(), None, Role::Chat).expect("the one configured reply");
+    list_models(server.base(), None, Role::Chat).expect_err("the first surplus request");
+    let err = list_models(server.base(), None, Role::Chat).expect_err("the second surplus request");
+    assert!(
+        matches!(err, Error::Provider { status: 599 }),
+        "a second surplus request must still get the sentinel, not {err:?}"
     );
 }
 
@@ -348,8 +371,17 @@ fn no_error_message_ever_contains_the_key() {
 
     // A host nothing listens on, rather than a slow one: a real `Transport`
     // error without paying out this crate's 30 s global timeout (G5).
-    assert_key_absent(
-        list_models("http://127.0.0.1:1", Some(KEY), Role::Chat)
-            .expect_err("an unreachable host must fail"),
+    let unreachable = list_models("http://127.0.0.1:1", Some(KEY), Role::Chat)
+        .expect_err("an unreachable host must fail");
+    // Task 2 review round 3, H2: after the 30-second silence test was
+    // deleted, nothing in this crate asserted `Error::Transport` at all — the
+    // scan above only ever checked for the key's absence, never the variant.
+    // If `finish`'s connection-failure branch ever collapsed into something
+    // carrying a status, an offline user would read "the provider answered
+    // 0", and this scan would stay green regardless.
+    assert!(
+        matches!(unreachable, Error::Transport(_)),
+        "got {unreachable:?}"
     );
+    assert_key_absent(unreachable);
 }

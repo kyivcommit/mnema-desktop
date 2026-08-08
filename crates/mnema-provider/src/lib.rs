@@ -33,24 +33,40 @@ pub fn list_models(base: &str, key: Option<&str>, role: Role) -> Result<Catalogu
         None => "/models".to_string(),
     };
     let (status, body) = http::get(base, &path, key)?;
+    if status == 200 {
+        return models_from_json(role, &body);
+    }
+    Err(error_for_status(status, key.is_some()))
+}
+
+/// The non-2xx status table, pulled out of `list_models` (Task 2 review
+/// round 3, H3): Task 3's key check answers the same statuses — always with
+/// a key sent — and would otherwise copy this match arm for arm, carrying
+/// two branches (`401 if !key_sent`, `403 if !key_sent`) it can never reach.
+/// This repository has already paid for exactly that shape of copy: a change
+/// in one task silently disarming a test case anchored in another, with
+/// every gate staying clean. `list_models` is the only caller for now — this
+/// task does not add a second one.
+///
+/// Never called for `200`: a 200 means something different to every caller
+/// (a model list here, an account check elsewhere), so only the caller knows
+/// what a 200 is worth.
+fn error_for_status(status: u16, key_sent: bool) -> Error {
+    // Four combinations, four true statements (Task 2 review round 2, G1).
+    // 401 means the request was not authenticated: with no key sent, this
+    // endpoint now requires one; with a key, that key was refused. 403 means
+    // the request WAS authenticated (or none was needed) and still refused:
+    // with a key, that key is probably not permitted to do this; with none,
+    // something between this machine and the provider probably refused an
+    // anonymous request — on a public endpoint that is most often a proxy or
+    // a gateway, not an account.
     match status {
-        200 => models_from_json(role, &body),
-        // Four combinations, four true statements (Task 2 review round 2,
-        // G1). 401 means the request was not authenticated: with no key sent,
-        // this endpoint now requires one; with a key, that key was refused.
-        // 403 means the request WAS authenticated (or none was needed) and
-        // still refused: with a key, that key is not permitted to do this;
-        // with none, something between this machine and the provider refused
-        // an anonymous request — on a public endpoint that is most often a
-        // proxy or a gateway, not an account. `list_models` is the one place
-        // that knows whether a key was sent at all, so the split happens
-        // here, not in `Error`.
-        401 if key.is_none() => Err(Error::KeyRequired),
-        401 => Err(Error::Unauthorised),
-        403 if key.is_some() => Err(Error::Forbidden),
-        403 => Err(Error::AnonymousBlocked),
-        429 => Err(Error::RateLimited),
-        other => Err(Error::Provider { status: other }),
+        401 if !key_sent => Error::KeyRequired,
+        401 => Error::Unauthorised,
+        403 if key_sent => Error::Forbidden,
+        403 => Error::AnonymousBlocked,
+        429 => Error::RateLimited,
+        other => Error::Provider { status: other },
     }
 }
 
@@ -75,16 +91,27 @@ pub enum Error {
     /// 403 with a key sent: the request was understood, the key is real, and
     /// it is not permitted to do this (Task 2 review round 2, G1) — a
     /// different fact from `Unauthorised`, which means the key itself was
-    /// rejected outright.
-    #[error("the key is not permitted to do this")]
+    /// rejected outright. "Probably" (Task 2 review round 3, Minor): a key
+    /// being present is a fact about this build's own request, not about who
+    /// answered it — a corporate proxy in front of the provider can return
+    /// 403 on its own, regardless of whether the key behind it was ever
+    /// checked, and a bare "the key is not permitted" would be false about
+    /// the actual cause in that case.
+    #[error("the key is probably not permitted to do this")]
     Forbidden,
     /// 403 on a call that sent no key at all (Task 2 review round 2, G1).
     /// Not naming an account: on a public, key-less endpoint this is most
     /// often something between this machine and the provider — a proxy or a
     /// gateway — refusing an anonymous request, which `Unauthorised` and
     /// `KeyRequired` would both misname as a credential problem when there
-    /// was no credential to begin with.
-    #[error("something between this machine and the provider refused an anonymous request")]
+    /// was no credential to begin with. "Probably" (Task 2 review round 3,
+    /// Minor), the opposite hedge from `Forbidden`: the provider itself can
+    /// geo-block or otherwise refuse an anonymous request with no
+    /// intermediary involved at all, so naming an intermediary as certain
+    /// would be false in that case.
+    #[error(
+        "something between this machine and the provider probably refused an anonymous request"
+    )]
     AnonymousBlocked,
     #[error("no model named {0}, or it does not make embeddings")]
     NoSuchModel(String),

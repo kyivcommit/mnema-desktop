@@ -80,12 +80,20 @@ impl MockServer {
     /// made one call too many to either hang or pass for a reason that had
     /// nothing to do with what it claimed to test. Past the end, the server
     /// answers with a status no real provider or proxy sends and a body that
-    /// names the mistake, so that test fails loudly instead — and then the
-    /// accept loop ends (Task 2 review round 2, G4): answering the sentinel
-    /// and looping back to `listener.incoming()` would keep the thread alive
-    /// forever, never dropping `tx`, so every mock server outlived the test
-    /// that created it and `request()` with nothing left to report waited out
-    /// the full 10 s `recv_timeout` instead of failing right away.
+    /// names the mistake, so that test fails loudly instead.
+    ///
+    /// The loop itself never ends (Task 2 review round 3, Minor, reversing
+    /// round 2's `break`): ending it after the first surplus request meant a
+    /// *second* surplus request got a connection refusal instead of the
+    /// sentinel — `Error::Transport`, precisely the shape the sentinel exists
+    /// to keep a test from mistaking for something else. Every surplus
+    /// request past the first is still answered with `599` for as long as
+    /// the server lives. What round 2 was really protecting — `request()`
+    /// failing fast when there is nothing left to report — comes from
+    /// dropping the sender instead: `tx` moves into an `Option` and is taken
+    /// once, right after the first surplus request is reported, so `seen`
+    /// disconnects and a later `request()` call still fails immediately
+    /// rather than waiting out the full 10 s `recv_timeout`.
     pub fn new(replies: Vec<Reply>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a port");
         let port = listener.local_addr().expect("read the port").port();
@@ -93,10 +101,13 @@ impl MockServer {
 
         thread::spawn(move || {
             let mut replies = replies.into_iter();
+            let mut tx = Some(tx);
             for (index, stream) in listener.incoming().enumerate() {
                 let mut stream = stream.expect("accept");
                 let request = read_request(&mut stream);
-                let _ = tx.send(request);
+                if let Some(sender) = &tx {
+                    let _ = sender.send(request);
+                }
                 match replies.next() {
                     Some(reply) => {
                         thread::sleep(reply.delay);
@@ -113,10 +124,9 @@ impl MockServer {
                             ),
                             0,
                         );
-                        // End the loop here (Task 2 review round 2, G4):
-                        // looping back to accept another connection would
-                        // keep this thread — and `tx` — alive forever.
-                        break;
+                        // Only the first surplus request is reported on
+                        // `seen` — see the doc comment above.
+                        tx = None;
                     }
                 }
             }
