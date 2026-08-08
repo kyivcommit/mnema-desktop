@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use mnema_mock_provider::{MockServer, Reply};
-use mnema_provider::{Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_key, list_models};
+use mnema_provider::{Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_key, list_models};
 
 /// Shared by every `check_key` test below — hoisted here rather than
 /// repeated per test or left local to `no_error_message_ever_contains_the_key`
@@ -403,7 +403,7 @@ fn a_good_key_comes_back_with_what_is_left_on_the_account() {
         r#"{"data":{"total_credits":10.0,"total_usage":3.5}}"#,
     )]);
     let check = check_key(server.base(), KEY).expect("accepted");
-    assert_eq!(check.credits_remaining, Some(6.5));
+    assert_eq!(check.balance, Balance::Known(6.5));
 }
 
 #[test]
@@ -414,12 +414,14 @@ fn a_refused_key_is_its_own_answer_and_not_a_generic_failure() {
 }
 
 #[test]
-fn a_key_check_that_cannot_read_the_balance_still_accepts_the_key() {
+fn a_key_check_with_no_stated_balance_still_accepts_the_key() {
     let server = MockServer::new(vec![Reply::ok(r#"{"data":{"unexpected":true}}"#)]);
     let check = check_key(server.base(), KEY).expect("accepted");
     assert_eq!(
-        check.credits_remaining, None,
-        "a balance we cannot read is unknown, not zero, and not a reason to refuse a working key"
+        check.balance,
+        Balance::NotStated,
+        "neither field was stated at all — a fact about the account, not a reason to refuse a \
+         working key"
     );
 }
 
@@ -484,6 +486,76 @@ fn a_key_echoed_back_by_the_provider_is_redacted_not_dropped() {
     );
 }
 
+/// Task 3 review round 2: six hand-picked bodies (the previous version of
+/// this file's leak scan) can only ever prove the property against six
+/// specific shapes — the shape that actually broke it, a C0 control
+/// character sitting inside the echoed key, was not among them, and was
+/// exactly the shape nobody would think to hand-pick. This loops over
+/// transformations of the key itself instead, so the property is checked
+/// against the key, not against a guessed list of provider behaviours.
+/// `\uXXXX` is used to insert the control character and the zero-width
+/// space, rather than a raw byte, because a raw C0 control byte inside a
+/// JSON string is invalid JSON and `serde_json` would refuse to parse the
+/// body at all — the shape this exercises is a *decoded* control character
+/// reaching `ProviderMessage::new`, which is what a provider's own JSON
+/// encoder produces for one, not a hand-broken JSON document.
+#[test]
+fn no_transformation_of_the_key_reaches_a_failure_message() {
+    fn json_escape(c: char) -> String {
+        format!("\\u{:04x}", c as u32)
+    }
+    let mid = KEY.len() / 2;
+    let fragment = &KEY[mid - 6..mid + 6];
+    let transformations: Vec<(&str, String, &str)> = vec![
+        ("verbatim", KEY.to_string(), KEY),
+        ("re-cased", KEY.to_ascii_uppercase(), KEY),
+        (
+            "a C0 control character inserted",
+            format!("{}{}{}", &KEY[..mid], json_escape('\u{1F}'), &KEY[mid..]),
+            KEY,
+        ),
+        (
+            "a zero-width space inserted",
+            format!("{}{}{}", &KEY[..mid], json_escape('\u{200B}'), &KEY[mid..]),
+            KEY,
+        ),
+        (
+            "split across a JSON escape",
+            format!(
+                "{}{}{}",
+                &KEY[..1],
+                json_escape(KEY.chars().nth(1).expect("KEY has at least two characters")),
+                &KEY[1 + KEY.chars().nth(1).unwrap().len_utf8()..]
+            ),
+            KEY,
+        ),
+        ("truncated to a fragment", fragment.to_string(), fragment),
+    ];
+
+    for (label, transformed, needle) in &transformations {
+        let body = format!(r#"{{"error":{{"message":"invalid credential: {transformed}"}}}}"#);
+        let server = MockServer::new(vec![Reply::status(401, &body)]);
+        let err = check_key(server.base(), KEY).expect_err("must fail");
+        let rendered = format!("{err} / {err:?}").to_ascii_lowercase();
+        // A human reading the message perceives the key even when an
+        // invisible character sits inside it, so the comparison strips
+        // control characters and the zero-width space before checking —
+        // otherwise the invisible character defeats this test's own
+        // `contains` check the same way it defeats a naive redaction pass,
+        // and a real leak (the zero-width-space transformation) would read
+        // as clean.
+        let visually: String = rendered
+            .chars()
+            .filter(|c| !c.is_control() && *c != '\u{200b}')
+            .collect();
+        assert!(
+            !visually.contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak, even to a reader who cannot see an \
+             invisible character: {rendered}"
+        );
+    }
+}
+
 /// Task 3 review, item 1: a plain `#[serde(default)] Option<f64>` field only
 /// falls back when the *key* is absent. `total_credits` stated as `"$10.00"`
 /// is present, so a naive field would fail to deserialize it, taking the
@@ -497,10 +569,11 @@ fn a_credits_field_in_a_shape_this_build_cannot_read_still_accepts_the_key() {
         r#"{"data":{"total_credits":"$10.00","total_usage":3.5}}"#,
     )]);
     let check = check_key(server.base(), KEY).expect("a working key must still be accepted");
-    assert_eq!(
-        check.credits_remaining, None,
-        "a balance stated in a shape this build cannot read is unknown, not a reason to fail \
-         the whole key check"
+    assert!(
+        matches!(check.balance, Balance::Unreadable { .. }),
+        "a balance stated in a shape this build cannot read is this build's own defect, not a \
+         reason to fail the whole key check: {:?}",
+        check.balance
     );
 }
 
@@ -562,7 +635,7 @@ fn a_refused_key_says_it_was_refused() {
 fn a_null_data_on_a_successful_status_still_accepts_the_key() {
     let server = MockServer::new(vec![Reply::ok(r#"{"data":null}"#)]);
     let check = check_key(server.base(), KEY).expect("a 200 means the key works");
-    assert_eq!(check.credits_remaining, None);
+    assert_eq!(check.balance, Balance::EnvelopeNotUnderstood);
 }
 
 /// Task 3 review round 1, I3, the other example named in review: an envelope
@@ -573,7 +646,7 @@ fn a_null_data_on_a_successful_status_still_accepts_the_key() {
 fn a_missing_data_key_on_a_successful_status_still_accepts_the_key() {
     let server = MockServer::new(vec![Reply::ok(r#"{"credits":{"total_credits":10.0}}"#)]);
     let check = check_key(server.base(), KEY).expect("a 200 means the key works");
-    assert_eq!(check.credits_remaining, None);
+    assert_eq!(check.balance, Balance::EnvelopeNotUnderstood);
 }
 
 /// Task 3 review round 1, Minor: `f64::from_str` accepts `"NaN"` and
@@ -595,9 +668,11 @@ fn a_non_finite_balance_is_unreadable_not_a_number() {
     ] {
         let server = MockServer::new(vec![Reply::ok(body)]);
         let check = check_key(server.base(), KEY).expect("a working key must still be accepted");
-        assert_eq!(
-            check.credits_remaining, None,
-            "a non-finite balance must read as unreadable, not as a number: body {body}"
+        assert!(
+            matches!(check.balance, Balance::Unreadable { .. }),
+            "a non-finite balance must read as unreadable, not as a number: body {body}, got \
+             {:?}",
+            check.balance
         );
     }
 }
