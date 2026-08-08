@@ -9,6 +9,7 @@ members = [
     "crates/mnema-index",
     "crates/mnema-ingest",
     "crates/mnema-pool",
+    "crates/mnema-provider",
     "crates/mnema-secrets",
     "crates/mnema-walk",
     "src-tauri",
