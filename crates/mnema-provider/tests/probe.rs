@@ -11,7 +11,9 @@
 use std::time::{Duration, Instant};
 
 use mnema_mock_provider::{MockServer, Reply};
-use mnema_provider::{Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_key, list_models};
+use mnema_provider::{
+    Balance, Error, MIN_CONTEXT_TOKENS, ProviderMessage, Refusal, Role, check_key, list_models,
+};
 
 /// Shared by every `check_key` test below — hoisted here rather than
 /// repeated per test or left local to `no_error_message_ever_contains_the_key`
@@ -403,7 +405,7 @@ fn a_good_key_comes_back_with_what_is_left_on_the_account() {
         r#"{"data":{"total_credits":10.0,"total_usage":3.5}}"#,
     )]);
     let check = check_key(server.base(), KEY).expect("accepted");
-    assert_eq!(check.balance, Balance::Known(6.5));
+    assert_eq!(check.balance, Balance::Known { amount: 6.5 });
 }
 
 #[test]
@@ -486,72 +488,125 @@ fn a_key_echoed_back_by_the_provider_is_redacted_not_dropped() {
     );
 }
 
-/// Task 3 review round 2: six hand-picked bodies (the previous version of
-/// this file's leak scan) can only ever prove the property against six
-/// specific shapes — the shape that actually broke it, a C0 control
-/// character sitting inside the echoed key, was not among them, and was
-/// exactly the shape nobody would think to hand-pick. This loops over
-/// transformations of the key itself instead, so the property is checked
-/// against the key, not against a guessed list of provider behaviours.
-/// `\uXXXX` is used to insert the control character and the zero-width
-/// space, rather than a raw byte, because a raw C0 control byte inside a
-/// JSON string is invalid JSON and `serde_json` would refuse to parse the
-/// body at all — the shape this exercises is a *decoded* control character
-/// reaching `ProviderMessage::new`, which is what a provider's own JSON
-/// encoder produces for one, not a hand-broken JSON document.
-#[test]
-fn no_transformation_of_the_key_reaches_a_failure_message() {
-    fn json_escape(c: char) -> String {
-        format!("\\u{:04x}", c as u32)
-    }
-    let mid = KEY.len() / 2;
-    let fragment = &KEY[mid - 6..mid + 6];
-    let transformations: Vec<(&str, String, &str)> = vec![
-        ("verbatim", KEY.to_string(), KEY),
-        ("re-cased", KEY.to_ascii_uppercase(), KEY),
+/// JSON-escapes `c` as a `\uXXXX` sequence, for embedding a control or
+/// invisible character into a JSON string literal — the shape a provider's
+/// own JSON encoder produces for one, not a hand-broken document a raw byte
+/// would be (a raw C0 control byte inside a JSON string is invalid JSON,
+/// and `serde_json` would refuse to parse the body at all). The shape this
+/// exercises is a *decoded* character reaching `ProviderMessage::new`.
+fn json_escape(c: char) -> String {
+    format!("\\u{:04x}", c as u32)
+}
+
+/// Seven shapes of `key` a provider (or a hand-broken document nobody
+/// intended) could produce, used to check the property "the key never
+/// reaches a rendered message" against the key itself rather than against a
+/// guessed list of provider behaviours (Task 3 review round 2). Each tuple
+/// is `(label, the transformed text to embed, the substring that must not
+/// survive)`. Shared between the failure-path and success-path leak scans
+/// below (Task 3 review round 3, J1) so both exercise the identical set.
+fn key_transformations(key: &str) -> Vec<(&'static str, String, String)> {
+    let mid = key.len() / 2;
+    let fragment = key[mid - 6..mid + 6].to_string();
+    vec![
+        ("verbatim", key.to_string(), key.to_string()),
+        ("re-cased", key.to_ascii_uppercase(), key.to_string()),
         (
             "a C0 control character inserted",
-            format!("{}{}{}", &KEY[..mid], json_escape('\u{1F}'), &KEY[mid..]),
-            KEY,
+            format!("{}{}{}", &key[..mid], json_escape('\u{1F}'), &key[mid..]),
+            key.to_string(),
         ),
         (
             "a zero-width space inserted",
-            format!("{}{}{}", &KEY[..mid], json_escape('\u{200B}'), &KEY[mid..]),
-            KEY,
+            format!("{}{}{}", &key[..mid], json_escape('\u{200B}'), &key[mid..]),
+            key.to_string(),
+        ),
+        (
+            // Task 3 review round 3, J5: the reviewer's measured attack —
+            // three U+2060 WORD JOINER insertions, spaced no more than
+            // eleven characters apart, rendered the key verbatim past both
+            // defences before the strip list moved from a handwritten set
+            // to the Cf Unicode general category.
+            "three WORD JOINERs spaced within the fragment window",
+            {
+                let wj = json_escape('\u{2060}');
+                let chunk = (key.len() / 4).max(1);
+                key.as_bytes()
+                    .chunks(chunk)
+                    .map(|part| std::str::from_utf8(part).expect("KEY is ASCII"))
+                    .collect::<Vec<_>>()
+                    .join(&wj)
+            },
+            key.to_string(),
         ),
         (
             "split across a JSON escape",
             format!(
                 "{}{}{}",
-                &KEY[..1],
-                json_escape(KEY.chars().nth(1).expect("KEY has at least two characters")),
-                &KEY[1 + KEY.chars().nth(1).unwrap().len_utf8()..]
+                &key[..1],
+                json_escape(key.chars().nth(1).expect("key has at least two characters")),
+                &key[1 + key.chars().nth(1).unwrap().len_utf8()..]
             ),
-            KEY,
+            key.to_string(),
         ),
-        ("truncated to a fragment", fragment.to_string(), fragment),
-    ];
+        ("truncated to a fragment", fragment.clone(), fragment),
+    ]
+}
 
-    for (label, transformed, needle) in &transformations {
+/// Reuses `ProviderMessage`'s own stripping pipeline (an empty key disables
+/// its redaction step, and an empty key can never reach the fragment check
+/// either) so "what would a human actually see" tracks production's strip
+/// list automatically (Task 3 review round 3, J4) instead of restating part
+/// of it by hand — a hand-restated subset stays green the day production's
+/// list changes and the test's own copy does not.
+fn strip_like_production(text: &str) -> String {
+    ProviderMessage::new(text, "")
+        .map(|m| m.to_string())
+        .unwrap_or_default()
+}
+
+/// Task 3 review round 2: six hand-picked bodies (the previous version of
+/// this test) can only ever prove the property against six specific shapes
+/// — the shape that actually broke it, a C0 control character sitting
+/// inside the echoed key, was not among them, and was exactly the shape
+/// nobody would think to hand-pick. Looping over `key_transformations`
+/// checks the property against the key itself instead.
+#[test]
+fn no_transformation_of_the_key_reaches_a_failure_message() {
+    for (label, transformed, needle) in key_transformations(KEY) {
         let body = format!(r#"{{"error":{{"message":"invalid credential: {transformed}"}}}}"#);
         let server = MockServer::new(vec![Reply::status(401, &body)]);
         let err = check_key(server.base(), KEY).expect_err("must fail");
-        let rendered = format!("{err} / {err:?}").to_ascii_lowercase();
-        // A human reading the message perceives the key even when an
-        // invisible character sits inside it, so the comparison strips
-        // control characters and the zero-width space before checking —
-        // otherwise the invisible character defeats this test's own
-        // `contains` check the same way it defeats a naive redaction pass,
-        // and a real leak (the zero-width-space transformation) would read
-        // as clean.
-        let visually: String = rendered
-            .chars()
-            .filter(|c| !c.is_control() && *c != '\u{200b}')
-            .collect();
+        let rendered = format!("{err} / {err:?}");
+        let visually = strip_like_production(&rendered).to_ascii_lowercase();
         assert!(
             !visually.contains(&needle.to_ascii_lowercase()),
             "transformation {label:?} must not leak, even to a reader who cannot see an \
              invisible character: {rendered}"
+        );
+    }
+}
+
+/// Task 3 review round 3, J1: `Balance::Unreadable`'s `raw` field carries
+/// provider bytes to the screen on the SUCCESS path — a 200 whose balance
+/// could not be read. Every leak scan before this one only ever exercised a
+/// *failure* path. The sanitising call in `balance_from`
+/// (`ProviderMessage::from_provider_text`) is already correct, but nothing
+/// held it: replacing it with a raw pass-through left the whole suite
+/// green.
+#[test]
+fn no_transformation_of_the_key_reaches_a_successful_balance() {
+    for (label, transformed, needle) in key_transformations(KEY) {
+        let body = format!(
+            r#"{{"data":{{"total_credits":"quota exhausted for key: {transformed}","total_usage":0}}}}"#
+        );
+        let server = MockServer::new(vec![Reply::ok(&body)]);
+        let check = check_key(server.base(), KEY).expect("a 200 means the key works");
+        let rendered = format!("{:?}", check.balance);
+        let visually = strip_like_production(&rendered).to_ascii_lowercase();
+        assert!(
+            !visually.contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak on the success path: {rendered}"
         );
     }
 }

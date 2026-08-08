@@ -13,7 +13,7 @@ pub use catalogue::{
     Catalogue, MIN_CONTEXT_TOKENS, ModelEntry, RecordId, Refusal, Role, UnreadableRecord,
     models_from_json,
 };
-pub use probe::{Balance, KeyCheck, ProviderMessage, check_key};
+pub use probe::{Balance, KeyCheck, ProviderMessage, SanitisedText, check_key};
 
 /// Where v1 goes. Not a configuration: v1 has one provider (spec §2.2).
 pub const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";

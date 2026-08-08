@@ -7,10 +7,12 @@
 
 use serde::Deserialize;
 use serde_json::Value;
+use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::{Error, KeySent, error_for_status, http};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KeyCheck {
     pub balance: Balance,
 }
@@ -22,10 +24,19 @@ pub struct KeyCheck {
 /// `Unreadable` and `EnvelopeNotUnderstood` are the pair round 1 folded
 /// together under one `None` — both are this build's own defect rather than
 /// a fact about the account, but at two different levels; see each variant.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Struct variants throughout, not `Known(f64)` (Task 3 review round 3, J3):
+/// measured against this crate's own `#[serde(tag = "kind")]` convention —
+/// the same one `Refusal`/`RecordId` already use, and the one the window's
+/// code is written against — a newtype variant holding a bare `f64` compiles
+/// and then fails at runtime, because serde cannot serialise a tagged
+/// newtype variant whose payload is not itself a map. The window expects
+/// `{"kind":"known","amount":6.5}`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
 pub enum Balance {
     /// The provider stated a number, and it was read.
-    Known(f64),
+    Known { amount: f64 },
     /// `data.total_credits` and `data.total_usage` both parsed — the shape
     /// this build knows — and neither stated a balance. Normal for some
     /// account types: a fact about the account, not a defect in this build.
@@ -53,13 +64,31 @@ pub enum Balance {
 /// variant that holds the raw string and renders it with `#[error("{0}")]`
 /// — forbidden by the same rule `Refusal::LimitNotUnderstood` and
 /// `RecordId::NotAString` already keep, one module over: provider bytes are
-/// never interpolated into a plain format string. `Text`'s payload is safe
-/// to render only because `from_provider_text` (below) already ran its
-/// pipeline on it — nothing else constructs a `Text`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// never interpolated into a plain format string.
+///
+/// `Text` holds a `SanitisedText`, not a bare `String` (Task 3 review round
+/// 3, J2): turning this type from a tuple struct into an enum in round 2
+/// opened a door the compiler used to hold shut on its own. A tuple
+/// struct's field can be private, keeping outside code from constructing one
+/// at all; an enum variant's fields are always exactly as visible as the
+/// enum, with no way to restrict them further — so `Text(String)` directly
+/// would have made `ProviderMessage::Text("anything".into())` constructible,
+/// unsanitised, from anywhere in the crate (Task 4's own module included,
+/// the reviewer's specific concern), while this doc comment kept claiming
+/// nothing else constructs one. `SanitisedText`'s own field is private and
+/// it has no public constructor, so a caller with no way to produce one has
+/// no way to call `Text` either — see its own doc comment.
+///
+/// Struct variant (`Text { text }`, not `Text(SanitisedText)`), for the same
+/// serialisation reason `Balance` is struct variants throughout (Task 3
+/// review round 3, J3): a newtype variant does not serialise under
+/// `#[serde(tag = "kind")]`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ProviderMessage {
-    /// Sanitised and safe to render.
-    Text(String),
+    /// Sanitised and safe to render — see `SanitisedText` for what enforces
+    /// that.
+    Text { text: SanitisedText },
     /// The provider stated something, but even after stripping and
     /// redacting, a long enough run of the key's own characters survived —
     /// a *fragment* of the key, which whole-key substring redaction
@@ -72,6 +101,30 @@ pub enum ProviderMessage {
     /// still needs to know the provider tried to explain, even though this
     /// build would not repeat what it said.
     Withheld,
+}
+
+/// Provider text, sanitised — the only way to produce one is
+/// `ProviderMessage::from_provider_text`'s pipeline (Task 3 review round 3,
+/// J2). The field is not `pub`, and there is no public constructor other
+/// than `from_provider_text` (private to this module), so
+/// `ProviderMessage::Text { text: .. }` is unconstructible from outside
+/// `probe.rs` even though the variant itself must be `pub` — a caller with
+/// no way to obtain a `SanitisedText` has no way to write one in. `as_str`
+/// and `Display` are the only ways out, both read-only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct SanitisedText(String);
+
+impl SanitisedText {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SanitisedText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Generous for a one-line refusal reason; `catalogue`'s own cap (64 bytes,
@@ -111,7 +164,7 @@ impl ProviderMessage {
     /// gone before redaction ever looks.
     ///
     /// Never fails on its own — the least this returns is
-    /// `Text(String::new())`. `new`, below, is the caller that treats an
+    /// `Text { text: "" }`. `new`, below, is the caller that treats an
     /// empty result as "nothing to show"; `Balance::Unreadable`'s `raw` is a
     /// caller that does not, since an empty *sanitised* value is still worth
     /// keeping there — what made a balance unreadable was its shape, not the
@@ -126,7 +179,9 @@ impl ProviderMessage {
         if contains_key_fragment(&redacted, key) {
             return ProviderMessage::Withheld;
         }
-        ProviderMessage::Text(cap(redacted.trim().to_string(), MAX_MESSAGE_LEN))
+        ProviderMessage::Text {
+            text: SanitisedText(cap(redacted.trim().to_string(), MAX_MESSAGE_LEN)),
+        }
     }
 
     /// `key` is the credential `check_key` sent — see `from_provider_text`
@@ -134,9 +189,16 @@ impl ProviderMessage {
     /// result is empty: "the provider said nothing worth showing" is decided
     /// here, not inside `from_provider_text`, which every other caller needs
     /// to NOT decide for it (see that method's own doc comment).
-    fn new(raw: &str, key: &str) -> Option<Self> {
+    ///
+    /// `pub` on purpose (Task 3 review round 3, J4/J2): this is the
+    /// controlled front door `SanitisedText` has no other way in through, so
+    /// exposing it does not reopen the door J2 closed — it is the door.
+    /// `tests/probe.rs`'s leak scans call it to run text through the exact
+    /// same pipeline production uses, rather than keeping their own partial
+    /// copy of what counts as "unsafe to render" in sync by hand.
+    pub fn new(raw: &str, key: &str) -> Option<Self> {
         match Self::from_provider_text(raw, key) {
-            ProviderMessage::Text(text) if text.is_empty() => None,
+            ProviderMessage::Text { text } if text.as_str().is_empty() => None,
             other => Some(other),
         }
     }
@@ -145,7 +207,7 @@ impl ProviderMessage {
 impl std::fmt::Display for ProviderMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProviderMessage::Text(s) => f.write_str(s),
+            ProviderMessage::Text { text } => write!(f, "{text}"),
             ProviderMessage::Withheld => {
                 f.write_str("the provider's explanation could not be shown safely")
             }
@@ -203,34 +265,29 @@ fn contains_key_fragment(text: &str, key: &str) -> bool {
 }
 
 /// True for anything unsafe to place in a rendered message or a log line.
-/// `char::is_control` (the ASCII/Latin-1 control block, `\n` and `\r` among
-/// them) is most of this, but not all of it (Task 3 review round 1 Minor,
-/// extended in round 2): U+2028 LINE SEPARATOR and U+2029 PARAGRAPH
-/// SEPARATOR act as a newline to a renderer even though Unicode's own
-/// General_Category does not call them controls; the bidi formatting block —
-/// U+202A-U+202E (which includes U+202E RIGHT-TO-LEFT OVERRIDE) and
-/// U+2066-U+2069 — can make text render in an order that does not match its
-/// byte order; and the zero-width/invisible block — U+200B-U+200F (zero
-/// width space, ZWNJ, ZWJ, and the left-to-right/right-to-left marks),
-/// U+FEFF (zero width no-break space, also the UTF-8 BOM) and U+00AD (soft
-/// hyphen) — is invisible to a reader but not to a substring match, which is
-/// exactly what let a key survive redaction in round 1: an invisible
-/// character inserted mid-key defeats `redact_key`'s exact-substring search
-/// without a reader ever seeing a gap. Stripping all of these before
-/// redaction runs (`ProviderMessage::from_provider_text`) is what closes
-/// that.
+/// By Unicode general category, not a handwritten list of code points (Task
+/// 3 review round 3, J5): rounds 1 and 2 named `char::is_control` (category
+/// `Cc`) plus a hand-picked set of bidi and zero-width characters (category
+/// `Cf`, mostly) one at a time, as each was found — and the reviewer
+/// measured that this stays open-ended by construction: three U+2060 WORD
+/// JOINER insertions, spaced no more than eleven characters apart, rendered
+/// a key verbatim past both the strip list and the fragment check, because
+/// `Cf` has far more members than the ones this file had happened to name.
+/// `Control` (`Cc`) and `Format` (`Cf`) together close the category instead
+/// of the list — every invisible or bidi-affecting character named in
+/// rounds 1 and 2 is `Cf`, and so is U+2060, and so is whatever the next one
+/// turns out to be. `LineSeparator` (`Zl`, U+2028) and `ParagraphSeparator`
+/// (`Zp`, U+2029) stay named separately: they are category `Z`, not `C`, and
+/// stripping all of `Z` would also strip an ordinary space (`Zs`), which
+/// this function must not do.
 fn unsafe_for_display(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{2028}'
-                | '\u{2029}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2066}'..='\u{2069}'
-                | '\u{200B}'..='\u{200F}'
-                | '\u{FEFF}'
-                | '\u{00AD}'
-        )
+    matches!(
+        get_general_category(c),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+    )
 }
 
 /// Truncates to at most `max` bytes without splitting a multi-byte character —
@@ -421,7 +478,11 @@ pub fn check_key(base: &str, key: &str) -> Result<KeyCheck, Error> {
 /// and the other not — is `Unreadable`, carrying the raw `data` object
 /// (sanitised through `ProviderMessage::from_provider_text`, the same
 /// pipeline any other provider bytes this crate keeps go through) rather
-/// than just the one field that happened to break.
+/// than just the one field that happened to break. That sanitising call is
+/// exercised on the success path too (Task 3 review round 3, J1) — a 200
+/// whose balance could not be read still carries provider bytes to the
+/// screen, and every leak scan before this file's fix history only ever
+/// exercised a *failure* path.
 ///
 /// The one shape that still fails the whole call outright, rather than
 /// becoming a `Balance` variant, is a body that is not JSON at all — an
@@ -444,7 +505,9 @@ fn balance_from(body: &str, key: &str) -> Result<Balance, Error> {
         return Ok(Balance::EnvelopeNotUnderstood);
     };
     Ok(match (credits.total_credits, credits.total_usage) {
-        (Stated::Number(total), Stated::Number(used)) => Balance::Known(total - used),
+        (Stated::Number(total), Stated::Number(used)) => Balance::Known {
+            amount: total - used,
+        },
         (Stated::Absent, Stated::Absent) => Balance::NotStated,
         _ => Balance::Unreadable {
             raw: ProviderMessage::from_provider_text(&data.to_string(), key),
@@ -458,7 +521,7 @@ mod tests {
 
     fn text_of(message: ProviderMessage) -> String {
         match message {
-            ProviderMessage::Text(text) => text,
+            ProviderMessage::Text { text } => text.as_str().to_string(),
             ProviderMessage::Withheld => panic!("expected Text, got Withheld"),
         }
     }
@@ -514,6 +577,9 @@ mod tests {
     /// alongside the strip-then-redact reorder that closed C1 — an
     /// invisible character mid-key is exactly what let a control character
     /// defeat redaction in round 1, and these are the same class of hazard.
+    /// Round 3 moved the mechanism from this hand-picked set to the `Cf`
+    /// Unicode general category (see `unsafe_for_display`); this test stays
+    /// as a pin on the specific characters named so far.
     #[test]
     fn zero_width_and_invisible_characters_are_stripped_too() {
         let raw = "before\u{200B}mid\u{FEFF}mid2\u{00AD}after";
@@ -525,6 +591,21 @@ mod tests {
                 "{forbidden:?} must not survive: {text:?}"
             );
         }
+    }
+
+    /// Task 3 review round 3, J5: the reviewer's measured attack — U+2060
+    /// WORD JOINER was not in round 2's handwritten list, and this pins that
+    /// the category-based fix (`GeneralCategory::Format`) catches it too,
+    /// without the list needing to name it specifically.
+    #[test]
+    fn word_joiner_is_stripped_by_category_not_by_name() {
+        let raw = "before\u{2060}after";
+        let message = ProviderMessage::new(raw, "").expect("non-empty input");
+        let text = text_of(message);
+        assert!(
+            !text.contains('\u{2060}'),
+            "U+2060 must not survive: {text:?}"
+        );
     }
 
     /// Task 3 review round 1, I2: a message that is nothing *but* unsafe
@@ -591,7 +672,7 @@ mod tests {
         let raw = format!("keys from this provider start with {short_prefix}");
         let message = ProviderMessage::new(&raw, key).expect("non-empty input");
         assert!(
-            matches!(message, ProviderMessage::Text(_)),
+            matches!(message, ProviderMessage::Text { .. }),
             "a fragment shorter than the window must not withhold: {message:?}"
         );
     }
@@ -617,6 +698,40 @@ mod tests {
             !text.to_ascii_lowercase().contains(key),
             "an inserted control character must not let the key reassemble after redaction: \
              {text:?}"
+        );
+    }
+
+    /// Task 3 review round 3, J3: pins the actual wire shape, not merely
+    /// that serialisation succeeds — struct variants under
+    /// `#[serde(tag = "kind")]` were required precisely because the
+    /// original newtype shapes (`Known(f64)`, `Text(String)`) compile and
+    /// then fail *at serialisation time*, which no type-level check catches
+    /// and no existing test exercised. The window is written against this
+    /// exact shape.
+    #[test]
+    fn balance_and_message_states_serialise_to_the_shape_the_window_expects() {
+        assert_eq!(
+            serde_json::to_string(&Balance::Known { amount: 6.5 }).unwrap(),
+            r#"{"kind":"known","amount":6.5}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Balance::NotStated).unwrap(),
+            r#"{"kind":"notStated"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Balance::EnvelopeNotUnderstood).unwrap(),
+            r#"{"kind":"envelopeNotUnderstood"}"#
+        );
+        let unreadable = Balance::Unreadable {
+            raw: ProviderMessage::new("odd shape", "").expect("non-empty input"),
+        };
+        assert_eq!(
+            serde_json::to_string(&unreadable).unwrap(),
+            r#"{"kind":"unreadable","raw":{"kind":"text","text":"odd shape"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderMessage::Withheld).unwrap(),
+            r#"{"kind":"withheld"}"#
         );
     }
 }
