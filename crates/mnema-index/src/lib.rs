@@ -1,4 +1,5 @@
 mod journal;
+mod meta;
 mod migrations;
 mod open;
 mod search;
@@ -7,6 +8,7 @@ mod text_prep;
 mod write;
 
 pub use journal::{DocumentStatus, SkipEntry, SkipRule, SkippedFile};
+pub use meta::{META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL, META_VEC_VERSION};
 pub use migrations::SCHEMA_VERSION;
 pub use open::{Db, open, register_vector_extension};
 pub use space::VectorRole;
@@ -91,6 +93,24 @@ pub enum Error {
     /// failed" in a message, which is what typed errors are here to avoid.
     #[error("embedding space {space_id} already has this model, width, format and chunker")]
     SpaceAlreadyExists { space_id: i64 },
+    /// The one `meta` key whose overwrite loses data rather than a diagnosis,
+    /// and it loses it silently: the replaced space's vectors are still on
+    /// disk, still complete, and no longer reachable by anything, while search
+    /// answers from a space that holds a fraction of the archive. No error, no
+    /// missing row — just an index that has quietly stopped containing what it
+    /// contains.
+    ///
+    /// So the key does not go through `meta_set` at all. Changing which space
+    /// is active is a decision about every vector already written, and it is
+    /// made by the adoption path, which can refuse while the space being left
+    /// behind still holds rows; `meta_set` cannot, because it sees one key and
+    /// one string.
+    #[error(
+        "{META_ACTIVE_SPACE} cannot be written through meta_set: it would orphan \
+         the vectors of the space being replaced, leaving them on disk and \
+         unreachable while search answers from the new one"
+    )]
+    ActiveSpaceNotWritable,
     #[error("{role} has a non-finite component at index {index}")]
     NonFiniteVector { role: VectorRole, index: usize },
     /// vec0 divides by the vector's norm in f32, and every way that division can
