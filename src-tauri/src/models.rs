@@ -243,25 +243,62 @@ pub fn set_chat_model(state: State<'_, AppState>, model: String) -> Result<(), E
 /// does not open at all, which is a state the application stays in rather than
 /// passes through. The settings screen is exactly the screen someone opens then.
 ///
-/// The first version measured `key_present`, then let `with_index` fail, and the
+/// The first version measured the key, then let `with_index` fail, and the
 /// measurement died with the call. One message for two facts: the window could
 /// not say "your key is there, the database did not open", and an empty state
 /// drawn from that failure tells someone who **has** a key that they have none —
 /// the sentence [`Error::NoKey`]'s own doc calls forbidden.
+///
+/// The second version fixed that half and left the other: a store that would not
+/// answer still took the whole index reading with it. Both halves are answers
+/// now, and the command has no failure path at all — see [`model_settings`].
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettings {
-    /// Measured, never a literal — `mnema_secrets::load(...)?.is_some()`. It is
-    /// the same question [`key_present`] answers and it has one source; see
-    /// [`KeyStatus`] for what a second one cost when it was tried.
-    ///
-    /// The store failing is still an `Err` from the command, not a third state
-    /// here: that is the line [`key_present`] already draws — absence is
-    /// `Ok(false)`, a store that would not answer is `Err` — and drawing it
-    /// differently one command over is how the two come to mean different
-    /// things in one window.
-    pub key_present: bool,
+    /// Measured, never a literal — every arm comes from one
+    /// `mnema_secrets::load(...)`. See [`KeyStatus`] for what a second source of
+    /// this answer cost when it was tried.
+    pub key: KeyState,
     pub index: IndexSettings,
+}
+
+/// What the credential store said, as a third state rather than as a rejected
+/// command.
+///
+/// **This is deliberately not the shape [`key_present`] has**, and the asymmetry
+/// is the point rather than an oversight. `key_present` answers one question, so
+/// a store that will not answer it has nothing left to report and `Err` is the
+/// whole truth. `model_settings` answers **two**, and the first version of this
+/// fix protected only the second: `key_present: mnema_secrets::load(…)?` fired
+/// before `index_settings` was ever called, so a locked keychain took
+/// `embedding_model`, `embedding_dim`, `active_space`, `embedded_chunks`,
+/// `total_chunks`, `rerank_model` and `chat_model` with it — seven facts with no
+/// connection to a keychain, on the only command that carries them to the
+/// window. It was the fix for that same defect, applied to one half and not the
+/// other.
+///
+/// Reachable, and not by a defect: `mnema_secrets::Error::Unavailable` is a
+/// locked keychain on macOS or an absent Secret Service session on Linux,
+/// `NotPersistent` and `Ambiguous` are likewise states of the machine.
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum KeyState {
+    /// The store answered, and it holds a key. It does not carry the key, and it
+    /// never may.
+    Present,
+    /// The store answered, and it holds none — the normal state of an
+    /// application nobody has signed into, and the one a sign-in panel belongs
+    /// to.
+    Absent,
+    /// The store would not answer. A different thing from `Absent`, and the
+    /// distinction [`Error::NoKey`] exists for: telling someone whose keychain
+    /// is merely locked that they have entered no key sends them to re-enter one
+    /// they already have.
+    Unreadable { reason: String },
 }
 
 /// The index half of [`ModelSettings`]: what the database says, or why it said
@@ -283,11 +320,66 @@ pub enum IndexSettings {
     /// is flattened into that map beside `kind`, which is the constraint
     /// `Balance`'s own doc records from the other side.
     Read(IndexRead),
-    /// The index could not be read — not open yet, opened and failed, or a read
-    /// that failed on its own. `reason` is the same `Display` string a rejected
-    /// command would have carried, so nothing is lost by not rejecting; what is
-    /// gained is that `key_present` beside it survives.
-    Unreadable { reason: String },
+    /// The index could not be read. `reason` is the same `Display` string a
+    /// rejected command would have carried, so nothing is lost by not rejecting;
+    /// what is gained is that [`ModelSettings::key`] beside it survives.
+    ///
+    /// `cause` is here because this doc used to enumerate three causes and offer
+    /// no way to tell them apart — and the first test written against it
+    /// separated them with `reason.contains("index is not open")`, which is
+    /// matching on message text, the failure mode `crate::error::Error`'s own
+    /// header says it exists to avoid. A rephrased sentence would have broken a
+    /// window silently. `reason` stays verbatim, for showing; `cause` is what
+    /// anything branches on.
+    ///
+    /// Named `cause` rather than `kind` because `kind` is this enum's own tag,
+    /// and serde refuses a variant field that collides with it — at compile
+    /// time, which is how this name was chosen.
+    Unreadable {
+        cause: UnreadableCause,
+        reason: String,
+    },
+}
+
+/// Why the index said nothing — the discriminant beside
+/// [`IndexSettings::Unreadable`]'s sentence.
+///
+/// **Two, where the prose named three.** "Never opened" and "opened and failed"
+/// are one value here because this layer genuinely cannot tell them apart:
+/// `AppState::db` is `None` in both cases, since a failed `open_index` returns
+/// before it assigns. The window can separate them, and must — it knows whether
+/// it has called `open_index` and what that answered. What it could not do
+/// before this field is separate either of them from a read that failed on its
+/// own, which is the distinction that decides between "ask the user to open a
+/// folder" and "report a bug".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnreadableCause {
+    /// No index is open. Either the window has not asked for one yet — the
+    /// ordinary state at start-up — or an open failed and left none; see this
+    /// enum's own doc for why those are one value.
+    NotOpen,
+    /// An index **is** open and reading it failed. Always a defect of this
+    /// build rather than a state of the machine, so a window meeting it is
+    /// looking at a bug report.
+    ReadFailed,
+}
+
+impl UnreadableCause {
+    /// Classifies what `AppState::with_index` handed back.
+    ///
+    /// The wildcard is not a shrug: it answers "this is not
+    /// [`Error::IndexNotOpen`]", and every other way out of `with_index` is by
+    /// construction a read that was attempted and failed — `StatePoisoned` from
+    /// the lock, `Index(_)` from the closure. A variant added to
+    /// [`crate::error::Error`] tomorrow is classified correctly by that
+    /// argument rather than by this list being kept in step with it.
+    fn of(e: &Error) -> Self {
+        match e {
+            Error::IndexNotOpen => Self::NotOpen,
+            _ => Self::ReadFailed,
+        }
+    }
 }
 
 /// What an open index says about its model configuration.
@@ -349,6 +441,23 @@ fn index_settings(state: &AppState) -> IndexSettings {
     match read {
         Ok(settings) => settings,
         Err(e) => IndexSettings::Unreadable {
+            cause: UnreadableCause::of(&e),
+            reason: e.to_string(),
+        },
+    }
+}
+
+/// The key half, asked and answered — and never an `Err`, for the same reason
+/// [`index_settings`] is not one. Between them they leave [`model_settings`]
+/// with no `?` at all, which is what makes "one half cannot swallow the other"
+/// a property of the command rather than of half of it.
+fn key_state(state: &AppState) -> KeyState {
+    // `Ok(Some(_))`, discarding what was loaded: this type carries whether a key
+    // is there and never the key.
+    match mnema_secrets::load(state.credential_ref()) {
+        Ok(Some(_)) => KeyState::Present,
+        Ok(None) => KeyState::Absent,
+        Err(e) => KeyState::Unreadable {
             reason: e.to_string(),
         },
     }
@@ -362,16 +471,23 @@ fn index_settings(state: &AppState) -> IndexSettings {
 /// An active space naming a space that is gone arrives as
 /// `mnema_index::Error::NoSuchSpace` rather than as "nothing chosen" — see
 /// `Db::space_model`, where the argument for that is written down. It reaches
-/// the window as [`IndexSettings::Unreadable`] carrying that sentence, and no
-/// longer takes `key_present` down with it. Nothing in this build can produce
-/// the state: `Db::drop_space` has no caller outside the index crate's own
-/// tests.
+/// the window as [`IndexSettings::Unreadable`] with `kind: ReadFailed`, and no
+/// longer takes the key half down with it. Nothing in this build can produce the
+/// state: `Db::drop_space` has no caller outside the index crate's own tests.
+///
+/// **It returns no `Result`, and that is the guarantee rather than a
+/// convenience.** Every state of the credential store and every state of the
+/// index is a state of the configuration, which is the thing this screen draws;
+/// there is nothing left for a rejection to mean. A `Result` here would be a
+/// type that is always `Ok` and a place for the next `?` to be written, and this
+/// command has now twice been the one where a `?` ate the other half of the
+/// answer. `bridge::job_status` is the same shape for the same reason.
 #[tauri::command(async)]
-pub fn model_settings(state: State<'_, AppState>) -> Result<ModelSettings, Error> {
-    Ok(ModelSettings {
-        key_present: mnema_secrets::load(state.credential_ref())?.is_some(),
+pub fn model_settings(state: State<'_, AppState>) -> ModelSettings {
+    ModelSettings {
+        key: key_state(&state),
         index: index_settings(&state),
-    })
+    }
 }
 
 #[cfg(test)]

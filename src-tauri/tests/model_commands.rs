@@ -10,8 +10,8 @@ mod support;
 use fixture::Fixture;
 use mnema_desktop::error::Error;
 use mnema_desktop::models::{
-    IndexRead, IndexSettings, forget_key, key_present, model_settings, provider_models,
-    set_chat_model, set_embedding_model, set_key, set_rerank_model,
+    IndexRead, IndexSettings, KeyState, UnreadableCause, forget_key, key_present, model_settings,
+    provider_models, set_chat_model, set_embedding_model, set_key, set_rerank_model,
 };
 
 /// The index half, or a failure naming what the index said instead.
@@ -22,8 +22,8 @@ use mnema_desktop::models::{
 fn read_index(index: &IndexSettings) -> &IndexRead {
     match index {
         IndexSettings::Read(read) => read,
-        IndexSettings::Unreadable { reason } => {
-            panic!("the index was expected to be readable here, and it said: {reason}")
+        IndexSettings::Unreadable { cause, reason } => {
+            panic!("the index was expected to be readable here; it said {cause:?}: {reason}")
         }
     }
 }
@@ -341,6 +341,16 @@ fn the_recorded_dimension_is_the_one_the_provider_answered_with() {
             read.embedded_chunks, 0,
             "an active space says which model the index works with, not that anything is embedded"
         );
+
+        // The one field on this type whose name the camelCase rename changes.
+        // `model`, `dim` and `created` are single words and would read the same
+        // with the attribute gone, so nothing else here can notice its loss —
+        // and a window looking for `spaceId` would get `undefined` in silence.
+        let wire = serde_json::to_string(&adopted).expect("the adoption serialises");
+        assert!(
+            wire.contains(r#""spaceId":"#),
+            "the adoption would not reach the window under the name it looks for: {wire}"
+        );
     }
 }
 
@@ -379,7 +389,7 @@ fn the_free_slots_change_without_touching_the_index() {
     set_chat_model(fx.state(), "vendor/two".into()).expect("set again");
     set_rerank_model(fx.state(), "vendor/rr".into()).expect("set the other slot");
 
-    let settings = model_settings(fx.state()).expect("read");
+    let settings = model_settings(fx.state());
     let read = read_index(&settings.index);
     // Both slots, and in this order. Asserting only the one just written is what
     // let the twin command go unproven: `set_rerank_model` writing the chat key
@@ -409,18 +419,26 @@ fn the_free_slots_change_without_touching_the_index() {
 fn the_settings_reach_the_window_tagged_and_in_camel_case() {
     let fx = Fixture::with_provider_accepting_everything();
 
-    let closed = serde_json::to_string(&model_settings(fx.state()).expect("read"))
-        .expect("the settings serialise");
-    assert!(
-        closed.contains(r#""kind":"unreadable""#) && closed.contains(r#""reason":"#),
-        "the unreadable arm did not arrive tagged: {closed}"
-    );
+    let closed =
+        serde_json::to_string(&model_settings(fx.state())).expect("the settings serialise");
+    // Three assertions and not one `&&`, in a file about not folding facts
+    // together: joined, a failure says the arm is wrong without saying which of
+    // the tag, the discriminant and the sentence was missing.
+    for expected in [
+        r#""kind":"unreadable""#,
+        r#""cause":"notOpen""#,
+        r#""reason":"#,
+    ] {
+        assert!(
+            closed.contains(expected),
+            "the unreadable arm did not carry {expected}: {closed}"
+        );
+    }
 
     fx.open_index();
-    let open = serde_json::to_string(&model_settings(fx.state()).expect("read"))
-        .expect("the settings serialise");
+    let open = serde_json::to_string(&model_settings(fx.state())).expect("the settings serialise");
     for expected in [
-        r#""keyPresent":false"#,
+        r#""key":{"kind":"absent"}"#,
         r#""kind":"read""#,
         r#""embeddingModel":null"#,
         r#""embeddedChunks":0"#,
@@ -454,20 +472,66 @@ fn a_key_that_is_there_survives_an_index_that_is_not() {
     // Deliberately no `open_index`.
     set_key(fx.state(), KEY.into()).expect("accepted");
 
-    let settings =
-        model_settings(fx.state()).expect("the settings screen still has something true to draw");
+    let settings = model_settings(fx.state());
 
     assert!(
-        settings.key_present,
-        "the key was measured before the index was consulted, and the measurement was thrown away"
+        matches!(settings.key, KeyState::Present),
+        "the key was measured before the index was consulted, and the measurement was thrown \
+         away: {:?}",
+        settings.key
     );
     match &settings.index {
-        IndexSettings::Unreadable { reason } => assert!(
-            reason.contains("index is not open"),
-            "the reason should say which half failed; it was {reason}"
-        ),
+        // The **discriminant**, not the sentence. Separating these by
+        // `reason.contains("index is not open")` is matching on message text,
+        // which `crate::error::Error`'s own header names as the thing it exists
+        // to avoid — and it was what this test did until `kind` existed.
+        IndexSettings::Unreadable { cause, reason } => {
+            assert_eq!(*cause, UnreadableCause::NotOpen);
+            // And separately: the sentence is carried through verbatim rather
+            // than summarised, which is what makes it worth showing. Compared
+            // against the typed error rather than against a literal, so a
+            // rephrasing moves both sides at once instead of reddening here.
+            assert_eq!(reason, &Error::IndexNotOpen.to_string());
+        }
         other => panic!("the index is not open, and the answer says it was read: {other:?}"),
     }
+}
+
+/// The mirror of the test above, and the half that fix round 1 left undone: a
+/// credential store that will not answer must not take the index reading with
+/// it.
+///
+/// It is the worse direction of the two. When the index half was lost, the
+/// window still had `key_present` as a second route to the key; there is no
+/// second route to the index half at all — `model_settings` is the only command
+/// that carries it.
+#[test]
+fn a_store_that_will_not_answer_does_not_take_the_index_with_it() {
+    let fx = Fixture::with_a_credential_store_that_will_not_answer();
+    fx.open_index();
+    // Something in the index worth losing. Without it, every assertion below is
+    // satisfied by an index that had nothing to report.
+    set_chat_model(fx.state(), "vendor/two".into()).expect("the index is open and writable");
+
+    let settings = model_settings(fx.state());
+
+    match &settings.key {
+        KeyState::Unreadable { reason } => assert!(
+            !reason.is_empty(),
+            "a store that would not answer must say something about why"
+        ),
+        other => panic!(
+            "this test needs a store that will not answer, and it got one that did: {other:?}"
+        ),
+    }
+    let read = read_index(&settings.index);
+    assert_eq!(
+        read.chat_model.as_deref(),
+        Some("vendor/two"),
+        "a credential store that would not answer swallowed the model configuration, which has \
+         nothing to do with a keychain"
+    );
+    assert_eq!(read.active_space, None);
 }
 
 #[test]

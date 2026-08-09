@@ -136,11 +136,36 @@ impl Fixture {
         Self::pointed_at(vec![], Some("http://127.0.0.1:1"))
     }
 
+    /// An application whose credential store cannot be reached at all.
+    ///
+    /// The reference is empty, and `mnema_secrets::entry` refuses an empty one
+    /// **before** it installs or consults any store, so this is a store failure
+    /// reached in microseconds and touching nothing — the same trick
+    /// `tests/commands.rs` documents at length for `NO_CREDENTIAL`, used here
+    /// deliberately rather than incidentally.
+    ///
+    /// It stands in for the states that make `mnema_secrets::Error` a fact about
+    /// the machine rather than a defect: a locked keychain on macOS, an absent
+    /// Secret Service session on Linux. Neither can be arranged from a test, and
+    /// both arrive at this layer the same way this does — as an `Err` from
+    /// `load`.
+    pub fn with_a_credential_store_that_will_not_answer() -> Self {
+        Self::pointed_at_with_reference(vec![Reply::ok(CREDITS)], None, String::new())
+    }
+
     fn new(replies: Vec<Reply>) -> Self {
         Self::pointed_at(replies, None)
     }
 
     fn pointed_at(replies: Vec<Reply>, base: Option<&str>) -> Self {
+        Self::pointed_at_with_reference(replies, base, unique_reference())
+    }
+
+    fn pointed_at_with_reference(
+        replies: Vec<Reply>,
+        base: Option<&str>,
+        credential_ref: String,
+    ) -> Self {
         // Before anything can ask for a credential. `ensure_default_store`
         // accepts whoever registered first, so this has to precede the first
         // `store`/`load`/`forget` in the binary rather than sit beside the
@@ -148,7 +173,6 @@ impl Fixture {
         mnema_secrets::test_store::register();
         let server = MockServer::new(replies);
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let credential_ref = unique_reference();
         let app = mock_builder()
             .manage(AppState::new(
                 dir.path().to_path_buf(),
@@ -255,7 +279,17 @@ impl Drop for Fixture {
     /// outlives this fixture, since it is the binary's process-global default.
     /// Not a panic on failure: panicking in a `Drop` during an unwinding
     /// assertion aborts the process and hides the real failure.
+    ///
+    /// An empty reference is skipped rather than attempted. That is not a
+    /// special case bolted on: this function removes the credential its fixture
+    /// created, and `with_a_credential_store_that_will_not_answer` cannot have
+    /// created one — `forget("")` would fail for the same reason `load("")`
+    /// does, and print a hand-wringing line about a credential that never
+    /// existed on every passing run.
     fn drop(&mut self) {
+        if self.credential_ref.is_empty() {
+            return;
+        }
         if let Err(e) = mnema_secrets::forget(&self.credential_ref) {
             eprintln!(
                 "could not remove the test credential `{}` — delete it by hand: {e}",

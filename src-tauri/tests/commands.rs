@@ -1258,11 +1258,19 @@ fn error_text(rejected: &Value) -> String {
 /// one side alone fails here too; the second control below is what says those
 /// arguments are being bound at all rather than ignored.
 ///
-/// Every call is expected to *fail*: this application has no provider behind it
-/// (`NO_PROVIDER`), no index open, and a credential reference that cannot reach
-/// a store (`NO_CREDENTIAL`). That is the point — the question here is only
-/// whether the command was reached, and being reached is exactly what lets it
-/// fail for a reason of its own.
+/// **Most of these calls fail, and that is the point rather than a problem.**
+/// This application has no provider behind it (`NO_PROVIDER`), no index open,
+/// and a credential reference that cannot reach a store (`NO_CREDENTIAL`); the
+/// question here is only whether the command was reached, and being reached is
+/// exactly what lets it fail for a reason of its own.
+///
+/// `model_settings` is the exception and answers `Ok` even here, because every
+/// state of the store and of the index is a state it draws — a store that will
+/// not answer arrives as `KeyState::Unreadable` rather than as a rejection.
+/// `Ok` proves registration at least as well as a specific failure does: an
+/// unregistered command cannot return one, it is refused by name before it runs.
+/// This paragraph said "every call is expected to fail" for one commit after
+/// that stopped being true.
 #[test]
 fn every_model_command_the_window_calls_is_registered() {
     let dir = tempfile::tempdir().unwrap();
