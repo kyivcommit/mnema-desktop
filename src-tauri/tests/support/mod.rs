@@ -4,6 +4,11 @@
 //! from becoming a third, empty test suite of its own: Cargo turns every file
 //! that sits directly inside `tests/` into its own binary, and a module
 //! nested one directory down is not one of those files.
+//!
+//! What belongs here is what *every* binary declaring `mod support;` uses.
+//! Cargo compiles this file separately into each of them, so an item only one
+//! of them wants is dead code in the others; `fixture.rs`, beside this file, is
+//! pulled in with `#[path]` by the binary that wants it instead.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

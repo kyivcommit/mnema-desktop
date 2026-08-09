@@ -8,6 +8,7 @@
 pub mod bridge;
 pub mod error;
 pub mod job;
+pub mod models;
 pub mod paths;
 pub mod state;
 pub mod walk_job;
@@ -31,6 +32,9 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::start_probe_job,
         bridge::cancel_job,
         bridge::job_status,
+        models::key_present,
+        models::set_key,
+        models::forget_key,
         walk_job::start_walk_job,
     ]
 }
@@ -41,6 +45,12 @@ pub fn invoke_handler<R: tauri::Runtime>()
 /// mistake: a test that constructs its own `AppState` proves the commands work
 /// against a directory, and nothing about which directory the application picks.
 /// This is the only place that choice is made.
+///
+/// Two of the four arguments are named here and nowhere else, for the same
+/// reason: the real provider address and the production credential reference.
+/// A test builds its own `AppState` pointed at a local server and at a
+/// credential reference of its own, which is what keeps it out of the
+/// developer's own keychain — see [`state::AppState`]'s fields.
 ///
 /// LOCAL data, not roaming and not cache — see [`paths::index_path`] for why.
 /// Getting it wrong is silent: it works on the machine that wrote it and loses a
@@ -54,7 +64,12 @@ pub fn invoke_handler<R: tauri::Runtime>()
 pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let dir = app.path().app_local_data_dir()?;
     let worker = paths::worker_path()?;
-    app.manage(state::AppState::new(dir, worker));
+    app.manage(state::AppState::new(
+        dir,
+        worker,
+        mnema_provider::OPENROUTER_BASE.to_string(),
+        models::CREDENTIAL_REF.to_string(),
+    ));
     Ok(())
 }
 

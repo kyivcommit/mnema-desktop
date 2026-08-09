@@ -44,6 +44,31 @@ pub enum Error {
     /// single writer, so a second concurrent job would contend for both.
     #[error("a job is already running")]
     JobAlreadyRunning,
+    /// The provider refused, or could not be reached. Its `Display` is safe to
+    /// show: no variant of `mnema_provider::Error` can carry the key —
+    /// everything it keeps from a provider body has been through that crate's
+    /// sanitising pipeline — and `crates/mnema-provider/tests/probe.rs` holds
+    /// it to that by running every failure path and searching the rendering for
+    /// the key it was given.
+    #[error("provider: {0}")]
+    Provider(#[from] mnema_provider::Error),
+    /// The OS credential store could not be reached, or would not answer.
+    ///
+    /// Safe to show for the same reason and by the same argument:
+    /// `mnema_secrets::Error` names the reference and never the secret, and
+    /// deliberately does not wrap a `keyring_core::Error`, three of whose
+    /// variants structurally hold credential material.
+    ///
+    /// There is deliberately no variant for "no key has been entered" beside
+    /// it. Nothing in this build needs the key yet, so nothing could construct
+    /// one, and the distinction such a variant would carry — that nobody having
+    /// entered a key is a normal state of the application while a keychain that
+    /// will not open is a failure — is already made by the shape of
+    /// [`crate::models::key_present`], which answers the first with `Ok(false)`
+    /// and only the second with an `Err`. A variant no code can produce cannot
+    /// be seen to go red: it would state the distinction without keeping it.
+    #[error("credential store: {0}")]
+    Secrets(#[from] mnema_secrets::Error),
     /// Something panicked while holding a lock in the shared state. Reported
     /// rather than re-panicked: taking the webview down with it would turn a
     /// recoverable command failure into a lost window.

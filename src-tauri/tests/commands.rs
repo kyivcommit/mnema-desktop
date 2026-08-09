@@ -22,6 +22,18 @@ use tauri::test::{INVOKE_KEY, MockRuntime, mock_builder, mock_context, noop_asse
 use tauri::webview::InvokeRequest;
 use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
 
+/// A provider address with nothing behind it. Nothing in this file calls the
+/// provider, and a base that refuses instantly is how a future test that starts
+/// to finds out at once rather than by reaching the real one.
+const NO_PROVIDER: &str = "http://127.0.0.1:1";
+
+/// A credential reference nothing in this file uses — and deliberately not
+/// `models::CREDENTIAL_REF`. An integration test writes into the developer's
+/// real keychain (`mnema-secrets` withholds the platform store only under its
+/// own `cfg(test)`), so a test file carrying the production name is one line
+/// away from overwriting their working key.
+const NO_CREDENTIAL: &str = "mnema-test-commands-touches-no-credential";
+
 /// An application whose data directory is a temporary one.
 ///
 /// The real one is `app_local_data_dir()`, which under the mock context would
@@ -33,6 +45,8 @@ fn app_in(dir: &std::path::Path) -> tauri::App<MockRuntime> {
         .manage(AppState::new(
             dir.to_path_buf(),
             support::worker().to_path_buf(),
+            NO_PROVIDER.to_string(),
+            NO_CREDENTIAL.to_string(),
         ))
         .invoke_handler(mnema_desktop::invoke_handler())
         .build(mock_context(noop_assets()))
@@ -631,7 +645,12 @@ fn the_probe_job_is_reachable_through_the_ipc() {
 #[test]
 fn the_indexing_job_is_given_its_own_connection_not_the_windows() {
     let dir = tempfile::tempdir().unwrap();
-    let state = AppState::new(dir.path().to_path_buf(), support::worker().to_path_buf());
+    let state = AppState::new(
+        dir.path().to_path_buf(),
+        support::worker().to_path_buf(),
+        NO_PROVIDER.to_string(),
+        NO_CREDENTIAL.to_string(),
+    );
     state.open_index().expect("the index opens");
 
     let job = state.open_job_index().expect("the job gets a connection");
@@ -1062,6 +1081,8 @@ fn a_missing_worker_binary_reports_why_in_the_message() {
         .manage(AppState::new(
             dir.path().to_path_buf(),
             PathBuf::from("/nonexistent/mnema-extract-worker"),
+            NO_PROVIDER.to_string(),
+            NO_CREDENTIAL.to_string(),
         ))
         .invoke_handler(mnema_desktop::invoke_handler())
         .build(mock_context(noop_assets()))

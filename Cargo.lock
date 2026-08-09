@@ -2656,10 +2656,14 @@ name = "mnema-desktop"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "mnema-chunk",
  "mnema-core",
  "mnema-index",
  "mnema-ingest",
+ "mnema-mock-provider",
  "mnema-pool",
+ "mnema-provider",
+ "mnema-secrets",
  "mnema-walk",
  "serde",
  "serde_json",

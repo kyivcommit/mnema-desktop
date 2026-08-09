@@ -18,6 +18,19 @@ pub struct AppState {
     /// for the same reason `data_dir` is — see [`crate::paths::worker_path`]
     /// for what this path is good for today and what it is not.
     worker: PathBuf,
+    /// Where the provider lives. A field rather than a constant because the
+    /// tests point it at a local server; production passes
+    /// `mnema_provider::OPENROUTER_BASE` in `lib.rs`.
+    provider_base: String,
+    /// Which entry in the OS credential store this installation uses. A field
+    /// for a sharper reason than the one above, and the reason is not testing
+    /// convenience. `mnema-secrets` keeps the platform store out of reach only
+    /// under its **own** `cfg(test)` — the `#[cfg(test)]` arm inside
+    /// `platform_store` (`crates/mnema-secrets/src/lib.rs:307,314`) — and an
+    /// integration test of *this* crate compiles that one without the flag. So
+    /// a test here reaches the developer's real keychain, and under the
+    /// production name it would overwrite their working key.
+    credential_ref: String,
     /// `None` until the first `open_index`. The window opens before the database
     /// does, because a failure to open must be something the user can read
     /// rather than a process that never draws.
@@ -29,10 +42,17 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(data_dir: PathBuf, worker: PathBuf) -> Self {
+    pub fn new(
+        data_dir: PathBuf,
+        worker: PathBuf,
+        provider_base: String,
+        credential_ref: String,
+    ) -> Self {
         Self {
             data_dir,
             worker,
+            provider_base,
+            credential_ref,
             db: Mutex::new(None),
             running: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -45,6 +65,14 @@ impl AppState {
 
     pub fn worker_path(&self) -> &Path {
         &self.worker
+    }
+
+    pub fn provider_base(&self) -> &str {
+        &self.provider_base
+    }
+
+    pub fn credential_ref(&self) -> &str {
+        &self.credential_ref
     }
 
     /// Opens the index, creating the directory and the database if needed, and
