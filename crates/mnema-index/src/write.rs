@@ -545,8 +545,15 @@ impl Db {
     /// Every `&self` writer on `Db` goes through `self.conn().execute`, so it
     /// simply joins whatever transaction is open on that connection; calling
     /// them from inside `f` is how a whole document is written as one unit.
-    /// The one exception is [`Db::insert_chunk`], which opens a transaction of
-    /// its own and so cannot nest — use [`Db::insert_chunk_in`] here.
+    /// The exceptions are the methods that open a transaction of their own, and
+    /// the rule is the reliable form of that list rather than a count:
+    /// `grep -n 'Transaction::new_unchecked' crates/mnema-index/src/` names
+    /// every one of them, while a number written into prose goes stale the next
+    /// time somebody adds one. This sentence said "the one exception" and named
+    /// [`Db::insert_chunk`] while there were already three, and Task 6 made it
+    /// four. Today: [`Db::insert_chunk`] (use [`Db::insert_chunk_in`] here),
+    /// [`Db::create_space`], [`Db::drop_space`], and
+    /// [`Db::adopt_embedding_model`] through the first two of those.
     pub fn transaction<T>(
         &self,
         f: impl FnOnce(&Transaction<'_>) -> Result<T, Error>,

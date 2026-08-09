@@ -111,23 +111,30 @@ pub enum Error {
          unreachable while search answers from the new one"
     )]
     ActiveSpaceNotWritable,
-    /// A different embedding model was chosen while the active space already
-    /// holds embeddings. Honouring it would leave half the archive in a space
-    /// the search does not read — the split D25 rejected as impossible in
-    /// principle rather than merely unimplemented. Doing it properly means
-    /// building the new space, filling it, and switching, which is the indexing
-    /// subsystem.
+    /// A space other than the one being adopted still has embeddings recorded
+    /// in it, so moving the index onto another would leave them where nothing
+    /// reads them — the split D25 rejected as impossible in principle rather
+    /// than merely unimplemented. Doing it properly means building the new
+    /// space, filling it, and switching, which is the indexing subsystem.
+    ///
+    /// **Not `ActiveSpaceNotEmpty`**, which is what this was called for one
+    /// commit. The space that blocks need not be the active one, and need not
+    /// be pointed at by anything at all; keying the question on
+    /// `meta.active_space` was the defect the rename goes with. See
+    /// [`Db::adopt_embedding_model`].
     ///
     /// `embedded_chunks` counts **chunks**, not rows, and the name is the
     /// message: a chunk is recorded as embedded in two places —
     /// `chunk_embedding_state` and the space's own `vec_emb_<id>` table — and
-    /// they are two records of one chunk, not two things to rebuild. See
-    /// [`Db::space_is_empty`] for why both are read.
+    /// they are two records of one chunk, not two things to rebuild. The
+    /// message says *recorded* for the same kind of reason: where only the
+    /// bookkeeping row exists, what the space holds is the record of an
+    /// embedding rather than the embedding.
     #[error(
-        "space {space_id} already holds embeddings for {embedded_chunks} chunks, so the \
-         embedding model cannot be changed without rebuilding them"
+        "space {space_id} is not empty: embeddings are recorded for {embedded_chunks} of its \
+         chunks, and the index cannot move to a different space without rebuilding them"
     )]
-    ActiveSpaceNotEmpty { space_id: i64, embedded_chunks: i64 },
+    SpaceNotEmpty { space_id: i64, embedded_chunks: i64 },
     #[error("{role} has a non-finite component at index {index}")]
     NonFiniteVector { role: VectorRole, index: usize },
     /// vec0 divides by the vector's norm in f32, and every way that division can

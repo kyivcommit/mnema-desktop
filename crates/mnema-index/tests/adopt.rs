@@ -1,7 +1,10 @@
 //! One embedding model per index (spec §2.1), and the guard that makes the
 //! split state unreachable rather than merely discouraged.
 
-use mnema_index::{Error, META_ACTIVE_SPACE, META_VEC_VERSION};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use mnema_index::{Error, META_ACTIVE_SPACE, META_VEC_VERSION, open};
 
 mod support;
 use support::temp_db;
@@ -101,7 +104,7 @@ fn a_different_model_is_refused_once_a_vector_exists() {
         .adopt_embedding_model("openai/text-embedding-3-small", 1536, REF, HASH)
         .expect_err("a filled space may not be swapped out from under the index");
     match err {
-        Error::ActiveSpaceNotEmpty {
+        Error::SpaceNotEmpty {
             space_id,
             embedded_chunks,
         } => {
@@ -134,6 +137,19 @@ fn a_different_model_is_refused_once_a_vector_exists() {
         count(&db, "SELECT count(*) FROM model_config"),
         1,
         "a refused adoption must not record the model it refused"
+    );
+    // The third thing a refusal must not leave, and the one arrangement the two
+    // counts above cannot see: create-then-undo puts both of them back to 1
+    // while the id is spent, because `AUTOINCREMENT` keeps a high-water mark
+    // that DELETE does not lower (`schema.sql:337-345`). Two comments claimed
+    // this and nothing asked.
+    assert_eq!(
+        count(
+            &db,
+            "SELECT ifnull((SELECT seq FROM sqlite_sequence WHERE name = 'embedding_space'), 0)"
+        ),
+        1,
+        "a refused adoption must not spend an id either"
     );
 }
 
@@ -169,10 +185,7 @@ fn a_chunker_change_is_the_same_refusal_as_a_model_change() {
     let err = db
         .adopt_embedding_model("baai/bge-m3", 4, REF, "a-different-chunker-hash")
         .expect_err("the same model under a new chunker is still a new space");
-    assert!(
-        matches!(err, Error::ActiveSpaceNotEmpty { .. }),
-        "got {err:?}"
-    );
+    assert!(matches!(err, Error::SpaceNotEmpty { .. }), "got {err:?}");
     assert_eq!(db.active_space().expect("read"), Some(first.space_id));
 }
 
@@ -254,7 +267,7 @@ fn one_chunk_recorded_in_both_places_is_counted_once() {
         .adopt_embedding_model("openai/text-embedding-3-small", 1536, REF, HASH)
         .expect_err("one embedded chunk is still enough to refuse");
     match err {
-        Error::ActiveSpaceNotEmpty {
+        Error::SpaceNotEmpty {
             embedded_chunks, ..
         } => assert_eq!(
             embedded_chunks, 1,
@@ -322,6 +335,285 @@ fn returning_to_a_model_already_tried_creates_nothing() {
         count(&db, "SELECT count(*) FROM embedding_space"),
         2,
         "and no third space was minted"
+    );
+}
+
+#[test]
+fn a_full_space_blocks_a_switch_even_though_nothing_points_at_it() {
+    // The guard used to ask `meta.active_space` — a pointer only the adoption
+    // path writes — instead of asking what exists. These four calls are all
+    // public and none of them is raw SQL, and they leave a full space with no
+    // pointer to it; read off the pointer, the guard saw `None`, ran no check
+    // at all, and let the index move away in silence.
+    let db = temp_db();
+    let config = db
+        .create_model_config("m", "openrouter", None, "baai/bge-m3", 4)
+        .expect("config");
+    let space = db.create_space(config, 4, HASH).expect("space");
+    let chunk_id = support::one_chunk(&db);
+    db.insert_vector(space, chunk_id, &[1.0, 0.0, 0.0, 0.0])
+        .expect("vector");
+    assert_eq!(
+        db.active_space().expect("read"),
+        None,
+        "nothing has written the pointer, which is the whole point of the test"
+    );
+
+    let err = db
+        .adopt_embedding_model("openai/text-embedding-3-small", 1536, REF, HASH)
+        .expect_err("a full space blocks the switch whether or not it is pointed at");
+    match err {
+        Error::SpaceNotEmpty {
+            space_id,
+            embedded_chunks,
+        } => {
+            assert_eq!(space_id, space);
+            assert_eq!(embedded_chunks, 1);
+        }
+        other => panic!("got {other:?}"),
+    }
+    assert_eq!(
+        db.active_space().expect("read"),
+        None,
+        "and the refusal wrote nothing"
+    );
+}
+
+#[test]
+fn a_pointer_nobody_can_read_neither_unlocks_the_switch_nor_locks_the_index() {
+    // Both directions, because either alone is satisfied by the wrong rule. An
+    // unreadable pointer must not open the switch — that was the hole — and it
+    // must not close the index either, which is what refusing to parse it would
+    // have done: `meta_set` refuses this key, so nobody outside the crate could
+    // repair it. Asking what exists answers both without a special case.
+    let db = temp_db();
+    let first = db
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("first");
+    let chunk_id = support::one_chunk(&db);
+    db.insert_vector(first.space_id, chunk_id, &[1.0, 0.0, 0.0, 0.0])
+        .expect("vector");
+    db.conn()
+        .execute(
+            "UPDATE meta SET value = 'not-a-number' WHERE key = ?1",
+            rusqlite::params![META_ACTIVE_SPACE],
+        )
+        .expect("scribble on the pointer");
+    assert_eq!(
+        db.active_space().expect("read"),
+        None,
+        "the pointer no longer reads as an id"
+    );
+
+    let err = db
+        .adopt_embedding_model("openai/text-embedding-3-small", 1536, REF, HASH)
+        .expect_err("a switch is still refused");
+    assert!(matches!(err, Error::SpaceNotEmpty { .. }), "got {err:?}");
+
+    let again = db
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("the model the index is already full of is not a switch");
+    assert_eq!(again.space_id, first.space_id);
+    assert_eq!(
+        db.active_space().expect("read"),
+        Some(first.space_id),
+        "and adopting it again is what repairs the pointer"
+    );
+}
+
+#[test]
+fn a_full_space_that_is_not_the_active_one_still_blocks() {
+    // Every call public, no raw SQL. Two spaces are adopted while both are
+    // empty, which is allowed; the vectors then go into the one that is *not*
+    // active, and the active one is dropped. A guard reading the pointer counts
+    // the dropped space, finds nothing there, and moves the index off the full
+    // one.
+    let db = temp_db();
+    let first = db
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("first");
+    let second = db
+        .adopt_embedding_model("openai/text-embedding-3-small", 1536, REF, HASH)
+        .expect("switching an empty index costs nothing");
+    let chunk_id = support::one_chunk(&db);
+    db.insert_vector(first.space_id, chunk_id, &[1.0, 0.0, 0.0, 0.0])
+        .expect("vector into the space nothing points at");
+    db.drop_space(second.space_id).expect("drop the active one");
+
+    let err = db
+        .adopt_embedding_model("mistral/embed", 1024, REF, HASH)
+        .expect_err("the space holding the archive still blocks");
+    match err {
+        Error::SpaceNotEmpty {
+            space_id,
+            embedded_chunks,
+        } => {
+            assert_eq!(space_id, first.space_id);
+            assert_eq!(embedded_chunks, 1);
+        }
+        other => panic!("got {other:?}"),
+    }
+}
+
+#[test]
+fn a_width_that_disagrees_with_the_configuration_says_so_either_way() {
+    // One call, one cause, and it must not change its story with the state of
+    // the index. Asking for a recorded model at a width the configuration does
+    // not have is a width problem; before this it was reported as a width
+    // problem on an empty index and as "the embedding model cannot be changed"
+    // on a full one, which named a cause nobody had raised.
+    let empty = temp_db();
+    empty
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("first");
+    let on_empty = empty
+        .adopt_embedding_model("baai/bge-m3", 1024, REF, HASH)
+        .expect_err("the recorded configuration is 4 wide");
+
+    let full = temp_db();
+    let first = full
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("first");
+    let chunk_id = support::one_chunk(&full);
+    full.insert_vector(first.space_id, chunk_id, &[1.0, 0.0, 0.0, 0.0])
+        .expect("vector");
+    let on_full = full
+        .adopt_embedding_model("baai/bge-m3", 1024, REF, HASH)
+        .expect_err("the recorded configuration is still 4 wide");
+
+    for err in [&on_empty, &on_full] {
+        assert!(
+            matches!(
+                err,
+                Error::SpaceDimMismatch {
+                    config_dim: 4,
+                    space_dim: 1024,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn a_vector_written_while_a_switch_is_deciding_still_refuses_it() {
+    // The check inside the transaction that repoints the index is the half of
+    // the double check that nothing single-threaded can see: in one thread
+    // nothing changes between the two, so deleting the second leaves the whole
+    // crate green.
+    //
+    // Two connections make the interleave deterministic rather than hopeful.
+    // The writer holds an open transaction with a vector in it; WAL readers see
+    // the last commit, so the adoption's pre-flight check reads the space as
+    // empty and passes. The adoption then blocks at its first write — and the
+    // assertion that it is *still* blocked is what proves it got past the
+    // pre-flight, since a check that only reads cannot block. Releasing the
+    // lock lets it reach the second check, which sees the vector that landed
+    // while it was deciding.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("index.sqlite");
+    let adopting = open(&path).expect("the connection that adopts");
+    let writer = open(&path).expect("the connection that writes a vector");
+
+    let first = adopting
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("first");
+    let chunk_id = support::one_chunk(&adopting);
+
+    writer
+        .conn()
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("the writer takes the lock");
+    writer
+        .insert_vector(first.space_id, chunk_id, &[1.0, 0.0, 0.0, 0.0])
+        .expect("written, and not yet visible to anybody else");
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let switch = std::thread::spawn(move || {
+        started_tx.send(()).expect("announce the start");
+        let outcome =
+            adopting.adopt_embedding_model("openai/text-embedding-3-small", 1536, REF, HASH);
+        finished_tx.send(()).expect("announce the finish");
+        (adopting, outcome)
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the adoption never started");
+    assert!(
+        finished_rx
+            .recv_timeout(Duration::from_millis(500))
+            .is_err(),
+        "the adoption returned while the writer still held the lock, so it never reached \
+         the write that has to block — and this test would then prove nothing"
+    );
+
+    writer
+        .conn()
+        .execute_batch("COMMIT")
+        .expect("the vector becomes visible");
+    let (adopting, outcome) = switch.join().expect("the adopting thread panicked");
+
+    let err = outcome.expect_err("a vector that landed mid-decision must still be counted");
+    match err {
+        Error::SpaceNotEmpty {
+            space_id,
+            embedded_chunks,
+        } => {
+            assert_eq!(space_id, first.space_id);
+            assert_eq!(embedded_chunks, 1);
+        }
+        other => panic!("got {other:?}"),
+    }
+    assert_eq!(
+        adopting.active_space().expect("read"),
+        Some(first.space_id),
+        "the index did not move"
+    );
+    // The one case where a refusal is not clean, asserted rather than only
+    // described: by the time the second check fires, the new space exists.
+    assert_eq!(
+        count(&adopting, "SELECT count(*) FROM embedding_space"),
+        2,
+        "a refusal from the second check keeps the space it had already created"
+    );
+}
+
+#[test]
+fn space_is_empty_does_not_call_a_missing_space_empty() {
+    // "Empty" and "not there" are two facts, and a public method returning
+    // `bool` can only carry one of them. It answered `Ok(true)` for any id at
+    // all until the pointer this was propping up went away.
+    let db = temp_db();
+    let err = db
+        .space_is_empty(9999)
+        .expect_err("an id nobody wrote is not a fact about emptiness");
+    assert!(matches!(err, Error::NoSuchSpace(9999)), "got {err:?}");
+}
+
+#[test]
+fn creating_a_space_records_the_vector_library_version() {
+    // `META_VEC_VERSION` says it is "the version that created the first space
+    // here". Written by the adoption path, that sentence described an event
+    // nothing recorded: a space created through the public `create_space` left
+    // no version at all.
+    let db = temp_db();
+    assert_eq!(db.meta_get(META_VEC_VERSION).expect("read"), None);
+
+    let config = db
+        .create_model_config("m", "openrouter", None, "baai/bge-m3", 4)
+        .expect("config");
+    db.create_space(config, 4, HASH).expect("space");
+
+    let from_the_library: String = db
+        .conn()
+        .query_row("SELECT vec_version()", [], |r| r.get(0))
+        .expect("the extension answers");
+    assert_eq!(
+        db.meta_get(META_VEC_VERSION).expect("read").as_deref(),
+        Some(from_the_library.as_str())
     );
 }
 
