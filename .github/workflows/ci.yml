@@ -211,6 +211,17 @@ jobs:
       # without a sound. A silence that replaced a noise needs the note more than
       # one that was always silent.
       #
+      # That sentence is worth more if you know which parts of it were run, so:
+      # MEASURED, on macOS with the platform store forced to fail — a test that
+      # reaches a credential without the in-memory store fails, and the message
+      # names the store (`Unavailable { reference, detail }`), so the failure
+      # would be loud and legible rather than a puzzle. INHERITED, from the
+      # sentence above this one, which predates it: that a runner has no Secret
+      # Service session. NEVER RUN ANYWHERE: the Linux store's own construction
+      # and the error it produces. It compiles on this leg and has never been
+      # built, because every path that would reach it either registers a store
+      # first or is `#[ignore]`d — which is the gap itself, stated as what it is.
+      #
       # What would close it — mirroring the step below rather than inventing a
       # shape: on ubuntu-24.04, run the same command inside `dbus-run-session`
       # with `gnome-keyring --unlock --components=secrets`, so `roundtrip` meets
