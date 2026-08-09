@@ -34,7 +34,7 @@ impl Db {
             .optional()?)
     }
 
-    /// Writes a key that may be overwritten freely.
+    /// Writes a key, refusing [`META_ACTIVE_SPACE`]: overwriting it loses data.
     ///
     /// An overwrite costs three different things here, not two, and the whole
     /// design of this function is the third one. [`META_RERANK_MODEL`] and
@@ -60,13 +60,13 @@ impl Db {
     /// The unguarded upsert, `meta_set` minus the one rule it enforces.
     ///
     /// `pub(crate)` deliberately, and it is worth being exact about what that
-    /// buys. This crate's own API offers a caller outside it no way to write
-    /// [`META_ACTIVE_SPACE`]: `meta_set` refuses the key, and this function
-    /// cannot be named. What that closes is the convenient route — the one
-    /// taken without a decision. It is not a boundary: [`Db::conn`] hands out
-    /// the connection, and raw SQL through it writes any row in this database,
-    /// this key included. So a caller who means to go around the guard can, and
-    /// one who never thought about it will not.
+    /// buys. This crate's own **typed** API offers a caller outside it no way
+    /// to write [`META_ACTIVE_SPACE`]: `meta_set` refuses the key, and this
+    /// function cannot be named. What that closes is the convenient route — the
+    /// one taken without a decision. It is not a boundary: [`Db::conn`] hands
+    /// out the connection, and nothing on `meta` stops raw SQL from writing
+    /// this key. So a caller who means to go around the guard can, and one who
+    /// never thought about it will not.
     ///
     /// Inside the crate this is where the adoption path writes, which is the
     /// point of leaving it here: the check that the space being left behind

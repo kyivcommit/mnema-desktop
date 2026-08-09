@@ -36,12 +36,19 @@ pub fn temp_db() -> TempDb {
 ///
 /// **It cannot be called from inside a `Db::transaction`.** `insert_chunk`
 /// opens one of its own, SQLite has no nested `BEGIN`, and `Db::transaction`'s
-/// own doc names it as the one exception. Measured, because the way it fails
-/// matters: the document, the page and the block go in first — they join
-/// whatever transaction is open — and only the chunk fails, with "cannot start
-/// a transaction within a transaction". So a test that reaches for this inside
-/// a transaction does not get a clean refusal, it gets three rows and a panic.
-/// Build the chunk with `insert_chunk_in` there instead.
+/// own doc names it as the one exception. Build the chunk with
+/// `insert_chunk_in` there instead.
+///
+/// What that costs is worth naming, because it is not what it looks like.
+/// Three inserts run first — the document, the page and the block join the
+/// open transaction — and then the chunk panics with "cannot start a
+/// transaction within a transaction". The panic unwinds through
+/// `Db::transaction`, whose `Transaction` rolls back on drop, so those three
+/// rows go back out and the database is left holding nothing. Measured, both
+/// halves: looking for a half-written document afterwards finds an empty
+/// index. What is actually in front of you is a message naming a `BEGIN` you
+/// never wrote, because both of them are hidden — one in `Db::transaction`,
+/// one inside `insert_chunk`.
 ///
 /// `dead_code` is allowed because this module is compiled into **every** test
 /// binary that declares `mod support;`, and the only one today — `meta.rs` —
