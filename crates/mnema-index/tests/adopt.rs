@@ -781,6 +781,75 @@ fn a_space_holding_only_a_record_is_refused_in_words_that_are_true_of_it() {
     );
 }
 
+#[test]
+fn a_refusal_over_a_space_that_already_exists_still_writes_nothing() {
+    // The shape no other test in this file has: a refusal in which `requested`
+    // is `Some`. In all nine of the others the model being adopted has no
+    // configuration yet, or no space yet, so `requested` is `None` — and an
+    // exemption weakened to "skip when a space was found" is invisible to every
+    // one of them. Measured: weakening it that way at the pre-flight left the
+    // whole crate green.
+    //
+    // Nothing is lost when that happens, because the check under the write lock
+    // still refuses. What is lost is the only thing the pre-flight is for, and
+    // it is not a count here — both spaces and both configurations already
+    // exist, so the debris assertions elsewhere cannot see it. `credential_ref`
+    // is the observable: a refusal that got past the pre-flight writes it on
+    // the way to being refused.
+    let db = temp_db();
+    let first = db
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("first");
+    let second = db
+        .adopt_embedding_model("openai/text-embedding-3-small", 4, REF, HASH)
+        .expect("switching an empty index costs nothing");
+    let chunk_id = support::one_chunk(&db);
+    db.insert_vector(second.space_id, chunk_id, &[1.0, 0.0, 0.0, 0.0])
+        .expect("the archive, in the space the index is now on");
+
+    let before = credential_of(&db, first.model_config_id);
+    assert_eq!(
+        before.as_deref(),
+        Some(REF),
+        "the credential this call would overwrite, read before it runs"
+    );
+
+    let err = db
+        .adopt_embedding_model("baai/bge-m3", 4, "key-that-should-not-land", HASH)
+        .expect_err("moving back onto the empty space would strand the archive");
+    match err {
+        Error::SpaceNotEmpty {
+            space_id,
+            embedded_chunks,
+        } => {
+            assert_eq!(space_id, second.space_id);
+            assert_eq!(embedded_chunks, 1);
+        }
+        other => panic!("got {other:?}"),
+    }
+
+    assert_eq!(
+        credential_of(&db, first.model_config_id).as_deref(),
+        Some(REF),
+        "a refusal must not have written on its way to refusing"
+    );
+    assert_eq!(
+        db.active_space().expect("read"),
+        Some(second.space_id),
+        "and the index has not moved"
+    );
+}
+
+fn credential_of(db: &mnema_index::Db, model_config_id: i64) -> Option<String> {
+    db.conn()
+        .query_row(
+            "SELECT credential_ref FROM model_config WHERE id = ?1",
+            rusqlite::params![model_config_id],
+            |r| r.get(0),
+        )
+        .expect("read")
+}
+
 fn count(db: &mnema_index::Db, sql: &str) -> i64 {
     db.conn().query_row(sql, [], |r| r.get(0)).expect("count")
 }

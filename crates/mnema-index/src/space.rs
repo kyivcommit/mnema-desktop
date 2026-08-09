@@ -183,6 +183,20 @@ impl Db {
     /// that ever reaches it will be a JSON response from a third party, and a
     /// truncated or failed one arriving as zeros will be ordinary rather than
     /// hypothetical.
+    ///
+    /// **`space_id` is a parameter, and writing a space that is not the active
+    /// one is how the archive gets split.** Nothing here can stop it, and
+    /// nothing should: building the new space beside the old one and filling it
+    /// before switching is the sanctioned migration, and it is exactly this
+    /// call into a non-active space. [`Db::adopt_embedding_model`] guards
+    /// transitions — it refuses to move the index onto a space while another
+    /// holds embeddings — and a writer that puts *new* chunks somewhere the
+    /// index is not pointing never asks it anything, so no guard sees that at
+    /// all. The obligation is the caller's: embed into [`Db::active_space`],
+    /// unless you are rebuilding a space you are about to switch to. That
+    /// obligation belongs in the indexing subsystem's spec and is written down
+    /// in no spec today; it is said here because this is the call that breaks
+    /// it.
     pub fn insert_vector(&self, space_id: i64, chunk_id: i64, v: &[f32]) -> Result<(), Error> {
         let space = self.space(space_id)?;
         check_rankable(v, &space.metric, VectorRole::Stored(chunk_id))?;
@@ -305,6 +319,17 @@ impl Db {
     /// this key, and it writes an `i64`, so an unparsable one means the file
     /// was edited around this crate — and there is nothing a caller could do
     /// with the distinction that it cannot do with `None`.
+    ///
+    /// ⚠️ **This must stay a straight read of the stored value: no fallback.**
+    /// "If the key is absent, use the only space there is" is the plausible,
+    /// well-meant change that would break something two functions away —
+    /// [`Db::refuse_if_the_move_would_orphan_anything`] exempts a call from the
+    /// split guard when this answer already equals the space about to be
+    /// written, and that is sound only while the answer is decided by the
+    /// stored value alone. With a fallback, this would report a space nobody
+    /// chose, the exemption would fire on a call that really does move the
+    /// index, and the guard would be skipped in silence. Anything derived
+    /// belongs in the caller that wants it, not here.
     pub fn active_space(&self) -> Result<Option<i64>, Error> {
         Ok(self
             .meta_get(crate::META_ACTIVE_SPACE)?
@@ -366,9 +391,54 @@ impl Db {
         )?)
     }
 
+    /// The rule below, asked only of a call that would actually move the
+    /// pointer — and asked of every call that would.
+    ///
+    /// A call whose destination is where the pointer already stands writes
+    /// `active_space` with the value it already holds. It is not a transition,
+    /// so there is nothing for a guard on transitions to decide: whatever was
+    /// true of the database before it is still true after. Refusing there
+    /// refused the middle of the migration this function's own documentation
+    /// calls legal — the new space built and filled, the old one not yet
+    /// dropped — and, since adoption is the only path that writes
+    /// `credential_ref`, it made the API key unchangeable in exactly that
+    /// state. It also told a caller who was not moving that the index could not
+    /// move.
+    ///
+    /// ⚠️ `requested.is_some()` is load-bearing and not defensive. With it
+    /// dropped, two `None`s compare equal — a fresh index with no pointer,
+    /// asking for a space that does not exist yet — and the check would be
+    /// skipped on precisely the call that mints the first space beside an
+    /// already-full one. That is C1 reopened from the other side.
+    ///
+    /// This is the only place the pointer takes any part in the decision, and
+    /// it is sound because the premise is decidable from the very value about
+    /// to be written: [`Db::active_space`] is `parse(stored)` and the write is
+    /// `space_id.to_string()`, so if the parse already equals `space_id` then
+    /// `stored` is already that id in decimal and the write changes at most its
+    /// spelling. Checked at the edges: `"+1"` parses to `Some(1)` and is the
+    /// same space, `" 1"` does not parse and the rule is asked.
+    ///
+    /// ⚠️ **That argument dies the moment [`Db::active_space`] gains a
+    /// fallback.** Something like "if the key is absent, use the only space
+    /// there is" would be plausible and well meant, and it would make this
+    /// exemption unsound: the premise would no longer be about the stored
+    /// value, and a call that really does move the pointer from "nothing
+    /// chosen" onto a space — while another one is full — would be waved
+    /// through. `active_space` carries the same warning from its side.
+    fn refuse_if_the_move_would_orphan_anything(
+        &self,
+        requested: Option<i64>,
+    ) -> Result<(), Error> {
+        if requested.is_some() && requested == self.active_space()? {
+            return Ok(());
+        }
+        self.refuse_unless_every_other_space_is_empty(requested)
+    }
+
     /// Refuses the move unless **every space except the requested one** is
-    /// empty. The one refusal, so that the two places which decide it cannot
-    /// decide it differently.
+    /// empty. The one rule, so that the two places which ask it cannot decide
+    /// it differently.
     ///
     /// It asks what exists. It used to ask `meta.active_space`, and that was
     /// the wrong question by a whole class: the pointer is written by
@@ -394,39 +464,10 @@ impl Db {
     /// then means every existing space has to be empty — which is right: a
     /// brand-new space is being minted, and anything already filled would be
     /// left behind by it.
-    /// The rule above, asked only of a call that would actually move the
-    /// pointer — and asked of every call that would.
     ///
-    /// A call whose destination is where the pointer already stands writes
-    /// `active_space` with the value it already holds. It is not a transition,
-    /// so there is nothing for a guard on transitions to decide: whatever was
-    /// true of the database before it is still true after. Refusing there
-    /// refused the middle of the migration this function's own documentation
-    /// calls legal — the new space built and filled, the old one not yet
-    /// dropped — and, since adoption is the only path that writes
-    /// `credential_ref`, it made the API key unchangeable in exactly that
-    /// state. It also told a caller who was not moving that the index could not
-    /// move.
-    ///
-    /// ⚠️ `requested.is_some()` is load-bearing and not defensive. With it
-    /// dropped, two `None`s compare equal — a fresh index with no pointer,
-    /// asking for a space that does not exist yet — and the check would be
-    /// skipped on precisely the call that mints the first space beside an
-    /// already-full one. That is C1 reopened from the other side.
-    ///
-    /// This is the only place the pointer takes any part in the decision, and
-    /// the direction it can fail in is the safe one: absent, unreadable or
-    /// stale, it reads as `None`, matches nothing, and the rule is asked.
-    fn refuse_if_the_move_would_orphan_anything(
-        &self,
-        requested: Option<i64>,
-    ) -> Result<(), Error> {
-        if requested.is_some() && requested == self.active_space()? {
-            return Ok(());
-        }
-        self.refuse_unless_every_other_space_is_empty(requested)
-    }
-
+    /// Whether this is asked at all is [`Db::refuse_if_the_move_would_orphan_anything`]'s
+    /// question, and the two are separate functions because they are two
+    /// contracts: this one is what the rule is, that one is who it applies to.
     fn refuse_unless_every_other_space_is_empty(
         &self,
         requested: Option<i64>,
@@ -455,6 +496,18 @@ impl Db {
                 // Scoped to this loop deliberately. `space_is_empty` still
                 // propagates, because there the caller did name the id, and
                 // being told which one was wrong is the whole answer.
+                //
+                // Nothing exercises this line, and that is worth knowing before
+                // relying on it: deleting it leaves the whole crate green —
+                // measured, not assumed. A test would have to land a committed
+                // `drop_space` between the `SELECT` above and the count below,
+                // inside one call. It is not impossible, as an earlier note
+                // here claimed: `rusqlite::Connection::progress_handler` would
+                // give a seam inside the `SELECT`, and no lock is in the way,
+                // since this check holds none. It is machinery that exists
+                // nowhere in this repository, built to witness a `continue`
+                // against a microscopic window, so the choice is to say this
+                // rather than to build it.
                 Err(Error::NoSuchSpace(_)) => continue,
                 Err(other) => return Err(other),
             };
@@ -495,9 +548,10 @@ impl Db {
     /// the active space holds anything" — is not true and must not be relied
     /// on, because the migration reaches two full spaces legitimately, through
     /// [`Db::insert_vector`] into a space that is not the active one, and no
-    /// adoption took part in getting there. The obligation that the embedder
-    /// writes into [`Db::active_space`] is the indexing subsystem's to state;
-    /// it is written down nowhere yet.
+    /// adoption took part in getting there. The obligation that follows from
+    /// that — the embedder writes into [`Db::active_space`] — is stated on
+    /// [`Db::insert_vector`], which is the call that can break it and so the
+    /// doc its breaker is reading.
     ///
     /// What the refusal asks is
     /// what exists rather than what `meta.active_space` says, and
