@@ -298,7 +298,74 @@ pub enum KeyState {
     /// distinction [`Error::NoKey`] exists for: telling someone whose keychain
     /// is merely locked that they have entered no key sends them to re-enter one
     /// they already have.
-    Unreadable { reason: String },
+    ///
+    /// `cause` for the same reason [`IndexSettings::Unreadable`] has one, and
+    /// added a commit later because that fix was made to one half and not the
+    /// other. `mnema_secrets::Error` has six variants asking for **three
+    /// different things from the person at the window** — unlock the store,
+    /// remove a duplicate, send a bug report — and a single sentence flattens a
+    /// distinction the credential crate drew with a typed enum one layer up.
+    ///
+    /// ⚠️ **`reason` is diagnostic text and not the sentence to show.**
+    /// `mnema_secrets::Error::Unavailable` interpolates the platform error —
+    /// an OS status on macOS and Windows, a D-Bus error on Secret Service — and
+    /// a status code put in front of a person is not an action. The window's
+    /// sentence comes from `cause`; `reason` belongs wherever a bug report is
+    /// pasted. It carries no secret: every variant of that type names the
+    /// reference and never the credential, by construction.
+    Unreadable {
+        cause: KeyStoreFailure,
+        reason: String,
+    },
+}
+
+/// Why the credential store would not answer, grouped by what it leaves the
+/// person to do.
+///
+/// Four values over six error variants, and the grouping is the whole content:
+/// two of them are things somebody can go and fix, one is a bug report, and one
+/// depends on what the store said. Splitting them further would name causes the
+/// window has no different answer for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyStoreFailure {
+    /// The store could not be opened at all — a locked keychain on macOS, no
+    /// Secret Service session on Linux. The person unlocks it and asks again,
+    /// and nothing about their configuration is wrong.
+    Locked,
+    /// More than one credential is filed under this installation's name. The
+    /// person removes the duplicate; this build will not guess which of them is
+    /// the key.
+    Duplicate,
+    /// The store was reached and would not hand the credential over. Whether
+    /// there is anything to do depends on what it said, which is what `reason`
+    /// is for — this is the one value that does not name an action.
+    Refused,
+    /// A defect in this build rather than a state of the machine: a registered
+    /// store that does not keep what it is given, or a credential reference
+    /// this build left empty. A bug report, and nothing the person can act on.
+    Defect,
+}
+
+impl KeyStoreFailure {
+    /// Classifies what the credential store answered with.
+    ///
+    /// **Exhaustive over `mnema_secrets::Error`, with no wildcard**, and that is
+    /// the guard rather than the mapping: the type is not `#[non_exhaustive]`,
+    /// so a seventh variant added over there stops this compiling until somebody
+    /// decides which of the four things it leaves a person to do. It is the
+    /// mechanism `job.rs` already uses for `EndReason` and this cycle used for
+    /// `Role`, and the reason [`UnreadableCause::of`] cannot have it is written
+    /// on that function.
+    fn of(e: &mnema_secrets::Error) -> Self {
+        use mnema_secrets::Error as E;
+        match e {
+            E::Unavailable { .. } => Self::Locked,
+            E::Ambiguous { .. } => Self::Duplicate,
+            E::Unreadable { .. } | E::Refused { .. } => Self::Refused,
+            E::NotPersistent { .. } | E::EmptyReference => Self::Defect,
+        }
+    }
 }
 
 /// The index half of [`ModelSettings`]: what the database says, or why it said
@@ -368,15 +435,33 @@ pub enum UnreadableCause {
 impl UnreadableCause {
     /// Classifies what `AppState::with_index` handed back.
     ///
-    /// The wildcard is not a shrug: it answers "this is not
-    /// [`Error::IndexNotOpen`]", and every other way out of `with_index` is by
-    /// construction a read that was attempted and failed — `StatePoisoned` from
-    /// the lock, `Index(_)` from the closure. A variant added to
-    /// [`crate::error::Error`] tomorrow is classified correctly by that
-    /// argument rather than by this list being kept in step with it.
+    /// **The three exits are named rather than left to a wildcard**, because
+    /// "everything else" is a definition by enumeration and reads as though the
+    /// classification had been thought about once. `AppState::with_index` has
+    /// exactly three ways out — `StatePoisoned` from the lock, `IndexNotOpen`
+    /// from the missing connection, `Index(_)` from the closure — and two of the
+    /// three are defects of this build, which is what `ReadFailed` says.
+    ///
+    /// ⚠️ **The trailing arm is not a compiler guard, and cannot be one from
+    /// here.** [`KeyStoreFailure::of`] gets one because it classifies a whole
+    /// foreign enum; this classifies a *subset* of [`crate::error::Error`] —
+    /// the subset one nine-line function can produce — and no match expresses
+    /// "the things `with_index` returns". Matching all of `Error` exhaustively
+    /// would add nine arms for variants that cannot arrive here, and a reader
+    /// would rightly ask why `NoKey` is being classified. So the obligation is
+    /// written where it can actually be broken, on `AppState::with_index`
+    /// itself: a fourth way out of that function owes this list a decision.
+    /// `a_read_that_failed_is_told_apart_from_an_index_that_is_not_open` pins
+    /// the three as they stand.
     fn of(e: &Error) -> Self {
         match e {
             Error::IndexNotOpen => Self::NotOpen,
+            Error::StatePoisoned | Error::Index(_) => Self::ReadFailed,
+            // Not reachable from `with_index` today. `ReadFailed` and not a
+            // panic: a command that classified an unexpected error by aborting
+            // would take the window down for a case this reasoning simply did
+            // not cover, and "a read was attempted and something went wrong" is
+            // the honest reading of any error arriving from a read.
             _ => Self::ReadFailed,
         }
     }
@@ -458,6 +543,7 @@ fn key_state(state: &AppState) -> KeyState {
         Ok(Some(_)) => KeyState::Present,
         Ok(None) => KeyState::Absent,
         Err(e) => KeyState::Unreadable {
+            cause: KeyStoreFailure::of(&e),
             reason: e.to_string(),
         },
     }
@@ -526,5 +612,223 @@ mod tests {
     #[test]
     fn a_role_this_build_does_not_know_is_refused_rather_than_defaulted() {
         assert!(matches!(role_from("embbeding"), Err(Error::UnknownRole(_))));
+    }
+
+    /// An `IndexRead` with nothing in it, for the tests below that care only
+    /// about the tag in front of it.
+    fn empty_read() -> IndexRead {
+        IndexRead {
+            embedding_model: None,
+            embedding_dim: None,
+            active_space: None,
+            embedded_chunks: 0,
+            total_chunks: 0,
+            rerank_model: None,
+            chat_model: None,
+        }
+    }
+
+    /// The canonical camelCase spelling of every discriminant this module sends
+    /// across the IPC, pinned the way `job.rs` pins `EndReason`'s.
+    ///
+    /// Four unions reach the window from here and not one of them was fastened
+    /// to anything: `grep -rn 'readFailed' src-tauri ui` was empty, and a fourth
+    /// `KeyState` variant would have arrived in the window as an unhandled
+    /// `kind` without reddening a thing. `job.rs` has had this exact mechanism
+    /// twice since the walk job.
+    ///
+    /// **Two independent opinions about each spelling, which is what makes it a
+    /// test rather than a restatement.** The `match` arms are written by hand
+    /// here; `serde_json::to_value` asks serde. A `#[serde(rename)]` typo is
+    /// caught unless the same typo was made twice, in two places, by two people.
+    /// And no arm has a wildcard, so a variant added to any of these four stops
+    /// this file compiling — which is the part that makes a maintainer look at
+    /// the list at all.
+    ///
+    /// What it cannot do is reach `ui/render.test.js`, where the mirrored lists
+    /// for `EndReason` live. There is nothing to mirror into yet — the window
+    /// has no renderer for these — and a JS list that nothing asserts against
+    /// goes stale while looking authoritative. That half belongs with the
+    /// renderer; `ui/render.test.js` already runs in CI, so it has somewhere to
+    /// land.
+    #[test]
+    fn every_discriminant_the_window_sees_has_its_camel_case_spelling_pinned() {
+        // Two shapes, and they are read differently on purpose. `KeyState` and
+        // `IndexSettings` are internally tagged, so their discriminant is the
+        // value of `kind` inside an object; `KeyStoreFailure` and
+        // `UnreadableCause` are plain unit enums and serialise as bare strings.
+        let tag = |v: serde_json::Value| -> String {
+            v["kind"]
+                .as_str()
+                .expect("an internally tagged enum carries `kind`")
+                .to_string()
+        };
+        let bare = |v: serde_json::Value| -> String {
+            v.as_str()
+                .expect("a unit-only enum serialises as a string")
+                .to_string()
+        };
+
+        let key = |state: &KeyState| -> &'static str {
+            match state {
+                KeyState::Present => "present",
+                KeyState::Absent => "absent",
+                KeyState::Unreadable { .. } => "unreadable",
+            }
+        };
+        for state in [
+            KeyState::Present,
+            KeyState::Absent,
+            KeyState::Unreadable {
+                cause: KeyStoreFailure::Locked,
+                reason: String::new(),
+            },
+        ] {
+            assert_eq!(
+                tag(serde_json::to_value(&state).unwrap()),
+                key(&state),
+                "{state:?} serialised differently than this test's own spelling of it"
+            );
+        }
+
+        let failure = |f: KeyStoreFailure| -> &'static str {
+            match f {
+                KeyStoreFailure::Locked => "locked",
+                KeyStoreFailure::Duplicate => "duplicate",
+                KeyStoreFailure::Refused => "refused",
+                KeyStoreFailure::Defect => "defect",
+            }
+        };
+        for f in [
+            KeyStoreFailure::Locked,
+            KeyStoreFailure::Duplicate,
+            KeyStoreFailure::Refused,
+            KeyStoreFailure::Defect,
+        ] {
+            assert_eq!(
+                bare(serde_json::to_value(f).unwrap()),
+                failure(f),
+                "{f:?} serialised differently than this test's own spelling of it"
+            );
+        }
+
+        let index = |settings: &IndexSettings| -> &'static str {
+            match settings {
+                IndexSettings::Read(_) => "read",
+                IndexSettings::Unreadable { .. } => "unreadable",
+            }
+        };
+        for settings in [
+            IndexSettings::Read(empty_read()),
+            IndexSettings::Unreadable {
+                cause: UnreadableCause::NotOpen,
+                reason: String::new(),
+            },
+        ] {
+            assert_eq!(
+                tag(serde_json::to_value(&settings).unwrap()),
+                index(&settings),
+                "{settings:?} serialised differently than this test's own spelling of it"
+            );
+        }
+
+        let cause = |c: UnreadableCause| -> &'static str {
+            match c {
+                UnreadableCause::NotOpen => "notOpen",
+                UnreadableCause::ReadFailed => "readFailed",
+            }
+        };
+        for c in [UnreadableCause::NotOpen, UnreadableCause::ReadFailed] {
+            assert_eq!(
+                bare(serde_json::to_value(c).unwrap()),
+                cause(c),
+                "{c:?} serialised differently than this test's own spelling of it"
+            );
+        }
+    }
+
+    /// The three ways out of `AppState::with_index`, sorted as
+    /// [`UnreadableCause::of`] sorts them.
+    ///
+    /// It pins the classification as it stands; it does **not** notice a fourth
+    /// exit being added to `with_index`, which is why that obligation is written
+    /// on `with_index` itself. Both directions, because a classifier that
+    /// answered `ReadFailed` to everything would satisfy two of these three.
+    #[test]
+    fn a_read_that_failed_is_told_apart_from_an_index_that_is_not_open() {
+        assert_eq!(
+            UnreadableCause::of(&Error::IndexNotOpen),
+            UnreadableCause::NotOpen
+        );
+        assert_eq!(
+            UnreadableCause::of(&Error::StatePoisoned),
+            UnreadableCause::ReadFailed
+        );
+        assert_eq!(
+            UnreadableCause::of(&Error::Index(mnema_index::Error::NoSuchSpace(7))),
+            UnreadableCause::ReadFailed,
+            "a space the pointer names and the database does not have is a defect of this \
+             build, not an index nobody opened"
+        );
+    }
+
+    /// Every failure the credential store can report, sorted by what it leaves
+    /// the person to do.
+    ///
+    /// The `match` in [`KeyStoreFailure::of`] is already exhaustive, so a
+    /// seventh variant of `mnema_secrets::Error` stops the crate compiling.
+    /// What this adds is the other half: that the four groups are actually
+    /// distinguished rather than all mapped to one value, which an exhaustive
+    /// match is perfectly happy to do.
+    #[test]
+    fn the_credential_store_failures_are_sorted_by_what_they_ask_of_a_person() {
+        let reference = "mnema-test-reference".to_string();
+        for (error, expected) in [
+            (
+                mnema_secrets::Error::Unavailable {
+                    reference: reference.clone(),
+                    detail: "the keychain is locked".into(),
+                },
+                KeyStoreFailure::Locked,
+            ),
+            (
+                mnema_secrets::Error::Ambiguous {
+                    reference: reference.clone(),
+                    count: 2,
+                },
+                KeyStoreFailure::Duplicate,
+            ),
+            (
+                mnema_secrets::Error::Refused {
+                    reference: reference.clone(),
+                    reason: "no".into(),
+                },
+                KeyStoreFailure::Refused,
+            ),
+            (
+                mnema_secrets::Error::Unreadable {
+                    reference: reference.clone(),
+                    reason: "not utf-8",
+                },
+                KeyStoreFailure::Refused,
+            ),
+            (
+                mnema_secrets::Error::NotPersistent {
+                    reference: reference.clone(),
+                    vendor: "a store that keeps nothing".into(),
+                },
+                KeyStoreFailure::Defect,
+            ),
+            (
+                mnema_secrets::Error::EmptyReference,
+                KeyStoreFailure::Defect,
+            ),
+        ] {
+            assert_eq!(
+                KeyStoreFailure::of(&error),
+                expected,
+                "`{error}` was sorted into the wrong thing for a person to do"
+            );
+        }
     }
 }

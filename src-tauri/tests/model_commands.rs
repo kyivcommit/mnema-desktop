@@ -10,8 +10,9 @@ mod support;
 use fixture::Fixture;
 use mnema_desktop::error::Error;
 use mnema_desktop::models::{
-    IndexRead, IndexSettings, KeyState, UnreadableCause, forget_key, key_present, model_settings,
-    provider_models, set_chat_model, set_embedding_model, set_key, set_rerank_model,
+    IndexRead, IndexSettings, KeyState, KeyStoreFailure, UnreadableCause, forget_key, key_present,
+    model_settings, provider_models, set_chat_model, set_embedding_model, set_key,
+    set_rerank_model,
 };
 
 /// The index half, or a failure naming what the index said instead.
@@ -270,6 +271,30 @@ fn nothing_that_crosses_to_the_window_repeats_the_key() {
         !json.contains(KEY),
         "the key status that crosses to the window repeats the key: {json}"
     );
+
+    // And the settings, which are the other command whose *successful* result
+    // carries text this module did not write — `KeyState::Unreadable.reason`
+    // comes from the credential store itself, the one place a key is. The rule
+    // this follows is stated on `KeyStatus`: a type carrying foreign text goes
+    // in this scan and not only the error type does.
+    let configured = Fixture::with_provider_accepting_everything();
+    configured.open_index();
+    set_key(configured.state(), KEY.into()).expect("accepted");
+
+    let settings =
+        serde_json::to_string(&model_settings(configured.state())).expect("the settings serialise");
+    // The positive control. Every assertion of absence below is satisfied by
+    // settings about an installation that has no key at all; this says the key
+    // exists to be leaked.
+    assert!(
+        settings.contains(r#""kind":"present""#),
+        "this half means to look at settings whose key is there; it is looking at \
+         something else: {settings}"
+    );
+    assert!(
+        !settings.contains(KEY),
+        "the settings that cross to the window repeat the key: {settings}"
+    );
 }
 
 #[test]
@@ -516,10 +541,20 @@ fn a_store_that_will_not_answer_does_not_take_the_index_with_it() {
     let settings = model_settings(fx.state());
 
     match &settings.key {
-        KeyState::Unreadable { reason } => assert!(
-            !reason.is_empty(),
-            "a store that would not answer must say something about why"
-        ),
+        // The discriminant and the sentence, both typed — the shape the index
+        // half already had. `!reason.is_empty()` was what stood here, and it is
+        // satisfied by any string at all: the mutation that proved the index
+        // half carries its sentence verbatim stayed green on this side of the
+        // same struct.
+        KeyState::Unreadable { cause, reason } => {
+            assert_eq!(
+                *cause,
+                KeyStoreFailure::Defect,
+                "an empty credential reference is this build's own defect, not something the \
+                 person at the window can unlock or de-duplicate"
+            );
+            assert_eq!(reason, &mnema_secrets::Error::EmptyReference.to_string());
+        }
         other => panic!(
             "this test needs a store that will not answer, and it got one that did: {other:?}"
         ),
