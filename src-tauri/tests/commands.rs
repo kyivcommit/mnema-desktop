@@ -1215,11 +1215,34 @@ fn a_window_the_capability_does_not_name_may_not_reach_the_folder_picker() {
     );
 }
 
-/// What Tauri answers a command name it has no entry for. Measured
-/// 2026-08-09 against `tauri` 2.11.5 by asking for `set_embeding_model`, and
-/// the control in the test below is what keeps it measured rather than
-/// remembered.
-const NOT_REGISTERED: &str = "not found";
+/// What Tauri answers a command name it has no entry for — the whole message,
+/// which is what makes a comparison against it discriminate.
+///
+/// `format!("Command {command} not found")`, built in
+/// `tauri-2.11.5/src/webview/mod.rs`. Measured 2026-08-09 by asking for
+/// `set_embeding_model`; the control in the test below is what keeps it measured
+/// rather than remembered.
+fn not_registered(cmd: &str) -> String {
+    format!("Command {cmd} not found")
+}
+
+/// The lead of Tauri's argument-binding refusal, ``invalid args `{1}` for
+/// command `{0}`: {2}`` (`tauri-2.11.5/src/error.rs`). Measured by the second
+/// control below, for the same reason as the first.
+const INVALID_ARGS: &str = "invalid args";
+
+/// What the webview would receive, insisting it is a string.
+///
+/// `call`'s own doc two hundred lines up states that for this shell an `Err` is
+/// **always** a string. `unwrap_or_default()` here would turn a violation of
+/// that into `""`, and every assertion of absence downstream would then pass
+/// while checking nothing.
+fn error_text(rejected: &Value) -> String {
+    rejected
+        .as_str()
+        .expect("this shell's rejections are strings; `call`'s own doc says so")
+        .to_string()
+}
 
 /// The eight model commands, enumerated, asked of the list that decides what
 /// the window can call.
@@ -1247,26 +1270,58 @@ fn every_model_command_the_window_calls_is_registered() {
     let webview = main_webview(&app);
 
     // Control one: a name nobody registered, one letter away from a real
-    // command. Without it, the assertion below is a search for a string that
-    // may no longer be the one Tauri uses, and it would pass for every command
-    // in the list including the absent ones.
+    // command. Without it, the assertion below is a search for a string that may
+    // no longer be the one Tauri uses, and it would pass for every command in
+    // the list including the absent ones.
+    //
+    // The whole message and not a substring of it. `contains("not found")` reads
+    // as the same check and is not: it also fires on any *other* refusal that
+    // happens to use those two words, and then reports "X is not in
+    // invoke_handler" about a command that is — red with the wrong cause named,
+    // which is worse than green.
     let missing = call(&webview, "set_embeding_model", json!({ "model": "x" }))
         .expect_err("a command nobody registered was accepted");
-    assert!(
-        missing.as_str().is_some_and(|m| m.contains(NOT_REGISTERED)),
-        "an unregistered command no longer answers with `{NOT_REGISTERED}`, so the loop \
-         below is looking for the wrong string and would pass for a command that is not \
-         registered either: {missing}"
+    assert_eq!(
+        error_text(&missing),
+        not_registered("set_embeding_model"),
+        "an unregistered command no longer answers with that sentence, so the loop below is \
+         comparing against the wrong string and would pass for a command that is not \
+         registered either"
     );
 
-    // Control two: the arguments are bound, not ignored. A command reached with
-    // its argument missing is refused by name, which is what makes "no
-    // complaint about the arguments" mean something in the loop.
+    // Control two: the arguments are bound, not ignored, AND the string the loop
+    // asserts the absence of is a string this build has seen.
+    //
+    // Both halves are needed and the first version had neither. `contains("model")`
+    // is satisfied by the *command name* — Tauri's format is
+    // ``invalid args `{1}` for command `{0}`: {2}`` (`tauri-2.11.5/src/error.rs`),
+    // and all eight command names contain `model`. And nothing measured
+    // "invalid args" at all, so the day Tauri rephrases it, the loop's second
+    // assertion becomes permanently vacuous without going red — the same
+    // absence-satisfied-by-nothing that control one exists to stop.
     let unbound = call(&webview, "set_rerank_model", json!({}))
         .expect_err("a command was accepted without the argument it declares");
+    let unbound = error_text(&unbound);
+    // This control is itself reached through the handler, so it has to say which
+    // failure it is looking at before it says anything about arguments.
+    // Measured: dropping `set_rerank_model` from `invoke_handler` makes the two
+    // assertions below fail with "Tauri no longer says `invalid args`" — red
+    // with the wrong cause named, about a command that is simply absent.
+    assert_ne!(
+        unbound,
+        not_registered("set_rerank_model"),
+        "this control asks about argument binding and its own command is not registered, so \
+         it can say nothing about arguments"
+    );
     assert!(
-        unbound.as_str().is_some_and(|m| m.contains("model")),
-        "the rejection should name the missing argument; it was {unbound}"
+        unbound.contains(INVALID_ARGS),
+        "a missing argument no longer answers with `{INVALID_ARGS}`, so the loop below \
+         asserts the absence of a string nothing produces: {unbound}"
+    );
+    assert!(
+        unbound.contains("`model`"),
+        "the rejection should name the missing argument, in the backticks Tauri puts round \
+         it — the bare word is in every one of these command names: {unbound}"
     );
 
     for (cmd, args) in [
@@ -1285,18 +1340,18 @@ fn every_model_command_the_window_calls_is_registered() {
         ),
         ("model_settings", json!({})),
     ] {
-        let answer = call(&webview, cmd, args);
-        let message = match &answer {
+        let message = match call(&webview, cmd, args) {
             Ok(_) => continue,
-            Err(e) => e.as_str().unwrap_or_default().to_string(),
+            Err(e) => error_text(&e),
         };
-        assert!(
-            !message.contains(NOT_REGISTERED),
+        assert_ne!(
+            message,
+            not_registered(cmd),
             "{cmd} is not in `invoke_handler`, so the window cannot call it however well \
-             the function itself works: {message}"
+             the function itself works"
         );
         assert!(
-            !message.contains("invalid args"),
+            !message.contains(INVALID_ARGS),
             "{cmd} was reached and would not take the arguments the window sends it: \
              {message}"
         );

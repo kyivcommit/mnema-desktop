@@ -10,9 +10,23 @@ mod support;
 use fixture::Fixture;
 use mnema_desktop::error::Error;
 use mnema_desktop::models::{
-    forget_key, key_present, model_settings, provider_models, set_chat_model, set_embedding_model,
-    set_key,
+    IndexRead, IndexSettings, forget_key, key_present, model_settings, provider_models,
+    set_chat_model, set_embedding_model, set_key, set_rerank_model,
 };
+
+/// The index half, or a failure naming what the index said instead.
+///
+/// A helper rather than a `match` at each call site: written out four times, one
+/// of them ends up an `if let` that simply does nothing when the index was never
+/// read — an assertion satisfied by the state it exists to exclude.
+fn read_index(index: &IndexSettings) -> &IndexRead {
+    match index {
+        IndexSettings::Read(read) => read,
+        IndexSettings::Unreadable { reason } => {
+            panic!("the index was expected to be readable here, and it said: {reason}")
+        }
+    }
+}
 
 /// Synthetic, and shaped so it cannot be mistaken for a provider key: no `sk-`
 /// prefix, no base64 tail, and it says what it is. If this string is ever found
@@ -310,15 +324,50 @@ fn the_recorded_dimension_is_the_one_the_provider_answered_with() {
         fx.open_index();
         set_key(fx.state(), KEY.into()).expect("accepted");
 
-        let settings = set_embedding_model(fx.state(), MODEL.into()).expect("chosen");
+        let adopted = set_embedding_model(fx.state(), MODEL.into()).expect("chosen");
 
-        assert_eq!(settings.embedding_model.as_deref(), Some(MODEL));
-        assert_eq!(settings.embedding_dim, Some(width as i64));
+        // What the call says it wrote, and then what the database says it holds.
+        // Only the second proves a write happened at all; only the first
+        // survives a read-back that fails.
+        assert_eq!(adopted.model, MODEL);
+        assert_eq!(adopted.dim, width as i64);
+        assert!(adopted.created, "this index had no space before the call");
+
+        let read = read_index(&adopted.index);
+        assert_eq!(read.embedding_model.as_deref(), Some(MODEL));
+        assert_eq!(read.embedding_dim, Some(width as i64));
+        assert_eq!(read.active_space, Some(adopted.space_id));
         assert_eq!(
-            settings.embedded_chunks, 0,
+            read.embedded_chunks, 0,
             "an active space says which model the index works with, not that anything is embedded"
         );
     }
+}
+
+/// Choosing the same model again finds the space rather than minting one, and
+/// `created` is what says so.
+///
+/// Without this the field is asserted `true` in one place and could be a literal
+/// `true` there: `assert!(adopted.created)` above is satisfied by a constant.
+#[test]
+fn choosing_the_same_model_again_reports_a_space_found_rather_than_created() {
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("accepted");
+    let first = set_embedding_model(fx.state(), MODEL.into()).expect("chosen");
+    assert!(first.created);
+
+    // A second embedding check, so the second call has an answer of its own.
+    let second = set_embedding_model(fx.state(), MODEL.into()).expect("chosen again");
+
+    assert!(
+        !second.created,
+        "the same model twice is one space, and the second call found it"
+    );
+    assert_eq!(
+        second.space_id, first.space_id,
+        "and it is the space the first call minted"
+    );
 }
 
 #[test]
@@ -328,13 +377,97 @@ fn the_free_slots_change_without_touching_the_index() {
 
     set_chat_model(fx.state(), "vendor/one".into()).expect("set");
     set_chat_model(fx.state(), "vendor/two".into()).expect("set again");
+    set_rerank_model(fx.state(), "vendor/rr".into()).expect("set the other slot");
 
     let settings = model_settings(fx.state()).expect("read");
-    assert_eq!(settings.chat_model.as_deref(), Some("vendor/two"));
+    let read = read_index(&settings.index);
+    // Both slots, and in this order. Asserting only the one just written is what
+    // let the twin command go unproven: `set_rerank_model` writing the chat key
+    // would silently discard a chat model already chosen, and a test that reads
+    // one slot cannot see it.
+    assert_eq!(read.rerank_model.as_deref(), Some("vendor/rr"));
     assert_eq!(
-        settings.active_space, None,
+        read.chat_model.as_deref(),
+        Some("vendor/two"),
+        "choosing a rerank model must leave the chat model where it was"
+    );
+    assert_eq!(
+        read.active_space, None,
         "choosing a chat model creates no space"
     );
+}
+
+/// The shape the window actually receives, on both arms.
+///
+/// Two things nothing else here would notice. The `kind` tag: `IndexSettings`
+/// is internally tagged and `Read` is a newtype variant, and serde can flatten
+/// such a payload beside the tag only while the payload is itself a map — a
+/// payload that is not one compiles and then fails at run time, which is the
+/// trap `Balance`'s own doc records from the other side. And the camelCase
+/// rename, which the IPC needs and which no assertion on a Rust field can see.
+#[test]
+fn the_settings_reach_the_window_tagged_and_in_camel_case() {
+    let fx = Fixture::with_provider_accepting_everything();
+
+    let closed = serde_json::to_string(&model_settings(fx.state()).expect("read"))
+        .expect("the settings serialise");
+    assert!(
+        closed.contains(r#""kind":"unreadable""#) && closed.contains(r#""reason":"#),
+        "the unreadable arm did not arrive tagged: {closed}"
+    );
+
+    fx.open_index();
+    let open = serde_json::to_string(&model_settings(fx.state()).expect("read"))
+        .expect("the settings serialise");
+    for expected in [
+        r#""keyPresent":false"#,
+        r#""kind":"read""#,
+        r#""embeddingModel":null"#,
+        r#""embeddedChunks":0"#,
+        r#""totalChunks":0"#,
+        r#""activeSpace":null"#,
+    ] {
+        assert!(
+            open.contains(expected),
+            "the window would not find {expected} in {open}"
+        );
+    }
+    // The tag and the payload are siblings, not nested: a `Read` arm that
+    // serialised as `{"kind":"read","read":{…}}` would satisfy every assertion
+    // above and be a different wire format.
+    assert!(
+        !open.contains(r#""read":{"#),
+        "the payload was nested under the variant name instead of flattened beside the tag: {open}"
+    );
+}
+
+/// The key is measured before the index is touched, and it must survive the
+/// index not being there.
+///
+/// This is the state the settings screen is opened in: `AppState.db` is `None`
+/// until the window calls `open_index`, and an index this build cannot open
+/// leaves it `None` for the rest of the session. Folded into one message, the
+/// screen tells someone who has a key that they have none.
+#[test]
+fn a_key_that_is_there_survives_an_index_that_is_not() {
+    let fx = Fixture::with_provider_accepting_everything();
+    // Deliberately no `open_index`.
+    set_key(fx.state(), KEY.into()).expect("accepted");
+
+    let settings =
+        model_settings(fx.state()).expect("the settings screen still has something true to draw");
+
+    assert!(
+        settings.key_present,
+        "the key was measured before the index was consulted, and the measurement was thrown away"
+    );
+    match &settings.index {
+        IndexSettings::Unreadable { reason } => assert!(
+            reason.contains("index is not open"),
+            "the reason should say which half failed; it was {reason}"
+        ),
+        other => panic!("the index is not open, and the answer says it was read: {other:?}"),
+    }
 }
 
 #[test]

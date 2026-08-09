@@ -91,10 +91,18 @@ impl Fixture {
     /// states none, and the same model name answers 1536 or 1024 depending on a
     /// parameter (spec §2.4).
     pub fn with_provider_answering_with_dimension(width: usize) -> Self {
-        Self::new(vec![
-            Reply::ok(CREDITS),
-            Reply::ok(&mnema_mock_provider::two_vectors(width)),
-        ])
+        Self::with_provider_answering_embedding_checks(width, 1)
+    }
+
+    /// A credit check, then `checks` embedding checks at `width` — the sequence
+    /// a test that sets the key once and then chooses a model `checks` times
+    /// makes. One reply short and the extra call gets the mock's `599`
+    /// sentinel, which fails the test loudly rather than hanging.
+    pub fn with_provider_answering_embedding_checks(width: usize, checks: usize) -> Self {
+        let mut replies = vec![Reply::ok(CREDITS)];
+        let vectors = mnema_mock_provider::two_vectors(width);
+        replies.extend((0..checks).map(|_| Reply::ok(&vectors)));
+        Self::new(replies)
     }
 
     /// A provider whose model list answers `200` with exactly `body`.
@@ -199,7 +207,7 @@ impl Fixture {
     /// [`Fixture::with_provider_accepting_everything`] with `set_key` called
     /// first.
     pub fn adopt_default_model(&self) {
-        let settings =
+        let adopted =
             mnema_desktop::models::set_embedding_model(self.state(), DEFAULT_MODEL.into())
                 .expect("the default model is adopted");
         // Not a restatement of the command's own test. It says the provider
@@ -207,8 +215,7 @@ impl Fixture {
         // caller relying on `DEFAULT_DIM` is relying on something checked
         // rather than on two constants that happen to match.
         assert_eq!(
-            settings.embedding_dim,
-            Some(DEFAULT_DIM),
+            adopted.dim, DEFAULT_DIM,
             "the fixture's provider answered a width other than the one this fixture names"
         );
     }

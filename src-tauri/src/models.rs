@@ -144,25 +144,75 @@ pub fn provider_models(state: State<'_, AppState>, role: String) -> Result<Catal
 /// keeps a test binary out of the developer's own keychain; writing the constant
 /// here would record a name this installation does not use.
 ///
-/// **What a failure after the adopt means.** The order is check → record → read
-/// back, and the read back can fail on its own — the credential store is asked
-/// again for `key_present`. A rejected command then reaches the window carrying
-/// the store's message while the model *has* been recorded, so the sentence the
-/// window draws must not be "the model was not chosen". Reordering to read the
-/// settings first would trade this for something worse: a report of the state
-/// before the change.
+/// **It answers with the adoption and not with [`ModelSettings`]**, so that "the
+/// model was recorded" is a fact on the wire rather than something the window
+/// has to infer from a command that returned `Ok`. The first version read the
+/// settings back and returned those, which meant a read-back that failed on its
+/// own turned a recorded model into a rejected command: the window could not
+/// tell "nothing was written" from "written, and reading it back failed", and no
+/// wording could have told them apart, because the fact was not in the message.
+/// It is not inferred here either — see [`AdoptedModel::created`].
+///
+/// The store is asked **once**, by `key`. Asking it again for a `key_present`
+/// would be a second measurement that can disagree with the one this command
+/// actually used: a concurrent `forget_key` would report the key as absent on a
+/// call that has just succeeded with it. The window does not need the answer in
+/// any case — a success here is a call that had the key, and the other arm is
+/// [`Error::NoKey`].
 #[tauri::command(async)]
 pub fn set_embedding_model(
     state: State<'_, AppState>,
     model: String,
-) -> Result<ModelSettings, Error> {
+) -> Result<AdoptedModel, Error> {
     let key = key(&state)?;
     let check = mnema_provider::check_embedding_model(state.provider_base(), &key, &model)?;
     let hash = mnema_chunk::chunker_hash();
-    state.with_index(|db| {
-        db.adopt_embedding_model(&model, check.dim as i64, state.credential_ref(), &hash)
-    })?;
-    model_settings(state)
+    let dim = check.dim as i64;
+    let adopted = state
+        .with_index(|db| db.adopt_embedding_model(&model, dim, state.credential_ref(), &hash))?;
+    Ok(AdoptedModel {
+        model,
+        dim,
+        space_id: adopted.space_id,
+        created: adopted.created,
+        index: index_settings(&state),
+    })
+}
+
+/// What [`set_embedding_model`] recorded, said rather than implied.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptedModel {
+    pub model: String,
+    /// The width the provider answered with, which is the width that was
+    /// written. Kept beside `index` rather than read out of it: `index` says
+    /// what the database holds, this says what this call put there, and the two
+    /// disagreeing is information rather than noise. It is also the only carrier
+    /// left when `index` is [`IndexSettings::Unreadable`].
+    pub dim: i64,
+    pub space_id: i64,
+    /// Whether this call minted the space or found one. **Stated by the index,
+    /// never inferred here** — `Db::adopt_embedding_model` reads it from
+    /// `create_space`'s own answer precisely because the neighbouring fact ("the
+    /// active space moved") is a different one, and agrees with it everywhere
+    /// except on a model chosen, abandoned and chosen again. Deriving it from
+    /// `embeddedChunks` would be worse still: that number is identically zero in
+    /// this build (D29), so the derivation is wrong in exactly one direction.
+    pub created: bool,
+    /// The settings as they now stand, or why they could not be read — see
+    /// [`IndexSettings`]. A failure here does not take the four fields above
+    /// with it, which is the whole point of answering with this type.
+    ///
+    /// ⚠️ **No test reaches the [`IndexSettings::Unreadable`] arm on *this*
+    /// type**, and it is worth knowing that before relying on it. The adoption
+    /// two lines up went through the same open index, so by the time this is
+    /// built the index has just been written to successfully; what is left is a
+    /// lock another thread poisoned in between, which no test here can arrange.
+    /// The guarantee is carried by the shape rather than by a run: the four
+    /// fields above are not inside `index`, so no reading failure can reach
+    /// them. `model_settings` exercises the same arm on the same type
+    /// (`a_key_that_is_there_survives_an_index_that_is_not`).
+    pub index: IndexSettings,
 }
 
 /// Leaves nothing on disk, so it needs no check and no space (spec §2.1).
@@ -184,14 +234,66 @@ pub fn set_chat_model(state: State<'_, AppState>, model: String) -> Result<(), E
     Ok(())
 }
 
-/// Everything the settings screen draws, read at one instant.
+/// Everything the settings screen draws: the key, and the index.
+///
+/// **Two halves, because they are two facts and they fail separately.** The key
+/// lives in the OS credential store and the rest lives in a database, and the
+/// database is not open until the window asks it to be — `AppState::db` is
+/// `None` until the first `open_index`, and an index written by a newer Mnema
+/// does not open at all, which is a state the application stays in rather than
+/// passes through. The settings screen is exactly the screen someone opens then.
+///
+/// The first version measured `key_present`, then let `with_index` fail, and the
+/// measurement died with the call. One message for two facts: the window could
+/// not say "your key is there, the database did not open", and an empty state
+/// drawn from that failure tells someone who **has** a key that they have none —
+/// the sentence [`Error::NoKey`]'s own doc calls forbidden.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettings {
     /// Measured, never a literal — `mnema_secrets::load(...)?.is_some()`. It is
     /// the same question [`key_present`] answers and it has one source; see
     /// [`KeyStatus`] for what a second one cost when it was tried.
+    ///
+    /// The store failing is still an `Err` from the command, not a third state
+    /// here: that is the line [`key_present`] already draws — absence is
+    /// `Ok(false)`, a store that would not answer is `Err` — and drawing it
+    /// differently one command over is how the two come to mean different
+    /// things in one window.
     pub key_present: bool,
+    pub index: IndexSettings,
+}
+
+/// The index half of [`ModelSettings`]: what the database says, or why it said
+/// nothing.
+///
+/// Tagged with `kind`, the convention `Balance`, `Refusal` and `RecordId`
+/// already use and the shape the window's code is written against.
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum IndexSettings {
+    /// A newtype variant holding a struct, rather than a struct variant, so the
+    /// fields have a name a caller can pass around — the tests destructure this
+    /// once instead of matching seven fields at four call sites. It serialises
+    /// identically: an internally tagged newtype variant whose payload is a map
+    /// is flattened into that map beside `kind`, which is the constraint
+    /// `Balance`'s own doc records from the other side.
+    Read(IndexRead),
+    /// The index could not be read — not open yet, opened and failed, or a read
+    /// that failed on its own. `reason` is the same `Display` string a rejected
+    /// command would have carried, so nothing is lost by not rejecting; what is
+    /// gained is that `key_present` beside it survives.
+    Unreadable { reason: String },
+}
+
+/// What an open index says about its model configuration.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexRead {
     pub embedding_model: Option<String>,
     pub embedding_dim: Option<i64>,
     pub active_space: Option<i64>,
@@ -199,32 +301,30 @@ pub struct ModelSettings {
     /// many exist. The window shows both: an active space says which model the
     /// index works with, not that anything is embedded yet.
     ///
-    /// ⚠️ **Not a fraction.** The two are counted over different populations
-    /// and the first can exceed the second — a vector outlives the chunk it
-    /// embeds, which `Db::chunk_count` sets out in full. Both are zero in this
-    /// build, because nothing embeds yet (D29), so nothing here goes red the
-    /// day it stops being true.
+    /// ⚠️ **Not a fraction, and never to be divided.** Four things follow, and
+    /// each is a way the obvious rendering is wrong:
+    ///
+    /// - `embedded_chunks` counts one space, `total_chunks` counts the whole
+    ///   index, so "X of Y" is already an inexact sentence.
+    /// - `embedded_chunks` can exceed `total_chunks`. A vector outlives the
+    ///   chunk it embeds; `Db::chunk_count` sets out why, and
+    ///   `a_vector_outlives_the_chunk_it_embeds` in the index crate's
+    ///   `tests/adopt.rs` holds the storage half of it in the gate.
+    /// - Both are zero in this build, because nothing embeds yet (D29).
+    /// - Zero with `active_space == null` is not "nothing is embedded", it is
+    ///   "the question does not arise". Tell them apart by `active_space`, never
+    ///   by the zero.
     pub embedded_chunks: i64,
     pub total_chunks: i64,
     pub rerank_model: Option<String>,
     pub chat_model: Option<String>,
 }
 
-/// What the window draws on the settings screen.
-///
-/// The key is asked of the store and the rest of one open index, and the index
-/// half is one closure so the numbers below are read from a single connection at
-/// a single moment rather than assembled from several.
-///
-/// An active space naming a space that is gone arrives as
-/// `mnema_index::Error::NoSuchSpace` rather than as "nothing chosen" — see
-/// `Db::space_model`, where the argument for that is written down. Nothing in
-/// this build can produce that state: `Db::drop_space` has no caller outside the
-/// index crate's own tests.
-#[tauri::command(async)]
-pub fn model_settings(state: State<'_, AppState>) -> Result<ModelSettings, Error> {
-    let key_present = mnema_secrets::load(state.credential_ref())?.is_some();
-    state.with_index(|db| {
+/// The index half, read or refused — and never an `Err`, which is the whole
+/// point: a caller building [`ModelSettings`] must not be able to lose the key
+/// half by writing `?` here.
+fn index_settings(state: &AppState) -> IndexSettings {
+    let read = state.with_index(|db| {
         let active_space = db.active_space()?;
         let (embedding_model, embedding_dim) = match active_space {
             Some(id) => {
@@ -233,8 +333,7 @@ pub fn model_settings(state: State<'_, AppState>) -> Result<ModelSettings, Error
             }
             None => (None, None),
         };
-        Ok(ModelSettings {
-            key_present,
+        Ok(IndexSettings::Read(IndexRead {
             embedding_model,
             embedding_dim,
             active_space,
@@ -245,6 +344,71 @@ pub fn model_settings(state: State<'_, AppState>) -> Result<ModelSettings, Error
             total_chunks: db.chunk_count()?,
             rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
             chat_model: db.meta_get(mnema_index::META_CHAT_MODEL)?,
-        })
+        }))
+    });
+    match read {
+        Ok(settings) => settings,
+        Err(e) => IndexSettings::Unreadable {
+            reason: e.to_string(),
+        },
+    }
+}
+
+/// What the window draws on the settings screen.
+///
+/// The index half is read inside one closure, so its numbers come from a single
+/// connection at a single moment rather than being assembled from several.
+///
+/// An active space naming a space that is gone arrives as
+/// `mnema_index::Error::NoSuchSpace` rather than as "nothing chosen" — see
+/// `Db::space_model`, where the argument for that is written down. It reaches
+/// the window as [`IndexSettings::Unreadable`] carrying that sentence, and no
+/// longer takes `key_present` down with it. Nothing in this build can produce
+/// the state: `Db::drop_space` has no caller outside the index crate's own
+/// tests.
+#[tauri::command(async)]
+pub fn model_settings(state: State<'_, AppState>) -> Result<ModelSettings, Error> {
+    Ok(ModelSettings {
+        key_present: mnema_secrets::load(state.credential_ref())?.is_some(),
+        index: index_settings(&state),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every role the provider has is reachable from the window — checked by the
+    /// compiler and not by counting to three.
+    ///
+    /// `role_from` is total over *strings*, and that is a different statement
+    /// from total over [`Role`]. A fourth variant added to `Role` tomorrow
+    /// compiles fine and is simply unreachable from the window, in silence. The
+    /// `match` below has no wildcard arm, so that day it stops compiling
+    /// instead — the same "a count is a definition" this cycle already paid for
+    /// on the eight commands.
+    #[test]
+    fn every_role_the_provider_has_is_named_by_a_string_the_window_can_send() {
+        let mut seen = Vec::new();
+        for name in ["embedding", "rerank", "chat"] {
+            let role = role_from(name).expect("a role this build claims to know");
+            // Exhaustive on purpose, and the arms are separate so that two
+            // strings mapping to one variant would leave a third unvisited.
+            match role {
+                Role::Embedding => seen.push("embedding"),
+                Role::Rerank => seen.push("rerank"),
+                Role::Chat => seen.push("chat"),
+            }
+        }
+        assert_eq!(
+            seen,
+            ["embedding", "rerank", "chat"],
+            "the strings and the variants are no longer in step"
+        );
+    }
+
+    #[test]
+    fn a_role_this_build_does_not_know_is_refused_rather_than_defaulted() {
+        assert!(matches!(role_from("embbeding"), Err(Error::UnknownRole(_))));
+    }
 }
