@@ -48,7 +48,15 @@ impl Db {
         Ok(self.conn().last_insert_rowid())
     }
 
-    /// Creates the space row and its vector table, or neither.
+    /// Creates the space row and its vector table — and, the first time either
+    /// is needed here, records the vector library's version in `meta`. All of
+    /// it or none of it: the three land in one transaction.
+    ///
+    /// The version is the third write and is easy to miss from outside, which
+    /// is why it is in this sentence and not only in a comment inside the body.
+    /// It is here rather than in the adoption path because
+    /// [`crate::META_VEC_VERSION`] describes the version that created the first
+    /// *space*, and this function is the only thing that creates one.
     ///
     /// The table name is derived from the immutable row id — never from a model
     /// or configuration name, because a vec0 table cannot be renamed: RENAME
@@ -386,6 +394,39 @@ impl Db {
     /// then means every existing space has to be empty — which is right: a
     /// brand-new space is being minted, and anything already filled would be
     /// left behind by it.
+    /// The rule above, asked only of a call that would actually move the
+    /// pointer — and asked of every call that would.
+    ///
+    /// A call whose destination is where the pointer already stands writes
+    /// `active_space` with the value it already holds. It is not a transition,
+    /// so there is nothing for a guard on transitions to decide: whatever was
+    /// true of the database before it is still true after. Refusing there
+    /// refused the middle of the migration this function's own documentation
+    /// calls legal — the new space built and filled, the old one not yet
+    /// dropped — and, since adoption is the only path that writes
+    /// `credential_ref`, it made the API key unchangeable in exactly that
+    /// state. It also told a caller who was not moving that the index could not
+    /// move.
+    ///
+    /// ⚠️ `requested.is_some()` is load-bearing and not defensive. With it
+    /// dropped, two `None`s compare equal — a fresh index with no pointer,
+    /// asking for a space that does not exist yet — and the check would be
+    /// skipped on precisely the call that mints the first space beside an
+    /// already-full one. That is C1 reopened from the other side.
+    ///
+    /// This is the only place the pointer takes any part in the decision, and
+    /// the direction it can fail in is the safe one: absent, unreadable or
+    /// stale, it reads as `None`, matches nothing, and the rule is asked.
+    fn refuse_if_the_move_would_orphan_anything(
+        &self,
+        requested: Option<i64>,
+    ) -> Result<(), Error> {
+        if requested.is_some() && requested == self.active_space()? {
+            return Ok(());
+        }
+        self.refuse_unless_every_other_space_is_empty(requested)
+    }
+
     fn refuse_unless_every_other_space_is_empty(
         &self,
         requested: Option<i64>,
@@ -399,7 +440,24 @@ impl Db {
             if Some(space_id) == requested {
                 continue;
             }
-            let embedded_chunks = self.embedded_chunk_count(space_id)?;
+            let embedded_chunks = match self.embedded_chunk_count(space_id) {
+                Ok(n) => n,
+                // Dropped between the listing and the count — the pre-flight
+                // holds no lock, so the window is real, if microscopic. It is
+                // inside the race this function's caller already declares, but
+                // the outcome would be new: `NoSuchSpace(N)` handed to a caller
+                // who named no space at all, about one that no longer exists.
+                // The question here is "does any other space hold embeddings",
+                // and a space that is gone is not one that does — its vectors
+                // went with its table and its bookkeeping cascaded. So this is
+                // the answer "nothing", not a swallowed error.
+                //
+                // Scoped to this loop deliberately. `space_is_empty` still
+                // propagates, because there the caller did name the id, and
+                // being told which one was wrong is the whole answer.
+                Err(Error::NoSuchSpace(_)) => continue,
+                Err(other) => return Err(other),
+            };
             if embedded_chunks > 0 {
                 return Err(Error::SpaceNotEmpty {
                     space_id,
@@ -416,11 +474,32 @@ impl Db {
     /// finds the space rather than minting a second one — [`Db::create_space`]
     /// is idempotent on `UNIQUE(model_config_id, dim, index_format_version,
     /// chunker_hash)` (`schema.sql:358`) and hands back the id it found.
-    /// Choosing a *different* one is refused while **any other space** holds
-    /// anything: honouring it would leave the archive split across two spaces,
-    /// only one of which search reads. The honest way to grant it is to build
-    /// the new space, fill it, and then switch, and that is the indexing
-    /// subsystem's work rather than this function's. What the refusal asks is
+    /// A call that would **move the index onto a different space** is refused
+    /// while any other space holds anything: honouring it would leave the
+    /// archive split across two spaces, only one of which search reads. The
+    /// honest way to grant it is to build the new space, fill it, and then
+    /// switch, and that is the indexing subsystem's work rather than this
+    /// function's.
+    ///
+    /// "Would move" and not "names a different model", because those are not
+    /// the same set and the difference is the middle of that very migration: a
+    /// new space built and filled while the old one is still there. Re-adopting
+    /// the model the index is **already on** moves nothing, so it is allowed
+    /// there — which is also the only way to update `credential_ref`, this
+    /// being the one path that writes it. A different *chunker* under the same
+    /// model does move the index, and is refused like any other move.
+    ///
+    /// So what is guaranteed is about **transitions and not about states**: no
+    /// adoption ever moves the index onto a space while another space holds
+    /// embeddings. The stronger reading — "after any successful adoption only
+    /// the active space holds anything" — is not true and must not be relied
+    /// on, because the migration reaches two full spaces legitimately, through
+    /// [`Db::insert_vector`] into a space that is not the active one, and no
+    /// adoption took part in getting there. The obligation that the embedder
+    /// writes into [`Db::active_space`] is the indexing subsystem's to state;
+    /// it is written down nowhere yet.
+    ///
+    /// What the refusal asks is
     /// what exists rather than what `meta.active_space` says, and
     /// [`Db::refuse_unless_every_other_space_is_empty`] is where that is
     /// argued — the pointer version had a hole reachable from four public
@@ -444,7 +523,12 @@ impl Db {
     ///   between. In one thread the two are indistinguishable, which is why the
     ///   second has a two-connection test of its own
     ///   (`tests/adopt.rs`, `a_vector_written_while_a_switch_is_deciding_still_refuses_it`)
-    ///   rather than a note admitting nothing exercises it.
+    ///   rather than a note admitting nothing exercises it. What makes that
+    ///   test's red attributable to *this* check is its count of
+    ///   `embedding_space`: both checks raise the same error, and only the
+    ///   second one has a space already created behind it. The timing
+    ///   assertion in it shows the interleave happened as designed; it is not
+    ///   what carries the proof.
     /// - The model configuration and the space are written **outside** that
     ///   transaction. Interrupted there, the index keeps a space nothing points
     ///   at and a configuration nothing uses. Neither is reachable by search,
@@ -494,7 +578,7 @@ impl Db {
         };
         // Refuse before writing rather than after, so that a refusal leaves
         // nothing behind.
-        self.refuse_unless_every_other_space_is_empty(requested)?;
+        self.refuse_if_the_move_would_orphan_anything(requested)?;
 
         let model_config_id = match existing_config {
             Some(config) => config.id,
@@ -523,11 +607,12 @@ impl Db {
         };
 
         self.transaction(|_tx| {
-            // Asked again under the write lock, and now the requested space is
-            // known exactly rather than looked up. Another connection can fill
-            // a space between the check above and this one; nothing can fill
-            // one between this and the write below.
-            self.refuse_unless_every_other_space_is_empty(Some(space_id))?;
+            // Asked again under the write lock, and now the destination is the
+            // id `create_space` actually settled on rather than the one looked
+            // up before it ran. Another connection can fill a space between the
+            // check above and this one; nothing can fill one between this and
+            // the write below.
+            self.refuse_if_the_move_would_orphan_anything(Some(space_id))?;
             // `meta_put` and not `meta_set`: `meta_set` refuses this key
             // precisely so that it is written here, by the one path that can
             // first ask what replacing it would orphan.

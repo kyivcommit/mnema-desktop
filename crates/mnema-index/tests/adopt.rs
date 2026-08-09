@@ -400,6 +400,25 @@ fn a_full_space_blocks_a_switch_even_though_nothing_points_at_it() {
         None,
         "and the refusal wrote nothing"
     );
+    // Which of the two checks refused matters here, and only these say so.
+    // Both `requested` and the pointer are `None` in this scenario, so an
+    // exemption written as `requested == active` instead of
+    // `requested.is_some() && requested == active` skips the pre-flight on
+    // exactly this call. The refusal still arrives — from the check under the
+    // write lock, one space and one configuration later — and without these
+    // counts the test passes on that neighbouring defence and the guard for
+    // this scenario has no witness at all. Measured: it survived until they
+    // were here.
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM embedding_space"),
+        1,
+        "the refusal has to come before the space is minted, not after"
+    );
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM model_config"),
+        1,
+        "and before the refused model is recorded"
+    );
 }
 
 #[test]
@@ -637,6 +656,128 @@ fn creating_a_space_records_the_vector_library_version() {
     assert_eq!(
         db.meta_get(META_VEC_VERSION).expect("read").as_deref(),
         Some(from_the_library.as_str())
+    );
+}
+
+#[test]
+fn re_adopting_the_model_the_index_is_already_on_moves_nothing_and_is_allowed() {
+    // Two non-empty spaces, which nothing else in this file builds — and that
+    // is exactly why the rule could refuse this and no test noticed.
+    //
+    // The state is the sanctioned migration's own middle, the one
+    // `adopt_embedding_model` documents as legal: the new space built and
+    // filled while the old one is still there. A call naming the model the
+    // index is already on writes the pointer with the value it already holds,
+    // so nothing can be orphaned by it — and since adoption is the only path
+    // that writes `credential_ref`, refusing it made the API key unchangeable
+    // for as long as the migration lasted.
+    let db = temp_db();
+    let first = db
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("first");
+    // One chunk, embedded into both spaces — which is what a migration is:
+    // the same archive re-embedded into the new space beside the old.
+    let chunk_id = support::one_chunk(&db);
+    db.insert_vector(first.space_id, chunk_id, &[1.0, 0.0, 0.0, 0.0])
+        .expect("the archive, in the space the index is on");
+
+    // The migration builds and fills the new space directly, because that is
+    // what "build the new space, fill it, and then switch" is: adoption is the
+    // switch, and it comes last.
+    let next_config = db
+        .create_model_config(
+            "next",
+            "openrouter",
+            None,
+            "openai/text-embedding-3-small",
+            4,
+        )
+        .expect("config");
+    let next_space = db
+        .create_space(next_config, 4, HASH)
+        .expect("the new space");
+    db.insert_vector(next_space, chunk_id, &[0.0, 1.0, 0.0, 0.0])
+        .expect("the archive, being rebuilt");
+    assert_ne!(next_space, first.space_id, "two spaces, both non-empty");
+
+    let again = db
+        .adopt_embedding_model("baai/bge-m3", 4, "openrouter-key-2", HASH)
+        .expect("a call that moves the index nowhere cannot orphan anything");
+    assert_eq!(again.space_id, first.space_id);
+    assert!(!again.created);
+    assert_eq!(
+        db.conn()
+            .query_row(
+                "SELECT credential_ref FROM model_config WHERE id = ?1",
+                rusqlite::params![again.model_config_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .expect("read")
+            .as_deref(),
+        Some("openrouter-key-2"),
+        "and the credential it came to update is updated"
+    );
+
+    // The other direction, and it is the whole reason the exemption is keyed on
+    // "would this move the pointer" rather than on anything looser: in this
+    // same state, a call that *does* move the index is still refused.
+    let err = db
+        .adopt_embedding_model("mistral/embed", 4, REF, HASH)
+        .expect_err("a real switch still splits the archive");
+    match err {
+        Error::SpaceNotEmpty { space_id, .. } => assert!(
+            space_id == first.space_id || space_id == next_space,
+            "one of the two full spaces, got {space_id}"
+        ),
+        other => panic!("got {other:?}"),
+    }
+    assert_eq!(
+        db.active_space().expect("read"),
+        Some(first.space_id),
+        "and the index has not moved"
+    );
+}
+
+#[test]
+fn a_space_holding_only_a_record_is_refused_in_words_that_are_true_of_it() {
+    // The branch the word "recorded" exists for. A targeted edit of the message
+    // from "recorded for" to "held for" passes all three assertions elsewhere
+    // in this file — the count is still there, the forbidden phrase is still
+    // absent — and is false only here, where the space holds no embedding at
+    // all and only a row claiming one.
+    //
+    // Same caveat as `bookkeeping_without_a_vector_also_makes_a_space_not_empty`:
+    // nothing in the product writes `chunk_embedding_state`, so this state is
+    // one only the fixture can reach, and the test would pass identically if
+    // the product could never produce it.
+    let db = temp_db();
+    let first = db
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("first");
+    let chunk_id = support::one_chunk(&db);
+    db.conn()
+        .execute(
+            "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state)
+             VALUES (?1, ?2, 'hash', 1)",
+            rusqlite::params![first.space_id, chunk_id],
+        )
+        .expect("bookkeeping row");
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT count(*) FROM vec_emb_{}", first.space_id)
+        ),
+        0,
+        "no embedding exists here at all, which is what makes the word load-bearing"
+    );
+
+    let err = db
+        .adopt_embedding_model("openai/text-embedding-3-small", 1536, REF, HASH)
+        .expect_err("a record of an embedding is still something a switch would lose");
+    let message = err.to_string();
+    assert!(
+        message.contains("recorded for"),
+        "the space holds a record and not an embedding, and the message reads {message}"
     );
 }
 

@@ -553,7 +553,10 @@ impl Db {
     /// [`Db::insert_chunk`] while there were already three, and Task 6 made it
     /// four. Today: [`Db::insert_chunk`] (use [`Db::insert_chunk_in`] here),
     /// [`Db::create_space`], [`Db::drop_space`], and
-    /// [`Db::adopt_embedding_model`] through the first two of those.
+    /// [`Db::adopt_embedding_model`], which opens one through
+    /// [`Db::create_space`] and another through this method itself. Naming
+    /// those two rather than counting to them: the sentence you are reading
+    /// replaced a wrong count, and its first draft ended in a wrong ordinal.
     pub fn transaction<T>(
         &self,
         f: impl FnOnce(&Transaction<'_>) -> Result<T, Error>,
