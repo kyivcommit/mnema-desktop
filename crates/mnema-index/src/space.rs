@@ -322,8 +322,8 @@ impl Db {
     ///
     /// ⚠️ **This must stay a straight read of the stored value: no fallback.**
     /// "If the key is absent, use the only space there is" is the plausible,
-    /// well-meant change that would break something two functions away —
-    /// [`Db::refuse_if_the_move_would_orphan_anything`] exempts a call from the
+    /// well-meant change that would break something two functions away:
+    /// `refuse_if_the_move_would_orphan_anything` exempts a call from the
     /// split guard when this answer already equals the space about to be
     /// written, and that is sound only while the answer is decided by the
     /// stored value alone. With a fallback, this would report a space nobody
@@ -501,10 +501,10 @@ impl Db {
                 // relying on it: deleting it leaves the whole crate green —
                 // measured, not assumed. A test would have to land a committed
                 // `drop_space` between the `SELECT` above and the count below,
-                // inside one call. It is not impossible, as an earlier note
-                // here claimed: `rusqlite::Connection::progress_handler` would
-                // give a seam inside the `SELECT`, and no lock is in the way,
-                // since this check holds none. It is machinery that exists
+                // inside one call. That is not impossible:
+                // `rusqlite::Connection::progress_handler` would give a seam
+                // inside the `SELECT`, and no lock is in the way, since this
+                // check holds none. It is machinery that exists
                 // nowhere in this repository, built to witness a `continue`
                 // against a microscopic window, so the choice is to say this
                 // rather than to build it.
@@ -553,11 +553,10 @@ impl Db {
     /// [`Db::insert_vector`], which is the call that can break it and so the
     /// doc its breaker is reading.
     ///
-    /// What the refusal asks is
-    /// what exists rather than what `meta.active_space` says, and
-    /// [`Db::refuse_unless_every_other_space_is_empty`] is where that is
-    /// argued — the pointer version had a hole reachable from four public
-    /// calls.
+    /// What the refusal asks is what exists rather than what
+    /// `meta.active_space` says, and `refuse_unless_every_other_space_is_empty`
+    /// is where that is argued — the pointer version had a hole reachable from
+    /// four public calls.
     ///
     /// `chunker_hash` arrives as a parameter and not as a call: this crate does
     /// not depend on `mnema-chunk` and is not to start. The shell supplies it,

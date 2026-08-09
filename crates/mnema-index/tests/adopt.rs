@@ -828,6 +828,16 @@ fn a_refusal_over_a_space_that_already_exists_still_writes_nothing() {
         other => panic!("got {other:?}"),
     }
 
+    // ⚠️ This assertion reads "the pre-flight check refused", and it is only
+    // entitled to, because this test is single-threaded. The write it watches
+    // sits *between* the two checks, so strictly it says "the decisive check
+    // refused" — and there is a path where the refusal is entirely correct and
+    // the credential moves anyway, which is that check doing its job. The
+    // inference holds here only because nothing can change between the two when
+    // one thread runs them both. `a_vector_written_while_a_switch_is_deciding…`
+    // in this same file breaks that condition on purpose, with a second
+    // connection: adding concurrency here to "strengthen" this test would make
+    // this assertion false without touching a line of what it guards.
     assert_eq!(
         credential_of(&db, first.model_config_id).as_deref(),
         Some(REF),
