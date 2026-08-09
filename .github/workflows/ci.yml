@@ -199,6 +199,24 @@ jobs:
       # macOS binary, and the store this crate compiles on Linux is the D-Bus
       # Secret Service, which a runner has no session for. The Linux binding
       # stays unexercised — a gap task 7 recorded, not one this closes.
+      #
+      # Read this before trusting the quiet, because the quiet is newer than the
+      # gap. Tests outside this crate that need a credential now register an
+      # in-memory store of their own, so they are served by it on every platform.
+      # That is deliberate and is the rule stated above. It also removes the one
+      # way this gap could ever have spoken up by accident: a test reaching for a
+      # credential without that store would fail on this leg, loudly and for the
+      # right reason, because there is no session behind the binding it compiles
+      # against. Such a test now passes, and the Linux binding goes untested
+      # without a sound. A silence that replaced a noise needs the note more than
+      # one that was always silent.
+      #
+      # What would close it — mirroring the step below rather than inventing a
+      # shape: on ubuntu-24.04, run the same command inside `dbus-run-session`
+      # with `gnome-keyring --unlock --components=secrets`, so `roundtrip` meets
+      # a real Secret Service. Everything the step below argues carries over
+      # unchanged: `--include-ignored` and never `--ignored`, for the reason
+      # spelled out at its last line, and the `#[ignore]` itself stays.
       - name: Credential store, against a throwaway keychain
         if: runner.os == 'macOS'
         run: |
