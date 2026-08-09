@@ -103,6 +103,14 @@ fn a_different_model_is_refused_once_a_vector_exists() {
     let err = db
         .adopt_embedding_model("openai/text-embedding-3-small", 1536, REF, HASH)
         .expect_err("a filled space may not be swapped out from under the index");
+    // The sentence a person actually reads, and a substring rather than the
+    // whole of it: the claim under test is that the count arrives in a form
+    // that is grammatical at one as well as at many, not that the wording never
+    // changes. It read "1 chunks" before.
+    assert!(
+        err.to_string().contains("1 of its chunks"),
+        "the message has to count in a form that survives the number one, and reads {err}"
+    );
     match err {
         Error::SpaceNotEmpty {
             space_id,
@@ -187,6 +195,21 @@ fn a_chunker_change_is_the_same_refusal_as_a_model_change() {
         .expect_err("the same model under a new chunker is still a new space");
     assert!(matches!(err, Error::SpaceNotEmpty { .. }), "got {err:?}");
     assert_eq!(db.active_space().expect("read"), Some(first.space_id));
+
+    // This is the scenario in which the old message was false, so it is where
+    // the replacement is pinned: nobody changed the model here — the chunker
+    // moved, and the same model got a new space — and the refusal used to say
+    // "the embedding model cannot be changed". Both directions, because the
+    // absence of a wrong word is satisfied by a message that says nothing.
+    let message = err.to_string();
+    assert!(
+        !message.contains("embedding model cannot be changed"),
+        "the model did not change, only the chunker did, and the refusal reads {message}"
+    );
+    assert!(
+        message.contains("cannot move to a different space"),
+        "and it has to name what it is refusing rather than merely avoid the wrong word: {message}"
+    );
 }
 
 #[test]
