@@ -31,14 +31,20 @@ const NO_PROVIDER: &str = "http://127.0.0.1:1";
 /// `NO_PROVIDER` uses, one line up.
 ///
 /// Empty is not carelessness: `mnema_secrets::entry` refuses an empty reference
-/// before it touches anything (`crates/mnema-secrets/src/lib.rs:239-241`,
-/// `Error::EmptyReference`), because in the macOS keychain an empty attribute is
-/// a wildcard that would match another configuration's credential. So any
-/// store operation added to this file tomorrow fails loudly instead of quietly
-/// succeeding under a fixed name — which is what a plausible-looking name would
-/// do, leaving an entry behind with no `Drop` to remove it and two parallel runs
-/// colliding on it. Nothing here touches a credential today; this is what keeps
-/// that true rather than stating it.
+/// *before* it calls `ensure_default_store`, so no store is installed and none
+/// is consulted — `Error::EmptyReference`, and the ordering inside `entry` is
+/// what makes that true rather than a hope. The reason it refuses at all is the
+/// macOS keychain, where an empty attribute is a wildcard that would match
+/// another configuration's credential. So any store operation in this file fails
+/// loudly instead of quietly succeeding under a fixed name — which is what a
+/// plausible-looking name would do, leaving an entry behind with no `Drop` to
+/// remove it and two parallel runs colliding on it.
+///
+/// `every_model_command_the_window_calls_is_registered` does reach
+/// `mnema_secrets` — four of the eight commands ask it something — and this is
+/// exactly why that test can do so without registering a store or touching the
+/// developer's keychain. `tests/model_commands.rs` is where a credential is
+/// really written, behind an in-memory store and a reference unique per fixture.
 const NO_CREDENTIAL: &str = "";
 
 /// An application whose data directory is a temporary one.
@@ -1207,4 +1213,92 @@ fn a_window_the_capability_does_not_name_may_not_reach_the_folder_picker() {
         "a window the capability does not name should be refused by the ACL, not by argument \
          parsing: {message}"
     );
+}
+
+/// What Tauri answers a command name it has no entry for. Measured
+/// 2026-08-09 against `tauri` 2.11.5 by asking for `set_embeding_model`, and
+/// the control in the test below is what keeps it measured rather than
+/// remembered.
+const NOT_REGISTERED: &str = "not found";
+
+/// The eight model commands, enumerated, asked of the list that decides what
+/// the window can call.
+///
+/// A count is a definition, and this file is where the definition is checkable:
+/// `generate_handler!` is a macro, so a command function that exists, compiles,
+/// is `pub`, and is simply missing from that list produces no warning anywhere
+/// — and the window's call fails at run time on a screen nobody runs in a gate.
+/// The tests in `model_commands.rs` call these functions directly and would all
+/// stay green through exactly that mistake.
+///
+/// **Each is asked with the arguments it declares**, so a parameter renamed on
+/// one side alone fails here too; the second control below is what says those
+/// arguments are being bound at all rather than ignored.
+///
+/// Every call is expected to *fail*: this application has no provider behind it
+/// (`NO_PROVIDER`), no index open, and a credential reference that cannot reach
+/// a store (`NO_CREDENTIAL`). That is the point — the question here is only
+/// whether the command was reached, and being reached is exactly what lets it
+/// fail for a reason of its own.
+#[test]
+fn every_model_command_the_window_calls_is_registered() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    // Control one: a name nobody registered, one letter away from a real
+    // command. Without it, the assertion below is a search for a string that
+    // may no longer be the one Tauri uses, and it would pass for every command
+    // in the list including the absent ones.
+    let missing = call(&webview, "set_embeding_model", json!({ "model": "x" }))
+        .expect_err("a command nobody registered was accepted");
+    assert!(
+        missing.as_str().is_some_and(|m| m.contains(NOT_REGISTERED)),
+        "an unregistered command no longer answers with `{NOT_REGISTERED}`, so the loop \
+         below is looking for the wrong string and would pass for a command that is not \
+         registered either: {missing}"
+    );
+
+    // Control two: the arguments are bound, not ignored. A command reached with
+    // its argument missing is refused by name, which is what makes "no
+    // complaint about the arguments" mean something in the loop.
+    let unbound = call(&webview, "set_rerank_model", json!({}))
+        .expect_err("a command was accepted without the argument it declares");
+    assert!(
+        unbound.as_str().is_some_and(|m| m.contains("model")),
+        "the rejection should name the missing argument; it was {unbound}"
+    );
+
+    for (cmd, args) in [
+        ("provider_models", json!({ "role": "chat" })),
+        ("key_present", json!({})),
+        ("set_key", json!({ "key": "test-key-not-a-real-one" })),
+        ("forget_key", json!({})),
+        ("set_embedding_model", json!({ "model": "baai/bge-m3" })),
+        (
+            "set_rerank_model",
+            json!({ "model": "baai/bge-reranker-v2-m3" }),
+        ),
+        (
+            "set_chat_model",
+            json!({ "model": "anthropic/claude-opus-4" }),
+        ),
+        ("model_settings", json!({})),
+    ] {
+        let answer = call(&webview, cmd, args);
+        let message = match &answer {
+            Ok(_) => continue,
+            Err(e) => e.as_str().unwrap_or_default().to_string(),
+        };
+        assert!(
+            !message.contains(NOT_REGISTERED),
+            "{cmd} is not in `invoke_handler`, so the window cannot call it however well \
+             the function itself works: {message}"
+        );
+        assert!(
+            !message.contains("invalid args"),
+            "{cmd} was reached and would not take the arguments the window sends it: \
+             {message}"
+        );
+    }
 }

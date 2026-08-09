@@ -850,6 +850,102 @@ fn a_refusal_over_a_space_that_already_exists_still_writes_nothing() {
     );
 }
 
+/// The three reads the settings screen is built from, each asserted against a
+/// state where the other two would give a different answer.
+///
+/// Everything here is zero on a fresh index, so a fixture that only adopts a
+/// model proves nothing about any of the queries: three functions returning a
+/// literal zero would pass it. Each step below therefore moves exactly one of
+/// the numbers.
+#[test]
+fn the_settings_read_names_the_model_the_width_and_what_is_embedded() {
+    let db = temp_db();
+    assert_eq!(
+        db.chunk_count().expect("count"),
+        0,
+        "an empty index holds no chunks"
+    );
+
+    let adopted = db
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("adopted");
+    assert_eq!(
+        db.space_model(adopted.space_id).expect("read"),
+        ("baai/bge-m3".to_string(), 4),
+        "the space names the model it was built for and the width it was built at"
+    );
+    assert_eq!(
+        db.embedded_chunk_count(adopted.space_id).expect("count"),
+        0,
+        "adopting a model embeds nothing"
+    );
+
+    // A chunk that exists is not a chunk that is embedded, and only these two
+    // lines together say so: without the first, the count below is satisfied by
+    // an index with nothing in it.
+    let chunk_id = support::one_chunk(&db);
+    assert_eq!(db.chunk_count().expect("count"), 1);
+    assert_eq!(
+        db.embedded_chunk_count(adopted.space_id).expect("count"),
+        0,
+        "a chunk with no vector is not embedded"
+    );
+
+    db.insert_vector(adopted.space_id, chunk_id, &[1.0, 0.0, 0.0, 0.0])
+        .expect("vector");
+    assert_eq!(
+        db.embedded_chunk_count(adopted.space_id).expect("count"),
+        1,
+        "a vector written straight into the space is what `insert_vector` records — and \
+         the only record it writes, so a count that read `chunk_embedding_state` alone \
+         would answer zero here"
+    );
+    assert_eq!(
+        db.chunk_count().expect("count"),
+        1,
+        "embedding a chunk does not create one"
+    );
+}
+
+/// A space that is gone is not a model nobody chose.
+///
+/// `drop_space` leaves `meta.active_space` dangling — the state
+/// `a_dropped_space_does_not_hold_the_index_hostage` above enters deliberately —
+/// so a settings read can arrive here holding an id with no row behind it. Told
+/// "no model is configured", the window would draw an empty picker over an index
+/// that may still hold vectors, and the person reading it would choose a model
+/// and pay to embed the archive a second time.
+#[test]
+fn reading_a_space_that_is_gone_names_the_id_rather_than_answering_nothing() {
+    let db = temp_db();
+    let adopted = db
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("adopted");
+    // Both directions: the same call answers the model while the space is
+    // there, so the refusal below is about the space being gone and not about
+    // the query never having worked.
+    assert_eq!(
+        db.space_model(adopted.space_id).expect("read").0,
+        "baai/bge-m3"
+    );
+
+    db.drop_space(adopted.space_id).expect("drop");
+
+    assert!(
+        matches!(
+            db.space_model(adopted.space_id),
+            Err(Error::NoSuchSpace(id)) if id == adopted.space_id
+        ),
+        "a space that is gone was reported as a model nobody chose: {:?}",
+        db.space_model(adopted.space_id)
+    );
+    assert_eq!(
+        db.active_space().expect("read"),
+        Some(adopted.space_id),
+        "and the pointer is still there, which is what makes the read above reachable"
+    );
+}
+
 fn credential_of(db: &mnema_index::Db, model_config_id: i64) -> Option<String> {
     db.conn()
         .query_row(

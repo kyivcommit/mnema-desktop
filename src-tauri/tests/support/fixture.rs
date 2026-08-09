@@ -71,11 +71,35 @@ impl Fixture {
         Self::new(vec![Reply::status(401, r#"{"error":{"message":"nope"}}"#)])
     }
 
-    /// A provider that answers a credit check, twice — once for the call under
-    /// test and once spare, so a test that sets a key again does not run the
-    /// server out of answers and fail for that instead.
+    /// A provider that answers a credit check and then an embedding check —
+    /// the order `set_key` and then `set_embedding_model` ask them in, which is
+    /// the sequence [`Fixture::adopt_default_model`] makes.
+    ///
+    /// `MockServer` answers its replies strictly in order, one per connection,
+    /// and pays no attention to which path was asked for. So this is a
+    /// *sequence* and not a set of behaviours, and a test that calls these two
+    /// in the other order gets the wrong body rather than an error saying so.
     pub fn with_provider_accepting_everything() -> Self {
-        Self::new(vec![Reply::ok(CREDITS), Reply::ok(CREDITS)])
+        Self::with_provider_answering_with_dimension(DEFAULT_DIM as usize)
+    }
+
+    /// The same two answers, with the embedding check answering vectors `width`
+    /// components wide.
+    ///
+    /// Named for the width because that is the only thing about the provider's
+    /// answer `set_embedding_model` may take a dimension from: the model list
+    /// states none, and the same model name answers 1536 or 1024 depending on a
+    /// parameter (spec §2.4).
+    pub fn with_provider_answering_with_dimension(width: usize) -> Self {
+        Self::new(vec![
+            Reply::ok(CREDITS),
+            Reply::ok(&mnema_mock_provider::two_vectors(width)),
+        ])
+    }
+
+    /// A provider whose model list answers `200` with exactly `body`.
+    pub fn with_provider_listing(body: &str) -> Self {
+        Self::new(vec![Reply::ok(body)])
     }
 
     /// A provider that refuses the key and repeats it back inside the refusal.
@@ -151,7 +175,8 @@ impl Fixture {
         self.state().open_index().expect("the index opens");
     }
 
-    /// Records this installation's model configuration in the index.
+    /// Records this installation's model configuration in the index, through
+    /// the command the application uses.
     ///
     /// That row is the one thing the design deliberately does put in the
     /// database in the key's place: `model_config.credential_ref` holds the
@@ -159,21 +184,33 @@ impl Fixture {
     /// the database for the key needs it there, or the scan proves only that it
     /// was reading an empty file.
     ///
-    /// It goes through the index's own API rather than through a command
-    /// because the command that will choose a model has to ask the provider how
-    /// wide it is first, and that question is not this file's subject. The row
-    /// written here is the row it will write.
+    /// It called `Db::adopt_embedding_model` directly until `set_embedding_model`
+    /// existed, and the part of the two that could have diverged in silence was
+    /// exactly `credential_ref`: a width that disagreed raises
+    /// `SpaceDimMismatch`, a model name that disagreed mints a second space, and
+    /// a reference that disagreed writes the wrong name and fails nothing. What
+    /// stops it now is not that they agree — it is that there is no second value
+    /// to disagree with. The command takes the reference from
+    /// `AppState::credential_ref`, this fixture put it there, and this function
+    /// passes none.
+    ///
+    /// It needs a key in the store and a provider answering an embedding check
+    /// with `DEFAULT_DIM`-wide vectors, which is
+    /// [`Fixture::with_provider_accepting_everything`] with `set_key` called
+    /// first.
     pub fn adopt_default_model(&self) {
-        self.state()
-            .with_index(|db| {
-                db.adopt_embedding_model(
-                    DEFAULT_MODEL,
-                    DEFAULT_DIM,
-                    &self.credential_ref,
-                    &mnema_chunk::chunker_hash(),
-                )
-            })
-            .expect("the default model is adopted");
+        let settings =
+            mnema_desktop::models::set_embedding_model(self.state(), DEFAULT_MODEL.into())
+                .expect("the default model is adopted");
+        // Not a restatement of the command's own test. It says the provider
+        // this fixture built answered the width this fixture names, so that a
+        // caller relying on `DEFAULT_DIM` is relying on something checked
+        // rather than on two constants that happen to match.
+        assert_eq!(
+            settings.embedding_dim,
+            Some(DEFAULT_DIM),
+            "the fixture's provider answered a width other than the one this fixture names"
+        );
     }
 
     /// Every file in the data directory, read as bytes.

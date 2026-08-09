@@ -32,9 +32,14 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::start_probe_job,
         bridge::cancel_job,
         bridge::job_status,
+        models::provider_models,
         models::key_present,
         models::set_key,
         models::forget_key,
+        models::set_embedding_model,
+        models::set_rerank_model,
+        models::set_chat_model,
+        models::model_settings,
         walk_job::start_walk_job,
     ]
 }

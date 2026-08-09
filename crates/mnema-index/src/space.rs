@@ -336,6 +336,59 @@ impl Db {
             .and_then(|v| v.parse().ok()))
     }
 
+    /// The model this space embeds with and how wide its vectors are — what the
+    /// settings screen puts in front of the person who chose them.
+    ///
+    /// [`Error::NoSuchSpace`] and not `Ok(None)` for an id with no row, which is
+    /// the answer [`Db::space_is_empty`] and [`Db::embedded_chunk_count`]
+    /// already give and is the only one coherent with them: a single caller
+    /// asking all three about one id must not be told the space is absent by two
+    /// of them and empty by the third.
+    ///
+    /// The distinction it keeps is the caller's, not this crate's. Whoever
+    /// reaches this is holding [`Db::active_space`], and the two facts in front
+    /// of it are "nobody has chosen a model" — which is `active_space`
+    /// answering `None`, one call earlier — and "the pointer names a space that
+    /// is gone", which is a defect in this build. Folded together they draw an
+    /// empty model picker over an index that may still hold vectors, and the
+    /// person reading it chooses a model and pays to embed the archive again.
+    ///
+    /// Both columns are `NOT NULL` — `model_config.embed_model` and
+    /// `embedding_space.dim` — so a row that exists always names both, and there
+    /// is no third state for this to return.
+    pub fn space_model(&self, space_id: i64) -> Result<(String, i64), Error> {
+        self.conn()
+            .query_row(
+                "SELECT c.embed_model, s.dim FROM embedding_space s
+                   JOIN model_config c ON c.id = s.model_config_id
+                  WHERE s.id = ?1",
+                params![space_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or(Error::NoSuchSpace(space_id))
+    }
+
+    /// How many chunks the index holds at all — the denominator the settings
+    /// screen shows [`Db::embedded_chunk_count`] against.
+    ///
+    /// ⚠️ **The two are not counted over the same population, and the
+    /// difference has a direction.** A `vec_emb_<id>` row is referenced by no
+    /// foreign key and outlives the chunk it embeds:
+    /// [`Db::clear_document_content`] takes the `chunk` rows and their
+    /// `chunk_embedding_state` rows and leaves the vectors, and
+    /// [`Db::delete_document`] has never reached them either. So once anything
+    /// writes vectors, the numerator can exceed this denominator, and whatever
+    /// renders the pair has to be able to show that rather than a percentage
+    /// above one hundred. Both are zero today, because nothing embeds yet
+    /// (D29) — this is the shape of the trap, written where the second half of
+    /// it is read.
+    pub fn chunk_count(&self) -> Result<i64, Error> {
+        Ok(self
+            .conn()
+            .query_row("SELECT count(*) FROM chunk", [], |r| r.get(0))?)
+    }
+
     /// Whether moving the index off this space would throw anything away.
     ///
     /// Reads **both** places a chunk can be recorded as embedded, because they
@@ -353,7 +406,8 @@ impl Db {
     }
 
     /// How many chunks this space has an embedding recorded for — the number a
-    /// refusal puts in front of the person deciding whether to rebuild.
+    /// refusal puts in front of the person deciding whether to rebuild, and the
+    /// numerator the settings screen shows against [`Db::chunk_count`].
     ///
     /// **Distinct chunks, not rows, and that is the whole point of the
     /// `UNION`.** A `chunk_embedding_state` row with `state = 1` says "this
@@ -364,6 +418,14 @@ impl Db {
     /// zero however they are combined — so the arithmetic is visible only in
     /// the number, which is exactly why it needs its own test.
     ///
+    /// **Reading only `chunk_embedding_state` would answer zero for a full
+    /// space today**, which is why the `UNION` is load-bearing for the second
+    /// caller as well as the first: [`Db::insert_vector`] writes the `vec0`
+    /// table and nothing in this crate writes a `chunk_embedding_state` row at
+    /// all — `grep -rn chunk_embedding_state crates/*/src` finds no INSERT.
+    /// The narrower query would put "0 of 900 embedded" in front of someone
+    /// whose archive is embedded, and send them to pay for it again.
+    ///
     /// An id with no row is [`Error::NoSuchSpace`] and not zero. It was zero
     /// for one commit, to keep a `meta.active_space` left dangling by
     /// [`Db::drop_space`] from becoming a dead end — and that special case is
@@ -371,7 +433,7 @@ impl Db {
     /// `embedding_space`, so a dropped space is simply not among the ids it
     /// asks about. What is left is a public method being asked about an id
     /// nobody wrote, and the honest answer to that is which id was wrong.
-    fn embedded_chunk_count(&self, space_id: i64) -> Result<i64, Error> {
+    pub fn embedded_chunk_count(&self, space_id: i64) -> Result<i64, Error> {
         let table = self.space(space_id)?.table;
         // `table` is never caller text: it comes only from
         // `embedding_space.vec_table`, which the schema's own CHECK pins to

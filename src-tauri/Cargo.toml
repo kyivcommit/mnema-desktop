@@ -35,6 +35,13 @@ mnema-ingest = { path = "../crates/mnema-ingest" }
 mnema-core = { path = "../crates/mnema-core" }
 mnema-pool = { path = "../crates/mnema-pool" }
 mnema-walk = { path = "../crates/mnema-walk" }
+# For the one value a model configuration needs that is neither the model's name
+# nor its width: `chunker_hash()`, which `set_embedding_model` passes to the
+# index because `mnema-index` deliberately does not depend on the chunker. It
+# was a dev-dependency while only a test fixture wanted it. Not new to the
+# normal graph either way — `mnema-ingest` already brings it in — which is what
+# `tests/dependency_boundary.rs` was re-run to confirm rather than assumed.
+mnema-chunk = { path = "../crates/mnema-chunk" }
 # The provider protocol. Brings `ureq` and a TLS stack, and nothing that
 # `tests/dependency_boundary.rs` forbids — checked by running it, not by
 # reading. This is the first TLS stack in the application's graph.
@@ -72,10 +79,5 @@ mnema-mock-provider = { workspace = true }
 # credential store at all. Enabling a feature from `[dev-dependencies]` does not
 # enable it for `cargo build`, so nothing here reaches a shipped binary.
 mnema-secrets = { path = "../crates/mnema-secrets", features = ["test-store"] }
-# For the one value a model configuration needs that is neither the model's name
-# nor its width. A dev-dependency, so `tests/dependency_boundary.rs` — which
-# asks `cargo tree -e normal` — is unaffected; the crate is already in the graph
-# transitively through `mnema-ingest` in any case.
-mnema-chunk = { path = "../crates/mnema-chunk" }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

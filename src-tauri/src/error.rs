@@ -91,16 +91,40 @@ pub enum Error {
     /// deliberately does not wrap a `keyring_core::Error`, three of whose
     /// variants structurally hold credential material.
     ///
-    /// There is deliberately no variant for "no key has been entered" beside
-    /// it. Nothing in this build needs the key yet, so nothing could construct
-    /// one, and the distinction such a variant would carry — that nobody having
-    /// entered a key is a normal state of the application while a keychain that
-    /// will not open is a failure — is already made by the shape of
-    /// [`crate::models::key_present`], which answers the first with `Ok(false)`
-    /// and only the second with an `Err`. A variant no code can produce cannot
-    /// be seen to go red: it would state the distinction without keeping it.
+    /// "No key has been entered" is [`Error::NoKey`] beside it and not this
+    /// one. Until a command needed the key there was no such variant, on the
+    /// ground that a variant no code can produce cannot be seen to go red;
+    /// `models::set_embedding_model` is the command that produces it, and the
+    /// distinction is stated there.
     #[error("credential store: {0}")]
     Secrets(#[from] mnema_secrets::Error),
+    /// A command that needs the key ran without one.
+    ///
+    /// Kept apart from [`Error::Secrets`], which is the store failing to
+    /// answer, because the two ask the person at the window for opposite
+    /// things: nobody having entered a key is a normal state of the
+    /// application with a sign-in panel behind it, while a keychain that will
+    /// not open is a failure, and telling someone to type a key they have
+    /// already entered is what one message for both produces. It is the same
+    /// line [`crate::models::key_present`] draws in its shape — `Ok(false)`
+    /// against `Err` — for the command that asks the question directly.
+    #[error("no provider key has been entered")]
+    NoKey,
+    /// The window asked for a list of models in a role this build has none.
+    ///
+    /// A refusal and not a default. [`mnema_provider::Role`] has three values,
+    /// the role crosses the IPC as a string, and `Role::Chat` is the one whose
+    /// list is unfiltered — so a typo falling through to it would answer a
+    /// question about embedders with the whole chat catalogue, and the window
+    /// would draw it as the answer.
+    ///
+    /// `{0:?}` and never `{0}`: this is caller text reaching a rendered
+    /// sentence, and a newline in it would cut a log line in half and let the
+    /// remainder pass for an entry of its own. The same rule
+    /// `mnema_provider::Refusal::LimitNotUnderstood` states for the provider
+    /// text it carries.
+    #[error("no such role: {0:?}")]
+    UnknownRole(String),
     /// Something panicked while holding a lock in the shared state. Reported
     /// rather than re-panicked: taking the webview down with it would turn a
     /// recoverable command failure into a lost window.
