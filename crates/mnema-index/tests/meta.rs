@@ -1,7 +1,7 @@
 //! `meta` is a key-value table, and the point of these tests is that the keys
 //! are constants rather than literals spread over three crates.
 
-use mnema_index::{Error, META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL};
+use mnema_index::{Error, META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL, META_VEC_VERSION};
 
 mod support;
 use support::temp_db;
@@ -67,5 +67,18 @@ fn the_active_space_is_refused_while_an_ordinary_key_still_writes() {
         db.meta_get(META_CHAT_MODEL).expect("read").as_deref(),
         Some("vendor/chat"),
         "the guard is about one key, not about writing"
+    );
+
+    // A second witness, and this key rather than any key. `META_VEC_VERSION` is
+    // the other one an overwrite costs something — a diagnosis — so it is the
+    // key a later widening of the guard would reach for first, and it stays
+    // writable on purpose. With the chat model as the only witness, widening
+    // the guard to cover this one too reddens nothing at all.
+    db.meta_set(META_VEC_VERSION, "0.1.9")
+        .expect("the other key an overwrite costs something still writes");
+    assert_eq!(
+        db.meta_get(META_VEC_VERSION).expect("read").as_deref(),
+        Some("0.1.9"),
+        "the guard is pinned to one key, not to 'not all of them'"
     );
 }

@@ -34,6 +34,15 @@ pub fn temp_db() -> TempDb {
 /// A document, a page, a block and one chunk — the shortest path to a
 /// `chunk_id` a vector may be attached to.
 ///
+/// **It cannot be called from inside a `Db::transaction`.** `insert_chunk`
+/// opens one of its own, SQLite has no nested `BEGIN`, and `Db::transaction`'s
+/// own doc names it as the one exception. Measured, because the way it fails
+/// matters: the document, the page and the block go in first — they join
+/// whatever transaction is open — and only the chunk fails, with "cannot start
+/// a transaction within a transaction". So a test that reaches for this inside
+/// a transaction does not get a clean refusal, it gets three rows and a panic.
+/// Build the chunk with `insert_chunk_in` there instead.
+///
 /// `dead_code` is allowed because this module is compiled into **every** test
 /// binary that declares `mod support;`, and the only one today — `meta.rs` —
 /// asks nothing about vectors. It is written here rather than inside the binary

@@ -36,11 +36,16 @@ impl Db {
 
     /// Writes a key that may be overwritten freely.
     ///
-    /// Every key here loses something when it is replaced, and for all but one
-    /// what it loses is a diagnosis: [`META_VEC_VERSION`] overwritten costs the
-    /// explanation of why an old database stopped opening, not the database.
-    /// [`META_ACTIVE_SPACE`] is the exception and is refused — see
-    /// [`Error::ActiveSpaceNotWritable`] for what an overwrite of it costs.
+    /// An overwrite costs three different things here, not two, and the whole
+    /// design of this function is the third one. [`META_RERANK_MODEL`] and
+    /// [`META_CHAT_MODEL`] leave nothing on disk, so replacing them costs
+    /// nothing. [`META_VEC_VERSION`] costs the explanation of why an old
+    /// database stopped opening — a diagnosis, not data. [`META_ACTIVE_SPACE`]
+    /// costs data, and is the one key refused here; see
+    /// [`Error::ActiveSpaceNotWritable`] for what the loss looks like.
+    ///
+    /// Whoever adds a fifth key owes it the same question rather than this
+    /// answer: what does replacing this value make unreachable?
     ///
     /// A refusal rather than a silent no-op, because a caller that has just
     /// been stopped from changing which space search reads is a caller whose
@@ -54,12 +59,19 @@ impl Db {
 
     /// The unguarded upsert, `meta_set` minus the one rule it enforces.
     ///
-    /// `pub(crate)` deliberately: this is the only way [`META_ACTIVE_SPACE`]
-    /// can be written, and it is reachable only from inside this crate, where
-    /// the check that the space being left behind holds no vectors can be made
-    /// in the same transaction as the write. A public function taking any key
-    /// would hand every caller a way around that check, which is the difference
-    /// between a split index being unreachable and being merely discouraged.
+    /// `pub(crate)` deliberately, and it is worth being exact about what that
+    /// buys. This crate's own API offers a caller outside it no way to write
+    /// [`META_ACTIVE_SPACE`]: `meta_set` refuses the key, and this function
+    /// cannot be named. What that closes is the convenient route — the one
+    /// taken without a decision. It is not a boundary: [`Db::conn`] hands out
+    /// the connection, and raw SQL through it writes any row in this database,
+    /// this key included. So a caller who means to go around the guard can, and
+    /// one who never thought about it will not.
+    ///
+    /// Inside the crate this is where the adoption path writes, which is the
+    /// point of leaving it here: the check that the space being left behind
+    /// holds no vectors and the write that replaces it can then be one
+    /// transaction rather than two.
     pub(crate) fn meta_put(&self, key: &str, value: &str) -> Result<(), Error> {
         self.conn().execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
