@@ -57,8 +57,19 @@ pub enum Error {
     /// `From` implementation below for the one variant it has to peel off first.
     #[error("provider: {0}")]
     Provider(mnema_provider::Error),
-    /// Nobody answered. The request never reached a provider, so nothing was
-    /// refused and nothing was decided about the key.
+    /// The request did not complete, so nothing was refused and nothing was
+    /// decided about the key.
+    ///
+    /// Deliberately not "the request never reached a provider", which is more
+    /// than the mapping behind it can support: this is built from every
+    /// `ureq` error (`crates/mnema-provider/src/http.rs:88`), and three of
+    /// those contradict that sentence — a timeout, where the request may well
+    /// have arrived and the answer merely did not come back in time; too many
+    /// redirects, where the provider answered repeatedly; and a base address
+    /// this build malformed, which is our own defect and not the network's.
+    /// The sentence shown to a person is inherited from
+    /// `mnema_provider::Error::Transport` and unchanged; what is corrected here
+    /// is a doc that claimed a cause nobody established.
     ///
     /// Split out from [`Error::Provider`] because the two ask the person at the
     /// window for opposite things. A key the provider refused needs a different

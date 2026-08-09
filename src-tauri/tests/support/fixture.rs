@@ -187,8 +187,9 @@ impl Fixture {
     /// thing it forbids sits on disk one filename over.
     ///
     /// **Where it stops**, written down rather than left to be re-derived. It is
-    /// one directory at one instant, with the connection open, and the directory
-    /// is the one the product writes to — `index_path` is
+    /// the directory tree — `collect_files` recurses, so a subdirectory is
+    /// scanned, not skipped — at one instant, with the connection open, and the
+    /// directory is the one the product writes to: `index_path` is
     /// `data_dir.join("index.sqlite")` on both sides
     /// (`src-tauri/src/paths.rs:8-10`). Outside it: SQLite's own temporary
     /// files, which go to `TMPDIR`/`SQLITE_TMPDIR` rather than here (this path

@@ -35,6 +35,20 @@
 //! Its [`vendor`](keyring_core::api::CredentialStoreApi::vendor) string says
 //! what it is, so a test that asserts which store is registered — as
 //! `tests/roundtrip.rs` does — fails loudly rather than passing against this.
+//! What actually keeps the feature out of a shipped graph, rather than merely
+//! documenting that it should be, is an assertion on `cargo tree -e normal` in
+//! `src-tauri/tests/dependency_boundary.rs`.
+//!
+//! # The `Debug` hazard is not only a release-build concern
+//!
+//! `build` below delegates to `keyring_core::mock`, so the credentials handed
+//! out are mock credentials, whose `Debug` contains the secret — and
+//! `keyring_core` logs that `Debug` on every operation. Inside a test binary
+//! that is live, not theoretical. It leaks nothing today for two reasons worth
+//! stating rather than assuming: no `log` implementation is installed in these
+//! binaries, so the macros compile to no-ops, and every value they would print
+//! is a synthetic fixture. A test binary that installs a logger and stores
+//! something real breaks both at once.
 //!
 //! # Not what `tests/foreign_store.rs` uses
 //!
@@ -64,12 +78,50 @@ use keyring_core::{CredentialPersistence, CredentialStore, Entry, mock};
 pub fn register() {
     static REGISTERED: Once = Once::new();
     REGISTERED.call_once(|| {
+        // Nobody may have got here first. `keyring_core::set_default_store`
+        // replaces silently and returns nothing, so without this the sequence
+        // that undoes the whole arrangement is invisible: a test that reaches a
+        // credential before building its fixture installs the *platform* store
+        // (`ensure_default_store` builds one when none is registered), touches
+        // the real keychain, and is then quietly papered over by the next
+        // fixture's call to this function. Nothing would go red — least of all
+        // on a developer's macOS machine, where the real keychain answers.
+        if let Some(existing) = keyring_core::get_default_store() {
+            panic!(
+                "a credential store was already registered when the test store went to \
+                 install itself: {}. Something in this test binary reached a credential \
+                 before the fixture that swaps the store — on a machine with a working \
+                 keychain that read or wrote a real one.",
+                existing.vendor()
+            );
+        }
         let store: Arc<CredentialStore> = Arc::new(InMemory(
             mock::Store::new().expect("the in-memory store builds"),
         ));
         keyring_core::set_default_store(store);
     });
+
+    // Checked on every call, not only the first. `Once` makes every later call
+    // a no-op, and a no-op is precisely what a caller must not be allowed to
+    // read as "the store is mine now". Positive — naming the store that must be
+    // there rather than ruling out the one that must not — for the reason
+    // `tests/roundtrip.rs` gives for its own vendor assertion: a negative names
+    // one impostor and waves the rest through.
+    let registered = keyring_core::get_default_store()
+        .expect("registering a default store leaves one registered");
+    assert_eq!(
+        registered.vendor(),
+        VENDOR,
+        "the registered credential store is not the test one, so anything this binary \
+         stores or loads is going somewhere real"
+    );
 }
+
+/// Says what it is, in one place, because two things depend on the exact
+/// string: the assertion in [`register`], and `tests/roundtrip.rs`, which
+/// asserts the platform store by name and so fails if this one is ever
+/// registered in its binary.
+const VENDOR: &str = "mnema-secrets test-store: in memory, keeps nothing beyond this process";
 
 /// `keyring_core::mock` with one method changed.
 ///
@@ -79,11 +131,8 @@ pub fn register() {
 struct InMemory(Arc<mock::Store>);
 
 impl CredentialStoreApi for InMemory {
-    /// Says what it is. `tests/roundtrip.rs` asserts the registered store is the
-    /// platform one by name, so this string is what makes that test fail rather
-    /// than quietly pass if this store is ever registered in its binary.
     fn vendor(&self) -> String {
-        "mnema-secrets test-store: in memory, keeps nothing beyond this process".to_string()
+        VENDOR.to_string()
     }
 
     fn id(&self) -> String {
