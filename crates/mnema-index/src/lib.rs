@@ -11,7 +11,7 @@ pub use journal::{DocumentStatus, SkipEntry, SkipRule, SkippedFile};
 pub use meta::{META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL, META_VEC_VERSION};
 pub use migrations::SCHEMA_VERSION;
 pub use open::{Db, open, register_vector_extension};
-pub use space::VectorRole;
+pub use space::{AdoptedSpace, VectorRole};
 pub use text_prep::prepare_for_search;
 pub use write::{Citation, INDEX_FORMAT_VERSION, PathEntry};
 
@@ -111,6 +111,23 @@ pub enum Error {
          unreachable while search answers from the new one"
     )]
     ActiveSpaceNotWritable,
+    /// A different embedding model was chosen while the active space already
+    /// holds embeddings. Honouring it would leave half the archive in a space
+    /// the search does not read — the split D25 rejected as impossible in
+    /// principle rather than merely unimplemented. Doing it properly means
+    /// building the new space, filling it, and switching, which is the indexing
+    /// subsystem.
+    ///
+    /// `embedded_chunks` counts **chunks**, not rows, and the name is the
+    /// message: a chunk is recorded as embedded in two places —
+    /// `chunk_embedding_state` and the space's own `vec_emb_<id>` table — and
+    /// they are two records of one chunk, not two things to rebuild. See
+    /// [`Db::space_is_empty`] for why both are read.
+    #[error(
+        "space {space_id} already holds embeddings for {embedded_chunks} chunks, so the \
+         embedding model cannot be changed without rebuilding them"
+    )]
+    ActiveSpaceNotEmpty { space_id: i64, embedded_chunks: i64 },
     #[error("{role} has a non-finite component at index {index}")]
     NonFiniteVector { role: VectorRole, index: usize },
     /// vec0 divides by the vector's norm in f32, and every way that division can
