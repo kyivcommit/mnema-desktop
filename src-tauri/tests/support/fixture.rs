@@ -41,7 +41,7 @@ const CREDITS: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#;
 ///
 /// The first is the store. `mnema-secrets` keeps the platform store out of reach
 /// only under its **own** `cfg(test)` — the `#[cfg(test)]` arm inside
-/// `platform_store`, `crates/mnema-secrets/src/lib.rs:307,314` — and an
+/// `platform_store`, `crates/mnema-secrets/src/lib.rs:313,320` — and an
 /// integration test of another crate compiles it without that flag. Left alone,
 /// everything below would reach the developer's real login keychain, and would
 /// fail outright on a runner that has neither an unlocked keychain nor a Secret

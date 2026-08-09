@@ -31,7 +31,7 @@ const NO_PROVIDER: &str = "http://127.0.0.1:1";
 /// `NO_PROVIDER` uses, one line up.
 ///
 /// Empty is not carelessness: `mnema_secrets::entry` refuses an empty reference
-/// before it touches anything (`crates/mnema-secrets/src/lib.rs:233-236`,
+/// before it touches anything (`crates/mnema-secrets/src/lib.rs:239-241`,
 /// `Error::EmptyReference`), because in the macOS keychain an empty attribute is
 /// a wildcard that would match another configuration's credential. So any
 /// store operation added to this file tomorrow fails loudly instead of quietly

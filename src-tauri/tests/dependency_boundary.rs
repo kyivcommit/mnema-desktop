@@ -152,6 +152,18 @@ fn the_shipped_graph_takes_tls_roots_from_the_machine_and_carries_no_test_store(
     // connection is opened — the first key check, on every installation, and
     // never here, because nothing in this workspace performs a TLS handshake.
     // Loudness that first sounds in front of a user is silence to a gate.
+    // The control comes first, because `features_of` answers an empty list to
+    // two different questions — the feature is off, and ureq is not here at all
+    // — and the assertion below states the first of them. Without this, the day
+    // the HTTP client is replaced, this test would name a cause nobody
+    // established. That is the rule `shipped_graph` states two levels up: a
+    // failure to answer is not the answer "no".
+    assert!(
+        packages.contains(&"ureq"),
+        "ureq is not in the shipped graph at all, so which trust store validates a \
+         certificate is UNANSWERED here rather than answered wrongly — this test knows \
+         only how to ask about ureq:\n{tree}"
+    );
     assert!(
         features_of(&tree, "ureq").contains(&"platform-verifier"),
         "ureq's `platform-verifier` feature is off, so asking for \

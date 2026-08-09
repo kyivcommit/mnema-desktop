@@ -28,7 +28,7 @@ pub struct AppState {
     /// A field rather than a constant for a sharper reason than the one above.
     /// `mnema-secrets` keeps the platform store out of reach only under its
     /// **own** `cfg(test)` — the `#[cfg(test)]` arm inside `platform_store`
-    /// (`crates/mnema-secrets/src/lib.rs:307,314`) — and an integration test of
+    /// (`crates/mnema-secrets/src/lib.rs:313,320`) — and an integration test of
     /// *this* crate compiles that one without the flag, so a test here reaches
     /// whatever store the process has. Tests register an in-memory one and give
     /// each fixture its own reference inside it; a shared reference would cross

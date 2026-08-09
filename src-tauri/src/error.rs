@@ -62,7 +62,7 @@ pub enum Error {
     ///
     /// Deliberately not "the request never reached a provider", which is more
     /// than the mapping behind it can support: this is built from every
-    /// `ureq` error (`crates/mnema-provider/src/http.rs:88`), and three of
+    /// `ureq` error (`crates/mnema-provider/src/http.rs:104`), and three of
     /// those contradict that sentence — a timeout, where the request may well
     /// have arrived and the answer merely did not come back in time; too many
     /// redirects, where the provider answered repeatedly; and a base address
@@ -81,7 +81,7 @@ pub enum Error {
     ///
     /// `detail` is `ureq`'s own error text, taken through `Display` and never
     /// `Debug`, and never the request: the key is in a header of the request
-    /// this error came from (`crates/mnema-provider/src/http.rs:100`).
+    /// this error came from (`crates/mnema-provider/src/http.rs:71,90`).
     #[error("the provider could not be reached: {detail}")]
     ProviderUnreachable { detail: String },
     /// The OS credential store could not be reached, or would not answer.
