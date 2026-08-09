@@ -47,6 +47,12 @@ use std::sync::{Arc, Mutex};
 
 use keyring_core::{CredentialStore, Entry};
 
+/// A store for other crates' integration tests. Read its header before enabling
+/// the feature — it claims durability and keeps nothing, which is the one shape
+/// [`store_is_acceptable`] exists to refuse.
+#[cfg(feature = "test-store")]
+pub mod test_store;
+
 #[cfg(not(any(
     target_os = "macos",
     target_os = "windows",

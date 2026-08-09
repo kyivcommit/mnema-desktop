@@ -64,6 +64,14 @@ tauri-utils = "2.9"
 # The same mock server the provider crate's own tests use — one server, not two
 # copies that drift.
 mnema-mock-provider = { workspace = true }
+# The same crate as the `[dependencies]` entry above, with the store these tests
+# register. Without it every command touching a credential would reach the
+# developer's real login keychain, and would fail outright on a runner that has
+# no unlocked keychain and no Secret Service session — which is why
+# `.github/workflows/ci.yml` forbids `cargo test --workspace` from touching a
+# credential store at all. Enabling a feature from `[dev-dependencies]` does not
+# enable it for `cargo build`, so nothing here reaches a shipped binary.
+mnema-secrets = { path = "../crates/mnema-secrets", features = ["test-store"] }
 # For the one value a model configuration needs that is neither the model's name
 # nor its width. A dev-dependency, so `tests/dependency_boundary.rs` — which
 # asks `cargo tree -e normal` — is unaffected; the crate is already in the graph

@@ -8,12 +8,17 @@ mod fixture;
 mod support;
 
 use fixture::Fixture;
+use mnema_desktop::error::Error;
 use mnema_desktop::models::{forget_key, key_present, set_key};
 
 /// Synthetic, and shaped so it cannot be mistaken for a provider key: no `sk-`
 /// prefix, no base64 tail, and it says what it is. If this string is ever found
 /// in a database or a keychain, it came from here.
 const KEY: &str = "test-key-not-a-real-one-0123456789";
+
+/// A second one, so a test can tell "the key that was already there" from "some
+/// key is there".
+const KEY_ALREADY_ENTERED: &str = "test-key-not-a-real-one-abcdefghij";
 
 #[test]
 fn a_key_is_checked_before_it_is_stored() {
@@ -27,6 +32,60 @@ fn a_key_is_checked_before_it_is_stored() {
         None,
         "a key that does not work, stored anyway, makes the app believe it is configured"
     );
+}
+
+#[test]
+fn a_refusal_leaves_the_key_that_was_already_working() {
+    // The best property of "check, then store", and the one the test above
+    // cannot see: it starts from an empty store, so it is satisfied both by a
+    // refusal that stored nothing and by a refusal that first deleted what was
+    // there. Reordering to forget → check → store keeps it green and destroys a
+    // working key on every mistyped attempt at a new one.
+    let fx = Fixture::with_provider_rejecting_the_key();
+    mnema_secrets::store(fx.credential_ref(), KEY_ALREADY_ENTERED).expect("a key is already there");
+
+    set_key(fx.state(), KEY.into()).expect_err("a refused key must not be accepted");
+
+    assert_eq!(
+        mnema_secrets::load(fx.credential_ref())
+            .expect("read the store")
+            .as_deref(),
+        Some(KEY_ALREADY_ENTERED),
+        "a refusal must leave the key that was already working exactly where it was"
+    );
+}
+
+#[test]
+fn a_provider_that_refused_and_one_that_never_answered_are_two_shapes() {
+    // Same consequence — the key was not saved — and opposite next actions: a
+    // refused key needs a different key, an unreachable provider needs the same
+    // key again later. One shape for both sends someone with a working
+    // credential off to find another one while their network is down. The
+    // `Display` strings already differed; what did not was the shape, so
+    // nothing above this layer could branch without matching on text.
+    let refusing = Fixture::with_provider_rejecting_the_key();
+    let refusal = set_key(refusing.state(), KEY.into()).expect_err("the provider refused");
+    assert!(
+        matches!(refusal, Error::Provider(_)),
+        "a provider that answered must not arrive as one that did not: {refusal:?}"
+    );
+
+    let silent = Fixture::with_no_provider_listening();
+    let unreachable = set_key(silent.state(), KEY.into()).expect_err("nobody answered");
+    assert!(
+        matches!(unreachable, Error::ProviderUnreachable { .. }),
+        "a provider that never answered must not arrive as one that refused: {unreachable:?}"
+    );
+
+    // Neither stored anything. Without this the two shapes could differ while
+    // the thing that matters about both — the key was not saved — did not hold.
+    for (case, fx) in [("refused", &refusing), ("unreachable", &silent)] {
+        assert_eq!(
+            mnema_secrets::load(fx.credential_ref()).expect("read the store"),
+            None,
+            "{case}: nothing may be stored when the key was never checked"
+        );
+    }
 }
 
 #[test]
@@ -143,6 +202,11 @@ fn nothing_that_crosses_to_the_window_repeats_the_key() {
         "this test means to look at a refusal of the key itself; it is looking at \
          something else: {refusal}"
     );
+    // Three renderings, two distinct strings today: `impl Serialize for Error`
+    // is `serialize_str(&self.to_string())` (`src-tauri/src/error.rs`), so the
+    // JSON is the `Display` in quotation marks. Both are listed on purpose —
+    // this is what holds them the same, and it goes red the day someone
+    // replaces that hand-written impl with a derive that reaches the fields.
     for (shape, rendering) in [
         ("the Display", refusal.to_string()),
         ("the Debug", format!("{refusal:?}")),

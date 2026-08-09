@@ -19,9 +19,8 @@ use crate::state::AppState;
 ///
 /// The value the commands actually use comes from [`AppState::credential_ref`],
 /// not from here. That indirection is what lets an integration test write under
-/// a reference of its own: `mnema-secrets` keeps the platform store out of reach
-/// only under its own `cfg(test)`, which a test of *this* crate does not set, so
-/// a test that used this constant would overwrite the developer's real key.
+/// a reference of its own — see that field for what each of the two test-side
+/// guards buys, since neither one alone is enough.
 pub const CREDENTIAL_REF: &str = "openrouter";
 
 /// Whether a key has been entered. Asks the store, because that is where the
@@ -42,7 +41,6 @@ pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Err
     let check = mnema_provider::check_key(state.provider_base(), &key)?;
     mnema_secrets::store(state.credential_ref(), &key)?;
     Ok(KeyStatus {
-        present: true,
         balance: check.balance,
     })
 }
@@ -56,10 +54,16 @@ pub fn forget_key(state: State<'_, AppState>) -> Result<(), Error> {
 }
 
 /// What the window draws after a key is accepted.
+///
+/// It carries no `present` flag. There was one, set to a literal `true` at the
+/// single place this type is built, and a literal is not a measurement: it told
+/// the caller nothing that `Ok` had not already told it, it could not be wrong
+/// today, and it would be wrong the first time `set_key` grew a path that
+/// returns without storing. "Is there a key?" has one answer in this build and
+/// it comes from asking the store — [`key_present`].
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyStatus {
-    pub present: bool,
     /// Four states, not "a number or nothing". Two states collapse "the
     /// provider did not mention a balance" into "the provider stated one this
     /// build could not read", and the shortest way to render the collapsed

@@ -44,14 +44,35 @@ pub enum Error {
     /// single writer, so a second concurrent job would contend for both.
     #[error("a job is already running")]
     JobAlreadyRunning,
-    /// The provider refused, or could not be reached. Its `Display` is safe to
-    /// show: no variant of `mnema_provider::Error` can carry the key —
-    /// everything it keeps from a provider body has been through that crate's
-    /// sanitising pipeline — and `crates/mnema-provider/tests/probe.rs` holds
-    /// it to that by running every failure path and searching the rendering for
-    /// the key it was given.
+    /// The provider answered, and the answer was not the one asked for — a key
+    /// it refused, a model it does not have, a body this build could not read.
+    ///
+    /// Its `Display` is safe to show: no variant of `mnema_provider::Error` can
+    /// carry the key — everything it keeps from a provider body has been through
+    /// that crate's sanitising pipeline — and
+    /// `crates/mnema-provider/tests/probe.rs` holds it to that by running every
+    /// failure path and searching the rendering for the key it was given.
+    ///
+    /// **Not `#[from]`**, and not because a manual conversion is nicer: see the
+    /// `From` implementation below for the one variant it has to peel off first.
     #[error("provider: {0}")]
-    Provider(#[from] mnema_provider::Error),
+    Provider(mnema_provider::Error),
+    /// Nobody answered. The request never reached a provider, so nothing was
+    /// refused and nothing was decided about the key.
+    ///
+    /// Split out from [`Error::Provider`] because the two ask the person at the
+    /// window for opposite things. A key the provider refused needs a different
+    /// key; a provider that could not be reached needs the same key again later,
+    /// and someone who is shown one message for both retypes a working
+    /// credential while their network is down. Both facts are true statements
+    /// today — the `Display` strings already differ — but they left this layer
+    /// as one shape, so nothing above it could branch without matching on text.
+    ///
+    /// `detail` is `ureq`'s own error text, taken through `Display` and never
+    /// `Debug`, and never the request: the key is in a header of the request
+    /// this error came from (`crates/mnema-provider/src/http.rs:100`).
+    #[error("the provider could not be reached: {detail}")]
+    ProviderUnreachable { detail: String },
     /// The OS credential store could not be reached, or would not answer.
     ///
     /// Safe to show for the same reason and by the same argument:
@@ -74,6 +95,21 @@ pub enum Error {
     /// recoverable command failure into a lost window.
     #[error("internal state was left inconsistent by an earlier failure")]
     StatePoisoned,
+}
+
+/// Splits the one provider failure that is not about the provider's answer.
+///
+/// Written out rather than `#[from]` so that every `?` on a `mnema_provider::Error`
+/// gets the split, wherever it is written. Doing it at one call site would leave
+/// the next command to remember, and "remember to keep two facts apart" is the
+/// mistake this exists to stop.
+impl From<mnema_provider::Error> for Error {
+    fn from(e: mnema_provider::Error) -> Self {
+        match e {
+            mnema_provider::Error::Transport(detail) => Error::ProviderUnreachable { detail },
+            answered => Error::Provider(answered),
+        }
+    }
 }
 
 impl Serialize for Error {

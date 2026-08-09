@@ -22,14 +22,18 @@ pub struct AppState {
     /// tests point it at a local server; production passes
     /// `mnema_provider::OPENROUTER_BASE` in `lib.rs`.
     provider_base: String,
-    /// Which entry in the OS credential store this installation uses. A field
-    /// for a sharper reason than the one above, and the reason is not testing
-    /// convenience. `mnema-secrets` keeps the platform store out of reach only
-    /// under its **own** `cfg(test)` — the `#[cfg(test)]` arm inside
-    /// `platform_store` (`crates/mnema-secrets/src/lib.rs:307,314`) — and an
-    /// integration test of *this* crate compiles that one without the flag. So
-    /// a test here reaches the developer's real keychain, and under the
-    /// production name it would overwrite their working key.
+    /// Which entry in the credential store this installation uses. Never the
+    /// secret — the name it is filed under.
+    ///
+    /// A field rather than a constant for a sharper reason than the one above.
+    /// `mnema-secrets` keeps the platform store out of reach only under its
+    /// **own** `cfg(test)` — the `#[cfg(test)]` arm inside `platform_store`
+    /// (`crates/mnema-secrets/src/lib.rs:307,314`) — and an integration test of
+    /// *this* crate compiles that one without the flag, so a test here reaches
+    /// whatever store the process has. Tests register an in-memory one and give
+    /// each fixture its own reference inside it; a shared reference would cross
+    /// one test's secret into another, and the production name in a test binary
+    /// would put a test's value where the application looks for the user's.
     credential_ref: String,
     /// `None` until the first `open_index`. The window opens before the database
     /// does, because a failure to open must be something the user can read

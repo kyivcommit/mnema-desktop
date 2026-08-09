@@ -27,12 +27,19 @@ use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
 /// to finds out at once rather than by reaching the real one.
 const NO_PROVIDER: &str = "http://127.0.0.1:1";
 
-/// A credential reference nothing in this file uses — and deliberately not
-/// `models::CREDENTIAL_REF`. An integration test writes into the developer's
-/// real keychain (`mnema-secrets` withholds the platform store only under its
-/// own `cfg(test)`), so a test file carrying the production name is one line
-/// away from overwriting their working key.
-const NO_CREDENTIAL: &str = "mnema-test-commands-touches-no-credential";
+/// A credential reference that cannot reach a store at all — the same trick
+/// `NO_PROVIDER` uses, one line up.
+///
+/// Empty is not carelessness: `mnema_secrets::entry` refuses an empty reference
+/// before it touches anything (`crates/mnema-secrets/src/lib.rs:233-236`,
+/// `Error::EmptyReference`), because in the macOS keychain an empty attribute is
+/// a wildcard that would match another configuration's credential. So any
+/// store operation added to this file tomorrow fails loudly instead of quietly
+/// succeeding under a fixed name — which is what a plausible-looking name would
+/// do, leaving an entry behind with no `Drop` to remove it and two parallel runs
+/// colliding on it. Nothing here touches a credential today; this is what keeps
+/// that true rather than stating it.
+const NO_CREDENTIAL: &str = "";
 
 /// An application whose data directory is a temporary one.
 ///

@@ -43,6 +43,22 @@ fn agent_with(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
+        // Selected, not inherited. `TlsConfig::default()` is
+        // `RootCerts::WebPki` (`ureq-3.3.0/src/tls/mod.rs:333`), which validates
+        // against Mozilla's compiled-in roots *instead of* the platform's — and
+        // that is wrong for this product in both directions. It goes on trusting
+        // a root an administrator or MDM has removed from the machine, and it
+        // refuses a corporate TLS-inspecting proxy whose root the machine does
+        // trust, which is a support case with no answer from inside the
+        // application. Taking the roots from the operating system is the reason
+        // the workspace manifest enables ureq's `platform-verifier` feature; the
+        // feature was enabled and this line was missing, so the feature was
+        // never reached.
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
         .build()
         .into()
 }
@@ -129,6 +145,39 @@ mod tests {
             !config.http_status_as_error(),
             "a non-2xx must arrive as a body to read, not a transport error that has lost \
              the status"
+        );
+    }
+
+    /// Which trust store validates a certificate, read back from the agent.
+    ///
+    /// **Say plainly what this covers and what it does not.** It goes red if the
+    /// `.tls_config` line is deleted or its argument swapped, which is the whole
+    /// defect it was written for: the default is `RootCerts::WebPki`, so an
+    /// agent built without that line silently validates against compiled-in
+    /// Mozilla roots while the manifest's comment says the roots come from the
+    /// operating system.
+    ///
+    /// It does **not** prove that a certificate is ever validated against the
+    /// platform's store, because nothing in this workspace performs a TLS
+    /// handshake at all — `MockServer` is plain HTTP. Nor would it catch ureq's
+    /// `platform-verifier` feature being dropped from the workspace manifest:
+    /// this enum is set either way, and the build panics only when a real
+    /// connection is opened (`ureq-3.3.0/src/tls/rustls.rs:183-185`). Both gaps
+    /// need a live endpoint, which this crate's tests deliberately never call.
+    ///
+    /// `matches!` rather than `assert_eq!`: `RootCerts` is `#[non_exhaustive]`
+    /// and derives no `PartialEq`.
+    #[test]
+    fn certificates_are_validated_against_the_platform_trust_store() {
+        let config = agent().config().clone();
+        assert!(
+            matches!(
+                config.tls_config().root_certs(),
+                ureq::tls::RootCerts::PlatformVerifier
+            ),
+            "the roots must come from the operating system, not from a set compiled into \
+             this binary: {:?}",
+            config.tls_config().root_certs()
         );
     }
 
