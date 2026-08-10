@@ -421,6 +421,60 @@ fn a_full_space_blocks_a_switch_even_though_nothing_points_at_it() {
     );
 }
 
+/// The way out of the state the test above builds, and the only test in this
+/// file that reaches `refuse_unless_every_other_space_is_empty`'s `continue`.
+///
+/// The same four public calls leave a space full of one model's vectors with
+/// nothing pointing at it. Adopting **that model** must be allowed: the rule is
+/// "every space EXCEPT the requested one is empty", and refusing here would
+/// leave an archive nobody can reach — the pointer cannot be set, and adoption
+/// is the only path that sets it.
+///
+/// ⚠️ Written because the mutation that makes the rule count the requested space
+/// against itself left the whole crate green (Task 10). Every other test where
+/// the requested space holds vectors is exempted one level up by
+/// `refuse_if_the_move_would_orphan_anything` — `requested == active_space()` —
+/// so the skip inside the rule was standing on the exemption, a defence that
+/// answers a different question. Here the pointer is `None` and `requested` is
+/// `Some`, so the exemption cannot fire and the rule is genuinely asked. That
+/// combination exists nowhere else in this file.
+#[test]
+fn the_model_a_space_is_full_of_can_be_adopted_even_with_nothing_pointing_at_it() {
+    let db = temp_db();
+    let config = db
+        .create_model_config("m", "openrouter", None, "baai/bge-m3", 4)
+        .expect("config");
+    let space = db.create_space(config, 4, HASH).expect("space");
+    let chunk_id = support::one_chunk(&db);
+    db.insert_vector(space, chunk_id, &[1.0, 0.0, 0.0, 0.0])
+        .expect("vector");
+    assert_eq!(
+        db.active_space().expect("read"),
+        None,
+        "nothing has written the pointer, which is what keeps the exemption out of this"
+    );
+
+    let adopted = db
+        .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
+        .expect("the space being adopted is not one the rule may count against the call");
+
+    assert_eq!(
+        adopted.space_id, space,
+        "it must find the space the vectors are already in, not mint a second one"
+    );
+    assert!(
+        !adopted.created,
+        "the space existed, and `created` is read from `create_space`'s own answer"
+    );
+    // And the point of allowing it: the archive is reachable again.
+    assert_eq!(db.active_space().expect("read"), Some(space));
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM embedding_space"),
+        1,
+        "no second space was minted beside the full one"
+    );
+}
+
 #[test]
 fn a_pointer_nobody_can_read_neither_unlocks_the_switch_nor_locks_the_index() {
     // Both directions, because either alone is satisfied by the wrong rule. An
