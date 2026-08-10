@@ -4,7 +4,22 @@
 // functions, importable and tested (`render.test.js`) without a browser —
 // and everything below is DOM: elements, listeners, `invoke`.
 
-import { endingSentence, searchResultItems } from "./render.js";
+import {
+  endingSentence,
+  searchResultItems,
+  ROLES,
+  ROLE_NAME,
+  disclosureSentence,
+  keyStateSentence,
+  indexStateSentence,
+  embeddingProgressText,
+  adoptedModelSentence,
+  modelOptionLabel,
+  keyAcceptedSentence,
+  unreadableSentence,
+  roleRecordedSentence,
+  recordedNoteSentence,
+} from "./render.js";
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
@@ -12,14 +27,30 @@ const { open } = window.__TAURI__.dialog;
 const el = (id) => document.getElementById(id);
 const results = el("results");
 
+// What `open_index` answered, kept because nothing on the core side can carry
+// it. `UnreadableCause::NotOpen` is one value over two situations — the window
+// has not asked for an index yet, and an open that failed and left none, since
+// `AppState::db` is `None` in both — and this variable is the only place that
+// difference exists. Without it, a permanent wall (an index written by a newer
+// Mnema, which never opens) draws exactly like an ordinary cold start, and
+// somebody waits out a state that will not change.
+//
+// `notAsked` is not reachable while `open_index` is awaited above the settings
+// section, as it is today. It is a state of this window all the same, and the
+// table that renders it (`INDEX_OPENING_TEXT`) has an arm for it so that
+// reordering this file cannot silently produce an unhandled one.
+let indexOpening = { kind: "notAsked" };
+
 // Opening the index is the first thing that happens, and its failure is
 // something the user has to be able to read — which is why the window opens
 // before the database does.
 try {
   const info = await invoke("open_index");
   el("index-status").textContent = `index ready at ${info.path} (schema v${info.schemaVersion})`;
+  indexOpening = { kind: "opened" };
 } catch (error) {
   el("index-status").textContent = `the index could not be opened: ${error}`;
+  indexOpening = { kind: "failed", error: `${error}` };
 }
 
 // `null` until `pick` answers with a real one. Kept apart from `jobRunning`
@@ -260,3 +291,156 @@ el("search-form").addEventListener("submit", async (event) => {
     results.replaceChildren(li);
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model configuration.
+//
+// Every sentence below comes from `render.js`, which is where the states are
+// told apart and where `render.test.js` can reach them. This half is elements
+// and listeners, and its own job is to keep two facts out of one element.
+
+// The three pickers, whose ids are `${role}-model` for every role — derived,
+// not tabulated, because a table here would be a fourth place the list of roles
+// is written down and the first to go stale. `ROLES` is the list, and the Rust
+// half is pinned by `every_role_the_provider_has_is_named_by_a_string_the_
+// window_can_send` (`src-tauri/src/models.rs`).
+const selectId = (role) => `${role}-model`;
+
+// Whether `provider_models` answered for this role. A recorded model missing
+// from an *empty* picker is not evidence that the provider stopped listing it
+// — those are two facts, and only one of them is about the model.
+const listRead = Object.fromEntries(ROLES.map((role) => [role, false]));
+
+// Every option carries its own label, refused ones disabled. Refused rather
+// than absent: a model the provider lists and this window hides sends the user
+// looking for a fault here.
+const fillRole = async (role) => {
+  const select = el(selectId(role));
+  select.replaceChildren();
+  try {
+    const catalogue = await invoke("provider_models", { role });
+    for (const entry of catalogue.entries) {
+      const option = document.createElement("option");
+      option.value = entry.id;
+      // `textContent`, never markup: the label can carry provider text
+      // (`Refusal::LimitNotUnderstood`'s `raw`), which is capped upstream but
+      // is still untrusted.
+      option.textContent = modelOptionLabel(entry);
+      option.disabled = entry.refusal !== null && entry.refusal !== undefined;
+      select.append(option);
+    }
+    // A list quietly shorter than the provider's is the failure Task 1 spent
+    // three fix rounds removing; do not reintroduce it at the last seam.
+    el(`${selectId(role)}-unreadable`).textContent = unreadableSentence(catalogue);
+    listRead[role] = true;
+  } catch (error) {
+    // Not into `key-status`: this endpoint needs no key (`provider_models` is
+    // called without one), so a network failure here has nothing to do with
+    // the credential store and must not be read as though it had.
+    listRead[role] = false;
+    el(`${selectId(role)}-unreadable`).textContent = `список моделей прочитати не вдалось: ${error}`;
+  }
+};
+
+// What the index records, shown in the picker — and said in words when the
+// picker cannot show it. Assigning a `value` no option carries leaves the
+// select blank, which is a recorded configuration disappearing quietly; whether
+// that blank is worth a sentence, and which sentence, is
+// `recordedNoteSentence`'s decision, because three different facts reach it.
+const showRecorded = (role, recorded) => {
+  const select = el(selectId(role));
+  select.value = recorded ?? "";
+  el(`${selectId(role)}-missing`).textContent = recordedNoteSentence({
+    recorded,
+    listRead: listRead[role],
+    // Asked of the element after the assignment rather than of the catalogue:
+    // this is what the person is actually looking at.
+    listed: select.value === recorded,
+  });
+};
+
+const drawSettings = (settings) => {
+  el("disclosure").textContent = disclosureSentence(settings);
+  el("key-state").textContent = keyStateSentence(settings);
+  el("index-state").textContent = indexStateSentence(settings.index, indexOpening);
+  el("embedding-progress").textContent = embeddingProgressText(settings.index);
+  // An index that could not be read says nothing about which models are
+  // recorded, so the pickers show nothing chosen and `index-state` carries the
+  // reason. Leaving the first option selected would have the window state a
+  // configuration it has not read.
+  const read = settings.index?.kind === "read" ? settings.index : null;
+  showRecorded("embedding", read && read.embeddingModel);
+  showRecorded("rerank", read && read.rerankModel);
+  showRecorded("chat", read && read.chatModel);
+};
+
+// No `.catch()`, and that is deliberate. `model_settings` returns no `Result`
+// at all: every state of the credential store and every state of the index is
+// an answer, so this command has no rejection to catch. A blanket `.catch()`
+// here would never fire, and would read as though the two `Unreadable` states
+// were being handled — they are handled in `drawSettings`, by being drawn.
+const refreshSettings = async () => drawSettings(await invoke("model_settings"));
+
+el("key-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const status = await invoke("set_key", { key: el("key").value });
+    el("key").value = "";
+    el("key-status").textContent = keyAcceptedSentence(status);
+  } catch (error) {
+    el("key-status").textContent = `ключ не прийнято: ${error}`;
+  }
+  await refreshSettings();
+});
+
+el("forget").addEventListener("click", async () => {
+  try {
+    await invoke("forget_key");
+    el("key-status").textContent = "ключ прибрано";
+  } catch (error) {
+    // The key is still there. Saying "removed" because the button was pressed
+    // would state as fact something the store refused to do — and the next
+    // line of the window, redrawn from the store itself, would contradict it.
+    el("key-status").textContent = `ключ прибрати не вдалось: ${error}`;
+  }
+  await refreshSettings();
+});
+
+// The embedding role is not the other two and does not share their handler.
+// It answers `AdoptedModel` — a model, a width, a space and whether that space
+// was minted — while `set_rerank_model` and `set_chat_model` write a string and
+// answer nothing. One handler for both would have to throw the adoption away to
+// have something in common with the other two.
+el(selectId("embedding")).addEventListener("change", async (event) => {
+  const model = event.target.value;
+  try {
+    const adopted = await invoke("set_embedding_model", { model });
+    el("model-status").textContent = adoptedModelSentence(adopted, indexOpening);
+  } catch (error) {
+    // The refusal already says how many vectors stand in the way; showing it
+    // whole is better than a sentence of our own that says less.
+    el("model-status").textContent = `модель відбитків не записано: ${error}`;
+  }
+  await refreshSettings();
+});
+
+for (const [role, command] of [
+  ["rerank", "set_rerank_model"],
+  ["chat", "set_chat_model"],
+]) {
+  el(selectId(role)).addEventListener("change", async (event) => {
+    const model = event.target.value;
+    try {
+      await invoke(command, { model });
+      el("model-status").textContent = roleRecordedSentence(role, model);
+    } catch (error) {
+      el("model-status").textContent = `модель ${ROLE_NAME[role]} не записано: ${error}`;
+    }
+    await refreshSettings();
+  });
+}
+
+// The lists first, then the settings: `showRecorded` sets a `value` on each
+// picker, and a picker with no options yet cannot hold one.
+await Promise.all(ROLES.map(fillRole));
+await refreshSettings();

@@ -32,6 +32,39 @@
         <p id="skips" class="muted"></p>
       </section>
 
+      <!--
+        Two facts are never given one element. `key-state` is what the
+        credential store says right now and is redrawn from `model_settings`;
+        `key-status` is the outcome of the last thing the person pressed and
+        must survive that redraw. Each picker likewise has two lines under it:
+        `-unreadable` is about the provider's list, `-missing` is about the
+        model this index has recorded — a single element would let whichever
+        was written second erase the other.
+      -->
+      <section>
+        <h2>Моделі</h2>
+        <p id="disclosure"></p>
+        <form id="key-form">
+          <input id="key" type="password" placeholder="ключ OpenRouter" autocomplete="off" />
+          <button type="submit">Перевірити й зберегти</button>
+          <button id="forget" type="button">Прибрати ключ</button>
+        </form>
+        <p id="key-state" class="muted"></p>
+        <p id="key-status" class="muted"></p>
+        <label>Відбитки <select id="embedding-model"></select></label>
+        <p id="embedding-model-unreadable" class="muted"></p>
+        <p id="embedding-model-missing" class="muted"></p>
+        <label>Упорядкування <select id="rerank-model"></select></label>
+        <p id="rerank-model-unreadable" class="muted"></p>
+        <p id="rerank-model-missing" class="muted"></p>
+        <label>Відповіді <select id="chat-model"></select></label>
+        <p id="chat-model-unreadable" class="muted"></p>
+        <p id="chat-model-missing" class="muted"></p>
+        <p id="model-status" class="muted"></p>
+        <p id="index-state" class="muted"></p>
+        <p id="embedding-progress" class="muted"></p>
+      </section>
+
       <section>
         <h2>Search</h2>
         <form id="search-form">

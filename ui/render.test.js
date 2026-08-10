@@ -18,6 +18,30 @@ import {
   endingSentence,
   hitLocation,
   searchResultItems,
+  ROLES,
+  ROLE_NAME,
+  DISCLOSURE_TEXT,
+  LEAVES_NOTHING,
+  LEAVES_EVERYTHING,
+  KEY_STATE_TEXT,
+  KEY_STORE_FAILURE_TEXT,
+  KEY_STORE_SHOWS_REASON,
+  INDEX_SETTINGS_TEXT,
+  UNREADABLE_CAUSE_TEXT,
+  INDEX_OPENING_TEXT,
+  REFUSAL_TEXT,
+  BALANCE_TEXT,
+  RECORD_ID_TEXT,
+  disclosureSentence,
+  keyStateSentence,
+  indexStateSentence,
+  embeddingProgressText,
+  adoptedModelSentence,
+  modelOptionLabel,
+  keyAcceptedSentence,
+  unreadableSentence,
+  roleRecordedSentence,
+  recordedNoteSentence,
 } from "./render.js";
 
 // The canonical list of `EndReason` discriminants, in the exact camelCase
@@ -208,4 +232,491 @@ test("search hits render their location and text", () => {
   assert.deepEqual(searchResultItems([{ relativePath: "a.txt", text: "fox" }]), [
     { kind: "hit", where: "a.txt", text: "fox" },
   ]);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model configuration.
+//
+// The canonical discriminant lists for every union the model-configuration
+// commands send this window, in the exact camelCase spelling
+// `#[serde(rename_all = "camelCase")]` produces.
+//
+// This is the JS half of an obligation that until now sat only in a Rust test's
+// doc comment — `every_discriminant_the_window_sees_has_its_camel_case_spelling_
+// pinned` (`src-tauri/src/models.rs`), which says the mirrored lists belong here
+// and could not be written before a renderer existed, because a JS list nothing
+// asserts against goes stale while looking authoritative. What makes these
+// worth having is the paragraph below them: every one is asserted to be exactly
+// the key set of a render table, so a variant added on one side and not the
+// other reddens something rather than rendering a silent fallback.
+//
+// ⚠️ Two of the four Rust-side pins stop `models.rs` compiling when a variant is
+// added, which is what sends whoever adds one here. **`Refusal`, `Balance` and
+// `RecordId` have no such pin** — they live in `crates/mnema-provider` and no
+// test there enumerates their spellings — so those three lists are held by this
+// file alone. That gap is real and is named in this task's report; do not read
+// the symmetry of the lists below as evidence it is closed.
+const KEY_STATES = ["present", "absent", "unreadable"];
+const KEY_STORE_FAILURES = ["locked", "duplicate", "refused", "defect"];
+const INDEX_SETTINGS_KINDS = ["read", "unreadable"];
+const UNREADABLE_CAUSES = ["notOpen", "readFailed"];
+const REFUSALS = [
+  "inputTooSmall",
+  "noStatedLimit",
+  "limitNotUnderstood",
+  "noStatedOutputModalities",
+  "noTextOutput",
+];
+const BALANCES = ["known", "notStated", "unreadable", "envelopeNotUnderstood"];
+const RECORD_IDS = ["absent", "notAString", "known"];
+
+// Not a wire union: `main.js` produces this one itself, from what `open_index`
+// answered. It is listed here for the same reason as the others — the table
+// that renders it must have an arm for every state the window can be in.
+const INDEX_OPENINGS = ["notAsked", "opened", "failed"];
+
+test("every union that reaches this window has exactly one table entry per variant", () => {
+  assert.deepEqual(Object.keys(DISCLOSURE_TEXT).sort(), [...KEY_STATES].sort());
+  assert.deepEqual(Object.keys(KEY_STATE_TEXT).sort(), [...KEY_STATES].sort());
+  assert.deepEqual(Object.keys(KEY_STORE_FAILURE_TEXT).sort(), [...KEY_STORE_FAILURES].sort());
+  assert.deepEqual(Object.keys(KEY_STORE_SHOWS_REASON).sort(), [...KEY_STORE_FAILURES].sort());
+  assert.deepEqual(Object.keys(INDEX_SETTINGS_TEXT).sort(), [...INDEX_SETTINGS_KINDS].sort());
+  assert.deepEqual(Object.keys(UNREADABLE_CAUSE_TEXT).sort(), [...UNREADABLE_CAUSES].sort());
+  assert.deepEqual(Object.keys(INDEX_OPENING_TEXT).sort(), [...INDEX_OPENINGS].sort());
+  assert.deepEqual(Object.keys(REFUSAL_TEXT).sort(), [...REFUSALS].sort());
+  assert.deepEqual(Object.keys(BALANCE_TEXT).sort(), [...BALANCES].sort());
+  assert.deepEqual(Object.keys(RECORD_ID_TEXT).sort(), [...RECORD_IDS].sort());
+  assert.deepEqual(Object.keys(ROLE_NAME).sort(), [...ROLES].sort());
+});
+
+test("the disclosure names the search query, not only indexing", () => {
+  const withKey = disclosureSentence({ key: { kind: "present" } });
+  assert.match(withKey, /кожне питання/,
+    "§3.2 of the requirements says 'once, at indexing', and that is false for cloud embeddings");
+  assert.match(withKey, /кожен шматочок/);
+});
+
+// The brief's own regexp was `/нічого/`, which cannot match `LEAVES_NOTHING`'s
+// own opening word `Нічого` — the two halves of the brief contradicted each
+// other. The sentence is the user-visible value, so the sentence stayed and the
+// pattern gained `/i`.
+test("with no key the disclosure promises nothing leaves", () => {
+  assert.match(disclosureSentence({ key: { kind: "absent" } }), /нічого/i);
+});
+
+// `KeyState` has three values, and a store that would not answer is not a store
+// that answered "no key". Promising that nothing leaves the machine, on the
+// evidence of a keychain that is merely locked, is a promise this window is in
+// no position to make — and the same sentence a key that *is* there would make
+// false.
+test("a key store that would not answer promises neither everything nor nothing", () => {
+  const unknown = disclosureSentence({
+    key: { kind: "unreadable", cause: "locked", reason: "synthetic: the keychain is locked" },
+  });
+  assert.notEqual(unknown, LEAVES_NOTHING);
+  assert.notEqual(unknown, LEAVES_EVERYTHING);
+  assert.match(unknown, /невідомо/);
+});
+
+test("a key state this build does not know promises neither everything nor nothing", () => {
+  const unknown = disclosureSentence({ key: { kind: "somethingFutureAndUnknown" } });
+  assert.notEqual(unknown, LEAVES_NOTHING);
+  assert.notEqual(unknown, LEAVES_EVERYTHING);
+});
+
+// The sentence `Error::NoKey`'s own doc calls forbidden: telling someone whose
+// keychain is merely locked that they have entered no key sends them to re-enter
+// one they already have. Both directions — `doesNotMatch` alone is satisfied by
+// a function returning the empty string, and `absent` is the state that must
+// say it.
+test("an unreadable key store is never rendered as having no key", () => {
+  for (const cause of KEY_STORE_FAILURES) {
+    const text = keyStateSentence({
+      key: { kind: "unreadable", cause, reason: "synthetic diagnostic text" },
+    });
+    assert.doesNotMatch(text, /немає/, `"${cause}" told a person with a key that they have none`);
+    assert.match(text, /невідомо/, `"${cause}" said nothing about what is not known`);
+  }
+  assert.match(keyStateSentence({ key: { kind: "absent" } }), /немає/);
+});
+
+// `KeyStoreFailure` is four values over six error variants, grouped by what the
+// person does next. Four sentences that read the same would satisfy the key-set
+// test above and lose the whole content of the grouping.
+test("each key store failure asks the person for a different thing", () => {
+  const said = KEY_STORE_FAILURES.map((cause) =>
+    keyStateSentence({ key: { kind: "unreadable", cause, reason: "" } }),
+  );
+  assert.equal(new Set(said).size, KEY_STORE_FAILURES.length, `two failures read alike: ${said}`);
+  assert.match(said[KEY_STORE_FAILURES.indexOf("locked")], /озблок/);
+  assert.match(said[KEY_STORE_FAILURES.indexOf("duplicate")], /ибер|рибер/);
+  assert.match(said[KEY_STORE_FAILURES.indexOf("defect")], /вад/);
+});
+
+// `reason` is diagnostic text, not a sentence to show: `mnema_secrets::Error::
+// Unavailable` interpolates the platform's own error, and an OS status put in
+// front of a person is not an action. It is appended only where `cause` names no
+// action of its own and a bug report is the action.
+test("a locked keychain shows an action, not the operating system's status code", () => {
+  const osStatus = "errSecInteractionNotAllowed (-25308)";
+  assert.doesNotMatch(
+    keyStateSentence({ key: { kind: "unreadable", cause: "locked", reason: osStatus } }),
+    /-25308/,
+  );
+  assert.match(
+    keyStateSentence({ key: { kind: "unreadable", cause: "refused", reason: osStatus } }),
+    /-25308/,
+    "`refused` is the one value that names no action, which is what `reason` is for",
+  );
+});
+
+// `UnreadableCause::NotOpen` is one value over two situations — `AppState::db`
+// is `None` both before the first `open_index` and after one that failed — and
+// the window is the only place that can tell them apart, because it made the
+// call and read the answer. A window that skips the correlation makes a
+// permanent wall (an index written by a newer Mnema, which never opens) look
+// like an ordinary cold start.
+test("an index that failed to open is a different sentence from one not asked for yet", () => {
+  const index = { kind: "unreadable", cause: "notOpen", reason: "the index is not open" };
+  const wall = indexStateSentence(index, {
+    kind: "failed",
+    error: "this index was written by a newer Mnema (schema v9, this build reads v7)",
+  });
+  const coldStart = indexStateSentence(index, { kind: "notAsked" });
+  assert.notEqual(wall, coldStart);
+  assert.match(wall, /schema v9/, "the reason the wall is permanent is the only thing worth saying");
+  assert.doesNotMatch(coldStart, /schema v9/);
+});
+
+// The third correlation: `open_index` answered `Ok`, so `AppState::db` was set
+// (`state.rs`, `open_index` assigns before returning) — a later `notOpen` is
+// then a defect of this build and not a folder anybody has to go and choose.
+test("an index that opened and then reported itself closed is a bug report", () => {
+  const text = indexStateSentence(
+    { kind: "unreadable", cause: "notOpen", reason: "the index is not open" },
+    { kind: "opened" },
+  );
+  assert.match(text, /вад/);
+  assert.notEqual(text, indexStateSentence(
+    { kind: "unreadable", cause: "notOpen", reason: "the index is not open" },
+    { kind: "notAsked" },
+  ));
+});
+
+test("a read that failed is a bug report and never an index nobody opened", () => {
+  const text = indexStateSentence(
+    { kind: "unreadable", cause: "readFailed", reason: "index: no space with id 7" },
+    { kind: "opened" },
+  );
+  assert.match(text, /вад/);
+  assert.match(text, /no space with id 7/, "the diagnostic is the whole value of a bug report");
+});
+
+// The entrance to the harm `NoSuchSpace` was written to prevent: an index that
+// could not be read, drawn as an index with nothing configured in it.
+test("an unreadable index is never drawn as an index with nothing configured", () => {
+  for (const cause of UNREADABLE_CAUSES) {
+    const index = { kind: "unreadable", cause, reason: "synthetic" };
+    const progress = embeddingProgressText(index);
+    assert.doesNotMatch(progress, /не обрана/, `"${cause}" read as "no model chosen"`);
+    assert.match(progress, /невідомо/, `"${cause}" said nothing about what is not known`);
+  }
+  assert.match(
+    embeddingProgressText({ kind: "read", activeSpace: null, embeddedChunks: 0, totalChunks: 0 }),
+    /не обрана/,
+    "the one state that really is 'nothing chosen' must still say so",
+  );
+});
+
+test("an index kind this build does not know is not read as a readable one", () => {
+  const progress = embeddingProgressText({ kind: "somethingFutureAndUnknown" });
+  assert.doesNotMatch(progress, /не обрана/);
+  assert.match(progress, /невідомо/);
+});
+
+test("an active space with nothing embedded says so", () => {
+  const text = embeddingProgressText({
+    kind: "read",
+    activeSpace: 1,
+    embeddedChunks: 0,
+    totalChunks: 812,
+  });
+  assert.match(text, /0 з 812/);
+});
+
+test("no active space is a different sentence from an empty one", () => {
+  const none = embeddingProgressText({
+    kind: "read",
+    activeSpace: null,
+    embeddedChunks: 0,
+    totalChunks: 812,
+  });
+  assert.notEqual(
+    none,
+    embeddingProgressText({ kind: "read", activeSpace: 1, embeddedChunks: 0, totalChunks: 812 }),
+  );
+});
+
+// Not a fraction, and never to be divided (`IndexRead::embedded_chunks`). The
+// numerator counts one space and the denominator the whole index, so a vector
+// that outlives the chunk it embeds — the storage half of which is in the gate
+// as `a_vector_outlives_the_chunk_it_embeds` — puts the numerator above the
+// denominator legitimately. A percentage of that is above 100, and clamping it
+// would be this window inventing a number nobody measured.
+test("the two counts are never divided, at any ratio", () => {
+  for (const [embedded, total] of [[0, 0], [0, 812], [406, 812], [812, 812], [900, 812]]) {
+    const text = embeddingProgressText({
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: embedded,
+      totalChunks: total,
+    });
+    assert.doesNotMatch(text, /%/, `${embedded}/${total} was rendered as a percentage`);
+    assert.match(text, new RegExp(`\\b${embedded}\\b`), `the numerator ${embedded} went missing`);
+    assert.match(text, new RegExp(`\\b${total}\\b`), `the denominator ${total} went missing`);
+  }
+});
+
+test("a numerator above the denominator is explained rather than left looking broken", () => {
+  const over = embeddingProgressText({
+    kind: "read",
+    activeSpace: 1,
+    embeddedChunks: 900,
+    totalChunks: 812,
+  });
+  assert.match(over, /не помилка/);
+  // Both directions: an explanation printed on every reading would say nothing.
+  const under = embeddingProgressText({
+    kind: "read",
+    activeSpace: 1,
+    embeddedChunks: 406,
+    totalChunks: 812,
+  });
+  assert.doesNotMatch(under, /не помилка/);
+});
+
+// `set_embedding_model` answers `AdoptedModel`, whose `model`, `dim`, `spaceId`
+// and `created` sit outside `index` precisely so a read-back that failed on its
+// own cannot take them. The sentence after choosing a model must therefore not
+// say the model was not chosen when only the read-back failed.
+test("a model that was recorded still says so when the read-back failed", () => {
+  const text = adoptedModelSentence(
+    {
+      model: "vendor/embed-3",
+      dim: 1536,
+      spaceId: 4,
+      created: true,
+      index: { kind: "unreadable", cause: "readFailed", reason: "index: database is locked" },
+    },
+    { kind: "opened" },
+  );
+  assert.match(text, /vendor\/embed-3/);
+  assert.match(text, /1536/);
+  assert.match(text, /записано/i, "the model was written; only reading it back failed");
+  assert.doesNotMatch(text, /не записано|не обрано/);
+});
+
+// `created` is stated by the index, never inferred. Deriving it from
+// `embeddedChunks` would be wrong in exactly one direction: that number is
+// identically zero in this build (D29), so every adoption would read as new.
+test("whether a space was created is taken from the field that states it", () => {
+  const adopted = {
+    model: "vendor/embed-3",
+    dim: 1536,
+    spaceId: 4,
+    index: { kind: "read", activeSpace: 4, embeddedChunks: 0, totalChunks: 0, embeddingDim: 1536 },
+  };
+  const fresh = adoptedModelSentence({ ...adopted, created: true }, { kind: "opened" });
+  const reused = adoptedModelSentence({ ...adopted, created: false }, { kind: "opened" });
+  assert.match(fresh, /овий простір/);
+  assert.doesNotMatch(reused, /овий простір/);
+  assert.notEqual(fresh, reused);
+});
+
+test("a refused model says both numbers", () => {
+  const label = modelOptionLabel({
+    id: "thenlper/gte-base",
+    contextLength: 512,
+    pricePerToken: 0.000000005,
+    refusal: { kind: "inputTooSmall", limit: 512, floor: 2048 },
+  });
+  assert.match(label, /512/);
+  assert.match(label, /2048/);
+});
+
+// The two pairs `Refusal` was split into over three review rounds, and the two
+// the brief's own table folded back together under one default. "Did not say"
+// and "said, and text was not among it" are opposite statements about the
+// provider; so are "stated no limit" and "stated one this build cannot read".
+test("a refusal never states about the provider something the provider did not say", () => {
+  const notSaid = modelOptionLabel({
+    id: "vendor/x",
+    contextLength: 8192,
+    pricePerToken: null,
+    refusal: { kind: "noStatedOutputModalities" },
+  });
+  assert.doesNotMatch(notSaid, /не пише тексту/);
+  assert.match(notSaid, /не сказав/);
+
+  const said = modelOptionLabel({
+    id: "vendor/y",
+    contextLength: 8192,
+    pricePerToken: null,
+    refusal: { kind: "noTextOutput" },
+  });
+  assert.match(said, /не пише тексту/);
+
+  const unread = modelOptionLabel({
+    id: "vendor/z",
+    contextLength: null,
+    pricePerToken: null,
+    refusal: { kind: "limitNotUnderstood", raw: "8192.0" },
+  });
+  assert.doesNotMatch(unread, /не назвав/);
+  assert.match(unread, /8192\.0/, "the value the provider actually sent is what a bug report needs");
+
+  const absent = modelOptionLabel({
+    id: "vendor/w",
+    contextLength: null,
+    pricePerToken: null,
+    refusal: { kind: "noStatedLimit" },
+  });
+  assert.match(absent, /не назвав/);
+});
+
+test("a refusal this build does not know is still shown as a refusal", () => {
+  const label = modelOptionLabel({
+    id: "vendor/x",
+    contextLength: 8192,
+    pricePerToken: null,
+    refusal: { kind: "somethingFutureAndUnknown" },
+  });
+  assert.match(label, /недоступна/);
+  assert.doesNotMatch(label, /undefined/);
+});
+
+test("a price the provider did not state is unknown, not free", () => {
+  const label = modelOptionLabel({
+    id: "vendor/x",
+    contextLength: 8192,
+    pricePerToken: null,
+    refusal: null,
+  });
+  assert.doesNotMatch(label, /безкоштовно|\$0/);
+});
+
+test("no state of the balance is ever rendered as a zero", () => {
+  for (const balance of [
+    { kind: "notStated" },
+    // The wire shape is `raw: ProviderMessage`, a tagged object — a bare string
+    // here is a canary, not a fixture: any implementation that interpolated
+    // `raw` would put "$10.00" in front of a person and redden the assertion
+    // below. The real shape is exercised in the test after this one.
+    { kind: "unreadable", raw: "$10.00" },
+    { kind: "envelopeNotUnderstood" },
+  ]) {
+    const text = keyAcceptedSentence({ balance });
+    assert.doesNotMatch(text, /0[.,]00|\b0\b/,
+      `"${balance.kind}" is a thing we do not know, and printing it as a number sends a funded user to pay again`);
+  }
+  assert.match(
+    keyAcceptedSentence({ balance: { kind: "known", amount: 0 } }),
+    /0[.,]00/,
+    "a real zero the provider sent must still be shown — it is the one state that is a number",
+  );
+});
+
+test("every balance state reads differently, and none of them leaks the envelope", () => {
+  const said = [
+    keyAcceptedSentence({ balance: { kind: "known", amount: 6.5 } }),
+    keyAcceptedSentence({ balance: { kind: "notStated" } }),
+    keyAcceptedSentence({
+      balance: { kind: "unreadable", raw: { kind: "text", text: "total_credits: not a number" } },
+    }),
+    keyAcceptedSentence({ balance: { kind: "envelopeNotUnderstood" } }),
+    keyAcceptedSentence({ balance: { kind: "somethingFutureAndUnknown" } }),
+  ];
+  assert.equal(new Set(said).size, said.length, `two balance states read alike: ${said}`);
+  for (const text of said) {
+    assert.doesNotMatch(text, /\[object Object\]/);
+    assert.doesNotMatch(text, /undefined|NaN/);
+  }
+  assert.match(said[0], /6[.,]50/);
+});
+
+test("an unreadable record with no readable id is still named by its position", () => {
+  const text = unreadableSentence({
+    unreadable: 2,
+    unreadableRecords: [
+      { index: 7, id: { kind: "notAString" } },
+      { index: 9, id: { kind: "absent" } },
+    ],
+  });
+  assert.match(text, /7/);
+  assert.match(text, /9/);
+  assert.doesNotMatch(text, /\[object Object\]/,
+    "a tagged id read as a string is how an upstream distinction dies at the last seam");
+});
+
+// `RecordId::NotAString` carries the value the provider sent. The position must
+// come from `index` and not accidentally from that value, which is what the
+// fixture above could not tell apart — both records there carry no `raw` at all.
+test("a record's position is its own, not a number that happened to be in its id", () => {
+  const text = unreadableSentence({
+    unreadable: 1,
+    unreadableRecords: [{ index: 4, id: { kind: "notAString", raw: "12345" } }],
+  });
+  assert.match(text, /\b4\b/);
+  assert.match(text, /12345/);
+});
+
+test("a readable id names the model, and no unreadable records say nothing at all", () => {
+  assert.match(
+    unreadableSentence({
+      unreadable: 1,
+      unreadableRecords: [{ index: 0, id: { kind: "known", id: "vendor/broken-pricing" } }],
+    }),
+    /vendor\/broken-pricing/,
+  );
+  assert.equal(unreadableSentence({ unreadable: 0, unreadableRecords: [] }), "");
+});
+
+// A count with no records behind it is still a count, and dropping it would
+// leave a list quietly shorter than the provider's — the defect Task 1 spent
+// three fix rounds removing one layer down.
+test("records the window was given no detail about are still counted", () => {
+  assert.match(unreadableSentence({ unreadable: 3 }), /\b3\b/);
+});
+
+// A blank picker is reached by three different facts, and only one of them is
+// "nothing is recorded". The pair worth the fix: a list that could not be read
+// says nothing whatever about the provider, and reporting it as a model the
+// provider withdrew invents a fact — while saying nothing at all loses the
+// configuration the index actually holds.
+test("a recorded model missing from the picker is never lost, and never blamed on the provider", () => {
+  assert.equal(
+    recordedNoteSentence({ recorded: null, listRead: true, listed: false }),
+    "",
+    "nothing is recorded — the blank picker is the truth and a sentence would be noise",
+  );
+  assert.equal(recordedNoteSentence({ recorded: "vendor/m", listRead: true, listed: true }), "");
+
+  const withdrawn = recordedNoteSentence({ recorded: "vendor/m", listRead: true, listed: false });
+  assert.match(withdrawn, /vendor\/m/);
+  assert.match(withdrawn, /не називає/);
+
+  const unread = recordedNoteSentence({ recorded: "vendor/m", listRead: false, listed: false });
+  assert.match(unread, /vendor\/m/, "the recorded model must not vanish with the list");
+  assert.doesNotMatch(unread, /не називає/,
+    "a list this window could not read is not evidence the provider withdrew anything");
+  assert.notEqual(unread, withdrawn);
+});
+
+test("each role is named in the sentence that says its model was recorded", () => {
+  const said = ROLES.map((role) => roleRecordedSentence(role, "vendor/m"));
+  assert.equal(new Set(said).size, ROLES.length, `two roles read alike: ${said}`);
+  for (const text of said) {
+    assert.match(text, /vendor\/m/);
+    assert.doesNotMatch(text, /undefined/);
+  }
 });
