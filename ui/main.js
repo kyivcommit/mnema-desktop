@@ -15,6 +15,7 @@ import {
   listNotAsked,
   listWasRead,
   listFailed,
+  selectId,
   disclosureSentence,
   keyStateSentence,
   keyNotSavedSentence,
@@ -313,13 +314,6 @@ el("search-form").addEventListener("submit", async (event) => {
 // told apart and where `render.test.js` can reach them. This half is elements
 // and listeners, and its own job is to keep two facts out of one element.
 
-// The three pickers, whose ids are `${role}-model` for every role — derived,
-// not tabulated, because a table here would be a fourth place the list of roles
-// is written down and the first to go stale. `ROLES` is the list, and the Rust
-// half is pinned by `every_role_the_provider_has_is_named_by_a_string_the_
-// window_can_send` (`src-tauri/src/models.rs`).
-const selectId = (role) => `${role}-model`;
-
 // What `provider_models` has answered for this role, in three states rather
 // than two. `false` used to mean both "could not be read" and "has not been
 // asked for yet", and the listeners below are registered *before* the three
@@ -354,7 +348,11 @@ const fillRole = async (role) => {
     // to point at, and `provider_models` keeps `unreadable` on the wire so this
     // seam can tell those apart.
     el(`${selectId(role)}-unreadable`).textContent = catalogueSentence(catalogue);
-    listState[role] = listWasRead();
+    // The catalogue travels with the state. "The call succeeded" does not
+    // establish that a model missing from the picker was withdrawn — a record
+    // this build could not decode still names itself — and only the catalogue
+    // can tell those apart.
+    listState[role] = listWasRead(catalogue);
   } catch (error) {
     // Not into `key-status`: this endpoint needs no key (`provider_models` is
     // called without one), so a network failure here has nothing to do with

@@ -33,6 +33,7 @@ import {
   UNREADABLE_CAUSE_TEXT,
   INDEX_OPENING_TEXT,
   LIST_STATE_NOTE,
+  MISSING_MODEL_REASON,
   REFUSAL_TEXT,
   BALANCE_TEXT,
   RECORD_ID_TEXT,
@@ -42,6 +43,8 @@ import {
   listNotAsked,
   listWasRead,
   listFailed,
+  selectId,
+  missingModelReason,
   disclosureSentence,
   keyStateSentence,
   keyNotSavedSentence,
@@ -293,6 +296,12 @@ const RECORD_IDS = ["absent", "notAString", "known"];
 const INDEX_OPENINGS = ["notAsked", "opened", "failed"];
 const LIST_STATES = ["notAsked", "read", "failed"];
 
+// Not a wire union either, and not a state of the window: the three answers to
+// "why is a recorded model not in the picker", derived from the catalogue the
+// call returned. Two of them are statements about the provider and one is the
+// refusal to make either.
+const MISSING_MODEL_REASONS = ["unreadableRecord", "withdrawn", "unknown"];
+
 test("every union that reaches this window has exactly one table entry per variant", () => {
   assert.deepEqual(Object.keys(DISCLOSURE_TEXT).sort(), [...KEY_STATES].sort());
   assert.deepEqual(Object.keys(KEY_STATE_TEXT).sort(), [...KEY_STATES].sort());
@@ -302,6 +311,7 @@ test("every union that reaches this window has exactly one table entry per varia
   assert.deepEqual(Object.keys(UNREADABLE_CAUSE_TEXT).sort(), [...UNREADABLE_CAUSES].sort());
   assert.deepEqual(Object.keys(INDEX_OPENING_TEXT).sort(), [...INDEX_OPENINGS].sort());
   assert.deepEqual(Object.keys(LIST_STATE_NOTE).sort(), [...LIST_STATES].sort());
+  assert.deepEqual(Object.keys(MISSING_MODEL_REASON).sort(), [...MISSING_MODEL_REASONS].sort());
   assert.deepEqual(Object.keys(REFUSAL_TEXT).sort(), [...REFUSALS].sort());
   assert.deepEqual(Object.keys(BALANCE_TEXT).sort(), [...BALANCES].sort());
   assert.deepEqual(Object.keys(RECORD_ID_TEXT).sort(), [...RECORD_IDS].sort());
@@ -320,7 +330,7 @@ test("the states main.js writes are exactly the states these tables render", () 
     [...INDEX_OPENINGS].sort(),
   );
   assert.deepEqual(
-    [listNotAsked(), listWasRead(), listFailed()].map((s) => s.kind).sort(),
+    [listNotAsked(), listWasRead(cleanCatalogue), listFailed()].map((s) => s.kind).sort(),
     [...LIST_STATES].sort(),
   );
   assert.equal(indexOpenFailed("boom").error, "boom", "the wall's reason must survive the trip");
@@ -679,14 +689,24 @@ test("a refusal this build does not know is still shown as a refusal", () => {
   assert.doesNotMatch(label, /undefined/);
 });
 
+// The fixture id carries `:free` on purpose. The oracle here used to be
+// `/free/`, which is a substring of a whole family of real OpenRouter ids — it
+// was green only because the fixture was called `vendor/x`, and a realistic id
+// would have reddened it on *correct* code. An oracle must not share a
+// substring with the data it checks; this one aims at the rendering instead.
 test("a price the provider did not state is unknown, not free", () => {
-  const label = modelOptionLabel({
-    id: "vendor/x",
-    contextLength: 8192,
-    pricePerToken: null,
-    refusal: null,
-  });
-  assert.doesNotMatch(label, /free|\$0/);
+  const entry = { id: "vendor/x:free", contextLength: 8192, refusal: null };
+  const unstated = modelOptionLabel({ ...entry, pricePerToken: null });
+  assert.match(unstated, /price unknown/);
+  assert.doesNotMatch(unstated, /\$/,
+    "an unstated price must not render as any amount at all, free included");
+
+  // Both directions, and the same rule `Balance::Known { amount: 0 }` follows:
+  // a zero the provider actually stated is a price, and the one state here that
+  // is a number.
+  const stated = modelOptionLabel({ ...entry, pricePerToken: 0 });
+  assert.match(stated, /\$0\.000/);
+  assert.notEqual(stated, unstated);
 });
 
 test("no state of the balance is ever rendered as a zero", () => {
@@ -777,17 +797,24 @@ test("records the window was given no detail about are still counted", () => {
 // be read says nothing whatever about the provider, and reporting it as a model
 // the provider withdrew invents a fact — while saying nothing at all loses the
 // configuration the index actually holds.
+// A catalogue in which every record was read — the only evidence that actually
+// establishes "the provider no longer lists it".
+const cleanCatalogue = { entries: [{ id: "vendor/other" }], unreadable: 0, unreadableRecords: [] };
+
 test("a recorded model missing from the picker is never lost, and never blamed on the provider", () => {
   assert.equal(
-    recordedNoteSentence({ recorded: null, list: listWasRead(), listed: false }),
+    recordedNoteSentence({ recorded: null, list: listWasRead(cleanCatalogue), listed: false }),
     "",
     "nothing is recorded — the blank picker is the truth and a sentence would be noise",
   );
-  assert.equal(recordedNoteSentence({ recorded: "vendor/m", list: listWasRead(), listed: true }), "");
+  assert.equal(
+    recordedNoteSentence({ recorded: "vendor/m", list: listWasRead(cleanCatalogue), listed: true }),
+    "",
+  );
 
   const withdrawn = recordedNoteSentence({
     recorded: "vendor/m",
-    list: listWasRead(),
+    list: listWasRead(cleanCatalogue),
     listed: false,
   });
   assert.match(withdrawn, /vendor\/m/);
@@ -798,6 +825,88 @@ test("a recorded model missing from the picker is never lost, and never blamed o
   assert.doesNotMatch(unread, /no longer lists/,
     "a list this window could not read is not evidence the provider withdrew anything");
   assert.notEqual(unread, withdrawn);
+});
+
+// The fifteenth "two facts, one message", and the sharpest so far because the
+// false half is a claim about somebody else. Reachable by construction, not by
+// argument: `models_from_json` reads a record's `id` off the raw value before
+// the decode that failed (`catalogue.rs:410-416`), so `RecordId::Known { id }`
+// names a model the provider **does** list and this build could not read. Its
+// id never reaches `entries`, so the picker has no option for it — and the
+// window used to print, under one picker, one line above the other:
+//
+//   records in the provider's list this build could not read: 1 (vendor/m)
+//   The index records “vendor/m”, but the provider no longer lists this model.
+test("a model the provider does list is never reported as one it withdrew", () => {
+  const catalogue = {
+    entries: [{ id: "vendor/other" }],
+    unreadable: 1,
+    unreadableRecords: [{ index: 7, id: { kind: "known", id: "vendor/m" } }],
+  };
+  const text = recordedNoteSentence({
+    recorded: "vendor/m",
+    list: listWasRead(catalogue),
+    listed: false,
+  });
+  assert.doesNotMatch(text, /no longer lists/,
+    "the provider named this model in the very same answer; the record is what could not be read");
+  assert.match(text, /does list it/);
+  assert.match(text, /vendor\/m/);
+
+  // Both ways, or the fix is satisfied by silence: a catalogue this build read
+  // whole must still say the model was withdrawn.
+  assert.match(
+    recordedNoteSentence({
+      recorded: "vendor/m",
+      list: listWasRead(cleanCatalogue),
+      listed: false,
+    }),
+    /no longer lists/,
+    "with every record accounted for, 'the provider no longer lists it' is established",
+  );
+});
+
+// The third arm, and the reason `unreadable > 0` is the wrong discriminant. A
+// record that could not even be named — `RecordId::Absent` or `NotAString` —
+// could be this model or could not, and neither of the other two sentences is
+// established. The same holds for a count with no records behind it.
+test("an unreadable record this build could not even name leaves the question open", () => {
+  for (const [label, catalogue] of [
+    ["a record with no id at all", {
+      entries: [{ id: "vendor/other" }],
+      unreadable: 1,
+      unreadableRecords: [{ index: 3, id: { kind: "absent" } }],
+    }],
+    ["a count with no records behind it", {
+      entries: [{ id: "vendor/other" }],
+      unreadable: 2,
+      unreadableRecords: [],
+    }],
+  ]) {
+    const text = recordedNoteSentence({
+      recorded: "vendor/m",
+      list: listWasRead(catalogue),
+      listed: false,
+    });
+    assert.doesNotMatch(text, /no longer lists/, `${label}: claimed a withdrawal nobody established`);
+    assert.doesNotMatch(text, /does list it/, `${label}: claimed a listing nobody established`);
+    assert.match(text, /unknown/, `${label}: said nothing about what is not known`);
+  }
+});
+
+test("the three reasons a recorded model can be missing are told apart", () => {
+  const withKnownId = {
+    unreadable: 1,
+    unreadableRecords: [{ index: 0, id: { kind: "known", id: "vendor/m" } }],
+  };
+  assert.equal(missingModelReason("vendor/m", withKnownId), "unreadableRecord");
+  assert.equal(missingModelReason("vendor/other", withKnownId), "withdrawn",
+    "every record is named, and this one is not among them");
+  assert.equal(missingModelReason("vendor/m", cleanCatalogue), "withdrawn");
+  assert.equal(
+    missingModelReason("vendor/m", { unreadable: 1, unreadableRecords: [{ index: 0, id: { kind: "absent" } }] }),
+    "unknown",
+  );
 });
 
 // I2 — the fourth fact, and the one that was a `false` sharing a value with
@@ -877,15 +986,21 @@ test("every element main.js reaches for exists in index.html", () => {
   );
 
   const literals = [...main.matchAll(/\bel\("([^"]+)"\)/g)].map((m) => m[1]);
-  assert.ok(literals.length > 10, `only ${literals.length} literal ids found — did the regexp rot?`);
+  // Tight on purpose. `> 10` against an actual 20 tolerates losing nine calls
+  // before anybody is told the regexp stopped matching what it is aimed at.
+  assert.ok(literals.length >= 20,
+    `only ${literals.length} literal ids found — the regexp has rotted, or main.js shrank`);
   for (const id of literals) {
     assert.ok(ids.has(id), `main.js reaches for #${id}, which index.html does not have`);
   }
 
-  // The derived ones, which the regexp above cannot see: `selectId(role)` and
-  // the two lines under each picker.
+  // The derived ones, which the regexp above cannot see. `selectId` is
+  // **imported**, not restated: written out here a second time, this loop
+  // checked the markup against the test's own copy of the rule, and changing
+  // the derivation in `main.js` left all 51 tests green while every picker in
+  // the window broke.
   for (const role of ROLES) {
-    for (const id of [`${role}-model`, `${role}-model-unreadable`, `${role}-model-missing`]) {
+    for (const id of [selectId(role), `${selectId(role)}-unreadable`, `${selectId(role)}-missing`]) {
       assert.ok(ids.has(id), `the ${role} role needs #${id}, which index.html does not have`);
     }
   }

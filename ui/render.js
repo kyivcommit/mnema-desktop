@@ -215,6 +215,14 @@ export function searchResultItems(hits) {
 // strings are what that function is sent.
 export const ROLES = ["embedding", "rerank", "chat"];
 
+// The id of one role's picker. Here rather than in `main.js` for the reason six
+// discriminants moved here one round ago: `main.js` is an entry point with no
+// `export`, so a test cannot see anything defined there and has to restate it.
+// A restated rule is checked against the test's own copy of itself — changing
+// the derivation in `main.js` left all 51 tests green while every picker in the
+// window broke.
+export const selectId = (role) => `${role}-model`;
+
 export const ROLE_NAME = {
   embedding: "embedding",
   rerank: "reranking",
@@ -236,7 +244,9 @@ export const indexOpened = () => ({ kind: "opened" });
 export const indexOpenFailed = (error) => ({ kind: "failed", error: `${error}` });
 
 export const listNotAsked = () => ({ kind: "notAsked" });
-export const listWasRead = () => ({ kind: "read" });
+// Carries the catalogue, because "the call succeeded" is not enough to say what
+// a model's absence from the picker means — see `missingModelReason`.
+export const listWasRead = (catalogue) => ({ kind: "read", catalogue });
 export const listFailed = () => ({ kind: "failed" });
 
 // What to say under a picker that is not showing the model this index records.
@@ -261,15 +271,73 @@ export const listFailed = () => ({ kind: "failed" });
 // round trips finish, so a key submitted in that window drew the failure
 // sentence. It is the same shape this file already gives `UnreadableCause::
 // NotOpen` two hundred lines down — fixed there, left boolean here.
+// Why a recorded model is not in the picker, **when the list itself was read**.
+//
+// "The provider no longer lists this model" is a claim about a third party, and
+// a call that succeeded does not establish it. `models_from_json` reads a
+// record's `id` off the raw value *before* the decode that failed
+// (`crates/mnema-provider/src/catalogue.rs:410-416`), precisely so a broken
+// `pricing` or `architecture` block does not cost the one field that names the
+// record — so `RecordId::Known { id }` is exactly a model the provider **does**
+// list and this build could not read. Its id never reaches `entries`, so the
+// picker has no option for it and it looks withdrawn.
+//
+// Before this table the window could print, one line above the other, under the
+// same picker:
+//
+//   records in the provider's list this build could not read: 1 (vendor/m)
+//   The index records “vendor/m”, but the provider no longer lists this model.
+//
+// Same model, adjacent lines, and the false one is the claim about someone
+// else. The partial form is the likely one: a provider renaming a single field
+// makes hundreds of records undecodable at once.
+export const MISSING_MODEL_REASON = {
+  // The provider named it and this build could not read the record. The one
+  // arm that contradicts "withdrawn" outright.
+  unreadableRecord: ({ recorded }) =>
+    `The index records “${recorded}”. The provider does list it, but this build could not read ` +
+    "its record, so the picker above does not offer it.",
+  // Every record the provider sent is accounted for by id, and this model is in
+  // none of them.
+  withdrawn: ({ recorded }) =>
+    `The index records “${recorded}”, but the provider no longer lists this model. ` +
+    "It stays recorded; the picker above does not show it.",
+  // Some record could not even be named — `RecordId::Absent` and `NotAString`
+  // exist for exactly that — so any of them could be this model. Neither of the
+  // two arms above is established, and saying either would be inventing one.
+  unknown: ({ recorded }) =>
+    `The index records “${recorded}”. It is not among the records this build could read, and ` +
+    "some records could not be named at all, so whether the provider still lists it is unknown.",
+};
+
+// Which of the three, from the catalogue the call actually returned.
+//
+// The discriminant is **not** `unreadable > 0`, which was the cheap version:
+// the question is whether this build can account, by id, for every record the
+// provider sent. Zero unreadable records satisfies that vacuously, which is why
+// a clean catalogue still says "withdrawn".
+export const missingModelReason = (recorded, catalogue) => {
+  const records = catalogue?.unreadableRecords ?? [];
+  const named = records.filter((r) => r.id?.kind === "known");
+  if (named.some((r) => r.id.id === recorded)) {
+    return "unreadableRecord";
+  }
+  // `records.length >= unreadable` matters on its own: a core that sent the
+  // count without the detail behind it leaves records this window cannot name,
+  // and an empty `unreadableRecords` must not read as "nothing was unreadable".
+  const accountedFor =
+    named.length === records.length && records.length >= (catalogue?.unreadable ?? 0);
+  return accountedFor ? "withdrawn" : "unknown";
+};
+
 export const LIST_STATE_NOTE = {
   // Nothing to say while it loads. Not "could not be read", which is a claim
   // about the machine that nothing has established yet.
   notAsked: () => "",
-  read: ({ recorded, listed }) =>
+  read: ({ recorded, listed, list }) =>
     listed
       ? ""
-      : `The index records “${recorded}”, but the provider no longer lists this model. ` +
-        "It stays recorded; the picker above does not show it.",
+      : MISSING_MODEL_REASON[missingModelReason(recorded, list?.catalogue)]({ recorded }),
   failed: ({ recorded }) =>
     `The index records “${recorded}”. The model list could not be read, so the picker above ` +
     "cannot show it.",
@@ -284,7 +352,7 @@ export const recordedNoteSentence = ({ recorded, list, listed }) => {
     (({ recorded: r }) =>
       `The index records “${r}”. This build did not understand what happened to the model ` +
       "list, so the picker above may not show it.")
-  )({ recorded, listed });
+  )({ recorded, listed, list });
 };
 
 // What leaves the machine, per state of the credential store. Two of these
