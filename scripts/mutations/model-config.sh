@@ -131,8 +131,7 @@ case_ "the line is drawn at architecture rather than at output_modalities" \
 # is a claim about the provider — "this model returns one averaged vector for a
 # batch" — true of exactly one row and false of every other count. One case per
 # arm below, each breaking the NEW distinction; restoring the old lump is what
-# each of
-# them does in one of its three directions.
+# each of them does, in its own direction.
 
 case_ "one vector for two texts is named as something other than averaging" \
   crates/mnema-provider/src/probe.rs \

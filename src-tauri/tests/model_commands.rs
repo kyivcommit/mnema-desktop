@@ -236,41 +236,76 @@ fn forgetting_a_key_leaves_the_index_alone() {
 /// empty string.
 ///
 /// ⚠️ What this does **not** hold, measured rather than assumed (review round 1,
-/// F2): the rule on `http.rs`'s `finish` is "`to_string()`, never `Debug`", and
-/// swapping `{e}` for `{e:?}` cannot be made to leak anything here. Both
-/// reachable shapes were run with a key in the `authorization` header — a
-/// refused connection renders `Io(Custom { kind: ConnectionRefused, error:
-/// "Connection refused" })`, and a header value the `http` crate rejects renders
-/// `Http(http::Error(InvalidHeaderValue))`, because that crate deliberately
-/// keeps the offending value out of both its `Display` and its `Debug`. The
-/// clause that could leak is the other one — "never the request" — and what
-/// holds that is `the_role_decides_the_query_and_the_key_travels_in_a_header`
-/// and `the_model_check_posts_to_the_embeddings_endpoint_with_the_key_only_in_a_header`,
-/// one crate over, each asserting the request line is clean as well as the
-/// header being present.
+/// F2): the rule on `http.rs`'s `finish` is "`to_string()`, never `Debug`, and
+/// never the request", and only the last clause can fire. Swapping `{e}` for
+/// `{e:?}` cannot be made to leak anything — both reachable shapes were run with
+/// a key in the `authorization` header, giving `Io(Custom { kind:
+/// ConnectionRefused, .. })` and `Http(http::Error(InvalidHeaderValue))`, and at
+/// the resolved version `InvalidHeaderValue` is `{ _priv: () }`
+/// (`http-1.4.2/src/header/value.rs:29-31`), so the rejected value is not stored
+/// in the type at all. The key is absent structurally, not by a rendering
+/// policy.
+///
+/// The clause that **can** fire is "never the request", because
+/// `ureq::Error::BadUri(String)` prints the URI it was given
+/// (`ureq-3.3.0/src/error.rs`). What holds it is
+/// `the_role_decides_the_query_and_the_key_travels_in_a_header`, one crate over,
+/// which asserts the request line is clean as well as the header being present.
+/// Its `POST` sibling asserts the same thing and **cannot be credited for it**:
+/// that test pins the whole request line first, so any way a key could reach one
+/// trips the endpoint assertion before the key assertion — see its own doc.
 #[test]
 fn a_provider_that_never_answered_reaches_the_window_with_why_and_without_the_key() {
     let silent = Fixture::with_no_provider_listening();
 
     let unreachable = set_key(silent.state(), KEY.into()).expect_err("nobody answered");
 
+    let Error::ProviderUnreachable { detail } = &unreachable else {
+        panic!(
+            "this test means to look at a provider that never answered; it is looking at \
+             something else: {unreachable:?}"
+        );
+    };
+    // The positive half, and both of its assertions are about **ureq's** text
+    // rather than an operating system's. `contains("connection refused")` stood
+    // here and was wrong: that wording is the OS's, true on macOS and Linux and
+    // false on Windows, where `WSAECONNREFUSED` renders as "No connection could
+    // be made because the target machine actively refused it". A test that goes
+    // red on a platform is not a test that catches a defect, and the product
+    // ships there.
+    //
+    // What is portable is the prefix ureq writes itself —
+    // `Error::Io(v) => write!(f, "io: {v}")`, read from the version `Cargo.lock`
+    // resolves (`ureq-3.3.0/src/error.rs`). Its presence is what says ureq
+    // classified this failure and that the classification survived the trip.
+    //
+    // ⚠️ The assumption this rests on, named rather than buried: a refused
+    // connection reaches `Error::Io` on every platform, because ureq's connector
+    // maps a failed `TcpStream::connect` to it. That is read from ureq's source,
+    // not run on Windows — the stand exists if it is ever worth confirming, and
+    // the failure mode is this line going red there rather than anything silent.
     assert!(
-        matches!(unreachable, Error::ProviderUnreachable { .. }),
-        "this test means to look at a provider that never answered; it is looking at \
-         something else: {unreachable:?}"
+        detail.starts_with("io: "),
+        "ureq's own classification of the failure must reach the window: a refused \
+         connection, an unresolved host and a timeout are three different things to do \
+         next, and this is what tells them apart: {detail}"
     );
-    // The positive half. `Fixture::with_no_provider_listening` points at a port
-    // nothing listens on, so ureq's own text is the io error for that, and it is
-    // the only thing in the sentence that says which kind of unreachable this
-    // was.
+    // The other half of the pair, and it is not the same assertion: the first is
+    // satisfied by any string ureq classified, this by any string that is not
+    // simply this layer's own sentence handed back. Derived from the type rather
+    // than written as a literal, so rephrasing `ProviderUnreachable` moves both
+    // sides at once instead of reddening here.
+    let our_own_words = Error::ProviderUnreachable {
+        detail: String::new(),
+    }
+    .to_string();
+    let our_own_words = our_own_words.trim_end_matches(": ");
+    assert!(
+        !detail.contains(our_own_words),
+        "the detail must add something to the sentence that wraps it, and this one is \
+         that sentence repeated: {detail}"
+    );
     let displayed = unreachable.to_string();
-    assert!(
-        displayed
-            .to_ascii_lowercase()
-            .contains("connection refused"),
-        "the transport error's own text must reach the window, not be replaced by a \
-         summary that cannot tell a refused connection from an unresolved host: {displayed}"
-    );
     // And the absence half, on the same three renderings the refusal path uses.
     for (shape, rendering) in [
         ("the Display", displayed.clone()),

@@ -1142,6 +1142,19 @@ fn no_transformation_of_the_key_reaches_a_model_check_failure() {
 /// caller at all until this task (`src/http.rs`), so nothing had ever checked
 /// where the key ends up on a request with a body — and a URL is the one part
 /// of a request a proxy writes to its own log without being asked.
+///
+/// ⚠️ **The key half of this test cannot be reddened on its own**, and that is a
+/// fact about the order of the assertions rather than about the code. The first
+/// one pins the whole request line — `"POST /embeddings "`, trailing space — so
+/// any way a key could reach a request line also changes the path and trips that
+/// assertion first. Measured while writing the mutation cases: the query-string
+/// mutation reddens this test on the endpoint, never on the key.
+///
+/// The witness for "the key travels only in a header" is therefore
+/// `the_role_decides_the_query_and_the_key_travels_in_a_header`, whose first
+/// assertion pins one query parameter rather than the path and so leaves its key
+/// assertion free to fire. Read this test as holding the endpoint; do not credit
+/// it for the last line.
 #[test]
 fn the_model_check_posts_to_the_embeddings_endpoint_with_the_key_only_in_a_header() {
     let server = MockServer::new(vec![Reply::ok(&two_vectors(4))]);
