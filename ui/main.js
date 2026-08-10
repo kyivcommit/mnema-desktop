@@ -9,14 +9,21 @@ import {
   searchResultItems,
   ROLES,
   ROLE_NAME,
+  indexNotAsked,
+  indexOpened,
+  indexOpenFailed,
+  listNotAsked,
+  listWasRead,
+  listFailed,
   disclosureSentence,
   keyStateSentence,
+  keyNotSavedSentence,
   indexStateSentence,
   embeddingProgressText,
   adoptedModelSentence,
   modelOptionLabel,
   keyAcceptedSentence,
-  unreadableSentence,
+  catalogueSentence,
   roleRecordedSentence,
   recordedNoteSentence,
 } from "./render.js";
@@ -39,7 +46,14 @@ const results = el("results");
 // section, as it is today. It is a state of this window all the same, and the
 // table that renders it (`INDEX_OPENING_TEXT`) has an arm for it so that
 // reordering this file cannot silently produce an unhandled one.
-let indexOpening = { kind: "notAsked" };
+//
+// The three values come from constructors in `render.js` rather than from
+// string literals written here. Literals were the one place in this window with
+// no guard at all: `"opened"` mistyped as `"opend"` falls through
+// `UNREADABLE_CAUSE_TEXT.notOpen`'s fallback without reddening anything, and
+// the state it silences is exactly the one the order asked to be made visible.
+// A named import that does not exist fails when the module loads.
+let indexOpening = indexNotAsked();
 
 // Opening the index is the first thing that happens, and its failure is
 // something the user has to be able to read — which is why the window opens
@@ -47,10 +61,10 @@ let indexOpening = { kind: "notAsked" };
 try {
   const info = await invoke("open_index");
   el("index-status").textContent = `index ready at ${info.path} (schema v${info.schemaVersion})`;
-  indexOpening = { kind: "opened" };
+  indexOpening = indexOpened();
 } catch (error) {
   el("index-status").textContent = `the index could not be opened: ${error}`;
-  indexOpening = { kind: "failed", error: `${error}` };
+  indexOpening = indexOpenFailed(error);
 }
 
 // `null` until `pick` answers with a real one. Kept apart from `jobRunning`
@@ -306,10 +320,15 @@ el("search-form").addEventListener("submit", async (event) => {
 // window_can_send` (`src-tauri/src/models.rs`).
 const selectId = (role) => `${role}-model`;
 
-// Whether `provider_models` answered for this role. A recorded model missing
-// from an *empty* picker is not evidence that the provider stopped listing it
-// — those are two facts, and only one of them is about the model.
-const listRead = Object.fromEntries(ROLES.map((role) => [role, false]));
+// What `provider_models` has answered for this role, in three states rather
+// than two. `false` used to mean both "could not be read" and "has not been
+// asked for yet", and the listeners below are registered *before* the three
+// round trips finish — so a key submitted in that window drew a sentence about
+// a failure that had not happened. It is the same shape as `indexOpening`
+// twenty lines up, and the constructors come from `render.js` for the same
+// reason: a mistyped literal here would fall through a table's fallback in
+// silence.
+const listState = Object.fromEntries(ROLES.map((role) => [role, listNotAsked()]));
 
 // Every option carries its own label, refused ones disabled. Refused rather
 // than absent: a model the provider lists and this window hides sends the user
@@ -329,16 +348,19 @@ const fillRole = async (role) => {
       option.disabled = entry.refusal !== null && entry.refusal !== undefined;
       select.append(option);
     }
-    // A list quietly shorter than the provider's is the failure Task 1 spent
-    // three fix rounds removing; do not reintroduce it at the last seam.
-    el(`${selectId(role)}-unreadable`).textContent = unreadableSentence(catalogue);
-    listRead[role] = true;
+    // Both numbers, and both zeroes. A list quietly shorter than the provider's
+    // is the failure Task 1 spent three fix rounds removing; a well-formed
+    // empty answer drawn as nothing at all is the same failure with no records
+    // to point at, and `provider_models` keeps `unreadable` on the wire so this
+    // seam can tell those apart.
+    el(`${selectId(role)}-unreadable`).textContent = catalogueSentence(catalogue);
+    listState[role] = listWasRead();
   } catch (error) {
     // Not into `key-status`: this endpoint needs no key (`provider_models` is
     // called without one), so a network failure here has nothing to do with
     // the credential store and must not be read as though it had.
-    listRead[role] = false;
-    el(`${selectId(role)}-unreadable`).textContent = `список моделей прочитати не вдалось: ${error}`;
+    listState[role] = listFailed();
+    el(`${selectId(role)}-unreadable`).textContent = `the model list could not be read: ${error}`;
   }
 };
 
@@ -346,13 +368,13 @@ const fillRole = async (role) => {
 // picker cannot show it. Assigning a `value` no option carries leaves the
 // select blank, which is a recorded configuration disappearing quietly; whether
 // that blank is worth a sentence, and which sentence, is
-// `recordedNoteSentence`'s decision, because three different facts reach it.
+// `recordedNoteSentence`'s decision, because four different facts reach it.
 const showRecorded = (role, recorded) => {
   const select = el(selectId(role));
   select.value = recorded ?? "";
   el(`${selectId(role)}-missing`).textContent = recordedNoteSentence({
     recorded,
-    listRead: listRead[role],
+    list: listState[role],
     // Asked of the element after the assignment rather than of the catalogue:
     // this is what the person is actually looking at.
     listed: select.value === recorded,
@@ -360,8 +382,8 @@ const showRecorded = (role, recorded) => {
 };
 
 const drawSettings = (settings) => {
-  el("disclosure").textContent = disclosureSentence(settings);
-  el("key-state").textContent = keyStateSentence(settings);
+  el("disclosure").textContent = disclosureSentence(settings.key);
+  el("key-state").textContent = keyStateSentence(settings.key);
   el("index-state").textContent = indexStateSentence(settings.index, indexOpening);
   el("embedding-progress").textContent = embeddingProgressText(settings.index);
   // An index that could not be read says nothing about which models are
@@ -388,7 +410,9 @@ el("key-form").addEventListener("submit", async (event) => {
     el("key").value = "";
     el("key-status").textContent = keyAcceptedSentence(status);
   } catch (error) {
-    el("key-status").textContent = `ключ не прийнято: ${error}`;
+    // Not "the key was not accepted": two of `set_key`'s three reachable
+    // failures decided nothing about the key. See `keyNotSavedSentence`.
+    el("key-status").textContent = keyNotSavedSentence(error);
   }
   await refreshSettings();
 });
@@ -396,12 +420,12 @@ el("key-form").addEventListener("submit", async (event) => {
 el("forget").addEventListener("click", async () => {
   try {
     await invoke("forget_key");
-    el("key-status").textContent = "ключ прибрано";
+    el("key-status").textContent = "the key was removed";
   } catch (error) {
     // The key is still there. Saying "removed" because the button was pressed
     // would state as fact something the store refused to do — and the next
     // line of the window, redrawn from the store itself, would contradict it.
-    el("key-status").textContent = `ключ прибрати не вдалось: ${error}`;
+    el("key-status").textContent = `the key could not be removed: ${error}`;
   }
   await refreshSettings();
 });
@@ -419,7 +443,7 @@ el(selectId("embedding")).addEventListener("change", async (event) => {
   } catch (error) {
     // The refusal already says how many vectors stand in the way; showing it
     // whole is better than a sentence of our own that says less.
-    el("model-status").textContent = `модель відбитків не записано: ${error}`;
+    el("model-status").textContent = `the embedding model was not recorded: ${error}`;
   }
   await refreshSettings();
 });
@@ -434,13 +458,27 @@ for (const [role, command] of [
       await invoke(command, { model });
       el("model-status").textContent = roleRecordedSentence(role, model);
     } catch (error) {
-      el("model-status").textContent = `модель ${ROLE_NAME[role]} не записано: ${error}`;
+      el("model-status").textContent =
+        `the ${ROLE_NAME[role]} model was not recorded: ${error}`;
     }
     await refreshSettings();
   });
 }
 
-// The lists first, then the settings: `showRecorded` sets a `value` on each
-// picker, and a picker with no options yet cannot hold one.
-await Promise.all(ROLES.map(fillRole));
+// Settings first, so the one sentence §3.2 actually requires is on screen
+// before three network round trips have to finish. `showRecorded` finds empty
+// pickers on this pass and says nothing about them, which is what the
+// `notAsked` list state is for.
+await refreshSettings();
+
+// `allSettled`, not `all`. `fillRole` handles its own rejections, but it has
+// one throwing path outside its own `try` — `el(...)` returning null for an id
+// this file and the HTML disagree about — and with `all` any such rejection
+// skipped the draw below entirely, leaving `#disclosure` blank. A blank
+// disclosure reads as "no promise was made", not as "this window could not
+// tell you", and it is the one line the requirements do not let this window
+// omit.
+await Promise.allSettled(ROLES.map(fillRole));
+
+// Again, now that the pickers have options to hold the recorded values.
 await refreshSettings();

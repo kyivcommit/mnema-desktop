@@ -200,6 +200,14 @@ export function searchResultItems(hits) {
 // Every table still has a fallback for a `kind` this build has never seen, and
 // every fallback is written to be *honest about not knowing* rather than to
 // pick the friendlier of the two neighbours it sits between.
+//
+// The sentences are English, like the rest of this window. They were written in
+// Ukrainian first, to the plan's instruction, and translated when the owner
+// settled the question: the interface is English by default and translation
+// arrives later as its own task, through a dictionary rather than as localised
+// strings written inline. These are the source strings that task inherits, so
+// they are phrased to survive it — see `unreadableSentence` for the one place
+// that shaped the wording.
 
 // The three roles a model can be chosen for, and the word each is called by.
 // `models.rs::role_from` is the Rust half and is pinned there by
@@ -208,13 +216,28 @@ export function searchResultItems(hits) {
 export const ROLES = ["embedding", "rerank", "chat"];
 
 export const ROLE_NAME = {
-  embedding: "відбитків",
-  rerank: "упорядкування",
-  chat: "відповідей",
+  embedding: "embedding",
+  rerank: "reranking",
+  chat: "answering",
 };
 
 export const roleRecordedSentence = (role, model) =>
-  `Модель ${ROLE_NAME[role] ?? role} записано: ${model}.`;
+  `The ${ROLE_NAME[role] ?? role} model was recorded: ${model}.`;
+
+// The three states `main.js` can be in about one role's model list, and the
+// three it can be in about `open_index`. **Built here rather than written as
+// string literals over there**: a named import that does not exist is a
+// link-time error the moment the module loads — the same failure that opened
+// this task — while a mistyped literal (`"opend"`) falls through a table's
+// fallback and reddens nothing. `render.test.js` asserts each constructor's
+// `kind` is a key of the table that renders it, so the two cannot drift either.
+export const indexNotAsked = () => ({ kind: "notAsked" });
+export const indexOpened = () => ({ kind: "opened" });
+export const indexOpenFailed = (error) => ({ kind: "failed", error: `${error}` });
+
+export const listNotAsked = () => ({ kind: "notAsked" });
+export const listWasRead = () => ({ kind: "read" });
+export const listFailed = () => ({ kind: "failed" });
 
 // What to say under a picker that is not showing the model this index records.
 //
@@ -230,17 +253,38 @@ export const roleRecordedSentence = (role, model) =>
 //   which says **nothing** about the provider, and must not be reported as
 //   though it did. This is the pair that made the fix worth making: an empty
 //   picker after a network failure is not evidence a model was withdrawn.
-export const recordedNoteSentence = ({ recorded, listRead, listed }) => {
+//
+// ⚠️ The list state is a **three-valued** union and was a boolean for one
+// round, which is how the first version reported a failure that had not
+// happened: `false` meant both "could not be read" and "has not been asked
+// for yet", and the listeners are registered before the three `provider_models`
+// round trips finish, so a key submitted in that window drew the failure
+// sentence. It is the same shape this file already gives `UnreadableCause::
+// NotOpen` two hundred lines down — fixed there, left boolean here.
+export const LIST_STATE_NOTE = {
+  // Nothing to say while it loads. Not "could not be read", which is a claim
+  // about the machine that nothing has established yet.
+  notAsked: () => "",
+  read: ({ recorded, listed }) =>
+    listed
+      ? ""
+      : `The index records “${recorded}”, but the provider no longer lists this model. ` +
+        "It stays recorded; the picker above does not show it.",
+  failed: ({ recorded }) =>
+    `The index records “${recorded}”. The model list could not be read, so the picker above ` +
+    "cannot show it.",
+};
+
+export const recordedNoteSentence = ({ recorded, list, listed }) => {
   if (recorded === null || recorded === undefined) {
     return "";
   }
-  if (!listRead) {
-    return `В індексі записано «${recorded}». Список моделей прочитати не вдалось, тож вибір вище його не показує.`;
-  }
-  return listed
-    ? ""
-    : `В індексі записано «${recorded}», але провайдер більше не називає цієї моделі. ` +
-        "Вона лишається записаною; вибір вище її не показує.";
+  return (
+    LIST_STATE_NOTE[list?.kind] ??
+    (({ recorded: r }) =>
+      `The index records “${r}”. This build did not understand what happened to the model ` +
+      "list, so the picker above may not show it.")
+  )({ recorded, listed });
 };
 
 // What leaves the machine, per state of the credential store. Two of these
@@ -249,19 +293,21 @@ export const recordedNoteSentence = ({ recorded, listRead, listed }) => {
 // `LEAVES_EVERYTHING` is longer than §3.2 of the requirements, which says
 // "once, at indexing". That is false for cloud embeddings: the question has to
 // be embedded too, on every search (D29).
-export const LEAVES_NOTHING = "Нічого не виходить із цієї машини. Пошук працює по словах.";
+export const LEAVES_NOTHING = "Nothing leaves this machine. Search works on words.";
 export const LEAVES_EVERYTHING =
-  "Назовні йде кожен шматочок кожного документа при індексації — і кожне питання при пошуку.";
+  "Every piece of every document leaves this machine while indexing — and every question you " +
+  "ask while searching.";
 // `KeyState::Unreadable` is not `Absent`. Drawn as "nothing leaves" it is a
 // promise made on the evidence of a keychain that is merely locked — and the
 // same promise a key that is sitting right there would make false.
 export const LEAVES_UNKNOWN =
-  "Чи виходить щось назовні — невідомо: цей застосунок не зміг прочитати сховище ключів.";
+  "Whether anything leaves this machine is unknown: the key store could not be read.";
 // A different not-knowing from the one above, and worth its own words: there,
 // the store was asked and would not answer; here, it answered something this
 // build has no name for.
 const LEAVES_UNSAID =
-  "Чи виходить щось назовні — невідомо: ця збірка не зрозуміла, що відповіло сховище ключів.";
+  "Whether anything leaves this machine is unknown: this build did not understand what the " +
+  "key store answered.";
 
 export const DISCLOSURE_TEXT = {
   present: LEAVES_EVERYTHING,
@@ -269,22 +315,27 @@ export const DISCLOSURE_TEXT = {
   unreadable: LEAVES_UNKNOWN,
 };
 
-export const disclosureSentence = (settings) =>
-  DISCLOSURE_TEXT[settings.key?.kind] ?? LEAVES_UNSAID;
+// Takes the `KeyState` field, not the whole `ModelSettings`. Every function in
+// this block takes the field it renders — `indexStateSentence` has to, since
+// `AdoptedModel` carries an `IndexSettings` of its own — and two conventions
+// for the same kind of argument is the shape that let the brief's `keyPresent`
+// go stale unnoticed.
+export const disclosureSentence = (key) => DISCLOSURE_TEXT[key?.kind] ?? LEAVES_UNSAID;
 
 // `KeyStoreFailure` is four values over six error variants, and the grouping is
 // the whole content: what the person does next. Four sentences that read alike
 // would satisfy a key-set check and throw the grouping away, which is why
 // `render.test.js` also asserts they are four different sentences.
 export const KEY_STORE_FAILURE_TEXT = {
-  locked: "Воно заблоковане: розблокуйте його й запитайте ще раз — з вашими налаштуваннями все гаразд.",
+  locked: "It is locked: unlock it and ask again — nothing about your configuration is wrong.",
   duplicate:
-    "Під цією назвою там лежить більше одного запису: приберіть зайвий, бо ця збірка не вгадуватиме, який із них ключ.",
-  refused: "Воно відмовилось видати ключ.",
-  defect: "Це вада цієї збірки, а не стан вашої машини: надішліть звіт про ваду.",
+    "More than one credential is filed under this name: remove the spare, because this build " +
+    "will not guess which of them is the key.",
+  refused: "It would not hand the key over.",
+  defect: "This is a defect in this build rather than a state of your machine: please send a bug report.",
 };
 const KEY_STORE_FAILURE_UNSAID =
-  "Ця збірка не зрозуміла, що воно відповіло: надішліть звіт про ваду.";
+  "This build did not understand what it answered: please send a bug report.";
 
 // ⚠️ `reason` is diagnostic text and **not** the sentence to show.
 // `mnema_secrets::Error::Unavailable` interpolates the platform's own error —
@@ -302,55 +353,72 @@ export const KEY_STORE_SHOWS_REASON = {
 };
 
 const diagnostic = (cause, reason) =>
-  (KEY_STORE_SHOWS_REASON[cause] ?? false) && reason
-    ? ` Подробиці для звіту про ваду: ${reason}`
-    : "";
+  (KEY_STORE_SHOWS_REASON[cause] ?? false) && reason ? ` Details for a bug report: ${reason}` : "";
 
 export const KEY_STATE_TEXT = {
-  present: () => "Ключ збережено у сховищі цієї машини.",
-  absent: () => "Ключа тут немає — введіть його, щоб увімкнути хмарні моделі.",
+  present: () => "The key is stored in this machine's credential store.",
+  absent: () => "There is no key here — enter one to turn on the cloud models.",
   // Says what is not known, and never "there is no key". That sentence is the
   // one `Error::NoKey`'s own doc calls forbidden: it sends someone whose
   // keychain is merely locked to re-enter a key they already have.
   unreadable: (key) =>
-    "Сховище ключів не відповіло, тож чи є там ключ — невідомо. " +
+    "The key store did not answer, so whether a key is there is unknown. " +
     `${KEY_STORE_FAILURE_TEXT[key.cause] ?? KEY_STORE_FAILURE_UNSAID}` +
     diagnostic(key.cause, key.reason),
 };
 
-export const keyStateSentence = (settings) =>
+export const keyStateSentence = (key) =>
   (
-    KEY_STATE_TEXT[settings.key?.kind] ??
-    (() => "Стан сховища ключів невідомий: ця збірка не зрозуміла, що воно відповіло.")
-  )(settings.key);
+    KEY_STATE_TEXT[key?.kind] ??
+    (() => "The state of the key store is unknown: this build did not understand what it answered.")
+  )(key);
+
+// What `set_key` failing means, and the one thing this window must not say
+// about it. `set_key` checks the key with the provider **before** storing it
+// (`models.rs:42-48`), so of its three reachable failures only one is a key the
+// provider refused:
+//
+// | what happened | `Error` | was the key rejected |
+// | provider refused it | `Provider` | yes |
+// | provider not reached | `ProviderUnreachable` | **no** — nothing was decided |
+// | provider accepted it, the store would not keep it | `Secrets` | **no** |
+//
+// The last is the sharpest: a locked keychain is an ordinary state of the
+// machine by `KeyState`'s own doc, and "the key was not accepted" sends its
+// owner for a new one. This is the seam `ProviderUnreachable` was split out of
+// `Provider` for — the split survived four layers and used to die in this one
+// sentence. The leading clause now states only what is true in all three, and
+// the provider's own `Display` string, which carries the actual fact, follows.
+export const keyNotSavedSentence = (error) => `the key was not saved: ${error}`;
 
 // What `main.js` knows about `open_index` and `UnreadableCause` structurally
 // cannot: whether the window has asked for an index at all, and what the ask
 // answered. Not a wire union — the window produces it — but it is rendered, so
 // it gets a table like the rest.
 export const INDEX_OPENING_TEXT = {
-  notAsked: () => "Індекс ще не відкрито.",
+  notAsked: () => "The index has not been opened yet.",
   // `AppState::open_index` assigns `db` before returning `Ok` (`state.rs`), so
   // an index that opened and then reports itself closed is a defect of this
   // build — not a folder anybody has to go and choose.
   opened: () =>
-    "Індекс відкрився на старті, а тепер недоступний. Це вада цієї збірки, а не стан вашої машини: " +
-    "надішліть звіт про ваду.",
+    "The index opened at start-up and is now unavailable. This is a defect in this build rather " +
+    "than a state of your machine: please send a bug report.",
   // The permanent wall: an index written by a newer Mnema never opens at all,
   // and a window that skipped this correlation would draw it as an ordinary
   // cold start — a state someone waits out instead of acting on.
-  failed: (opening) => `Індекс не вдалося відкрити, тож налаштувань не прочитати: ${opening.error}`,
+  failed: (opening) =>
+    `The index could not be opened, so its settings cannot be read: ${opening.error}`,
 };
 
 export const UNREADABLE_CAUSE_TEXT = {
   notOpen: (index, opening) =>
     (INDEX_OPENING_TEXT[opening?.kind] ??
-      (() => "Індекс недоступний, і ця збірка не знає, чим скінчилась спроба його відкрити."))(
-      opening,
-    ),
+      (() =>
+        "The index is unavailable, and this build does not know how the attempt to open it " +
+        "ended."))(opening),
   readFailed: (index) =>
-    "Індекс відкрито, але прочитати з нього налаштування не вдалось. Це вада цієї збірки: " +
-    `надішліть звіт про ваду. Подробиці: ${index.reason}`,
+    "The index is open, but its settings could not be read from it. This is a defect in this " +
+    `build: please send a bug report. Details: ${index.reason}`,
 };
 
 export const INDEX_SETTINGS_TEXT = {
@@ -359,10 +427,11 @@ export const INDEX_SETTINGS_TEXT = {
   read: (index) =>
     index.activeSpace === null || index.activeSpace === undefined
       ? ""
-      : `Активний простір векторів #${index.activeSpace}, ширина ${index.embeddingDim ?? "невідома"}.`,
+      : `Active vector space #${index.activeSpace}, width ${index.embeddingDim ?? "unknown"}.`,
   unreadable: (index, opening) =>
     (UNREADABLE_CAUSE_TEXT[index.cause] ??
-      ((i) => `Налаштування прочитати не вдалось, і ця збірка не знає чому. Подробиці: ${i.reason}`))(
+      ((i) =>
+        `The settings could not be read, and this build does not know why. Details: ${i.reason}`))(
       index,
       opening,
     ),
@@ -371,7 +440,7 @@ export const INDEX_SETTINGS_TEXT = {
 export const indexStateSentence = (index, opening) =>
   (
     INDEX_SETTINGS_TEXT[index?.kind] ??
-    (() => "Стан індексу невідомий: ця збірка не зрозуміла, що він відповів.")
+    (() => "The state of the index is unknown: this build did not understand what it answered.")
   )(index, opening);
 
 // ⚠️ **Not a fraction, and never divided.** Four measured rules, all of which
@@ -387,10 +456,10 @@ export const indexStateSentence = (index, opening) =>
 // - Both are zero in this build, because nothing embeds yet (D29).
 // - Zero with `activeSpace == null` is not "nothing is embedded", it is "the
 //   question does not arise" — told apart by `activeSpace`, never by the zero.
-const PROGRESS_NO_MODEL = "модель відбитків не обрана";
+const PROGRESS_NO_MODEL = "no embedding model chosen";
 // And an index that could not be read is neither of those: drawn as "nothing
 // chosen" it is the entrance to the harm `NoSuchSpace` was written to prevent.
-const PROGRESS_UNKNOWN = "скільки шматочків мають відбитки — невідомо, поки індекс не прочитано";
+const PROGRESS_UNKNOWN = "how many pieces have embeddings is unknown until the index can be read";
 
 export const embeddingProgressText = (index) => {
   if (index?.kind !== "read") {
@@ -400,11 +469,11 @@ export const embeddingProgressText = (index) => {
     return PROGRESS_NO_MODEL;
   }
   const head =
-    `відбитки в активному просторі: ${index.embeddedChunks} з ${index.totalChunks} ` +
-    "шматочків усього індексу";
+    `embeddings in the active space: ${index.embeddedChunks} of ${index.totalChunks} ` +
+    "pieces in the whole index";
   return index.embeddedChunks > index.totalChunks
-    ? `${head} — перше число рахує один простір, друге весь індекс, і вектор може пережити ` +
-        "шматочок, який він кодує, тож перше буває більшим; це не помилка"
+    ? `${head} — the first number counts one space and the second the whole index, and a vector ` +
+        "can outlive the piece it embeds, so the first is sometimes larger; this is not an error"
     : head;
 };
 
@@ -424,24 +493,27 @@ export const embeddingProgressText = (index) => {
 // freshly minted space.
 export const adoptedModelSentence = (adopted, opening) => {
   const head =
-    `Модель відбитків записано: ${adopted.model}, ширина ${adopted.dim}, простір #${adopted.spaceId}.`;
+    `The embedding model was recorded: ${adopted.model}, width ${adopted.dim}, ` +
+    `space #${adopted.spaceId}.`;
   const space = adopted.created
-    ? " Створено новий простір векторів."
-    : " Використано простір, який уже був.";
+    ? " A new vector space was created."
+    : " An existing vector space was used.";
+  // Only when the read-back actually failed. An unconditional tail passed every
+  // assertion this file had for one round — the `created` test's only
+  // `doesNotMatch` looked for the words "new vector space", which the tail does
+  // not contain — so the reverse direction is now pinned on its own.
   const tail =
     adopted.index?.kind === "read"
       ? ""
-      : ` Прочитати налаштування назад не вдалось — на записану модель це не впливає. ${indexStateSentence(
-          adopted.index,
-          opening,
-        )}`;
+      : " The settings could not be read back — that does not affect the model that was " +
+        `recorded. ${indexStateSentence(adopted.index, opening)}`;
   return head + space + tail;
 };
 
 const price = (perToken) =>
   perToken === null || perToken === undefined
-    ? "ціна невідома"
-    : `$${(perToken * 1e6).toFixed(3)} за млн токенів`;
+    ? "price unknown"
+    : `$${(perToken * 1e6).toFixed(3)} per million tokens`;
 
 // One sentence per `Refusal`, and the pairs are what the table is for. "The
 // provider did not say whether this model writes text" and "the provider said,
@@ -450,22 +522,22 @@ const price = (perToken) =>
 // read". Each pair cost a review round to split upstream (F3/N2 and N1), and a
 // `default` arm here would have folded both back at the last seam.
 export const REFUSAL_TEXT = {
-  inputTooSmall: (r) => `межа входу ${r.limit} токенів, потрібно щонайменше ${r.floor}`,
-  noStatedLimit: () => "провайдер не назвав межі входу",
+  inputTooSmall: (r) => `input limit ${r.limit} tokens, at least ${r.floor} needed`,
+  noStatedLimit: () => "the provider did not state an input limit",
   // `raw` is provider text, capped to 64 bytes on the Rust side for exactly
   // this use — a malformed value must not become an unbounded label in a
   // picker. It reaches the DOM through `textContent` only, never as markup.
   limitNotUnderstood: (r) =>
-    `провайдер назвав межу входу у формі, якої ця збірка не розуміє (${r.raw})`,
-  noStatedOutputModalities: () => "провайдер не сказав, чи ця модель пише текст",
-  noTextOutput: () => "ця модель не пише тексту",
+    `the provider stated an input limit in a shape this build does not understand (${r.raw})`,
+  noStatedOutputModalities: () => "the provider did not say whether this model writes text",
+  noTextOutput: () => "this model does not write text",
 };
 
 const refusalText = (refusal) =>
-  `недоступна: ${(REFUSAL_TEXT[refusal.kind] ?? (() => "причини ця збірка не розпізнала"))(refusal)}`;
+  `unavailable: ${(REFUSAL_TEXT[refusal.kind] ?? (() => "this build did not recognise the reason"))(refusal)}`;
 
 export const modelOptionLabel = (entry) => {
-  const head = `${entry.id} — ${price(entry.pricePerToken)}, вхід ${entry.contextLength ?? "?"}`;
+  const head = `${entry.id} — ${price(entry.pricePerToken)}, input ${entry.contextLength ?? "?"}`;
   return entry.refusal ? `${head} — ${refusalText(entry.refusal)}` : head;
 };
 
@@ -480,16 +552,16 @@ export const modelOptionLabel = (entry) => {
 // act on, and the two defects the pair names are ours to report, not theirs to
 // read.
 export const BALANCE_TEXT = {
-  known: (b) => `на рахунку $${b.amount.toFixed(2)}`,
-  notStated: () => "провайдер не називає залишку для цього рахунку",
-  unreadable: () => "залишок надіслано у формі, якої цей застосунок не розуміє",
-  envelopeNotUnderstood: () => "відповідь провайдера не тієї форми, яку знає ця збірка",
+  known: (b) => `the account balance is $${b.amount.toFixed(2)}`,
+  notStated: () => "the provider does not state a balance for this account",
+  unreadable: () => "the balance arrived in a shape this application does not understand",
+  envelopeNotUnderstood: () => "the provider's answer is not a shape this build knows",
 };
 
 export const keyAcceptedSentence = (status) =>
-  "ключ прийнято; " +
+  "the key was accepted; " +
   (BALANCE_TEXT[status.balance?.kind] ??
-    (() => "залишок надіслано у стані, якого ця збірка не знає"))(status.balance);
+    (() => "the balance arrived in a state this build does not know"))(status.balance);
 
 // Records the provider listed and this build could not read. Silence here would
 // mean a list quietly shorter than the provider's, with nothing saying so —
@@ -504,23 +576,48 @@ export const keyAcceptedSentence = (status) =>
 export const RECORD_ID_TEXT = {
   known: (record) => record.id.id,
   notAString: (record) =>
-    `запис ${record.index}: ідентифікатор не є рядком` +
+    `record ${record.index}: the identifier is not a string` +
     (record.id.raw ? ` (${record.id.raw})` : ""),
-  absent: (record) => `запис ${record.index}: без ідентифікатора`,
+  absent: (record) => `record ${record.index}: no identifier`,
 };
 
 const recordName = (record) =>
   (RECORD_ID_TEXT[record.id?.kind] ??
-    ((r) => `запис ${r.index}: ідентифікатор у стані, якого ця збірка не знає`))(record);
+    ((r) => `record ${r.index}: the identifier is in a state this build does not know`))(record);
 
-// The count is phrased with the number last on purpose: Ukrainian would need
-// the noun declined for 1 / 2–4 / 5+, and a window that got that wrong reads as
-// machine-translated. Nothing about the count itself is lost by moving it.
+// The count is phrased with the number last on purpose. English needs "1
+// record" against "3 records" and Ukrainian needs three forms rather than two;
+// a count in front of a noun is a plural rule in every language this sentence
+// will be translated into, and a window that gets one wrong reads as machine
+// output. Nothing about the count is lost by moving it, and the dictionary task
+// inherits one string instead of a rule.
 export const unreadableSentence = (catalogue) => {
   if (!catalogue.unreadable) {
     return "";
   }
   const named = (catalogue.unreadableRecords ?? []).map(recordName);
   const tail = named.length ? ` (${named.join(", ")})` : "";
-  return `записів у списку провайдера, яких ця збірка не змогла прочитати: ${catalogue.unreadable}${tail}`;
+  return `records in the provider's list this build could not read: ${catalogue.unreadable}${tail}`;
+};
+
+// What to say about a whole catalogue, including the decision `provider_models`
+// explicitly left here: whether zero selectable models is worth alarming
+// anybody about, and — the part only this function can answer — whether it is
+// the provider's own answer or something upstream that ate them. Both numbers
+// have to still be present to tell those apart, which is why the command hands
+// the window the `Catalogue` rather than its `entries`.
+//
+// A well-formed empty answer is a success by construction: `models_from_json`
+// returns `entries: []` with `unreadable: 0` for `{"data":[]}`. Rendered as
+// nothing at all it is a picker with no options and no explanation — the same
+// pixel as a list that has not loaded, and an empty state is exactly where a
+// defect stops being wrong and becomes invisible.
+export const catalogueSentence = (catalogue) => {
+  const records = unreadableSentence(catalogue);
+  if ((catalogue.entries ?? []).length > 0) {
+    return records;
+  }
+  return catalogue.unreadable
+    ? `no model in the provider's list for this role could be read by this build — ${records}`
+    : "the provider lists no models for this role";
 };
