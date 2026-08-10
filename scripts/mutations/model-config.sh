@@ -14,37 +14,56 @@
 # everything; a rule with only the permitting direction is satisfied by
 # permitting everything. Where both appear they are adjacent and say so.
 #
-# ── Three rules of this cycle that are NOT below, and why ────────────────────
+# ── Rules of this cycle that are NOT below, and what holds each instead ──────
 #
 # They are here in comments rather than left out silently, because a case file
 # read as a list of everything that is held would be read wrongly.
 #
-# 1. The two probe texts differ, and one is ASCII while the other is not
-#    (`crates/mnema-provider/src/probe.rs`, the `const _: () = assert!` pins).
-#    These cannot be cases in this harness at all: breaking a `const` assertion
-#    is a compile error, and `mutation-check.sh` classifies a mutation that does
-#    not compile as a BROKEN CASE — correctly, since the named test never ran.
-#    The pins are stronger than a case would be. Task 6 measured the
-#    alternative: with the pins disabled and the two texts made equal, the whole
-#    suite stayed green, because no test built on `mnema_mock_provider` can see
-#    it — the mock answers with a canned body whatever it is sent.
+# - **The two probe texts differ, and one is ASCII while the other is not**
+#   (`crates/mnema-provider/src/probe.rs`, the `const _: () = assert!` pins).
+#   Breaking a `const` assertion is a compile error, and `mutation-check.sh`
+#   classifies a mutation that does not compile as a BROKEN CASE — correctly,
+#   since the named test never ran. A two-part mutation that disabled the pins
+#   AND equalised the texts would compile; it would report STILL GREEN, which is
+#   the accurate way to say this rather than "no case is possible". Task 6
+#   measured exactly that: with the pins disabled and the texts made equal the
+#   whole suite stayed green, because no test built on `mnema_mock_provider` can
+#   see it — the mock answers with a canned body whatever it is sent. The pins
+#   are stronger than a case would be.
 #
-# 2. `model_settings` cannot lose half its answer. The structural half is held
-#    by a type and not by a test: `model_settings`, `index_settings` and
-#    `key_state` return no `Result` at all, so there is no `?` for a caller to
-#    write and no `Err` for one half to take the other out through. A mutation
-#    that reintroduces the `Result` does not compile at the call site. What IS
-#    testable is the other half — that each half still carries its own answer
-#    rather than a summary or an empty state — and those are the four cases in
-#    the `model_settings` section below.
+# - **`model_settings` cannot lose half its answer.** The structural half is held
+#   by a type and not by a test: `model_settings`, `index_settings` and
+#   `key_state` return no `Result` at all, so there is no `?` for a caller to
+#   write and no `Err` for one half to take the other out through. A mutation
+#   that reintroduces the `Result` does not compile at the call site. What IS
+#   testable is the other half — that each half still carries its own answer
+#   rather than a summary or an empty state — and that is what the
+#   `model_settings` section below breaks, one way per case.
 #
-# 3. The window's own lists of these discriminants (`ui/render.test.js`,
-#    `REFUSALS` / `BALANCES` / `RECORD_IDS`) are a hand-made copy of the Rust
-#    ones. Nothing ties the two languages together, and tying them would need
-#    the cross-language artefact D39 withdrew. `mutation-check.sh` runs
-#    `cargo test` only, so a case cannot reach `node --test ui/render.test.js`
-#    either. The Rust pin below is what makes a new variant stop the build; a
-#    person still carries it across.
+# - **The window's own lists of these discriminants** (`ui/render.test.js`,
+#   `REFUSALS` / `BALANCES` / `RECORD_IDS`) are a hand-made copy of the Rust
+#   ones. Nothing ties the two languages together, and tying them would need
+#   the cross-language artefact D39 withdrew. `mutation-check.sh` runs
+#   `cargo test` only, so a case cannot reach `node --test ui/render.test.js`
+#   either. The Rust pin below is what stops the build when a variant is added;
+#   a person still carries it across. The same sentence disposes of Task 9's
+#   fifteenth — "the window does not claim things about the provider it cannot
+#   know", whose witness is `doesNotMatch(text, /no longer lists/)` in
+#   `ui/render.test.js` and is therefore out of this harness's reach too.
+#
+# - **`Error::Transport` must not carry the request.** Measured rather than
+#   asserted (review round 1, F2): the neighbouring clause, "`to_string()`, never
+#   `Debug`", cannot be broken into a leak, because no reachable `ureq::Error`
+#   carries the key in either rendering — a refused connection gives
+#   `Io(Custom { kind: ConnectionRefused, .. })` and a header value the `http`
+#   crate rejects gives `Http(http::Error(InvalidHeaderValue))`, that crate
+#   keeping the offending value out of its own `Debug` on purpose. Both were run
+#   with a key in the `authorization` header. A case aimed at `{e:?}` would go
+#   green for a reason that says nothing about this code. What holds the clause
+#   that CAN leak — never the request — is the key-in-a-header case below, and
+#   what holds the payload reaching the window at all is the transport case
+#   beside it. The same section says which half of that rule could not be given
+#   a case, and why.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The input floor.
@@ -110,8 +129,9 @@ case_ "the line is drawn at architecture rather than at output_modalities" \
 # The row count used to be `if parsed.data.len() != PROBE_TEXTS.len()`, one lump
 # meaning "not two". It is a `match` with named arms now, because `AveragedBatch`
 # is a claim about the provider — "this model returns one averaged vector for a
-# batch" — true of exactly one row and false of every other count. The three
-# cases here break the NEW distinction; restoring the old lump is what each of
+# batch" — true of exactly one row and false of every other count. One case per
+# arm below, each breaking the NEW distinction; restoring the old lump is what
+# each of
 # them does in one of its three directions.
 
 case_ "one vector for two texts is named as something other than averaging" \
@@ -140,7 +160,7 @@ case_ "more vectors than texts is reported as averaging a batch" \
 # answer. Every document in the archive would land on the same point and
 # retrieval would be random, with no message anywhere.
 #
-# Two cases, and the pair is the point. The first says the answer is refused at
+# A pair, and the pairing is the point. The first says the answer is refused at
 # all; the second says it is refused under its own name. `IdenticalVectors`
 # exists because `AveragedBatch`'s sentence names a mechanism this build did not
 # observe — a model answering with a constant returned two vectors and averaged
@@ -318,17 +338,18 @@ case_ "the key is written into the index beside the reference" \
 # The key in a message.
 #
 # A provider that rejects a malformed credential commonly echoes it back inside
-# its own error text, and an error message is a log line. Three cases, because
-# the scan and its positive half hold different things: an absence assertion on
-# its own is satisfied by a build that shows nothing at all.
+# its own error text, and an error message is a log line. The scan and its
+# positive half hold different things: an absence assertion on its own is
+# satisfied by a build that shows nothing at all.
 #
-# Note which mutations are NOT here. Neither `redact_key` alone nor
-# `contains_key_fragment` alone can be broken into a leak: with the key at 23
-# characters and `FRAGMENT_LEN` at 12, the fragment net catches a whole key that
-# redaction missed, and redaction catches what the net would have. That is two
-# defences covering one path, not one rule with two names — so the leak case
-# below bypasses the pipeline as a whole, and each defence's own contribution is
-# held by the pair of cases after it.
+# The pipeline is strip → redact → fragment check, and **no case here breaks one
+# stage into a leak**, deliberately. With the key at 23 characters and
+# `FRAGMENT_LEN` at 12, the fragment net catches a whole key redaction missed and
+# redaction catches what the net would have: two defences over one path. So the
+# leak case bypasses the pipeline as a whole, and each stage's own contribution
+# is broken separately below against the unit tests written for it — which is a
+# different question from "does it leak", and the one a case can actually ask
+# (review round 1, F3).
 case_ "provider text reaches a message without going through the pipeline" \
   crates/mnema-provider/src/probe.rs \
   's~    fn from_provider_text\(raw: &str, key: &str\) -> Self \{~    fn from_provider_text(raw: \&str, key: \&str) -> Self {\n        return ProviderMessage::Text {\n            text: SanitisedText(raw.to_string()),\n        };~' \
@@ -354,15 +375,87 @@ case_ "the key's place in the sentence is closed up rather than marked" \
   '        result.push_str("");' \
   mnema-provider 'a_key_echoed_back_by_the_provider_is_redacted_not_dropped' --test probe
 
+# The fragment net, both directions, against the unit tests written for each.
+# It is the stage `redact_key` cannot stand in for: whole-key redaction cannot
+# catch a *run* of the key's own characters, and a net that fired on any short
+# shared prefix would withhold every message this provider ever sends.
+case_ "a surviving run of the key's characters no longer withholds the message" \
+  crates/mnema-provider/src/probe.rs \
+  's~fn contains_key_fragment\(text: &str, key: &str\) -> bool \{~fn contains_key_fragment(text: \&str, key: \&str) -> bool {\n    return false;~' \
+  'fn contains_key_fragment(text: &str, key: &str) -> bool {
+    return false;' \
+  mnema-provider 'probe::tests::a_surviving_key_fragment_withholds_the_message_entirely' --lib
+
+case_ "the fragment net withholds everything, including a short shared prefix" \
+  crates/mnema-provider/src/probe.rs \
+  's~fn contains_key_fragment\(text: &str, key: &str\) -> bool \{~fn contains_key_fragment(text: \&str, key: \&str) -> bool {\n    return true;~' \
+  'fn contains_key_fragment(text: &str, key: &str) -> bool {
+    return true;' \
+  mnema-provider 'probe::tests::a_fragment_shorter_than_the_window_does_not_withhold' --lib
+
+# The order of the first two stages, which is a Task 3 fix with a witness written
+# precisely because the fragment net masks a plain revert of it. That is why the
+# witness uses a key SHORTER than `FRAGMENT_LEN` — the net has nothing to catch —
+# and why this case reddens it and nothing else.
+case_ "redaction runs before stripping, so the key reassembles afterwards" \
+  crates/mnema-provider/src/probe.rs \
+  's~        let stripped: String = raw\.chars\(\)\.filter\(\|c\| !unsafe_for_display\(\*c\)\)\.collect\(\);\n        // 2\. Redact whole-key occurrences\.\n        let redacted = redact_key\(&stripped, key\);~        let redacted_first = redact_key(raw, key);\n        let redacted: String = redacted_first\n            .chars()\n            .filter(|c| !unsafe_for_display(*c))\n            .collect();~' \
+  '        let redacted_first = redact_key(raw, key);' \
+  mnema-provider 'probe::tests::strip_then_redact_matters_even_when_the_fragment_net_cannot_help' --lib
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The one provider failure that is not about the provider's answer.
+#
+# `http.rs:104` builds `Error::Transport` from ureq's own text, `error.rs:144`
+# carries that payload verbatim into `ProviderUnreachable`, and `Serialize` for
+# that type is `serialize_str(&self.to_string())` — so it crosses to the window.
+# Until review round 1 there was no test anywhere on that path: `http.rs`'s own
+# five are about timeouts, trust roots and non-2xx bodies, and `error.rs` has no
+# test module.
+
+case_ "the transport error's own text is replaced by a summary" \
+  crates/mnema-provider/src/http.rs \
+  's~    let mut response = result\.map_err\(\|e\| Error::Transport\(e\.to_string\(\)\)\)\?;~    let mut response = result.map_err(|_| Error::Transport("the provider could not be reached".to_string()))?;~' \
+  'Error::Transport("the provider could not be reached".to_string())' \
+  mnema-desktop 'a_provider_that_never_answered_reaches_the_window_with_why_and_without_the_key' --test model_commands
+
+# "Never the request" is the clause of that rule which can actually leak, and
+# what holds it is that the key travels in a header and nowhere else.
+case_ "the key travels in the query string of the list request" \
+  crates/mnema-provider/src/http.rs \
+  's~        \.get\(format!\("\{base\}\{path\}"\)\)~        .get(format!("{base}{path}\&key={}", key.unwrap_or_default()))~' \
+  '.get(format!("{base}{path}&key={}", key.unwrap_or_default()))' \
+  mnema-provider 'the_role_decides_the_query_and_the_key_travels_in_a_header' --test probe
+
+# ⚠️ The same mutation on the POST side is deliberately NOT here, and the reason
+# is a fact about that test rather than about the code. Its first assertion pins
+# the whole request line — `starts_with("POST /embeddings ")`, with the trailing
+# space — so any way the key can reach a request line also changes the path and
+# trips that assertion first. Measured: the mutation reddens
+# `the_model_check_posts_to_the_embeddings_endpoint_with_the_key_only_in_a_header`
+# on the endpoint, not on the key, which is the false attribution this file is
+# supposed to avoid rather than produce. The key-in-the-request-line half of that
+# test cannot be witnessed on its own; the GET case above witnesses the class,
+# because its first assertion pins one query parameter rather than the path.
+#
+# What IS witnessable there is the endpoint itself, and it is worth a case: the
+# key is scoped to a header of a request to a URL, and a check posted somewhere
+# else is a different request with the same credential on it.
+case_ "the embedding check posts to an endpoint other than the one it names" \
+  crates/mnema-provider/src/probe.rs \
+  's~    let \(status, answer\) = match http::post_json\(base, "/embeddings", key, &request\) \{~    let (status, answer) = match http::post_json(base, "/embed", key, \&request) {~' \
+  'http::post_json(base, "/embed", key, &request)' \
+  mnema-provider 'the_model_check_posts_to_the_embeddings_endpoint_with_the_key_only_in_a_header' --test probe
+
 # ─────────────────────────────────────────────────────────────────────────────
 # The settings screen: two facts, two answers.
 #
 # `model_settings` answers two questions — is there a key, and what does the
 # index hold — and it has twice been the command where one half ate the other.
-# The structural half of that fix is held by a type (see the header). These are
-# the four cases for what a type cannot hold: that each half still carries the
-# answer it was given rather than a summary, and that neither failure is drawn
-# as an ordinary empty state.
+# The structural half of that fix is held by a type (see the header). What a type
+# cannot hold is broken below: that each half still carries the answer it was
+# given rather than a summary, that neither failure is drawn as an ordinary empty
+# state, and that an index nobody opened is not filed as a read that failed.
 
 case_ "a store that will not answer is reported as nobody having entered a key" \
   src-tauri/src/models.rs \
@@ -410,10 +503,18 @@ case_ "an index nobody opened is classified as a read that failed" \
 # `Refusal`, `Balance` and `RecordId` cross the IPC and `ui/render.js` looks each
 # one up by its `kind` in a table with a fallback sentence, so a spelling that
 # drifts renders as "this build did not recognise the reason" and reddens
-# nothing. The pin's other guarantee — that a new variant stops this crate
-# compiling — is not a case here, for the reason the header gives: a mutation
-# that does not compile is a broken case, not a red one. It is checked by the
-# `match` arms in the test having no wildcard.
+# nothing. The window interpolates the payload fields as well — `inputTooSmall`
+# reads `r.limit` and `r.floor`, `known` reads `record.id.id` — which is why the
+# pin compares the whole serialised value and why the last case below is a field
+# rather than a variant.
+#
+# The pin's other guarantee — that a variant added one crate over stops the build
+# — is not a case here, for the reason the header gives: a mutation that does not
+# compile is a broken case, not a red one. It is carried by the `match` arms
+# having no wildcard and no `..`, and precisely it stops the **test** target:
+# those arms are inside `#[cfg(test)] mod tests`, so `cargo build` still
+# succeeds and `cargo test` does not. That is the gate, so the guarantee holds
+# where it is needed — but it is not `cargo build`.
 
 case_ "Refusal's variants stop being spelled the way the window reads them" \
   crates/mnema-provider/src/catalogue.rs \
@@ -453,6 +554,16 @@ case_ "Refusal stops carrying its discriminant in a kind field" \
   's~#\[serde\(\n    rename_all = "camelCase",\n    rename_all_fields = "camelCase",\n    tag = "kind"\n\)\]\npub enum Refusal \{~#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]\npub enum Refusal {~' \
   '#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Refusal {' \
+  mnema-desktop 'models::tests::every_provider_discriminant_the_window_sees_has_its_camel_case_spelling_pinned' --lib
+
+# And a payload field rather than a variant, which is the half a pin that read
+# only `kind` left open (review round 1, F6): the discriminant stays correct and
+# the window draws "input limit undefined tokens, at least undefined needed".
+case_ "a Refusal payload field is renamed under a correct discriminant" \
+  crates/mnema-provider/src/catalogue.rs \
+  's~pub enum Refusal \{\n    InputTooSmall \{\n        limit: i64,~pub enum Refusal {\n    InputTooSmall {\n        #[serde(rename = "inputLimit")]\n        limit: i64,~' \
+  '        #[serde(rename = "inputLimit")]
+        limit: i64,' \
   mnema-desktop 'models::tests::every_provider_discriminant_the_window_sees_has_its_camel_case_spelling_pinned' --lib
 
 # ─────────────────────────────────────────────────────────────────────────────
