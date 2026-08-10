@@ -761,11 +761,25 @@ mod tests {
     /// three is `#[non_exhaustive]`** — checked, the way
     /// [`Self::the_credential_store_failures_are_sorted_by_what_they_ask_of_a_person`]'s
     /// own guard was checked against `mnema_secrets::Error`. A sixth `Refusal`
-    /// variant added one crate over stops *this* crate compiling, which is the
+    /// variant added one crate over stops **this file** compiling, which is the
     /// defect this test exists for: `ui/render.js` looks its `kind` up in a
     /// table and falls back to "this build did not recognise the reason", so
     /// without this the new variant would reach a person as that sentence and
-    /// redden nothing anywhere.
+    /// redden nothing anywhere. Precisely: the arms are inside
+    /// `#[cfg(test)] mod tests`, so `cargo build` still succeeds and it is
+    /// `cargo test` that stops — which is what the gate runs, and is the whole
+    /// distance this guarantee travels.
+    ///
+    /// **It compares the whole serialised value, not the tag** (review round 1,
+    /// F6). Reading `kind` alone left every payload field unpinned in the entire
+    /// workspace — `Refusal`'s `limit`, `floor` and `raw`, `RecordId`'s `raw` and
+    /// `id` — while `ui/render.js` interpolates all of them: `REFUSAL_TEXT`'s
+    /// `inputTooSmall` reads `r.limit` and `r.floor`, `RECORD_ID_TEXT`'s `known`
+    /// reads `record.id.id`. A `#[serde(rename)]` on one field would have drawn
+    /// "input limit **undefined** tokens" under a correct `kind`, with this test
+    /// green. The `match` arms also **destructure** the fields rather than
+    /// eliding them with `..`, so renaming one in Rust stops this file compiling
+    /// for the same reason a new variant does.
     ///
     /// **What it does not reach**, said rather than implied: the window keeps
     /// its own lists (`ui/render.test.js`, `REFUSALS` / `BALANCES` /
@@ -785,26 +799,26 @@ mod tests {
     #[test]
     fn every_provider_discriminant_the_window_sees_has_its_camel_case_spelling_pinned() {
         use mnema_provider::{Balance, ProviderMessage, RecordId, Refusal};
-
-        // All three are internally tagged, so the discriminant is the value of
-        // `kind` inside an object — the same read as `KeyState` above.
-        let tag = |v: serde_json::Value| -> String {
-            v["kind"]
-                .as_str()
-                .expect("an internally tagged enum carries `kind`")
-                .to_string()
-        };
+        use serde_json::json;
 
         // Written by hand, and by serde, and compared — the second opinion is
         // what makes this a test rather than a restatement of the attribute.
-        // No wildcard arm anywhere below.
-        let refusal = |r: &Refusal| -> &'static str {
+        // No wildcard arm anywhere below, and no `..` in any pattern.
+        //
+        // The payload values are deliberately distinct from one another
+        // (`limit` is not `floor`, `raw` is not `id`), so a pair of fields
+        // swapped by a rename cannot satisfy this by accident.
+        let refusal = |r: &Refusal| -> serde_json::Value {
             match r {
-                Refusal::InputTooSmall { .. } => "inputTooSmall",
-                Refusal::NoStatedLimit => "noStatedLimit",
-                Refusal::LimitNotUnderstood { .. } => "limitNotUnderstood",
-                Refusal::NoStatedOutputModalities => "noStatedOutputModalities",
-                Refusal::NoTextOutput => "noTextOutput",
+                Refusal::InputTooSmall { limit, floor } => {
+                    json!({"kind": "inputTooSmall", "limit": limit, "floor": floor})
+                }
+                Refusal::NoStatedLimit => json!({"kind": "noStatedLimit"}),
+                Refusal::LimitNotUnderstood { raw } => {
+                    json!({"kind": "limitNotUnderstood", "raw": raw})
+                }
+                Refusal::NoStatedOutputModalities => json!({"kind": "noStatedOutputModalities"}),
+                Refusal::NoTextOutput => json!({"kind": "noTextOutput"}),
             }
         };
         for r in [
@@ -813,27 +827,33 @@ mod tests {
                 floor: 2048,
             },
             Refusal::NoStatedLimit,
-            Refusal::LimitNotUnderstood { raw: String::new() },
+            Refusal::LimitNotUnderstood {
+                raw: "8192.0".to_string(),
+            },
             Refusal::NoStatedOutputModalities,
             Refusal::NoTextOutput,
         ] {
             assert_eq!(
-                tag(serde_json::to_value(&r).unwrap()),
+                serde_json::to_value(&r).unwrap(),
                 refusal(&r),
                 "{r:?} serialised differently than this test's own spelling of it"
             );
         }
 
-        let balance = |b: &Balance| -> &'static str {
+        let balance = |b: &Balance| -> serde_json::Value {
             match b {
-                Balance::Known { .. } => "known",
-                Balance::NotStated => "notStated",
-                Balance::Unreadable { .. } => "unreadable",
-                Balance::EnvelopeNotUnderstood => "envelopeNotUnderstood",
+                Balance::Known { amount } => json!({"kind": "known", "amount": amount}),
+                Balance::NotStated => json!({"kind": "notStated"}),
+                // `raw` is a `ProviderMessage`, itself tagged. Pinned here as
+                // the nested object the window receives rather than looked
+                // past: `ui/render.js` deliberately does not interpolate it,
+                // and this is what would show if it stopped being an object.
+                Balance::Unreadable { raw } => json!({"kind": "unreadable", "raw": raw}),
+                Balance::EnvelopeNotUnderstood => json!({"kind": "envelopeNotUnderstood"}),
             }
         };
         for b in [
-            Balance::Known { amount: 0.0 },
+            Balance::Known { amount: 12.5 },
             Balance::NotStated,
             Balance::Unreadable {
                 raw: ProviderMessage::Withheld,
@@ -841,26 +861,30 @@ mod tests {
             Balance::EnvelopeNotUnderstood,
         ] {
             assert_eq!(
-                tag(serde_json::to_value(&b).unwrap()),
+                serde_json::to_value(&b).unwrap(),
                 balance(&b),
                 "{b:?} serialised differently than this test's own spelling of it"
             );
         }
 
-        let record = |r: &RecordId| -> &'static str {
+        let record = |r: &RecordId| -> serde_json::Value {
             match r {
-                RecordId::Absent => "absent",
-                RecordId::NotAString { .. } => "notAString",
-                RecordId::Known { .. } => "known",
+                RecordId::Absent => json!({"kind": "absent"}),
+                RecordId::NotAString { raw } => json!({"kind": "notAString", "raw": raw}),
+                RecordId::Known { id } => json!({"kind": "known", "id": id}),
             }
         };
         for r in [
             RecordId::Absent,
-            RecordId::NotAString { raw: String::new() },
-            RecordId::Known { id: String::new() },
+            RecordId::NotAString {
+                raw: "12345".to_string(),
+            },
+            RecordId::Known {
+                id: "vendor/m".to_string(),
+            },
         ] {
             assert_eq!(
-                tag(serde_json::to_value(&r).unwrap()),
+                serde_json::to_value(&r).unwrap(),
                 record(&r),
                 "{r:?} serialised differently than this test's own spelling of it"
             );

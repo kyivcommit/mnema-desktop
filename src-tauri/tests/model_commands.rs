@@ -218,6 +218,75 @@ fn forgetting_a_key_leaves_the_index_alone() {
     );
 }
 
+/// The sibling of the test below, on the one provider failure that is not about
+/// the provider's answer — and the path that had nothing at all.
+///
+/// `http.rs:104` is the only place `Error::Transport` is built, `error.rs:144`
+/// carries its payload verbatim into `ProviderUnreachable`, and `Serialize` for
+/// `Error` is `serialize_str(&self.to_string())`, so that payload is what
+/// crosses the IPC. Between those three lines and the window there was no test:
+/// `http.rs`'s own five are about timeouts, trust roots and non-2xx bodies, and
+/// `src-tauri/src/error.rs` has no test module.
+///
+/// **Both halves, and the first one is why this exists.** A message that says
+/// only "the provider could not be reached" is a true sentence that helps
+/// nobody: a refused connection, an unresolved host and a timeout are three
+/// different things to do next, and only ureq's own text tells them apart. The
+/// absence half alone would be satisfied by exactly that summary — and by an
+/// empty string.
+///
+/// ⚠️ What this does **not** hold, measured rather than assumed (review round 1,
+/// F2): the rule on `http.rs`'s `finish` is "`to_string()`, never `Debug`", and
+/// swapping `{e}` for `{e:?}` cannot be made to leak anything here. Both
+/// reachable shapes were run with a key in the `authorization` header — a
+/// refused connection renders `Io(Custom { kind: ConnectionRefused, error:
+/// "Connection refused" })`, and a header value the `http` crate rejects renders
+/// `Http(http::Error(InvalidHeaderValue))`, because that crate deliberately
+/// keeps the offending value out of both its `Display` and its `Debug`. The
+/// clause that could leak is the other one — "never the request" — and what
+/// holds that is `the_role_decides_the_query_and_the_key_travels_in_a_header`
+/// and `the_model_check_posts_to_the_embeddings_endpoint_with_the_key_only_in_a_header`,
+/// one crate over, each asserting the request line is clean as well as the
+/// header being present.
+#[test]
+fn a_provider_that_never_answered_reaches_the_window_with_why_and_without_the_key() {
+    let silent = Fixture::with_no_provider_listening();
+
+    let unreachable = set_key(silent.state(), KEY.into()).expect_err("nobody answered");
+
+    assert!(
+        matches!(unreachable, Error::ProviderUnreachable { .. }),
+        "this test means to look at a provider that never answered; it is looking at \
+         something else: {unreachable:?}"
+    );
+    // The positive half. `Fixture::with_no_provider_listening` points at a port
+    // nothing listens on, so ureq's own text is the io error for that, and it is
+    // the only thing in the sentence that says which kind of unreachable this
+    // was.
+    let displayed = unreachable.to_string();
+    assert!(
+        displayed
+            .to_ascii_lowercase()
+            .contains("connection refused"),
+        "the transport error's own text must reach the window, not be replaced by a \
+         summary that cannot tell a refused connection from an unresolved host: {displayed}"
+    );
+    // And the absence half, on the same three renderings the refusal path uses.
+    for (shape, rendering) in [
+        ("the Display", displayed.clone()),
+        ("the Debug", format!("{unreachable:?}")),
+        (
+            "the JSON that crosses the IPC",
+            serde_json::to_string(&unreachable).expect("an error serialises"),
+        ),
+    ] {
+        assert!(
+            !rendering.contains(KEY),
+            "{shape} of the unreachable-provider error repeats the key: {rendering}"
+        );
+    }
+}
+
 #[test]
 fn nothing_that_crosses_to_the_window_repeats_the_key() {
     // A provider repeating the key back inside its own refusal is measured
