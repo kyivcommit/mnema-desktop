@@ -747,6 +747,126 @@ mod tests {
         }
     }
 
+    /// The same pin for the three unions that reach the window from
+    /// `mnema-provider` rather than from here — `Refusal`, `Balance` and
+    /// `RecordId`.
+    ///
+    /// They are pinned in this crate and not in theirs on purpose. "Reaches the
+    /// window" is a fact about `mnema-desktop`: `provider_models` returns a
+    /// `Catalogue` carrying `Refusal` and `RecordId`, and [`KeyStatus::balance`]
+    /// carries `Balance`. `mnema-provider` does not know it has a window, and a
+    /// test living there would be pinning a serialisation for no stated reader.
+    ///
+    /// **The compiler half works across the crate boundary because none of the
+    /// three is `#[non_exhaustive]`** — checked, the way
+    /// [`Self::the_credential_store_failures_are_sorted_by_what_they_ask_of_a_person`]'s
+    /// own guard was checked against `mnema_secrets::Error`. A sixth `Refusal`
+    /// variant added one crate over stops *this* crate compiling, which is the
+    /// defect this test exists for: `ui/render.js` looks its `kind` up in a
+    /// table and falls back to "this build did not recognise the reason", so
+    /// without this the new variant would reach a person as that sentence and
+    /// redden nothing anywhere.
+    ///
+    /// **What it does not reach**, said rather than implied: the window keeps
+    /// its own lists (`ui/render.test.js`, `REFUSALS` / `BALANCES` /
+    /// `RECORD_IDS`) and asserts its tables against them. Those are a hand-made
+    /// copy of the list below, and nothing ties the two languages together —
+    /// tying them would need the cross-language artefact D39 withdrew. So a
+    /// variant added here still has to be carried across by a person; what this
+    /// buys is that the person is *told*, by a build that stops, instead of
+    /// finding out from a fallback sentence in front of a user.
+    ///
+    /// `Balance::Unreadable` takes a [`mnema_provider::ProviderMessage`], whose
+    /// `Text` variant is unconstructible outside `probe.rs` — `SanitisedText`
+    /// has no public constructor. `Withheld` is a public unit variant and needs
+    /// none, so the payload costs nothing here; `ProviderMessage` itself is
+    /// therefore not pinned by this test, and the window does not read its
+    /// `kind` (`ui/render.js` deliberately does not interpolate `raw`).
+    #[test]
+    fn every_provider_discriminant_the_window_sees_has_its_camel_case_spelling_pinned() {
+        use mnema_provider::{Balance, ProviderMessage, RecordId, Refusal};
+
+        // All three are internally tagged, so the discriminant is the value of
+        // `kind` inside an object — the same read as `KeyState` above.
+        let tag = |v: serde_json::Value| -> String {
+            v["kind"]
+                .as_str()
+                .expect("an internally tagged enum carries `kind`")
+                .to_string()
+        };
+
+        // Written by hand, and by serde, and compared — the second opinion is
+        // what makes this a test rather than a restatement of the attribute.
+        // No wildcard arm anywhere below.
+        let refusal = |r: &Refusal| -> &'static str {
+            match r {
+                Refusal::InputTooSmall { .. } => "inputTooSmall",
+                Refusal::NoStatedLimit => "noStatedLimit",
+                Refusal::LimitNotUnderstood { .. } => "limitNotUnderstood",
+                Refusal::NoStatedOutputModalities => "noStatedOutputModalities",
+                Refusal::NoTextOutput => "noTextOutput",
+            }
+        };
+        for r in [
+            Refusal::InputTooSmall {
+                limit: 512,
+                floor: 2048,
+            },
+            Refusal::NoStatedLimit,
+            Refusal::LimitNotUnderstood { raw: String::new() },
+            Refusal::NoStatedOutputModalities,
+            Refusal::NoTextOutput,
+        ] {
+            assert_eq!(
+                tag(serde_json::to_value(&r).unwrap()),
+                refusal(&r),
+                "{r:?} serialised differently than this test's own spelling of it"
+            );
+        }
+
+        let balance = |b: &Balance| -> &'static str {
+            match b {
+                Balance::Known { .. } => "known",
+                Balance::NotStated => "notStated",
+                Balance::Unreadable { .. } => "unreadable",
+                Balance::EnvelopeNotUnderstood => "envelopeNotUnderstood",
+            }
+        };
+        for b in [
+            Balance::Known { amount: 0.0 },
+            Balance::NotStated,
+            Balance::Unreadable {
+                raw: ProviderMessage::Withheld,
+            },
+            Balance::EnvelopeNotUnderstood,
+        ] {
+            assert_eq!(
+                tag(serde_json::to_value(&b).unwrap()),
+                balance(&b),
+                "{b:?} serialised differently than this test's own spelling of it"
+            );
+        }
+
+        let record = |r: &RecordId| -> &'static str {
+            match r {
+                RecordId::Absent => "absent",
+                RecordId::NotAString { .. } => "notAString",
+                RecordId::Known { .. } => "known",
+            }
+        };
+        for r in [
+            RecordId::Absent,
+            RecordId::NotAString { raw: String::new() },
+            RecordId::Known { id: String::new() },
+        ] {
+            assert_eq!(
+                tag(serde_json::to_value(&r).unwrap()),
+                record(&r),
+                "{r:?} serialised differently than this test's own spelling of it"
+            );
+        }
+    }
+
     /// The three ways out of `AppState::with_index`, sorted as
     /// [`UnreadableCause::of`] sorts them.
     ///
