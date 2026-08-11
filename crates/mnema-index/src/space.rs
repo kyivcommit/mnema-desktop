@@ -374,15 +374,16 @@ impl Db {
     ///
     /// ⚠️ **The two are not counted over the same population, and the
     /// difference has a direction.** A `vec_emb_<id>` row is referenced by no
-    /// foreign key and outlives the chunk it embeds:
-    /// [`Db::clear_document_content`] takes the `chunk` rows and their
-    /// `chunk_embedding_state` rows and leaves the vectors, and
-    /// [`Db::delete_document`] has never reached them either. So once anything
-    /// writes vectors, the numerator can exceed this denominator, and whatever
-    /// renders the pair has to be able to show that rather than a percentage
-    /// above one hundred. Both are zero today, because nothing embeds yet
-    /// (D29) — this is the shape of the trap, written where the second half of
-    /// it is read.
+    /// foreign key, so nothing forces it to go when the chunk it embeds does.
+    /// [`Db::clear_document_content`] closed this for a rebuild (D88): it now
+    /// sweeps a document's vectors, in every space, before the `chunk` rows
+    /// and their `chunk_embedding_state` rows go with it. [`Db::delete_document`]
+    /// has not — deleting a document outright still leaves its vectors behind.
+    /// So the numerator can still exceed this denominator through that path,
+    /// and whatever renders the pair has to be able to show that rather than a
+    /// percentage above one hundred. Both are zero today, because nothing
+    /// embeds yet (D29) — this is the shape of the trap, written where the
+    /// second half of it is read.
     pub fn chunk_count(&self) -> Result<i64, Error> {
         Ok(self
             .conn()
@@ -391,11 +392,18 @@ impl Db {
 
     /// Whether moving the index off this space would throw anything away.
     ///
-    /// Reads **both** places a chunk can be recorded as embedded, because they
-    /// are allowed to disagree: a `vec0` table cannot be the target of a
-    /// foreign key, so a vector outlives the chunk it embeds and the
-    /// bookkeeping row that cascaded away with it. A check that read one of
-    /// them would be an assertion satisfied by zero from the wrong side.
+    /// Reads **both** places a chunk can be recorded as embedded, because
+    /// neither alone is trustworthy, in either direction. Nothing in this
+    /// crate writes a `chunk_embedding_state` row — [`Db::insert_vector`]
+    /// writes only the `vec0` table, [`Db::embedded_chunk_count`]'s own doc
+    /// names the grep that proves it — so a check reading that table alone
+    /// would call a space full of vectors empty: an assertion satisfied by
+    /// zero from one side. And a `vec0` table takes no foreign key, so a
+    /// vector can still outlive the chunk it embeds and the
+    /// `chunk_embedding_state` row that cascaded away with it —
+    /// [`Db::clear_document_content`] closed that for a rebuild (D88), but
+    /// [`Db::delete_document`] has not — so a check reading only `vec_emb_<id>`
+    /// would be satisfied by zero from the other side instead.
     ///
     /// A space that does not exist is **not** empty — it is absent, and that
     /// arrives as [`Error::NoSuchSpace`] rather than as `Ok(true)`. Two facts

@@ -524,6 +524,22 @@ impl Db {
     /// writing them, and the gap was closed ahead of that rather than after
     /// it. D88.
     ///
+    /// **What makes leaving it embedding-less correct, rather than merely
+    /// silent.** This method takes a document's vectors away and writes
+    /// nothing to replace them — on purpose, it is not this method's job to
+    /// re-embed. That is only safe because whatever decides what needs
+    /// embedding is meant to be a *computed* pass over `chunk` — "which chunks
+    /// have no vector yet, asked fresh" — rather than a list kept in its own
+    /// table. A computed pass notices a cleared document the same way it
+    /// notices a brand new one, with nothing here having to tell it so. No
+    /// such pass exists in this crate yet; it is later work in this cycle. If
+    /// it is ever built as something *stored* instead — a queue populated by
+    /// whoever writes chunks — this method takes on the obligation to enqueue
+    /// what it just cleared, or a rebuilt document goes from D88's defect
+    /// (search answers with stale text) to a quieter one (search answers with
+    /// nothing, forever, because nothing was ever asked to re-embed it) — and
+    /// nothing in `tests/citation.rs` would catch either shape.
+    ///
     /// [`Db::delete_document`] has never reached them either, so this is not a
     /// regression — it is written down here because this is the method a
     /// rebuild goes through.

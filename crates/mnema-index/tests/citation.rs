@@ -4,6 +4,8 @@ use mnema_index::{
 };
 use rusqlite::{Transaction, TransactionBehavior};
 
+mod support;
+
 fn fresh(dir: &tempfile::TempDir) -> Db {
     register_vector_extension().unwrap();
     open(&dir.path().join("index.sqlite")).unwrap()
@@ -1183,28 +1185,12 @@ fn deleting_a_document_takes_every_path_that_names_it() {
 mod fixture {
     use super::*;
 
-    /// A fresh, empty index. The temporary directory lives inside the
-    /// returned value on purpose — dropped separately it takes the database
-    /// file with it while the connection is still open, and the failure that
-    /// follows names SQLite rather than the test.
-    pub struct TempDb {
-        db: Db,
-        _dir: tempfile::TempDir,
-    }
-
-    impl std::ops::Deref for TempDb {
-        type Target = Db;
-        fn deref(&self) -> &Db {
-            &self.db
-        }
-    }
-
-    pub fn db() -> TempDb {
-        let dir = tempfile::tempdir().unwrap();
-        TempDb {
-            db: fresh(&dir),
-            _dir: dir,
-        }
+    /// A fresh, empty index. `support::TempDb` and not a second copy of it:
+    /// `support/mod.rs`'s own doc says it is written there so this is not
+    /// grown a second time, and a second copy is exactly what a `TempDb`
+    /// local to this module would be.
+    pub fn db() -> support::TempDb {
+        support::temp_db()
     }
 
     /// A 1024-wide embedding space — the width `unit_vector_1024` is built
@@ -1317,6 +1303,13 @@ fn a_reused_chunk_id_gets_no_inherited_vector() {
     let first = fixture::only_chunk_id(&db, &doc);
     db.insert_vector(space, first, &fixture::unit_vector_1024())
         .expect("insert");
+    // Without this, a version of `embedded_chunk_count` narrowed to
+    // `chunk_embedding_state` alone would pass this test whether or not the
+    // fix below exists: it would answer 0 before the clear too, and the
+    // assertion at the end would be satisfied by a count that was never
+    // anything else. This is the same "asks nothing" failure the first test's
+    // own assertion below is written to avoid.
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 1);
 
     db.clear_document_content(&doc).expect("clear");
     fixture::rebuild_with_one_chunk(&db, &doc, "entirely different content");
