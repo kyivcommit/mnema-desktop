@@ -1337,7 +1337,20 @@ fn every_model_command_the_window_calls_is_registered() {
         ("key_present", json!({})),
         ("set_key", json!({ "key": "test-key-not-a-real-one" })),
         ("forget_key", json!({})),
-        ("set_embedding_model", json!({ "model": "baai/bge-m3" })),
+        // Both spellings of `existingVectors`, because the window sends both and
+        // a value this build does not recognise is rejected as `invalid args` —
+        // which is the assertion below. Two entries and not one: `keep` alone
+        // would leave the destructive spelling unpinned, and a rename of it
+        // reaches a person as a change that will not happen rather than as a
+        // build that stopped.
+        (
+            "set_embedding_model",
+            json!({ "model": "baai/bge-m3", "existingVectors": "keep" }),
+        ),
+        (
+            "set_embedding_model",
+            json!({ "model": "baai/bge-m3", "existingVectors": "discard" }),
+        ),
         (
             "set_rerank_model",
             json!({ "model": "baai/bge-reranker-v2-m3" }),

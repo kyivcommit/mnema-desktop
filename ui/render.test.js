@@ -73,6 +73,12 @@ import {
   keySubmitText,
   listNotReadSentence,
   embeddingModelNotRecordedSentence,
+  KEEP_EXISTING_VECTORS,
+  DISCARD_EXISTING_VECTORS,
+  discardOffer,
+  discardVectorsLabel,
+  discardVectorsNote,
+  retiredSpacesClause,
   roleNotRecordedSentence,
 } from "./render.js";
 
@@ -691,6 +697,163 @@ test("a read-back that succeeded is never told it failed", () => {
   assert.match(text, /vendor\/embed-3/, "and the adoption itself is still stated");
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The one control in this window that destroys anything (D96g).
+
+// The settings as `model_settings` sends them when a space holds embeddings.
+const settingsWith = (fields) => ({
+  kind: "read",
+  activeSpace: 1,
+  embeddingDim: 1024,
+  embeddedChunks: 3,
+  totalChunks: 812,
+  ...fields,
+});
+
+// The whole requirement on this button in one assertion: the number is on it.
+// "Are you sure?" is a question nobody can answer, because it asks about a cost
+// it does not state.
+test("the confirmation names how many embeddings it would delete", () => {
+  const label = discardVectorsLabel(discardOffer("vendor/other", settingsWith({})));
+  assert.match(label, /\b3 embeddings\b/, `the number is not on the button: ${label}`);
+  assert.match(label, /vendor\/other/, "and which change it is for");
+  assert.match(label, /#1\b/, "and which space is being spent");
+  assert.doesNotMatch(label, /are you sure/i);
+});
+
+// A count in a sentence is a definition of the thing it counts, and `1
+// embeddings` invites doubt about the only number this control carries.
+test("one embedding is not called one embeddings", () => {
+  assert.match(discardVectorsLabel(discardOffer("m", settingsWith({ embeddedChunks: 1 }))),
+    /\b1 embedding\b/);
+  assert.doesNotMatch(discardVectorsLabel(discardOffer("m", settingsWith({ embeddedChunks: 1 }))),
+    /1 embeddings/);
+  assert.match(discardVectorsNote(discardOffer("m", settingsWith({ embeddedChunks: 1 }))),
+    /\b1 embedding\b/);
+});
+
+// Every state in which this window must not offer to delete anything, named one
+// at a time. The control direction is first, because a `discardOffer` that
+// answered `null` to everything would satisfy all four of the others.
+test("the discard is offered only when this window can state what it costs", () => {
+  assert.notEqual(discardOffer("vendor/other", settingsWith({})), null,
+    "the control: with a refusal and a full space, the offer exists");
+  assert.equal(discardOffer(null, settingsWith({})), null,
+    "nothing was refused, so there is nothing to confirm");
+  assert.equal(discardOffer("vendor/other", { kind: "unreadable", cause: "readFailed", reason: "x" }), null,
+    "an index that could not be read carries no number, and the button is only a number");
+  assert.equal(discardOffer("vendor/other", settingsWith({ activeSpace: null })), null,
+    "no space is chosen, so nothing is embedded and the refusal was about something else");
+  assert.equal(discardOffer("vendor/other", settingsWith({ embeddedChunks: 0 })), null,
+    "a zero here is `this window cannot see what blocks`, not `nothing does`");
+});
+
+// `null` reaches the label and the note on every ordinary draw — the button is
+// hidden almost always — and main.js writes whatever they answer straight into
+// the DOM. An exception here would take the settings screen with it, and a
+// literal `""` in main.js to avoid it is the one thing that file's header
+// forbids.
+test("no offer draws no words, rather than throwing", () => {
+  assert.equal(discardVectorsLabel(null), "");
+  assert.equal(discardVectorsNote(null), "");
+});
+
+// The two directions of the note: what goes, and what does not. Only the second
+// separates this button from one that would look identical and remove the
+// archive — `Db::drop_space` takes the vector table and the bookkeeping that
+// cascades from it, and touches no `chunk`, no `page` and no `document`.
+test("the note says what is deleted and what is not", () => {
+  const note = discardVectorsNote(discardOffer("vendor/other", settingsWith({})));
+  assert.match(note, /\b3 embeddings\b/);
+  assert.match(note, /deleted/i);
+  assert.match(note, /documents/i, "and that the documents themselves stay");
+  assert.match(note, /keyword search/i, "and that the other half of search still works");
+});
+
+// The number the button showed and the number the index destroyed are two facts
+// about two moments. This is the second, and it is why `retired` is on the wire
+// at all: without it the window's only account of a destructive act is a reading
+// taken before the act.
+test("a confirmed change reports what it actually retired", () => {
+  const adopted = {
+    model: "vendor/other",
+    dim: 1024,
+    spaceId: 2,
+    created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 3 }],
+    index: { kind: "read", activeSpace: 2, embeddingDim: 1024, embeddedChunks: 0, totalChunks: 812 },
+  };
+  const text = adoptedModelSentence(adopted, { kind: "opened" });
+  assert.match(text, /#1 was retired/, `the destruction is not reported: ${text}`);
+  assert.match(text, /\b3 embeddings\b/, "and not what it cost");
+  assert.match(text, /vendor\/other/, "and the adoption itself is still stated");
+});
+
+// The other direction, and the one an unconditional clause would have hidden —
+// the same shape as `a read-back that succeeded is never told it failed`, which
+// this file already paid for once. A change that retired nothing must not
+// mention retirement, and the two calls that reach here with an empty list are
+// every refused change and every confirmed one that met nothing in the way.
+test("a change that retired nothing says nothing about retiring", () => {
+  const adopted = {
+    model: "vendor/other",
+    dim: 1024,
+    spaceId: 2,
+    created: true,
+    index: { kind: "read", activeSpace: 2, embeddingDim: 1024, embeddedChunks: 0, totalChunks: 0 },
+  };
+  assert.doesNotMatch(adoptedModelSentence({ ...adopted, retired: [] }, { kind: "opened" }), /retired/i);
+  // And with the field absent altogether, which is what an older payload or a
+  // rename of it looks like from here.
+  assert.doesNotMatch(adoptedModelSentence(adopted, { kind: "opened" }), /retired/i);
+  assert.equal(retiredSpacesClause([]), "");
+  assert.equal(retiredSpacesClause(undefined), "");
+});
+
+// More than one space can stand in the way, and reporting the first would
+// understate the bill. Both are named, and the numbers are distinct so that a
+// clause built from one of them twice cannot pass.
+test("every space a change retired is reported, not just the first", () => {
+  const clause = retiredSpacesClause([
+    { spaceId: 1, embeddedChunks: 3 },
+    { spaceId: 4, embeddedChunks: 7 },
+  ]);
+  assert.match(clause, /#1\b/);
+  assert.match(clause, /#4\b/);
+  assert.match(clause, /\b3 embeddings\b/);
+  assert.match(clause, /\b7 embeddings\b/);
+});
+
+// The two strings that cross to `set_embedding_model`. They are pinned here and
+// sent through the real handler by `tests/commands.rs`, so a rename on either
+// side stops one of the two builds rather than reaching a person as a change
+// that quietly will not happen.
+test("the two spellings of existingVectors are the ones the command takes", () => {
+  assert.equal(KEEP_EXISTING_VECTORS, "keep");
+  assert.equal(DISCARD_EXISTING_VECTORS, "discard");
+  assert.notEqual(KEEP_EXISTING_VECTORS, DISCARD_EXISTING_VECTORS);
+});
+
+// The harmless press must send the harmless value. A `change` on the picker is
+// not a confirmation of anything, and this is the line that keeps it from
+// becoming one — read as text, because the handler needs a DOM this suite does
+// not have.
+test("choosing a model in the picker never sends the discarding value", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const main = readFileSync(join(here, "main.js"), "utf8");
+  assert.match(
+    main,
+    /selectId\("embedding"\)\)\.addEventListener\("change",[\s\S]*?recordEmbeddingModel\(\s*event\.target\.value,\s*KEEP_EXISTING_VECTORS,?\s*\)/,
+    "the picker's own handler no longer sends KEEP_EXISTING_VECTORS",
+  );
+  assert.match(
+    main,
+    /el\("discard-vectors"\)\.addEventListener\("click",[\s\S]*?recordEmbeddingModel\(\s*refusedChange,\s*DISCARD_EXISTING_VECTORS,?\s*\)/,
+    "the button that was confirmed no longer sends DISCARD_EXISTING_VECTORS, or no longer " +
+      "re-sends the model the refusal was about — the picker holds the recorded one by then",
+  );
+});
+
 // A model entry as the wire carries it, with the two fields a test does not
 // care about filled in. Named states, never bare numbers: `pricePerToken: null`
 // and `contextLength: null` were the shapes the acceptance run found too narrow,
@@ -1239,14 +1402,15 @@ test("every element main.js reaches for exists in index.html", () => {
 
   const literals = [...main.matchAll(/\bel\("([^"]+)"\)/g)].map((m) => m[1]);
   // A floor, because a loop over an empty list passes and a regexp that has
-  // stopped matching produces exactly that. **52 today, re-measured**: this
-  // said "`> 10` against an actual 20" while the actual had been 48 since
-  // `667d2ff`, so it tolerated losing thirty-two calls in silence — a
-  // number describing a file it had stopped describing, in a test whose whole
-  // job is to notice that (whole-branch review, closing check). The margin is
-  // what a legitimate edit may remove before this asks to be looked at, and
-  // the same rule and the same shape of number are on the block test below.
-  assert.ok(literals.length >= 44,
+  // stopped matching produces exactly that. **58 today, re-measured** with the
+  // discard control (D96g): this said "`> 10` against an actual 20" while the
+  // actual had been 48 since `667d2ff`, so it tolerated losing thirty-two calls
+  // in silence — a number describing a file it had stopped describing, in a test
+  // whose whole job is to notice that (whole-branch review, closing check). The
+  // margin is what a legitimate edit may remove before this asks to be looked
+  // at, and the same rule and the same shape of number are on the block test
+  // below.
+  assert.ok(literals.length >= 50,
     `only ${literals.length} literal ids found — the regexp has rotted, or main.js shrank`);
   for (const id of literals) {
     assert.ok(ids.has(id), `main.js reaches for #${id}, which index.html does not have`);
@@ -1453,14 +1617,15 @@ test("every sentence in the model configuration block comes from render.js", () 
     ...block.matchAll(/\.(?:textContent|innerText|innerHTML|placeholder)\s*\+?=\s*(\S)/g),
   ].map((m) => m[1]);
   // A floor, because an assertion over an empty list passes and a rotted regexp
-  // produces exactly that. **19 today**, and the margin is what a legitimate
-  // edit may remove before this asks to be looked at. The id test above carries
-  // the same rule and its own re-measured number; this one said `>= 10` against
-  // 16 and called itself tight "the same way the id test above is", which was
-  // a parity claim pointing at a floor that had been stale for six commits.
-  // Both numbers are re-measured whenever this file's regexps or main.js's
-  // block change, which is the whole point of naming the actual beside them.
-  assert.ok(assignments.length >= 17,
+  // produces exactly that. **22 today**, re-measured with the discard control
+  // (D96g), and the margin is what a legitimate edit may remove before this asks
+  // to be looked at. The id test above carries the same rule and its own
+  // re-measured number; this one said `>= 10` against 16 and called itself tight
+  // "the same way the id test above is", which was a parity claim pointing at a
+  // floor that had been stale for six commits. Both numbers are re-measured
+  // whenever this file's regexps or main.js's block change, which is the whole
+  // point of naming the actual beside them.
+  assert.ok(assignments.length >= 20,
     `only ${assignments.length} textContent assignments found — the regexp has rotted, or the block shrank`);
   for (const first of assignments) {
     assert.ok(!["'", '"', "`"].includes(first),

@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use mnema_desktop::models::ExistingVectors;
 use mnema_desktop::state::AppState;
 use mnema_mock_provider::{MockServer, Reply};
 use tauri::Manager as _;
@@ -238,10 +239,17 @@ impl Fixture {
     /// with `DEFAULT_DIM`-wide vectors, which is
     /// [`Fixture::with_provider_accepting_everything`] with `set_key` called
     /// first.
+    /// It adopts with [`ExistingVectors::Keep`], the value that changes nothing
+    /// about a fresh index and would refuse rather than destroy on one that is
+    /// not — so a test reaching this helper for "an index that is configured"
+    /// cannot lose vectors to it by accident.
     pub fn adopt_default_model(&self) {
-        let adopted =
-            mnema_desktop::models::set_embedding_model(self.state(), DEFAULT_MODEL.into())
-                .expect("the default model is adopted");
+        let adopted = mnema_desktop::models::set_embedding_model(
+            self.state(),
+            DEFAULT_MODEL.into(),
+            ExistingVectors::Keep,
+        )
+        .expect("the default model is adopted");
         // Not a restatement of the command's own test. It says the provider
         // this fixture built answered the width this fixture names, so that a
         // caller relying on `DEFAULT_DIM` is relying on something checked
@@ -250,6 +258,106 @@ impl Fixture {
             adopted.dim, DEFAULT_DIM,
             "the fixture's provider answered a width other than the one this fixture names"
         );
+    }
+
+    /// Puts `count` embeddings into the active space, so a model change has
+    /// something to be refused over — and something a confirmed one can throw
+    /// away.
+    ///
+    /// The chunk ids are `1..=count` and no `chunk` row exists for any of them.
+    /// That is not a shortcut around a foreign key but the shape the schema
+    /// actually permits: a `vec0` table is the target of none, which is the
+    /// whole reason `Db::delete_vectors_for_document` has to sweep by hand, and
+    /// `embedded_chunk_count` counts these rows exactly as it counts any others.
+    ///
+    /// It returns the space the vectors went into, read back from the index
+    /// rather than taken from the adoption that put it there — a test asserting
+    /// that a space disappeared must be naming a space the database agrees
+    /// exists.
+    pub fn embed_chunks_in_the_active_space(&self, count: i64) -> i64 {
+        let space = self
+            .active_space()
+            .expect("a model has to be adopted before anything can be embedded");
+        self.state()
+            .with_index(|db| {
+                for chunk_id in 1..=count {
+                    // Finite and far from a zero norm, which is all
+                    // `check_rankable` asks of a stored vector; the components
+                    // differ per chunk so that two of these are not literally
+                    // the same vector under a different key.
+                    let width = DEFAULT_DIM as usize;
+                    let mut v = vec![0.0f32; width];
+                    v[0] = 1.0;
+                    v[chunk_id as usize % width] += 0.5;
+                    db.insert_vector(space, chunk_id, &v)?;
+                }
+                Ok(())
+            })
+            .expect("the vectors are written");
+        assert_eq!(
+            self.embedded_chunks_in(space),
+            count,
+            "the index did not record the embeddings this fixture claims to have written, so \
+             every assertion about losing them is about nothing"
+        );
+        space
+    }
+
+    /// Which space the index is working with, straight from `meta.active_space`.
+    pub fn active_space(&self) -> Option<i64> {
+        self.state()
+            .with_index(|db| db.active_space())
+            .expect("the index answers")
+    }
+
+    /// Every space the index holds a row for, in id order.
+    pub fn space_ids(&self) -> Vec<i64> {
+        self.state()
+            .with_index(|db| {
+                let mut stmt = db
+                    .conn()
+                    .prepare("SELECT id FROM embedding_space ORDER BY id")?;
+                let ids = stmt
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<Vec<i64>, _>>()?;
+                Ok(ids)
+            })
+            .expect("the index answers")
+    }
+
+    pub fn embedded_chunks_in(&self, space_id: i64) -> i64 {
+        self.state()
+            .with_index(|db| db.embedded_chunk_count(space_id))
+            .expect("the index answers")
+    }
+
+    /// Every table SQLite holds for one space: the `vec0` table itself and the
+    /// four shadow tables vec0 brings with it.
+    ///
+    /// **Matched exactly rather than with `LIKE 'vec_emb_1%'`**, which also
+    /// matches space 10 — an assertion that a table is gone must not be
+    /// satisfied, or contradicted, by a neighbour's name. The shadow tables are
+    /// counted rather than skipped because they are the disk this task exists to
+    /// free: a row deleted with four shadow tables left behind is the silent
+    /// leak, and it is invisible to any check that looks only for `vec_emb_<id>`.
+    pub fn tables_of_space(&self, space_id: i64) -> Vec<String> {
+        let own = format!("vec_emb_{space_id}");
+        let shadow = format!("{own}_");
+        self.state()
+            .with_index(|db| {
+                let mut stmt = db.conn().prepare(
+                    "SELECT name FROM sqlite_master WHERE name LIKE 'vec\\_emb\\_%' ESCAPE '\\' \
+                     ORDER BY name",
+                )?;
+                let names = stmt
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<String>, _>>()?;
+                Ok(names)
+            })
+            .expect("the index answers")
+            .into_iter()
+            .filter(|name| *name == own || name.starts_with(&shadow))
+            .collect()
     }
 
     /// Every file in the data directory, read as bytes.

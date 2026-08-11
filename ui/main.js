@@ -37,6 +37,11 @@ import {
   keySubmitText,
   embeddingModelNotRecordedSentence,
   roleNotRecordedSentence,
+  KEEP_EXISTING_VECTORS,
+  DISCARD_EXISTING_VECTORS,
+  discardOffer,
+  discardVectorsLabel,
+  discardVectorsNote,
 } from "./render.js";
 
 const { invoke, Channel } = window.__TAURI__.core;
@@ -371,6 +376,12 @@ const listState = Object.fromEntries(ROLES.map((role) => [role, listNotAsked()])
 // nobody had asked for.
 let keyState = keyNotAsked();
 
+// The model a refused change was trying to reach, or `null`. It is the only
+// thing that can make the discard button do anything, and it is set nowhere
+// except where a change was actually refused — so a button left on screen by a
+// stale draw cannot act on a model this window has stopped showing.
+let refusedChange = null;
+
 // Every option carries its own label, refused ones disabled. Refused rather
 // than absent: a model the provider lists and this window hides sends the user
 // looking for a fault here.
@@ -452,6 +463,16 @@ const drawSettings = (settings) => {
   // recorded, so the pickers show nothing chosen and `index-state` carries the
   // reason. Leaving the first option selected would have the window state a
   // configuration it has not read.
+  // Redrawn from the settings on every pass rather than set once at the moment
+  // of refusal: the number on that button is what the index says now, and a
+  // number left over from an earlier draw is the one thing this control may not
+  // show. Written every time for the same reason `key-note` is — a line set once
+  // and never cleared outlives the state it described, and this one outliving it
+  // is a button offering to delete embeddings that are already gone.
+  const offer = discardOffer(refusedChange, settings.index);
+  el("discard-vectors").hidden = offer === null;
+  el("discard-vectors").textContent = discardVectorsLabel(offer);
+  el("discard-vectors-note").textContent = discardVectorsNote(offer);
   const read = settings.index?.kind === "read" ? settings.index : null;
   showRecorded("embedding", read && read.embeddingModel);
   showRecorded("rerank", read && read.rerankModel);
@@ -509,21 +530,45 @@ el("forget").addEventListener("click", async () => {
 });
 
 // The embedding role is not the other two and does not share their handler.
-// It answers `AdoptedModel` — a model, a width, a space and whether that space
-// was minted — while `set_rerank_model` and `set_chat_model` write a string and
-// answer nothing. One handler for both would have to throw the adoption away to
-// have something in common with the other two.
-el(selectId("embedding")).addEventListener("change", async (event) => {
-  const model = event.target.value;
+// It answers `AdoptedModel` — a model, a width, a space, whether that space was
+// minted and what it retired — while `set_rerank_model` and `set_chat_model`
+// write a string and answer nothing. One handler for both would have to throw
+// the adoption away to have something in common with the other two.
+//
+// Both presses that can record an embedding model go through this one function,
+// differing only in `existingVectors`. Two copies would be two places for the
+// destructive spelling to end up on the harmless press.
+const recordEmbeddingModel = async (model, existingVectors) => {
   try {
-    const adopted = await invoke("set_embedding_model", { model });
+    const adopted = await invoke("set_embedding_model", { model, existingVectors });
+    // Cleared on success, so the button below cannot survive the change it was
+    // offered for and act a second time on a model nobody is looking at.
+    refusedChange = null;
     el("model-status").textContent = asSentence(adoptedModelSentence(adopted, indexOpening));
   } catch (error) {
     // The refusal already says how many vectors stand in the way; showing it
     // whole is better than a sentence of our own that says less.
+    refusedChange = model;
     el("model-status").textContent = asSentence(embeddingModelNotRecordedSentence(error));
   }
   await refreshSettings();
+};
+
+el(selectId("embedding")).addEventListener("change", async (event) => {
+  // Never the discarding value. A change nobody has been asked about must not
+  // be able to delete anything, whatever this window later offers.
+  await recordEmbeddingModel(event.target.value, KEEP_EXISTING_VECTORS);
+});
+
+// The confirmed half. It re-sends the model the refusal was about rather than
+// whatever the picker is showing: `drawSettings` puts the *recorded* model back
+// into the select, so by the time this button is on screen the select no longer
+// holds the model the person chose.
+el("discard-vectors").addEventListener("click", async () => {
+  if (refusedChange === null) {
+    return;
+  }
+  await recordEmbeddingModel(refusedChange, DISCARD_EXISTING_VECTORS);
 });
 
 for (const [role, command] of [

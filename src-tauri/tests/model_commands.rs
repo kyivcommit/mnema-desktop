@@ -10,9 +10,9 @@ mod support;
 use fixture::Fixture;
 use mnema_desktop::error::Error;
 use mnema_desktop::models::{
-    IndexRead, IndexSettings, KeyRemoval, KeyState, KeyStoreFailure, UnreadableCause, forget_key,
-    key_present, model_settings, provider_models, set_chat_model, set_embedding_model, set_key,
-    set_rerank_model,
+    ExistingVectors, IndexRead, IndexSettings, KeyRemoval, KeyState, KeyStoreFailure,
+    UnreadableCause, forget_key, key_present, model_settings, provider_models, set_chat_model,
+    set_embedding_model, set_key, set_rerank_model,
 };
 
 /// The index half, or a failure naming what the index said instead.
@@ -579,7 +579,8 @@ fn the_recorded_dimension_is_the_one_the_provider_answered_with() {
         fx.open_index();
         set_key(fx.state(), KEY.into()).expect("accepted");
 
-        let adopted = set_embedding_model(fx.state(), MODEL.into()).expect("chosen");
+        let adopted =
+            set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep).expect("chosen");
 
         // What the call says it wrote, and then what the database says it holds.
         // Only the second proves a write happened at all; only the first
@@ -619,11 +620,13 @@ fn choosing_the_same_model_again_reports_a_space_found_rather_than_created() {
     let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
     fx.open_index();
     set_key(fx.state(), KEY.into()).expect("accepted");
-    let first = set_embedding_model(fx.state(), MODEL.into()).expect("chosen");
+    let first =
+        set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep).expect("chosen");
     assert!(first.created);
 
     // A second embedding check, so the second call has an answer of its own.
-    let second = set_embedding_model(fx.state(), MODEL.into()).expect("chosen again");
+    let second =
+        set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep).expect("chosen again");
 
     assert!(
         !second.created,
@@ -816,8 +819,8 @@ fn a_command_that_needs_the_key_says_no_key_rather_than_blaming_the_store() {
         "this test is about a command running without a key; there is one"
     );
 
-    let refusal =
-        set_embedding_model(fx.state(), MODEL.into()).expect_err("a model needs a key to check");
+    let refusal = set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep)
+        .expect_err("a model needs a key to check");
 
     assert!(
         matches!(refusal, Error::NoKey),
@@ -832,4 +835,196 @@ fn a_command_that_needs_the_key_says_no_key_rather_than_blaming_the_store() {
         None,
         "a command that could not run recorded a model anyway"
     );
+}
+
+/// A second embedding model, so that "change the model" is a real change rather
+/// than the re-adoption `choosing_the_same_model_again_reports_a_space_found`
+/// covers. The mock ignores the name; the index mints a second configuration and
+/// a second space for it, which is what makes the first one an obstacle.
+const OTHER_MODEL: &str = "vendor/other-embedder";
+
+/// How many embeddings the tests below put in the way. Small, and never a round
+/// number the code could produce by accident: `0` would satisfy every assertion
+/// about loss vacuously, and `1` cannot tell "the count" from "a count".
+const EMBEDDED: i64 = 3;
+
+/// The dangerous half of this task. A model change that retires a space is a
+/// deliberate act; one that retires a space because the caller did not ask for
+/// it is data loss with a confirmation dialog somewhere else entirely.
+///
+/// Every direction is asserted, because each is separately satisfiable by a
+/// build that lost the vectors: the refusal itself, the space row, the vector
+/// tables on disk, the count inside the space, and the pointer.
+#[test]
+fn changing_the_model_without_confirmation_leaves_the_space_alone() {
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("accepted");
+    fx.adopt_default_model();
+    let old = fx.embed_chunks_in_the_active_space(EMBEDDED);
+    let spaces_before = fx.space_ids();
+    let tables_before = fx.tables_of_space(old);
+    assert!(
+        tables_before.len() > 1,
+        "a vec0 table brings four shadow tables; without them here the assertion below that \
+         they went would be about nothing: {tables_before:?}"
+    );
+
+    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect_err("it must refuse, not silently drop");
+
+    assert!(
+        matches!(
+            refusal,
+            Error::Index(mnema_index::Error::SpaceNotEmpty { space_id, embedded_chunks })
+                if space_id == old && embedded_chunks == EMBEDDED
+        ),
+        "the refusal has to name the space in the way and what it holds, since that number is \
+         what the window puts in front of the person: {refusal:?}"
+    );
+    assert_eq!(
+        fx.space_ids(),
+        spaces_before,
+        "a refused change removed a space"
+    );
+    assert_eq!(
+        fx.tables_of_space(old),
+        tables_before,
+        "the row survived a refusal and its tables did not"
+    );
+    assert_eq!(
+        fx.embedded_chunks_in(old),
+        EMBEDDED,
+        "the space survived a refusal and was emptied"
+    );
+    assert_eq!(
+        fx.active_space(),
+        Some(old),
+        "a refused change moved the index off the space it refused to leave"
+    );
+}
+
+/// The other half: asked for plainly, the change happens, and the space it cost
+/// is gone in full.
+///
+/// The third assertion is the one this test is written for. A row deleted with
+/// its `vec0` table left behind is a leak nothing reports: the space is not in
+/// `embedding_space`, so nothing counts it, nothing lists it, and its vectors
+/// and four shadow tables sit on the disk of somebody who was told the old model
+/// had been retired.
+#[test]
+fn a_confirmed_model_change_retires_the_old_space_and_its_tables() {
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("accepted");
+    fx.adopt_default_model();
+    let old = fx.embed_chunks_in_the_active_space(EMBEDDED);
+
+    let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Discard)
+        .expect("a confirmed change");
+
+    assert_ne!(
+        Some(old),
+        fx.active_space(),
+        "the index is still on the space the change was supposed to leave"
+    );
+    assert_eq!(
+        fx.active_space(),
+        Some(adopted.space_id),
+        "the call named one space and the index is on another"
+    );
+    assert!(
+        !fx.space_ids().contains(&old),
+        "the space row is still there: {:?}",
+        fx.space_ids()
+    );
+    assert_eq!(
+        fx.tables_of_space(old),
+        Vec::<String>::new(),
+        "the row went and the vec0 tables stayed — the disk is still full"
+    );
+    // Both directions. Without this, a build that dropped every space would
+    // satisfy everything above.
+    assert!(
+        fx.space_ids().contains(&adopted.space_id),
+        "the new space was not created, so nothing can be embedded into it: {:?}",
+        fx.space_ids()
+    );
+    assert_eq!(
+        fx.embedded_chunks_in(adopted.space_id),
+        0,
+        "the new space is to be counted again from nothing"
+    );
+
+    // What it cost, stated by the call rather than left for the window to infer
+    // from a number it read before the act.
+    assert_eq!(
+        adopted.retired,
+        vec![mnema_desktop::models::RetiredSpace {
+            space_id: old,
+            embedded_chunks: EMBEDDED,
+        }],
+        "the answer does not name what it destroyed"
+    );
+    // And under the names the window looks for. `spaceId` and `embeddedChunks`
+    // are the two the camelCase rename changes, and a window reading a renamed
+    // field gets `undefined` in silence — the same defect the `spaceId`
+    // assertion in `the_recorded_dimension_is_the_one_the_provider_answered_with`
+    // exists for.
+    let wire = serde_json::to_string(&adopted).expect("the adoption serialises");
+    assert!(
+        wire.contains(&format!(
+            r#""retired":[{{"spaceId":{old},"embeddedChunks":{EMBEDDED}}}]"#
+        )),
+        "what was destroyed would not reach the window under the names it reads: {wire}"
+    );
+}
+
+/// Confirmation is permission to remove what is **in the way**, and re-adopting
+/// the model the index is already on has nothing in the way.
+///
+/// The shortcut this excludes is one line long and reads as the obvious
+/// implementation: on confirmation, drop `active_space` and then adopt. It
+/// destroys an archive for a press that changed nothing — the settings screen
+/// re-sends the recorded model on any path that re-selects it, and this command
+/// is also the only one that can rewrite `credential_ref`, so the same call is
+/// how a new API key is recorded.
+#[test]
+fn a_confirmed_change_to_the_model_the_index_is_already_on_retires_nothing() {
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("accepted");
+    fx.adopt_default_model();
+    let space = fx.embed_chunks_in_the_active_space(EMBEDDED);
+    let tables_before = fx.tables_of_space(space);
+
+    let adopted = set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Discard)
+        .expect("re-adopting the recorded model is not a move and is allowed");
+
+    // Ordered so the first assertion to fire is the one about loss. Asking
+    // `embedded_chunks_in` about a space that has been dropped raises
+    // `NoSuchSpace` inside the fixture, which is red as a panic from a helper
+    // rather than red as a sentence about what was destroyed — measured, by
+    // running exactly the shortcut this test excludes.
+    assert!(
+        fx.space_ids().contains(&space),
+        "the space holding the embeddings was retired by a call that changed no model: {:?}",
+        fx.space_ids()
+    );
+    assert_eq!(
+        fx.embedded_chunks_in(space),
+        EMBEDDED,
+        "the embeddings were thrown away by a call that changed no model"
+    );
+    assert_eq!(
+        fx.tables_of_space(space),
+        tables_before,
+        "the count survived and the tables behind it did not"
+    );
+    assert_eq!(
+        adopted.retired,
+        Vec::new(),
+        "confirmation retired a space that was not in the way"
+    );
+    assert_eq!(adopted.space_id, space, "re-adoption minted a second space");
 }

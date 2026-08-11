@@ -71,3 +71,68 @@ case_ "space: delete_vector without clearing chunk_embedding_state leaves a stal
         })
     }' \
   mnema-index 'deleting_a_vector_also_clears_its_bookkeeping_row' --test space
+
+# ── Task 4 (D96g): a confirmed model change retires the old space ─────────────
+#
+# The dangerous one first. `ExistingVectors` is read backwards, so a change
+# nobody confirmed retires the space instead of being refused — which is data
+# loss with a confirmation dialog somewhere else entirely, and the whole reason
+# this parameter exists rather than the command simply dropping what blocks.
+case_ "models: a model change nobody confirmed must not retire a space (D96g)" \
+  src-tauri/src/models.rs \
+  's{if existing_vectors == ExistingVectors::Discard\n                && !retired}{if existing_vectors == ExistingVectors::Keep\n                && !retired}' \
+  '}) if existing_vectors == ExistingVectors::Keep
+                && !retired.iter().any(|r| r.space_id == space_id) =>' \
+  mnema-desktop 'changing_the_model_without_confirmation_leaves_the_space_alone' --test model_commands
+
+# The other half: with the drop gone the loop records a retirement it did not
+# perform, the next pass meets the same refusal, and the guard returns it — so a
+# confirmed change fails instead of happening. Nothing about the refusal path
+# changes, which is why this case names the confirmed test and the one above
+# names the refused one.
+case_ "models: a confirmed change that retires nothing cannot happen at all (D96g)" \
+  src-tauri/src/models.rs \
+  's{                db\.drop_space\(space_id\)\?;\n}{}' \
+  '                && !retired.iter().any(|r| r.space_id == space_id) =>
+            {
+                retired.push(RetiredSpace {' \
+  mnema-desktop 'a_confirmed_model_change_retires_the_old_space_and_its_tables' --test model_commands
+
+# The shortcut the loop exists instead of, written out: on confirmation, drop
+# `active_space` and then adopt. It reads as the obvious implementation and it
+# destroys an archive for a press that changed nothing — re-adopting the
+# recorded model moves nothing, and it is also the only path that rewrites
+# `credential_ref`, so the same call is how a new API key is recorded.
+case_ "models: confirmation retires what blocks, not whatever is active (D96g)" \
+  src-tauri/src/models.rs \
+  's{    let mut retired: Vec<RetiredSpace> = Vec::new\(\);\n}{    let mut retired: Vec<RetiredSpace> = Vec::new();\n    let _ = db\n        .active_space()?\n        .filter(|_| existing_vectors == ExistingVectors::Discard)\n        .map(|active| db.drop_space(active))\n        .transpose()?;\n}' \
+  '.filter(|_| existing_vectors == ExistingVectors::Discard)
+        .map(|active| db.drop_space(active))' \
+  mnema-desktop 'a_confirmed_change_to_the_model_the_index_is_already_on_retires_nothing' --test model_commands
+
+# The silent leak, from the other crate. The `embedding_space` row goes and the
+# `vec0` table and its four shadow tables stay: nothing counts the space, nothing
+# lists it, and its vectors sit on the disk of somebody who was told the old
+# model had been retired.
+#
+# Two cases for one mutation, the pattern this file already uses above: `case_`
+# names one test at a time, and this `DROP` is claimed by two — `mnema-index`'s
+# own, which is where the mechanism lives, and the desktop one, which is where
+# the promise is made to a person. Checked rather than assumed: `grep -rn
+# drop_space scripts/mutations/` had no case for either before these, so the
+# index crate's test was protecting the line by assertion alone.
+case_ "space: a retired space whose vec0 table stays behind leaks the disk (D96g)" \
+  crates/mnema-index/src/space.rs \
+  's{        tx\.execute_batch\(&format!\("DROP TABLE IF EXISTS \{table\};"\)\)\?;\n}{        let _ = &table;\n}' \
+  'let _ = &table;
+        tx.execute(
+            "DELETE FROM embedding_space WHERE id = ?1",' \
+  mnema-desktop 'a_confirmed_model_change_retires_the_old_space_and_its_tables' --test model_commands
+
+case_ "space: the same DROP, against the index crate's own test (D96g)" \
+  crates/mnema-index/src/space.rs \
+  's{        tx\.execute_batch\(&format!\("DROP TABLE IF EXISTS \{table\};"\)\)\?;\n}{        let _ = &table;\n}' \
+  'let _ = &table;
+        tx.execute(
+            "DELETE FROM embedding_space WHERE id = ?1",' \
+  mnema-index 'dropping_a_space_removes_its_row_its_table_and_its_shadows' --test space

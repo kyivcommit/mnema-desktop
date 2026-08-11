@@ -778,6 +778,88 @@ export const embeddingProgressText = (index) => {
 // `embeddedChunks` is the tempting proxy and is wrong in exactly one direction:
 // it is identically zero in this build (D29), so every adoption would read as a
 // freshly minted space.
+// The two values `existingVectors` may take on the wire, spelled once. They are
+// here and not in `main.js` for the reason every other wire spelling is: a typo
+// in a literal over there is a rejected command with a message about arguments,
+// on the one press in this window that a person had to be asked about first.
+// `tests/commands.rs` sends both through the real handler, which is what makes
+// these two strings checked rather than agreed.
+export const KEEP_EXISTING_VECTORS = "keep";
+export const DISCARD_EXISTING_VECTORS = "discard";
+
+// `1 embeddings` is the kind of sentence that makes a person doubt the number
+// beside it, and this number is the whole content of the confirmation.
+const embeddingsCount = (n) => (n === 1 ? "1 embedding" : `${n} embeddings`);
+
+// Whether this window may offer to throw vectors away, and what it would say
+// they cost — `null` for "do not offer", never a partly-filled offer.
+//
+// `model` is the change that was refused; without one there is nothing to
+// confirm. The other three guards are all the same rule: **this window does not
+// offer a destructive act whose price it cannot state.**
+//
+// - An index it could not read has no number in it, so the button would have to
+//   fall back to "are you sure?", which is the sentence this whole control
+//   exists instead of.
+// - No active space means nothing is embedded and the refusal was about
+//   something else.
+// - `embeddedChunks === 0` is the subtle one. The space that blocks a change
+//   need not be the active one — `mnema_index::Error::SpaceNotEmpty`'s own doc
+//   says so — and `embeddedChunks` counts only the active one. A zero here is
+//   therefore "this window cannot see what is in the way", not "nothing is",
+//   and a button reading *delete 0 embeddings* would understate a bill it
+//   cannot read. Unreachable through this window today, since the only thing
+//   that writes vectors writes them into the active space; offered as a
+//   refusal rather than as a guess for the day that stops being true.
+export const discardOffer = (model, index) => {
+  if (model === null || model === undefined) return null;
+  if (index?.kind !== "read") return null;
+  if (index.activeSpace === null || index.activeSpace === undefined) return null;
+  if (!(index.embeddedChunks > 0)) return null;
+  return { model, spaceId: index.activeSpace, embeddedChunks: index.embeddedChunks };
+};
+
+// The label on the button, and the line under it. Both take the offer `null`
+// included and answer with the empty string for it, so that `main.js` writes no
+// literal of its own — including the empty one that clears them.
+export const discardVectorsLabel = (offer) =>
+  offer === null
+    ? ""
+    : `Change to ${offer.model} and delete the ${embeddingsCount(offer.embeddedChunks)} ` +
+      `in vector space #${offer.spaceId}`;
+
+// What it costs, in the two directions that matter: what goes, and what does
+// not. The second half is not reassurance — it is the difference between this
+// button and one that would look identical and remove the archive.
+export const discardVectorsNote = (offer) =>
+  offer === null
+    ? ""
+    : `${embeddingsCount(offer.embeddedChunks)} will be deleted from this machine, and the new ` +
+      "model has to embed everything again before search by meaning finds anything. Your " +
+      "documents, their text and the keyword search are not touched.";
+
+// What a confirmed change actually destroyed, reported by the command rather
+// than by the button.
+//
+// They are two different numbers about two different moments and this window
+// says the second: the button's came from `embeddedChunks`, which counts the
+// active space at the moment before the press, and `retired` is what the index
+// counted as it destroyed it. A person who paid for embeddings is owed the
+// second.
+//
+// Empty for every call that retired nothing, which is every refused change and
+// every confirmed one that met nothing in the way.
+export const retiredSpacesClause = (retired) =>
+  !retired || retired.length === 0
+    ? ""
+    : ` ${retired
+        .map(
+          (space) =>
+            `Vector space #${space.spaceId} was retired and its ` +
+            `${embeddingsCount(space.embeddedChunks)} deleted.`,
+        )
+        .join(" ")}`;
+
 export const adoptedModelSentence = (adopted, opening) => {
   const head =
     `The embedding model was recorded: ${adopted.model}, width ${adopted.dim}, ` +
@@ -785,6 +867,10 @@ export const adoptedModelSentence = (adopted, opening) => {
   const space = adopted.created
     ? " A new vector space was created."
     : " An existing vector space was used.";
+  // Conditional for the reason the read-back clause below is: an unconditional
+  // tail is a sentence no assertion in this suite distinguishes from its own
+  // absence, which is how one of these got through a whole round.
+  const retired = retiredSpacesClause(adopted.retired);
   // Only when the read-back actually failed. An unconditional tail passed every
   // assertion this file had for one round — the `created` test's only
   // `doesNotMatch` looked for the words "new vector space", which the tail does
@@ -794,7 +880,7 @@ export const adoptedModelSentence = (adopted, opening) => {
       ? ""
       : " The settings could not be read back — that does not affect the model that was " +
         `recorded. ${indexStateSentence(adopted.index, opening)}`;
-  return head + space + tail;
+  return head + space + retired + tail;
 };
 
 // A stated zero, a number that cannot be a price, a value this build cannot

@@ -71,6 +71,16 @@
         <label>Embeddings <select id="embedding-model"></select></label>
         <p id="embedding-model-unreadable" class="muted"></p>
         <p id="embedding-model-missing" class="muted"></p>
+        <!--
+          The only control in this window that destroys anything, and it is
+          hidden until a model change has actually been refused. Its label is
+          never "are you sure?": it carries the number of embeddings the change
+          would delete, because that number is what is being spent. Whether it
+          can be shown at all is `discardOffer`'s decision, and it says no when
+          this window cannot state the number.
+        -->
+        <button id="discard-vectors" type="button" hidden></button>
+        <p id="discard-vectors-note" class="muted"></p>
         <label>Reranking <select id="rerank-model"></select></label>
         <p id="rerank-model-unreadable" class="muted"></p>
         <p id="rerank-model-missing" class="muted"></p>
