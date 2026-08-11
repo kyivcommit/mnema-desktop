@@ -176,7 +176,7 @@ case_ "models: the number of spaces must be measured, not asserted (D96g, review
   src-tauri/src/models.rs \
   's{            space_count: db\.space_count\(\)\?,\n}{            space_count: 1,\n}' \
   '            space_count: 1,
-            rerank_model:' \
+            embedded_chunks_everywhere:' \
   mnema-desktop 'the_settings_tell_the_active_space_apart_from_the_whole_index' --test model_commands
 
 # The argument that must be the caller's. Made optional, a window that sends
