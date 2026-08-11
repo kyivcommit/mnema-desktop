@@ -69,9 +69,55 @@ pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Err
 /// Removes the key. What was embedded stays embedded; what stops is embedding
 /// anything new and answering a question, because the question must be embedded
 /// too (D29).
+///
+/// **It answers which of the two things happened**, because `Ok(())` was one
+/// answer to two events and the window turned it into one sentence: "the key
+/// was removed", to somebody who had entered none or whose key a second window
+/// had already taken (whole-branch review, I1). It is the same press and the
+/// same class as the empty field [`set_key`] refuses — a button that reports an
+/// event it did not cause.
+///
+/// The fact is not measured a second time here. `mnema_secrets::forget` sees
+/// `NoEntry` from the store and used to discard it; it reports it now, and this
+/// command passes it on. Asking `load` first would be the second measurement
+/// [`set_embedding_model`] argues against on the same store.
 #[tauri::command(async)]
-pub fn forget_key(state: State<'_, AppState>) -> Result<(), Error> {
-    Ok(mnema_secrets::forget(state.credential_ref())?)
+pub fn forget_key(state: State<'_, AppState>) -> Result<KeyRemoval, Error> {
+    Ok(KeyRemoval::of(mnema_secrets::forget(
+        state.credential_ref(),
+    )?))
+}
+
+/// What [`forget_key`] did, on the wire.
+///
+/// Tagged with `kind`, the convention every union this module sends the window
+/// already uses. It is [`mnema_secrets::Forgotten`] one layer out rather than
+/// that type re-exported: `mnema-secrets` knows nothing about a window and
+/// carries no serde, and the pin that fixes these spellings
+/// ([`Self::every_discriminant_the_window_sees_has_its_camel_case_spelling_pinned`])
+/// lives in this crate for the reason its own doc gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum KeyRemoval {
+    /// There was a key filed under this installation's reference, and there is
+    /// not any more.
+    Removed,
+    /// There was none. **Not a failure** — the caller asked for the key to be
+    /// gone and it is — and not the same sentence either.
+    NothingToRemove,
+}
+
+impl KeyRemoval {
+    /// Exhaustive over `mnema_secrets::Forgotten`, with no wildcard, for the
+    /// reason [`KeyStoreFailure::of`] gives about that crate's error type: a
+    /// third value added over there stops this compiling until somebody decides
+    /// what the window says about it.
+    fn of(forgotten: mnema_secrets::Forgotten) -> Self {
+        match forgotten {
+            mnema_secrets::Forgotten::Removed => Self::Removed,
+            mnema_secrets::Forgotten::NothingToRemove => Self::NothingToRemove,
+        }
+    }
 }
 
 /// What the window draws after a key is accepted.
@@ -650,8 +696,11 @@ mod tests {
     /// The canonical camelCase spelling of every discriminant this module sends
     /// across the IPC, pinned the way `job.rs` pins `EndReason`'s.
     ///
-    /// Four unions reach the window from here and not one of them was fastened
-    /// to anything: `grep -rn 'readFailed' src-tauri ui` was empty, and a fourth
+    /// `KeyState`, `KeyStoreFailure`, `IndexSettings`, `UnreadableCause` and
+    /// `KeyRemoval` reach the window from here — named rather than counted,
+    /// because the list has grown since this test was written and a total is a
+    /// definition that goes stale. Not one of them was fastened to anything
+    /// when it was: `grep -rn 'readFailed' src-tauri ui` was empty, and a fourth
     /// `KeyState` variant would have arrived in the window as an unhandled
     /// `kind` without reddening a thing. `job.rs` has had this exact mechanism
     /// twice since the walk job.
@@ -764,6 +813,39 @@ mod tests {
                 "{c:?} serialised differently than this test's own spelling of it"
             );
         }
+
+        let removal = |r: KeyRemoval| -> &'static str {
+            match r {
+                KeyRemoval::Removed => "removed",
+                KeyRemoval::NothingToRemove => "nothingToRemove",
+            }
+        };
+        for r in [KeyRemoval::Removed, KeyRemoval::NothingToRemove] {
+            assert_eq!(
+                tag(serde_json::to_value(r).unwrap()),
+                removal(r),
+                "{r:?} serialised differently than this test's own spelling of it"
+            );
+        }
+    }
+
+    /// Every answer the credential store can give a deletion, kept apart.
+    ///
+    /// The `match` in [`KeyRemoval::of`] is already exhaustive, so a third
+    /// `mnema_secrets::Forgotten` stops the crate compiling. What this adds is
+    /// the half an exhaustive match is perfectly happy without: that the two
+    /// are actually told apart rather than both mapped to `Removed`, which is
+    /// the build the window used to be.
+    #[test]
+    fn a_deletion_that_removed_a_key_is_told_apart_from_one_that_found_none() {
+        assert_eq!(
+            KeyRemoval::of(mnema_secrets::Forgotten::Removed),
+            KeyRemoval::Removed
+        );
+        assert_eq!(
+            KeyRemoval::of(mnema_secrets::Forgotten::NothingToRemove),
+            KeyRemoval::NothingToRemove
+        );
     }
 
     /// The same pin for the unions that reach the window from `mnema-provider`

@@ -732,3 +732,32 @@ case_ "the input limit is dropped for the one role whose refusal repeats it" \
   '        let input_limit = match role {
             Role::Embedding => InputLimit::NotStated,' \
   mnema-provider 'a_limit_stated_unreadably_is_told_apart_from_no_limit_for_every_role' --test catalogue
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The whole-branch review's own findings.
+#
+# ⚠️ Only one half of I2 can have a case at all. "Every sentence in the model
+# configuration block comes from `render.js`" is checked by a test that reads
+# `ui/main.js` as text (`every sentence in the model configuration block comes
+# from render.js`, `ui/render.test.js`), and `mutation-check.sh` runs
+# `cargo test` and nothing else — the same reach this file's header already
+# names for `REFUSALS` / `BALANCES` / `RECORD_IDS`. What is below is I1, which
+# is Rust on both of its halves.
+
+# The button that reported an event it had not caused. `mnema_secrets::forget`
+# is idempotent by design, so the deletion's own answer is the only place the
+# two events are still distinguishable — and this is the arm that used to throw
+# it away.
+case_ "a deletion that found nothing reports it as a removal" \
+  crates/mnema-secrets/src/lib.rs \
+  's~        Err\(keyring_core::Error::NoEntry\) => Ok\(Forgotten::NothingToRemove\),~        Err(keyring_core::Error::NoEntry) => Ok(Forgotten::Removed),~' \
+  '        Err(keyring_core::Error::NoEntry) => Ok(Forgotten::Removed),' \
+  mnema-secrets 'tests::forgetting_says_whether_there_was_anything_to_forget' --lib
+
+# And the same fold one layer out, where the fact reaches the window: an
+# exhaustive `match` is perfectly happy to map both values to one.
+case_ "the two answers to a deletion are folded on the way to the window" \
+  src-tauri/src/models.rs \
+  's~            mnema_secrets::Forgotten::NothingToRemove => Self::NothingToRemove,~            mnema_secrets::Forgotten::NothingToRemove => Self::Removed,~' \
+  '            mnema_secrets::Forgotten::NothingToRemove => Self::Removed,' \
+  mnema-desktop 'removing_a_key_that_is_not_there_says_so_rather_than_reporting_a_removal' --test model_commands

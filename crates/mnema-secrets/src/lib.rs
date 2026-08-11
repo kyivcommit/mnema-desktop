@@ -227,11 +227,33 @@ pub fn load(reference: &str) -> Result<Option<String>, Error> {
     }
 }
 
+/// What a [`forget`] that succeeded actually did.
+///
+/// Deleting a credential that is not there is not a failure — the caller asked
+/// for it to be gone and it is — but it is not the same event either, and this
+/// crate is the only layer that can still tell them apart: the store reports
+/// `NoEntry` and nothing above ever sees it. Answering `()` to both let a
+/// window tell somebody who had entered no key that this application had just
+/// removed one (whole-branch review, I1).
+///
+/// Asking the store beforehand would be a second measurement that can disagree
+/// with the one the deletion actually made — the argument
+/// `mnema_desktop::models::set_embedding_model` already writes down for the key
+/// it loads. This is the first measurement, reported instead of discarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Forgotten {
+    /// A credential was filed under this reference, and is not any more.
+    Removed,
+    /// There was none to remove.
+    NothingToRemove,
+}
+
 /// Deletes the secret filed under `reference`. Deleting one that is not there
-/// succeeds: the caller asked for it to be gone, and it is.
-pub fn forget(reference: &str) -> Result<(), Error> {
+/// succeeds — see [`Forgotten`] for why it succeeds with a different answer.
+pub fn forget(reference: &str) -> Result<Forgotten, Error> {
     match entry(reference)?.delete_credential() {
-        Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+        Ok(()) => Ok(Forgotten::Removed),
+        Err(keyring_core::Error::NoEntry) => Ok(Forgotten::NothingToRemove),
         Err(e) => Err(Error::from_keyring(reference, e)),
     }
 }
@@ -350,7 +372,9 @@ mod tests {
 
     use keyring_core::mock;
 
-    use super::{Error, SERVICE, forget, load, platform_store, store, store_is_acceptable};
+    use super::{
+        Error, Forgotten, SERVICE, forget, load, platform_store, store, store_is_acceptable,
+    };
 
     /// Synthetic, and shaped so it cannot be mistaken for a provider key: no
     /// `sk-` prefix, no base64 tail, and it says what it is.
@@ -480,6 +504,26 @@ mod tests {
         // entered, and re-running a cleanup must not fail on the second pass.
         forget("forget-never-stored").unwrap();
         forget("forget-never-stored").unwrap();
+    }
+
+    /// The same call, two events, and this is the only layer that can still see
+    /// which one happened: the store says `NoEntry` and nothing above it does.
+    /// Both directions, because a `forget` that answered `Removed` to
+    /// everything is exactly the build this exists to stop, and one that
+    /// answered `NothingToRemove` to everything would satisfy the second half
+    /// alone (whole-branch review, I1).
+    #[test]
+    fn forgetting_says_whether_there_was_anything_to_forget() {
+        mock_store();
+        store("forget-reported", SYNTHETIC).unwrap();
+
+        assert_eq!(forget("forget-reported").unwrap(), Forgotten::Removed);
+        assert_eq!(
+            forget("forget-reported").unwrap(),
+            Forgotten::NothingToRemove,
+            "the second call removed nothing, and a window that is told otherwise \
+             tells a person this application deleted a key they never had"
+        );
     }
 
     #[test]

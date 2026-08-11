@@ -39,6 +39,7 @@ import {
   RECORD_ID_TEXT,
   PRICE_TEXT,
   INPUT_LIMIT_TEXT,
+  KEY_REMOVAL_TEXT,
   indexNotAsked,
   indexOpened,
   indexOpenFailed,
@@ -59,6 +60,11 @@ import {
   catalogueSentence,
   roleRecordedSentence,
   recordedNoteSentence,
+  keyRemovedSentence,
+  keyNotRemovedSentence,
+  listNotReadSentence,
+  embeddingModelNotRecordedSentence,
+  roleNotRecordedSentence,
 } from "./render.js";
 
 // The canonical list of `EndReason` discriminants, in the exact camelCase
@@ -291,6 +297,9 @@ const RECORD_IDS = ["absent", "notAString", "known"];
 // `RecordId`, and held here for the same reason as those three.
 const PRICES = ["known", "notStated", "notAPrice", "unreadable"];
 const INPUT_LIMITS = ["known", "notStated", "notUnderstood"];
+// What `forget_key` answers. It answered `Ok(())` to two events until the
+// whole-branch review, and this window turned both into "the key was removed".
+const KEY_REMOVALS = ["removed", "nothingToRemove"];
 
 // Two unions `main.js` produces itself rather than reading off the wire: what
 // `open_index` answered, and what one role's `provider_models` call answered.
@@ -324,6 +333,7 @@ test("every union that reaches this window has exactly one table entry per varia
   assert.deepEqual(Object.keys(RECORD_ID_TEXT).sort(), [...RECORD_IDS].sort());
   assert.deepEqual(Object.keys(PRICE_TEXT).sort(), [...PRICES].sort());
   assert.deepEqual(Object.keys(INPUT_LIMIT_TEXT).sort(), [...INPUT_LIMITS].sort());
+  assert.deepEqual(Object.keys(KEY_REMOVAL_TEXT).sort(), [...KEY_REMOVALS].sort());
   assert.deepEqual(Object.keys(ROLE_NAME).sort(), [...ROLES].sort());
 });
 
@@ -1212,5 +1222,96 @@ test("each role is named in the sentence that says its model was recorded", () =
   for (const text of said) {
     assert.match(text, /vendor\/m/);
     assert.doesNotMatch(text, /undefined/);
+  }
+});
+
+// I1 — the button that reported an event it had not caused. `forget_key`
+// answered `Ok(())` whether or not there was a key, and this window wrote "the
+// key was removed" unconditionally, so somebody who had entered none, or whose
+// key a second window had already taken, was told this application removed one.
+// The Rust half is `a_deletion_that_removed_a_key_is_told_apart_from_one_that_
+// found_none` and `forgetting_says_whether_there_was_anything_to_forget`.
+test("a removal that found no key never says one was removed", () => {
+  const removed = keyRemovedSentence({ kind: "removed" });
+  const none = keyRemovedSentence({ kind: "nothingToRemove" });
+  const unknown = keyRemovedSentence({ kind: "somethingFutureAndUnknown" });
+
+  assert.match(removed, /was removed/);
+  assert.doesNotMatch(none, /was removed/,
+    "nothing was removed, and a person reading this had entered no key");
+  // Both directions and the third state: a table answering "there was no key"
+  // to everything would satisfy the line above and lie the other way, and a
+  // `kind` this build does not know must claim neither.
+  const said = [removed, none, unknown];
+  assert.equal(new Set(said).size, said.length, `two removal states read alike: ${said}`);
+  assert.doesNotMatch(unknown, /was removed/);
+  for (const text of said) {
+    assert.doesNotMatch(text, /undefined|\[object Object\]/);
+  }
+
+  // The failure of the same press is not one of the arms above, and must not
+  // read like either: the key is still exactly where it was.
+  const refused = keyNotRemovedSentence("credential store: the keychain is locked");
+  assert.doesNotMatch(refused, /was removed|no key to remove/);
+  assert.match(refused, /could not be removed/);
+  assert.ok(refused.endsWith("credential store: the keychain is locked"),
+    "the store's own words carry the fact and must survive");
+});
+
+// The four sentences that moved out of `main.js` for I2, checked where they can
+// now be reached at all. `roleNotRecordedSentence` is the one with a rule
+// rather than an interpolation: it was written in `main.js` without the
+// `?? role` fallback its own success sentence has, so a role this build does
+// not know rendered "the undefined model was not recorded".
+test("a failure sentence names what failed and carries the reason it was given", () => {
+  for (const [what, text] of [
+    ["the list", listNotReadSentence("dns error")],
+    ["the embedding model", embeddingModelNotRecordedSentence("index: no such space 7")],
+    ["a role", roleNotRecordedSentence("rerank", "dns error")],
+  ]) {
+    assert.doesNotMatch(text, /undefined|\[object Object\]/, `${what}: ${text}`);
+    assert.match(text, /could not be read|not recorded/, `${what}: ${text}`);
+  }
+
+  const said = ROLES.map((role) => roleNotRecordedSentence(role, "dns error"));
+  assert.equal(new Set(said).size, ROLES.length, `two roles read alike: ${said}`);
+  assert.match(roleNotRecordedSentence("rerank", "dns error"), /reranking/);
+  assert.match(roleNotRecordedSentence("somethingFutureAndUnknown", "dns error"),
+    /somethingFutureAndUnknown/,
+    "a role this build does not know is named, not rendered as undefined");
+});
+
+// `main.js`'s own header says every sentence in its model configuration block
+// comes from `render.js`. It was false for five of them (whole-branch review,
+// I2), and the sentence furthest outside the tables was the one that told
+// people a key had been removed when none had. So the claim is checked here
+// rather than promised there: a sentence that never enters this file is a
+// sentence no test in it can reach, whatever either comment says.
+//
+// It reads the source, like the test above it, and is scoped to the block —
+// the walking skeleton's half above the marker makes no such claim and is
+// deliberately not covered, because covering it silently would be this test
+// asserting something nobody wrote down.
+test("every sentence in the model configuration block comes from render.js", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const main = readFileSync(join(here, "main.js"), "utf8");
+
+  const marker = "// Model configuration.";
+  const at = main.lastIndexOf(marker);
+  assert.ok(at > 0, "the model configuration block's own header is gone, so this test aims at nothing");
+  const block = main.slice(at);
+
+  // Right-hand sides of `textContent =`, up to the end of the line. A literal
+  // opens with a quote or a backtick; anything else is a call or an identifier,
+  // which is to say `render.js`.
+  const assignments = [...block.matchAll(/\.textContent\s*=\s*(\S)/g)].map((m) => m[1]);
+  // Tight on purpose, the same way the id test above is: an assertion over an
+  // empty list passes, and a regexp that has rotted produces exactly that.
+  assert.ok(assignments.length >= 10,
+    `only ${assignments.length} textContent assignments found — the regexp has rotted, or the block shrank`);
+  for (const first of assignments) {
+    assert.ok(!["'", '"', "`"].includes(first),
+      `a sentence in the model configuration block starts with ${first} — it is a literal in ` +
+      "main.js, where render.test.js cannot reach it, and main.js's own header says there are none");
   }
 });

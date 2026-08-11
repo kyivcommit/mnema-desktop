@@ -8,7 +8,6 @@ import {
   endingSentence,
   searchResultItems,
   ROLES,
-  ROLE_NAME,
   indexNotAsked,
   indexOpened,
   indexOpenFailed,
@@ -27,6 +26,11 @@ import {
   catalogueSentence,
   roleRecordedSentence,
   recordedNoteSentence,
+  listNotReadSentence,
+  keyRemovedSentence,
+  keyNotRemovedSentence,
+  embeddingModelNotRecordedSentence,
+  roleNotRecordedSentence,
 } from "./render.js";
 
 const { invoke, Channel } = window.__TAURI__.core;
@@ -313,6 +317,28 @@ el("search-form").addEventListener("submit", async (event) => {
 // Every sentence below comes from `render.js`, which is where the states are
 // told apart and where `render.test.js` can reach them. This half is elements
 // and listeners, and its own job is to keep two facts out of one element.
+//
+// **The claim above was false** until the whole-branch review (I2) enumerated
+// the sentences that broke it — listed rather than counted, for the reason the
+// `render.js` header gives about its own union list: `the model list could not
+// be read`, `the key was removed`, `the key could not be removed`, `the
+// embedding model was not recorded`, and the one for rerank and chat.
+//
+// The exception was not even consistent: for rerank and chat the *success*
+// sentence was in `render.js` while its *failure* sentence was a literal here,
+// so a reader could not derive the rule from the code and the comment stated
+// the wrong one. All of them moved rather than the sentence being softened,
+// because the rule is what keeps a sentence inside the surface
+// `render.test.js` can reach — and the sentence furthest outside it was `the
+// key was removed`, which was also I1: a sentence about an event that had not
+// happened.
+//
+// It is checked rather than promised now: `every sentence in the model
+// configuration block comes from render.js` in `render.test.js` reads this file
+// and fails on a string or template literal assigned to a `textContent` below
+// this line. The block above it is the walking skeleton's and is deliberately
+// not covered — that claim would be a different one, and this comment does not
+// make it.
 
 // What `provider_models` has answered for this role, in three states rather
 // than two. `false` used to mean both "could not be read" and "has not been
@@ -358,7 +384,7 @@ const fillRole = async (role) => {
     // called without one), so a network failure here has nothing to do with
     // the credential store and must not be read as though it had.
     listState[role] = listFailed();
-    el(`${selectId(role)}-unreadable`).textContent = `the model list could not be read: ${error}`;
+    el(`${selectId(role)}-unreadable`).textContent = listNotReadSentence(error);
   }
 };
 
@@ -420,13 +446,12 @@ el("key-form").addEventListener("submit", async (event) => {
 
 el("forget").addEventListener("click", async () => {
   try {
-    await invoke("forget_key");
-    el("key-status").textContent = "the key was removed";
+    el("key-status").textContent = keyRemovedSentence(await invoke("forget_key"));
   } catch (error) {
     // The key is still there. Saying "removed" because the button was pressed
     // would state as fact something the store refused to do — and the next
     // line of the window, redrawn from the store itself, would contradict it.
-    el("key-status").textContent = `the key could not be removed: ${error}`;
+    el("key-status").textContent = keyNotRemovedSentence(error);
   }
   await refreshSettings();
 });
@@ -444,7 +469,7 @@ el(selectId("embedding")).addEventListener("change", async (event) => {
   } catch (error) {
     // The refusal already says how many vectors stand in the way; showing it
     // whole is better than a sentence of our own that says less.
-    el("model-status").textContent = `the embedding model was not recorded: ${error}`;
+    el("model-status").textContent = embeddingModelNotRecordedSentence(error);
   }
   await refreshSettings();
 });
@@ -459,8 +484,7 @@ for (const [role, command] of [
       await invoke(command, { model });
       el("model-status").textContent = roleRecordedSentence(role, model);
     } catch (error) {
-      el("model-status").textContent =
-        `the ${ROLE_NAME[role]} model was not recorded: ${error}`;
+      el("model-status").textContent = roleNotRecordedSentence(role, error);
     }
     await refreshSettings();
   });

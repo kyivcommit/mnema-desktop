@@ -10,8 +10,8 @@ mod support;
 use fixture::Fixture;
 use mnema_desktop::error::Error;
 use mnema_desktop::models::{
-    IndexRead, IndexSettings, KeyState, KeyStoreFailure, UnreadableCause, forget_key, key_present,
-    model_settings, provider_models, set_chat_model, set_embedding_model, set_key,
+    IndexRead, IndexSettings, KeyRemoval, KeyState, KeyStoreFailure, UnreadableCause, forget_key,
+    key_present, model_settings, provider_models, set_chat_model, set_embedding_model, set_key,
     set_rerank_model,
 };
 
@@ -285,8 +285,13 @@ fn forgetting_a_key_leaves_the_index_alone() {
         "the key must be present before forgetting it means anything"
     );
 
-    forget_key(fx.state()).expect("forgotten");
+    let removal = forget_key(fx.state()).expect("forgotten");
 
+    assert_eq!(
+        removal,
+        KeyRemoval::Removed,
+        "there was a key, and it is gone"
+    );
     assert!(!key_present(fx.state()).expect("ask the store"));
     assert!(
         fx.state()
@@ -294,6 +299,48 @@ fn forgetting_a_key_leaves_the_index_alone() {
             .expect("read")
             .is_some(),
         "removing the key removes the ability to embed, not what was embedded"
+    );
+}
+
+/// Pressing "Remove the key" with none stored says so, instead of reporting a
+/// removal this application did not make.
+///
+/// **This is the case the test above structurally cannot see**, and says so in
+/// its own words: it asserts the key *is* present first, on purpose, so that
+/// its later assertion is not satisfied by a key that was never there. That
+/// deliberate setup is why eleven review rounds and 45 mutation cases passed
+/// over `forget_key` answering `Ok(())` to two different events, and why the
+/// window wrote "the key was removed" to somebody who had entered none
+/// (whole-branch review, I1).
+///
+/// It is a state a person reaches by pressing the same button twice, or by
+/// pressing it once in a second window.
+#[test]
+fn removing_a_key_that_is_not_there_says_so_rather_than_reporting_a_removal() {
+    let fx = Fixture::with_provider_accepting_everything();
+
+    assert!(
+        !key_present(fx.state()).expect("ask the store"),
+        "this fixture starts with an empty store, which is the state under test"
+    );
+
+    assert_eq!(
+        forget_key(fx.state()).expect("removing nothing is not a failure"),
+        KeyRemoval::NothingToRemove,
+        "nothing was removed, and a window told otherwise tells a person this application \
+         deleted a key they never had"
+    );
+
+    // Idempotent, and still honest the second time — the press that produced
+    // the defect is the second one on a key that was there.
+    set_key(fx.state(), KEY.into()).expect("accepted");
+    assert_eq!(
+        forget_key(fx.state()).expect("forgotten"),
+        KeyRemoval::Removed
+    );
+    assert_eq!(
+        forget_key(fx.state()).expect("removing nothing is not a failure"),
+        KeyRemoval::NothingToRemove
     );
 }
 

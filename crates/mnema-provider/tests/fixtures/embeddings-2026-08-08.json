@@ -1,4 +1,5 @@
 {
+ "_mnema_note": "Not the whole answer. Six of the 33 records OpenRouter returned for output_modalities=embeddings on 2026-08-08, kept for the rules they exercise. `total_count` below is the provider's own number for that answer and is deliberately not rewritten to match the records here: 33 is the measured figure `MIN_CONTEXT_TOKENS` cites (12 of 33 refused). This key is Mnema's, not the provider's; nothing reads it.",
  "data": [
   {
    "id": "thenlper/gte-base",

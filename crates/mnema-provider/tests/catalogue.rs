@@ -1,5 +1,16 @@
 //! Розбір списку моделей провайдера. Фікстури — справжні відповіді від
 //! 2026-08-08; команди, якими їх знято, у Task 1 плану.
+//!
+//! **The two are not the same kind of artefact, and the difference is now
+//! written in each file.** `rerank-2026-08-08.json` is the whole answer: six
+//! records and `total_count: 6`. `embeddings-2026-08-08.json` is an excerpt —
+//! six of the 33 records that answer carried, kept for the rules they exercise
+//! — and its `total_count: 33` is the provider's own number for the full
+//! answer, not this file's. Read as a total of what the file holds it is the
+//! "count from a limited query" trap this project has already paid for, so the
+//! file says which it is in a `_mnema_note` key of ours that nothing reads
+//! (whole-branch review, M1). The 33 is not rewritten to 6: it is the measured
+//! figure `MIN_CONTEXT_TOKENS`' own doc cites as "12 of the 33".
 
 use mnema_provider::{
     Error, InputLimit, MIN_CONTEXT_TOKENS, ModelEntry, Price, RecordId, Refusal, Role,

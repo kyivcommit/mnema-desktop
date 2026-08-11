@@ -184,9 +184,9 @@ export function searchResultItems(hits) {
 //
 // The tagged unions that reach this file from `src-tauri/src/models.rs` and
 // `crates/mnema-provider` are `KeyState`, `IndexSettings`, `UnreadableCause`,
-// `KeyStoreFailure`, `Refusal`, `Balance`, `RecordId`, `Price` and
-// `InputLimit`. They are named rather than counted, because a count is a
-// definition and this list has grown twice. Every one of them exists because
+// `KeyStoreFailure`, `Refusal`, `Balance`, `RecordId`, `Price`, `InputLimit`
+// and `KeyRemoval`. They are named rather than counted, because a count is a
+// definition and this list has grown three times. Every one of them exists because
 // somebody measured a place where folding two of its values together stated, to
 // a person, a fact nobody had established — the last two after a person pressed
 // one button and read `$-1000000.000 per million tokens` under one model and a
@@ -466,6 +466,56 @@ export const keyStateSentence = (key) =>
 // clause states only what is true of every row, and the `Display` string that
 // follows carries the actual fact.
 export const keyNotSavedSentence = (error) => `the key was not saved: ${error}`;
+
+// What pressing "Remove the key" actually did, per `KeyRemoval`.
+//
+// It was one sentence — "the key was removed" — written unconditionally on a
+// command that answered `Ok(())` to two different events. `mnema_secrets::
+// forget` is idempotent by design, so somebody who had entered no key, or whose
+// key a second window had already taken, pressed the button and was told this
+// application had just removed one. The same press and the same class as the
+// empty field `set_key` refuses: a button reporting an event it did not cause
+// (whole-branch review, I1).
+//
+// `nothingToRemove` says what is true of the machine now as well as what did
+// not happen, because "there was nothing to remove" alone reads as a refusal.
+export const KEY_REMOVAL_TEXT = {
+  removed: () => "the key was removed",
+  nothingToRemove: () => "there was no key to remove — this machine has none stored",
+};
+
+export const keyRemovedSentence = (removal) =>
+  (
+    KEY_REMOVAL_TEXT[removal?.kind] ??
+    // Deliberately without the words the `removed` arm uses. An honest
+    // sentence built out of "was removed" is still a sentence a person skims as
+    // a removal, and it is what an oracle for "never says one was removed"
+    // cannot tell apart either.
+    (() =>
+      "this build did not understand what the key store answered, so what happened to the key " +
+      "is unknown")
+  )(removal);
+
+// The failure half of the same press. Not folded into `keyRemovedSentence`'s
+// table: a store that refused says nothing about whether a key is there, and
+// the key is still where it was — which is the opposite of both arms above.
+export const keyNotRemovedSentence = (error) => `the key could not be removed: ${error}`;
+
+// The failure sentences for the three commands that record a model, and for the
+// list one role's picker is filled from. They are here rather than in `main.js`
+// for the reason this file's own header gives and `main.js`'s repeats: a
+// sentence outside these tables is a sentence `render.test.js` cannot reach,
+// and the one that was outside them is the one that spent this branch telling
+// people about an event that had not happened.
+export const listNotReadSentence = (error) => `the model list could not be read: ${error}`;
+export const embeddingModelNotRecordedSentence = (error) =>
+  `the embedding model was not recorded: ${error}`;
+// `ROLE_NAME[role] ?? role`, the same fallback `roleRecordedSentence` has. In
+// `main.js` this was written without it, so a role this build does not know
+// produced "the undefined model was not recorded" — the cost of one sentence
+// living outside the table its own success sentence is in.
+export const roleNotRecordedSentence = (role, error) =>
+  `the ${ROLE_NAME[role] ?? role} model was not recorded: ${error}`;
 
 // What `main.js` knows about `open_index` and `UnreadableCause` structurally
 // cannot: whether the window has asked for an index at all, and what the ask
