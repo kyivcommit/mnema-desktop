@@ -500,17 +500,29 @@ impl Db {
     /// delete arrives through a cascade rather than directly — measured, and
     /// pinned by `tests/citation.rs`.
     ///
-    /// **What it does not reach: the vectors.** `chunk_embedding_state`
+    /// **What it reaches now: the vectors too.** `chunk_embedding_state`
     /// cascades from `chunk` and goes; the `vec_emb_<space_id>` tables are
-    /// created at runtime, are referenced by no foreign key, and stay. Nothing
-    /// today writes one — there is no embedder under D29 — so this is a trap
-    /// laid for the indexing-and-embedding spec rather than a live defect, and
-    /// it is sharper than it looks: `chunk.id` is `INTEGER PRIMARY KEY`
+    /// created at runtime and referenced by no foreign key, so the cascade
+    /// alone would never touch them —
+    /// [`crate::space::delete_vectors_for_document_in`] is what does, called
+    /// from [`Db::clear_document_content_in`] **before** the `DELETE FROM
+    /// page` that starts the cascade. That order is load-bearing, not
+    /// stylistic: once the cascade has taken the chunks there is no
+    /// `chunk.document_id` left to look their vector ids up by, and
+    /// [`Db::delete_watched_root`] (`write.rs:292`) keeps the same ordering
+    /// for the same reason.
+    ///
+    /// The sharper fact underneath is why leaving this unreached would have
+    /// been worse than clutter: `chunk.id` is `INTEGER PRIMARY KEY`
     /// **without** `AUTOINCREMENT`, so a rebuild reuses the ids it just freed.
     /// A surviving vector would then name a chunk whose text is different
-    /// content, with the row that recorded it as embedded already cleared. It
-    /// is the same shape as the block-id reuse D36 closed one level up, and it
-    /// needs the same kind of answer.
+    /// content, with the row that recorded it as embedded already gone with
+    /// the cascade — search answering with text the file no longer contains,
+    /// and nothing anywhere saying so. The same shape as the block-id reuse
+    /// D36 closed one level up. Nothing outside a test writes a vector yet —
+    /// there is no embedder under D29 — but this cycle is what starts
+    /// writing them, and the gap was closed ahead of that rather than after
+    /// it. D88.
     ///
     /// [`Db::delete_document`] has never reached them either, so this is not a
     /// regression — it is written down here because this is the method a
@@ -529,6 +541,11 @@ impl Db {
     /// **this** `Db`'s connection, which [`same_connection`] is what enforces.
     pub fn clear_document_content_in(&self, tx: &Transaction<'_>, id: &str) -> Result<(), Error> {
         same_connection(self, tx);
+        // Before the pages go: once the cascade has taken the chunks there is
+        // no `chunk.document_id` left to look their ids up by — the same
+        // ordering `delete_watched_root` keeps (`write.rs:292`). A `vec0`
+        // table is the target of no foreign key, so nothing else reaches it.
+        crate::space::delete_vectors_for_document_in(tx, id)?;
         tx.execute("DELETE FROM page WHERE document_id = ?1", params![id])?;
         crate::journal::write_document_status(tx, id, DocumentStatus::Pending)
     }
