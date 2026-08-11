@@ -257,7 +257,10 @@ fn wait_until_it_will_run(path: &Path) {
             // Anything else is this stand-in being wrong rather than busy, and
             // is worth failing on here — where the script is written and its
             // text is in hand — instead of several layers down as a pool error.
-            Err(e) => panic!("the stand-in at {} will not run at all: {e}", path.display()),
+            Err(e) => panic!(
+                "the stand-in at {} will not run at all: {e}",
+                path.display()
+            ),
         }
     }
     panic!(
