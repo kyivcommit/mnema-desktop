@@ -31,3 +31,20 @@ case_ "write: the vector sweep must run before the page delete, not after (D88, 
   'params![id])?;
         crate::space::delete_vectors_for_document_in(tx, id)?;' \
   mnema-index 'a_reused_chunk_id_gets_no_inherited_vector' --test citation
+
+# vec0 has no ON CONFLICT (space.rs's own comment on upsert_vector names the
+# grep that shows it), so the delete before the insert is what makes the
+# second write a replace rather than a second row. Removing it turns
+# upsert_vector into what insert_vector already is — and the row-count half
+# of the test above cannot tell that apart, only the stored-vector half can:
+# without the delete the second write's INSERT collides with the first row's
+# primary key and the call itself fails, which the count assertion never
+# reaches.
+case_ "space: upsert_vector without the delete stops being a replace (D95a)" \
+  crates/mnema-index/src/space.rs \
+  's{            tx\.execute\(\n                &format!\("DELETE FROM \{\} WHERE chunk_id = \?1", space\.table\),\n                params!\[chunk_id\],\n            \)\?;\n}{}' \
+  'self.transaction(|tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO' \
+  mnema-index 'upserting_a_vector_replaces_the_previous_one' --test space

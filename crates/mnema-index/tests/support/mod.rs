@@ -59,6 +59,68 @@ pub fn temp_db() -> TempDb {
 /// the alternative is a second copy of it later, and two answers to "what is
 /// the shortest real chunk" are a standing invitation for one of them to
 /// drift.
+/// A 1024-wide embedding space — the width `unit_vector_1024` and
+/// `other_unit_vector_1024` are built for.
+///
+/// `#[allow(dead_code)]` for the same reason [`one_chunk`] carries it: not
+/// every binary that declares `mod support;` calls this one.
+#[allow(dead_code)]
+pub fn space_1024(db: &Db) -> i64 {
+    let cfg = db
+        .create_model_config("default", "openrouter", None, "baai/bge-m3", 1024)
+        .expect("model config");
+    db.create_space(cfg, 1024, "chunker-v1").expect("space")
+}
+
+/// A unit vector along axis 0: valid for the cosine space [`space_1024`]
+/// builds, and — unlike an all-zero vector — one the crate's own
+/// `check_rankable` accepts.
+#[allow(dead_code)]
+pub fn unit_vector_1024() -> Vec<f32> {
+    let mut v = vec![0.0; 1024];
+    v[0] = 1.0;
+    v
+}
+
+/// A second unit vector, along axis 1 rather than axis 0. Distinct from
+/// [`unit_vector_1024`] in content and not only in identity, so a test can
+/// tell a genuine replacement from one that only looks like it happened —
+/// a row count of one is satisfied just as well by a write that silently
+/// kept the first vector's numbers.
+#[allow(dead_code)]
+pub fn other_unit_vector_1024() -> Vec<f32> {
+    let mut v = vec![0.0; 1024];
+    v[1] = 1.0;
+    v
+}
+
+/// Reads one stored vector back exactly as `insert_vector`/`upsert_vector`
+/// wrote it: float32, host byte order — the layout `mnema_index::space`'s
+/// private `as_blob` produces, decoded here because nothing public hands a
+/// vector back out of a space.
+#[allow(dead_code)]
+pub fn stored_vector(db: &Db, space_id: i64, chunk_id: i64) -> Vec<f32> {
+    let table: String = db
+        .conn()
+        .query_row(
+            "SELECT vec_table FROM embedding_space WHERE id = ?1",
+            [space_id],
+            |r| r.get(0),
+        )
+        .expect("space exists");
+    let blob: Vec<u8> = db
+        .conn()
+        .query_row(
+            &format!("SELECT embedding FROM {table} WHERE chunk_id = ?1"),
+            [chunk_id],
+            |r| r.get(0),
+        )
+        .expect("vector exists");
+    blob.chunks_exact(4)
+        .map(|b| f32::from_ne_bytes(b.try_into().expect("4-byte chunk")))
+        .collect()
+}
+
 #[allow(dead_code)]
 pub fn one_chunk(db: &Db) -> i64 {
     let doc = db

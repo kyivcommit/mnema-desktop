@@ -12,6 +12,8 @@
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_index::{Db, DocumentStatus, open, register_vector_extension};
 
+mod support;
+
 fn fresh(dir: &tempfile::TempDir) -> Db {
     register_vector_extension().unwrap();
     open(&dir.path().join("index.sqlite")).unwrap()
@@ -714,4 +716,49 @@ fn a_second_space_with_the_same_identity_names_the_first() {
     // A different chunker version is a different space, not a duplicate.
     db.create_space(cfg, 4, "chunker-v2")
         .expect("a new identity tuple");
+}
+
+// -------------------------------------------------- upsert and delete (D95a)
+
+/// `insert_vector` refuses a second write for the same chunk; `upsert_vector`
+/// is the retry-safe alternative a batch resumed after a partial failure
+/// needs. The row count alone is not proof: a delete-then-insert that failed
+/// halfway, or one that inserted without deleting, would also leave exactly
+/// one row — just the wrong one. The stored vector's content is what tells
+/// the two apart.
+#[test]
+fn upserting_a_vector_replaces_the_previous_one() {
+    let db = support::temp_db();
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .expect("first");
+    db.upsert_vector(space, chunk, &support::other_unit_vector_1024())
+        .expect("second");
+
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 1);
+    assert_eq!(
+        support::stored_vector(&db, space, chunk),
+        support::other_unit_vector_1024(),
+        "the second write did not replace the first"
+    );
+}
+
+/// The other half of retry-safety: a batch that already deleted its half of
+/// a failed run must be able to delete it again without first checking
+/// whether the row is still there.
+#[test]
+fn deleting_a_vector_is_idempotent() {
+    let db = support::temp_db();
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .expect("insert");
+
+    db.delete_vector(space, chunk).expect("first delete");
+    db.delete_vector(space, chunk)
+        .expect("second delete on nothing");
+
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 0);
 }

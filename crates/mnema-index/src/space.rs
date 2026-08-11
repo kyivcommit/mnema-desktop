@@ -210,6 +210,62 @@ impl Db {
         Ok(())
     }
 
+    /// Stores one embedding, replacing whatever this chunk already had in
+    /// this space.
+    ///
+    /// The check `insert_vector` documents applies here for the same reason
+    /// and is not weakened: a degenerate vector is degenerate whether it is
+    /// the first write for a chunk or the second. What differs is only the
+    /// collision rule — a retry that already wrote half a batch must be able
+    /// to finish without first asking which half landed.
+    ///
+    /// vec0 has no `ON CONFLICT` to lean on: `sqlite-vec.c` 0.1.9 — the
+    /// version `create_space` records into `meta`, `sqlite-vec-0.1.9/
+    /// sqlite-vec.c` in the crate's own vendored source — never calls
+    /// `sqlite3_vtab_on_conflict()` from its `xUpdate` (`vec0Update`,
+    /// `vec0Update_Insert`); the insert path always goes through
+    /// `vec0Update_InsertRowidStep`, which inserts the id into the `_rowids`
+    /// shadow table and fails on a duplicate primary key rather than
+    /// replacing the row. So `INSERT ... ON CONFLICT(chunk_id) DO UPDATE`
+    /// would reach that same insert path and fail the same way. Delete then
+    /// insert instead, in one transaction so an interruption cannot leave
+    /// the chunk with no vector at all.
+    ///
+    /// `insert_vector` is deliberately left alone. Its "exactly once" is a
+    /// statement some caller may want enforced, and quietly turning it into
+    /// a replace would remove an error worth seeing.
+    pub fn upsert_vector(&self, space_id: i64, chunk_id: i64, v: &[f32]) -> Result<(), Error> {
+        let space = self.space(space_id)?;
+        check_rankable(v, &space.metric, VectorRole::Stored(chunk_id))?;
+        self.transaction(|tx| {
+            tx.execute(
+                &format!("DELETE FROM {} WHERE chunk_id = ?1", space.table),
+                params![chunk_id],
+            )?;
+            tx.execute(
+                &format!(
+                    "INSERT INTO {} (chunk_id, embedding) VALUES (?1, ?2)",
+                    space.table
+                ),
+                params![chunk_id, as_blob(v)],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Removes one chunk's embedding from one space. Absence is not an
+    /// error: the caller retrying a partially failed batch cannot know which
+    /// rows already landed, and a delete that refused on "nothing to delete"
+    /// would turn every retry into a special case.
+    pub fn delete_vector(&self, space_id: i64, chunk_id: i64) -> Result<(), Error> {
+        let space = self.space(space_id)?;
+        self.conn().execute(
+            &format!("DELETE FROM {} WHERE chunk_id = ?1", space.table),
+            params![chunk_id],
+        )?;
+        Ok(())
+    }
+
     /// Nearest neighbours, optionally restricted to a set of chunk ids — which is
     /// what a tag filter becomes, since tags are many-to-many and cannot be a
     /// column on the vector table.

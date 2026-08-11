@@ -1195,11 +1195,12 @@ mod fixture {
 
     /// A 1024-wide embedding space — the width `unit_vector_1024` is built
     /// for, and the ordinary one under D95's default model.
+    ///
+    /// Delegates to `support::space_1024`, which Task 3's upsert/delete
+    /// tests (`tests/space.rs`) need too: one definition rather than a
+    /// second copy that can drift from this one.
     pub fn space_1024(db: &Db) -> i64 {
-        let cfg = db
-            .create_model_config("default", "openrouter", None, "baai/bge-m3", 1024)
-            .unwrap();
-        db.create_space(cfg, 1024, "chunker-v1").unwrap()
+        support::space_1024(db)
     }
 
     /// A document with one page, one block and one chunk holding `text`.
@@ -1260,10 +1261,11 @@ mod fixture {
 
     /// A unit vector along axis 0: valid for the cosine space `space_1024`
     /// builds, and — unlike an all-zero vector — one `check_rankable` accepts.
+    ///
+    /// Delegates to `support::unit_vector_1024`, for the same reason
+    /// `space_1024` above does.
     pub fn unit_vector_1024() -> Vec<f32> {
-        let mut v = vec![0.0; 1024];
-        v[0] = 1.0;
-        v
+        support::unit_vector_1024()
     }
 }
 
