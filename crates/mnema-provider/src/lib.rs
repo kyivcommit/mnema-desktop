@@ -10,8 +10,8 @@ mod http;
 mod probe;
 
 pub use catalogue::{
-    Catalogue, MIN_CONTEXT_TOKENS, ModelEntry, RecordId, Refusal, Role, UnreadableRecord,
-    models_from_json,
+    Catalogue, InputLimit, MIN_CONTEXT_TOKENS, ModelEntry, Price, RecordId, Refusal, Role,
+    UnreadableRecord, models_from_json,
 };
 pub use probe::{
     Balance, EmbeddingCheck, KeyCheck, ProviderMessage, SanitisedText, check_embedding_model,
@@ -218,8 +218,8 @@ pub enum Error {
     /// review finding 3). The dispatch order that specified this variant held
     /// it safe "only because it is filled from the user's own model id", and
     /// that premise is false: the user *selects* from the provider's list, and
-    /// `ModelEntry::id` (`catalogue.rs:56`) is copied verbatim out of the
-    /// provider's own body (`catalogue.rs:412`) with nothing sanitising it on
+    /// `ModelEntry::id` (`catalogue.rs:58`) is copied verbatim out of the
+    /// provider's own body (`catalogue.rs:558`) with nothing sanitising it on
     /// the way. This was the last variant interpolating an unbounded string
     /// through a plain format, and a newline inside a model id would cut a log
     /// line in half and let provider text pass for a separate entry.

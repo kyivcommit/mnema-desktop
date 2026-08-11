@@ -182,17 +182,21 @@ export function searchResultItems(hits) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Model configuration.
 //
-// Seven tagged unions reach this file from `src-tauri/src/models.rs` and
-// `crates/mnema-provider` — `KeyState`, `IndexSettings`, `UnreadableCause`,
-// `KeyStoreFailure`, `Refusal`, `Balance`, `RecordId` — and every one of them
-// exists because somebody measured a place where folding two of its values
-// together stated, to a person, a fact nobody had established. This is the last
-// seam before that person: a distinction lost here is lost.
+// The tagged unions that reach this file from `src-tauri/src/models.rs` and
+// `crates/mnema-provider` are `KeyState`, `IndexSettings`, `UnreadableCause`,
+// `KeyStoreFailure`, `Refusal`, `Balance`, `RecordId`, `Price` and
+// `InputLimit`. They are named rather than counted, because a count is a
+// definition and this list has grown twice. Every one of them exists because
+// somebody measured a place where folding two of its values together stated, to
+// a person, a fact nobody had established — the last two after a person pressed
+// one button and read `$-1000000.000 per million tokens` under one model and a
+// `$0.000` that was not free under six others.
+// This is the last seam before that person: a distinction lost here is lost.
 //
 // So each is a **table**, not a `switch` with a `default`, and `render.test.js`
 // asserts every table's key set is exactly the union's list of variants. A
 // `default` arm is where two states quietly become one pixel; a missing key is
-// a test failure. The four unions in `models.rs` also have a Rust-side pin
+// a test failure. The unions declared in `models.rs` also have a Rust-side pin
 // (`every_discriminant_the_window_sees_has_its_camel_case_spelling_pinned`),
 // whose own doc says the mirrored half belongs in `render.test.js` — this is
 // the renderer that lets it exist.
@@ -276,7 +280,7 @@ export const listFailed = () => ({ kind: "failed" });
 // "The provider no longer lists this model" is a claim about a third party, and
 // a call that succeeded does not establish it. `models_from_json` reads a
 // record's `id` off the raw value *before* the decode that failed
-// (`crates/mnema-provider/src/catalogue.rs:410-416`), precisely so a broken
+// (`crates/mnema-provider/src/catalogue.rs:556-562`), precisely so a broken
 // `pricing` or `architecture` block does not cost the one field that names the
 // record — so `RecordId::Known { id }` is exactly a model the provider **does**
 // list and this build could not read. Its id never reaches `entries`, so the
@@ -442,21 +446,25 @@ export const keyStateSentence = (key) =>
   )(key);
 
 // What `set_key` failing means, and the one thing this window must not say
-// about it. `set_key` checks the key with the provider **before** storing it
-// (`models.rs:42-48`), so of its three reachable failures only one is a key the
-// provider refused:
+// about it. `set_key` refuses an empty submission before it calls anyone and
+// checks the key with the provider **before** storing it (`models.rs:58-67`),
+// so of its reachable failures only one is a key the provider refused:
 //
 // | what happened | `Error` | was the key rejected |
 // | provider refused it | `Provider` | yes |
 // | provider not reached | `ProviderUnreachable` | **no** — nothing was decided |
 // | provider accepted it, the store would not keep it | `Secrets` | **no** |
+// | nothing was typed | `EmptyKey` | **no** — nothing was even asked |
 //
-// The last is the sharpest: a locked keychain is an ordinary state of the
+// The last two are the sharpest. A locked keychain is an ordinary state of the
 // machine by `KeyState`'s own doc, and "the key was not accepted" sends its
 // owner for a new one. This is the seam `ProviderUnreachable` was split out of
 // `Provider` for — the split survived four layers and used to die in this one
-// sentence. The leading clause now states only what is true in all three, and
-// the provider's own `Display` string, which carries the actual fact, follows.
+// sentence. `EmptyKey` is the one a person met on the first real run: the empty
+// string went to the provider, and "Missing Authentication header" came back
+// and was rendered here as a verdict on a key nobody had typed. The leading
+// clause states only what is true of every row, and the `Display` string that
+// follows carries the actual fact.
 export const keyNotSavedSentence = (error) => `the key was not saved: ${error}`;
 
 // What `main.js` knows about `open_index` and `UnreadableCause` structurally
@@ -578,10 +586,64 @@ export const adoptedModelSentence = (adopted, opening) => {
   return head + space + tail;
 };
 
-const price = (perToken) =>
-  perToken === null || perToken === undefined
-    ? "price unknown"
-    : `$${(perToken * 1e6).toFixed(3)} per million tokens`;
+// A stated zero, a number that cannot be a price, a value this build cannot
+// read, and nothing said at all — `Price`'s own states, named rather than
+// counted, and every one of them arrives at this line as something to say
+// rather than as a number to format.
+//
+// Two of them were on the screen at the first real run. `-1`, which the
+// provider sends for a model it prices at routing time, went through the
+// multiplication below and printed `$-1000000.000 per million tokens`. And all
+// six rerank models state `"prompt": "0"` — true, and billed per search rather
+// than per token, so `$0.000 per million tokens` told six models' worth of
+// people they would not be charged. Nothing in the payload states the
+// per-search price, so this window cannot say what they cost; what it can do is
+// stop concluding "free" from a zero.
+const ZERO_PRICE = "no charge per token stated — that is not the same as free";
+// A positive price so small that three decimals of a million tokens round to
+// zero would otherwise print `$0.000` and read as the sentence above, which is
+// about a provider that stated zero. `toFixed` is where the two facts would
+// meet, so the branch is here rather than in the wording.
+const SMALLEST_SHOWN_PER_MILLION = 0.001;
+
+const statedPrice = (amount) => {
+  if (amount === 0) {
+    return ZERO_PRICE;
+  }
+  const perMillion = amount * 1e6;
+  return perMillion < SMALLEST_SHOWN_PER_MILLION
+    ? `under $${SMALLEST_SHOWN_PER_MILLION.toFixed(3)} per million tokens`
+    : `$${perMillion.toFixed(3)} per million tokens`;
+};
+
+export const PRICE_TEXT = {
+  known: (p) => statedPrice(p.amount),
+  // Not "free", and not a zero. The provider said nothing.
+  notStated: () => "price unknown",
+  // `raw` is provider text, capped to 64 bytes on the Rust side and reaching
+  // the DOM through `textContent` only, never as markup — the same rule
+  // `limitNotUnderstood` states below.
+  notAPrice: (p) => `the provider stated ${p.raw} per token, which is not a price`,
+  unreadable: (p) => `price stated in a shape this build cannot read (${p.raw})`,
+};
+
+const priceText = (p) =>
+  (PRICE_TEXT[p?.kind] ?? (() => "the price is in a state this build does not know"))(p);
+
+// One phrase per `InputLimit`. "The provider stated no input limit" and "the
+// provider stated one this build cannot read" are opposite statements about the
+// provider, and for rerank and chat they used to arrive here as the same
+// `null`: the refusals that carry the distinction are the embedding role's, so
+// the other two roles rendered both as `input ?`. Fixing that is what put a
+// union on this field (I4).
+export const INPUT_LIMIT_TEXT = {
+  known: (l) => `input ${l.tokens}`,
+  notStated: () => "input limit not stated",
+  notUnderstood: (l) => `input limit in a shape this build cannot read (${l.raw})`,
+};
+
+const inputLimitText = (l) =>
+  (INPUT_LIMIT_TEXT[l?.kind] ?? (() => "the input limit is in a state this build does not know"))(l);
 
 // One sentence per `Refusal`, and the pairs are what the table is for. "The
 // provider did not say whether this model writes text" and "the provider said,
@@ -605,7 +667,7 @@ const refusalText = (refusal) =>
   `unavailable: ${(REFUSAL_TEXT[refusal.kind] ?? (() => "this build did not recognise the reason"))(refusal)}`;
 
 export const modelOptionLabel = (entry) => {
-  const head = `${entry.id} — ${price(entry.pricePerToken)}, input ${entry.contextLength ?? "?"}`;
+  const head = `${entry.id} — ${priceText(entry.price)}, ${inputLimitText(entry.inputLimit)}`;
   return entry.refusal ? `${head} — ${refusalText(entry.refusal)}` : head;
 };
 

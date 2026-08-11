@@ -62,7 +62,7 @@ pub struct Fixture {
     app: tauri::App<MockRuntime>,
     dir: tempfile::TempDir,
     credential_ref: String,
-    _server: MockServer,
+    server: MockServer,
 }
 
 impl Fixture {
@@ -187,12 +187,20 @@ impl Fixture {
             app,
             dir,
             credential_ref,
-            _server: server,
+            server,
         }
     }
 
     pub fn state(&self) -> tauri::State<'_, AppState> {
         self.app.state::<AppState>()
+    }
+
+    /// A request the mock provider has already received, or `None` — for a
+    /// test whose claim is that a command never called out at all. See
+    /// [`MockServer::request_if_any`] for why it does not wait and what makes
+    /// the answer sound.
+    pub fn provider_request(&self) -> Option<String> {
+        self.server.request_if_any()
     }
 
     pub fn credential_ref(&self) -> &str {

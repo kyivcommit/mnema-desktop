@@ -864,7 +864,7 @@ struct EmbeddingRow {
 /// `model` goes through the sanitising pipeline before it reaches
 /// `Error::NoSuchModel` (fix round 1, item 3): the id the user picked is a
 /// string this crate copied verbatim out of the provider's body
-/// (`catalogue.rs:412`), so it is provider bytes and gets what provider bytes
+/// (`catalogue.rs:558`), so it is provider bytes and gets what provider bytes
 /// get. The guarantee is carried by the field's type, not by this call site —
 /// see `Error::NoSuchModel`'s own doc comment for why a sanitised `String` in
 /// a `String` field would not have been the fix.
@@ -941,9 +941,9 @@ fn unreadable_embeddings_answer(body: &str, key: &str, error: &serde_json::Error
 /// because it is stated nowhere else (spec §2.4).
 ///
 /// **`model` is treated as provider bytes, and the caller owes nothing.** The
-/// id a user picks comes from `ModelEntry::id` (`catalogue.rs:56`), which
+/// id a user picks comes from `ModelEntry::id` (`catalogue.rs:58`), which
 /// `models_from_json` copies verbatim out of the provider's own body
-/// (`catalogue.rs:412`) with nothing sanitising it on the way — so this call
+/// (`catalogue.rs:558`) with nothing sanitising it on the way — so this call
 /// sanitises it, in `status_error`, and `Error::NoSuchModel` carries the result
 /// in a field that cannot hold anything else. The first version of this
 /// function stated the requirement here instead and left it to whoever wired

@@ -37,6 +37,8 @@ import {
   REFUSAL_TEXT,
   BALANCE_TEXT,
   RECORD_ID_TEXT,
+  PRICE_TEXT,
+  INPUT_LIMIT_TEXT,
   indexNotAsked,
   indexOpened,
   indexOpenFailed,
@@ -284,6 +286,11 @@ const REFUSALS = [
 ];
 const BALANCES = ["known", "notStated", "unreadable", "envelopeNotUnderstood"];
 const RECORD_IDS = ["absent", "notAString", "known"];
+// The two the first live run added, and the two whose Rust side is `Price` and
+// `InputLimit` — pinned in `models.rs` beside `Refusal`, `Balance` and
+// `RecordId`, and held here for the same reason as those three.
+const PRICES = ["known", "notStated", "notAPrice", "unreadable"];
+const INPUT_LIMITS = ["known", "notStated", "notUnderstood"];
 
 // Two unions `main.js` produces itself rather than reading off the wire: what
 // `open_index` answered, and what one role's `provider_models` call answered.
@@ -315,6 +322,8 @@ test("every union that reaches this window has exactly one table entry per varia
   assert.deepEqual(Object.keys(REFUSAL_TEXT).sort(), [...REFUSALS].sort());
   assert.deepEqual(Object.keys(BALANCE_TEXT).sort(), [...BALANCES].sort());
   assert.deepEqual(Object.keys(RECORD_ID_TEXT).sort(), [...RECORD_IDS].sort());
+  assert.deepEqual(Object.keys(PRICE_TEXT).sort(), [...PRICES].sort());
+  assert.deepEqual(Object.keys(INPUT_LIMIT_TEXT).sort(), [...INPUT_LIMITS].sort());
   assert.deepEqual(Object.keys(ROLE_NAME).sort(), [...ROLES].sort());
 });
 
@@ -417,18 +426,21 @@ test("a locked keychain shows an action, not the operating system's status code"
 });
 
 // I1, the fourteenth "two facts, one message", and the only one that reached the
-// window's own text. `set_key` checks the key with the provider before storing
-// it, so two of its three reachable failures decided nothing about the key:
-// `ProviderUnreachable` ("nothing was refused and nothing was decided", by
-// `error.rs`'s own words) and `Secrets` (the provider accepted it; the store
-// would not keep it). The sharpest is the third — a locked keychain is an
+// window's own text. `set_key` refuses an empty submission before it calls
+// anyone and checks the key with the provider before storing it, so every
+// reachable failure but one decided nothing about the key: `ProviderUnreachable`
+// ("nothing was refused and nothing was decided", by `error.rs`'s own words),
+// `Secrets` (the provider accepted it; the store would not keep it), and
+// `EmptyKey` (nothing was typed, so nothing was asked). A locked keychain is an
 // ordinary state of the machine, and "the key was not accepted" sends its owner
-// for a new one.
+// for a new one; the empty box is the same sentence about a person who has not
+// started yet, and it is the one the first real run put on the screen.
 test("a key that was not saved is never reported as a key the provider refused", () => {
   const failures = [
     "the provider refused the key",
     "the provider could not be reached: dns error",
     "the credential store: the keychain is locked",
+    "an empty key was submitted, so nothing was sent to the provider and nothing was checked",
   ];
   for (const error of failures) {
     const text = keyNotSavedSentence(error);
@@ -438,7 +450,7 @@ test("a key that was not saved is never reported as a key the provider refused",
     assert.doesNotMatch(clause, /accepted|rejected|refused/i,
       `"${error}" had a decision about the key attributed to it that nobody made`);
     assert.match(clause, /not saved/,
-      "the one thing true of all three failures is what the clause may state");
+      "the one thing true of every failure is what the clause may state");
     assert.ok(text.endsWith(error), "the provider's own words carry the fact and must survive");
   }
 });
@@ -627,13 +639,27 @@ test("a read-back that succeeded is never told it failed", () => {
   assert.match(text, /vendor\/embed-3/, "and the adoption itself is still stated");
 });
 
+// A model entry as the wire carries it, with the two fields a test does not
+// care about filled in. Named states, never bare numbers: `pricePerToken: null`
+// and `contextLength: null` were the shapes the acceptance run found too narrow,
+// and a fixture written in the old shape would silently exercise a fallback.
+const entryWith = (fields) => ({
+  id: "vendor/x",
+  price: { kind: "notStated" },
+  inputLimit: { kind: "known", tokens: 8192 },
+  refusal: null,
+  ...fields,
+});
+
 test("a refused model says both numbers", () => {
-  const label = modelOptionLabel({
-    id: "thenlper/gte-base",
-    contextLength: 512,
-    pricePerToken: 0.000000005,
-    refusal: { kind: "inputTooSmall", limit: 512, floor: 2048 },
-  });
+  const label = modelOptionLabel(
+    entryWith({
+      id: "thenlper/gte-base",
+      price: { kind: "known", amount: 0.000000005 },
+      inputLimit: { kind: "known", tokens: 512 },
+      refusal: { kind: "inputTooSmall", limit: 512, floor: 2048 },
+    }),
+  );
   assert.match(label, /512/);
   assert.match(label, /2048/);
 });
@@ -643,48 +669,37 @@ test("a refused model says both numbers", () => {
 // and "said, and text was not among it" are opposite statements about the
 // provider; so are "stated no limit" and "stated one this build cannot read".
 test("a refusal never states about the provider something the provider did not say", () => {
-  const notSaid = modelOptionLabel({
-    id: "vendor/x",
-    contextLength: 8192,
-    pricePerToken: null,
-    refusal: { kind: "noStatedOutputModalities" },
-  });
+  const notSaid = modelOptionLabel(
+    entryWith({ refusal: { kind: "noStatedOutputModalities" } }),
+  );
   assert.doesNotMatch(notSaid, /does not write text/);
   assert.match(notSaid, /did not say/);
 
-  const said = modelOptionLabel({
-    id: "vendor/y",
-    contextLength: 8192,
-    pricePerToken: null,
-    refusal: { kind: "noTextOutput" },
-  });
+  const said = modelOptionLabel(entryWith({ id: "vendor/y", refusal: { kind: "noTextOutput" } }));
   assert.match(said, /does not write text/);
 
-  const unread = modelOptionLabel({
-    id: "vendor/z",
-    contextLength: null,
-    pricePerToken: null,
-    refusal: { kind: "limitNotUnderstood", raw: "8192.0" },
-  });
+  const unread = modelOptionLabel(
+    entryWith({
+      id: "vendor/z",
+      inputLimit: { kind: "notUnderstood", raw: "8192.0" },
+      refusal: { kind: "limitNotUnderstood", raw: "8192.0" },
+    }),
+  );
   assert.doesNotMatch(unread, /did not state/);
   assert.match(unread, /8192\.0/, "the value the provider actually sent is what a bug report needs");
 
-  const absent = modelOptionLabel({
-    id: "vendor/w",
-    contextLength: null,
-    pricePerToken: null,
-    refusal: { kind: "noStatedLimit" },
-  });
+  const absent = modelOptionLabel(
+    entryWith({
+      id: "vendor/w",
+      inputLimit: { kind: "notStated" },
+      refusal: { kind: "noStatedLimit" },
+    }),
+  );
   assert.match(absent, /did not state an input limit/);
 });
 
 test("a refusal this build does not know is still shown as a refusal", () => {
-  const label = modelOptionLabel({
-    id: "vendor/x",
-    contextLength: 8192,
-    pricePerToken: null,
-    refusal: { kind: "somethingFutureAndUnknown" },
-  });
+  const label = modelOptionLabel(entryWith({ refusal: { kind: "somethingFutureAndUnknown" } }));
   assert.match(label, /unavailable/);
   assert.doesNotMatch(label, /undefined/);
 });
@@ -695,18 +710,116 @@ test("a refusal this build does not know is still shown as a refusal", () => {
 // would have reddened it on *correct* code. An oracle must not share a
 // substring with the data it checks; this one aims at the rendering instead.
 test("a price the provider did not state is unknown, not free", () => {
-  const entry = { id: "vendor/x:free", contextLength: 8192, refusal: null };
-  const unstated = modelOptionLabel({ ...entry, pricePerToken: null });
+  // The fixture id carries `:free` on purpose. The oracle here used to be
+  // `/free/`, which is a substring of a whole family of real OpenRouter ids —
+  // it was green only because the fixture was called `vendor/x`, and a
+  // realistic id would have reddened it on *correct* code. An oracle must not
+  // share a substring with the data it checks; this one aims at the rendering.
+  const unstated = modelOptionLabel(
+    entryWith({ id: "vendor/x:free", price: { kind: "notStated" } }),
+  );
   assert.match(unstated, /price unknown/);
   assert.doesNotMatch(unstated, /\$/,
     "an unstated price must not render as any amount at all, free included");
+});
 
-  // Both directions, and the same rule `Balance::Known { amount: 0 }` follows:
-  // a zero the provider actually stated is a price, and the one state here that
-  // is a number.
-  const stated = modelOptionLabel({ ...entry, pricePerToken: 0 });
-  assert.match(stated, /\$0\.000/);
-  assert.notEqual(stated, unstated);
+// The defect a person met on the first run, and the reason the old version of
+// this assertion is gone rather than extended: it required `$0.000` of a stated
+// zero, on the rule `Balance::Known { amount: 0 }` follows. The rule is right
+// about the *number* and the sentence built on it was not. All six rerank
+// models state `"prompt": "0"` — pinned in the provider crate by
+// `every_rerank_model_the_provider_lists_states_a_price_of_zero` — and they are
+// billed per search, so "$0.000 per million tokens" told their users they would
+// not be charged. The payload states no per-search price, so the honest
+// sentence says what was stated and refuses the conclusion.
+test("a stated zero is a price the provider stated, and never a promise that the model is free", () => {
+  const zero = modelOptionLabel(entryWith({ price: { kind: "known", amount: 0 } }));
+  assert.match(zero, /not the same as free/);
+  assert.doesNotMatch(zero, /\$0\.000/,
+    "a bare $0.000 per million tokens is exactly the sentence that reads as a promise");
+
+  // Both directions: a table that answered the caveat to every price would
+  // satisfy the line above and say nothing.
+  const real = modelOptionLabel(entryWith({ price: { kind: "known", amount: 0.000000015 } }));
+  assert.match(real, /\$0\.015 per million tokens/);
+  assert.doesNotMatch(real, /not the same as free/);
+});
+
+// A positive price small enough that three decimals of a million tokens round
+// to zero. `toFixed` is where it would become the same pixels as a stated zero
+// — the two facts, one message this whole cycle is about, in a rounding rule.
+test("a price too small to show at three decimals is not rendered as a zero", () => {
+  const tiny = modelOptionLabel(entryWith({ price: { kind: "known", amount: 1e-12 } }));
+  assert.match(tiny, /under \$0\.001 per million tokens/);
+  assert.doesNotMatch(tiny, /not the same as free/,
+    "it is not a stated zero: the provider stated a price, and it is small");
+  assert.doesNotMatch(tiny, /\$0\.000/);
+
+  // The boundary in the other direction: a price that does reach three decimals
+  // is shown as itself, so the branch above cannot swallow everything cheap.
+  const shown = modelOptionLabel(entryWith({ price: { kind: "known", amount: 1e-9 } }));
+  assert.match(shown, /\$0\.001 per million tokens/);
+  assert.doesNotMatch(shown, /under/);
+});
+
+// The sentinel that was on the screen: `-1`, which the provider sends for a
+// model priced at routing time, went through `× 1e6` and printed
+// `$-1000000.000 per million tokens`. Nothing anywhere rejected a negative.
+test("a number that cannot be a price is never rendered as one", () => {
+  const sentinel = modelOptionLabel(entryWith({ price: { kind: "notAPrice", raw: "-1" } }));
+  assert.doesNotMatch(sentinel, /\$/, "no amount may be shown for a number that is not an amount");
+  assert.doesNotMatch(sentinel, /-1000000/);
+  assert.match(sentinel, /-1/, "what the provider actually sent is what a bug report needs");
+  assert.doesNotMatch(sentinel, /undefined|NaN/);
+});
+
+// Every state of the price reads as its own fact. A key-set check is satisfied
+// by four arms saying the same thing, and "the provider said nothing" against
+// "the provider said something this build cannot read" is the pair `Option`
+// could not hold — the same fold N1 fixed one field over, for the input limit.
+// The fact that used to die on the wire for rerank and chat. The refusals that
+// carry it are the embedding role's, so for the other two roles "the provider
+// stated no input limit" and "the provider stated one this build cannot read"
+// both arrived as `contextLength: null, refusal: null` and drew `input ?` (I4).
+// The Rust half is
+// `a_limit_stated_unreadably_is_told_apart_from_no_limit_for_the_roles_that_refuse_over_neither`.
+test("nothing stated about the input limit reads differently from something unreadable", () => {
+  const silent = modelOptionLabel(entryWith({ inputLimit: { kind: "notStated" } }));
+  const unreadable = modelOptionLabel(
+    entryWith({ inputLimit: { kind: "notUnderstood", raw: "8k" } }),
+  );
+  const known = modelOptionLabel(entryWith({ inputLimit: { kind: "known", tokens: 8194 } }));
+  const unknownState = modelOptionLabel(
+    entryWith({ inputLimit: { kind: "somethingFutureAndUnknown" } }),
+  );
+
+  const said = [silent, unreadable, known, unknownState];
+  assert.equal(new Set(said).size, said.length, `two input limit states read alike: ${said}`);
+  for (const text of said) {
+    assert.doesNotMatch(text, /undefined|NaN|\[object Object\]/);
+  }
+  assert.match(unreadable, /8k/, "the value the provider actually sent is what a bug report needs");
+  assert.doesNotMatch(silent, /8k/);
+  assert.match(known, /8194/);
+  // The one thing neither of the two unknowns may be drawn as: a number.
+  assert.doesNotMatch(silent, /\d/);
+  assert.doesNotMatch(unknownState, /\d/);
+});
+
+test("every price state reads differently, and none of them is a number this build invented", () => {
+  const said = [
+    { kind: "known", amount: 0.000000015 },
+    { kind: "known", amount: 0 },
+    { kind: "notStated" },
+    { kind: "notAPrice", raw: "-1" },
+    { kind: "unreadable", raw: "free" },
+    { kind: "somethingFutureAndUnknown" },
+  ].map((price) => modelOptionLabel(entryWith({ price })));
+
+  assert.equal(new Set(said).size, said.length, `two price states read alike: ${said}`);
+  for (const text of said) {
+    assert.doesNotMatch(text, /undefined|NaN|\[object Object\]/);
+  }
 });
 
 test("no state of the balance is ever rendered as a zero", () => {
@@ -830,7 +943,7 @@ test("a recorded model missing from the picker is never lost, and never blamed o
 // The fifteenth "two facts, one message", and the sharpest so far because the
 // false half is a claim about somebody else. Reachable by construction, not by
 // argument: `models_from_json` reads a record's `id` off the raw value before
-// the decode that failed (`catalogue.rs:410-416`), so `RecordId::Known { id }`
+// the decode that failed (`catalogue.rs:556-562`), so `RecordId::Known { id }`
 // names a model the provider **does** list and this build could not read. Its
 // id never reaches `entries`, so the picker has no option for it — and the
 // window used to print, under one picker, one line above the other:
@@ -938,7 +1051,7 @@ test("a list state this build does not know does not claim the provider withdrew
 });
 
 // I3 — the decision `provider_models` explicitly delegated to whoever renders
-// this: `models.rs:120-125` keeps both numbers on the wire precisely so the
+// this: `models.rs:135-145` keeps both numbers on the wire precisely so the
 // window can tell "the provider has none" from "something upstream ate them",
 // and rendering neither leaves a picker with no options and no explanation.
 test("a well-formed empty catalogue says so instead of drawing an empty picker", () => {

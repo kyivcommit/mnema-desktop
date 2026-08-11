@@ -66,6 +66,56 @@ fn a_key_is_checked_before_it_is_stored() {
 }
 
 #[test]
+fn an_empty_key_is_refused_here_rather_than_being_sent_and_reported_as_a_verdict_on_a_key() {
+    // The first thing the first real run of the application found. Pressing
+    // "Check and save" with nothing typed sent a request carrying an empty
+    // bearer token, and the provider's "Missing Authentication header" reached
+    // the window as "the key was not saved: provider: the key was refused:
+    // Missing Authentication header". Nobody had typed a key, so nothing had
+    // been refused.
+    //
+    // Two claims, checked separately because they fail separately: the message
+    // is not a verdict about a key, and no request left the machine to produce
+    // one.
+    let fx = Fixture::with_provider_rejecting_the_key();
+
+    let refusal = set_key(fx.state(), String::new()).expect_err("an empty key is not a key");
+
+    assert!(
+        matches!(refusal, Error::EmptyKey),
+        "an empty box must not arrive as anything the provider decided: {refusal:?}"
+    );
+    // The variant is not the whole guarantee: this type crosses the IPC as its
+    // `Display` string, so the sentence is what a person actually reads.
+    let said = refusal.to_string();
+    assert!(
+        !said.contains("refused") && !said.contains("provider:"),
+        "the sentence still reports a refusal nobody made: {said}"
+    );
+    assert!(
+        fx.provider_request().is_none(),
+        "a request left the machine for a key nobody typed"
+    );
+    assert_eq!(
+        mnema_secrets::load(fx.credential_ref()).expect("read the store"),
+        None,
+        "an empty string must not be stored as this installation's key"
+    );
+
+    // The other direction, and the reason this test can claim anything at all
+    // about the line above: a real key DOES reach the provider through this
+    // same fixture, so "no request arrived" is a fact about the guard and not
+    // about a mock nobody could have reached. It is the fixture's one 401, so
+    // the call is refused — which is beside the point here.
+    set_key(fx.state(), KEY.into()).expect_err("the fixture's provider refuses every key");
+    assert!(
+        fx.provider_request().is_some(),
+        "no request arrived for a key that was typed either, so the assertion above proves \
+         nothing about the empty one"
+    );
+}
+
+#[test]
 fn a_refusal_leaves_the_key_that_was_already_working() {
     // The best property of "check, then store", and the one the test above
     // cannot see: it starts from an empty store, so it is satisfied both by a

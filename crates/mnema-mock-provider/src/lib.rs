@@ -160,6 +160,22 @@ impl MockServer {
             .recv_timeout(Duration::from_secs(10))
             .expect("the client made no request")
     }
+
+    /// The next request if one has **already** arrived, and `None` if none has.
+    ///
+    /// For the opposite claim from [`MockServer::request`]'s: that a call was
+    /// never made at all, which no amount of waiting can establish — so this
+    /// one does not wait.
+    ///
+    /// It is sound only about a client that has already returned, and that is
+    /// the whole of its contract. The order on this side is fixed: the request
+    /// goes onto the channel *before* the reply is written, so any request the
+    /// client got an answer to is already queued here by the time the call
+    /// under test returns. A `None` from a client still in flight would mean
+    /// nothing.
+    pub fn request_if_any(&self) -> Option<String> {
+        self.seen.try_recv().ok()
+    }
 }
 
 /// Writes a status line, headers and `body`, declaring `content-length` as

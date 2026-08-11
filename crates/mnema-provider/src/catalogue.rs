@@ -13,7 +13,9 @@
 //! the first odd record the provider ever sends — and the same rule applies one
 //! level down, to a single field: a value this build cannot read must say so,
 //! never be folded into the same `None` a field that was simply never
-//! mentioned would produce (N1, review round 2).
+//! mentioned would produce (N1, review round 2). [`InputLimit`] and [`Price`]
+//! are that rule as types — the first live run found both fields still
+//! answering in an `Option` narrower than what the provider sends.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -55,14 +57,121 @@ impl Role {
 pub struct ModelEntry {
     pub id: String,
     pub name: String,
-    pub context_length: Option<i64>,
-    /// Price of one input token, as the provider states it. `None` when it does
-    /// not — shown as "price unknown" rather than as free.
-    pub price_per_token: Option<f64>,
+    /// What the provider said about how much input this model takes — see
+    /// [`InputLimit`] for why it is not an `Option<i64>`.
+    pub input_limit: InputLimit,
+    /// What the provider said about the price of one input token — see
+    /// [`Price`] for why it is not an `Option<f64>`.
+    pub price: Price,
     /// `None` means selectable. Anything else is shown, greyed, with its reason
     /// (spec §2.5): a model the provider lists and we hide sends the user
     /// looking for a fault in this application.
     pub refusal: Option<Refusal>,
+}
+
+/// What `context_length` and `top_provider.context_length`, taken together,
+/// say about a record's input limit — and the shape that fact travels in.
+///
+/// It was a private enum flattened into `Option<i64>` on the way out, and the
+/// flattening lost a fact for two of the three roles. The refusals that carry
+/// it — [`Refusal::NoStatedLimit`] and [`Refusal::LimitNotUnderstood`] — are
+/// `Role::Embedding` only, because the floor is an embedding rule, so for
+/// rerank and chat "the provider stated no limit" and "the provider stated one
+/// this build cannot read" both reached the window as `contextLength: null,
+/// refusal: null` and drew the same question mark. Task 10 routed that to the
+/// ledger rather than fixing it, on the grounds that recovering it changes this
+/// type's wire shape; the acceptance run needed that change for [`Price`]
+/// anyway, and had the harm on the screen.
+///
+/// `NotUnderstood` wins even next to a sibling that parsed fine — see
+/// [`combined_limit`] for why that is the honest answer and not a defect (I1,
+/// review round 3).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum InputLimit {
+    /// Neither `context_length` nor `top_provider.context_length` was present.
+    NotStated,
+    /// The narrower of what the provider stated, in tokens.
+    Known { tokens: i64 },
+    /// At least one of the two was present in a shape this build does not
+    /// understand. `raw` is the one payload in this enum the crate did not
+    /// compute — provider text, capped to `MAX_RAW_LEN` so a malformed value
+    /// cannot become an unbounded label in a picker (I2, review round 3), and
+    /// untrusted wherever it is rendered. If it ever reaches a log line,
+    /// format it with `{:?}` and never `{}` (Task 2 review round 1, spec item
+    /// B): a newline inside it would cut the line in half and let provider
+    /// text impersonate a log entry.
+    NotUnderstood { raw: String },
+}
+
+/// What the provider said about the price of one input token.
+///
+/// It was an `Option<f64>`, and the acceptance run measured the live list
+/// answering in more shapes than that can hold. Each of these is a different
+/// thing to tell a person, and the two that arrive as a number are the ones
+/// `Option` could not separate:
+///
+/// - a price — rendered as a price;
+/// - a stated zero, which is a price and is deliberately **not** a variant of
+///   its own; see [`Price::Known`];
+/// - a negative number, which cannot be the cost of a token at all; see
+///   [`Price::NotAPrice`]. `openrouter/auto-beta` and `openrouter/fusion` state
+///   `-1`, nothing rejected it, and the window multiplied it by a million and
+///   printed `$-1000000.000 per million tokens`;
+/// - a value stated in a shape this build cannot read, which used to be folded
+///   into the same "nothing was stated" an absent field produces — the honesty
+///   question `Pricing`'s own field left open when N1 fixed the same fold one
+///   field over, for the input limit;
+/// - nothing said at all.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum Price {
+    /// No `pricing` block, no `prompt` inside one, or an explicit JSON `null`.
+    #[default]
+    NotStated,
+    /// A price for one input token, as the provider stated it.
+    ///
+    /// **A stated zero is one of these**, and that is a ruling rather than an
+    /// oversight: zero is a number the provider sent, the same reading
+    /// `Balance::Known { amount: 0 }` already carries one module over, and a
+    /// type that hid it would be answering "how much?" with "unknown" about a
+    /// provider that answered. What a zero may be *rendered* as is a different
+    /// question and belongs to whoever renders it: all six rerank models state
+    /// `"prompt": "0"` while being billed per search rather than per token, so
+    /// "$0.000 per million tokens" on its own tells a person they will not be
+    /// charged. Nothing in the payload states the per-search price —
+    /// `tests/fixtures/rerank-2026-08-08.json` carries `prompt` and
+    /// `completion` and no other price field — so no code here can name what
+    /// the model actually costs, and the honest sentence says what was stated
+    /// and stops there.
+    Known { amount: f64 },
+    /// The provider stated a number that cannot be the price of one token:
+    /// negative, or not finite. Both are together because they leave a person
+    /// with the same question and neither answers it; `raw` is what the
+    /// provider actually sent, and is what tells them apart.
+    ///
+    /// Measured 2026-08-11 on the live list: `openrouter/auto-beta` and
+    /// `openrouter/fusion` state `-1`. A non-finite value cannot arrive as a
+    /// JSON number, but `"NaN"` and `"inf"` are strings `f64::from_str`
+    /// accepts, and this crate reads a price stated as a string.
+    ///
+    /// `raw` is provider text, capped and untrusted — see
+    /// [`InputLimit::NotUnderstood`] for the full rule, which is the same one.
+    NotAPrice { raw: String },
+    /// The provider stated something this build cannot read as a number at all
+    /// — a string that does not parse, an object, a list. Kept apart from
+    /// [`Price::NotStated`], which means the opposite: nothing was said.
+    ///
+    /// `raw` is provider text, capped and untrusted, as above.
+    Unreadable { raw: String },
 }
 
 /// `rename_all_fields = "camelCase"` alongside `rename_all` (Task 3 review
@@ -220,8 +329,11 @@ struct Raw {
 
 #[derive(Deserialize)]
 struct Pricing {
-    #[serde(default, deserialize_with = "flexible_f64")]
-    prompt: Option<f64>,
+    /// A [`Price`] rather than an `Option<f64>`, for the reason that type's own
+    /// doc gives: the field arrives in more shapes than "a number or nothing",
+    /// and two of the shapes that *are* numbers are not prices.
+    #[serde(default)]
+    prompt: Price,
 }
 
 #[derive(Deserialize)]
@@ -302,30 +414,64 @@ fn cap_raw(mut raw: String) -> String {
     raw
 }
 
-/// The `f64` counterpart of the numeric half of [`Stated`], kept separate and
-/// unchanged: N1 is scoped to the input limit, not to `pricing.prompt`, whose
-/// own honesty question (an unparseable price also reads as "price unknown"
-/// today) is recorded in the ledger for the final review rather than fixed
-/// here.
-fn flexible_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(match Value::deserialize(deserializer)? {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.parse::<f64>().ok(),
-        _ => None,
-    })
+/// The price half of what [`Stated`] does for the input limit — the honesty
+/// question `flexible_f64` left open, now answered rather than recorded. That
+/// function read a number, a numeric string, and nothing at all, and answered
+/// `None` for everything else: an object, a list and `"free"` all reached the
+/// window as the same "the provider did not state a price".
+impl<'de> Deserialize<'de> for Price {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        Ok(match &value {
+            Value::Null => Price::NotStated,
+            Value::Number(n) => match n.as_f64() {
+                Some(amount) => Price::from_stated_number(amount, || n.to_string()),
+                // `as_f64` answers `Some` for every number serde_json parses
+                // under the features this workspace builds it with. The arm is
+                // written rather than unwrapped because the alternative to
+                // "this build could not read it" is a panic in a list of four
+                // hundred models, and not because anything is claimed to reach
+                // it.
+                None => Price::Unreadable {
+                    raw: cap_raw(n.to_string()),
+                },
+            },
+            // `s.clone()`, not `value.to_string()`, for the reason [`Stated`]
+            // gives one field over: the latter re-serialises a JSON string with
+            // its surrounding quotes, so the same unreadable value would read
+            // differently depending on how the provider spelled it (I5, review
+            // round 3).
+            Value::String(s) => match s.parse::<f64>() {
+                Ok(amount) => Price::from_stated_number(amount, || s.clone()),
+                Err(_) => Price::Unreadable {
+                    raw: cap_raw(s.clone()),
+                },
+            },
+            _ => Price::Unreadable {
+                raw: cap_raw(value.to_string()),
+            },
+        })
+    }
 }
 
-/// What `context_length` and `top_provider.context_length`, taken together,
-/// say about a record's actual input limit. `Unreadable` wins even next to a
-/// sibling that parsed fine — see `combined_limit` for why that is the honest
-/// answer and not a defect (I1, review round 3).
-enum Limit {
-    NotStated,
-    Known(i64),
-    Unreadable(String),
+impl Price {
+    /// Sorts a number the provider stated into a price and a number that
+    /// cannot be one.
+    ///
+    /// `raw` is a closure because it is needed on one of the two paths only,
+    /// and rendering it is what allocates.
+    fn from_stated_number(amount: f64, raw: impl FnOnce() -> String) -> Self {
+        if amount.is_finite() && amount >= 0.0 {
+            Price::Known { amount }
+        } else {
+            Price::NotAPrice {
+                raw: cap_raw(raw()),
+            }
+        }
+    }
 }
 
 /// The provider states the input limit twice per record, `context_length` and
@@ -337,7 +483,7 @@ enum Limit {
 /// number is the one that would let a chunk through to a model that then
 /// truncates it.
 ///
-/// If either side is `Unreadable`, the whole result is `Unreadable`, even next
+/// If either side is `Unreadable`, the whole result is `NotUnderstood`, even next
 /// to a sibling that parsed fine (I1, review round 3). This function's promise
 /// is "the narrower of what the provider stated", and with one side unreadable
 /// it cannot keep that promise — the honest answer to "does this model hold
@@ -349,10 +495,10 @@ enum Limit {
 /// text the vector never saw. This triggers narrowly: only `Unreadable`
 /// counts, never `Absent` — an ordinary record with no `top_provider` block
 /// still uses whichever side is readable, exactly as before.
-fn combined_limit(context_length: &Stated, top_provider_context_length: &Stated) -> Limit {
+fn combined_limit(context_length: &Stated, top_provider_context_length: &Stated) -> InputLimit {
     for stated in [context_length, top_provider_context_length] {
         if let Stated::Unreadable(raw) = stated {
-            return Limit::Unreadable(raw.clone());
+            return InputLimit::NotUnderstood { raw: raw.clone() };
         }
     }
     let numbers = [context_length, top_provider_context_length]
@@ -362,8 +508,8 @@ fn combined_limit(context_length: &Stated, top_provider_context_length: &Stated)
             _ => None,
         });
     match numbers.min() {
-        Some(min) => Limit::Known(min),
-        None => Limit::NotStated,
+        Some(tokens) => InputLimit::Known { tokens },
+        None => InputLimit::NotStated,
     }
 }
 
@@ -428,11 +574,10 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
             .as_ref()
             .map(|tp| tp.context_length.clone())
             .unwrap_or_default();
-        let limit = combined_limit(&raw.context_length, &top_provider_limit);
-        let context_length = match &limit {
-            Limit::Known(n) => Some(*n),
-            Limit::NotStated | Limit::Unreadable(_) => None,
-        };
+        // Kept whole rather than reduced to a number-or-nothing on its way into
+        // `ModelEntry`: for rerank and chat nothing else carries it, since the
+        // refusals below are the embedding role's (see [`InputLimit`]).
+        let input_limit = combined_limit(&raw.context_length, &top_provider_limit);
 
         // The line "did the provider say?" is drawn at `output_modalities`
         // itself (N2, review round 2): a provider that states `architecture`
@@ -446,14 +591,18 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
         let writes_text = output_modalities.is_some_and(|m| m.iter().any(|x| x == "text"));
 
         let refusal = match role {
-            Role::Embedding => match limit {
-                Limit::Known(limit) if limit < MIN_CONTEXT_TOKENS => Some(Refusal::InputTooSmall {
-                    limit,
-                    floor: MIN_CONTEXT_TOKENS,
-                }),
-                Limit::Known(_) => None,
-                Limit::NotStated => Some(Refusal::NoStatedLimit),
-                Limit::Unreadable(raw) => Some(Refusal::LimitNotUnderstood { raw }),
+            Role::Embedding => match &input_limit {
+                InputLimit::Known { tokens } if *tokens < MIN_CONTEXT_TOKENS => {
+                    Some(Refusal::InputTooSmall {
+                        limit: *tokens,
+                        floor: MIN_CONTEXT_TOKENS,
+                    })
+                }
+                InputLimit::Known { .. } => None,
+                InputLimit::NotStated => Some(Refusal::NoStatedLimit),
+                InputLimit::NotUnderstood { raw } => {
+                    Some(Refusal::LimitNotUnderstood { raw: raw.clone() })
+                }
             },
             Role::Chat if !output_modalities_stated => Some(Refusal::NoStatedOutputModalities),
             Role::Chat if !writes_text => Some(Refusal::NoTextOutput),
@@ -462,9 +611,9 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
 
         entries.push(ModelEntry {
             name: raw.name.clone().unwrap_or_else(|| raw.id.clone()),
-            price_per_token: raw.pricing.and_then(|p| p.prompt),
+            price: raw.pricing.map(|p| p.prompt).unwrap_or_default(),
             id: raw.id,
-            context_length,
+            input_limit,
             refusal,
         });
     }

@@ -110,6 +110,30 @@ pub enum Error {
     /// against `Err` — for the command that asks the question directly.
     #[error("no provider key has been entered")]
     NoKey,
+    /// [`crate::models::set_key`] was handed an empty string.
+    ///
+    /// Kept apart from [`Error::NoKey`], which is about the **store** and not
+    /// about what was submitted: somebody with a working key who presses the
+    /// button with the box empty would be told "no provider key has been
+    /// entered", which is false about their machine and sends them looking for
+    /// a key they already have.
+    ///
+    /// Kept much further apart from [`Error::Provider`], which is what the
+    /// empty string used to become. `set_key` handed it straight to
+    /// `check_key`, a request went out carrying an empty bearer token, and the
+    /// provider's own "Missing Authentication header" reached the window as
+    /// *"the key was not saved: provider: the key was refused: Missing
+    /// Authentication header"*. Nobody had typed a key, so nothing had been
+    /// refused — two facts, one message, and the first one a person meets by
+    /// doing the most ordinary thing on the screen (the acceptance run, item
+    /// 1).
+    ///
+    /// The sentence has to carry both facts on its own: this type crosses the
+    /// IPC as its `Display` string and nothing above can branch on the variant.
+    #[error(
+        "an empty key was submitted, so nothing was sent to the provider and nothing was checked"
+    )]
+    EmptyKey,
     /// The window asked for a list of models in a role this build has none.
     ///
     /// A refusal and not a default. [`mnema_provider::Role`] has three values,

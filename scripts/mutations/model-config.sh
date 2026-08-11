@@ -79,9 +79,9 @@ case_ "the input floor stops refusing anything" \
 # second survives a later "the floor is not doing anything, delete it".
 case_ "the input floor is not consulted at all" \
   crates/mnema-provider/src/catalogue.rs \
-  's~                Limit::Known\(limit\) if limit < MIN_CONTEXT_TOKENS => Some\(Refusal::InputTooSmall \{\n                    limit,\n                    floor: MIN_CONTEXT_TOKENS,\n                \}\),\n                Limit::Known\(_\) => None,~                Limit::Known(_) => None,~' \
-  '            Role::Embedding => match limit {
-                Limit::Known(_) => None,' \
+  's~                InputLimit::Known \{ tokens \} if \*tokens < MIN_CONTEXT_TOKENS => \{\n                    Some\(Refusal::InputTooSmall \{\n                        limit: \*tokens,\n                        floor: MIN_CONTEXT_TOKENS,\n                    \}\)\n                \}\n                InputLimit::Known \{ \.\. \} => None,~                InputLimit::Known { .. } => None,~' \
+  '            Role::Embedding => match &input_limit {
+                InputLimit::Known { .. } => None,' \
   mnema-provider 'a_model_that_takes_512_tokens_is_refused_and_says_both_numbers' --test catalogue
 
 # The other direction of the same rule, and the expensive one: the floor is an
@@ -90,8 +90,8 @@ case_ "the input floor is not consulted at all" \
 # nobody can act on, over a limit that does not apply.
 case_ "the input floor is applied to rerank as well" \
   crates/mnema-provider/src/catalogue.rs \
-  's~            Role::Embedding => match limit \{~            Role::Embedding | Role::Rerank => match limit {~; s~            Role::Chat \| Role::Rerank => None,~            Role::Chat => None,~' \
-  '            Role::Embedding | Role::Rerank => match limit {' \
+  's~            Role::Embedding => match &input_limit \{~            Role::Embedding | Role::Rerank => match &input_limit {~; s~            Role::Chat \| Role::Rerank => None,~            Role::Chat => None,~' \
+  '            Role::Embedding | Role::Rerank => match &input_limit {' \
   mnema-provider 'the_rerank_list_parses_and_the_input_floor_does_not_apply_to_it' --test catalogue
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -594,3 +594,116 @@ case_ "the shipped binary gets the credential store that keeps nothing" \
   's~mnema-secrets = \{ path = "\.\./crates/mnema-secrets" \}~mnema-secrets = { path = "../crates/mnema-secrets", features = ["test-store"] }~' \
   'mnema-secrets = { path = "../crates/mnema-secrets", features = ["test-store"] }' \
   mnema-desktop 'the_shipped_graph_takes_tls_roots_from_the_machine_and_carries_no_test_store' --test dependency_boundary
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What the first live run found, and one finding folded in with it.
+#
+# None of the three below was caught by 840 tests, 45 mutation cases or eleven
+# review rounds; a person pressing one button found all of them. They are the
+# same defect class as everything above — two facts arrive and one message
+# leaves — and the cases are here so the next edit that folds them back has
+# something to go red.
+#
+# ⚠️ The window's half of these rules is out of this harness's reach, for the
+# reason the header already gives about `REFUSALS` / `BALANCES` / `RECORD_IDS`:
+# `mutation-check.sh` runs `cargo test` and nothing else, so
+# `ui/render.test.js`'s "a stated zero is never a promise that the model is
+# free", "a number that cannot be a price is never rendered as one" and
+# "nothing stated about the input limit reads differently from something
+# unreadable" are held by that file alone. What the cases below hold is the
+# Rust side: the facts reaching the window at all, and their spellings.
+
+# The key, and the request that used to leave the machine for it. Pressing
+# "Check and save" with the box empty handed the empty string to `check_key`,
+# and the provider's "Missing Authentication header" came back as "the key was
+# not saved: provider: the key was refused: …". Nobody had typed a key.
+case_ "an empty key goes to the provider and its answer becomes a verdict on a key" \
+  src-tauri/src/models.rs \
+  's~    if key\.is_empty\(\) \{\n        return Err\(Error::EmptyKey\);\n    \}\n    let check = mnema_provider::check_key~    let check = mnema_provider::check_key~' \
+  '-> Result<KeyStatus, Error> {
+    let check = mnema_provider::check_key' \
+  mnema-desktop 'an_empty_key_is_refused_here_rather_than_being_sent_and_reported_as_a_verdict_on_a_key' --test model_commands
+
+# The half a fixed message does not fix, and the finding names them as two
+# things: the sentence can be right while a pointless request still leaves the
+# machine with an empty bearer token in it. This is the case that fails if the
+# guard is ever moved below the call it exists to prevent.
+case_ "the message is right and the request still leaves the machine" \
+  src-tauri/src/models.rs \
+  's~    if key\.is_empty\(\) \{\n        return Err\(Error::EmptyKey\);~    if key.is_empty() {\n        let _ = mnema_provider::check_key(state.provider_base(), \&key);\n        return Err(Error::EmptyKey);~' \
+  '        let _ = mnema_provider::check_key(state.provider_base(), &key);' \
+  mnema-desktop 'an_empty_key_is_refused_here_rather_than_being_sent_and_reported_as_a_verdict_on_a_key' --test model_commands
+
+# And the fold this cycle is about, in its cheapest form: "you submitted
+# nothing" and "the store holds nothing" are two facts, and the second is false
+# about somebody who has a working key and an empty box.
+case_ "an empty submission is reported as an empty credential store" \
+  src-tauri/src/models.rs \
+  's~        return Err\(Error::EmptyKey\);~        return Err(Error::NoKey);~' \
+  '        return Err(Error::NoKey);' \
+  mnema-desktop 'an_empty_key_is_refused_here_rather_than_being_sent_and_reported_as_a_verdict_on_a_key' --test model_commands
+
+# The price. `-1` is what the provider sends for a model it prices at routing
+# time; nothing rejected it, and the window multiplied it by a million and drew
+# `$-1000000.000 per million tokens`.
+case_ "a negative number is accepted as the price of a token" \
+  crates/mnema-provider/src/catalogue.rs \
+  's~        if amount\.is_finite\(\) && amount >= 0\.0 \{~        if amount.is_finite() {~' \
+  '        if amount.is_finite() {' \
+  mnema-provider 'the_states_a_price_arrives_in_are_not_folded_into_one_another' --test catalogue
+
+# The other half of the same guard, and it needs its own case because the
+# condition has two clauses and either one alone lets something through: a
+# price stated as the string "inf" parses as an f64 and is not an amount of
+# money. Both clauses, both directions.
+case_ "a price that is not a finite number is accepted as one" \
+  crates/mnema-provider/src/catalogue.rs \
+  's~        if amount\.is_finite\(\) && amount >= 0\.0 \{~        if amount >= 0.0 {~' \
+  '        if amount >= 0.0 {' \
+  mnema-provider 'a_price_that_is_not_a_finite_number_is_not_a_price' --test catalogue
+
+# The fold `Price` exists to undo, in the arm where it used to live: `"free"`
+# and a record with no `pricing` block at all both reaching the window as "the
+# provider did not state a price". This is N1 one field over, and the honesty
+# question `flexible_f64`'s own doc comment recorded rather than answered.
+case_ "a price this build cannot read is reported as one the provider never stated" \
+  crates/mnema-provider/src/catalogue.rs \
+  's~                Err\(_\) => Price::Unreadable \{\n                    raw: cap_raw\(s\.clone\(\)\),\n                \},~                Err(_) => Price::NotStated,~' \
+  '                Err(_) => Price::NotStated,' \
+  mnema-provider 'the_states_a_price_arrives_in_are_not_folded_into_one_another' --test catalogue
+
+# I4, the finding Task 10 routed to the ledger. The mutation is the state this
+# code was in: the input limit survives for the one role whose refusals already
+# carry it, and for the other two "nothing was stated" and "stated in a shape
+# this build cannot read" arrive as the same silence.
+case_ "the input limit reaches the window only for the role that refuses over it" \
+  crates/mnema-provider/src/catalogue.rs \
+  's~        let input_limit = combined_limit\(&raw\.context_length, &top_provider_limit\);~        let input_limit = match role {\n            Role::Embedding => combined_limit(\&raw.context_length, \&top_provider_limit),\n            Role::Rerank | Role::Chat => InputLimit::NotStated,\n        };~' \
+  '        let input_limit = match role {
+            Role::Embedding => combined_limit(&raw.context_length, &top_provider_limit),' \
+  mnema-provider 'a_limit_stated_unreadably_is_told_apart_from_no_limit_for_the_roles_that_refuse_over_neither' --test catalogue
+
+# The spelling half, for the two unions the acceptance run added — the same case
+# `Refusal`, `RecordId` and `Balance` already have above, and needed for the
+# same reason: `ui/render.js` looks the `kind` up in a table and falls back to a
+# sentence about not knowing, so a renamed variant reaches a person as that
+# sentence and reddens nothing on its own.
+case_ "Price's variants stop being spelled the way the window reads them" \
+  crates/mnema-provider/src/catalogue.rs \
+  's~    rename_all = "camelCase",\n    rename_all_fields = "camelCase",\n    tag = "kind"\n\)\]\npub enum Price \{~    rename_all = "snake_case",\n    rename_all_fields = "camelCase",\n    tag = "kind"\n)]\npub enum Price {~' \
+  '    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum Price {' \
+  mnema-desktop 'models::tests::every_provider_discriminant_the_window_sees_has_its_camel_case_spelling_pinned' --lib
+
+# And a payload field under a correct discriminant, which is the half F6 found
+# open on `Refusal`: `InputLimit::Known`'s number is the one the picker prints,
+# and renaming it draws "input undefined" with every `kind` still right.
+case_ "InputLimit's token count is renamed under a correct discriminant" \
+  crates/mnema-provider/src/catalogue.rs \
+  's~    Known \{ tokens: i64 \},~    Known {\n        #[serde(rename = "contextLength")]\n        tokens: i64,\n    },~' \
+  '        #[serde(rename = "contextLength")]
+        tokens: i64,' \
+  mnema-desktop 'models::tests::every_provider_discriminant_the_window_sees_has_its_camel_case_spelling_pinned' --lib

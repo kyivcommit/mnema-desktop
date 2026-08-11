@@ -2,8 +2,8 @@
 //! 2026-08-08; команди, якими їх знято, у Task 1 плану.
 
 use mnema_provider::{
-    Error, MIN_CONTEXT_TOKENS, ModelEntry, RecordId, Refusal, Role, UnreadableRecord,
-    models_from_json,
+    Error, InputLimit, MIN_CONTEXT_TOKENS, ModelEntry, Price, RecordId, Refusal, Role,
+    UnreadableRecord, models_from_json,
 };
 
 const EMBEDDINGS: &str = include_str!("fixtures/embeddings-2026-08-08.json");
@@ -21,8 +21,8 @@ fn the_default_model_survives_every_rule_and_keeps_its_price() {
     let catalogue = models_from_json(Role::Embedding, EMBEDDINGS).expect("parses");
     let bge = find(&catalogue.entries, "baai/bge-m3");
     assert_eq!(bge.refusal, None, "the default choice must be selectable");
-    assert_eq!(bge.context_length, Some(8194));
-    assert_eq!(bge.price_per_token, Some(0.00000001));
+    assert_eq!(bge.input_limit, InputLimit::Known { tokens: 8194 });
+    assert_eq!(bge.price, Price::Known { amount: 0.00000001 });
 }
 
 #[test]
@@ -250,8 +250,8 @@ fn an_absent_sibling_still_lets_the_readable_number_through() {
         "an absent top_provider must not refuse anything"
     );
     assert_eq!(
-        entry.context_length,
-        Some(32000),
+        entry.input_limit,
+        InputLimit::Known { tokens: 32000 },
         "with no top_provider stated at all, the one readable number must still be used"
     );
 }
@@ -307,7 +307,7 @@ fn an_unknown_field_is_ignored_and_a_missing_price_is_not_an_error() {
         catalogue.unreadable, 0,
         "an unknown field must not make the record unreadable"
     );
-    assert_eq!(catalogue.entries[0].price_per_token, None);
+    assert_eq!(catalogue.entries[0].price, Price::NotStated);
     assert_eq!(catalogue.entries[0].refusal, None);
 }
 
@@ -341,9 +341,12 @@ fn a_record_with_no_usable_id_is_counted_as_unreadable_rather_than_dropped_silen
          than vanish without a trace"
     );
     assert_eq!(
-        find(&catalogue.entries, "vendor/second").context_length,
-        None,
-        "an odd-shaped context_length must only cost that field, not the whole record"
+        find(&catalogue.entries, "vendor/second").input_limit,
+        InputLimit::NotUnderstood {
+            raw: "{}".to_string()
+        },
+        "an odd-shaped context_length must only cost that field, not the whole record — and \
+         it must cost it as 'stated, and unreadable' rather than as silence"
     );
     assert_eq!(
         catalogue.unreadable_records,
@@ -460,8 +463,192 @@ fn the_narrower_of_the_two_stated_limits_is_the_one_that_counts() {
     ]}"#;
     let catalogue = models_from_json(Role::Embedding, json).expect("parses");
     assert_eq!(
-        find(&catalogue.entries, "vendor/optimistic-headline").context_length,
-        Some(4000),
+        find(&catalogue.entries, "vendor/optimistic-headline").input_limit,
+        InputLimit::Known { tokens: 4000 },
         "the smaller, more pessimistic number must win over the larger headline one"
     );
+}
+
+/// What the provider said about the input limit reaches the window for every
+/// role, and not only for the one role that refuses over it.
+///
+/// The fact used to die on the wire for rerank and chat: the limit refusals are
+/// `Role::Embedding`'s, so "the provider stated no limit" and "the provider
+/// stated one this build cannot read" both arrived as `context_length: None`
+/// with no refusal beside them — the same question mark for opposite statements
+/// about the provider (I4, deferred by Task 10, on the screen at the first real
+/// run).
+///
+/// Both roles that have no limit refusal, and both facts, because a build that
+/// answered `NotStated` to everything would satisfy half of this, and one that
+/// applied the embedding refusals to rerank would satisfy the other half while
+/// greying out models that work.
+#[test]
+fn a_limit_stated_unreadably_is_told_apart_from_no_limit_for_the_roles_that_refuse_over_neither() {
+    let unreadable = r#"{"data":[{"id":"vendor/unreadable-limit","name":"Unreadable",
+        "context_length":"8k","architecture":{"output_modalities":["text"]}}]}"#;
+    let silent = r#"{"data":[{"id":"vendor/silent-limit","name":"Silent",
+        "architecture":{"output_modalities":["text"]}}]}"#;
+
+    for role in [Role::Rerank, Role::Chat] {
+        let stated = models_from_json(role, unreadable).expect("parses");
+        let entry = find(&stated.entries, "vendor/unreadable-limit");
+        assert_eq!(
+            entry.input_limit,
+            InputLimit::NotUnderstood {
+                raw: "8k".to_string()
+            },
+            "{role:?}: a limit the provider DID state must not reach the window as silence"
+        );
+        assert_eq!(
+            entry.refusal, None,
+            "{role:?}: the floor is an embedding rule and must not start refusing here"
+        );
+
+        let none = models_from_json(role, silent).expect("parses");
+        assert_eq!(
+            find(&none.entries, "vendor/silent-limit").input_limit,
+            InputLimit::NotStated,
+            "{role:?}: nothing stated must not read as something stated unreadably"
+        );
+    }
+}
+
+/// The price arrives in more shapes than "a number or nothing", and the two
+/// that are numbers are the pair `Option<f64>` could not keep apart.
+///
+/// Every case is one the live list produces. The negative is the one that was
+/// on the screen: `-1` multiplied by a million and printed as
+/// `$-1000000.000 per million tokens` (the acceptance run, item 2).
+#[test]
+fn the_states_a_price_arrives_in_are_not_folded_into_one_another() {
+    let json = r#"{"data":[
+        {"id":"vendor/priced","pricing":{"prompt":"0.000000015"},
+         "architecture":{"output_modalities":["text"]}},
+        {"id":"vendor/zero","pricing":{"prompt":"0"},
+         "architecture":{"output_modalities":["text"]}},
+        {"id":"vendor/sentinel","pricing":{"prompt":"-1"},
+         "architecture":{"output_modalities":["text"]}},
+        {"id":"vendor/worded","pricing":{"prompt":"free"},
+         "architecture":{"output_modalities":["text"]}},
+        {"id":"vendor/structured","pricing":{"prompt":{"per_request":"0.01"}},
+         "architecture":{"output_modalities":["text"]}},
+        {"id":"vendor/nulled","pricing":{"prompt":null},
+         "architecture":{"output_modalities":["text"]}},
+        {"id":"vendor/silent","pricing":{"completion":"0"},
+         "architecture":{"output_modalities":["text"]}}
+    ]}"#;
+    let catalogue = models_from_json(Role::Chat, json).expect("parses");
+    assert_eq!(
+        catalogue.unreadable, 0,
+        "no price this build cannot read may cost the whole record"
+    );
+
+    for (id, expected) in [
+        (
+            "vendor/priced",
+            Price::Known {
+                amount: 0.000000015,
+            },
+        ),
+        // A stated zero is a number the provider sent, and stays one. What it
+        // may be rendered as is the window's question, and `ui/render.test.js`
+        // is where it is answered.
+        ("vendor/zero", Price::Known { amount: 0.0 }),
+        (
+            "vendor/sentinel",
+            Price::NotAPrice {
+                raw: "-1".to_string(),
+            },
+        ),
+        (
+            "vendor/worded",
+            Price::Unreadable {
+                raw: "free".to_string(),
+            },
+        ),
+        (
+            "vendor/structured",
+            Price::Unreadable {
+                raw: r#"{"per_request":"0.01"}"#.to_string(),
+            },
+        ),
+        ("vendor/nulled", Price::NotStated),
+        ("vendor/silent", Price::NotStated),
+    ] {
+        assert_eq!(
+            find(&catalogue.entries, id).price,
+            expected,
+            "{id} was sorted into the wrong thing to tell a person"
+        );
+    }
+}
+
+/// A price stated as a string `f64::from_str` accepts but arithmetic cannot use.
+///
+/// `"NaN"` and `"inf"` are not JSON numbers and cannot arrive as one, but this
+/// crate reads a price stated as a string — every price in the live list is one
+/// — and `parse::<f64>()` accepts both. Before `Price`, either became
+/// `Some(f64::NAN)` and the window rendered `$NaN per million tokens`.
+#[test]
+fn a_price_that_is_not_a_finite_number_is_not_a_price() {
+    for stated in ["NaN", "inf", "-inf"] {
+        let json = format!(
+            r#"{{"data":[{{"id":"vendor/x","pricing":{{"prompt":"{stated}"}},
+            "architecture":{{"output_modalities":["text"]}}}}]}}"#
+        );
+        let catalogue = models_from_json(Role::Chat, &json).expect("parses");
+        assert_eq!(
+            catalogue.entries[0].price,
+            Price::NotAPrice {
+                raw: stated.to_string()
+            },
+            "{stated} parses as an f64 and is not an amount of money"
+        );
+    }
+}
+
+/// Provider text on a price is capped exactly as it is on an input limit.
+///
+/// The same rule, and it needs its own witness: the cap on the limit is applied
+/// by `Stated`'s own deserializer, and nothing there reaches this field.
+#[test]
+fn an_unreadable_price_is_capped_before_it_becomes_a_label() {
+    let long = "x".repeat(200);
+    let json = format!(
+        r#"{{"data":[{{"id":"vendor/huge-unreadable-price","pricing":{{"prompt":"{long}"}},
+        "architecture":{{"output_modalities":["text"]}}}}]}}"#
+    );
+    let catalogue = models_from_json(Role::Chat, &json).expect("parses");
+    match &find(&catalogue.entries, "vendor/huge-unreadable-price").price {
+        Price::Unreadable { raw } => assert!(
+            raw.len() <= 64,
+            "a price this build cannot read must be capped before it is stored anywhere, \
+             got {} bytes",
+            raw.len()
+        ),
+        other => panic!("expected an unreadable price, got {other:?}"),
+    }
+}
+
+/// Every rerank model the provider lists states a price of zero, and none of
+/// them is free.
+///
+/// The fixture is the live answer of 2026-08-08. This pins the fact the
+/// window's own sentence is built on: rerank is billed per search, the payload
+/// says nothing about that, and a screen reading `"prompt": "0"` as "this
+/// costs nothing" would be telling six models' worth of people they will not be
+/// charged.
+#[test]
+fn every_rerank_model_the_provider_lists_states_a_price_of_zero() {
+    let catalogue = models_from_json(Role::Rerank, RERANK).expect("parses");
+    assert_eq!(catalogue.entries.len(), 6, "the fixture holds six");
+    for entry in &catalogue.entries {
+        assert_eq!(
+            entry.price,
+            Price::Known { amount: 0.0 },
+            "{} no longer states zero, so the sentence built on this measurement is stale",
+            entry.id
+        );
+    }
 }

@@ -38,8 +38,27 @@ pub fn key_present(state: State<'_, AppState>) -> Result<bool, Error> {
 /// the application believing it is configured and failing at every call
 /// afterwards — three hours into an indexing run, at the earliest place anyone
 /// would look.
+///
+/// **An empty key is refused here and not by the provider** ([`Error::EmptyKey`],
+/// where the message this replaces is written out). The refusal is in the
+/// command rather than in the window because the window is not the only caller:
+/// a guard in `main.js` leaves this command reachable over the IPC with exactly
+/// the old result, and it is this side that decides whether a request leaves the
+/// machine at all. It is also the only side that can keep the sentence single —
+/// the window renders whatever this returns, so a second refusal over there
+/// would be a second wording of one fact.
+///
+/// **Empty, not blank.** A key of spaces is refused by the provider and not
+/// here, and the two directions of getting that wrong are not symmetric:
+/// trimming would store something other than what a person typed, and calling
+/// spaces "nothing was typed" states a fact about them that this build did not
+/// observe. `mnema_secrets::entry` draws the same line for a reference, one
+/// field over.
 #[tauri::command(async)]
 pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Error> {
+    if key.is_empty() {
+        return Err(Error::EmptyKey);
+    }
     let check = mnema_provider::check_key(state.provider_base(), &key)?;
     mnema_secrets::store(state.credential_ref(), &key)?;
     Ok(KeyStatus {
@@ -747,18 +766,19 @@ mod tests {
         }
     }
 
-    /// The same pin for the three unions that reach the window from
-    /// `mnema-provider` rather than from here — `Refusal`, `Balance` and
-    /// `RecordId`.
+    /// The same pin for the unions that reach the window from `mnema-provider`
+    /// rather than from here — `Refusal`, `Balance`, `RecordId`, `Price` and
+    /// `InputLimit`.
     ///
     /// They are pinned in this crate and not in theirs on purpose. "Reaches the
     /// window" is a fact about `mnema-desktop`: `provider_models` returns a
-    /// `Catalogue` carrying `Refusal` and `RecordId`, and [`KeyStatus::balance`]
+    /// `Catalogue` carrying `Refusal`, `RecordId`, `Price` and `InputLimit`, and
+    /// [`KeyStatus::balance`]
     /// carries `Balance`. `mnema-provider` does not know it has a window, and a
     /// test living there would be pinning a serialisation for no stated reader.
     ///
-    /// **The compiler half works across the crate boundary because none of the
-    /// three is `#[non_exhaustive]`** — checked, the way
+    /// **The compiler half works across the crate boundary because none of them
+    /// is `#[non_exhaustive]`** — checked, the way
     /// [`Self::the_credential_store_failures_are_sorted_by_what_they_ask_of_a_person`]'s
     /// own guard was checked against `mnema_secrets::Error`. A sixth `Refusal`
     /// variant added one crate over stops **this file** compiling, which is the
@@ -798,7 +818,7 @@ mod tests {
     /// `kind` (`ui/render.js` deliberately does not interpolate `raw`).
     #[test]
     fn every_provider_discriminant_the_window_sees_has_its_camel_case_spelling_pinned() {
-        use mnema_provider::{Balance, ProviderMessage, RecordId, Refusal};
+        use mnema_provider::{Balance, InputLimit, Price, ProviderMessage, RecordId, Refusal};
         use serde_json::json;
 
         // Written by hand, and by serde, and compared — the second opinion is
@@ -887,6 +907,58 @@ mod tests {
                 serde_json::to_value(&r).unwrap(),
                 record(&r),
                 "{r:?} serialised differently than this test's own spelling of it"
+            );
+        }
+
+        // `amount` is the field the window multiplies by a million, and `raw`
+        // is the provider text beside it — a rename of either draws a price of
+        // `undefined` under a correct `kind`, which is exactly what F6 found on
+        // `Refusal`. The values are distinct from every other payload below so
+        // that a pair of fields swapped by a rename cannot satisfy this by
+        // accident.
+        let price = |p: &Price| -> serde_json::Value {
+            match p {
+                Price::NotStated => json!({"kind": "notStated"}),
+                Price::Known { amount } => json!({"kind": "known", "amount": amount}),
+                Price::NotAPrice { raw } => json!({"kind": "notAPrice", "raw": raw}),
+                Price::Unreadable { raw } => json!({"kind": "unreadable", "raw": raw}),
+            }
+        };
+        for p in [
+            Price::NotStated,
+            Price::Known { amount: 1.5e-8 },
+            Price::NotAPrice {
+                raw: "-1".to_string(),
+            },
+            Price::Unreadable {
+                raw: "free".to_string(),
+            },
+        ] {
+            assert_eq!(
+                serde_json::to_value(&p).unwrap(),
+                price(&p),
+                "{p:?} serialised differently than this test's own spelling of it"
+            );
+        }
+
+        let limit = |l: &InputLimit| -> serde_json::Value {
+            match l {
+                InputLimit::NotStated => json!({"kind": "notStated"}),
+                InputLimit::Known { tokens } => json!({"kind": "known", "tokens": tokens}),
+                InputLimit::NotUnderstood { raw } => json!({"kind": "notUnderstood", "raw": raw}),
+            }
+        };
+        for l in [
+            InputLimit::NotStated,
+            InputLimit::Known { tokens: 8194 },
+            InputLimit::NotUnderstood {
+                raw: "8k".to_string(),
+            },
+        ] {
+            assert_eq!(
+                serde_json::to_value(&l).unwrap(),
+                limit(&l),
+                "{l:?} serialised differently than this test's own spelling of it"
             );
         }
     }
