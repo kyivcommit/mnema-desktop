@@ -640,13 +640,21 @@ export const PRICE_TEXT = {
   // `raw` is provider text, capped to 64 bytes on the Rust side and reaching
   // the DOM through `textContent` only, never as markup — the same rule
   // `limitNotUnderstood` states below.
-  notAPrice: (p) => `the provider stated ${p.raw} per token, which is not a price`,
+  //
+  // Quoted for the reason `unreadable` gives, and with a sharper case than
+  // either of its neighbours: `NaN` is pinned in Rust as a value that reaches
+  // this arm (`a_price_that_is_not_a_finite_number_is_not_a_price`), and `NaN`
+  // is also what `render.test.js` searches a label for when it asks whether
+  // this window invented a number. Unquoted, the provider's text and this
+  // window's own marker for a defect are the same word in the same line.
+  notAPrice: (p) => `the provider stated "${p.raw}" per token, which is not a price`,
   // Quoted, because `raw` here can be a word that is itself a claim about the
   // price — `"free"` is the measured one — and unquoted it becomes the last
   // word of the label, where it reads as this window's own verdict rather than
   // as the provider's text this build could not parse. The same quoting is on
   // `INPUT_LIMIT_TEXT.notUnderstood`, whose `raw` can just as easily be
-  // `unlimited`.
+  // `unlimited`, and on `REFUSAL_TEXT.limitNotUnderstood`, which a refused
+  // model renders in the same line as the limit clause.
   unreadable: (p) => `price stated in a shape this build cannot read ("${p.raw}")`,
 };
 

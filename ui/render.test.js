@@ -833,6 +833,20 @@ test("a value this build could not read is shown as the provider's text, not as 
   assert.equal((both.match(/"unlimited"/g) ?? []).length, 2,
     `one unparsed value must be spelled one way in one label: ${both}`);
   assert.doesNotMatch(both, /\(unlimited\)/);
+
+  // The sharpest of the arms that carry `raw`, and the reason its fixture lives
+  // here rather than in "every price state reads differently, and none of them
+  // is a number this build invented": `NaN` is a value the provider can state
+  // (`a_price_that_is_not_a_finite_number_is_not_a_price` pins it one crate
+  // over) **and** the word that test searches a label for when it asks whether
+  // this window invented a number. Unquoted, one word means both things in one
+  // line, and only the choice of `-1` as a fixture there kept it invisible.
+  const notANumber = modelOptionLabel(
+    entryWith({ price: { kind: "notAPrice", raw: "NaN" }, refusal: null }),
+  );
+  assert.match(notANumber, /stated "NaN" per token/);
+  assert.doesNotMatch(notANumber, /stated NaN per token/,
+    "the provider's word and this window's marker for a defect must not be the same token");
 });
 
 // The sentinel that was on the screen: `-1`, which the provider sends for a
