@@ -1466,3 +1466,30 @@ test("every sentence in the model configuration block comes from render.js", () 
       "main.js, where render.test.js cannot reach it, and main.js's own header says there are none");
   }
 });
+
+// The acceptance run of 2026-08-11 found the longer placeholder cut to "leave
+// empty to keep the sto" at the field's default width — the one sentence whose
+// whole job is to say an empty field is fine here, unreadable exactly when it
+// is shown. This reads main.js as text because a width has no rendering to
+// measure in this suite, and that is also why every window test missed it: what
+// broke was not a value but the space it was drawn in.
+//
+// It pins the shape rather than a number: the width comes from the text being
+// shown, so a longer placeholder cannot be cut by a width chosen once. Both
+// halves are asserted because either alone is satisfied by the other's absence
+// — a literal width passes the first, and a placeholder assigned straight from
+// the call passes the second with nothing left to derive a width from.
+test("the key field is sized from the text it shows, not from a number", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const main = readFileSync(join(here, "main.js"), "utf8");
+  assert.match(
+    main,
+    /placeholder = keyFieldPlaceholder\([^)]*\);\s+el\("key"\)\.placeholder = placeholder;/,
+    "the placeholder is no longer held in a binding a width can be derived from",
+  );
+  assert.match(
+    main,
+    /el\("key"\)\.size = placeholder\.length/,
+    "the field's width is not derived from the placeholder it is showing",
+  );
+});

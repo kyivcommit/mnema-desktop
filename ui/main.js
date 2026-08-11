@@ -431,7 +431,14 @@ const drawSettings = (settings) => {
   // The field and its button are drawn from the store's answer too. With a key
   // stored this window has just cleared the field, so an empty one is the
   // ordinary state and must not read as something missing.
-  el("key").placeholder = keyFieldPlaceholder(settings.key);
+  const placeholder = keyFieldPlaceholder(settings.key);
+  el("key").placeholder = placeholder;
+  // Sized from the text it is showing rather than from a width chosen once. The
+  // acceptance run of 2026-08-11 found the longer of the two placeholders cut to
+  // "leave empty to keep the sto" at the field's default width — and that is the
+  // one sentence whose whole job is to say an empty field is fine here, so a
+  // person who cannot finish reading it is back where the message started.
+  el("key").size = placeholder.length;
   el("key-submit").textContent = keySubmitText(settings.key);
   el("index-state").textContent = indexStateSentence(settings.index, indexOpening);
   el("embedding-progress").textContent = embeddingProgressText(settings.index);
