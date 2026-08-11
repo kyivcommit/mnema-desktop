@@ -40,6 +40,9 @@ import {
   PRICE_TEXT,
   INPUT_LIMIT_TEXT,
   KEY_REMOVAL_TEXT,
+  EMPTY_FIELD_TEXT,
+  KEY_FIELD_PLACEHOLDER,
+  KEY_SUBMIT_TEXT,
   indexNotAsked,
   indexOpened,
   indexOpenFailed,
@@ -62,6 +65,10 @@ import {
   recordedNoteSentence,
   keyRemovedSentence,
   keyNotRemovedSentence,
+  keyNotAsked,
+  emptyFieldSentence,
+  keyFieldPlaceholder,
+  keySubmitText,
   listNotReadSentence,
   embeddingModelNotRecordedSentence,
   roleNotRecordedSentence,
@@ -300,6 +307,10 @@ const INPUT_LIMITS = ["known", "notStated", "notUnderstood"];
 // What `forget_key` answers. It answered `Ok(())` to two events until the
 // whole-branch review, and this window turned both into "the key was removed".
 const KEY_REMOVALS = ["removed", "nothingToRemove"];
+// `KeyState`'s three, plus the one the window holds before it has asked. Not a
+// wire union: the core always knows what it measured, and `notAsked` is a fact
+// about this page — the same shape as `INDEX_OPENINGS` and `LIST_STATES`.
+const KEY_FIELD_STATES = ["notAsked", ...KEY_STATES];
 
 // Two unions `main.js` produces itself rather than reading off the wire: what
 // `open_index` answered, and what one role's `provider_models` call answered.
@@ -334,6 +345,9 @@ test("every union that reaches this window has exactly one table entry per varia
   assert.deepEqual(Object.keys(PRICE_TEXT).sort(), [...PRICES].sort());
   assert.deepEqual(Object.keys(INPUT_LIMIT_TEXT).sort(), [...INPUT_LIMITS].sort());
   assert.deepEqual(Object.keys(KEY_REMOVAL_TEXT).sort(), [...KEY_REMOVALS].sort());
+  assert.deepEqual(Object.keys(EMPTY_FIELD_TEXT).sort(), [...KEY_FIELD_STATES].sort());
+  assert.deepEqual(Object.keys(KEY_FIELD_PLACEHOLDER).sort(), [...KEY_FIELD_STATES].sort());
+  assert.deepEqual(Object.keys(KEY_SUBMIT_TEXT).sort(), [...KEY_FIELD_STATES].sort());
   assert.deepEqual(Object.keys(ROLE_NAME).sort(), [...ROLES].sort());
 });
 
@@ -353,6 +367,8 @@ test("the states main.js writes are exactly the states these tables render", () 
     [...LIST_STATES].sort(),
   );
   assert.equal(indexOpenFailed("boom").error, "boom", "the wall's reason must survive the trip");
+  assert.ok(KEY_FIELD_STATES.includes(keyNotAsked().kind),
+    "the state main.js starts in must be one the three key-field tables render");
 });
 
 test("the disclosure names the search query, not only indexing", () => {
@@ -1197,14 +1213,14 @@ test("every element main.js reaches for exists in index.html", () => {
 
   const literals = [...main.matchAll(/\bel\("([^"]+)"\)/g)].map((m) => m[1]);
   // A floor, because a loop over an empty list passes and a regexp that has
-  // stopped matching produces exactly that. **48 today, re-measured**: this
+  // stopped matching produces exactly that. **52 today, re-measured**: this
   // said "`> 10` against an actual 20" while the actual had been 48 since
-  // `667d2ff`, so it tolerated losing twenty-eight calls in silence — a
+  // `667d2ff`, so it tolerated losing thirty-two calls in silence — a
   // number describing a file it had stopped describing, in a test whose whole
   // job is to notice that (whole-branch review, closing check). The margin is
   // what a legitimate edit may remove before this asks to be looked at, and
   // the same rule and the same shape of number are on the block test below.
-  assert.ok(literals.length >= 40,
+  assert.ok(literals.length >= 44,
     `only ${literals.length} literal ids found — the regexp has rotted, or main.js shrank`);
   for (const id of literals) {
     assert.ok(ids.has(id), `main.js reaches for #${id}, which index.html does not have`);
@@ -1287,6 +1303,71 @@ test("a failure sentence names what failed and carries the reason it was given",
     "a role this build does not know is named, not rendered as undefined");
 });
 
+// The twenty-first, found by the owner on the second live run and introduced by
+// the fix for the twentieth: this window clears the field after a successful
+// save, so pressing the button with an empty field is the ordinary state of
+// somebody whose key is stored and fine — and `Error::EmptyKey`'s sentence
+// reads to them as a failure.
+//
+// The states are four, not two, and the one that decides the shape is
+// `unreadable`: it is neither "a key is stored" nor "none is", and sending
+// would hand it the same sentence `absent` gets, folding the two apart states
+// this window keeps apart everywhere else.
+test("an empty field is only the command's to answer when nothing is stored", () => {
+  // The one that sends. `null` is the decision, not an empty sentence.
+  assert.equal(emptyFieldSentence({ kind: "absent" }), null);
+
+  const said = [
+    ["present", emptyFieldSentence({ kind: "present" })],
+    ["unreadable", emptyFieldSentence({ kind: "unreadable", cause: "locked", reason: "" })],
+    ["notAsked", emptyFieldSentence(keyNotAsked())],
+    ["a kind this build does not know", emptyFieldSentence({ kind: "somethingFutureAndUnknown" })],
+  ];
+  for (const [state, text] of said) {
+    assert.notEqual(text, null, `${state} must not be sent: the command cannot tell it apart`);
+    assert.doesNotMatch(text, /undefined|\[object Object\]/, `${state}: ${text}`);
+  }
+  assert.equal(new Set(said.map(([, text]) => text)).size, said.length,
+    `two states of the key store read alike: ${said.map(([, t]) => t)}`);
+
+  // A key IS stored: the sentence must say so, and must not read as a refusal.
+  const stored = emptyFieldSentence({ kind: "present" });
+  assert.match(stored, /already stored/);
+  assert.doesNotMatch(stored, /nothing was sent|not saved|empty key was submitted/);
+
+  // The store would not answer: neither claim, and no repetition of the remedy
+  // — `keyStateSentence` is drawn beside this one and owns that.
+  const silent = emptyFieldSentence({ kind: "unreadable", cause: "locked", reason: "" });
+  assert.match(silent, /unknown/);
+  assert.doesNotMatch(silent, /already stored;|there is no key/,
+    "a store that would not answer establishes neither, and guessing either is the defect");
+});
+
+// The field's two labels. Three of the four states read alike here and that is
+// deliberate: these say what the button does, not what the store holds.
+// "Replace the key" is the one that claims a key is stored.
+test("only a key this window has been told about turns the button into Replace", () => {
+  assert.match(keySubmitText({ kind: "present" }), /Replace/);
+  assert.match(keyFieldPlaceholder({ kind: "present" }), /leave empty/i);
+
+  for (const key of [
+    { kind: "absent" },
+    { kind: "unreadable", cause: "locked", reason: "" },
+    keyNotAsked(),
+    { kind: "somethingFutureAndUnknown" },
+    undefined,
+  ]) {
+    const label = keySubmitText(key);
+    const placeholder = keyFieldPlaceholder(key);
+    assert.doesNotMatch(label, /Replace/,
+      `"${label}" claims a key is stored, and ${JSON.stringify(key)} does not establish one`);
+    assert.doesNotMatch(placeholder, /leave empty/i,
+      `"${placeholder}" tells somebody an empty field will keep a key that may not be there`);
+    assert.doesNotMatch(label, /undefined/);
+    assert.doesNotMatch(placeholder, /undefined/);
+  }
+});
+
 // `main.js`'s own header says every sentence in its model configuration block
 // comes from `render.js`. It was false for five of them (whole-branch review,
 // I2), and the sentence furthest outside the tables was the one that told
@@ -1333,18 +1414,27 @@ test("every sentence in the model configuration block comes from render.js", () 
 
   // The first character of what is assigned to text in the DOM. A literal opens
   // with a quote or a backtick. `+=` is here because `textContent = "a"` and
-  // `textContent += "a"` put the same word on the same screen, and the other
-  // two property names because a sentence does not become reachable by being
-  // written to `innerText` instead.
-  const assignments = [...block.matchAll(/\.(?:textContent|innerText|innerHTML)\s*\+?=\s*(\S)/g)]
-    .map((m) => m[1]);
+  // `textContent += "a"` put the same word on the same screen; the other
+  // property names because a sentence does not become reachable by being
+  // written to `innerText` instead, and `placeholder` because it is a sentence
+  // a person reads for as long as the field is empty — which, with a key
+  // stored, is all the time.
+  //
+  // `value` is deliberately **not** here. `el("key").value = ""` is not a
+  // sentence, it is the field being cleared so a credential does not sit in the
+  // DOM, and a rule that reddened on it would be read as a reason to stop.
+  const assignments = [
+    ...block.matchAll(/\.(?:textContent|innerText|innerHTML|placeholder)\s*\+?=\s*(\S)/g),
+  ].map((m) => m[1]);
   // A floor, because an assertion over an empty list passes and a rotted regexp
-  // produces exactly that. **16 today**, and the margin is what a legitimate
+  // produces exactly that. **19 today**, and the margin is what a legitimate
   // edit may remove before this asks to be looked at. The id test above carries
   // the same rule and its own re-measured number; this one said `>= 10` against
   // 16 and called itself tight "the same way the id test above is", which was
   // a parity claim pointing at a floor that had been stale for six commits.
-  assert.ok(assignments.length >= 14,
+  // Both numbers are re-measured whenever this file's regexps or main.js's
+  // block change, which is the whole point of naming the actual beside them.
+  assert.ok(assignments.length >= 17,
     `only ${assignments.length} textContent assignments found — the regexp has rotted, or the block shrank`);
   for (const first of assignments) {
     assert.ok(!["'", '"', "`"].includes(first),

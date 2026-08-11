@@ -46,7 +46,17 @@
         <p id="disclosure"></p>
         <form id="key-form">
           <input id="key" type="password" placeholder="OpenRouter key" autocomplete="off" />
-          <button type="submit">Check and save</button>
+          <!--
+            The placeholder and the label below are both redrawn from the
+            credential store's own answer (`keyFieldPlaceholder`,
+            `keySubmitText`): with a key stored, this window clears the field
+            after saving it, so an empty field is the ordinary state and the
+            markup must not read as though something were missing. The values
+            here are what a person sees before the first `model_settings`
+            answers, and they are the neutral pair for the same reason the
+            `notAsked` arm is.
+          -->
+          <button id="key-submit" type="submit">Check and save</button>
           <button id="forget" type="button">Remove the key</button>
         </form>
         <p id="key-state" class="muted"></p>

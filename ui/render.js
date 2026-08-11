@@ -445,6 +445,103 @@ export const keyStateSentence = (key) =>
     (() => "The state of the key store is unknown: this build did not understand what it answered.")
   )(key);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// An empty field means two different things, and the window is the only side
+// that can tell them apart.
+//
+// `set_key` refuses an empty submission before it calls anyone, and that guard
+// **stays**: the command is reachable over the IPC, and that side is the one
+// that decides whether a request leaves the machine. What the guard cannot know
+// is that this window clears the field after a successful save — correctly, a
+// credential does not live in a DOM input any longer than it must — so pressing
+// the button with an empty field is the ordinary state of somebody whose key is
+// stored and fine, and "an empty key was submitted, so nothing was sent to the
+// provider and nothing was checked" reads to them as a failure. The owner met
+// it on the second live run, and the fix for the twentieth introduced it.
+//
+// Keeping the key in the field was proposed and rejected, with the reason kept
+// here because it is the kind of decision that gets re-argued: the input is
+// already `type="password"`, so masking is not what is missing, presence is —
+// and keeping the value would move the key from "in the window until you press
+// the button" to "in the window for the whole session", where anything running
+// in the page, a screenshot and an accessibility dump can all reach it.
+
+// What the window knows about the key store before it has asked. Not a wire
+// state — `KeyState` has no such variant, because the *core* always knows what
+// it measured — and it is the same shape and the same reason as `indexNotAsked`
+// and `listNotAsked`: the listeners below are registered before the first
+// `model_settings` round trip finishes, so a press in that window would
+// otherwise fall through a table's fallback and say this build did not
+// understand an answer nobody had asked for.
+export const keyNotAsked = () => ({ kind: "notAsked" });
+
+// The sentence to show **instead of** submitting an empty field, or `null` when
+// the empty field is genuinely the command's to answer.
+//
+// `null` rather than `""`: this is a decision and not an empty sentence, and
+// the one call site tells them apart by identity. The state that sends is named
+// by its own arm rather than by the absence of one.
+//
+// ⚠️ **`unreadable` does not send, and does not guess.** It is not "a key is
+// stored" and it is not "none is". Sending would put the command's own sentence
+// on the screen — true, and *identical to the one `absent` gets* — which folds
+// the two states this window keeps apart everywhere else into one message, on
+// the one screen where the difference decides whether somebody goes to find a
+// key or goes to unlock their keychain. So it says what it knows: nothing was
+// typed, and whether a key is already stored is unknown. It deliberately does
+// not repeat what to do about the store; `keyStateSentence` is drawn beside it
+// and `KEY_STORE_FAILURE_TEXT` is where that action lives.
+export const EMPTY_FIELD_TEXT = {
+  present: () =>
+    "a key is already stored; this window cleared the field after saving it, so type a new one " +
+    "only to replace it",
+  // The one that goes to the command. With nothing stored there is nothing this
+  // window knows that `Error::EmptyKey` does not, and its sentence is right.
+  absent: () => null,
+  unreadable: () =>
+    "nothing was typed, and whether a key is already stored is unknown: the key store did not " +
+    "answer",
+  notAsked: () => "nothing was typed, and this window has not read the key store yet",
+};
+
+export const emptyFieldSentence = (key) =>
+  (
+    EMPTY_FIELD_TEXT[key?.kind] ??
+    (() =>
+      "nothing was typed, and this build did not understand what the key store answered, so " +
+      "whether one is already stored is unknown")
+  )(key);
+
+// The field's own two labels, per the same state.
+//
+// **`absent`, `notAsked` and `unreadable` read alike here on purpose, and that
+// is not the fold this file spends its time avoiding.** These two strings say
+// what the button does and what the field is for; they are not statements about
+// the store. "Check and save" is true whether or not a key is stored, while
+// "Replace the key" claims one is — which is why only `present` gets it, and
+// why a store that would not answer must not. The distinction between those
+// three is carried where it belongs: `keyStateSentence` above, and
+// `EMPTY_FIELD_TEXT` when the button is actually pressed.
+export const KEY_FIELD_PLACEHOLDER = {
+  present: () => "leave empty to keep the stored key",
+  absent: () => "OpenRouter key",
+  unreadable: () => "OpenRouter key",
+  notAsked: () => "OpenRouter key",
+};
+
+export const KEY_SUBMIT_TEXT = {
+  present: () => "Replace the key",
+  absent: () => "Check and save",
+  unreadable: () => "Check and save",
+  notAsked: () => "Check and save",
+};
+
+// The fallbacks are the neutral pair for the same reason `unreadable` gets it:
+// a `kind` this build has never seen is not evidence that a key is stored.
+export const keyFieldPlaceholder = (key) =>
+  (KEY_FIELD_PLACEHOLDER[key?.kind] ?? KEY_FIELD_PLACEHOLDER.absent)(key);
+export const keySubmitText = (key) => (KEY_SUBMIT_TEXT[key?.kind] ?? KEY_SUBMIT_TEXT.absent)(key);
+
 // What `set_key` failing means, and the one thing this window must not say
 // about it. `set_key` refuses an empty submission before it calls anyone and
 // checks the key with the provider **before** storing it (`models.rs:58-67`),

@@ -29,6 +29,10 @@ import {
   listNotReadSentence,
   keyRemovedSentence,
   keyNotRemovedSentence,
+  keyNotAsked,
+  emptyFieldSentence,
+  keyFieldPlaceholder,
+  keySubmitText,
   embeddingModelNotRecordedSentence,
   roleNotRecordedSentence,
 } from "./render.js";
@@ -357,6 +361,14 @@ el("search-form").addEventListener("submit", async (event) => {
 // silence.
 const listState = Object.fromEntries(ROLES.map((role) => [role, listNotAsked()]));
 
+// What the credential store last answered, kept because the submit handler has
+// to know it and `model_settings` is the only thing that asks. `keyNotAsked()`
+// rather than `null` for the reason `listState` above is a three-valued union:
+// this listener is registered before the first `refreshSettings()` resolves, so
+// a press in that window must not fall through a fallback and report an answer
+// nobody had asked for.
+let keyState = keyNotAsked();
+
 // Every option carries its own label, refused ones disabled. Refused rather
 // than absent: a model the provider lists and this window hides sends the user
 // looking for a fault here.
@@ -413,8 +425,14 @@ const showRecorded = (role, recorded) => {
 };
 
 const drawSettings = (settings) => {
+  keyState = settings.key;
   el("disclosure").textContent = disclosureSentence(settings.key);
   el("key-state").textContent = keyStateSentence(settings.key);
+  // The field and its button are drawn from the store's answer too. With a key
+  // stored this window has just cleared the field, so an empty one is the
+  // ordinary state and must not read as something missing.
+  el("key").placeholder = keyFieldPlaceholder(settings.key);
+  el("key-submit").textContent = keySubmitText(settings.key);
   el("index-state").textContent = indexStateSentence(settings.index, indexOpening);
   el("embedding-progress").textContent = embeddingProgressText(settings.index);
   // An index that could not be read says nothing about which models are
@@ -436,6 +454,20 @@ const refreshSettings = async () => drawSettings(await invoke("model_settings"))
 
 el("key-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  // An empty field means two different things, and only this side knows which:
+  // it clears the field after a successful save, so an empty field with a key
+  // stored is somebody in a perfectly good state pressing a button. `set_key`'s
+  // own guard is untouched and still refuses the empty string — this is a
+  // distinction added in front of it, not a refusal taken over from it. A
+  // `null` sentence is the one state where the command's answer is the right
+  // one; see `EMPTY_FIELD_TEXT`, and note `unreadable` is not that state.
+  if (el("key").value === "") {
+    const instead = emptyFieldSentence(keyState);
+    if (instead !== null) {
+      el("key-status").textContent = instead;
+      return;
+    }
+  }
   try {
     const status = await invoke("set_key", { key: el("key").value });
     el("key").value = "";
