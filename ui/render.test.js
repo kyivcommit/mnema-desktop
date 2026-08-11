@@ -27,7 +27,7 @@ import {
   LEAVES_NOTHING,
   LEAVES_EVERYTHING,
   KEY_STATE_TEXT,
-  asStatusSentence,
+  asSentence,
   keyStoreNote,
   KEY_STORE_FAILURE_TEXT,
   KEY_STORE_SHOWS_REASON,
@@ -1506,33 +1506,39 @@ test("the key field is sized from the text it shows, not from a number", () => {
 // test that only checked one: it must also leave a text that is already a
 // sentence alone, or "…was created." becomes "…was created..".
 test("a status line is shaped into a sentence, and an already-shaped one is left alone", () => {
-  assert.equal(asStatusSentence("the key was accepted"), "The key was accepted.");
+  assert.equal(asSentence("the key was accepted"), "The key was accepted.");
   assert.equal(
-    asStatusSentence("The embedding model was recorded: baai/bge-m3."),
+    asSentence("The embedding model was recorded: baai/bge-m3."),
     "The embedding model was recorded: baai/bge-m3.",
   );
-  assert.equal(asStatusSentence(""), "", "an empty status must stay empty, not become a full stop");
-  assert.equal(asStatusSentence(null), "", "nothing to say is not a sentence either");
+  assert.equal(asSentence(""), "", "an empty status must stay empty, not become a full stop");
+  assert.equal(asSentence(null), "", "nothing to say is not a sentence either");
 });
 
-// And the seam is only a seam if everything goes through it. Nine writes today;
-// the floor is a floor rather than a total, so a tenth is not a failure and a
-// regexp that has rotted to nothing is.
-test("every write to the status line goes through the seam", () => {
+// And the seam is only a seam if everything goes through it. **The first version
+// of this test named the two action lines, and the very next screenshot showed
+// the same mismatch between two it had not named** — `index-state` reading as a
+// sentence and `embedding-progress` directly under it not. So it names every
+// element in the settings block that carries prose.
+//
+// Fourteen writes today, and the number is a floor rather than a total: a
+// fifteenth is not a failure, a regexp that has rotted to nothing is.
+test("every line of prose in the settings block goes through the seam", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const main = readFileSync(join(here, "main.js"), "utf8");
-  const writes = [...main.matchAll(/el\("(?:key|model)-status"\)\.textContent\s*=\s*([^\n]*)/g)].map(
-    (m) => m[1],
-  );
+  const prose = ["key-status", "model-status", "disclosure", "key-state", "key-note", "index-state", "embedding-progress"];
+  const writes = [
+    ...main.matchAll(new RegExp(`el\\("(?:${prose.join("|")})"\\)\\.textContent\\s*=\\s*([^\\n]*)`, "g")),
+  ].map((m) => m[1]);
   assert.ok(
-    writes.length >= 9,
-    `only ${writes.length} status writes found — the regexp has rotted, or the handlers moved`,
+    writes.length >= 14,
+    `only ${writes.length} prose writes found — the regexp has rotted, or the handlers moved`,
   );
   for (const written of writes) {
     assert.match(
       written,
-      /^asStatusSentence\(/,
-      `a status line is written without the seam, so its shape depends on which producer ran: ${written}`,
+      /^asSentence\(/,
+      `a line of prose is written without the seam, so its shape depends on which producer ran: ${written}`,
     );
   }
 });
