@@ -335,10 +335,17 @@ el("search-form").addEventListener("submit", async (event) => {
 //
 // It is checked rather than promised now: `every sentence in the model
 // configuration block comes from render.js` in `render.test.js` reads this file
-// and fails on a string or template literal assigned to a `textContent` below
-// this line. The block above it is the walking skeleton's and is deliberately
-// not covered — that claim would be a different one, and this comment does not
-// make it.
+// and fails on a string or template literal assigned to a `textContent`,
+// `innerText` or `innerHTML` below this line, by `=` or by `+=`. The block
+// above it is the walking skeleton's and is deliberately not covered — that
+// claim would be a different one, and this comment does not make it.
+//
+// **What that check does not reach**, said here because this is the file
+// somebody writing a sentence is looking at: a literal bound to a name first,
+// or sitting second in a concatenation or a ternary, is invisible to it —
+// telling those from a call needs a parser rather than a regexp, and the test
+// says the same from its own side with the shapes measured one at a time. The
+// rule above is a rule to keep, not a fence that will stop you.
 
 // What `provider_models` has answered for this role, in three states rather
 // than two. `false` used to mean both "could not be read" and "has not been

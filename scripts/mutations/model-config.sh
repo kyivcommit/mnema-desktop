@@ -761,3 +761,14 @@ case_ "the two answers to a deletion are folded on the way to the window" \
   's~            mnema_secrets::Forgotten::NothingToRemove => Self::NothingToRemove,~            mnema_secrets::Forgotten::NothingToRemove => Self::Removed,~' \
   '            mnema_secrets::Forgotten::NothingToRemove => Self::Removed,' \
   mnema-desktop 'removing_a_key_that_is_not_there_says_so_rather_than_reporting_a_removal' --test model_commands
+
+# The fix for a count trap wrote two more counts, in prose, held by nothing —
+# `_mnema_note` inside the excerpt and the header of `tests/catalogue.rs`. The
+# case breaks the file rather than the code, which is the only way this rule can
+# be broken: nothing in `src/` reads `total_count`, and that is exactly why it
+# went unchecked.
+case_ "an excerpt of the provider's list claims to be the whole of it" \
+  crates/mnema-provider/tests/fixtures/embeddings-2026-08-08.json \
+  's~"total_count": 33~"total_count": 6~' \
+  '"total_count": 6' \
+  mnema-provider 'each_fixture_says_what_it_is_and_its_own_numbers_agree' --test catalogue

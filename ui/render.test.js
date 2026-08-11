@@ -1196,9 +1196,15 @@ test("every element main.js reaches for exists in index.html", () => {
   );
 
   const literals = [...main.matchAll(/\bel\("([^"]+)"\)/g)].map((m) => m[1]);
-  // Tight on purpose. `> 10` against an actual 20 tolerates losing nine calls
-  // before anybody is told the regexp stopped matching what it is aimed at.
-  assert.ok(literals.length >= 20,
+  // A floor, because a loop over an empty list passes and a regexp that has
+  // stopped matching produces exactly that. **48 today, re-measured**: this
+  // said "`> 10` against an actual 20" while the actual had been 48 since
+  // `667d2ff`, so it tolerated losing twenty-eight calls in silence — a
+  // number describing a file it had stopped describing, in a test whose whole
+  // job is to notice that (whole-branch review, closing check). The margin is
+  // what a legitimate edit may remove before this asks to be looked at, and
+  // the same rule and the same shape of number are on the block test below.
+  assert.ok(literals.length >= 40,
     `only ${literals.length} literal ids found — the regexp has rotted, or main.js shrank`);
   for (const id of literals) {
     assert.ok(ids.has(id), `main.js reaches for #${id}, which index.html does not have`);
@@ -1292,6 +1298,30 @@ test("a failure sentence names what failed and carries the reason it was given",
 // the walking skeleton's half above the marker makes no such claim and is
 // deliberately not covered, because covering it silently would be this test
 // asserting something nobody wrote down.
+//
+// **Say plainly what this covers and what it does not.** Measured on copies of
+// `main.js`, one edit at a time (whole-branch review, closing check):
+//
+// | a literal reaching the DOM as | this test |
+// | --- | --- |
+// | `textContent = "..."`, and now `+=`, `innerText`, `innerHTML` | **red** |
+// | a local `const` assigned to `textContent` | green |
+// | a literal second in a concatenation | green |
+// | a ternary whose first branch is not a literal | green |
+//
+// It goes red for the defect it was written for — the shape all five I2
+// sentences actually had — and for the two spellings of it that cost one word
+// each to add. It cannot see a literal bound to a name, because "anything that
+// is not a quote is a call into `render.js`" is false for an identifier, and
+// deciding otherwise needs a parser rather than a regexp. The claim in
+// `main.js`'s own header is written to the same limit; an earlier version of
+// both overclaimed.
+//
+// ⚠️ **Nothing in `scripts/mutations/` can reach this file.**
+// `mutation-check.sh` runs `cargo test` and nothing else, so the whole of
+// `ui/render.test.js` — this regexp included — is held by review and by hand.
+// The case file states the same limit from its own side twice; this is the
+// side somebody loosening the regexp is actually standing on.
 test("every sentence in the model configuration block comes from render.js", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const main = readFileSync(join(here, "main.js"), "utf8");
@@ -1301,13 +1331,20 @@ test("every sentence in the model configuration block comes from render.js", () 
   assert.ok(at > 0, "the model configuration block's own header is gone, so this test aims at nothing");
   const block = main.slice(at);
 
-  // Right-hand sides of `textContent =`, up to the end of the line. A literal
-  // opens with a quote or a backtick; anything else is a call or an identifier,
-  // which is to say `render.js`.
-  const assignments = [...block.matchAll(/\.textContent\s*=\s*(\S)/g)].map((m) => m[1]);
-  // Tight on purpose, the same way the id test above is: an assertion over an
-  // empty list passes, and a regexp that has rotted produces exactly that.
-  assert.ok(assignments.length >= 10,
+  // The first character of what is assigned to text in the DOM. A literal opens
+  // with a quote or a backtick. `+=` is here because `textContent = "a"` and
+  // `textContent += "a"` put the same word on the same screen, and the other
+  // two property names because a sentence does not become reachable by being
+  // written to `innerText` instead.
+  const assignments = [...block.matchAll(/\.(?:textContent|innerText|innerHTML)\s*\+?=\s*(\S)/g)]
+    .map((m) => m[1]);
+  // A floor, because an assertion over an empty list passes and a rotted regexp
+  // produces exactly that. **16 today**, and the margin is what a legitimate
+  // edit may remove before this asks to be looked at. The id test above carries
+  // the same rule and its own re-measured number; this one said `>= 10` against
+  // 16 and called itself tight "the same way the id test above is", which was
+  // a parity claim pointing at a floor that had been stale for six commits.
+  assert.ok(assignments.length >= 14,
     `only ${assignments.length} textContent assignments found — the regexp has rotted, or the block shrank`);
   for (const first of assignments) {
     assert.ok(!["'", '"', "`"].includes(first),

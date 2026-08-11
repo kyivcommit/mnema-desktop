@@ -11,6 +11,13 @@
 //! file says which it is in a `_mnema_note` key of ours that nothing reads
 //! (whole-branch review, M1). The 33 is not rewritten to 6: it is the measured
 //! figure `MIN_CONTEXT_TOKENS`' own doc cites as "12 of the 33".
+//!
+//! ⚠️ **Every number in the paragraph above is checked**, by
+//! [`each_fixture_says_what_it_is_and_its_own_numbers_agree`]. Writing them here
+//! and in `_mnema_note` was the fix for a count trap producing two more counts,
+//! in prose, held by nothing: a record added or dropped for some later rule
+//! would leave both stale in silence, which is the exact shape of the finding
+//! they were written to close (whole-branch review, closing check).
 
 use mnema_provider::{
     Error, InputLimit, MIN_CONTEXT_TOKENS, ModelEntry, Price, RecordId, Refusal, Role,
@@ -687,6 +694,55 @@ fn every_rerank_model_the_provider_lists_states_a_price_of_zero() {
             Price::Known { amount: 0.0 },
             "{} no longer states zero, so the sentence built on this measurement is stale",
             entry.id
+        );
+    }
+}
+
+/// What each fixture claims to be, checked against what it holds.
+///
+/// The prose this pins lives in three places and none of them could go red:
+/// this module's own header, the `_mnema_note` key inside the excerpt, and
+/// `MIN_CONTEXT_TOKENS`' "12 of the 33". Adding or dropping a record for some
+/// later rule would leave every one of them stale in silence — the count trap
+/// this project has paid for repeatedly, produced by the fix for one instance
+/// of it (whole-branch review, closing check).
+///
+/// **The relationship is asserted as well as the numbers**, and that is the
+/// half a pair of literals does not give: `records == total_count` is what
+/// "the whole answer" means and `records < total_count` is what "an excerpt"
+/// means, so a fixture cannot quietly change kind while both of its numbers
+/// still look plausible.
+#[test]
+fn each_fixture_says_what_it_is_and_its_own_numbers_agree() {
+    for (name, body, records, total_count, whole_answer) in [
+        ("rerank-2026-08-08.json", RERANK, 6, 6, true),
+        ("embeddings-2026-08-08.json", EMBEDDINGS, 6, 33, false),
+    ] {
+        let value: serde_json::Value = serde_json::from_str(body).expect("the fixture is JSON");
+        let held = value["data"].as_array().expect("a data list").len();
+        let stated = value["total_count"].as_u64().expect("a stated total") as usize;
+
+        assert_eq!(
+            held, records,
+            "{name} holds {held} records; this module's header and, for the excerpt, its own \
+             `_mnema_note` both name the count in prose — update them and this line together"
+        );
+        assert_eq!(stated, total_count, "{name}'s `total_count` changed");
+        assert_eq!(
+            held == stated,
+            whole_answer,
+            "{name} has changed which kind of artefact it is: `records == total_count` is the \
+             whole answer, `records < total_count` is an excerpt of one"
+        );
+
+        // The note is what tells the person who opens the file, and it belongs
+        // to exactly one of the two. On the complete fixture it would be a
+        // sentence contradicting the numbers beside it.
+        assert_eq!(
+            value.get("_mnema_note").is_some(),
+            !whole_answer,
+            "{name}: an excerpt must say so in the file itself, and a complete answer must not \
+             claim to be one"
         );
     }
 }
