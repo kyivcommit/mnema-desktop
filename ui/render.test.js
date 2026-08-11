@@ -700,17 +700,21 @@ test("a read-back that succeeded is never told it failed", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // The one control in this window that destroys anything (D96g).
 
-// The settings as `model_settings` sends them when one space holds embeddings.
-// `spaceCount: 1` is part of the baseline rather than a field a test opts into:
-// it is the arrangement in which the button's number is the whole bill, and a
-// fixture without it would make every case below exercise the refusing path.
+// The settings as `model_settings` sends them when the index holds embeddings.
+//
+// `spaceCount: 2` and `embeddedChunks: 1` are the load-bearing part of this
+// baseline, not filler. Two spaces is the ORDINARY state — adoption never
+// removes the space it moves off — and `embeddedChunks` counts only the active
+// one, so a build that read either of those instead of
+// `embeddedChunksEverywhere` would put 2, or 1, on a button that is about 3.
 const settingsWith = (fields) => ({
   kind: "read",
   activeSpace: 1,
   embeddingDim: 1024,
-  embeddedChunks: 3,
+  embeddedChunks: 1,
+  embeddedChunksEverywhere: 3,
   totalChunks: 812,
-  spaceCount: 1,
+  spaceCount: 2,
   ...fields,
 });
 
@@ -726,18 +730,24 @@ test("the confirmation names how many embeddings it would delete", () => {
   const label = discardVectorsLabel(discardOffer("vendor/other", settingsWith({}), KEY_PRESENT));
   assert.match(label, /\b3 embeddings\b/, `the number is not on the button: ${label}`);
   assert.match(label, /vendor\/other/, "and which change it is for");
-  assert.match(label, /#1\b/, "and which space is being spent");
   assert.doesNotMatch(label, /are you sure/i);
+  // Review 2. It named `#1` while the change retires every space in the way, so
+  // the number and the place contradicted each other as soon as there was more
+  // than one — and there is more than one after any model change at all. The
+  // number is the whole index's now, and no space is named until
+  // `retiredSpacesClause` names the ones that actually went.
+  assert.doesNotMatch(label, /#\d/,
+    `the button names one space while the number counts the whole index: ${label}`);
 });
 
 // A count in a sentence is a definition of the thing it counts, and `1
 // embeddings` invites doubt about the only number this control carries.
 test("one embedding is not called one embeddings", () => {
-  assert.match(discardVectorsLabel(discardOffer("m", settingsWith({ embeddedChunks: 1 }), KEY_PRESENT)),
+  assert.match(discardVectorsLabel(discardOffer("m", settingsWith({ embeddedChunksEverywhere: 1 }), KEY_PRESENT)),
     /\b1 embedding\b/);
-  assert.doesNotMatch(discardVectorsLabel(discardOffer("m", settingsWith({ embeddedChunks: 1 }), KEY_PRESENT)),
+  assert.doesNotMatch(discardVectorsLabel(discardOffer("m", settingsWith({ embeddedChunksEverywhere: 1 }), KEY_PRESENT)),
     /1 embeddings/);
-  assert.match(discardVectorsNote(discardOffer("m", settingsWith({ embeddedChunks: 1 }), KEY_PRESENT)),
+  assert.match(discardVectorsNote(discardOffer("m", settingsWith({ embeddedChunksEverywhere: 1 }), KEY_PRESENT)),
     /\b1 embedding\b/);
 });
 
@@ -751,16 +761,23 @@ test("the discard is offered only when this window can state what it costs", () 
     "nothing was refused, so there is nothing to confirm");
   assert.equal(discardOffer("vendor/other", { kind: "unreadable", cause: "readFailed", reason: "x" }, KEY_PRESENT), null,
     "an index that could not be read carries no number, and the button is only a number");
-  assert.equal(discardOffer("vendor/other", settingsWith({ activeSpace: null }), KEY_PRESENT), null,
-    "no space is chosen, so nothing is embedded and the refusal was about something else");
-  assert.equal(discardOffer("vendor/other", settingsWith({ embeddedChunks: 0 }), KEY_PRESENT), null,
-    "a zero here is `this window cannot see what blocks`, not `nothing does`");
-  // Review 1, Important 2. The command retires EVERY space in the way and this
-  // label names one, so with two spaces the button understates a bill it is the
-  // whole point of. Both directions are already here: the control above passes
-  // with `spaceCount: 1`.
-  assert.equal(discardOffer("vendor/other", settingsWith({ spaceCount: 2 }), KEY_PRESENT), null,
-    "with a second space in the index the number on the button is not the whole bill");
+  assert.equal(
+    discardOffer("vendor/other", settingsWith({ embeddedChunksEverywhere: 0 }), KEY_PRESENT),
+    null,
+    "no space in the index holds anything, so a confirmation would be a question about nothing");
+  // And that zero is decided by the total, not by the active space's share of
+  // it: an abandoned space holding everything while the active one is empty is
+  // still an index with something to destroy.
+  assert.notEqual(
+    discardOffer("vendor/other", settingsWith({ embeddedChunks: 0 }), KEY_PRESENT),
+    null,
+    "the offer was withheld because the ACTIVE space is empty, while the index is not");
+  // Review 2. `spaceCount === 1` was the guard here for one commit, and it is
+  // the ordinary state that has two: adoption never removes the space it moves
+  // off, so anybody who has ever tried a second model would never see this
+  // button again — with no other way to change the model at all.
+  assert.notEqual(discardOffer("vendor/other", settingsWith({ spaceCount: 7 }), KEY_PRESENT), null,
+    "a second space is the ordinary state after any model change and must not hide the offer");
   // Review 1, Minor 1. `refusedChange` is set on every failed change, and this
   // command fails on the credential store before it reaches the index — so
   // without this guard, "you have entered no key" produces a button offering to

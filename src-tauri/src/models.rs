@@ -864,7 +864,35 @@ pub struct IndexRead {
     /// `index_settings` reads `space_model` for it and a missing row makes the
     /// whole answer `Unreadable` — so `space_count == 1` beside a set
     /// `active_space` means the active one is it.
+    ///
+    /// ⚠️ **Nothing in `ui/` reads it today, and it is not the number to gate a
+    /// confirmation on.** It was, for one commit, and `space_count == 1` turned
+    /// out to be the *rare* state rather than the ordinary one:
+    /// `Db::adopt_embedding_model` mints a space and repoints, and never removes
+    /// the one it moved off, so anybody who has ever tried a second model has two
+    /// spaces for the life of the index and the confirmation would never appear
+    /// again. What replaced it is [`IndexRead::embedded_chunks_everywhere`],
+    /// which is the honest number rather than a guard around a misleading one.
     pub space_count: i64,
+    /// Every embedding the index holds, across every space — the number a
+    /// confirmed model change actually costs.
+    ///
+    /// **Not `embedded_chunks`, and the difference is the ordinary case rather
+    /// than a corner.** That field counts the active space; a space left behind
+    /// by an earlier model change is still there holding whatever it held, and
+    /// `Db::adopt_embedding_model` never removes what it moves off. A window
+    /// naming the active space's count while the change retires every non-empty
+    /// space understates the bill by exactly the spaces it forgot.
+    ///
+    /// **It is what will go, not merely what exists**, and the two coincide for
+    /// a reason worth writing down rather than assuming: a confirmed change
+    /// retires every space in the way and adopts a destination that is empty —
+    /// either newly minted, or an earlier empty one — so the spaces spared are
+    /// spaces holding nothing. Two full spaces at once would break that
+    /// equality, and cannot arise through this window: vectors are written into
+    /// the active space, and adoption refuses to move the pointer off a full one
+    /// unless the caller confirmed, which retires it.
+    pub embedded_chunks_everywhere: i64,
     pub rerank_model: Option<String>,
     pub chat_model: Option<String>,
 }
@@ -892,6 +920,7 @@ fn index_settings(state: &AppState) -> IndexSettings {
             },
             total_chunks: db.chunk_count()?,
             space_count: db.space_count()?,
+            embedded_chunks_everywhere: db.embedded_chunks_everywhere()?,
             rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
             chat_model: db.meta_get(mnema_index::META_CHAT_MODEL)?,
         }))
@@ -998,6 +1027,7 @@ mod tests {
             embedded_chunks: 0,
             total_chunks: 0,
             space_count: 0,
+            embedded_chunks_everywhere: 0,
             rerank_model: None,
             chat_model: None,
         }

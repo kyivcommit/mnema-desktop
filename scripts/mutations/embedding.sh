@@ -177,7 +177,7 @@ case_ "models: the number of spaces must be measured, not asserted (D96g, review
   's{            space_count: db\.space_count\(\)\?,\n}{            space_count: 1,\n}' \
   '            space_count: 1,
             rerank_model:' \
-  mnema-desktop 'the_settings_say_how_many_spaces_there_are_and_not_only_what_the_active_one_holds' --test model_commands
+  mnema-desktop 'the_settings_tell_the_active_space_apart_from_the_whole_index' --test model_commands
 
 # The argument that must be the caller's. Made optional, a window that sends
 # nothing is handed one of the two answers by a library rather than refused —
@@ -196,3 +196,25 @@ case_ "space: the number of spaces counts the empty ones too (D96g, review 1)" \
   's{            \.query_row\("SELECT count\(\*\) FROM embedding_space", \[\], \|r\| r\.get\(0\)\)\?\)\n}{            .query_row(\n                "SELECT count(*) FROM embedding_space WHERE id IN (SELECT space_id FROM chunk_embedding_state)",\n                [],\n                |r| r.get(0),\n            )?)\n}' \
   'WHERE id IN (SELECT space_id FROM chunk_embedding_state)' \
   mnema-index 'the_number_of_spaces_counts_the_empty_ones_too' --test space
+
+# ── Task 4, fix round 2 (D96g) ───────────────────────────────────────────────
+#
+# Review round 2. The confirmation's number must be the whole index's, not the
+# active space's share of it: an abandoned space is left behind by every model
+# change (`adopt_embedding_model` mints and repoints and never removes what it
+# moved off), and the change retires every space in the way. Collapsed to the
+# active space, the button offers to delete less than it will.
+case_ "models: the confirmation's number must count the index, not the active space (D96g, review 2)" \
+  src-tauri/src/models.rs \
+  's{            embedded_chunks_everywhere: db\.embedded_chunks_everywhere\(\)\?,\n}{            embedded_chunks_everywhere: db.embedded_chunk_count(active_space.unwrap_or(0)).unwrap_or(0),\n}' \
+  'embedded_chunks_everywhere: db.embedded_chunk_count(active_space.unwrap_or(0)).unwrap_or(0),' \
+  mnema-desktop 'the_settings_tell_the_active_space_apart_from_the_whole_index' --test model_commands
+
+# The sum, in the crate that owns it. Assignment rather than addition answers
+# whatever the last space happened to hold — a number, plausible, and not the
+# one somebody is about to spend.
+case_ "space: the embeddings everywhere must be summed, not overwritten (D96g, review 2)" \
+  crates/mnema-index/src/space.rs \
+  's{            total \+= self\.embedded_chunk_count\(space_id\)\?;\n}{            total = self.embedded_chunk_count(space_id)?;\n}' \
+  '            total = self.embedded_chunk_count(space_id)?;' \
+  mnema-index 'the_embeddings_everywhere_are_summed_over_spaces_and_distinct_within_one' --test space

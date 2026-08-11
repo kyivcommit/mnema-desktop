@@ -795,28 +795,14 @@ const embeddingsCount = (n) => (n === 1 ? "1 embedding" : `${n} embeddings`);
 // they cost — `null` for "do not offer", never a partly-filled offer.
 //
 // `model` is the change that was refused; without one there is nothing to
-// confirm. Every other guard is the same rule: **this window does not offer a
-// destructive act whose price it cannot state, and does not offer one it can
-// already see will not happen.**
+// confirm. The rest is one rule: **the number on the button is the number that
+// will go, and there is no button when there is nothing to go.**
 //
 // - An index it could not read has no number in it, so the button would have to
 //   fall back to "are you sure?", which is the sentence this whole control
 //   exists instead of.
-// - No active space means nothing is embedded and the refusal was about
-//   something else.
-// - `embeddedChunks === 0` is the subtle one. The space that blocks a change
-//   need not be the active one — `mnema_index::Error::SpaceNotEmpty`'s own doc
-//   says so — and `embeddedChunks` counts only the active one. A zero here is
-//   therefore "this window cannot see what is in the way", not "nothing is",
-//   and a button reading *delete 0 embeddings* would understate a bill it
-//   cannot read.
-// - `spaceCount !== 1` is the same defect the other way round, and the one
-//   review found: the command retires **every** space in the way, and this label
-//   names one. With two full spaces the button says "delete the 3 embeddings in
-//   space #1" and #1 and #4 both go. One space in the index, and it is the
-//   active one — a `read` with `activeSpace` set guarantees that space exists,
-//   since `index_settings` reads `space_model` for it — is the only arrangement
-//   in which the number on the button is the whole bill.
+// - `embeddedChunksEverywhere === 0` is nothing to destroy — no space in the
+//   index holds anything — so a confirmation would be a question about nothing.
 // - `key.kind !== "present"` is not about price but about the offer being real.
 //   `refusedChange` is set on every failed change, and `set_embedding_model`
 //   fails on the credential store before it ever reaches the index — so without
@@ -824,32 +810,49 @@ const embeddingsCount = (n) => (n === 1 ? "1 embedding" : `${n} embeddings`);
 //   offering to delete embeddings, which is destruction proposed as the cure for
 //   somebody else's ailment.
 //
+// **The number is `embeddedChunksEverywhere` and not `embeddedChunks`, and the
+// guard that stood here instead is gone.** Review round 1 fixed the divergence —
+// the command retires every space in the way while the label named one — by
+// withholding the button unless `spaceCount === 1`. That was the wrong half to
+// fix: `Db::adopt_embedding_model` never removes the space it moves off, so
+// anybody who has ever tried a second model has two spaces for the life of the
+// index (`tests/adopt.rs`, `returning_to_a_model_already_tried_creates_nothing`,
+// pins it at two), and the button would then never appear again — with no other
+// way to change the model at all. The number was already right in that state,
+// because an abandoned space is empty and contributes nothing; what was wrong
+// was naming one space in the sentence. So the sum is stated and no space is
+// named, and the guard has nothing left to hide.
+//
 // ⚠️ **What this does not reach**, since a guard's gaps belong beside it: a
 // change refused by the *provider* — unreachable, or a model it does not have —
-// leaves this window with a key present, a full space and no way to tell that
-// refusal from the index's. The button appears, and its sentence about the index
-// is still true; pressing it destroys nothing, because the provider check runs
-// before the index is touched, and produces the same provider refusal again.
-// Telling the two apart needs the refusal to carry its own shape rather than a
-// string, which is deliberately not this cycle's work.
+// leaves this window with a key present, a full index and no way to tell that
+// refusal from the index's. The button appears, and its sentence about what the
+// index holds is still true; pressing it destroys nothing, because the provider
+// check runs before the index is touched, and produces the same provider refusal
+// again. Telling the two apart needs the refusal to carry its own shape rather
+// than a string, which is deliberately not this cycle's work.
 export const discardOffer = (model, index, key) => {
   if (model === null || model === undefined) return null;
   if (key?.kind !== "present") return null;
   if (index?.kind !== "read") return null;
-  if (index.activeSpace === null || index.activeSpace === undefined) return null;
-  if (index.spaceCount !== 1) return null;
-  if (!(index.embeddedChunks > 0)) return null;
-  return { model, spaceId: index.activeSpace, embeddedChunks: index.embeddedChunks };
+  if (!(index.embeddedChunksEverywhere > 0)) return null;
+  return { model, embeddedChunks: index.embeddedChunksEverywhere };
 };
 
 // The label on the button, and the line under it. Both take the offer `null`
 // included and answer with the empty string for it, so that `main.js` writes no
 // literal of its own — including the empty one that clears them.
+//
+// **It names no space**, which is a correction rather than an omission. It said
+// "in vector space #N" while the change retires every space in the way, so the
+// number and the place disagreed the moment there was more than one. The number
+// is now the whole index's and the sentence says so; which spaces actually went
+// is `retiredSpacesClause`, afterwards, from what the command measured.
 export const discardVectorsLabel = (offer) =>
   offer === null
     ? ""
     : `Change to ${offer.model} and delete the ${embeddingsCount(offer.embeddedChunks)} ` +
-      `in vector space #${offer.spaceId}`;
+      "this index holds";
 
 // What it costs, in the two directions that matter: what goes, and what does
 // not. The second half is not reassurance — it is the difference between this

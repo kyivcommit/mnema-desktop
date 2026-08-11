@@ -1043,25 +1043,28 @@ fn a_confirmed_change_to_the_model_the_index_is_already_on_retires_nothing() {
     assert_eq!(adopted.space_id, space, "re-adoption minted a second space");
 }
 
-/// The settings carry how many vector spaces exist, and it is not derived from
-/// anything else on the payload.
+/// The settings carry three different numbers about embeddings, and no two of
+/// them may collapse into one.
 ///
-/// **This is the number the window's confirmation stands on** (review 1,
-/// Important 2). `embedded_chunks` counts the active space; the command retires
-/// every space in the way, and the space that blocks need not be the active one.
-/// So the button may only appear when the active space is the only space there
-/// is, and this field is the only thing that says so.
+/// **`embedded_chunks_everywhere` is the number the window's confirmation stands
+/// on** (review 2). `embedded_chunks` counts the active space; the command
+/// retires every space in the way; and a space abandoned by an earlier model
+/// change is still there holding whatever it held, because
+/// `Db::adopt_embedding_model` mints and repoints and never removes what it
+/// moved off. So a button naming the active space's count understates the bill
+/// by exactly the spaces it forgot.
+///
+/// The fixture makes the three numbers **pairwise different** — 3 in the active
+/// space, 2 in another, 2 spaces — so that a build reading any one of them in
+/// place of another is caught rather than accidentally right. A fixture with
+/// equal halves is the shape that lets that through.
 ///
 /// A second space is built through `Db::create_model_config` and
 /// `Db::create_space` rather than through a second adoption, because a second
-/// adoption is exactly what the index refuses here — and that refusal is the
-/// state this number exists to describe.
-///
-/// Both numbers after the second space, because either alone is satisfied by the
-/// wrong build: a `space_count` reading `embedded_chunks` would answer 3, and an
-/// `embedded_chunks` that started counting every space would answer 3 as well.
+/// adoption is exactly what the index refuses in this state — and that refusal
+/// is what these numbers exist to describe.
 #[test]
-fn the_settings_say_how_many_spaces_there_are_and_not_only_what_the_active_one_holds() {
+fn the_settings_tell_the_active_space_apart_from_the_whole_index() {
     let fx = Fixture::with_provider_answering_embedding_checks(1024, 1);
     fx.open_index();
     set_key(fx.state(), KEY.into()).expect("accepted");
@@ -1069,13 +1072,25 @@ fn the_settings_say_how_many_spaces_there_are_and_not_only_what_the_active_one_h
     let active = fx.embed_chunks_in_the_active_space(EMBEDDED);
 
     let before = model_settings(fx.state());
-    assert_eq!(read_index(&before.index).space_count, 1);
+    let before = read_index(&before.index);
+    assert_eq!(before.space_count, 1);
+    assert_eq!(
+        before.embedded_chunks_everywhere, EMBEDDED,
+        "with one space the two counts agree, which is why the second space below is needed"
+    );
 
+    // Full, and holding fewer than the active one, so no assertion here can be
+    // satisfied by the wrong number.
+    const ELSEWHERE: i64 = 2;
     let second = fx
         .state()
         .with_index(|db| {
             let config = db.create_model_config("other", "openrouter", None, OTHER_MODEL, 1024)?;
-            db.create_space(config, 1024, &mnema_chunk::chunker_hash())
+            let space = db.create_space(config, 1024, &mnema_chunk::chunker_hash())?;
+            for chunk in 1..=ELSEWHERE {
+                db.insert_vector(space, 1000 + chunk, &vec![0.5f32; 1024])?;
+            }
+            Ok(space)
         })
         .expect("a second space is created");
     assert_ne!(second, active, "the fixture built one space twice");
@@ -1083,13 +1098,85 @@ fn the_settings_say_how_many_spaces_there_are_and_not_only_what_the_active_one_h
     let settings = model_settings(fx.state());
     let after = read_index(&settings.index);
     assert_eq!(
-        after.space_count, 2,
-        "the window is told there is one space while the index holds two, which is what lets \
-         it offer to delete a number that is not the whole bill"
+        after.embedded_chunks, EMBEDDED,
+        "this one counts the active space alone"
     );
     assert_eq!(
-        after.embedded_chunks, EMBEDDED,
-        "and this one still counts the active space alone — the two are different questions"
+        after.embedded_chunks_everywhere,
+        EMBEDDED + ELSEWHERE,
+        "and this one counts the index — a confirmed change retires the second space too, and a \
+         window told only the first number offers to delete less than it will"
+    );
+    assert_eq!(
+        after.space_count, 2,
+        "and this one counts spaces, not either"
     );
     assert_eq!(after.active_space, Some(active), "the pointer did not move");
+}
+
+/// Trying a second model and going back leaves two spaces **for the life of the
+/// index**, and that is the ordinary state rather than a corner of it.
+///
+/// This is the regression test for what review round 2 found: the confirmation
+/// was gated on there being exactly one space, and after this sequence — three
+/// presses on a settings screen, before anything is indexed — there are two,
+/// permanently. `Db::adopt_embedding_model` mints and repoints and never removes
+/// what it moved off, and the only production caller of `Db::drop_space` is the
+/// confirmed change itself, so nothing else can bring the count back down.
+///
+/// **The number was never the problem, which is the part worth pinning.** An
+/// abandoned space is empty and contributes nothing, so
+/// `embedded_chunks_everywhere` equals the active space's count here — the state
+/// that hid the button is a state in which the button's number was already
+/// right. Both are asserted, because the claim is about them agreeing.
+#[test]
+fn trying_a_second_model_leaves_a_space_behind_and_it_never_goes_away() {
+    // Four embedding checks: three adoptions and the refused attempt at the end,
+    // which reaches the provider before it reaches the index. One short and that
+    // last call gets the mock's `599` sentinel, and the refusal this test is
+    // about is replaced by one about a provider — measured, on the first run.
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 4);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("accepted");
+
+    // Three presses on the settings screen, all allowed: nothing is embedded
+    // yet, so nothing blocks a switch in either direction.
+    let first = set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep)
+        .expect("the first model");
+    set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect("a second model, while nothing is embedded");
+    let back = set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep)
+        .expect("and back to the first");
+    assert_eq!(
+        back.space_id, first.space_id,
+        "going back found the space the first press minted"
+    );
+
+    fx.embed_chunks_in_the_active_space(EMBEDDED);
+
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(
+        read.space_count, 2,
+        "the abandoned space is still there, and nothing but a confirmed change removes it"
+    );
+    assert_eq!(
+        read.embedded_chunks_everywhere, EMBEDDED,
+        "and it holds nothing, so the number a confirmation would name is unaffected by it — \
+         which is why the count of spaces must not decide whether that confirmation is offered"
+    );
+
+    // And the state is exactly the one the whole task exists for: a further
+    // change is refused, so without a reachable confirmation there is no way to
+    // change the model at all from here.
+    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect_err("a third model, now that something is embedded");
+    assert!(
+        matches!(
+            refusal,
+            Error::Index(mnema_index::Error::SpaceNotEmpty { embedded_chunks, .. })
+                if embedded_chunks == EMBEDDED
+        ),
+        "this test's premise is that the index refuses here: {refusal:?}"
+    );
 }

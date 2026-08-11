@@ -871,3 +871,81 @@ fn the_number_of_spaces_counts_the_empty_ones_too() {
     db.drop_space(full).unwrap();
     assert_eq!(db.space_count().unwrap(), 1);
 }
+
+/// The number a confirmed model change actually costs: every embedding in the
+/// index, not the active space's share of them.
+///
+/// **The two spaces hold different counts, and neither is the total.** A sum
+/// that read one space, or that answered the largest, or that counted spaces
+/// instead of embeddings, all give something other than 5 here — which a fixture
+/// with equal halves would not have caught.
+///
+/// The chunk ids overlap on purpose. Chunk 1 is embedded in both spaces and is
+/// two embeddings, because two provider calls made them and two would have to be
+/// made again; a sum written as `count(DISTINCT chunk_id)` over the union of the
+/// tables would answer 4 and understate what a rebuild costs.
+#[test]
+fn the_embeddings_everywhere_are_summed_over_spaces_and_distinct_within_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    assert_eq!(
+        db.embedded_chunks_everywhere().unwrap(),
+        0,
+        "a fresh index has nothing to rebuild"
+    );
+
+    // A real chunk, because the bookkeeping row at the end of this test has a
+    // foreign key to `chunk` and the vector table has none. The other ids are
+    // invented, which is what a `vec0` table permits and what
+    // `Db::delete_vectors_for_document` exists because of.
+    let shared = support::one_chunk(&db);
+
+    let first = db
+        .create_model_config("a", "openrouter", None, "vendor/a", 8)
+        .unwrap();
+    let a = db.create_space(first, 8, "chunker-v1").unwrap();
+    for chunk in [shared, 101, 102] {
+        db.insert_vector(a, chunk, &vec_of(8, chunk as f32))
+            .unwrap();
+    }
+    assert_eq!(db.embedded_chunks_everywhere().unwrap(), 3);
+
+    let second = db
+        .create_model_config("b", "openrouter", None, "vendor/b", 8)
+        .unwrap();
+    let b = db.create_space(second, 8, "chunker-v1").unwrap();
+    for chunk in [shared, 103] {
+        db.insert_vector(b, chunk, &vec_of(8, chunk as f32))
+            .unwrap();
+    }
+
+    assert_eq!(db.embedded_chunk_count(a).unwrap(), 3);
+    assert_eq!(db.embedded_chunk_count(b).unwrap(), 2);
+    assert_eq!(
+        db.embedded_chunks_everywhere().unwrap(),
+        5,
+        "chunk 1 is embedded twice, by two models, and is two embeddings to pay for again"
+    );
+
+    // Two records of ONE embedded chunk stay one, which is the rule
+    // `embedded_chunk_count` draws and this must not undo by summing rows.
+    db.conn()
+        .execute(
+            "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state)
+             VALUES (?1, ?2, 'h', 1)",
+            [a, shared],
+        )
+        .unwrap();
+    assert_eq!(
+        db.embedded_chunks_everywhere().unwrap(),
+        5,
+        "a bookkeeping row beside the vector it describes is not a second embedding"
+    );
+
+    db.drop_space(a).unwrap();
+    assert_eq!(
+        db.embedded_chunks_everywhere().unwrap(),
+        2,
+        "what a retired space held is no longer owed to anybody"
+    );
+}

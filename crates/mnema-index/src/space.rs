@@ -505,6 +505,38 @@ impl Db {
             .query_row("SELECT count(*) FROM embedding_space", [], |r| r.get(0))?)
     }
 
+    /// How many chunk embeddings the index holds **across every space**, which
+    /// is what a model change with the old spaces retired actually costs.
+    ///
+    /// **Summed over spaces, distinct within one.** The same chunk embedded in
+    /// two spaces is two embeddings, because two calls to a provider made them
+    /// and two would have to be made again; the same chunk recorded twice inside
+    /// one space is one, for the reason [`Db::embedded_chunk_count`]'s own doc
+    /// gives. Built by calling that method per space rather than by a second
+    /// query that does its own arithmetic: the `UNION` in there is load-bearing
+    /// and a copy of it here could disagree with it, in a number somebody reads
+    /// before deciding to destroy something.
+    ///
+    /// **Why this and not [`Db::embedded_chunk_count`] of the active space.** A
+    /// space left behind by an earlier model change is still in
+    /// `embedding_space` — `Db::adopt_embedding_model` mints and repoints, and
+    /// never removes what it moved off, which `tests/adopt.rs`'s
+    /// `returning_to_a_model_already_tried_creates_nothing` pins at two spaces —
+    /// so "the active space's count" is not what a retiring change throws away
+    /// the moment anybody has ever tried a second model.
+    pub fn embedded_chunks_everywhere(&self) -> Result<i64, Error> {
+        let ids: Vec<i64> = self
+            .conn()
+            .prepare("SELECT id FROM embedding_space")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut total = 0;
+        for space_id in ids {
+            total += self.embedded_chunk_count(space_id)?;
+        }
+        Ok(total)
+    }
+
     /// Whether moving the index off this space would throw anything away.
     ///
     /// Reads **both** places a chunk can be recorded as embedded, because
