@@ -280,6 +280,24 @@ jobs:
           # rest of the crate's tests already ran under `cargo test --workspace`.
           cargo test -p mnema-secrets --test roundtrip -- --include-ignored
 
+  mutations:
+    # The instrument that proves a test is load-bearing. It ran by hand only
+    # until now, which meant it protected exactly as much as someone
+    # remembered to protect.
+    runs-on: ubuntu-latest
+    needs: check
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The harness builds a worktree at HEAD; a shallow clone has no
+          # HEAD to branch from.
+          fetch-depth: 0
+      - name: Provision the toolchain named in rust-toolchain.toml
+        run: rustup toolchain install
+      - name: Run this cycle's mutation cases
+        run: scripts/mutation-check.sh scripts/mutations/embedding.sh
+
   bundle:
     # One architecture per package rather than a universal binary: a universal
     # build carries both slices, so every user downloads roughly twice the
