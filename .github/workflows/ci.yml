@@ -284,17 +284,28 @@ jobs:
     # The instrument that proves a test is load-bearing. It ran by hand only
     # until now, which meant it protected exactly as much as someone
     # remembered to protect.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: check
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-        with:
-          # The harness builds a worktree at HEAD; a shallow clone has no
-          # HEAD to branch from.
-          fetch-depth: 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Provision the toolchain named in rust-toolchain.toml
         run: rustup toolchain install
+      # The harness's own worktree only carries vendor/ and
+      # src-tauri/binaries/ if this checkout already has them
+      # (mutation-check.sh:57, :75-76) — both are git-ignored, so a case
+      # touching mnema-desktop needs the same setup `check` uses to build it
+      # at all.
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Stage the extraction worker that src-tauri declares as a sidecar
+        run: scripts/stage-sidecar.sh debug
+      - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
+        run: scripts/fetch-pdfium.sh
       - name: Run this cycle's mutation cases
         run: scripts/mutation-check.sh scripts/mutations/embedding.sh
 
