@@ -738,16 +738,66 @@ test("a stated zero is a price the provider stated, and never a promise that the
   assert.doesNotMatch(zero, /\$0\.000/,
     "a bare $0.000 per million tokens is exactly the sentence that reads as a promise");
 
+  // The half the first wording failed, and no assertion here could see: "no
+  // charge per token stated" reads as *no price was stated*, which is the one
+  // neighbour this sentence exists to be told apart from. So the sentence must
+  // name the amount, and the neighbour must not — a state split in the type and
+  // merged again in the words is the same defect one layer down.
+  assert.match(zero, /\$0\b/, "a stated zero must name the number the provider stated");
+  const unstated = modelOptionLabel(entryWith({ price: { kind: "notStated" } }));
+  assert.doesNotMatch(unstated, /\$/, "and an absence must name none");
+
   // Both directions: a table that answered the caveat to every price would
-  // satisfy the line above and say nothing.
+  // satisfy the lines above and say nothing.
   const real = modelOptionLabel(entryWith({ price: { kind: "known", amount: 0.000000015 } }));
   assert.match(real, /\$0\.015 per million tokens/);
   assert.doesNotMatch(real, /not the same as free/);
 });
 
-// A positive price small enough that three decimals of a million tokens round
-// to zero. `toFixed` is where it would become the same pixels as a stated zero
-// — the two facts, one message this whole cycle is about, in a rounding rule.
+// The label is assembled as `id — price, limit — refusal`, so an em-dash is a
+// field boundary and a sentence that carries one of its own destroys the
+// boundaries. The first wording of the stated zero did exactly that and put
+// three dashes in one line; nothing asserted it, because every state still read
+// differently as a string and identically to a person.
+test("the label's em-dashes are its field boundaries and nothing else", () => {
+  const prices = [
+    { kind: "known", amount: 0 },
+    { kind: "known", amount: 0.000000015 },
+    { kind: "known", amount: 1e-12 },
+    { kind: "notStated" },
+    { kind: "notAPrice", raw: "-1" },
+    { kind: "unreadable", raw: "free" },
+    { kind: "somethingFutureAndUnknown" },
+  ];
+  const limits = [
+    { kind: "known", tokens: 8192 },
+    { kind: "notStated" },
+    { kind: "notUnderstood", raw: "8k" },
+    { kind: "somethingFutureAndUnknown" },
+  ];
+  const refusals = [
+    [null, 1],
+    [{ kind: "noStatedLimit" }, 2],
+    [{ kind: "limitNotUnderstood", raw: "8k" }, 2],
+    [{ kind: "inputTooSmall", limit: 512, floor: 2048 }, 2],
+    [{ kind: "somethingFutureAndUnknown" }, 2],
+  ];
+  for (const price of prices) {
+    for (const inputLimit of limits) {
+      for (const [refusal, expected] of refusals) {
+        const label = modelOptionLabel(entryWith({ price, inputLimit, refusal }));
+        assert.equal((label.match(/—/g) ?? []).length, expected,
+          `an em-dash that is not a field boundary: ${label}`);
+      }
+    }
+  }
+});
+
+// A positive price small enough that `toFixed(3)` of a million tokens would
+// print `$0.000` — a number this window made up about a provider that stated
+// something else. Not a collision with the stated zero: no state of `Price`
+// renders as `$0.000` any more, which is why the comment on the branch says so
+// and this test does not.
 test("a price too small to show at three decimals is not rendered as a zero", () => {
   const tiny = modelOptionLabel(entryWith({ price: { kind: "known", amount: 1e-12 } }));
   assert.match(tiny, /under \$0\.001 per million tokens/);
@@ -760,6 +810,29 @@ test("a price too small to show at three decimals is not rendered as a zero", ()
   const shown = modelOptionLabel(entryWith({ price: { kind: "known", amount: 1e-9 } }));
   assert.match(shown, /\$0\.001 per million tokens/);
   assert.doesNotMatch(shown, /under/);
+});
+
+// Provider text this build could not parse is shown quoted, wherever it is
+// shown. `"free"` is the measured one: unquoted it is the last word of the
+// label and reads as this window's own verdict on the price. The refusal clause
+// carries the same value as the limit clause in one line, so a label that
+// quoted one and not the other would show one value as two.
+test("a value this build could not read is shown as the provider's text, not as a word of ours", () => {
+  const price = modelOptionLabel(
+    entryWith({ price: { kind: "unreadable", raw: "free" }, refusal: null }),
+  );
+  assert.match(price, /\("free"\)/);
+  assert.doesNotMatch(price, /read \(free\)/, "unquoted, the label's last word is “free”");
+
+  const both = modelOptionLabel(
+    entryWith({
+      inputLimit: { kind: "notUnderstood", raw: "unlimited" },
+      refusal: { kind: "limitNotUnderstood", raw: "unlimited" },
+    }),
+  );
+  assert.equal((both.match(/"unlimited"/g) ?? []).length, 2,
+    `one unparsed value must be spelled one way in one label: ${both}`);
+  assert.doesNotMatch(both, /\(unlimited\)/);
 });
 
 // The sentinel that was on the screen: `-1`, which the provider sends for a
@@ -782,7 +855,7 @@ test("a number that cannot be a price is never rendered as one", () => {
 // stated no input limit" and "the provider stated one this build cannot read"
 // both arrived as `contextLength: null, refusal: null` and drew `input ?` (I4).
 // The Rust half is
-// `a_limit_stated_unreadably_is_told_apart_from_no_limit_for_the_roles_that_refuse_over_neither`.
+// `a_limit_stated_unreadably_is_told_apart_from_no_limit_for_every_role`.
 test("nothing stated about the input limit reads differently from something unreadable", () => {
   const silent = modelOptionLabel(entryWith({ inputLimit: { kind: "notStated" } }));
   const unreadable = modelOptionLabel(

@@ -115,6 +115,35 @@ fn an_empty_key_is_refused_here_rather_than_being_sent_and_reported_as_a_verdict
     );
 }
 
+/// The line `set_key`'s doc draws deliberately, and had no witness for a round:
+/// **empty is refused here, blank is decided by the provider.**
+///
+/// `if key.trim().is_empty()` passes every other test in this file and every
+/// mutation case, and it states about somebody who typed spaces that they typed
+/// nothing — which this build did not observe. The other direction is worse
+/// still: trimming before the check would store a credential different from the
+/// one a person entered.
+///
+/// The provider's verdict on a blank key is not this test's business — the
+/// fixture answers 401 to everything — only that it is the provider's to give.
+#[test]
+fn a_key_of_spaces_is_decided_by_the_provider_rather_than_called_nothing() {
+    let fx = Fixture::with_provider_rejecting_the_key();
+
+    let outcome = set_key(fx.state(), "   ".into()).expect_err("this fixture refuses every key");
+
+    assert!(
+        !matches!(outcome, Error::EmptyKey),
+        "spaces are something a person typed, and calling them nothing states what this build \
+         did not see: {outcome:?}"
+    );
+    assert!(
+        fx.provider_request().is_some(),
+        "the request never left, so the refusal was ours and the doc comment is describing a \
+         build that does not exist"
+    );
+}
+
 #[test]
 fn a_refusal_leaves_the_key_that_was_already_working() {
     // The best property of "check, then store", and the one the test above

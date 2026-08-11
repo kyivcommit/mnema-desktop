@@ -681,7 +681,7 @@ case_ "the input limit reaches the window only for the role that refuses over it
   's~        let input_limit = combined_limit\(&raw\.context_length, &top_provider_limit\);~        let input_limit = match role {\n            Role::Embedding => combined_limit(\&raw.context_length, \&top_provider_limit),\n            Role::Rerank | Role::Chat => InputLimit::NotStated,\n        };~' \
   '        let input_limit = match role {
             Role::Embedding => combined_limit(&raw.context_length, &top_provider_limit),' \
-  mnema-provider 'a_limit_stated_unreadably_is_told_apart_from_no_limit_for_the_roles_that_refuse_over_neither' --test catalogue
+  mnema-provider 'a_limit_stated_unreadably_is_told_apart_from_no_limit_for_every_role' --test catalogue
 
 # The spelling half, for the two unions the acceptance run added — the same case
 # `Refusal`, `RecordId` and `Balance` already have above, and needed for the
@@ -707,3 +707,28 @@ case_ "InputLimit's token count is renamed under a correct discriminant" \
   '        #[serde(rename = "contextLength")]
         tokens: i64,' \
   mnema-desktop 'models::tests::every_provider_discriminant_the_window_sees_has_its_camel_case_spelling_pinned' --lib
+
+# Two rules the first review round found had no case, both about a decision that
+# was written down and held by nothing.
+
+# "Empty is refused here, blank is decided by the provider" is a deliberate line
+# in `set_key`'s doc, and `trim()` passes every other test in the workspace. It
+# states about a person who typed spaces that they typed nothing, which is the
+# harm the doc names — and the same edit made before the check would store a
+# credential other than the one entered.
+case_ "a key of spaces is called nothing rather than sent" \
+  src-tauri/src/models.rs \
+  's~    if key\.is_empty\(\) \{~    if key.trim().is_empty() {~' \
+  '    if key.trim().is_empty() {' \
+  mnema-desktop 'a_key_of_spaces_is_decided_by_the_provider_rather_than_called_nothing' --test model_commands
+
+# The direction the I4 case above cannot reach: the embedding role's own
+# unknown states were held by its refusal alone for a round, so dropping the
+# field for exactly that role — "the refusal says it anyway" — stayed green and
+# drew a label whose two halves contradict each other.
+case_ "the input limit is dropped for the one role whose refusal repeats it" \
+  crates/mnema-provider/src/catalogue.rs \
+  's~        let input_limit = combined_limit\(&raw\.context_length, &top_provider_limit\);~        let input_limit = match role {\n            Role::Embedding => InputLimit::NotStated,\n            Role::Rerank | Role::Chat => combined_limit(\&raw.context_length, \&top_provider_limit),\n        };~' \
+  '        let input_limit = match role {
+            Role::Embedding => InputLimit::NotStated,' \
+  mnema-provider 'a_limit_stated_unreadably_is_told_apart_from_no_limit_for_every_role' --test catalogue

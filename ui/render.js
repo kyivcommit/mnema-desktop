@@ -599,11 +599,28 @@ export const adoptedModelSentence = (adopted, opening) => {
 // people they would not be charged. Nothing in the payload states the
 // per-search price, so this window cannot say what they cost; what it can do is
 // stop concluding "free" from a zero.
-const ZERO_PRICE = "no charge per token stated — that is not the same as free";
-// A positive price so small that three decimals of a million tokens round to
-// zero would otherwise print `$0.000` and read as the sentence above, which is
-// about a provider that stated zero. `toFixed` is where the two facts would
-// meet, so the branch is here rather than in the wording.
+//
+// **A noun phrase naming the statement, and no dash inside it.** "No charge per
+// token stated" was the first wording, and it fails in the two ways this whole
+// change is about. It reads as *no price was stated* — which is `notStated`,
+// the one neighbour this sentence exists to be told apart from, so a state
+// split in the type merged again in the words. And the label is assembled as
+// `id — price, limit — refusal`, so a sentence carrying its own em-dash put
+// three in one line and the field boundaries stopped being readable. Neither is
+// visible to a test that only asserts the states read differently: the strings
+// differ and a person does not.
+const ZERO_PRICE = "a stated price of $0 per token (not the same as free)";
+// A positive price small enough that `toFixed(3)` of a million tokens would
+// print `$0.000` — a number this window made up, about a provider that stated
+// something else. That is the whole of it: the collision with a stated zero
+// that first suggested this branch does not exist, because no state of `Price`
+// renders as `$0.000` any more.
+//
+// The threshold is deliberately wider than the rounding it guards: `toFixed(3)`
+// only reaches `0.000` below `0.0005`, and in `[0.0005, 0.001)` the plain
+// rendering would print `$0.001`, which is not a lie. "Under $0.001 per million
+// tokens" is true across the whole band, so the extra width costs a person
+// nothing and saves this constant from being two numbers that have to agree.
 const SMALLEST_SHOWN_PER_MILLION = 0.001;
 
 const statedPrice = (amount) => {
@@ -624,7 +641,13 @@ export const PRICE_TEXT = {
   // the DOM through `textContent` only, never as markup — the same rule
   // `limitNotUnderstood` states below.
   notAPrice: (p) => `the provider stated ${p.raw} per token, which is not a price`,
-  unreadable: (p) => `price stated in a shape this build cannot read (${p.raw})`,
+  // Quoted, because `raw` here can be a word that is itself a claim about the
+  // price — `"free"` is the measured one — and unquoted it becomes the last
+  // word of the label, where it reads as this window's own verdict rather than
+  // as the provider's text this build could not parse. The same quoting is on
+  // `INPUT_LIMIT_TEXT.notUnderstood`, whose `raw` can just as easily be
+  // `unlimited`.
+  unreadable: (p) => `price stated in a shape this build cannot read ("${p.raw}")`,
 };
 
 const priceText = (p) =>
@@ -639,7 +662,10 @@ const priceText = (p) =>
 export const INPUT_LIMIT_TEXT = {
   known: (l) => `input ${l.tokens}`,
   notStated: () => "input limit not stated",
-  notUnderstood: (l) => `input limit in a shape this build cannot read (${l.raw})`,
+  // Quoted for the reason `PRICE_TEXT.unreadable` gives: this `raw` can be a
+  // word that reads as a statement about the limit — `unlimited` — and the
+  // quotes are what keep it the provider's text rather than this window's.
+  notUnderstood: (l) => `input limit in a shape this build cannot read ("${l.raw}")`,
 };
 
 const inputLimitText = (l) =>
@@ -657,8 +683,12 @@ export const REFUSAL_TEXT = {
   // `raw` is provider text, capped to 64 bytes on the Rust side for exactly
   // this use — a malformed value must not become an unbounded label in a
   // picker. It reaches the DOM through `textContent` only, never as markup.
+  // Quoted for the reason `PRICE_TEXT.unreadable` gives, and because a refused
+  // model shows this clause **beside** `INPUT_LIMIT_TEXT.notUnderstood` in one
+  // line: the same unparsed value rendered two ways in one label reads as two
+  // different values.
   limitNotUnderstood: (r) =>
-    `the provider stated an input limit in a shape this build does not understand (${r.raw})`,
+    `the provider stated an input limit in a shape this build does not understand ("${r.raw}")`,
   noStatedOutputModalities: () => "the provider did not say whether this model writes text",
   noTextOutput: () => "this model does not write text",
 };

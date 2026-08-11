@@ -479,18 +479,40 @@ fn the_narrower_of_the_two_stated_limits_is_the_one_that_counts() {
 /// about the provider (I4, deferred by Task 10, on the screen at the first real
 /// run).
 ///
-/// Both roles that have no limit refusal, and both facts, because a build that
-/// answered `NotStated` to everything would satisfy half of this, and one that
-/// applied the embedding refusals to rerank would satisfy the other half while
-/// greying out models that work.
+/// **Every role, and `Embedding` is not a formality here** (review round 1,
+/// Minor-1). Its two unknown states were held by the refusal alone — no
+/// assertion looked at the field — so a build that answered `NotStated` for
+/// this role on the grounds that "the refusal says it anyway" stayed green and
+/// produced a label whose halves contradict each other: `input limit not stated
+/// — unavailable: the provider stated an input limit in a shape this build does
+/// not understand ("8k")`. The mutation case beside this test breaks the
+/// opposite direction and cannot see that one.
+///
+/// Both facts under every role, because a build that answered `NotStated` to
+/// everything would satisfy half of this, and one that applied the embedding
+/// refusals to rerank would satisfy the other half while greying out models
+/// that work.
 #[test]
-fn a_limit_stated_unreadably_is_told_apart_from_no_limit_for_the_roles_that_refuse_over_neither() {
+fn a_limit_stated_unreadably_is_told_apart_from_no_limit_for_every_role() {
     let unreadable = r#"{"data":[{"id":"vendor/unreadable-limit","name":"Unreadable",
         "context_length":"8k","architecture":{"output_modalities":["text"]}}]}"#;
     let silent = r#"{"data":[{"id":"vendor/silent-limit","name":"Silent",
         "architecture":{"output_modalities":["text"]}}]}"#;
 
-    for role in [Role::Rerank, Role::Chat] {
+    for role in [Role::Rerank, Role::Chat, Role::Embedding] {
+        // The refusal is the embedding role's alone, and it is asserted beside
+        // the field rather than instead of it: the point of this test is that
+        // the two carry the fact separately.
+        let (unreadable_refusal, silent_refusal) = match role {
+            Role::Embedding => (
+                Some(Refusal::LimitNotUnderstood {
+                    raw: "8k".to_string(),
+                }),
+                Some(Refusal::NoStatedLimit),
+            ),
+            Role::Rerank | Role::Chat => (None, None),
+        };
+
         let stated = models_from_json(role, unreadable).expect("parses");
         let entry = find(&stated.entries, "vendor/unreadable-limit");
         assert_eq!(
@@ -501,15 +523,20 @@ fn a_limit_stated_unreadably_is_told_apart_from_no_limit_for_the_roles_that_refu
             "{role:?}: a limit the provider DID state must not reach the window as silence"
         );
         assert_eq!(
-            entry.refusal, None,
-            "{role:?}: the floor is an embedding rule and must not start refusing here"
+            entry.refusal, unreadable_refusal,
+            "{role:?}: the floor is an embedding rule, and only there"
         );
 
         let none = models_from_json(role, silent).expect("parses");
+        let entry = find(&none.entries, "vendor/silent-limit");
         assert_eq!(
-            find(&none.entries, "vendor/silent-limit").input_limit,
+            entry.input_limit,
             InputLimit::NotStated,
             "{role:?}: nothing stated must not read as something stated unreadably"
+        );
+        assert_eq!(
+            entry.refusal, silent_refusal,
+            "{role:?}: the floor is an embedding rule, and only there"
         );
     }
 }

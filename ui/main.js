@@ -408,8 +408,11 @@ el("key-form").addEventListener("submit", async (event) => {
     el("key").value = "";
     el("key-status").textContent = keyAcceptedSentence(status);
   } catch (error) {
-    // Not "the key was not accepted": two of `set_key`'s three reachable
-    // failures decided nothing about the key. See `keyNotSavedSentence`.
+    // Not "the key was not accepted": every reachable failure of `set_key`
+    // except `Provider` decided nothing about the key. Said without a total,
+    // because the total was wrong for one commit — this comment counted three
+    // while its two neighbours, the table on `keyNotSavedSentence` and the test
+    // above it, were updated. `keyNotSavedSentence` has the enumeration.
     el("key-status").textContent = keyNotSavedSentence(error);
   }
   await refreshSettings();

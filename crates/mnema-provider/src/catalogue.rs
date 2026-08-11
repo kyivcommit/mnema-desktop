@@ -86,6 +86,10 @@ pub struct ModelEntry {
 /// `NotUnderstood` wins even next to a sibling that parsed fine — see
 /// [`combined_limit`] for why that is the honest answer and not a defect (I1,
 /// review round 3).
+///
+/// `Serialize` only, like [`Price`] beside it and unlike it in how that would
+/// break: see the `impl Deserialize for Price` for the asymmetry, which is
+/// worth reading before adding `Deserialize` to [`ModelEntry`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(
     rename_all = "camelCase",
@@ -419,6 +423,17 @@ fn cap_raw(mut raw: String) -> String {
 /// function read a number, a numeric string, and nothing at all, and answered
 /// `None` for everything else: an object, a list and `"free"` all reached the
 /// window as the same "the provider did not state a price".
+///
+/// ⚠️ **This reads the provider's `pricing.prompt`, not this type's own
+/// serialisation.** [`Price`] serialises as `{"kind":…}` for the window and
+/// deserialises from a bare number, string or null — the two are not inverses,
+/// and nothing today asks them to be, because [`ModelEntry`] is `Serialize`
+/// only. Whoever adds `Deserialize` to `ModelEntry` — a catalogue cached to
+/// disk is the obvious reason — has to fix that here, and must not be misled by
+/// what the compiler says: this field would **compile and silently turn every
+/// price into `Unreadable`**, carrying the serialised object as its `raw`,
+/// while [`InputLimit`] beside it has no `Deserialize` at all and would simply
+/// **fail to build**. One derive, two failures, and only one of them is loud.
 impl<'de> Deserialize<'de> for Price {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
