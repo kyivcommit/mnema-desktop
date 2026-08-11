@@ -103,7 +103,7 @@ pub fn stored_vector(db: &Db, space_id: i64, chunk_id: i64) -> Vec<f32> {
 ///
 /// **It cannot be called from inside a `Db::transaction`.** `insert_chunk`
 /// opens one of its own, SQLite has no nested `BEGIN`, and `Db::transaction`'s
-/// own doc names it as the one exception. Build the chunk with
+/// own doc lists it among the methods that do. Build the chunk with
 /// `insert_chunk_in` there instead.
 ///
 /// What that costs is worth naming, because it is not what it looks like.
@@ -121,11 +121,11 @@ pub fn stored_vector(db: &Db, space_id: i64, chunk_id: i64) -> Vec<f32> {
 /// binary that declares `mod support;`, and not all of them call this
 /// particular function: `meta.rs` asks nothing about vectors, and
 /// `citation.rs` builds its own chunk with caller-supplied text instead of
-/// this one's fixed `"кошторис на ремонт"` — only `adopt.rs` calls it today.
-/// It is written here rather than inside the binary that will need it because
-/// the alternative is a second copy of it later, and two answers to "what is
-/// the shortest real chunk" are a standing invitation for one of them to
-/// drift.
+/// this one's fixed `"кошторис на ремонт"` — `adopt.rs` and `space.rs` are the
+/// ones that call it today. It is written here rather than inside the binary
+/// that will need it because the alternative is a second copy of it later,
+/// and two answers to "what is the shortest real chunk" are a standing
+/// invitation for one of them to drift.
 #[allow(dead_code)]
 pub fn one_chunk(db: &Db) -> i64 {
     let doc = db
