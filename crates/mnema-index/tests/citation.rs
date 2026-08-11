@@ -1322,6 +1322,9 @@ fn a_reused_chunk_id_gets_no_inherited_vector() {
     fixture::rebuild_with_one_chunk(&db, &doc, "entirely different content");
     let second = fixture::only_chunk_id(&db, &doc);
 
-    assert_eq!(second, first, "this test is pointless unless the id was reused");
+    assert_eq!(
+        second, first,
+        "this test is pointless unless the id was reused"
+    );
     assert_eq!(db.embedded_chunk_count(space).expect("count"), 0);
 }
