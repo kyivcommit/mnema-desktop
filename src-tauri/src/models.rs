@@ -394,9 +394,20 @@ pub enum KeyState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum KeyStoreFailure {
-    /// The store could not be opened at all — a locked keychain on macOS, no
-    /// Secret Service session on Linux. The person unlocks it and asks again,
-    /// and nothing about their configuration is wrong.
+    /// The store would not answer, and **this value stands for two situations
+    /// rather than one**: it is locked, or a confirmation was asked for and not
+    /// given. Nothing about the person's configuration is wrong in either.
+    ///
+    /// Naming both is not a hedge. The platform error arrives already flattened
+    /// — every status the store does not recognise becomes one variant — so this
+    /// build genuinely cannot tell them apart, and the earlier doc here, which
+    /// said only "a locked keychain", was falsified by measurement on
+    /// 2026-08-11: macOS reaches this value with a keychain that is not locked
+    /// at all, when the authorisation dialog is declined, because that store
+    /// authorises against the code identity that wrote the credential and an
+    /// ad-hoc signature changes with every build. Linux reaches it both ways,
+    /// the second as a dismissed prompt. The window's sentence therefore names
+    /// both and claims neither.
     Locked,
     /// More than one credential is filed under this installation's name. The
     /// person removes the duplicate; this build will not guess which of them is

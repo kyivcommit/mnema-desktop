@@ -399,7 +399,17 @@ export const disclosureSentence = (key) => DISCLOSURE_TEXT[key?.kind] ?? LEAVES_
 // would satisfy a key-set check and throw the grouping away, which is why
 // `render.test.js` also asserts they are four different sentences.
 export const KEY_STORE_FAILURE_TEXT = {
-  locked: "It is locked: unlock it and ask again — nothing about your configuration is wrong.",
+  // Two situations, not one, and this build cannot tell which — the platform
+  // error arrives already flattened into one variant. Measured 2026-08-11: a
+  // macOS keychain that is not locked at all reaches this value when the
+  // authorisation dialog is declined, and Linux reaches it both by a locked
+  // collection and by a dismissed prompt. Prescribing only the unlock described
+  // nothing for the situation somebody is most likely to be in, so both are
+  // named and nothing about the cause is claimed.
+  locked:
+    "This build cannot tell which of two things happened: it is locked, or a confirmation " +
+    "was asked for and not given. So unlock it and ask again — and if something asks you to " +
+    "confirm this time, answer it. Nothing about your configuration is wrong.",
   duplicate:
     "More than one credential is filed under this name: remove the spare, because this build " +
     "will not guess which of them is the key.",

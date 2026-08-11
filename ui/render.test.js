@@ -434,6 +434,30 @@ test("each key store failure asks the person for a different thing", () => {
   assert.match(said[KEY_STORE_FAILURES.indexOf("defect")], /defect/);
 });
 
+// Measured 2026-08-11 on three platforms: `locked` is one value over at least
+// two situations whose actions differ. macOS reaches it with a perfectly
+// unlocked keychain, when the authorisation dialog was declined — that store
+// authorises against the code identity that wrote the credential, and an ad-hoc
+// signature is a hash of the binary, so it changes with every build. Linux
+// reaches it the same way ("SS error: prompt dismissed", measured after 279
+// seconds of waiting for a human) as well as by a genuinely locked collection.
+// The old sentence prescribed unlocking for both, which describes nothing for
+// the one somebody is most likely to be in.
+//
+// What this test can see is narrow, and worth saying plainly: it holds that both
+// situations are named. It cannot see that the build has no way to tell them
+// apart — the platform error arrives already flattened into `PlatformFailure` —
+// which is the reason naming both is the honest answer rather than a hedge.
+test("a store that would not answer names both of the things that cause it", () => {
+  const locked = keyStateSentence({ kind: "unreadable", cause: "locked", reason: "" });
+  assert.match(locked, /unlock/i, "a locked store is one of the two, and unlocking is its action");
+  assert.match(
+    locked,
+    /confirmation/i,
+    "a confirmation that was not given is the other, and is what macOS reaches after a rebuild",
+  );
+});
+
 // `reason` is diagnostic text, not a sentence to show: `mnema_secrets::Error::
 // Unavailable` interpolates the platform's own error, and an OS status put in
 // front of a person is not an action. It is appended only where `cause` names no
