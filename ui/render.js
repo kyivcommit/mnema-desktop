@@ -602,19 +602,24 @@ export const keySubmitText = (key) => (KEY_SUBMIT_TEXT[key?.kind] ?? KEY_SUBMIT_
 // and was rendered here as a verdict on a key nobody had typed. The leading
 // clause states only what is true of every row, and the `Display` string that
 // follows carries the actual fact.
-// The status line is written from nine places, and its text arrives from two
-// languages with opposite conventions: sentences written here, and `Error`
-// renderings from Rust, which by that language's convention begin lower case and
-// carry no full stop — `keyNotSavedSentence` below interpolates one whole. Drawn
-// under a state line that *is* a proper sentence, the result read as unfinished,
-// which the owner met in the acceptance run of 2026-08-11.
+// Every line of prose the settings screen draws goes through here, and their
+// text arrives from two languages with opposite conventions: sentences written
+// in this file, and `Error` renderings from Rust, which by that language's
+// convention begin lower case and carry no full stop — `keyNotSavedSentence`
+// below interpolates one whole. Beside a neighbour that *is* a proper sentence
+// the result read as unfinished, which the owner met in the acceptance run of
+// 2026-08-11.
 //
-// **Shaped once, at the seam, rather than in each of the nine producers.** Two
-// of them already wrote proper sentences and seven did not, so fixing the words
-// would mean editing exactly the ones whose lower case is correct where it is
-// written — and leaving the next producer free to pick either. Idempotent on
-// purpose: a text that is already a sentence comes back unchanged.
-export const asStatusSentence = (text) => {
+// **Shaped once, at the seam, rather than in each of the fourteen producers.**
+// Fixing the words instead would mean editing exactly the ones whose lower case
+// is correct where it is written, and would leave the next producer free to pick
+// either — which is not a guess: the first attempt at this covered the two
+// action lines only, and the very next screenshot showed the same mismatch one
+// line further down, between `index-state` and `embedding-progress`.
+//
+// Idempotent on purpose: a text that is already a sentence comes back unchanged,
+// and an empty one stays empty rather than becoming a lone full stop.
+export const asSentence = (text) => {
   const trimmed = `${text ?? ""}`.trim();
   if (trimmed === "") return "";
   const opened = trimmed[0].toUpperCase() + trimmed.slice(1);
