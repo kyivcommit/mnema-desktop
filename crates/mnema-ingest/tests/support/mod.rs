@@ -202,5 +202,70 @@ fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    wait_until_it_will_run(&path);
     path
+}
+
+/// Runs the script once before handing it over, retrying while the kernel says
+/// the file is still open for writing somewhere.
+///
+/// **`ETXTBSY` here is a state of the process, not of this thread.** `fs::write`
+/// above has closed its own descriptor; what has not necessarily happened is
+/// somebody else's `exec`. These tests run in parallel threads and every one of
+/// them spawns workers, and between a `fork` and the `exec` that follows it the
+/// child holds a duplicate of every descriptor the parent had open — including
+/// this file's, for as long as that window lasts. Execute it in that window and
+/// Linux refuses with "Text file busy".
+///
+/// Measured 2026-08-11 rather than reasoned about: one run in six of
+/// `cargo test -p mnema-ingest --test slice` failed this way on a four-core
+/// Linux box, and both CI runs of a branch that changes nothing in this crate
+/// failed it — **on a different test each time**, which is what a race looks
+/// like when a total is the only thing you write down.
+///
+/// This closes it rather than making it rarer: nothing opens the file for
+/// writing again after the line above, so once every child that forked during
+/// that one window has reached its `exec`, the file is free for good. Waiting
+/// for one successful run is waiting for exactly that.
+///
+/// `--manifest` is the argument both stand-ins answer without reading standard
+/// input and without touching an index, and stdin is closed as well, so a body
+/// that loops on `read` cannot be left waiting for a request that is not coming.
+///
+/// It does not belong in `mnema_pool`, which has no such problem to solve: the
+/// worker it spawns was not written to disk seconds earlier by the process that
+/// runs it.
+#[cfg(unix)]
+fn wait_until_it_will_run(path: &Path) {
+    use std::process::{Command, Stdio};
+
+    for _ in 0..400 {
+        match Command::new(path)
+            .arg("--manifest")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                let _ = child.wait();
+                return;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            // Anything else is this stand-in being wrong rather than busy, and
+            // is worth failing on here — where the script is written and its
+            // text is in hand — instead of several layers down as a pool error.
+            Err(e) => panic!(
+                "the stand-in at {} will not run at all: {e}",
+                path.display()
+            ),
+        }
+    }
+    panic!(
+        "{} was still reported as busy after two seconds of retrying, which is far longer \
+         than a fork-to-exec window: something holds it open for writing",
+        path.display()
+    );
 }

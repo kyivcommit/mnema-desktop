@@ -199,6 +199,55 @@ jobs:
       # macOS binary, and the store this crate compiles on Linux is the D-Bus
       # Secret Service, which a runner has no session for. The Linux binding
       # stays unexercised — a gap task 7 recorded, not one this closes.
+      #
+      # Read this before trusting the quiet, because the quiet is newer than the
+      # gap. Tests outside this crate that need a credential now register an
+      # in-memory store of their own, so they are served by it on every platform.
+      # That is deliberate and is the rule stated above. It also removes the one
+      # way this gap could ever have spoken up by accident: a test reaching for a
+      # credential without that store would fail on this leg, loudly and for the
+      # right reason, because there is no session behind the binding it compiles
+      # against. Such a test now passes, and the Linux binding goes untested
+      # without a sound. A gap that could once have spoken and no longer can
+      # needs the note more than one that was always silent.
+      #
+      # That sentence is worth more if you know which parts of it were run, so:
+      # MEASURED, on macOS with the platform store forced to fail — a test that
+      # reaches a credential without the in-memory store fails, and the message
+      # names the reference it was for and says the store could not be reached
+      # (`Unavailable { reference, detail }`), so the failure would be loud and
+      # legible rather than a puzzle. It does not say WHICH store; only
+      # `NotPersistent` carries a vendor. INHERITED, from the sentence above
+      # this one, which predates it: that a runner has no Secret Service
+      # session. NEVER RUN ANYWHERE: the Linux store's own construction and the
+      # error it produces. It compiles on this leg and is never constructed at
+      # runtime, because nothing gets as far as calling it — which is the gap
+      # itself, stated as what it is.
+      #
+      # Do not read what follows as a closed list; it is why no path arrives,
+      # not a rule with two branches. A test may register a store of its own
+      # first (the desktop fixture, `foreign_store.rs`, and this crate's unit
+      # tests through `mock_store()`); it may be `#[ignore]`d (`roundtrip.rs`);
+      # it may be turned back before a store is chosen at all
+      # (`src-tauri/tests/commands.rs` passes an empty reference, which `entry`
+      # rejects outright). And for this crate's own unit tests the platform
+      # branch is not compiled in the first place: `platform_store` has a
+      # `#[cfg(test)]` arm (`crates/mnema-secrets/src/lib.rs:313,320`).
+      #
+      # That last one is the one to know about, because it is the only thing
+      # covering the single place in the workspace that calls `platform_store`
+      # by name — `a_unit_test_cannot_reach_the_platform_store`, which is a
+      # plain `#[test]`, is NOT ignored, and runs on this leg in every
+      # `cargo test --workspace`. It matches none of the other three and still
+      # constructs nothing. If you go looking for only "registers or ignored",
+      # that test will look like uncovered ground, and it is not.
+      #
+      # What would close it — mirroring the step below rather than inventing a
+      # shape: on ubuntu-24.04, run the same command inside `dbus-run-session`
+      # with `gnome-keyring --unlock --components=secrets`, so `roundtrip` meets
+      # a real Secret Service. Everything the step below argues carries over
+      # unchanged: `--include-ignored` and never `--ignored`, for the reason
+      # spelled out at its last line, and the `#[ignore]` itself stays.
       - name: Credential store, against a throwaway keychain
         if: runner.os == 'macOS'
         run: |

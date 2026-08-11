@@ -4,6 +4,16 @@ version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
+[features]
+# `src/test_store.rs`: a credential store for OTHER crates' integration tests,
+# which claims durability and keeps nothing. Never enable it for a build that
+# ships. It is a feature rather than `#[cfg(test)]` because the crates that need
+# it are not this one, and `#[doc(hidden)]` alone would leave it compiled into a
+# release binary where registering it loses keys silently. Cargo does not enable
+# a feature that only a dev-dependency asks for when building a normal one, so a
+# `[dev-dependencies]` entry naming it does not reach `cargo build --release`.
+test-store = []
+
 [dependencies]
 # Not the `keyring` crate. `keyring` 4.x is a shim over this one whose `v1`
 # module seizes the process-wide default store on the first `Entry::new`, which

@@ -32,6 +32,56 @@
         <p id="skips" class="muted"></p>
       </section>
 
+      <!--
+        Two facts are never given one element. `key-state` is what the
+        credential store says right now and is redrawn from `model_settings`;
+        `key-status` is the outcome of the last thing the person pressed and
+        must survive that redraw. Each picker likewise has two lines under it:
+        `-unreadable` is about the provider's list, `-missing` is about the
+        model this index has recorded — a single element would let whichever
+        was written second erase the other.
+      -->
+      <section>
+        <h2>Models</h2>
+        <p id="disclosure"></p>
+        <form id="key-form">
+          <input id="key" type="password" placeholder="OpenRouter key" autocomplete="off" />
+          <!--
+            The placeholder and the label below are both redrawn from the
+            credential store's own answer (`keyFieldPlaceholder`,
+            `keySubmitText`): with a key stored, this window clears the field
+            after saving it, so an empty field is the ordinary state and the
+            markup must not read as though something were missing. The values
+            here are what a person sees before the first `model_settings`
+            answers, and they are the neutral pair for the same reason the
+            `notAsked` arm is.
+          -->
+          <button id="key-submit" type="submit">Check and save</button>
+          <button id="forget" type="button">Remove the key</button>
+        </form>
+        <p id="key-state" class="muted"></p>
+        <p id="key-status" class="muted"></p>
+        <!--
+          Empty on two of the three platforms and with no key stored, and filled
+          from `keyStoreNote`. It says what macOS will ask for after an update,
+          before it asks — the request comes from an application the system
+          cannot vouch for, and somebody meeting it cold should refuse it.
+        -->
+        <p id="key-note" class="muted"></p>
+        <label>Embeddings <select id="embedding-model"></select></label>
+        <p id="embedding-model-unreadable" class="muted"></p>
+        <p id="embedding-model-missing" class="muted"></p>
+        <label>Reranking <select id="rerank-model"></select></label>
+        <p id="rerank-model-unreadable" class="muted"></p>
+        <p id="rerank-model-missing" class="muted"></p>
+        <label>Answers <select id="chat-model"></select></label>
+        <p id="chat-model-unreadable" class="muted"></p>
+        <p id="chat-model-missing" class="muted"></p>
+        <p id="model-status" class="muted"></p>
+        <p id="index-state" class="muted"></p>
+        <p id="embedding-progress" class="muted"></p>
+      </section>
+
       <section>
         <h2>Search</h2>
         <form id="search-form">

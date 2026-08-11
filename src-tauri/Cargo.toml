@@ -35,6 +35,19 @@ mnema-ingest = { path = "../crates/mnema-ingest" }
 mnema-core = { path = "../crates/mnema-core" }
 mnema-pool = { path = "../crates/mnema-pool" }
 mnema-walk = { path = "../crates/mnema-walk" }
+# For the one value a model configuration needs that is neither the model's name
+# nor its width: `chunker_hash()`, which `set_embedding_model` passes to the
+# index because `mnema-index` deliberately does not depend on the chunker. It
+# was a dev-dependency while only a test fixture wanted it. Not new to the
+# normal graph either way — `mnema-ingest` already brings it in — which is what
+# `tests/dependency_boundary.rs` was re-run to confirm rather than assumed.
+mnema-chunk = { path = "../crates/mnema-chunk" }
+# The provider protocol. Brings `ureq` and a TLS stack, and nothing that
+# `tests/dependency_boundary.rs` forbids — checked by running it, not by
+# reading. This is the first TLS stack in the application's graph.
+mnema-provider = { path = "../crates/mnema-provider" }
+# The OS credential store. The key lives here and never in the database (D33).
+mnema-secrets = { path = "../crates/mnema-secrets" }
 tauri = { version = "2.11", features = [] }
 tauri-plugin-single-instance = "2.4"
 tauri-plugin-dialog = "2"
@@ -55,5 +68,16 @@ tauri = { version = "2.11", features = ["test"] }
 # dev-dependency at that, so `tests/dependency_boundary.rs` is unaffected: it
 # asks `cargo tree -e normal`, which excludes dev- and build-dependencies.
 tauri-utils = "2.9"
+# The same mock server the provider crate's own tests use — one server, not two
+# copies that drift.
+mnema-mock-provider = { workspace = true }
+# The same crate as the `[dependencies]` entry above, with the store these tests
+# register. Without it every command touching a credential would reach the
+# developer's real login keychain, and would fail outright on a runner that has
+# no unlocked keychain and no Secret Service session — which is why
+# `.github/workflows/ci.yml` forbids `cargo test --workspace` from touching a
+# credential store at all. Enabling a feature from `[dev-dependencies]` does not
+# enable it for `cargo build`, so nothing here reaches a shipped binary.
+mnema-secrets = { path = "../crates/mnema-secrets", features = ["test-store"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

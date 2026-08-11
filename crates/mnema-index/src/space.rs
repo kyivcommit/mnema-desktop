@@ -11,6 +11,21 @@ use crate::{Db, Error, INDEX_FORMAT_VERSION};
 /// disagree on the first result, not on some tail.
 const METRIC: &str = "cosine";
 
+/// What [`Db::adopt_embedding_model`] settled on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdoptedSpace {
+    pub space_id: i64,
+    pub model_config_id: i64,
+    /// `false` when the space was already there — the ordinary case of choosing
+    /// the same model twice.
+    ///
+    /// It reports what `create_space` did, and nothing else. "The active space
+    /// changed" is a neighbouring fact that is true in almost the same cases,
+    /// and answering both with one field is how a caller ends up told a space
+    /// was created when the call found one.
+    pub created: bool,
+}
+
 impl Db {
     /// Records a model configuration.
     ///
@@ -33,7 +48,15 @@ impl Db {
         Ok(self.conn().last_insert_rowid())
     }
 
-    /// Creates the space row and its vector table, or neither.
+    /// Creates the space row and its vector table — and, the first time either
+    /// is needed here, records the vector library's version in `meta`. All of
+    /// it or none of it: the three land in one transaction.
+    ///
+    /// The version is the third write and is easy to miss from outside, which
+    /// is why it is in this sentence and not only in a comment inside the body.
+    /// It is here rather than in the adoption path because
+    /// [`crate::META_VEC_VERSION`] describes the version that created the first
+    /// *space*, and this function is the only thing that creates one.
     ///
     /// The table name is derived from the immutable row id — never from a model
     /// or configuration name, because a vec0 table cannot be renamed: RENAME
@@ -74,16 +97,7 @@ impl Db {
 
         // Reported before the INSERT rather than translated from the UNIQUE
         // violation afterwards, so the existing id can be handed back.
-        if let Some(space_id) = tx
-            .query_row(
-                "SELECT id FROM embedding_space
-                  WHERE model_config_id = ?1 AND dim = ?2
-                    AND index_format_version = ?3 AND chunker_hash = ?4",
-                params![model_config_id, dim, INDEX_FORMAT_VERSION, chunker_hash],
-                |r| r.get::<_, i64>(0),
-            )
-            .optional()?
-        {
+        if let Some(space_id) = existing_space_id(&tx, model_config_id, dim, chunker_hash)? {
             return Err(Error::SpaceAlreadyExists { space_id });
         }
 
@@ -137,6 +151,24 @@ impl Db {
              );"
         ))?;
 
+        // The vector library's version, recorded when the first space here
+        // needs one — which is this function and not the adoption path, because
+        // this one is public and a space created through it is as much a space
+        // as any other. `META_VEC_VERSION`'s own doc says "the version that
+        // created the first space"; written one level up, that sentence
+        // described an event the code did not record, and a `create_space`
+        // caller left no version at all. Measured before the move: the key was
+        // `None` after a direct `create_space`.
+        //
+        // `sqlite-vec` exports no version constant — the crate declares
+        // `sqlite3_vec_init` and nothing else — so the string comes from the
+        // extension running on this connection. Measured: `v0.1.9`. Inside this
+        // transaction, so a space and the version that built it land together.
+        if self.meta_get(crate::META_VEC_VERSION)?.is_none() {
+            let version: String = tx.query_row("SELECT vec_version()", [], |r| r.get(0))?;
+            self.meta_set(crate::META_VEC_VERSION, &version)?;
+        }
+
         tx.commit()?;
         Ok(id)
     }
@@ -151,6 +183,20 @@ impl Db {
     /// that ever reaches it will be a JSON response from a third party, and a
     /// truncated or failed one arriving as zeros will be ordinary rather than
     /// hypothetical.
+    ///
+    /// **`space_id` is a parameter, and writing a space that is not the active
+    /// one is how the archive gets split.** Nothing here can stop it, and
+    /// nothing should: building the new space beside the old one and filling it
+    /// before switching is the sanctioned migration, and it is exactly this
+    /// call into a non-active space. [`Db::adopt_embedding_model`] guards
+    /// transitions — it refuses to move the index onto a space while another
+    /// holds embeddings — and a writer that puts *new* chunks somewhere the
+    /// index is not pointing never asks it anything, so no guard sees that at
+    /// all. The obligation is the caller's: embed into [`Db::active_space`],
+    /// unless you are rebuilding a space you are about to switch to. That
+    /// obligation belongs in the indexing subsystem's spec and is written down
+    /// in no spec today; it is said here because this is the call that breaks
+    /// it.
     pub fn insert_vector(&self, space_id: i64, chunk_id: i64, v: &[f32]) -> Result<(), Error> {
         let space = self.space(space_id)?;
         check_rankable(v, &space.metric, VectorRole::Stored(chunk_id))?;
@@ -266,6 +312,459 @@ impl Db {
         Ok(())
     }
 
+    /// Which space the product is working with, if one has been chosen.
+    ///
+    /// A value that does not parse as an id reads as "nothing chosen yet"
+    /// rather than as an error. Only [`Db::adopt_embedding_model`] ever writes
+    /// this key, and it writes an `i64`, so an unparsable one means the file
+    /// was edited around this crate — and there is nothing a caller could do
+    /// with the distinction that it cannot do with `None`.
+    ///
+    /// ⚠️ **This must stay a straight read of the stored value: no fallback.**
+    /// "If the key is absent, use the only space there is" is the plausible,
+    /// well-meant change that would break something two functions away:
+    /// `refuse_if_the_move_would_orphan_anything` exempts a call from the
+    /// split guard when this answer already equals the space about to be
+    /// written, and that is sound only while the answer is decided by the
+    /// stored value alone. With a fallback, this would report a space nobody
+    /// chose, the exemption would fire on a call that really does move the
+    /// index, and the guard would be skipped in silence. Anything derived
+    /// belongs in the caller that wants it, not here.
+    pub fn active_space(&self) -> Result<Option<i64>, Error> {
+        Ok(self
+            .meta_get(crate::META_ACTIVE_SPACE)?
+            .and_then(|v| v.parse().ok()))
+    }
+
+    /// The model this space embeds with and how wide its vectors are — what the
+    /// settings screen puts in front of the person who chose them.
+    ///
+    /// [`Error::NoSuchSpace`] and not `Ok(None)` for an id with no row, which is
+    /// the answer [`Db::space_is_empty`] and [`Db::embedded_chunk_count`]
+    /// already give and is the only one coherent with them: a single caller
+    /// asking all three about one id must not be told the space is absent by two
+    /// of them and empty by the third.
+    ///
+    /// The distinction it keeps is the caller's, not this crate's. Whoever
+    /// reaches this is holding [`Db::active_space`], and the two facts in front
+    /// of it are "nobody has chosen a model" — which is `active_space`
+    /// answering `None`, one call earlier — and "the pointer names a space that
+    /// is gone", which is a defect in this build. Folded together they draw an
+    /// empty model picker over an index that may still hold vectors, and the
+    /// person reading it chooses a model and pays to embed the archive again.
+    ///
+    /// Both columns are `NOT NULL` — `model_config.embed_model` and
+    /// `embedding_space.dim` — so a row that exists always names both, and there
+    /// is no third state for this to return.
+    pub fn space_model(&self, space_id: i64) -> Result<(String, i64), Error> {
+        self.conn()
+            .query_row(
+                "SELECT c.embed_model, s.dim FROM embedding_space s
+                   JOIN model_config c ON c.id = s.model_config_id
+                  WHERE s.id = ?1",
+                params![space_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or(Error::NoSuchSpace(space_id))
+    }
+
+    /// How many chunks the index holds at all — the denominator the settings
+    /// screen shows [`Db::embedded_chunk_count`] against.
+    ///
+    /// ⚠️ **The two are not counted over the same population, and the
+    /// difference has a direction.** A `vec_emb_<id>` row is referenced by no
+    /// foreign key and outlives the chunk it embeds:
+    /// [`Db::clear_document_content`] takes the `chunk` rows and their
+    /// `chunk_embedding_state` rows and leaves the vectors, and
+    /// [`Db::delete_document`] has never reached them either. So once anything
+    /// writes vectors, the numerator can exceed this denominator, and whatever
+    /// renders the pair has to be able to show that rather than a percentage
+    /// above one hundred. Both are zero today, because nothing embeds yet
+    /// (D29) — this is the shape of the trap, written where the second half of
+    /// it is read.
+    pub fn chunk_count(&self) -> Result<i64, Error> {
+        Ok(self
+            .conn()
+            .query_row("SELECT count(*) FROM chunk", [], |r| r.get(0))?)
+    }
+
+    /// Whether moving the index off this space would throw anything away.
+    ///
+    /// Reads **both** places a chunk can be recorded as embedded, because they
+    /// are allowed to disagree: a `vec0` table cannot be the target of a
+    /// foreign key, so a vector outlives the chunk it embeds and the
+    /// bookkeeping row that cascaded away with it. A check that read one of
+    /// them would be an assertion satisfied by zero from the wrong side.
+    ///
+    /// A space that does not exist is **not** empty — it is absent, and that
+    /// arrives as [`Error::NoSuchSpace`] rather than as `Ok(true)`. Two facts
+    /// leaving through one `bool` is how a caller comes to believe it asked
+    /// about something.
+    pub fn space_is_empty(&self, space_id: i64) -> Result<bool, Error> {
+        Ok(self.embedded_chunk_count(space_id)? == 0)
+    }
+
+    /// How many chunks this space has an embedding recorded for — the number a
+    /// refusal puts in front of the person deciding whether to rebuild, and the
+    /// numerator the settings screen shows against [`Db::chunk_count`].
+    ///
+    /// **Distinct chunks, not rows, and that is the whole point of the
+    /// `UNION`.** A `chunk_embedding_state` row with `state = 1` says "this
+    /// chunk is embedded here" and the row in `vec_emb_<id>` is the embedding
+    /// it is talking about: two records of *one* embedded chunk. Adding the two
+    /// counts reports twice what a switch costs, in a sentence a person reads
+    /// before deciding. Emptiness cannot tell the difference — zero and zero is
+    /// zero however they are combined — so the arithmetic is visible only in
+    /// the number, which is exactly why it needs its own test.
+    ///
+    /// **Reading only `chunk_embedding_state` would answer zero for a full
+    /// space today**, which is why the `UNION` is load-bearing for the second
+    /// caller as well as the first: [`Db::insert_vector`] writes the `vec0`
+    /// table and nothing in this crate writes a `chunk_embedding_state` row at
+    /// all — `grep -rn chunk_embedding_state crates/*/src` finds no INSERT.
+    /// The narrower query would put "0 of 900 embedded" in front of someone
+    /// whose archive is embedded, and send them to pay for it again.
+    ///
+    /// An id with no row is [`Error::NoSuchSpace`] and not zero. It was zero
+    /// for one commit, to keep a `meta.active_space` left dangling by
+    /// [`Db::drop_space`] from becoming a dead end — and that special case is
+    /// gone with the pointer it served: the refusal below enumerates
+    /// `embedding_space`, so a dropped space is simply not among the ids it
+    /// asks about. What is left is a public method being asked about an id
+    /// nobody wrote, and the honest answer to that is which id was wrong.
+    pub fn embedded_chunk_count(&self, space_id: i64) -> Result<i64, Error> {
+        let table = self.space(space_id)?.table;
+        // `table` is never caller text: it comes only from
+        // `embedding_space.vec_table`, which the schema's own CHECK pins to
+        // `'vec_emb_' || id` — the same reasoning `knn` and `insert_vector`
+        // already rely on for interpolating a table name into SQL.
+        Ok(self.conn().query_row(
+            &format!(
+                "SELECT count(*) FROM (
+                     SELECT chunk_id FROM chunk_embedding_state
+                      WHERE space_id = ?1 AND state = 1
+                     UNION
+                     SELECT chunk_id FROM {table}
+                 )"
+            ),
+            params![space_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The rule below, asked only of a call that would actually move the
+    /// pointer — and asked of every call that would.
+    ///
+    /// A call whose destination is where the pointer already stands writes
+    /// `active_space` with the value it already holds. It is not a transition,
+    /// so there is nothing for a guard on transitions to decide: whatever was
+    /// true of the database before it is still true after. Refusing there
+    /// refused the middle of the migration this function's own documentation
+    /// calls legal — the new space built and filled, the old one not yet
+    /// dropped — and, since adoption is the only path that writes
+    /// `credential_ref`, it made the API key unchangeable in exactly that
+    /// state. It also told a caller who was not moving that the index could not
+    /// move.
+    ///
+    /// ⚠️ `requested.is_some()` is load-bearing and not defensive. With it
+    /// dropped, two `None`s compare equal — a fresh index with no pointer,
+    /// asking for a space that does not exist yet — and the check would be
+    /// skipped on precisely the call that mints the first space beside an
+    /// already-full one. That is C1 reopened from the other side.
+    ///
+    /// This is the only place the pointer takes any part in the decision, and
+    /// it is sound because the premise is decidable from the very value about
+    /// to be written: [`Db::active_space`] is `parse(stored)` and the write is
+    /// `space_id.to_string()`, so if the parse already equals `space_id` then
+    /// `stored` is already that id in decimal and the write changes at most its
+    /// spelling. Checked at the edges: `"+1"` parses to `Some(1)` and is the
+    /// same space, `" 1"` does not parse and the rule is asked.
+    ///
+    /// ⚠️ **That argument dies the moment [`Db::active_space`] gains a
+    /// fallback.** Something like "if the key is absent, use the only space
+    /// there is" would be plausible and well meant, and it would make this
+    /// exemption unsound: the premise would no longer be about the stored
+    /// value, and a call that really does move the pointer from "nothing
+    /// chosen" onto a space — while another one is full — would be waved
+    /// through. `active_space` carries the same warning from its side.
+    fn refuse_if_the_move_would_orphan_anything(
+        &self,
+        requested: Option<i64>,
+    ) -> Result<(), Error> {
+        if requested.is_some() && requested == self.active_space()? {
+            return Ok(());
+        }
+        self.refuse_unless_every_other_space_is_empty(requested)
+    }
+
+    /// Refuses the move unless **every space except the requested one** is
+    /// empty. The one rule, so that the two places which ask it cannot decide
+    /// it differently.
+    ///
+    /// It asks what exists. It used to ask `meta.active_space`, and that was
+    /// the wrong question by a whole class: the pointer is written by
+    /// [`Db::adopt_embedding_model`] alone, while [`Db::create_space`] and
+    /// [`Db::insert_vector`] are public and take a `space_id` parameter — so a
+    /// full space that nothing points at is reachable through this crate's
+    /// typed API with no raw SQL anywhere. Keyed on the pointer, the guard read
+    /// `None`, ran no check at all, and let the index move off that space in
+    /// silence. Measured, and the whole sequence is four public calls:
+    /// `create_model_config`, `create_space`, `insert_vector`,
+    /// `adopt_embedding_model`.
+    ///
+    /// Asking what exists removes two special cases instead of adding one. An
+    /// absent pointer and an unreadable one stop differing, because neither is
+    /// consulted. And a pointer left dangling by [`Db::drop_space`] repairs
+    /// itself for free: the dropped space is no longer a row in
+    /// `embedding_space`, so it is not among the ids asked about, nothing
+    /// blocks, and the adoption that meets it rewrites the key.
+    ///
+    /// `requested` is skipped rather than counted, because adopting the model
+    /// an index is already full of is the ordinary case and not a switch. It is
+    /// `Option` because the space may not exist yet, and "no space asked for"
+    /// then means every existing space has to be empty — which is right: a
+    /// brand-new space is being minted, and anything already filled would be
+    /// left behind by it.
+    ///
+    /// Whether this is asked at all is [`Db::refuse_if_the_move_would_orphan_anything`]'s
+    /// question, and the two are separate functions because they are two
+    /// contracts: this one is what the rule is, that one is who it applies to.
+    fn refuse_unless_every_other_space_is_empty(
+        &self,
+        requested: Option<i64>,
+    ) -> Result<(), Error> {
+        let ids: Vec<i64> = self
+            .conn()
+            .prepare("SELECT id FROM embedding_space")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for space_id in ids {
+            if Some(space_id) == requested {
+                continue;
+            }
+            let embedded_chunks = match self.embedded_chunk_count(space_id) {
+                Ok(n) => n,
+                // Dropped between the listing and the count — the pre-flight
+                // holds no lock, so the window is real, if microscopic. It is
+                // inside the race this function's caller already declares, but
+                // the outcome would be new: `NoSuchSpace(N)` handed to a caller
+                // who named no space at all, about one that no longer exists.
+                // The question here is "does any other space hold embeddings",
+                // and a space that is gone is not one that does — its vectors
+                // went with its table and its bookkeeping cascaded. So this is
+                // the answer "nothing", not a swallowed error.
+                //
+                // Scoped to this loop deliberately. `space_is_empty` still
+                // propagates, because there the caller did name the id, and
+                // being told which one was wrong is the whole answer.
+                //
+                // Nothing exercises this line, and that is worth knowing before
+                // relying on it: deleting it leaves the whole crate green —
+                // measured, not assumed. A test would have to land a committed
+                // `drop_space` between the `SELECT` above and the count below,
+                // inside one call. That is not impossible:
+                // `rusqlite::Connection::progress_handler` would give a seam
+                // inside the `SELECT`, and no lock is in the way, since this
+                // check holds none. It is machinery that exists
+                // nowhere in this repository, built to witness a `continue`
+                // against a microscopic window, so the choice is to say this
+                // rather than to build it.
+                Err(Error::NoSuchSpace(_)) => continue,
+                Err(other) => return Err(other),
+            };
+            if embedded_chunks > 0 {
+                return Err(Error::SpaceNotEmpty {
+                    space_id,
+                    embedded_chunks,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Records the chosen embedding model and makes its space the active one.
+    ///
+    /// One embedding model per index (spec §2.1). Choosing the same model again
+    /// finds the space rather than minting a second one — [`Db::create_space`]
+    /// is idempotent on `UNIQUE(model_config_id, dim, index_format_version,
+    /// chunker_hash)` (`schema.sql:358`) and hands back the id it found.
+    /// A call that would **move the index onto a different space** is refused
+    /// while any other space holds anything: honouring it would leave the
+    /// archive split across two spaces, only one of which search reads. The
+    /// honest way to grant it is to build the new space, fill it, and then
+    /// switch, and that is the indexing subsystem's work rather than this
+    /// function's.
+    ///
+    /// "Would move" and not "names a different model", because those are not
+    /// the same set and the difference is the middle of that very migration: a
+    /// new space built and filled while the old one is still there. Re-adopting
+    /// the model the index is **already on** moves nothing, so it is allowed
+    /// there — which is also the only way to update `credential_ref`, this
+    /// being the one path that writes it. A different *chunker* under the same
+    /// model does move the index, and is refused like any other move.
+    ///
+    /// So what is guaranteed is about **transitions and not about states**: no
+    /// adoption ever moves the index onto a space while another space holds
+    /// embeddings. The stronger reading — "after any successful adoption only
+    /// the active space holds anything" — is not true and must not be relied
+    /// on, because the migration reaches two full spaces legitimately, through
+    /// [`Db::insert_vector`] into a space that is not the active one, and no
+    /// adoption took part in getting there. The obligation that follows from
+    /// that — the embedder writes into [`Db::active_space`] — is stated on
+    /// [`Db::insert_vector`], which is the call that can break it and so the
+    /// doc its breaker is reading.
+    ///
+    /// What the refusal asks is what exists rather than what
+    /// `meta.active_space` says, and `refuse_unless_every_other_space_is_empty`
+    /// is where that is argued — the pointer version had a hole reachable from
+    /// four public calls.
+    ///
+    /// `chunker_hash` arrives as a parameter and not as a call: this crate does
+    /// not depend on `mnema-chunk` and is not to start. The shell supplies it,
+    /// as the tests do.
+    ///
+    /// **What is atomic and what is not.** Three transactions, not one, and it
+    /// cannot be one: `create_space` opens its own IMMEDIATE transaction and
+    /// SQLite has no nested `BEGIN`.
+    ///
+    /// - The refusal is decided **twice**, and the two are not redundant. Once
+    ///   before anything is written, so a refusal leaves behind no
+    ///   configuration row, no space row, no `vec0` table and no advanced id
+    ///   counter — writes that a refusal implies did not happen. Once again
+    ///   inside the transaction that writes `active_space`, where it has to be:
+    ///   counting and then repointing is check-then-act, and only holding the
+    ///   write lock across both stops another connection inserting a vector in
+    ///   between. In one thread the two are indistinguishable, which is why the
+    ///   second has a two-connection test of its own
+    ///   (`tests/adopt.rs`, `a_vector_written_while_a_switch_is_deciding_still_refuses_it`)
+    ///   rather than a note admitting nothing exercises it. What makes that
+    ///   test's red attributable to *this* check is its count of
+    ///   `embedding_space`: both checks raise the same error, and only the
+    ///   second one has a space already created behind it. The timing
+    ///   assertion in it shows the interleave happened as designed; it is not
+    ///   what carries the proof.
+    /// - The model configuration and the space are written **outside** that
+    ///   transaction. Interrupted there, the index keeps a space nothing points
+    ///   at and a configuration nothing uses. Neither is reachable by search,
+    ///   neither is data lost, and the next call with the same arguments adopts
+    ///   both instead of duplicating them.
+    /// - A refusal from the **second** check leaves that same debris, and this
+    ///   is the one case where a refusal is not clean. Saying it plainly rather
+    ///   than through the race below: by then the space exists, and unwinding
+    ///   it would be a `DROP` in a transaction whose whole purpose is to have
+    ///   changed nothing.
+    /// - Left racy, deliberately and not by omission: two callers adopting two
+    ///   different models at the same instant can both clear the pre-flight
+    ///   check, and the loser's space becomes that debris. The caller is a
+    ///   person choosing a model in a settings window.
+    pub fn adopt_embedding_model(
+        &self,
+        model: &str,
+        dim: i64,
+        credential_ref: &str,
+        chunker_hash: &str,
+    ) -> Result<AdoptedSpace, Error> {
+        let existing_config = self.model_config_for(model)?;
+
+        // The width is checked here, and `create_space` checks it again, and
+        // that is not duplication: the refusing path never reaches
+        // `create_space`. Without this, a width disagreeing with the recorded
+        // configuration made `requested` `None` — no space has that key — and
+        // the caller was then told the *embedding model* could not be changed,
+        // a cause nobody had raised. Measured before the fix: the same call
+        // answered `SpaceDimMismatch` on an empty index and
+        // `ActiveSpaceNotEmpty` on a full one.
+        if let Some(config) = existing_config
+            && config.dim != dim
+        {
+            return Err(Error::SpaceDimMismatch {
+                model_config_id: config.id,
+                config_dim: config.dim,
+                space_dim: dim,
+            });
+        }
+
+        // Which space is being asked for is answerable without creating it: no
+        // configuration for this model means no space for it either.
+        let requested = match existing_config {
+            Some(config) => existing_space_id(self.conn(), config.id, dim, chunker_hash)?,
+            None => None,
+        };
+        // Refuse before writing rather than after, so that a refusal leaves
+        // nothing behind.
+        self.refuse_if_the_move_would_orphan_anything(requested)?;
+
+        let model_config_id = match existing_config {
+            Some(config) => config.id,
+            // The provider is a constant because v1 has exactly one (spec §2.2,
+            // `mnema-provider/src/lib.rs:21`); the name is the model's own
+            // because there is nothing else here to call it. The secret is not
+            // a parameter and never will be — `credential_ref` names an entry
+            // in the OS credential store.
+            None => self.create_model_config(model, "openrouter", None, model, dim)?,
+        };
+        self.conn().execute(
+            "UPDATE model_config SET credential_ref = ?2 WHERE id = ?1",
+            params![model_config_id, credential_ref],
+        )?;
+
+        // `create_space` reports an existing space as an *error* carrying its
+        // id, because the caller it was built for wanted get-or-create. That
+        // error is the only place the difference between "found" and "created"
+        // is stated, so `created` is read from here rather than inferred from
+        // whether the active space moved — which is a different fact, and one
+        // that answers "created" for a space that was already there.
+        let (space_id, created) = match self.create_space(model_config_id, dim, chunker_hash) {
+            Ok(id) => (id, true),
+            Err(Error::SpaceAlreadyExists { space_id }) => (space_id, false),
+            Err(other) => return Err(other),
+        };
+
+        self.transaction(|_tx| {
+            // Asked again under the write lock, and now the destination is the
+            // id `create_space` actually settled on rather than the one looked
+            // up before it ran. Another connection can fill a space between the
+            // check above and this one; nothing can fill one between this and
+            // the write below.
+            self.refuse_if_the_move_would_orphan_anything(Some(space_id))?;
+            // `meta_put` and not `meta_set`: `meta_set` refuses this key
+            // precisely so that it is written here, by the one path that can
+            // first ask what replacing it would orphan.
+            self.meta_put(crate::META_ACTIVE_SPACE, &space_id.to_string())?;
+            Ok(())
+        })?;
+
+        Ok(AdoptedSpace {
+            space_id,
+            model_config_id,
+            created,
+        })
+    }
+
+    /// The configuration this crate recognises for a model name, if one is
+    /// recorded.
+    ///
+    /// Carries the width as well as the id because the adoption path has to
+    /// compare it before it can say what a mismatch is about; fetching the id
+    /// alone is what left that question to a function the refusing path never
+    /// reaches.
+    fn model_config_for(&self, model: &str) -> Result<Option<ModelConfigRef>, Error> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT id, dim FROM model_config WHERE embed_model = ?1",
+                params![model],
+                |r| {
+                    Ok(ModelConfigRef {
+                        id: r.get(0)?,
+                        dim: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// Resolves a space id to what every vector operation needs, or says which id
     /// was wrong. Read straight through `query_row` an unknown id arrives as
     /// `QueryReturnedNoRows`, which reads like an empty index rather than a bug.
@@ -323,6 +822,43 @@ pub(crate) fn delete_vectors_for_document_in(
         )?;
     }
     Ok(())
+}
+
+/// The id of the space with exactly this key, if there is one.
+///
+/// Written once and asked from both sides on purpose. `create_space` asks it in
+/// order to hand back the existing id instead of colliding;
+/// `adopt_embedding_model` asks it *before writing anything*, to learn whether
+/// the model being chosen is the one already active. A second copy of the
+/// UNIQUE key (`schema.sql:358`) would be a second place to update, and the one
+/// that fell behind would not fail loudly — the adoption path would quietly
+/// stop recognising the active space as the requested one and start refusing
+/// switches that are not switches.
+///
+/// Takes `&Connection` so a `&Transaction` coerces at the call site, the same
+/// reason `delete_vectors_for_document_in` does.
+fn existing_space_id(
+    conn: &rusqlite::Connection,
+    model_config_id: i64,
+    dim: i64,
+    chunker_hash: &str,
+) -> Result<Option<i64>, Error> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM embedding_space
+              WHERE model_config_id = ?1 AND dim = ?2
+                AND index_format_version = ?3 AND chunker_hash = ?4",
+            params![model_config_id, dim, INDEX_FORMAT_VERSION, chunker_hash],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?)
+}
+
+/// A model configuration, as much of it as the adoption path asks for.
+#[derive(Debug, Clone, Copy)]
+struct ModelConfigRef {
+    id: i64,
+    dim: i64,
 }
 
 /// What a space is, to the code that reads and writes its vectors.

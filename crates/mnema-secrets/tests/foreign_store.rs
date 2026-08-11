@@ -48,7 +48,7 @@ fn a_store_that_does_not_persist_is_refused_on_every_entry_point() {
     for (entry_point, result) in [
         ("store", store(name, SYNTHETIC).map(|()| None)),
         ("load", load(name)),
-        ("forget", forget(name).map(|()| None)),
+        ("forget", forget(name).map(|_| None)),
     ] {
         let err = result.expect_err("a non-persistent store must be refused");
         assert!(

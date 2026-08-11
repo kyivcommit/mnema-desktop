@@ -1,4 +1,5 @@
 mod journal;
+mod meta;
 mod migrations;
 mod open;
 mod search;
@@ -7,9 +8,10 @@ mod text_prep;
 mod write;
 
 pub use journal::{DocumentStatus, SkipEntry, SkipRule, SkippedFile};
+pub use meta::{META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL, META_VEC_VERSION};
 pub use migrations::SCHEMA_VERSION;
 pub use open::{Db, open, register_vector_extension};
-pub use space::VectorRole;
+pub use space::{AdoptedSpace, VectorRole};
 pub use text_prep::prepare_for_search;
 pub use write::{Citation, INDEX_FORMAT_VERSION, PathEntry};
 
@@ -91,6 +93,48 @@ pub enum Error {
     /// failed" in a message, which is what typed errors are here to avoid.
     #[error("embedding space {space_id} already has this model, width, format and chunker")]
     SpaceAlreadyExists { space_id: i64 },
+    /// The one `meta` key whose overwrite loses data rather than a diagnosis,
+    /// and it loses it silently: the replaced space's vectors are still on
+    /// disk, still complete, and no longer reachable by anything, while search
+    /// answers from a space that holds a fraction of the archive. No error, no
+    /// missing row — just an index that has quietly stopped containing what it
+    /// contains.
+    ///
+    /// So the key does not go through `meta_set` at all. Changing which space
+    /// is active is a decision about every vector already written, and it is
+    /// made by the adoption path, which can refuse while the space being left
+    /// behind still holds rows; `meta_set` cannot, because it sees one key and
+    /// one string.
+    #[error(
+        "{META_ACTIVE_SPACE} cannot be written through meta_set: it would orphan \
+         the vectors of the space being replaced, leaving them on disk and \
+         unreachable while search answers from the new one"
+    )]
+    ActiveSpaceNotWritable,
+    /// A space other than the one being adopted still has embeddings recorded
+    /// in it, so moving the index onto another would leave them where nothing
+    /// reads them — the split D25 rejected as impossible in principle rather
+    /// than merely unimplemented. Doing it properly means building the new
+    /// space, filling it, and switching, which is the indexing subsystem.
+    ///
+    /// **Not `ActiveSpaceNotEmpty`**, which is what this was called for one
+    /// commit. The space that blocks need not be the active one, and need not
+    /// be pointed at by anything at all; keying the question on
+    /// `meta.active_space` was the defect the rename goes with. See
+    /// [`Db::adopt_embedding_model`].
+    ///
+    /// `embedded_chunks` counts **chunks**, not rows, and the name is the
+    /// message: a chunk is recorded as embedded in two places —
+    /// `chunk_embedding_state` and the space's own `vec_emb_<id>` table — and
+    /// they are two records of one chunk, not two things to rebuild. The
+    /// message says *recorded* for the same kind of reason: where only the
+    /// bookkeeping row exists, what the space holds is the record of an
+    /// embedding rather than the embedding.
+    #[error(
+        "space {space_id} is not empty: embeddings are recorded for {embedded_chunks} of its \
+         chunks, and the index cannot move to a different space without rebuilding them"
+    )]
+    SpaceNotEmpty { space_id: i64, embedded_chunks: i64 },
     #[error("{role} has a non-finite component at index {index}")]
     NonFiniteVector { role: VectorRole, index: usize },
     /// vec0 divides by the vector's norm in f32, and every way that division can

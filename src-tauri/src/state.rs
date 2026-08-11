@@ -18,6 +18,23 @@ pub struct AppState {
     /// for the same reason `data_dir` is — see [`crate::paths::worker_path`]
     /// for what this path is good for today and what it is not.
     worker: PathBuf,
+    /// Where the provider lives. A field rather than a constant because the
+    /// tests point it at a local server; production passes
+    /// `mnema_provider::OPENROUTER_BASE` in `lib.rs`.
+    provider_base: String,
+    /// Which entry in the credential store this installation uses. Never the
+    /// secret — the name it is filed under.
+    ///
+    /// A field rather than a constant for a sharper reason than the one above.
+    /// `mnema-secrets` keeps the platform store out of reach only under its
+    /// **own** `cfg(test)` — the `#[cfg(test)]` arm inside `platform_store`
+    /// (`crates/mnema-secrets/src/lib.rs:313,320`) — and an integration test of
+    /// *this* crate compiles that one without the flag, so a test here reaches
+    /// whatever store the process has. Tests register an in-memory one and give
+    /// each fixture its own reference inside it; a shared reference would cross
+    /// one test's secret into another, and the production name in a test binary
+    /// would put a test's value where the application looks for the user's.
+    credential_ref: String,
     /// `None` until the first `open_index`. The window opens before the database
     /// does, because a failure to open must be something the user can read
     /// rather than a process that never draws.
@@ -29,10 +46,17 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(data_dir: PathBuf, worker: PathBuf) -> Self {
+    pub fn new(
+        data_dir: PathBuf,
+        worker: PathBuf,
+        provider_base: String,
+        credential_ref: String,
+    ) -> Self {
         Self {
             data_dir,
             worker,
+            provider_base,
+            credential_ref,
             db: Mutex::new(None),
             running: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -45,6 +69,14 @@ impl AppState {
 
     pub fn worker_path(&self) -> &Path {
         &self.worker
+    }
+
+    pub fn provider_base(&self) -> &str {
+        &self.provider_base
+    }
+
+    pub fn credential_ref(&self) -> &str {
+        &self.credential_ref
     }
 
     /// Opens the index, creating the directory and the database if needed, and
@@ -106,6 +138,17 @@ impl AppState {
     /// A closure rather than a getter because the connection is behind a lock:
     /// handing out a guard would let a caller hold it across an await point or a
     /// whole command, and the indexing job is on the other side of that lock.
+    ///
+    /// ⚠️ **Three ways out, and something downstream classifies them.**
+    /// `StatePoisoned`, `IndexNotOpen`, and whatever `f` returns as
+    /// `Error::Index(_)`. `models::UnreadableCause::of` sorts those three into
+    /// what a settings window draws — "no index is open" against "a read
+    /// failed, which is a bug report" — and it cannot be made to fail
+    /// compilation when this list grows, because no `match` can express "the
+    /// errors `with_index` produces". So the obligation sits here, on the
+    /// function that can break it: **a fourth way out of this function owes
+    /// that classification a decision.** Left unmade, a new failure is drawn to
+    /// the user as a defect report whatever it actually is.
     pub fn with_index<T>(
         &self,
         f: impl FnOnce(&Db) -> Result<T, mnema_index::Error>,
