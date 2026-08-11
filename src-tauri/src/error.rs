@@ -154,6 +154,55 @@ pub enum Error {
     /// recoverable command failure into a lost window.
     #[error("internal state was left inconsistent by an earlier failure")]
     StatePoisoned,
+    /// A confirmed model change destroyed something and then could not finish.
+    ///
+    /// **This variant exists because the sentence has to carry a fact the
+    /// failure would otherwise take with it.** `set_embedding_model` with
+    /// [`crate::models::ExistingVectors::Discard`] retires a space, commits
+    /// that, and only then adopts the model. A failure in between used to leave
+    /// through [`Error::Index`], which says what went wrong and nothing about
+    /// what had already gone — so the window drew "the embedding model was not
+    /// recorded", a sentence that reads as *nothing happened*, to somebody whose
+    /// embeddings had just been deleted. The retirement is not undone by the
+    /// failure and nothing later mentions it either: the space is simply no
+    /// longer in `embedding_space`, which is exactly why nothing can notice it
+    /// afterwards.
+    ///
+    /// **Not [`Error::Index`] with a longer message**, and not a wrapper the
+    /// caller may forget: the only way to build it is
+    /// `models::failure_after_retiring`, which is also the only place `retired`
+    /// can be dropped, so the two facts cannot be separated by an ordinary edit
+    /// at a call site.
+    ///
+    /// It carries no credential and cannot: `RetiredSpace` is two integers.
+    #[error(
+        "{}, and that is not undone by what went wrong next: {source}",
+        retirements(.retired)
+    )]
+    RetiredThenFailed {
+        retired: Vec<crate::models::RetiredSpace>,
+        source: mnema_index::Error,
+    },
+}
+
+/// The retirements as a clause, for [`Error::RetiredThenFailed`]'s sentence.
+///
+/// Both numbers on every space, because "a vector space was retired" is not what
+/// a person needs to know — which one, and how much was in it, is. Never called
+/// with an empty list: `models::failure_after_retiring` answers [`Error::Index`]
+/// for that case, and this would otherwise render an empty clause in front of a
+/// cause, which reads as a sentence that lost its subject.
+fn retirements(retired: &[crate::models::RetiredSpace]) -> String {
+    retired
+        .iter()
+        .map(|space| {
+            format!(
+                "vector space {} and the {} embeddings recorded in it were already deleted",
+                space.space_id, space.embedded_chunks
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Splits the one provider failure that is not about the provider's answer.

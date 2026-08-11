@@ -700,21 +700,30 @@ test("a read-back that succeeded is never told it failed", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // The one control in this window that destroys anything (D96g).
 
-// The settings as `model_settings` sends them when a space holds embeddings.
+// The settings as `model_settings` sends them when one space holds embeddings.
+// `spaceCount: 1` is part of the baseline rather than a field a test opts into:
+// it is the arrangement in which the button's number is the whole bill, and a
+// fixture without it would make every case below exercise the refusing path.
 const settingsWith = (fields) => ({
   kind: "read",
   activeSpace: 1,
   embeddingDim: 1024,
   embeddedChunks: 3,
   totalChunks: 812,
+  spaceCount: 1,
   ...fields,
 });
+
+// A credential store that answered and holds a key — the state every offer
+// below needs, since a change refused for want of a key is not one a
+// confirmation can help.
+const KEY_PRESENT = { kind: "present" };
 
 // The whole requirement on this button in one assertion: the number is on it.
 // "Are you sure?" is a question nobody can answer, because it asks about a cost
 // it does not state.
 test("the confirmation names how many embeddings it would delete", () => {
-  const label = discardVectorsLabel(discardOffer("vendor/other", settingsWith({})));
+  const label = discardVectorsLabel(discardOffer("vendor/other", settingsWith({}), KEY_PRESENT));
   assert.match(label, /\b3 embeddings\b/, `the number is not on the button: ${label}`);
   assert.match(label, /vendor\/other/, "and which change it is for");
   assert.match(label, /#1\b/, "and which space is being spent");
@@ -724,11 +733,11 @@ test("the confirmation names how many embeddings it would delete", () => {
 // A count in a sentence is a definition of the thing it counts, and `1
 // embeddings` invites doubt about the only number this control carries.
 test("one embedding is not called one embeddings", () => {
-  assert.match(discardVectorsLabel(discardOffer("m", settingsWith({ embeddedChunks: 1 }))),
+  assert.match(discardVectorsLabel(discardOffer("m", settingsWith({ embeddedChunks: 1 }), KEY_PRESENT)),
     /\b1 embedding\b/);
-  assert.doesNotMatch(discardVectorsLabel(discardOffer("m", settingsWith({ embeddedChunks: 1 }))),
+  assert.doesNotMatch(discardVectorsLabel(discardOffer("m", settingsWith({ embeddedChunks: 1 }), KEY_PRESENT)),
     /1 embeddings/);
-  assert.match(discardVectorsNote(discardOffer("m", settingsWith({ embeddedChunks: 1 }))),
+  assert.match(discardVectorsNote(discardOffer("m", settingsWith({ embeddedChunks: 1 }), KEY_PRESENT)),
     /\b1 embedding\b/);
 });
 
@@ -736,16 +745,32 @@ test("one embedding is not called one embeddings", () => {
 // at a time. The control direction is first, because a `discardOffer` that
 // answered `null` to everything would satisfy all four of the others.
 test("the discard is offered only when this window can state what it costs", () => {
-  assert.notEqual(discardOffer("vendor/other", settingsWith({})), null,
+  assert.notEqual(discardOffer("vendor/other", settingsWith({}), KEY_PRESENT), null,
     "the control: with a refusal and a full space, the offer exists");
-  assert.equal(discardOffer(null, settingsWith({})), null,
+  assert.equal(discardOffer(null, settingsWith({}), KEY_PRESENT), null,
     "nothing was refused, so there is nothing to confirm");
-  assert.equal(discardOffer("vendor/other", { kind: "unreadable", cause: "readFailed", reason: "x" }), null,
+  assert.equal(discardOffer("vendor/other", { kind: "unreadable", cause: "readFailed", reason: "x" }, KEY_PRESENT), null,
     "an index that could not be read carries no number, and the button is only a number");
-  assert.equal(discardOffer("vendor/other", settingsWith({ activeSpace: null })), null,
+  assert.equal(discardOffer("vendor/other", settingsWith({ activeSpace: null }), KEY_PRESENT), null,
     "no space is chosen, so nothing is embedded and the refusal was about something else");
-  assert.equal(discardOffer("vendor/other", settingsWith({ embeddedChunks: 0 })), null,
+  assert.equal(discardOffer("vendor/other", settingsWith({ embeddedChunks: 0 }), KEY_PRESENT), null,
     "a zero here is `this window cannot see what blocks`, not `nothing does`");
+  // Review 1, Important 2. The command retires EVERY space in the way and this
+  // label names one, so with two spaces the button understates a bill it is the
+  // whole point of. Both directions are already here: the control above passes
+  // with `spaceCount: 1`.
+  assert.equal(discardOffer("vendor/other", settingsWith({ spaceCount: 2 }), KEY_PRESENT), null,
+    "with a second space in the index the number on the button is not the whole bill");
+  // Review 1, Minor 1. `refusedChange` is set on every failed change, and this
+  // command fails on the credential store before it reaches the index — so
+  // without this guard, "you have entered no key" produces a button offering to
+  // delete embeddings.
+  assert.equal(discardOffer("vendor/other", settingsWith({}), { kind: "absent" }), null,
+    "a change refused for want of a key is not one deleting embeddings can help");
+  assert.equal(
+    discardOffer("vendor/other", settingsWith({}), { kind: "unreadable", cause: "locked", reason: "x" }),
+    null,
+    "a store that would not answer says nothing about what blocks the change either");
 });
 
 // `null` reaches the label and the note on every ordinary draw — the button is
@@ -763,7 +788,7 @@ test("no offer draws no words, rather than throwing", () => {
 // archive — `Db::drop_space` takes the vector table and the bookkeeping that
 // cascades from it, and touches no `chunk`, no `page` and no `document`.
 test("the note says what is deleted and what is not", () => {
-  const note = discardVectorsNote(discardOffer("vendor/other", settingsWith({})));
+  const note = discardVectorsNote(discardOffer("vendor/other", settingsWith({}), KEY_PRESENT));
   assert.match(note, /\b3 embeddings\b/);
   assert.match(note, /deleted/i);
   assert.match(note, /documents/i, "and that the documents themselves stay");

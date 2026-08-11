@@ -832,3 +832,42 @@ fn upserting_a_vector_clears_a_stale_bookkeeping_row() {
         "a stale bookkeeping row survived a successful upsert"
     );
 }
+
+/// `space_count` answers the question a caller cannot answer from
+/// `embedded_chunk_count`: whether the space it can count is the only one.
+///
+/// Three values and not one, because a count that always answered `1` — or
+/// always the number of *non-empty* spaces — would satisfy a single case. The
+/// empty space in the middle is the load-bearing one: it is invisible to
+/// `embedded_chunk_count` from every side, and it is exactly the kind of space
+/// a caller asking "is this all there is" must be told about.
+#[test]
+fn the_number_of_spaces_counts_the_empty_ones_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    assert_eq!(db.space_count().unwrap(), 0, "a fresh index has no spaces");
+
+    let cfg = db
+        .create_model_config("a", "openrouter", None, "vendor/a", 8)
+        .unwrap();
+    let full = db.create_space(cfg, 8, "chunker-v1").unwrap();
+    db.insert_vector(full, 1, &vec_of(8, 1.0)).unwrap();
+    assert_eq!(db.space_count().unwrap(), 1);
+
+    // A second space with nothing in it. `embedded_chunk_count` says zero about
+    // it and `space_is_empty` says true, so neither can tell a caller it exists.
+    let other = db
+        .create_model_config("b", "openrouter", None, "vendor/b", 8)
+        .unwrap();
+    let empty = db.create_space(other, 8, "chunker-v1").unwrap();
+    assert_eq!(db.embedded_chunk_count(empty).unwrap(), 0);
+    assert_eq!(
+        db.space_count().unwrap(),
+        2,
+        "an empty space is still a space this index holds"
+    );
+
+    // And down again, so the count is read rather than accumulated.
+    db.drop_space(full).unwrap();
+    assert_eq!(db.space_count().unwrap(), 1);
+}

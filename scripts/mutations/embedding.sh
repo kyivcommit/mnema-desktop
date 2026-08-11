@@ -100,9 +100,15 @@ case_ "models: a confirmed change that retires nothing cannot happen at all (D96
 
 # The shortcut the loop exists instead of, written out: on confirmation, drop
 # `active_space` and then adopt. It reads as the obvious implementation and it
-# destroys an archive for a press that changed nothing — re-adopting the
-# recorded model moves nothing, and it is also the only path that rewrites
-# `credential_ref`, so the same call is how a new API key is recorded.
+# destroys an archive for a call the index promises will change nothing —
+# `refuse_if_the_move_would_orphan_anything` (`crates/mnema-index/src/space.rs:594-602`)
+# exempts a call whose destination is where the pointer already stands, because
+# it is not a transition at all.
+#
+# An earlier version of this comment said the same call is how a new API key is
+# recorded. False, and corrected in review: the key goes to the OS credential
+# store through `set_key`, and `model_config.credential_ref` holds the NAME the
+# credential is filed under, not the key.
 case_ "models: confirmation retires what blocks, not whatever is active (D96g)" \
   src-tauri/src/models.rs \
   's{    let mut retired: Vec<RetiredSpace> = Vec::new\(\);\n}{    let mut retired: Vec<RetiredSpace> = Vec::new();\n    let _ = db\n        .active_space()?\n        .filter(|_| existing_vectors == ExistingVectors::Discard)\n        .map(|active| db.drop_space(active))\n        .transpose()?;\n}' \
@@ -136,3 +142,58 @@ case_ "space: the same DROP, against the index crate's own test (D96g)" \
         tx.execute(
             "DELETE FROM embedding_space WHERE id = ?1",' \
   mnema-index 'dropping_a_space_removes_its_row_its_table_and_its_shadows' --test space
+
+# ── Task 4, fix round 1 (D96g) ───────────────────────────────────────────────
+#
+# The defect review found: the retirements are thrown away on the failing exit,
+# so a confirmed change that destroyed a space and then could not finish reaches
+# the window as "the embedding model was not recorded" — a sentence that reads
+# as *nothing happened*, to somebody whose embeddings have just gone. Nothing
+# afterwards can mention it either: the space is no longer a row in
+# `embedding_space`, which is exactly why nothing notices.
+case_ "models: a failure after a retirement must not lose the retirement (D96g, review 1)" \
+  src-tauri/src/models.rs \
+  's{    if retired\.is_empty\(\) \{\n        return Error::Index\(cause\);\n    \}\n    Error::RetiredThenFailed \{\n        retired,\n        source: cause,\n    \}\n}{    let _ = &retired;\n    Error::Index(cause)\n}' \
+  'let _ = &retired;
+    Error::Index(cause)
+}' \
+  mnema-desktop 'models::tests::a_failure_that_destroyed_something_first_says_so_and_one_that_did_not_does_not' --lib
+
+# The mirror, and it is not a lesser fault: every ordinary refusal — a model
+# change nobody confirmed, overwhelmingly — would tell the person a vector space
+# was deleted. A one-sided assertion is satisfied by exactly this.
+case_ "models: an ordinary refusal must not claim a deletion (D96g, review 1)" \
+  src-tauri/src/models.rs \
+  's{    if retired\.is_empty\(\) \{\n        return Error::Index\(cause\);\n    \}\n}{}' \
+  'fn failure_after_retiring(cause: mnema_index::Error, retired: Vec<RetiredSpace>) -> Error {
+    Error::RetiredThenFailed {' \
+  mnema-desktop 'models::tests::a_failure_that_destroyed_something_first_says_so_and_one_that_did_not_does_not' --lib
+
+# The number the window's confirmation stands on. Hardcoded, the settings say
+# "one space" over an index holding two, and the button offers to delete a
+# number that is not the whole bill — which is exactly review 1's Important 2
+# reopened, from the side the window cannot check.
+case_ "models: the number of spaces must be measured, not asserted (D96g, review 1)" \
+  src-tauri/src/models.rs \
+  's{            space_count: db\.space_count\(\)\?,\n}{            space_count: 1,\n}' \
+  '            space_count: 1,
+            rerank_model:' \
+  mnema-desktop 'the_settings_say_how_many_spaces_there_are_and_not_only_what_the_active_one_holds' --test model_commands
+
+# The argument that must be the caller's. Made optional, a window that sends
+# nothing is handed one of the two answers by a library rather than refused —
+# and only one of the two can be undone.
+case_ "models: the answer about existing vectors must be required (D96g, review 1)" \
+  src-tauri/src/models.rs \
+  's{    existing_vectors: ExistingVectors,\n\) -> Result<AdoptedModel, Error> \{\n    let key = key\(&state\)\?;\n}{    existing_vectors: Option<ExistingVectors>,\n) -> Result<AdoptedModel, Error> \{\n    let existing_vectors = existing_vectors.unwrap_or(ExistingVectors::Keep);\n    let key = key(&state)?;\n}' \
+  'let existing_vectors = existing_vectors.unwrap_or(ExistingVectors::Keep);' \
+  mnema-desktop 'a_model_change_that_says_nothing_about_the_existing_vectors_is_refused' --test commands
+
+# The count `space_count` answers, in the crate that owns the SQL. Counting only
+# non-empty spaces passes every desktop test — the second space in that fixture
+# is empty — and re-opens the same gap from underneath.
+case_ "space: the number of spaces counts the empty ones too (D96g, review 1)" \
+  crates/mnema-index/src/space.rs \
+  's{            \.query_row\("SELECT count\(\*\) FROM embedding_space", \[\], \|r\| r\.get\(0\)\)\?\)\n}{            .query_row(\n                "SELECT count(*) FROM embedding_space WHERE id IN (SELECT space_id FROM chunk_embedding_state)",\n                [],\n                |r| r.get(0),\n            )?)\n}' \
+  'WHERE id IN (SELECT space_id FROM chunk_embedding_state)' \
+  mnema-index 'the_number_of_spaces_counts_the_empty_ones_too' --test space

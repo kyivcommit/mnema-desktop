@@ -985,10 +985,24 @@ fn a_confirmed_model_change_retires_the_old_space_and_its_tables() {
 ///
 /// The shortcut this excludes is one line long and reads as the obvious
 /// implementation: on confirmation, drop `active_space` and then adopt. It
-/// destroys an archive for a press that changed nothing — the settings screen
-/// re-sends the recorded model on any path that re-selects it, and this command
-/// is also the only one that can rewrite `credential_ref`, so the same call is
-/// how a new API key is recorded.
+/// destroys an archive for a call that by contract moves nothing.
+///
+/// **Not a hypothetical about how a window might behave — the index states it.**
+/// `Db::refuse_if_the_move_would_orphan_anything`
+/// (`crates/mnema-index/src/space.rs:594-602`) exempts a call whose destination
+/// is where the pointer already stands, precisely because it is not a transition
+/// and there is nothing for a guard on transitions to decide. So re-adopting the
+/// recorded model is a call the index promises will leave the database as it
+/// found it, and a confirmation flag turning that into a deletion breaks the
+/// promise rather than a convention.
+///
+/// ⚠️ An earlier version of this comment justified the test by saying this
+/// command is how a new API key is recorded. That is false and was corrected in
+/// review: the key goes to the OS credential store through `set_key` /
+/// `mnema_secrets::store`, and `model_config.credential_ref` holds only the
+/// *name* the credential is filed under — a constant this window never changes.
+/// Adoption is indeed the one path that writes that column; writing a name is
+/// not recording a key.
 #[test]
 fn a_confirmed_change_to_the_model_the_index_is_already_on_retires_nothing() {
     let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
@@ -1027,4 +1041,55 @@ fn a_confirmed_change_to_the_model_the_index_is_already_on_retires_nothing() {
         "confirmation retired a space that was not in the way"
     );
     assert_eq!(adopted.space_id, space, "re-adoption minted a second space");
+}
+
+/// The settings carry how many vector spaces exist, and it is not derived from
+/// anything else on the payload.
+///
+/// **This is the number the window's confirmation stands on** (review 1,
+/// Important 2). `embedded_chunks` counts the active space; the command retires
+/// every space in the way, and the space that blocks need not be the active one.
+/// So the button may only appear when the active space is the only space there
+/// is, and this field is the only thing that says so.
+///
+/// A second space is built through `Db::create_model_config` and
+/// `Db::create_space` rather than through a second adoption, because a second
+/// adoption is exactly what the index refuses here — and that refusal is the
+/// state this number exists to describe.
+///
+/// Both numbers after the second space, because either alone is satisfied by the
+/// wrong build: a `space_count` reading `embedded_chunks` would answer 3, and an
+/// `embedded_chunks` that started counting every space would answer 3 as well.
+#[test]
+fn the_settings_say_how_many_spaces_there_are_and_not_only_what_the_active_one_holds() {
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 1);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("accepted");
+    fx.adopt_default_model();
+    let active = fx.embed_chunks_in_the_active_space(EMBEDDED);
+
+    let before = model_settings(fx.state());
+    assert_eq!(read_index(&before.index).space_count, 1);
+
+    let second = fx
+        .state()
+        .with_index(|db| {
+            let config = db.create_model_config("other", "openrouter", None, OTHER_MODEL, 1024)?;
+            db.create_space(config, 1024, &mnema_chunk::chunker_hash())
+        })
+        .expect("a second space is created");
+    assert_ne!(second, active, "the fixture built one space twice");
+
+    let settings = model_settings(fx.state());
+    let after = read_index(&settings.index);
+    assert_eq!(
+        after.space_count, 2,
+        "the window is told there is one space while the index holds two, which is what lets \
+         it offer to delete a number that is not the whole bill"
+    );
+    assert_eq!(
+        after.embedded_chunks, EMBEDDED,
+        "and this one still counts the active space alone — the two are different questions"
+    );
+    assert_eq!(after.active_space, Some(active), "the pointer did not move");
 }

@@ -469,7 +469,7 @@ const drawSettings = (settings) => {
   // show. Written every time for the same reason `key-note` is — a line set once
   // and never cleared outlives the state it described, and this one outliving it
   // is a button offering to delete embeddings that are already gone.
-  const offer = discardOffer(refusedChange, settings.index);
+  const offer = discardOffer(refusedChange, settings.index, settings.key);
   el("discard-vectors").hidden = offer === null;
   el("discard-vectors").textContent = discardVectorsLabel(offer);
   el("discard-vectors-note").textContent = discardVectorsNote(offer);
@@ -548,6 +548,13 @@ const recordEmbeddingModel = async (model, existingVectors) => {
   } catch (error) {
     // The refusal already says how many vectors stand in the way; showing it
     // whole is better than a sentence of our own that says less.
+    //
+    // Set on **every** failure, and narrowed by `discardOffer` rather than here.
+    // Not for tidiness: the refusal arrives as a string, so this `catch` cannot
+    // tell "a space blocks the change" from "you have entered no key" without
+    // matching on message text — the failure mode `crate::error::Error`'s own
+    // header says that type exists to avoid. What can be decided is decided from
+    // state, one line down, where the guards and their gaps are written out.
     refusedChange = model;
     el("model-status").textContent = asSentence(embeddingModelNotRecordedSentence(error));
   }

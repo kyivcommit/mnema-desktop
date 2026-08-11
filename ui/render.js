@@ -795,8 +795,9 @@ const embeddingsCount = (n) => (n === 1 ? "1 embedding" : `${n} embeddings`);
 // they cost — `null` for "do not offer", never a partly-filled offer.
 //
 // `model` is the change that was refused; without one there is nothing to
-// confirm. The other three guards are all the same rule: **this window does not
-// offer a destructive act whose price it cannot state.**
+// confirm. Every other guard is the same rule: **this window does not offer a
+// destructive act whose price it cannot state, and does not offer one it can
+// already see will not happen.**
 //
 // - An index it could not read has no number in it, so the button would have to
 //   fall back to "are you sure?", which is the sentence this whole control
@@ -808,13 +809,35 @@ const embeddingsCount = (n) => (n === 1 ? "1 embedding" : `${n} embeddings`);
 //   says so — and `embeddedChunks` counts only the active one. A zero here is
 //   therefore "this window cannot see what is in the way", not "nothing is",
 //   and a button reading *delete 0 embeddings* would understate a bill it
-//   cannot read. Unreachable through this window today, since the only thing
-//   that writes vectors writes them into the active space; offered as a
-//   refusal rather than as a guess for the day that stops being true.
-export const discardOffer = (model, index) => {
+//   cannot read.
+// - `spaceCount !== 1` is the same defect the other way round, and the one
+//   review found: the command retires **every** space in the way, and this label
+//   names one. With two full spaces the button says "delete the 3 embeddings in
+//   space #1" and #1 and #4 both go. One space in the index, and it is the
+//   active one — a `read` with `activeSpace` set guarantees that space exists,
+//   since `index_settings` reads `space_model` for it — is the only arrangement
+//   in which the number on the button is the whole bill.
+// - `key.kind !== "present"` is not about price but about the offer being real.
+//   `refusedChange` is set on every failed change, and `set_embedding_model`
+//   fails on the credential store before it ever reaches the index — so without
+//   this, a refusal that means "you have entered no key" produces a button
+//   offering to delete embeddings, which is destruction proposed as the cure for
+//   somebody else's ailment.
+//
+// ⚠️ **What this does not reach**, since a guard's gaps belong beside it: a
+// change refused by the *provider* — unreachable, or a model it does not have —
+// leaves this window with a key present, a full space and no way to tell that
+// refusal from the index's. The button appears, and its sentence about the index
+// is still true; pressing it destroys nothing, because the provider check runs
+// before the index is touched, and produces the same provider refusal again.
+// Telling the two apart needs the refusal to carry its own shape rather than a
+// string, which is deliberately not this cycle's work.
+export const discardOffer = (model, index, key) => {
   if (model === null || model === undefined) return null;
+  if (key?.kind !== "present") return null;
   if (index?.kind !== "read") return null;
   if (index.activeSpace === null || index.activeSpace === undefined) return null;
+  if (index.spaceCount !== 1) return null;
   if (!(index.embeddedChunks > 0)) return null;
   return { model, spaceId: index.activeSpace, embeddedChunks: index.embeddedChunks };
 };

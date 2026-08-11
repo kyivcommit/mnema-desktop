@@ -1378,3 +1378,53 @@ fn every_model_command_the_window_calls_is_registered() {
         );
     }
 }
+
+/// A model change that says nothing about the embeddings already there is
+/// refused before the command runs.
+///
+/// **`ExistingVectors`'s own doc claims this and nothing held it.** The test
+/// above sends both spellings *present*, so it is satisfied by a build in which
+/// the field is optional — adding `#[serde(default)]` to that enum leaves every
+/// assertion in this file green while turning a window's typo into one of two
+/// answers, only one of which can be undone. This is the assertion that fails
+/// the day somebody adds it.
+///
+/// Which of the two a default would pick does not matter to this test and is
+/// exactly why it asserts the refusal rather than the outcome: the argument is
+/// that the choice belongs to the caller, not that the safe branch happens to
+/// be the one serde would take.
+///
+/// It says which failure it is looking at before it says anything about
+/// arguments, the same way the controls above do — "the command is not
+/// registered" also produces an `Err`, and reading that as a refusal about
+/// arguments would be red with the wrong cause named.
+#[test]
+fn a_model_change_that_says_nothing_about_the_existing_vectors_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let refused = call(
+        &webview,
+        "set_embedding_model",
+        json!({ "model": "baai/bge-m3" }),
+    )
+    .expect_err("a model change with no answer about the existing vectors was accepted");
+    let refused = error_text(&refused);
+    assert_ne!(
+        refused,
+        not_registered("set_embedding_model"),
+        "this test asks about argument binding and its own command is not registered, so it \
+         can say nothing about arguments"
+    );
+    assert!(
+        refused.contains(INVALID_ARGS),
+        "the call was reached and ran, so the decision to destroy or keep embeddings was taken \
+         by something other than the caller: {refused}"
+    );
+    assert!(
+        refused.contains("`existingVectors`"),
+        "the rejection should name the missing argument, in the backticks Tauri puts round it \
+         — the bare word appears in this command's own name in the same message: {refused}"
+    );
+}

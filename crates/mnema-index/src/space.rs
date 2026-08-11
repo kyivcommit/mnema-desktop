@@ -485,6 +485,26 @@ impl Db {
             .query_row("SELECT count(*) FROM chunk", [], |r| r.get(0))?)
     }
 
+    /// How many vector spaces the index holds at all.
+    ///
+    /// **Not a diagnostic.** It exists so a caller holding
+    /// [`Db::embedded_chunk_count`] for one space can say whether that space is
+    /// the only one there is — and therefore whether the number it holds is the
+    /// whole of what a model change would cost. Without it, a caller that can
+    /// count one space has no way to tell "this is the bill" from "this is part
+    /// of a bill I cannot read", and [`Error::SpaceNotEmpty`]'s own doc is where
+    /// the difference is argued: the space that blocks need not be the active
+    /// one, nor pointed at by anything.
+    ///
+    /// It counts rows in `embedding_space`, empty ones included. That is the
+    /// question a caller asking "is what I can see all there is" is asking; an
+    /// empty space is one this caller cannot see either.
+    pub fn space_count(&self) -> Result<i64, Error> {
+        Ok(self
+            .conn()
+            .query_row("SELECT count(*) FROM embedding_space", [], |r| r.get(0))?)
+    }
+
     /// Whether moving the index off this space would throw anything away.
     ///
     /// Reads **both** places a chunk can be recorded as embedded, because
