@@ -27,6 +27,8 @@ import {
   LEAVES_NOTHING,
   LEAVES_EVERYTHING,
   KEY_STATE_TEXT,
+  asStatusSentence,
+  keyStoreNote,
   KEY_STORE_FAILURE_TEXT,
   KEY_STORE_SHOWS_REASON,
   INDEX_SETTINGS_TEXT,
@@ -1492,4 +1494,72 @@ test("the key field is sized from the text it shows, not from a number", () => {
     /el\("key"\)\.size = placeholder\.length/,
     "the field's width is not derived from the placeholder it is showing",
   );
+});
+
+// The status line is written from nine places and its text comes from two
+// languages: sentences written in render.js, and `Error` renderings from Rust,
+// which by that language's convention begin lower case and carry no full stop.
+// Under a state line that is a proper sentence, the mixture read as unfinished —
+// found by the owner in the acceptance run of 2026-08-11, and by nothing else.
+//
+// Both directions, because a shaper that only ever added a stop would pass a
+// test that only checked one: it must also leave a text that is already a
+// sentence alone, or "…was created." becomes "…was created..".
+test("a status line is shaped into a sentence, and an already-shaped one is left alone", () => {
+  assert.equal(asStatusSentence("the key was accepted"), "The key was accepted.");
+  assert.equal(
+    asStatusSentence("The embedding model was recorded: baai/bge-m3."),
+    "The embedding model was recorded: baai/bge-m3.",
+  );
+  assert.equal(asStatusSentence(""), "", "an empty status must stay empty, not become a full stop");
+  assert.equal(asStatusSentence(null), "", "nothing to say is not a sentence either");
+});
+
+// And the seam is only a seam if everything goes through it. Nine writes today;
+// the floor is a floor rather than a total, so a tenth is not a failure and a
+// regexp that has rotted to nothing is.
+test("every write to the status line goes through the seam", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const main = readFileSync(join(here, "main.js"), "utf8");
+  const writes = [...main.matchAll(/el\("(?:key|model)-status"\)\.textContent\s*=\s*([^\n]*)/g)].map(
+    (m) => m[1],
+  );
+  assert.ok(
+    writes.length >= 9,
+    `only ${writes.length} status writes found — the regexp has rotted, or the handlers moved`,
+  );
+  for (const written of writes) {
+    assert.match(
+      written,
+      /^asStatusSentence\(/,
+      `a status line is written without the seam, so its shape depends on which producer ran: ${written}`,
+    );
+  }
+});
+
+// The note exists because an update makes macOS ask for the login keychain
+// password on behalf of an application it cannot vouch for (measured
+// 2026-08-11), and somebody meeting that with no warning should refuse it.
+//
+// Three assertions rather than one, and the last two are what stop this being a
+// sentence that appears everywhere: it is for one platform, and for the one key
+// state where there is something to be asked about later.
+test("the note about a future request is drawn on the platform that will make it", () => {
+  const present = { kind: "present" };
+  assert.match(keyStoreNote("mac", present), /Always Allow/);
+  for (const platform of ["windows", "linux"]) {
+    assert.equal(
+      keyStoreNote(platform, present),
+      "",
+      `${platform} was told about a mechanism it does not have`,
+    );
+  }
+  for (const key of [{ kind: "absent" }, { kind: "unreadable", cause: "locked", reason: "" }]) {
+    assert.equal(
+      keyStoreNote("mac", key),
+      "",
+      `"${key.kind}" was warned about a key that is not stored`,
+    );
+  }
+  assert.equal(keyStoreNote("plan9", present), "", "a platform this build does not know said something");
 });

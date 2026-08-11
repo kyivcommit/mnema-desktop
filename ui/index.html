@@ -61,6 +61,13 @@
         </form>
         <p id="key-state" class="muted"></p>
         <p id="key-status" class="muted"></p>
+        <!--
+          Empty on two of the three platforms and with no key stored, and filled
+          from `keyStoreNote`. It says what macOS will ask for after an update,
+          before it asks — the request comes from an application the system
+          cannot vouch for, and somebody meeting it cold should refuse it.
+        -->
+        <p id="key-note" class="muted"></p>
         <label>Embeddings <select id="embedding-model"></select></label>
         <p id="embedding-model-unreadable" class="muted"></p>
         <p id="embedding-model-missing" class="muted"></p>

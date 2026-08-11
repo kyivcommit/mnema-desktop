@@ -539,6 +539,36 @@ export const KEY_FIELD_PLACEHOLDER = {
   notAsked: () => "OpenRouter key",
 };
 
+// What macOS will do later, said before it happens rather than after.
+//
+// Measured 2026-08-11: that store authorises every read of a credential against
+// the code identity that wrote it, and an ad-hoc signature is a hash of the
+// binary. So **an update makes this application a stranger to its own key**, and
+// the system asks for the login keychain password — from an application it
+// cannot vouch for, with no warning and no explanation. Somebody meeting that
+// cold should reasonably refuse it.
+//
+// The other two platforms are a different mechanism and this would be noise
+// there: Secret Service unlocks per session and the Windows Credential Manager
+// per logon, neither per binary. Hence the platform on the wire — see
+// `ModelSettings::platform`, and the note there on why the window is not allowed
+// to work it out from `navigator`.
+//
+// Only with a key stored: with none there is nothing to be asked about yet, and
+// with a store that would not answer `keyStateSentence` is already saying the
+// thing that matters.
+const KEY_STORE_NOTE = {
+  mac: () =>
+    "macOS ties this key to the copy of Mnema that saved it, so after an update it will ask " +
+    "once for your login keychain password before handing the key back. That request is this " +
+    "application asking for its own key; Always Allow answers it until the next update.",
+  windows: () => "",
+  linux: () => "",
+};
+
+export const keyStoreNote = (platform, key) =>
+  key?.kind === "present" ? (KEY_STORE_NOTE[platform] ?? (() => ""))() : "";
+
 export const KEY_SUBMIT_TEXT = {
   present: () => "Replace the key",
   absent: () => "Check and save",
@@ -572,6 +602,25 @@ export const keySubmitText = (key) => (KEY_SUBMIT_TEXT[key?.kind] ?? KEY_SUBMIT_
 // and was rendered here as a verdict on a key nobody had typed. The leading
 // clause states only what is true of every row, and the `Display` string that
 // follows carries the actual fact.
+// The status line is written from nine places, and its text arrives from two
+// languages with opposite conventions: sentences written here, and `Error`
+// renderings from Rust, which by that language's convention begin lower case and
+// carry no full stop — `keyNotSavedSentence` below interpolates one whole. Drawn
+// under a state line that *is* a proper sentence, the result read as unfinished,
+// which the owner met in the acceptance run of 2026-08-11.
+//
+// **Shaped once, at the seam, rather than in each of the nine producers.** Two
+// of them already wrote proper sentences and seven did not, so fixing the words
+// would mean editing exactly the ones whose lower case is correct where it is
+// written — and leaving the next producer free to pick either. Idempotent on
+// purpose: a text that is already a sentence comes back unchanged.
+export const asStatusSentence = (text) => {
+  const trimmed = `${text ?? ""}`.trim();
+  if (trimmed === "") return "";
+  const opened = trimmed[0].toUpperCase() + trimmed.slice(1);
+  return /[.!?]$/.test(opened) ? opened : `${opened}.`;
+};
+
 export const keyNotSavedSentence = (error) => `the key was not saved: ${error}`;
 
 // What pressing "Remove the key" actually did, per `KeyRemoval`.

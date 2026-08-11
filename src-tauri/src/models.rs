@@ -325,6 +325,57 @@ pub struct ModelSettings {
     /// this answer cost when it was tried.
     pub key: KeyState,
     pub index: IndexSettings,
+    /// Which credential store this build talks to, so the window can say the one
+    /// thing that is true on exactly one of them. See [`Platform`].
+    pub platform: Platform,
+}
+
+/// The operating system this build was compiled for, as a fact rather than a
+/// guess.
+///
+/// It rides on [`ModelSettings`] because that is the payload the settings screen
+/// is drawn from, and the sentence that needs it is drawn there — a constant on
+/// every read is cheaper than a second command whose only answer never changes.
+///
+/// **The window must not work this out for itself.** `navigator.userAgent` is
+/// available to it and would be a plausible proxy; this project has measured
+/// twice, on two platforms, that a plausible proxy is wrong in the direction a
+/// test does not catch. The build knows, so the build says.
+///
+/// What it is for: on macOS the credential store authorises against the code
+/// identity that wrote the credential, and an ad-hoc signature is a hash of the
+/// binary, so **every update makes this application a stranger to its own key**
+/// and the system asks for the login keychain password once. Nothing of the sort
+/// happens on the other two — Secret Service unlocks per session and the Windows
+/// Credential Manager per logon, neither per binary — so a sentence explaining it
+/// belongs on one platform and would be noise on the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Platform {
+    Mac,
+    Windows,
+    Linux,
+}
+
+impl Platform {
+    /// Chosen at compile time, so it cannot disagree with the store that is
+    /// actually linked: `mnema_secrets::platform_store` selects its backend from
+    /// the same three `cfg`s, and "everything that is not macOS or Windows" is
+    /// the arm that crate uses too.
+    fn of_this_build() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::Mac
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Self::Windows
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Self::Linux
+        }
+    }
 }
 
 /// What the credential store said, as a third state rather than as a rejected
@@ -649,6 +700,7 @@ pub fn model_settings(state: State<'_, AppState>) -> ModelSettings {
     ModelSettings {
         key: key_state(&state),
         index: index_settings(&state),
+        platform: Platform::of_this_build(),
     }
 }
 
@@ -707,8 +759,8 @@ mod tests {
     /// The canonical camelCase spelling of every discriminant this module sends
     /// across the IPC, pinned the way `job.rs` pins `EndReason`'s.
     ///
-    /// `KeyState`, `KeyStoreFailure`, `IndexSettings`, `UnreadableCause` and
-    /// `KeyRemoval` reach the window from here — named rather than counted,
+    /// `KeyState`, `KeyStoreFailure`, `IndexSettings`, `UnreadableCause`,
+    /// `KeyRemoval` and `Platform` reach the window from here — named rather than counted,
     /// because the list has grown since this test was written and a total is a
     /// definition that goes stale. Not one of them was fastened to anything
     /// when it was: `grep -rn 'readFailed' src-tauri ui` was empty, and a fourth
@@ -790,6 +842,44 @@ mod tests {
                 "{f:?} serialised differently than this test's own spelling of it"
             );
         }
+
+        // All three are listed although this build can only ever send one of
+        // them: the window's table is indexed by every spelling, and a rename
+        // that only breaks on the platform nobody is compiling today is the
+        // shape this cycle already met once, in a resource named for one
+        // operating system and required by three.
+        let platform = |p: Platform| -> &'static str {
+            match p {
+                Platform::Mac => "mac",
+                Platform::Windows => "windows",
+                Platform::Linux => "linux",
+            }
+        };
+        for p in [Platform::Mac, Platform::Windows, Platform::Linux] {
+            assert_eq!(
+                bare(serde_json::to_value(p).unwrap()),
+                platform(p),
+                "{p:?} serialised differently than this test's own spelling of it"
+            );
+        }
+
+        // And that the field arrives at all, which is a different claim from how
+        // its values are spelled. The window indexes a table by it; an absent
+        // field is `undefined` there, falls through that table's fallback, and
+        // draws nothing — silently, on the one platform the sentence exists for.
+        let settings = ModelSettings {
+            key: KeyState::Absent,
+            index: IndexSettings::Unreadable {
+                cause: UnreadableCause::NotOpen,
+                reason: String::new(),
+            },
+            platform: Platform::of_this_build(),
+        };
+        let sent = serde_json::to_value(&settings).unwrap();
+        assert!(
+            ["mac", "windows", "linux"].contains(&sent["platform"].as_str().unwrap_or_default()),
+            "`platform` did not reach the window as one of the three spellings: {sent}"
+        );
 
         let index = |settings: &IndexSettings| -> &'static str {
             match settings {

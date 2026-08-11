@@ -16,6 +16,8 @@ import {
   listFailed,
   selectId,
   disclosureSentence,
+  asStatusSentence,
+  keyStoreNote,
   keyStateSentence,
   keyNotSavedSentence,
   indexStateSentence,
@@ -440,6 +442,10 @@ const drawSettings = (settings) => {
   // person who cannot finish reading it is back where the message started.
   el("key").size = placeholder.length;
   el("key-submit").textContent = keySubmitText(settings.key);
+  // Empty on two of the three platforms and with no key stored, which is why it
+  // is written every time rather than only when there is something to say: a
+  // line that is set once and never cleared outlives the state it described.
+  el("key-note").textContent = keyStoreNote(settings.platform, settings.key);
   el("index-state").textContent = indexStateSentence(settings.index, indexOpening);
   el("embedding-progress").textContent = embeddingProgressText(settings.index);
   // An index that could not be read says nothing about which models are
@@ -471,33 +477,33 @@ el("key-form").addEventListener("submit", async (event) => {
   if (el("key").value === "") {
     const instead = emptyFieldSentence(keyState);
     if (instead !== null) {
-      el("key-status").textContent = instead;
+      el("key-status").textContent = asStatusSentence(instead);
       return;
     }
   }
   try {
     const status = await invoke("set_key", { key: el("key").value });
     el("key").value = "";
-    el("key-status").textContent = keyAcceptedSentence(status);
+    el("key-status").textContent = asStatusSentence(keyAcceptedSentence(status));
   } catch (error) {
     // Not "the key was not accepted": every reachable failure of `set_key`
     // except `Provider` decided nothing about the key. Said without a total,
     // because the total was wrong for one commit — this comment counted three
     // while its two neighbours, the table on `keyNotSavedSentence` and the test
     // above it, were updated. `keyNotSavedSentence` has the enumeration.
-    el("key-status").textContent = keyNotSavedSentence(error);
+    el("key-status").textContent = asStatusSentence(keyNotSavedSentence(error));
   }
   await refreshSettings();
 });
 
 el("forget").addEventListener("click", async () => {
   try {
-    el("key-status").textContent = keyRemovedSentence(await invoke("forget_key"));
+    el("key-status").textContent = asStatusSentence(keyRemovedSentence(await invoke("forget_key")));
   } catch (error) {
     // The key is still there. Saying "removed" because the button was pressed
     // would state as fact something the store refused to do — and the next
     // line of the window, redrawn from the store itself, would contradict it.
-    el("key-status").textContent = keyNotRemovedSentence(error);
+    el("key-status").textContent = asStatusSentence(keyNotRemovedSentence(error));
   }
   await refreshSettings();
 });
@@ -511,11 +517,11 @@ el(selectId("embedding")).addEventListener("change", async (event) => {
   const model = event.target.value;
   try {
     const adopted = await invoke("set_embedding_model", { model });
-    el("model-status").textContent = adoptedModelSentence(adopted, indexOpening);
+    el("model-status").textContent = asStatusSentence(adoptedModelSentence(adopted, indexOpening));
   } catch (error) {
     // The refusal already says how many vectors stand in the way; showing it
     // whole is better than a sentence of our own that says less.
-    el("model-status").textContent = embeddingModelNotRecordedSentence(error);
+    el("model-status").textContent = asStatusSentence(embeddingModelNotRecordedSentence(error));
   }
   await refreshSettings();
 });
@@ -528,9 +534,9 @@ for (const [role, command] of [
     const model = event.target.value;
     try {
       await invoke(command, { model });
-      el("model-status").textContent = roleRecordedSentence(role, model);
+      el("model-status").textContent = asStatusSentence(roleRecordedSentence(role, model));
     } catch (error) {
-      el("model-status").textContent = roleNotRecordedSentence(role, error);
+      el("model-status").textContent = asStatusSentence(roleNotRecordedSentence(role, error));
     }
     await refreshSettings();
   });
