@@ -31,36 +31,13 @@ pub fn temp_db() -> TempDb {
     TempDb { db, _dir: dir }
 }
 
-/// A document, a page, a block and one chunk — the shortest path to a
-/// `chunk_id` a vector may be attached to.
-///
-/// **It cannot be called from inside a `Db::transaction`.** `insert_chunk`
-/// opens one of its own, SQLite has no nested `BEGIN`, and `Db::transaction`'s
-/// own doc names it as the one exception. Build the chunk with
-/// `insert_chunk_in` there instead.
-///
-/// What that costs is worth naming, because it is not what it looks like.
-/// Three inserts run first — the document, the page and the block join the
-/// open transaction — and then the chunk panics with "cannot start a
-/// transaction within a transaction". The panic unwinds through
-/// `Db::transaction`, whose `Transaction` rolls back on drop, so those three
-/// rows go back out and the database is left holding nothing. Measured, both
-/// halves: looking for a half-written document afterwards finds an empty
-/// index. What is actually in front of you is a message naming a `BEGIN` you
-/// never wrote, because both of them are hidden — one in `Db::transaction`,
-/// one inside `insert_chunk`.
-///
-/// `dead_code` is allowed because this module is compiled into **every** test
-/// binary that declares `mod support;`, and not all of them call this
-/// particular function: `meta.rs` asks nothing about vectors, and
-/// `citation.rs` builds its own chunk with caller-supplied text instead of
-/// this one's fixed `"кошторис на ремонт"` — only `adopt.rs` calls it today.
-/// It is written here rather than inside the binary that will need it because
-/// the alternative is a second copy of it later, and two answers to "what is
-/// the shortest real chunk" are a standing invitation for one of them to
-/// drift.
 /// A 1024-wide embedding space — the width `unit_vector_1024` and
 /// `other_unit_vector_1024` are built for.
+///
+/// **It cannot be called from inside a `Db::transaction` either, though not
+/// for `one_chunk`'s reason below.** `create_space` (`space.rs:80`) opens its
+/// own IMMEDIATE transaction, and SQLite has no nested `BEGIN` — the same
+/// failure shape, but a different function holding the outer `BEGIN`.
 ///
 /// `#[allow(dead_code)]` for the same reason [`one_chunk`] carries it: not
 /// every binary that declares `mod support;` calls this one.
@@ -121,6 +98,34 @@ pub fn stored_vector(db: &Db, space_id: i64, chunk_id: i64) -> Vec<f32> {
         .collect()
 }
 
+/// A document, a page, a block and one chunk — the shortest path to a
+/// `chunk_id` a vector may be attached to.
+///
+/// **It cannot be called from inside a `Db::transaction`.** `insert_chunk`
+/// opens one of its own, SQLite has no nested `BEGIN`, and `Db::transaction`'s
+/// own doc names it as the one exception. Build the chunk with
+/// `insert_chunk_in` there instead.
+///
+/// What that costs is worth naming, because it is not what it looks like.
+/// Three inserts run first — the document, the page and the block join the
+/// open transaction — and then the chunk panics with "cannot start a
+/// transaction within a transaction". The panic unwinds through
+/// `Db::transaction`, whose `Transaction` rolls back on drop, so those three
+/// rows go back out and the database is left holding nothing. Measured, both
+/// halves: looking for a half-written document afterwards finds an empty
+/// index. What is actually in front of you is a message naming a `BEGIN` you
+/// never wrote, because both of them are hidden — one in `Db::transaction`,
+/// one inside `insert_chunk`.
+///
+/// `dead_code` is allowed because this module is compiled into **every** test
+/// binary that declares `mod support;`, and not all of them call this
+/// particular function: `meta.rs` asks nothing about vectors, and
+/// `citation.rs` builds its own chunk with caller-supplied text instead of
+/// this one's fixed `"кошторис на ремонт"` — only `adopt.rs` calls it today.
+/// It is written here rather than inside the binary that will need it because
+/// the alternative is a second copy of it later, and two answers to "what is
+/// the shortest real chunk" are a standing invitation for one of them to
+/// drift.
 #[allow(dead_code)]
 pub fn one_chunk(db: &Db) -> i64 {
     let doc = db

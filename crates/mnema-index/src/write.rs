@@ -584,18 +584,34 @@ impl Db {
     /// Every `&self` writer on `Db` goes through `self.conn().execute`, so it
     /// simply joins whatever transaction is open on that connection; calling
     /// them from inside `f` is how a whole document is written as one unit.
-    /// The exceptions are the methods that open a transaction of their own, and
-    /// the rule is the reliable form of that list rather than a count:
-    /// `grep -n 'Transaction::new_unchecked' crates/mnema-index/src/` names
-    /// every one of them, while a number written into prose goes stale the next
-    /// time somebody adds one. This sentence said "the one exception" and named
-    /// [`Db::insert_chunk`] while there were already three, and Task 6 made it
-    /// four. Today: [`Db::insert_chunk`] (use [`Db::insert_chunk_in`] here),
-    /// [`Db::create_space`], [`Db::drop_space`], and
-    /// [`Db::adopt_embedding_model`], which opens one through
-    /// [`Db::create_space`] and another through this method itself. Naming
-    /// those two rather than counting to them: the sentence you are reading
-    /// replaced a wrong count, and its first draft ended in a wrong ordinal.
+    /// The exceptions are the methods that open a transaction of their own —
+    /// either directly, with `Transaction::new_unchecked`, or by calling this
+    /// method itself — and none of them may be called from inside `f`: SQLite
+    /// has no nested `BEGIN`.
+    ///
+    /// The rule is a reliable form rather than a count written into prose, and
+    /// it takes two greps, not one. This sentence once named
+    /// [`Db::insert_chunk`] as "the one exception" while there were already
+    /// three, and Task 6 made it four — and the single grep that replaced that
+    /// count was itself only ever half right, because it named direct
+    /// `Transaction::new_unchecked` callers and stayed blind to every method
+    /// that opens its transaction by calling `self.transaction(...)` instead,
+    /// [`Db::insert_chunk`] among them. So: `grep -rn
+    /// 'Transaction::new_unchecked' crates/mnema-index/src/` for the direct
+    /// openers, and `grep -rn 'self\.transaction\(' crates/mnema-index/src/`
+    /// for everyone who goes through this one — each grep's hit inside this
+    /// doc comment and inside this function's own body is not itself a caller
+    /// and does not belong on the list either greps names.
+    ///
+    /// Today: [`Db::insert_chunk`] (use [`Db::insert_chunk_in`] here) and
+    /// [`Db::clear_document_content`] (use [`Db::clear_document_content_in`]
+    /// here) go through `self.transaction`, and so do [`Db::upsert_vector`]
+    /// and [`Db::delete_vector`], added in D95a to make a chunk's embedding
+    /// replaceable and removable. [`Db::create_space`], [`Db::drop_space`] and
+    /// [`Db::delete_watched_root`] open one directly.
+    /// [`Db::adopt_embedding_model`] does both at once: one transaction
+    /// through [`Db::create_space`], another through `self.transaction` for
+    /// the pointer write itself.
     pub fn transaction<T>(
         &self,
         f: impl FnOnce(&Transaction<'_>) -> Result<T, Error>,

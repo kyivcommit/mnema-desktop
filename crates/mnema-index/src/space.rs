@@ -211,7 +211,8 @@ impl Db {
     }
 
     /// Stores one embedding, replacing whatever this chunk already had in
-    /// this space.
+    /// this space — and clearing any stale `chunk_embedding_state` row for
+    /// it, in the same transaction.
     ///
     /// The check `insert_vector` documents applies here for the same reason
     /// and is not weakened: a degenerate vector is degenerate whether it is
@@ -219,17 +220,36 @@ impl Db {
     /// collision rule — a retry that already wrote half a batch must be able
     /// to finish without first asking which half landed.
     ///
-    /// vec0 has no `ON CONFLICT` to lean on: `sqlite-vec.c` 0.1.9 — the
-    /// version `create_space` records into `meta`, `sqlite-vec-0.1.9/
-    /// sqlite-vec.c` in the crate's own vendored source — never calls
-    /// `sqlite3_vtab_on_conflict()` from its `xUpdate` (`vec0Update`,
-    /// `vec0Update_Insert`); the insert path always goes through
-    /// `vec0Update_InsertRowidStep`, which inserts the id into the `_rowids`
-    /// shadow table and fails on a duplicate primary key rather than
-    /// replacing the row. So `INSERT ... ON CONFLICT(chunk_id) DO UPDATE`
-    /// would reach that same insert path and fail the same way. Delete then
-    /// insert instead, in one transaction so an interruption cannot leave
-    /// the chunk with no vector at all.
+    /// Delete then insert, rather than one statement that does both. Not for
+    /// lack of an `ON CONFLICT`: measured directly (`INSERT INTO vec_emb_1 ...
+    /// ON CONFLICT(chunk_id) DO UPDATE ...` against a live space), SQLite
+    /// itself answers `"UPSERT not implemented for virtual table"` — this is
+    /// SQLite refusing the statement before it ever reaches `vec0`'s own
+    /// `xUpdate`, not a gap `vec0` could close. `vec0` does implement `UPDATE`
+    /// on its own — `UPDATE vec_emb_1 SET embedding = ? WHERE chunk_id = ?`
+    /// measured `Ok(1)` with the new bytes on read-back — so a single-`UPDATE`
+    /// form is available and delete+insert is a choice, not a workaround: it
+    /// is what makes "no row for this chunk yet" and "replacing this chunk's
+    /// row" the same code path, rather than an `UPDATE` that silently touches
+    /// zero rows the one time there was nothing to replace. `INSERT OR
+    /// REPLACE` was checked too, and fails exactly like a plain `INSERT` —
+    /// `"UNIQUE constraint failed on ... primary key"` — because `vec0`'s
+    /// `xUpdate` (`vec0Update` → `vec0Update_Insert` →
+    /// `vec0Update_InsertRowidStep`, `sqlite-vec.c` 0.1.9, the version
+    /// `create_space` records into `meta`) never calls
+    /// `sqlite3_vtab_on_conflict()`, so the `OR REPLACE` conflict-resolution
+    /// mode it would need to read is never looked at.
+    ///
+    /// The `chunk_embedding_state` row is cleared for the same reason as
+    /// [`Db::delete_vector`]'s own doc gives, in the direction that matters
+    /// here: a row from before this write — `state = 1` from an interrupted
+    /// earlier run, or `state != 1` recording a failure this write has now
+    /// superseded — no longer describes the chunk once this call succeeds,
+    /// and a caller reading that table (Task 6's queue) must not find a
+    /// chunk marked failed the moment after it was embedded. Nothing in this
+    /// crate writes that table yet — `embedded_chunk_count`'s own doc names
+    /// the grep — so today the `DELETE` below removes nothing; it is here so
+    /// the first writer does not have to remember to add it.
     ///
     /// `insert_vector` is deliberately left alone. Its "exactly once" is a
     /// statement some caller may want enforced, and quietly turning it into
@@ -249,21 +269,40 @@ impl Db {
                 ),
                 params![chunk_id, as_blob(v)],
             )?;
+            tx.execute(
+                "DELETE FROM chunk_embedding_state WHERE space_id = ?1 AND chunk_id = ?2",
+                params![space_id, chunk_id],
+            )?;
             Ok(())
         })
     }
 
-    /// Removes one chunk's embedding from one space. Absence is not an
-    /// error: the caller retrying a partially failed batch cannot know which
-    /// rows already landed, and a delete that refused on "nothing to delete"
-    /// would turn every retry into a special case.
+    /// Removes one chunk's embedding from one space, and any
+    /// `chunk_embedding_state` row for it, in one transaction. Absence of
+    /// either is not an error: the caller retrying a partially failed batch
+    /// cannot know which rows already landed, and a delete that refused on
+    /// "nothing to delete" would turn every retry into a special case.
+    ///
+    /// The bookkeeping row has to go too, and atomically with the vector,
+    /// because [`Db::embedded_chunk_count`]'s own doc explains why leaving it
+    /// is not merely untidy: its `UNION` counts a `chunk_embedding_state` row
+    /// with `state = 1` as an embedded chunk on its own, the same way
+    /// `tests/adopt.rs`'s `bookkeeping_without_a_vector_also_makes_a_space_not_empty`
+    /// demonstrates. A vector deleted without its bookkeeping would leave a
+    /// chunk counted as embedded with nothing to show for it.
     pub fn delete_vector(&self, space_id: i64, chunk_id: i64) -> Result<(), Error> {
         let space = self.space(space_id)?;
-        self.conn().execute(
-            &format!("DELETE FROM {} WHERE chunk_id = ?1", space.table),
-            params![chunk_id],
-        )?;
-        Ok(())
+        self.transaction(|tx| {
+            tx.execute(
+                &format!("DELETE FROM {} WHERE chunk_id = ?1", space.table),
+                params![chunk_id],
+            )?;
+            tx.execute(
+                "DELETE FROM chunk_embedding_state WHERE space_id = ?1 AND chunk_id = ?2",
+                params![space_id, chunk_id],
+            )?;
+            Ok(())
+        })
     }
 
     /// Nearest neighbours, optionally restricted to a set of chunk ids — which is

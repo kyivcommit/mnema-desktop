@@ -48,3 +48,26 @@ case_ "space: upsert_vector without the delete stops being a replace (D95a)" \
                 &format!(
                     "INSERT INTO' \
   mnema-index 'upserting_a_vector_replaces_the_previous_one' --test space
+
+# Review round 1 (D95a): `embedded_chunk_count`'s own UNION counts a
+# `chunk_embedding_state` row on its own, so a vector deleted or replaced
+# without also clearing that row leaves a chunk misreported — counted as
+# embedded after `delete_vector`, or still marked failed after a successful
+# `upsert_vector`. Two cases, one per method, since each clears its own row.
+case_ "space: upsert_vector without clearing chunk_embedding_state leaves a stale row (D95a, review 1)" \
+  crates/mnema-index/src/space.rs \
+  's{                params!\[chunk_id, as_blob\(v\)\],\n            \)\?;\n            tx\.execute\(\n                "DELETE FROM chunk_embedding_state WHERE space_id = \?1 AND chunk_id = \?2",\n                params!\[space_id, chunk_id\],\n            \)\?;\n}{                params![chunk_id, as_blob(v)],\n            )?;\n}' \
+  'params![chunk_id, as_blob(v)],
+            )?;
+            Ok(())' \
+  mnema-index 'upserting_a_vector_clears_a_stale_bookkeeping_row' --test space
+
+case_ "space: delete_vector without clearing chunk_embedding_state leaves a stale row (D95a, review 1)" \
+  crates/mnema-index/src/space.rs \
+  's{                &format!\("DELETE FROM \{\} WHERE chunk_id = \?1", space\.table\),\n                params!\[chunk_id\],\n            \)\?;\n            tx\.execute\(\n                "DELETE FROM chunk_embedding_state WHERE space_id = \?1 AND chunk_id = \?2",\n                params!\[space_id, chunk_id\],\n            \)\?;\n}{                &format!("DELETE FROM {} WHERE chunk_id = ?1", space.table),\n                params![chunk_id],\n            )?;\n}' \
+  'params![chunk_id],
+            )?;
+            Ok(())
+        })
+    }' \
+  mnema-index 'deleting_a_vector_also_clears_its_bookkeeping_row' --test space

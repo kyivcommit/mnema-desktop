@@ -762,3 +762,73 @@ fn deleting_a_vector_is_idempotent() {
 
     assert_eq!(db.embedded_chunk_count(space).expect("count"), 0);
 }
+
+/// `embedded_chunk_count`'s own `UNION` counts a `chunk_embedding_state` row
+/// with `state = 1` as an embedded chunk on its own — `tests/adopt.rs`'s
+/// `bookkeeping_without_a_vector_also_makes_a_space_not_empty` is exactly that
+/// case. `delete_vector` used to touch only the vector table, so a
+/// bookkeeping row surviving from an earlier run — Task 6's queue is what will
+/// start writing them — would keep a chunk counted as embedded after its
+/// vector was gone. Written by hand, the same way `tests/adopt.rs` does:
+/// nothing in this crate writes that table yet.
+#[test]
+fn deleting_a_vector_also_clears_its_bookkeeping_row() {
+    let db = support::temp_db();
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .expect("insert");
+    db.conn()
+        .execute(
+            "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state)
+             VALUES (?1, ?2, 'hash', 1)",
+            rusqlite::params![space, chunk],
+        )
+        .expect("bookkeeping row");
+
+    db.delete_vector(space, chunk).expect("delete");
+
+    assert_eq!(
+        db.embedded_chunk_count(space).expect("count"),
+        0,
+        "a leftover chunk_embedding_state row kept the chunk counted as embedded"
+    );
+}
+
+/// The other direction of the same fix: a stale row — success or failure —
+/// no longer describes a chunk once `upsert_vector` gives it a fresh
+/// embedding. Read directly against `chunk_embedding_state` rather than
+/// through `embedded_chunk_count`: a `state = 1` row is already folded into
+/// that count by the vector's own presence in the `UNION`, so this
+/// particular leftover has no symptom through the public count yet — only
+/// Task 6's queue will read the table directly enough for a stale row to be
+/// wrong out loud.
+#[test]
+fn upserting_a_vector_clears_a_stale_bookkeeping_row() {
+    let db = support::temp_db();
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+    db.conn()
+        .execute(
+            "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state)
+             VALUES (?1, ?2, 'hash', 2)",
+            rusqlite::params![space, chunk],
+        )
+        .expect("stale failure row");
+
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .expect("upsert");
+
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM chunk_embedding_state WHERE space_id = ?1 AND chunk_id = ?2",
+            rusqlite::params![space, chunk],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(
+        rows, 0,
+        "a stale bookkeeping row survived a successful upsert"
+    );
+}
