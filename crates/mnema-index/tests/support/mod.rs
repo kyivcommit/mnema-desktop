@@ -51,11 +51,14 @@ pub fn temp_db() -> TempDb {
 /// one inside `insert_chunk`.
 ///
 /// `dead_code` is allowed because this module is compiled into **every** test
-/// binary that declares `mod support;`, and the only one today — `meta.rs` —
-/// asks nothing about vectors. It is written here rather than inside the binary
-/// that will need it because the alternative is a second copy of it later, and
-/// two answers to "what is the shortest real chunk" are a standing invitation
-/// for one of them to drift.
+/// binary that declares `mod support;`, and not all of them call this
+/// particular function: `meta.rs` asks nothing about vectors, and
+/// `citation.rs` builds its own chunk with caller-supplied text instead of
+/// this one's fixed `"кошторис на ремонт"` — only `adopt.rs` calls it today.
+/// It is written here rather than inside the binary that will need it because
+/// the alternative is a second copy of it later, and two answers to "what is
+/// the shortest real chunk" are a standing invitation for one of them to
+/// drift.
 #[allow(dead_code)]
 pub fn one_chunk(db: &Db) -> i64 {
     let doc = db

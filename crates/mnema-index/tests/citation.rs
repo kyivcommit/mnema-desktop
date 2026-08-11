@@ -1308,7 +1308,7 @@ fn a_reused_chunk_id_gets_no_inherited_vector() {
     // fix below exists: it would answer 0 before the clear too, and the
     // assertion at the end would be satisfied by a count that was never
     // anything else. This is the same "asks nothing" failure the first test's
-    // own assertion below is written to avoid.
+    // own assertion above is written to avoid.
     assert_eq!(db.embedded_chunk_count(space).expect("count"), 1);
 
     db.clear_document_content(&doc).expect("clear");

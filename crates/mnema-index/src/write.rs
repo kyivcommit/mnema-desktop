@@ -532,13 +532,19 @@ impl Db {
     /// have no vector yet, asked fresh" — rather than a list kept in its own
     /// table. A computed pass notices a cleared document the same way it
     /// notices a brand new one, with nothing here having to tell it so. No
-    /// such pass exists in this crate yet; it is later work in this cycle. If
-    /// it is ever built as something *stored* instead — a queue populated by
-    /// whoever writes chunks — this method takes on the obligation to enqueue
-    /// what it just cleared, or a rebuilt document goes from D88's defect
-    /// (search answers with stale text) to a quieter one (search answers with
-    /// nothing, forever, because nothing was ever asked to re-embed it) — and
-    /// nothing in `tests/citation.rs` would catch either shape.
+    /// such pass exists in this crate yet; it is later work in this cycle.
+    ///
+    /// The obligation this method would then owe is not a queue forgetting a
+    /// rebuilt document — a rebuild writes chunks again, same as a first
+    /// build, so a queue fed at write time picks it back up for free. It is a
+    /// *record that survives the clear* claiming the document is already
+    /// embedded, the same shape `status` had before D61: this method
+    /// deliberately leaves the `document` row itself in place (above), and if
+    /// "embedded" ever became a mark on that row or elsewhere instead of a
+    /// question answered fresh, it would still say so with the vectors gone —
+    /// a rebuilt document that looks embedded and answers nothing, and no test
+    /// in `tests/citation.rs` would catch it. This method would then owe that
+    /// mark the same reset the second statement above already gives `status`.
     ///
     /// [`Db::delete_document`] has never reached them either, so this is not a
     /// regression — it is written down here because this is the method a
