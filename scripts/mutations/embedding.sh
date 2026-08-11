@@ -92,9 +92,8 @@ case_ "models: a model change nobody confirmed must not retire a space (D96g)" \
 # names the refused one.
 case_ "models: a confirmed change that retires nothing cannot happen at all (D96g)" \
   src-tauri/src/models.rs \
-  's{                db\.drop_space\(space_id\)\?;\n}{}' \
-  '                && !retired.iter().any(|r| r.space_id == space_id) =>
-            {
+  's{                if let Err\(e\) = db\.drop_space\(space_id\) \{\n                    return Err\(failure_after_retiring\(e, retired\)\);\n                \}\n}{}' \
+  '                // nothing had gone.
                 retired.push(RetiredSpace {' \
   mnema-desktop 'a_confirmed_model_change_retires_the_old_space_and_its_tables' --test model_commands
 
