@@ -1281,8 +1281,8 @@ fn a_space_with_a_failed_chunk_behind_a_document_that_left_indexed_stays_buildin
 /// `ready`, then a second document's chunks arrive behind a status that is
 /// not yet `indexed` (I1's window, reached the ordinary way an archive
 /// grows): the queue never sees them, so `total` stays `0` and nothing asks
-/// for a retraction — and the queue being empty on the very next check means
-/// `space_is_complete` is never asked either. The space stays `ready` over
+/// for a retraction — and the exit write, reached once the queue is empty,
+/// can only ever set `ready`, never retract it. The space stays `ready` over
 /// chunks with no vector, and no later run can ever clear it, because no
 /// later run's queue will see them either.
 #[test]

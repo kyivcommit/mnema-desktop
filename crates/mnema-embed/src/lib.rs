@@ -231,8 +231,8 @@ pub fn run(
     // is the queue's own `d.status = 'indexed'`-scoped question, and a chunk
     // behind a document not yet indexed is invisible to it — the same window
     // I1 closed on the write side. A space already `ready` when such a chunk
-    // arrives would see `total == 0` and never ask for a retraction, and the
-    // queue reading empty next would never ask `space_is_complete` either: the
+    // arrives would see `total == 0` and never ask for a retraction — and the
+    // exit write below can only ever set `ready`, never retract it, so the
     // claim would stand over a chunk with no vector, unretractable by any
     // later run, because no later run's queue sees it either. Asking the wide
     // question here is what closes that: one predicate governs both writes,
