@@ -2658,6 +2658,7 @@ dependencies = [
  "anyhow",
  "mnema-chunk",
  "mnema-core",
+ "mnema-embed",
  "mnema-index",
  "mnema-ingest",
  "mnema-mock-provider",

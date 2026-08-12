@@ -230,12 +230,15 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
 
     // `start_walk_job` joins this list rather than the blocking one below:
     // unlike `start_probe_job`, it reads the root's path through
-    // `with_index` before it ever spawns a thread. The body below is
-    // `{"query": ""}` for every command in this loop, which is not
-    // `start_walk_job`'s shape (`rootId`, `onProgress`) — the point here is
-    // only which thread answers, and a rejection for missing arguments
-    // answers from the same place a success would.
-    for cmd in ["open_index", "search", "start_walk_job"] {
+    // `with_index` before it ever spawns a thread. `start_embed_job` joins it
+    // for a sharper version of the same reason — it reads the *credential
+    // store* before it spawns anything, and on macOS that store can put an
+    // authorisation dialog on screen and wait for a person to answer it. The
+    // body below is `{"query": ""}` for every command in this loop, which is
+    // neither job's shape — the point here is only which thread answers, and a
+    // rejection for missing arguments answers from the same place a success
+    // would.
+    for cmd in ["open_index", "search", "start_walk_job", "start_embed_job"] {
         assert_ne!(
             responding_thread(&webview, cmd),
             here,
@@ -796,6 +799,56 @@ fn the_walk_job_is_reachable_through_the_ipc() {
     assert!(
         !app.state::<AppState>().job_is_running(),
         "the walk job never released the slot"
+    );
+}
+
+/// The same narrow question for the embedding job: is it in `invoke_handler!`
+/// at all, and does its one argument arrive under the name JavaScript sends it
+/// by.
+///
+/// It is asked here rather than in `tests/model_commands.rs`, where the job's
+/// behaviour is tested, because that file calls the command function directly
+/// and would stay green through exactly the mistake this catches — a `pub`
+/// command that compiles and is simply missing from a macro's list, which
+/// warns nowhere and fails only on a screen no gate runs.
+///
+/// **The call is expected to fail**, and that is what proves it was reached:
+/// this application's credential reference cannot reach a store at all
+/// (`NO_CREDENTIAL`), so the command refuses for a reason of its own rather
+/// than being refused by name before it runs. Nothing is started and no slot is
+/// taken, which is why this test needs no teardown of its own.
+#[test]
+fn the_embed_job_is_reachable_through_the_ipc() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let refusal = call(
+        &webview,
+        "start_embed_job",
+        json!({ "onProgress": "__CHANNEL__:11" }),
+    )
+    .expect_err("this application has no reachable credential store, so the job cannot start");
+    assert_ne!(
+        error_text(&refusal),
+        not_registered("start_embed_job"),
+        "the command the window presses Embed to reach is not in `invoke_handler!`"
+    );
+
+    let renamed = call(
+        &webview,
+        "start_embed_job",
+        json!({ "on_progress": "__CHANNEL__:12" }),
+    )
+    .expect_err("the snake_case argument name was accepted");
+    assert!(
+        error_text(&renamed).contains("onProgress"),
+        "the rejection should name the missing argument; it was {renamed}"
+    );
+
+    assert!(
+        !app.state::<AppState>().job_is_running(),
+        "a call that was refused before it started anything left the job slot taken"
     );
 }
 

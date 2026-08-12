@@ -12,8 +12,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_desktop::models::ExistingVectors;
 use mnema_desktop::state::AppState;
+use mnema_index::DocumentStatus;
 use mnema_mock_provider::{MockServer, Reply};
 use tauri::Manager as _;
 use tauri::test::{MockRuntime, mock_builder, mock_context, noop_assets};
@@ -103,6 +105,26 @@ impl Fixture {
         let mut replies = vec![Reply::ok(CREDITS)];
         let vectors = mnema_mock_provider::two_vectors(width);
         replies.extend((0..checks).map(|_| Reply::ok(&vectors)));
+        Self::new(replies)
+    }
+
+    /// A credit check, one embedding check at [`DEFAULT_DIM`], and then
+    /// whatever `run` says — the sequence a test that sets the key, adopts the
+    /// default model and *then* starts an embedding job makes.
+    ///
+    /// The replies for the run are the caller's because there is no one shape:
+    /// how many calls a pass makes depends on how many chunks are queued, how
+    /// wide the batch is, and whether a refusal sends it back one text at a
+    /// time. `MockServer` answers strictly in order and ignores the path, so a
+    /// test that miscounts gets the wrong body rather than a message saying so
+    /// — and one reply short gets the mock's `599` sentinel, which fails
+    /// loudly.
+    pub fn with_provider_answering_a_run(run: Vec<Reply>) -> Self {
+        let mut replies = vec![
+            Reply::ok(CREDITS),
+            Reply::ok(&mnema_mock_provider::two_vectors(DEFAULT_DIM as usize)),
+        ];
+        replies.extend(run);
         Self::new(replies)
     }
 
@@ -303,6 +325,66 @@ impl Fixture {
         space
     }
 
+    /// One `indexed` document holding `count` chunks, each with its own text —
+    /// the state an embedding pass actually meets, as opposed to
+    /// [`Fixture::embed_chunks_in_the_active_space`], which writes vectors for
+    /// chunk ids no `chunk` row exists for.
+    ///
+    /// It goes through `Db`'s own writers rather than raw SQL for the reason
+    /// `adopt_default_model` does: a fixture that writes rows its own way is a
+    /// fixture that can build a database the product cannot. `status` is
+    /// advanced to `Indexed` last, because the embedding queue joins on it —
+    /// `Db::chunks_needing_embedding` ignores a document that is still
+    /// `pending`, which is the ordinary state of one being rebuilt.
+    ///
+    /// Returns the chunk ids, so a test can name a chunk rather than assume
+    /// what the ids came out as.
+    pub fn write_indexed_chunks(&self, count: usize) -> Vec<i64> {
+        self.state()
+            .with_index(|db| {
+                let doc =
+                    db.insert_document(&"a".repeat(64), "text/plain", 64, SourceKind::Document)?;
+                let mut ids = Vec::new();
+                for ord in 0..count {
+                    // Distinct text per chunk: `upsert_vector_for_text` binds a
+                    // vector to the text it was made from, and chunks that all
+                    // said the same thing would hide a pass that bound one
+                    // chunk's answer to another's row.
+                    let text = format!("chunk number {ord}");
+                    let page = db.insert_page(&doc, ord as i64 + 1, "native:txt", None)?;
+                    let block = db.insert_block(
+                        page,
+                        &Block {
+                            block_type: BlockType::Paragraph,
+                            reading_order: 0,
+                            language: Some("uk".into()),
+                            text: text.clone(),
+                            line_start: None,
+                            line_end: None,
+                        },
+                    )?;
+                    ids.push(db.insert_chunk(
+                        &doc,
+                        ord as i64,
+                        &text,
+                        &Locator {
+                            spans: vec![Segment {
+                                block_id: block,
+                                start: 0,
+                                end: text.chars().count() as u32,
+                                block_start: 0,
+                            }],
+                            coordinate: Coordinate::None,
+                        },
+                        SourceKind::Document,
+                    )?);
+                }
+                db.set_document_status(&doc, DocumentStatus::Indexed)?;
+                Ok(ids)
+            })
+            .expect("the chunks are written")
+    }
+
     /// Which space the index is working with, straight from `meta.active_space`.
     pub fn active_space(&self) -> Option<i64> {
         self.state()
@@ -413,6 +495,29 @@ impl Drop for Fixture {
             );
         }
     }
+}
+
+/// What the provider answers a batch of `count` texts with: `count` vectors
+/// [`DEFAULT_DIM`] wide, each naming its own position.
+///
+/// `mnema_mock_provider::two_vectors` answers exactly two, which is what a
+/// model *check* asks for; a run asks for as many as its batch holds. Every
+/// vector is a different basis vector, so a pass that bound one chunk's answer
+/// to another chunk's row leaves two rows this test can tell apart rather than
+/// two copies of one number.
+pub fn vectors_for(count: usize) -> String {
+    let width = DEFAULT_DIM as usize;
+    let rows: Vec<String> = (0..count)
+        .map(|i| {
+            let hot = i % width;
+            let components = (0..width)
+                .map(|c| if c == hot { "1.0" } else { "0.0" })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(r#"{{"embedding":[{components}],"index":{i}}}"#)
+        })
+        .collect();
+    format!(r#"{{"data":[{}]}}"#, rows.join(","))
 }
 
 /// One file on disk, with its contents.

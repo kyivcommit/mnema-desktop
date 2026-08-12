@@ -844,12 +844,38 @@ pub struct IndexRead {
     ///   chunk it embeds; `Db::chunk_count` sets out why, and
     ///   `a_vector_outlives_the_chunk_it_embeds` in the index crate's
     ///   `tests/adopt.rs` holds the storage half of it in the gate.
-    /// - Both are zero in this build, because nothing embeds yet (D29).
     /// - Zero with `active_space == null` is not "nothing is embedded", it is
     ///   "the question does not arise". Tell them apart by `active_space`, never
     ///   by the zero.
+    /// - `embedded_chunks + failed_chunks` is what the run has *settled*; the
+    ///   remainder against `total_chunks` is what is still waiting. Neither
+    ///   subtraction on its own means anything — see [`IndexRead::
+    ///   failed_chunks`].
     pub embedded_chunks: i64,
     pub total_chunks: i64,
+    /// How many chunks the provider refused, in the active space — **the third
+    /// number, and the reason the pass is allowed to be as unforgiving as it
+    /// is.**
+    ///
+    /// `Db::chunks_needing_embedding` lets a refused chunk leave the queue and
+    /// does not offer it again until its text changes. That chunk is still in
+    /// the database, the document still shows it, keyword search still finds
+    /// it — and vector search will not return it again. The only thing standing
+    /// between that and silence is this count being in front of a person:
+    /// `total_chunks − embedded_chunks` reads as "not got to them yet", and for
+    /// these chunks nobody ever will.
+    ///
+    /// **It is the space's number, not a run's.** It counts every chunk this
+    /// space has given up on and still holds a refusal for, whatever run wrote
+    /// it and whatever the document's status is now; `job::Ended::refused` is
+    /// the count for *one* run and starts again at zero on the next one. The
+    /// two are different numbers about different scopes, and `ui/render.js`
+    /// words them so that neither can be read as the other.
+    ///
+    /// `0` with `active_space == null` is "the question does not arise", the
+    /// same way it is for `embedded_chunks` — and for the same reason, told
+    /// apart by `active_space` and never by the zero.
+    pub failed_chunks: i64,
     /// How many vector spaces the index holds at all, empty ones included.
     ///
     /// **It is here so the window can tell what `embedded_chunks` is a count
@@ -919,6 +945,16 @@ fn index_settings(state: &AppState) -> IndexSettings {
                 None => 0,
             },
             total_chunks: db.chunk_count()?,
+            // Read inside the same closure as the two counts above, so all
+            // three come from one connection at one moment — see
+            // [`model_settings`]'s own doc comment. Three numbers assembled
+            // from three reads can disagree with each other about an index
+            // that changed between them, and this one is the number a person
+            // is asked to trust the no-retry rule on.
+            failed_chunks: match active_space {
+                Some(id) => db.failed_chunk_count(id)?,
+                None => 0,
+            },
             space_count: db.space_count()?,
             embedded_chunks_everywhere: db.embedded_chunks_everywhere()?,
             rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
@@ -1026,6 +1062,7 @@ mod tests {
             active_space: None,
             embedded_chunks: 0,
             total_chunks: 0,
+            failed_chunks: 0,
             space_count: 0,
             embedded_chunks_everywhere: 0,
             rerank_model: None,

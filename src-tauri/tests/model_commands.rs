@@ -7,13 +7,22 @@
 mod fixture;
 mod support;
 
-use fixture::Fixture;
+use std::sync::mpsc;
+use std::time::Duration;
+
+use fixture::{Fixture, vectors_for};
+use mnema_desktop::bridge;
+use mnema_desktop::embed_job::start_embed_job;
 use mnema_desktop::error::Error;
+use mnema_desktop::job::JobEvent;
 use mnema_desktop::models::{
     ExistingVectors, IndexRead, IndexSettings, KeyRemoval, KeyState, KeyStoreFailure,
     UnreadableCause, forget_key, key_present, model_settings, provider_models, set_chat_model,
     set_embedding_model, set_key, set_rerank_model,
 };
+use mnema_mock_provider::Reply;
+use serde_json::{Value, json};
+use tauri::ipc::Channel;
 
 /// The index half, or a failure naming what the index said instead.
 ///
@@ -1178,5 +1187,322 @@ fn trying_a_second_model_leaves_a_space_behind_and_it_never_goes_away() {
                 if embedded_chunks == EMBEDDED
         ),
         "this test's premise is that the index refuses here: {refusal:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The embedding job: the one command that takes the key out of the store, sends
+// it to the provider, and writes what comes back into the index.
+//
+// It is in this file rather than in `tests/commands.rs` because it needs all
+// three of the things this file's fixture builds and that one's does not: a
+// credential store nobody's real keychain is behind, a provider that answers,
+// and an index with a model adopted through the command the window uses.
+
+/// Collects what the webview would receive on a job channel.
+///
+/// The same helper `tests/commands.rs` has, copied rather than moved into
+/// `support/mod.rs` for the reason that file's own header gives: Cargo compiles
+/// a shared module into every binary that declares it, so an item only two of
+/// the six want is dead code in the other four, and `-D warnings` makes that an
+/// error rather than a note.
+fn job_channel() -> (Channel<JobEvent>, mpsc::Receiver<Value>) {
+    let (tx, rx) = mpsc::channel();
+    let channel = Channel::new(move |body| {
+        let json: Value = body.deserialize().expect("the job event was not JSON");
+        let _ = tx.send(json);
+        Ok(())
+    });
+    (channel, rx)
+}
+
+/// Every progress report the window was shown, and the ending — which always
+/// arrives, however the job ended, and is what this returns rather than a
+/// timeout.
+fn events_until_ended(events: &mpsc::Receiver<Value>) -> (Vec<Value>, Value) {
+    let mut progress = Vec::new();
+    loop {
+        match events.recv_timeout(Duration::from_secs(20)) {
+            Ok(event) if event["event"] == json!("progress") => {
+                progress.push(event["data"].clone())
+            }
+            Ok(event) if event["event"] == json!("ended") => {
+                return (progress, event["data"].clone());
+            }
+            Ok(other) => panic!("the job sent something that is neither: {other}"),
+            Err(_) => panic!("the job never told the window it ended"),
+        }
+    }
+}
+
+/// Waits for the job slot to come free, so a test that starts a second job is
+/// not racing the first one's own thread.
+fn wait_for_the_slot(fx: &Fixture) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while fx.state().job_is_running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !fx.state().job_is_running(),
+        "the job never released the slot"
+    );
+}
+
+/// One job at a time is the model, and `AppState::running` is one flag for the
+/// whole application — so embedding cannot run beside a folder walk, and this is
+/// the command being made to say so rather than being trusted to.
+///
+/// **Both directions.** A command that refused every call would satisfy the
+/// first half on its own, and this is a project that has measured that exact
+/// shape nine times in one branch. So the same call is made again once the slot
+/// is free, and it has to be accepted.
+#[test]
+fn embedding_refuses_to_start_while_another_job_runs() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+
+    // A real job in the slot, taken by the command that takes it — not
+    // `claim_job` called by hand, which would prove this refuses a flag rather
+    // than that it refuses a job.
+    let (probe, _probe_events) = job_channel();
+    bridge::start_probe_job(fx.state(), probe).expect("the probe job starts");
+
+    let (channel, _events) = job_channel();
+    let refusal = start_embed_job(fx.state(), channel)
+        .expect_err("embedding started while a job was already running");
+    assert!(
+        matches!(refusal, Error::JobAlreadyRunning),
+        "the refusal must name the slot, not something else: {refusal:?}"
+    );
+
+    bridge::cancel_job(fx.state());
+    wait_for_the_slot(&fx);
+
+    let (channel, events) = job_channel();
+    start_embed_job(fx.state(), channel)
+        .expect("embedding was still refused with nothing else running");
+    // Nothing is adopted in this test, so the run ends at once — waited out
+    // rather than left running, because the fixture's temporary directory is
+    // about to go and the job holds a connection to a database inside it.
+    events_until_ended(&events);
+}
+
+/// The store is asked **before** the slot is taken, and the refusal a person
+/// gets says so.
+///
+/// It is `walk_job::start_walk_job`'s own rule — every fallible step before
+/// `claim_job`, so that a call which was always going to fail never has
+/// `job_status` reporting a job that is running — and it has more force here
+/// than there. `mnema_secrets::load` can block on a modal authorisation dialog:
+/// on macOS the store authorises against the code identity that wrote the
+/// credential, and an ad-hoc signature changes with every build
+/// (`KeyStoreFailure::Locked`'s own doc comment, measured 2026-08-11). Claiming
+/// the slot first would disable Start, and refuse a walk, for as long as that
+/// dialog sits unanswered on somebody's screen.
+///
+/// So the order is observable, and this is what observes it: with a job already
+/// running **and** no key, the answer names the key.
+#[test]
+fn the_key_is_read_before_the_job_slot_is_taken() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+
+    let (probe, _probe_events) = job_channel();
+    bridge::start_probe_job(fx.state(), probe).expect("the probe job starts");
+
+    let (channel, _events) = job_channel();
+    let refusal =
+        start_embed_job(fx.state(), channel).expect_err("a job is running and there is no key");
+    assert!(
+        matches!(refusal, Error::NoKey),
+        "the slot was claimed before the store was asked: {refusal:?}"
+    );
+    // The sentence, not only the variant: this type crosses the IPC as its
+    // `Display` string, and `Error::NoKey`'s own doc comment is about what it
+    // tells the person to do next.
+    let said = refusal.to_string();
+    assert!(
+        !said.contains("already running"),
+        "a person with no key was told to wait for a job instead: {said}"
+    );
+
+    bridge::cancel_job(fx.state());
+    wait_for_the_slot(&fx);
+}
+
+/// A missing key is a refusal a person can read, not a panic — and the slot is
+/// left free, so nothing is blocked by a call that never started anything.
+#[test]
+fn embedding_without_a_key_is_refused_rather_than_panicking() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+
+    let (channel, _events) = job_channel();
+    let refusal = start_embed_job(fx.state(), channel).expect_err("there is no key to embed with");
+
+    assert!(matches!(refusal, Error::NoKey), "{refusal:?}");
+    assert!(
+        !fx.state().job_is_running(),
+        "a refused start left the job slot taken, and nothing can index until a restart"
+    );
+    assert!(
+        fx.provider_request().is_none(),
+        "a request left the machine for a key nobody has entered"
+    );
+}
+
+/// The whole path, from the press to the number on the settings screen: the key
+/// comes out of the store, the queue comes out of the index, the vectors go back
+/// into it, and what the window is shown agrees with what the database holds.
+#[test]
+fn a_run_started_from_the_window_embeds_the_queue_and_reports_what_it_did() {
+    const CHUNKS: usize = 3;
+    let fx = Fixture::with_provider_answering_a_run(vec![Reply::ok(&vectors_for(CHUNKS))]);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    fx.adopt_default_model();
+    let space = fx.active_space().expect("a model was adopted");
+    fx.write_indexed_chunks(CHUNKS);
+
+    let (channel, events) = job_channel();
+    start_embed_job(fx.state(), channel).expect("the embedding job starts");
+    let (progress, ending) = events_until_ended(&events);
+
+    assert_eq!(ending["reason"], json!("completed"), "{ending}");
+    assert_eq!(ending["done"], json!(CHUNKS), "{ending}");
+    assert_eq!(ending["total"], json!(CHUNKS), "{ending}");
+    assert_eq!(ending["refused"], json!(0), "{ending}");
+
+    // The bar moved, and the last thing it was shown is the truth rather than
+    // whatever the throttle last let through. Both halves: an empty list also
+    // satisfies "no report disagreed with the ending".
+    assert!(
+        !progress.is_empty(),
+        "the window was shown no progress at all, so the bar never moved"
+    );
+    let last = progress.last().expect("the assertion above found one");
+    assert_eq!(
+        last["done"], ending["done"],
+        "the last progress report the window saw is short of the ending: {last}"
+    );
+
+    // What the index actually holds, which is the only thing that makes the
+    // numbers above worth anything.
+    assert_eq!(
+        fx.embedded_chunks_in(space),
+        CHUNKS as i64,
+        "the run reported vectors the index does not have"
+    );
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(read.embedded_chunks, CHUNKS as i64);
+    assert_eq!(read.total_chunks, CHUNKS as i64);
+    assert_eq!(
+        read.failed_chunks, 0,
+        "nothing was refused, and the screen must say that rather than nothing"
+    );
+}
+
+/// **The load-bearing test of this task.** A chunk the provider refuses leaves
+/// the embedding queue and is not offered again until its text changes — so
+/// vector search stops answering for it while the document still shows it and
+/// lexical search still finds it. That is only defensible while the count is in
+/// front of a person, and `Db::failed_chunk_count` had no production caller at
+/// all before this: the whole no-retry rule stood on a number nothing read.
+///
+/// The refusal is a `400`, which is one of the three statuses
+/// `mnema_embed::speaks_only_about_these_texts` will attribute to a text at all,
+/// and the batch is split one text at a time — so the first chunk embeds, which
+/// is the corroboration that lets the second one be written down as refused
+/// rather than blamed on a provider having a bad minute.
+#[test]
+fn a_chunk_the_provider_refused_is_counted_where_a_person_can_read_it() {
+    const CHUNKS: usize = 2;
+    let fx = Fixture::with_provider_answering_a_run(vec![
+        // The batch of two, refused as a whole. `embed` is all-or-nothing over
+        // the batch it was given, so the answer names no particular text.
+        Reply::status(400, r#"{"error":{"message":"input is too long"}}"#),
+        // The split: the first text alone succeeds…
+        Reply::ok(&vectors_for(1)),
+        // …and the second alone is refused, which is now evidence about it
+        // rather than about the provider.
+        Reply::status(400, r#"{"error":{"message":"input is too long"}}"#),
+    ]);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    fx.adopt_default_model();
+    let space = fx.active_space().expect("a model was adopted");
+    fx.write_indexed_chunks(CHUNKS);
+
+    let (channel, events) = job_channel();
+    start_embed_job(fx.state(), channel).expect("the embedding job starts");
+    let (_progress, ending) = events_until_ended(&events);
+
+    assert_eq!(
+        ending["refused"],
+        json!(1),
+        "the ending does not say a chunk was given up on: {ending}"
+    );
+    assert_eq!(ending["done"], json!(1), "{ending}");
+    assert_eq!(ending["total"], json!(CHUNKS), "{ending}");
+
+    // The number on the settings screen, which is the one that outlives this
+    // run's channel and the one the no-retry rule is justified by.
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(
+        read.failed_chunks, 1,
+        "the third number never reached the window, so a chunk left vector search in silence"
+    );
+    // And it agrees with the database rather than with the run's own tally:
+    // `Db::failed_chunk_count` counts a refusal that is still about the chunk's
+    // current text, and this asks it through the command the window calls.
+    assert_eq!(
+        fx.state()
+            .with_index(|db| db.failed_chunk_count(space))
+            .expect("the index answers"),
+        read.failed_chunks,
+        "the screen and the database disagree about how many chunks were refused"
+    );
+    assert_eq!(
+        read.embedded_chunks, 1,
+        "a refused chunk must not be counted as an embedded one"
+    );
+    assert_eq!(read.total_chunks, CHUNKS as i64);
+}
+
+/// A person who has entered a key but chosen no model gets a sentence, not a
+/// silence and not a panic. The pass reads `meta.active_space` itself and
+/// refuses; this is that refusal reaching the window as an ending it can render.
+#[test]
+fn a_run_with_no_model_chosen_ends_with_a_message_saying_so() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    // The credit check `set_key` itself makes, taken off the queue so that the
+    // assertion at the end is about this job and not about that call — and
+    // asserted rather than discarded, because a queue that was empty for some
+    // other reason would make the one below prove nothing.
+    assert!(
+        fx.provider_request().is_some(),
+        "`set_key` made no call at all, so nothing below can distinguish a job that stayed quiet"
+    );
+
+    let (channel, events) = job_channel();
+    start_embed_job(fx.state(), channel).expect("the job starts, and then fails on its own");
+    let (_progress, ending) = events_until_ended(&events);
+
+    assert_eq!(ending["reason"], json!("failed"), "{ending}");
+    let message = ending["message"]
+        .as_str()
+        .expect("a failed job must carry a message the window can render");
+    assert!(
+        message.contains("no embedding model"),
+        "the ending does not say what is missing: {message}"
+    );
+    assert!(
+        fx.provider_request().is_none(),
+        "a request left the machine before there was anywhere to put the answer"
     );
 }

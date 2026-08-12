@@ -6,6 +6,7 @@
 //! webview calls them.
 
 pub mod bridge;
+pub mod embed_job;
 pub mod error;
 pub mod job;
 pub mod models;
@@ -41,6 +42,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         models::set_chat_model,
         models::model_settings,
         walk_job::start_walk_job,
+        embed_job::start_embed_job,
     ]
 }
 
