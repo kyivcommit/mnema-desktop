@@ -730,7 +730,7 @@ export const indexStateSentence = (index, opening) =>
     (() => "The state of the index is unknown: this build did not understand what it answered.")
   )(index, opening);
 
-// ⚠️ **Not a fraction, and never divided.** Four measured rules, all of which
+// ⚠️ **Not a fraction, and never divided.** Three measured rules, all of which
 // the obvious rendering breaks (`IndexRead::embedded_chunks`):
 //
 // - `embeddedChunks` counts the active space, `totalChunks` the whole index, so
@@ -740,13 +740,52 @@ export const indexStateSentence = (index, opening) =>
 //   embeds, and `a_vector_outlives_the_chunk_it_embeds` holds the storage half
 //   of that in the gate. A percentage of it is above 100, and clamping would be
 //   this window inventing a number nobody measured.
-// - Both are zero in this build, because nothing embeds yet (D29).
 // - Zero with `activeSpace == null` is not "nothing is embedded", it is "the
 //   question does not arise" — told apart by `activeSpace`, never by the zero.
+//
+// A fourth rule said "both are zero in this build, because nothing embeds yet
+// (D29)". It is gone because it stopped being true the moment there was a
+// command that embeds; it is recorded here rather than deleted silently,
+// because a stale rule in a list of measured ones is worse than no list.
 const PROGRESS_NO_MODEL = "no embedding model chosen";
 // And an index that could not be read is neither of those: drawn as "nothing
 // chosen" it is the entrance to the harm `NoSuchSpace` was written to prevent.
 const PROGRESS_UNKNOWN = "how many pieces have embeddings is unknown until the index can be read";
+
+// "1 pieces" is the kind of sentence that makes a person doubt the number beside
+// it, the same reason `embeddingsCount` exists further down.
+const piecesCount = (n) => (n === 1 ? "1 piece" : `${n} pieces`);
+
+// **The third number, and the whole safety argument for the queue's own rule.**
+//
+// `Db::chunks_needing_embedding` lets a chunk the provider refused leave the
+// queue and does not offer it again until its text changes. That chunk stays in
+// the database, the document still shows it and keyword search still finds it —
+// and search by meaning will not return it again. `totalChunks −
+// embeddedChunks` reads as "not got to them yet", and for these pieces nobody
+// ever will, so the difference is exactly the wrong way to learn about them.
+// Until this sentence existed, `Db::failed_chunk_count` had no caller outside
+// the tests and the number was in front of nobody.
+//
+// **Said at zero as well**, and that is deliberate rather than noise: a clause
+// that appears only when something is wrong cannot be told apart from a build
+// that does not report refusals at all, which is the silence this exists to
+// break. The harsh half — that they are not retried — is said only when there is
+// something for it to be about.
+//
+// A third arm for "the window was not told", because `failedChunks` absent is
+// not `failedChunks: 0`. Saying "none were refused" about a payload that carries
+// no such number states a fact this window did not receive — the mistake
+// `KeyState`, `Balance` and `Refusal` are each split into named states to avoid.
+const refusedClause = (failed) => {
+  if (typeof failed !== "number") {
+    return "; how many pieces the provider refused is not in what this window was sent";
+  }
+  return failed > 0
+    ? `; ${piecesCount(failed)} the provider refused, and it will not try again until their ` +
+        "text changes, so search by meaning does not return them"
+    : "; none were refused by the provider";
+};
 
 export const embeddingProgressText = (index) => {
   if (index?.kind !== "read") {
@@ -758,11 +797,96 @@ export const embeddingProgressText = (index) => {
   const head =
     `embeddings in the active space: ${index.embeddedChunks} of ${index.totalChunks} ` +
     "pieces in the whole index";
-  return index.embeddedChunks > index.totalChunks
-    ? `${head} — the first number counts one space and the second the whole index, and a vector ` +
-        "can outlive the piece it embeds, so the first is sometimes larger; this is not an error"
-    : head;
+  const counted =
+    index.embeddedChunks > index.totalChunks
+      ? `${head} — the first number counts one space and the second the whole index, and a ` +
+        "vector can outlive the piece it embeds, so the first is sometimes larger; this is not " +
+        "an error"
+      : head;
+  return counted + refusedClause(index.failedChunks);
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The embedding job.
+//
+// A run's sentences, kept apart from the walk's above. `endingSentence` appends
+// a reconciliation clause — "nothing was removed from the index, a file deleted
+// from the folder could still answer a search" — which is a statement about a
+// folder walk and would be both irrelevant and misleading after a run that
+// reconciled nothing and walked nothing. The two jobs share a slot, a bar and a
+// Cancel button, and they do not share a vocabulary.
+//
+// ⚠️ **Every count here is this run's, and the settings line above is the
+// space's.** `job::Ended::refused` starts again at zero on the next run;
+// `IndexRead::failed_chunks` counts every refusal the space still holds. They
+// are different numbers that could otherwise be read as one, so the sentences
+// below say "in this run" wherever they name one.
+
+// What one report says while a run is going.
+//
+// `secondsLeft` is `null` before anything is measured — a real state, and one
+// that must not render as `0` (`job::Progress::seconds_left`). The refusals are
+// named as soon as there are any: a person watching the bar is the person the
+// third number is for.
+export const embedProgressLine = ({ done, total, refused, secondsLeft }) => {
+  const eta = secondsLeft === null || secondsLeft === undefined ? "estimating…" : `${secondsLeft}s left`;
+  const gaveUp = refused > 0 ? `, ${refused} refused in this run` : "";
+  return `embedding: ${done} of ${total}${gaveUp} — ${eta}`;
+};
+
+// What a run leaves on the screen when it is over, in this run's own terms.
+const embedRefusedTail = (refused) =>
+  refused > 0
+    ? `, ${piecesCount(refused)} the provider refused in this run — they stay in the index and ` +
+      "in keyword search, and search by meaning will not return them until their text changes"
+    : "";
+
+// Both endings that leave work behind say so, and it is the same fact in both:
+// the queue is computed from the index rather than stored, so nothing has to be
+// recovered and a second press simply carries on. It is what a person needs
+// after a network drops in the middle of a run.
+const EMBED_RESUMABLE = " What was embedded stays; starting again continues from there.";
+
+// `EndReason`'s four walk-only variants. `walk_job.rs` is their only writer, so
+// no embedding run produces one — and they have an arm because a table with a
+// missing key renders a fallback instead of failing, and this file's rule is one
+// arm per variant so that a variant added later reddens a test rather than
+// disappearing into a default. It says what it was told rather than inventing a
+// sentence about a folder.
+const notAnEmbeddingEnding = ({ reason, done, total }) =>
+  `ended (${reason}) after ${done} of ${total}`;
+
+export const EMBED_ENDING_TEXT = {
+  // `total === 0` is the ordinary answer to a second press, and it is not "all
+  // done": the queue is what has no vector *and* is not already refused, so
+  // zero can also mean everything left has been given up on. The settings line
+  // beside it carries the numbers; this says only what this run did, which is
+  // nothing.
+  completed: ({ done, total, refused }) =>
+    total === 0
+      ? "nothing was waiting to be embedded"
+      : `finished: ${done} of ${total} embedded${embedRefusedTail(refused)}`,
+  cancelled: ({ done, total, refused }) =>
+    `stopped after ${done} of ${total} embedded, at your request${embedRefusedTail(refused)}.` +
+    EMBED_RESUMABLE,
+  failed: ({ done, total, refused, message }) =>
+    `failed after ${done} of ${total} embedded${embedRefusedTail(refused)}` +
+    (message ? `: ${message}.` : ".") +
+    EMBED_RESUMABLE,
+  brokenWorker: notAnEmbeddingEnding,
+  rulesNotApplied: notAnEmbeddingEnding,
+  rootUnavailable: notAnEmbeddingEnding,
+  volumeMissing: notAnEmbeddingEnding,
+};
+
+export const embedEndingSentence = (ended) =>
+  (EMBED_ENDING_TEXT[ended.reason] ?? notAnEmbeddingEnding)(ended);
+
+// A run that never started. The refusals are `Error::NoKey`, `Error::Secrets`,
+// `Error::JobAlreadyRunning` and `Error::IndexNotOpen`, and each already says
+// what it is and what to do about it — this only says that nothing started, so
+// that a message about a key is not read as a run that failed halfway.
+export const embedNotStartedSentence = (error) => `nothing was embedded: ${error}`;
 
 // `set_embedding_model` answers `AdoptedModel`, not `ModelSettings`, and its
 // `model`, `dim`, `spaceId` and `created` sit **outside** `index` precisely so a

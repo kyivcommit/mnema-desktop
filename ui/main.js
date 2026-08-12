@@ -35,6 +35,9 @@ import {
   emptyFieldSentence,
   keyFieldPlaceholder,
   keySubmitText,
+  embedProgressLine,
+  embedEndingSentence,
+  embedNotStartedSentence,
   embeddingModelNotRecordedSentence,
   roleNotRecordedSentence,
   KEEP_EXISTING_VECTORS,
@@ -94,6 +97,11 @@ let jobRunning = false;
 
 const syncButtons = () => {
   el("walk").disabled = jobRunning || watchedRootId === null;
+  // Not gated on `watchedRootId`: embedding works off what the index already
+  // holds, so a reload that lost the chosen folder must not take it with it.
+  // One flag for the whole application, so the slot is the only thing that
+  // disables this.
+  el("embed").disabled = jobRunning;
   el("cancel").disabled = !jobRunning;
 };
 
@@ -223,6 +231,19 @@ el("walk").addEventListener("click", async () => {
     if (watchedRootId !== null) {
       renderSkips(watchedRootId);
     }
+    // A walk changes how many pieces the index holds, which is the denominator
+    // of the settings line further down — left alone, that line goes on
+    // describing the index as it was before this run. Redrawn from the
+    // database rather than adjusted from the ending, so the screen cannot come
+    // to hold a number the index does not.
+    //
+    // `refreshSettings` is declared below this handler and is a `const`, so it
+    // is worth saying why this is not a use before initialisation: the handler
+    // runs on a message from a job, a job is started by a click on a button
+    // that stays disabled until a folder has been chosen through a native
+    // dialog, and the whole module — this file's last line included — has
+    // finished evaluating long before any of that.
+    refreshSettings();
   };
 
   if (watchedRootId === null) {
@@ -576,6 +597,58 @@ el("discard-vectors").addEventListener("click", async () => {
     return;
   }
   await recordEmbeddingModel(refusedChange, DISCARD_EXISTING_VECTORS);
+});
+
+// Starting the embedding pass.
+//
+// Its button sits in the job area at the top of the window, with "Index it" and
+// the one Cancel, because there is one job slot and one bar. The listener is
+// registered **here** for two reasons that both belong to this block: every
+// sentence it writes comes from `render.js`, which is this block's rule and is
+// checked by `render.test.js`; and it redraws the settings when the run is over,
+// which needs `refreshSettings` to have been declared.
+el("embed").addEventListener("click", async () => {
+  // A channel of its own, and a handler of its own. It is not the walk's with a
+  // flag: `endingSentence` appends a clause about folder reconciliation, which
+  // an embedding run neither did nor could do, and one handler serving both
+  // would be one sentence deciding which job it is about.
+  const onProgress = new Channel();
+  onProgress.onmessage = ({ event, data }) => {
+    if (event === "progress") {
+      el("bar").max = data.total;
+      el("bar").value = data.done;
+      el("job-status").textContent = embedProgressLine(data);
+      return;
+    }
+
+    const ending = data;
+    el("bar").max = ending.total;
+    el("bar").value = ending.done;
+    el("job-status").textContent = embedEndingSentence(ending);
+    endingDescribed = true;
+    jobRunning = false;
+    syncButtons();
+    // The counts this run reported are this run's; the settings line states the
+    // space's, and they have just changed. Read back from the database rather
+    // than added up from the ending, which is the only way the two numbers
+    // cannot come to disagree.
+    refreshSettings();
+  };
+
+  try {
+    endingDescribed = false;
+    await invoke("start_embed_job", { onProgress });
+    jobRunning = true;
+    // After the await, for the reason the walk's own press gives: an ending
+    // that arrived first has already been overwritten by the line above, and
+    // only the core can put it right.
+    syncButtons();
+    follow();
+  } catch (error) {
+    // Refused before anything started — no key, no index, or a job already
+    // running. Nothing began, so the buttons must not move.
+    el("job-status").textContent = embedNotStartedSentence(error);
+  }
 });
 
 for (const [role, command] of [

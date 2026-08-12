@@ -21,11 +21,27 @@
       <h1>Mnema</h1>
       <p id="index-status" class="muted">opening the index…</p>
 
+      <!--
+        One job area, because there is one job. `AppState::running` is a single
+        flag for the whole application: embedding cannot run beside a walk, so
+        both start buttons draw on the same bar, write to the same status line
+        and are stopped by the same Cancel. Two bars would suggest two jobs, and
+        a second Cancel would be a button that stops whichever job happens to be
+        running rather than the one it sits beside.
+
+        "Embed" is not disabled by the absence of a folder the way "Index it"
+        is: it works off what the index already holds, not off a folder chosen
+        in this window, and it stays pressable after a reload that lost the
+        chosen folder. What it does need — a key and a chosen model — it does
+        not gate on either, because a refusal that names what is missing is
+        better than a button that is dead for a reason nobody can see.
+      -->
       <section>
         <h2>Watched folder</h2>
         <button id="pick">Choose a folder…</button>
         <p id="folder" class="muted">no folder chosen</p>
         <button id="walk" disabled>Index it</button>
+        <button id="embed">Embed what is indexed</button>
         <button id="cancel" disabled>Cancel</button>
         <progress id="bar" value="0" max="1"></progress>
         <p id="job-status" class="muted">idle</p>

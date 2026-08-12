@@ -80,6 +80,10 @@ import {
   discardVectorsNote,
   retiredSpacesClause,
   roleNotRecordedSentence,
+  EMBED_ENDING_TEXT,
+  embedProgressLine,
+  embedEndingSentence,
+  embedNotStartedSentence,
 } from "./render.js";
 
 // The canonical list of `EndReason` discriminants, in the exact camelCase
@@ -103,6 +107,14 @@ const END_REASONS = [
 // Same pairing, for `FrozenReason` — mirrors `job.rs`'s `every_frozen_
 // reason_has_its_camel_case_spelling_pinned`.
 const FROZEN_REASONS = ["symlinkedSubtree", "emptyDirectory", "unreadableDirectory"];
+
+test("every EndReason has a table entry in EMBED_ENDING_TEXT too", () => {
+  // A second table over the same union, for the other job. Four of its seven
+  // arms are reasons only `walk_job.rs` writes, and they are there because a
+  // missing key renders a fallback rather than failing — the rule the table
+  // above follows for the same reason.
+  assert.deepEqual(Object.keys(EMBED_ENDING_TEXT).sort(), [...END_REASONS].sort());
+});
 
 test("every EndReason has a table entry in both ENDING_TEXT and STOPPED_CLEANLY", () => {
   assert.deepEqual(Object.keys(ENDING_TEXT).sort(), [...END_REASONS].sort());
@@ -636,6 +648,194 @@ test("a numerator above the denominator is explained rather than left looking br
     totalChunks: 812,
   });
   assert.doesNotMatch(under, /not an error/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The third number.
+//
+// `Db::failed_chunk_count` had no caller outside its own crate's tests until
+// this window read it. Everything below is about the number arriving and about
+// it not being read as one of the two beside it.
+
+// A settings payload with all three counts, and nothing that could be mistaken
+// for a measurement: single digits, distinct from each other and from their own
+// defaults, so a swapped field shows up rather than only a dropped one. What the
+// real numbers are is the acceptance run's to say, and this window's tests are
+// not where a number nobody measured gets written down as though somebody had.
+const readWith = (fields) => ({
+  kind: "read",
+  activeSpace: 1,
+  embeddedChunks: 6,
+  totalChunks: 9,
+  failedChunks: 2,
+  ...fields,
+});
+
+test("the settings line reports embedded, total and refused", () => {
+  const text = embeddingProgressText(readWith({}));
+  assert.match(text, /\b6\b/, "how many are embedded went missing");
+  assert.match(text, /\b9\b/, "how many pieces there are went missing");
+  assert.match(text, /\b2\b/, "how many the provider refused went missing");
+});
+
+// The whole reason the number is on the screen at all: a refused piece leaves
+// the queue and is not offered again until its text changes, so the difference
+// between the first two numbers is not "not got to them yet". A count with no
+// sentence would be read as exactly that.
+test("refused pieces are said to be permanent rather than pending", () => {
+  const text = embeddingProgressText(readWith({}));
+  assert.match(text, /will not try again/);
+  assert.match(text, /text changes/);
+});
+
+// Both directions, and this is the direction a conditional clause gets wrong:
+// at zero the line must still say so, because a clause that appears only when
+// something is wrong cannot be told apart from a build that never reports
+// refusals at all.
+test("nothing refused is stated rather than left silent", () => {
+  const none = embeddingProgressText(readWith({ failedChunks: 0 }));
+  assert.match(none, /none were refused/);
+  assert.doesNotMatch(none, /will not try again/,
+    "a warning about pieces that will never be retried, over a run that refused none");
+});
+
+// `failedChunks` absent is not `failedChunks: 0`. Saying "none were refused"
+// about a payload carrying no such number states a fact this window was not
+// told — the mistake `KeyState`, `Balance` and `Refusal` are each split into
+// named states to avoid.
+test("a payload with no refusal count is not read as a payload saying zero", () => {
+  const untold = embeddingProgressText(readWith({ failedChunks: undefined }));
+  assert.doesNotMatch(untold, /none were refused/);
+  assert.match(untold, /not in what this window was sent/);
+});
+
+test("one refused piece is not called one pieces", () => {
+  assert.match(embeddingProgressText(readWith({ failedChunks: 1 })), /\b1 piece\b/);
+  assert.doesNotMatch(embeddingProgressText(readWith({ failedChunks: 1 })), /1 pieces/);
+});
+
+// ⚠️ **Two numbers about two scopes.** `IndexRead::failed_chunks` counts every
+// refusal the active space still holds; `job::Ended::refused` counts one run and
+// starts again at zero on the next. A person who runs the pass twice sees them
+// diverge, and a sentence that could be read as either is how "8 400 of 9 000"
+// comes to mean four things at once. The run's sentences say "in this run"; the
+// space's does not, and must not.
+test("a run's refusal count and the space's are worded so neither reads as the other", () => {
+  const space = embeddingProgressText(readWith({}));
+  const run = embedEndingSentence({ reason: "completed", done: 6, total: 9, refused: 2 });
+  assert.doesNotMatch(space, /this run/,
+    "the settings line counts the space, and claiming it is a run's makes it wrong every time \
+     the pass is run twice");
+  assert.match(run, /in this run/);
+  assert.notEqual(space, run);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The embedding job's own sentences.
+
+test("a live report says how far it has got and how long is left", () => {
+  const line = embedProgressLine({ done: 6, total: 9, refused: 0, secondsLeft: 12 });
+  assert.match(line, /\b6\b/);
+  assert.match(line, /\b9\b/);
+  assert.match(line, /12s/);
+  assert.doesNotMatch(line, /refused/, "a run that has refused nothing must not say it has");
+});
+
+test("a live report names refusals as soon as there are any", () => {
+  const line = embedProgressLine({ done: 6, total: 9, refused: 2, secondsLeft: 12 });
+  assert.match(line, /2 refused in this run/);
+});
+
+// `null` is "not known yet", a real state, and it must not render as `0` —
+// `job::Progress::seconds_left`'s own doc comment is the other end of this.
+test("an estimate that is not known yet is not rendered as no time left", () => {
+  const line = embedProgressLine({ done: 0, total: 9, refused: 0, secondsLeft: null });
+  assert.match(line, /estimating/);
+  assert.doesNotMatch(line, /0s left/);
+});
+
+// The reason `EMBED_ENDING_TEXT` exists at all rather than the walk's table
+// being reused: `endingSentence` appends a clause about folder reconciliation —
+// what was not removed from the index, a deleted file that could still answer a
+// search — and after an embedding run that reconciled nothing and walked nothing
+// it is both irrelevant and misleading.
+test("an embedding ending never talks about folder reconciliation", () => {
+  for (const reason of END_REASONS) {
+    const text = embedEndingSentence({
+      reason,
+      done: 6,
+      total: 9,
+      refused: 2,
+      message: "the provider stopped answering",
+    });
+    assert.doesNotMatch(text, /reconciliation/, `"${reason}" borrowed the walk's clause`);
+    assert.doesNotMatch(text, /folder/, `"${reason}" said something about a folder`);
+    assert.doesNotMatch(text, /undefined/, `"${reason}" rendered a missing field`);
+  }
+});
+
+test("a finished run says what it embedded and what it gave up on", () => {
+  const text = embedEndingSentence({ reason: "completed", done: 6, total: 9, refused: 2 });
+  assert.match(text, /6 of 9/);
+  assert.match(text, /2 pieces the provider refused/);
+  assert.match(text, /keyword search/,
+    "the one thing a person can act on is which searches still find those pieces");
+});
+
+test("a finished run that refused nothing says nothing about refusals", () => {
+  const text = embedEndingSentence({ reason: "completed", done: 9, total: 9, refused: 0 });
+  assert.doesNotMatch(text, /refused/);
+});
+
+// The ordinary answer to a second press, and it must not be an error or a
+// silence. It is deliberately not "everything is embedded": the queue excludes
+// pieces the space has already given up on, so an empty queue can also mean
+// everything left has been refused — which the settings line beside it is what
+// says.
+test("a run with an empty queue says nothing was waiting, not that all is done", () => {
+  const text = embedEndingSentence({ reason: "completed", done: 0, total: 0, refused: 0 });
+  assert.match(text, /nothing was waiting/);
+  assert.doesNotMatch(text, /0 of 0/);
+});
+
+// The two endings that leave work behind. Both are resumable and for the same
+// reason — the queue is computed from the index rather than stored — and that is
+// the sentence a person needs after a network drops mid-run.
+test("a stopped run and a failed one both say what survives and that it can go on", () => {
+  const stopped = embedEndingSentence({ reason: "cancelled", done: 6, total: 9, refused: 0 });
+  assert.match(stopped, /at your request/);
+  assert.match(stopped, /starting again continues/i);
+
+  const failed = embedEndingSentence({
+    reason: "failed",
+    done: 6,
+    total: 9,
+    refused: 0,
+    message: "provider: the key was refused",
+  });
+  assert.match(failed, /the key was refused/, "the ending's own message is what says why");
+  assert.match(failed, /starting again continues/i);
+
+  // Both directions: a run that finished has nothing to resume, and telling
+  // somebody to start it again would be advice about a state they are not in.
+  const finished = embedEndingSentence({ reason: "completed", done: 9, total: 9, refused: 0 });
+  assert.doesNotMatch(finished, /starting again continues/i);
+});
+
+test("a failed run with no message still says how far it got", () => {
+  const text = embedEndingSentence({ reason: "failed", done: 6, total: 9, refused: 0 });
+  assert.match(text, /6 of 9/);
+  assert.doesNotMatch(text, /undefined/);
+});
+
+// A refusal before anything starts — no key, no index, a job already running.
+// Each error already says what it is; this only says that nothing began, so that
+// a message about a key is not read as a run that failed halfway through.
+test("a run that never started is not reported as one that stopped part way", () => {
+  const text = embedNotStartedSentence("no provider key has been entered");
+  assert.match(text, /nothing was embedded/);
+  assert.match(text, /no provider key/);
+  assert.doesNotMatch(text, /stopped after/);
 });
 
 // `set_embedding_model` answers `AdoptedModel`, whose `model`, `dim`, `spaceId`
@@ -1444,15 +1644,15 @@ test("every element main.js reaches for exists in index.html", () => {
 
   const literals = [...main.matchAll(/\bel\("([^"]+)"\)/g)].map((m) => m[1]);
   // A floor, because a loop over an empty list passes and a regexp that has
-  // stopped matching produces exactly that. **58 today, re-measured** with the
-  // discard control (D96g): this said "`> 10` against an actual 20" while the
-  // actual had been 48 since `667d2ff`, so it tolerated losing thirty-two calls
-  // in silence — a number describing a file it had stopped describing, in a test
-  // whose whole job is to notice that (whole-branch review, closing check). The
-  // margin is what a legitimate edit may remove before this asks to be looked
-  // at, and the same rule and the same shape of number are on the block test
-  // below.
-  assert.ok(literals.length >= 50,
+  // stopped matching produces exactly that. **67 today, re-measured** with the
+  // Embed button: it was 58 with the discard control (D96g), and before that it
+  // said "`> 10` against an actual 20" while the actual had been 48 since
+  // `667d2ff`, so it tolerated losing thirty-two calls in silence — a number
+  // describing a file it had stopped describing, in a test whose whole job is to
+  // notice that (whole-branch review, closing check). The margin is what a
+  // legitimate edit may remove before this asks to be looked at, and the same
+  // rule and the same shape of number are on the block test below.
+  assert.ok(literals.length >= 58,
     `only ${literals.length} literal ids found — the regexp has rotted, or main.js shrank`);
   for (const id of literals) {
     assert.ok(ids.has(id), `main.js reaches for #${id}, which index.html does not have`);
@@ -1659,15 +1859,15 @@ test("every sentence in the model configuration block comes from render.js", () 
     ...block.matchAll(/\.(?:textContent|innerText|innerHTML|placeholder)\s*\+?=\s*(\S)/g),
   ].map((m) => m[1]);
   // A floor, because an assertion over an empty list passes and a rotted regexp
-  // produces exactly that. **22 today**, re-measured with the discard control
-  // (D96g), and the margin is what a legitimate edit may remove before this asks
-  // to be looked at. The id test above carries the same rule and its own
-  // re-measured number; this one said `>= 10` against 16 and called itself tight
-  // "the same way the id test above is", which was a parity claim pointing at a
-  // floor that had been stale for six commits. Both numbers are re-measured
-  // whenever this file's regexps or main.js's block change, which is the whole
-  // point of naming the actual beside them.
-  assert.ok(assignments.length >= 20,
+  // produces exactly that. **25 today**, re-measured with the Embed press; it
+  // was 22 with the discard control (D96g), and the margin is what a legitimate
+  // edit may remove before this asks to be looked at. The id test above carries
+  // the same rule and its own re-measured number; this one said `>= 10` against
+  // 16 and called itself tight "the same way the id test above is", which was a
+  // parity claim pointing at a floor that had been stale for six commits. Both
+  // numbers are re-measured whenever this file's regexps or main.js's block
+  // change, which is the whole point of naming the actual beside them.
+  assert.ok(assignments.length >= 23,
     `only ${assignments.length} textContent assignments found — the regexp has rotted, or the block shrank`);
   for (const first of assignments) {
     assert.ok(!["'", '"', "`"].includes(first),
