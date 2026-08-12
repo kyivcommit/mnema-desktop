@@ -936,16 +936,58 @@ impl Db {
         Ok(written > 0)
     }
 
+    /// Whether every chunk that exists has a vector in this space — the one
+    /// question [`Db::mark_space_ready`] is decided by (D95b, fix round 1).
+    ///
+    /// **Not the queue's question, and deliberately wider.**
+    /// [`Db::chunks_needing_embedding`]'s queue is right to ignore a chunk
+    /// behind a document whose `status` is not yet `'indexed'` — its own
+    /// comment argues that case, and this method does not relitigate it. But
+    /// "the queue found nothing to do" and "the space is complete" used to be
+    /// treated as the same fact, and they are not: a document can have chunks
+    /// written and no `'indexed'` status yet — the window
+    /// `crates/mnema-ingest/src/lib.rs:546-598`'s own comment names, between
+    /// writing chunks and writing the status, kept a separate transaction on
+    /// purpose so a crash there "costs a re-index rather than a lie" — and
+    /// those chunks exist, right now, with no vector, invisible to a queue
+    /// that is asking a narrower question than this one.
+    ///
+    /// Same scope as [`Db::failed_chunk_count`]: every chunk that exists,
+    /// whatever its document's status — not a third copy of that predicate,
+    /// but the same one asked from the vector side instead of the failure
+    /// side. A chunk this space gave up on has no vector by construction
+    /// (nothing writes both a `failed` row and a vector for the same chunk),
+    /// so this single question already answers what used to take two: no
+    /// carve-out for a failed chunk is needed or added, and a space with one
+    /// permanently refused chunk stays `building` for ever. That is correct,
+    /// not a bug this state should hide — the space genuinely is not
+    /// complete, and `failed_chunk_count` is what tells a person why, once
+    /// something reads it.
+    pub fn space_is_complete(&self, space_id: i64) -> Result<bool, Error> {
+        let table = self.space(space_id)?.table;
+        // `table` is never caller text: the same reasoning `embedded_chunk_count`
+        // and `knn` already rely on for interpolating a table name into SQL.
+        Ok(self.conn().query_row(
+            &format!(
+                "SELECT NOT EXISTS (
+                     SELECT 1 FROM chunk c
+                      WHERE c.id NOT IN (SELECT chunk_id FROM {table})
+                 )"
+            ),
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Marks a space as holding a vector for every chunk it currently owes
     /// one — `ready`, one of the three values the schema's own `CHECK` on
     /// `embedding_space.state` allows (`schema.sql:356`) beside `building`
     /// and the `stale` nothing writes yet.
     ///
     /// A write, not a decision: `mnema_embed::run` is the one caller (D95b),
-    /// and only once it has established both halves
-    /// of the claim itself — the queue empty and [`Db::failed_chunk_count`]
-    /// answering zero. Neither is re-read here, so this cannot come to
-    /// disagree with the facts that justified calling it.
+    /// and only once [`Db::space_is_complete`] has answered `true`. Not
+    /// re-read here, so this cannot come to disagree with the fact that
+    /// justified calling it.
     ///
     /// An id with no row is [`Error::NoSuchSpace`], the same answer every
     /// other space method here gives for one, rather than a silent no-op: an
@@ -978,6 +1020,12 @@ impl Db {
     /// has no other need to read: the queue being non-empty already is the
     /// whole of the fact that matters, and writing `building` over a space
     /// that already says `building` costs nothing to be wrong about.
+    ///
+    /// ⚠️ Unconditional in the literal sense: this retracts *any* current
+    /// value, `'stale'` included. Nothing writes `'stale'` today, so there is
+    /// nothing this can erase yet — but the day something does, the next
+    /// `run` against a non-empty queue overwrites it silently, with no
+    /// carve-out and no warning.
     ///
     /// Same [`Error::NoSuchSpace`] convention as [`Db::mark_space_ready`].
     pub fn mark_space_building(&self, space_id: i64) -> Result<(), Error> {

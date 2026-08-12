@@ -190,12 +190,16 @@ pub enum Error {
 ///   grown since the space last finished — not from the moment this pass gets
 ///   back around to it. A state that could only ever move the other way would
 ///   go on reporting "complete" over an archive it no longer describes.
-/// - On exit, the moment the queue is genuinely empty **and**
-///   [`mnema_index::Db::failed_chunk_count`] agrees nothing in the space was
-///   given up on, the space is written `ready`. The same count
-///   [`mnema_index::Db::chunks_needing_embedding`] itself excludes on, asked
-///   through the one method both share — not a second query that could come to
-///   disagree with it about what "no failures" means.
+/// - On exit, the moment the queue reads empty, [`mnema_index::Db::space_is_complete`]
+///   is asked the one question that decides `ready`: does every chunk that
+///   exists — not only the ones the queue looked at — have a vector in this
+///   space. **Not** "queue empty and no failures", which fix round 1 (D95b)
+///   found were two predicates over two different sets of chunks: the queue
+///   is `d.status = 'indexed'` only, and a chunk behind a document written
+///   but not yet indexed answered neither "pending" nor "failed" — it was
+///   simply invisible, and the old condition read that silence as `ready`.
+///   `space_is_complete` asks the wider question directly, so it cannot be
+///   fooled by a chunk the queue never looked at.
 pub fn run(
     db: &Db,
     base: &str,
@@ -244,10 +248,10 @@ pub fn run(
             // The queue is genuinely empty, and only here is that true: a
             // `cancel` before this point never reaches this branch, so a
             // stopped run never claims `ready` over work it did not finish.
-            // `failed_chunk_count` is the same predicate the queue itself
-            // excludes on — see `GIVEN_UP_ON_CURRENT_TEXT` — asked through the
-            // one method that names it, not counted a second way.
-            if db.failed_chunk_count(space)? == 0 {
+            // `space_is_complete` asks about every chunk that exists, not only
+            // the ones this queue looked at — see the function doc's "What
+            // this does to `embedding_space.state`" above (fix round 1, D95b).
+            if db.space_is_complete(space)? {
                 db.mark_space_ready(space)?;
             }
             break;

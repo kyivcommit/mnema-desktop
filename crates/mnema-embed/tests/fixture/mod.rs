@@ -84,6 +84,32 @@ pub fn db_with_chunks(count: usize) -> TempDb {
     db
 }
 
+/// `count` chunks written against a document that is left `'pending'` — the
+/// default a fresh `insert_document` row gets (`schema.sql:71`) — rather than
+/// advanced to `indexed`.
+///
+/// This is the window `crates/mnema-ingest/src/lib.rs:546-598`'s own comment
+/// names: chunks written, the status write still to come, in a **separate**
+/// transaction on purpose — "a crash before this point costs a re-index
+/// rather than a lie". A crash there, or simply not having reached it yet,
+/// leaves exactly this: chunks that exist and no vector for any of them,
+/// invisible to the queue (`d.status = 'indexed'`, `space.rs:47`) the same way
+/// a chunk the space gave up on is invisible to it — fix round 1's I1.
+///
+/// A fourth document identity: `"a"` is [`db_with_chunks`]'s, `"b"` is
+/// [`db_with_chunks_in_two_documents`]'s second, `"c"` is
+/// [`add_document_with_chunks`]'s, so `"d"` collides with none of them.
+pub fn db_with_unindexed_chunks(count: usize) -> TempDb {
+    let db = temp_db();
+    let doc = db
+        .insert_document(&"d".repeat(64), "text/plain", 64, SourceKind::Document)
+        .expect("document");
+    for ord in 0..count {
+        write_chunk(&db, &doc, ord as i64, &format!("{CHUNK_TEXT_PREFIX}d{ord}"));
+    }
+    db
+}
+
 /// One `indexed` document holding one chunk whose text is `text` — for the
 /// test that reads what went onto the wire.
 pub fn db_with_display_text(text: &str) -> TempDb {

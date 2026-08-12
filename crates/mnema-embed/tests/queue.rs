@@ -1221,3 +1221,56 @@ fn a_ready_space_goes_back_to_building_when_new_chunks_arrive() {
     );
     assert_eq!(fixture::space_state(&db, space), "ready");
 }
+
+// ── Task 7 fix round 1: `ready` was two predicates over two different sets
+// of chunks — the queue is `d.status = 'indexed'` only, `failed_chunk_count`
+// is every chunk that exists. Both rows below were probed by review, not
+// reasoned, and both are regression tests now rather than a probe script
+// that ran once and was deleted.
+
+/// I1 — the dangerous direction. A document whose chunks are written but not
+/// yet `indexed` is invisible to the queue (`space.rs:47`) and has no
+/// failures (`failed_chunk_count` finds nothing to have given up on), so the
+/// old two-predicate condition read both halves as satisfied and wrote
+/// `ready` over a space holding zero vectors for three chunks that exist.
+#[test]
+fn a_space_with_chunks_behind_an_unindexed_document_does_not_become_ready() {
+    let db = fixture::db_with_unindexed_chunks(3);
+    let space = fixture::active_space_1024(&db);
+    let mock = fixture::mock(vec![]);
+
+    mnema_embed::run(&db, mock.base(), "k", 10, &|| false, &mut |_| {}).expect("run");
+
+    assert!(
+        mock.request_if_any().is_none(),
+        "the provider was asked about a document that is not indexed"
+    );
+    assert_eq!(fixture::space_state(&db, space), "building");
+}
+
+/// I2 — the mirror, and the direction fix round 1 keeps rather than closes.
+/// A chunk this space gave up on, whose document has since left `indexed`
+/// (the same transition a rebuild starts with), is invisible to the queue
+/// exactly like I1's chunk — but unlike I1's, it already carries a verdict,
+/// and the space genuinely is not complete. Staying `building` here is not a
+/// bug the state should hide: `failed_chunk_count` is what tells a person
+/// why, once something reads it.
+#[test]
+fn a_space_with_a_failed_chunk_behind_a_document_that_left_indexed_stays_building() {
+    let db = fixture::db_with_chunks(3);
+    let space = fixture::active_space_1024(&db);
+    let mock = fixture::provider_refusing_the_second_text();
+    mnema_embed::run(&db, mock.base(), "k", 1, &|| false, &mut |_| {}).expect("run");
+    assert_eq!(fixture::space_state(&db, space), "building");
+
+    fixture::set_status(&db, &fixture::first_document(&db), "pending");
+
+    let empty = fixture::mock(vec![]);
+    mnema_embed::run(&db, empty.base(), "k", 10, &|| false, &mut |_| {}).expect("run");
+
+    assert!(
+        empty.request_if_any().is_none(),
+        "the provider was asked about a document that is not indexed"
+    );
+    assert_eq!(fixture::space_state(&db, space), "building");
+}
