@@ -290,10 +290,26 @@ case_ "provider: PositionState must not fail the whole body on a wrong-shaped in
 
 # ---------------------------------------------------------------- task 6
 #
-# The embedding pass. Every test in `crates/mnema-embed/tests/queue.rs` that
-# is not protected by another case below has one of its own: this is the crate
-# that writes vectors, and the failure it exists to prevent is a chunk that
-# reports as handled and is not in the index.
+# The embedding pass: the crate that writes vectors, and the failure it exists
+# to prevent is a chunk that reports as handled and is not in the index.
+#
+# ⚠️ **These cases do not name every test in `crates/mnema-embed/tests/queue.rs`,
+# and the claim that they did was false.** It said "every test that is not
+# protected by another case below has one of its own", which read as a
+# completeness guarantee and was not one — a review found five `queue.rs` tests
+# named by no case at all. That is the shape this project has already paid for
+# under "there are exactly three" when there were four: a number, or the word
+# "every", is a definition as surely as a name is.
+#
+# What is actually true: each case below breaks one thing and names one test
+# that must go red. Several tests are covered only as a side effect of a case
+# aimed at something else, and a few — `a_run_that_stopped_continues_where_it_
+# left_off`, `cancelling_keeps_what_was_already_written`,
+# `nothing_to_do_asks_the_provider_nothing`,
+# `the_tally_and_the_index_agree_after_a_run_with_both_kinds` — are named by no
+# case here. They are ordinary-path tests whose defects the cases below already
+# redden elsewhere; that is a judgement, not a guarantee, and anybody adding a
+# case is welcome to take one of them.
 
 # The invariant the whole task exists to establish. There is no "filter by the
 # active space" to remove — the space is the active one by construction,
@@ -320,6 +336,10 @@ case_ "embed: no active space is a refusal, not a guess at which space to use" \
 # offered again on every run for ever; without the count, the refusal never
 # reaches the person who could act on it. Two cases, because one test asserts
 # both and each half fails it alone.
+# ⚠️ Reddens at `queue.rs`'s `.expect("run")`, not at the `failed_rows`
+# assertion this case is named for: with no row written the chunk stays in the
+# queue, the mock runs out, and the run returns Err. The detection is real —
+# look at the panic line the harness prints, not at the assertion in the title.
 case_ "embed: a refused chunk must leave a failed row behind" \
   crates/mnema-embed/src/lib.rs \
   's{                    db\.record_embedding_failure\(space, pending\[0\]\.id\)\?;\n                    tally\.failed \+= 1;\n}{                    tally.failed += 1;\n}' \
@@ -378,6 +398,8 @@ case_ "index: the queue must skip failed and skipped documents too, not only pen
 # Without this the pass spins on the chunk the provider will not take: it is
 # offered again on the next batch, and on the next run, for as long as the
 # archive is open, against a provider that charges for the attempt.
+# ⚠️ Reddens at `.expect("run")` rather than at the count assertion: the chunk
+# is offered again, the mock has nothing left, and the `599` ends the run.
 case_ "index: a chunk this space gave up on must leave the queue" \
   crates/mnema-index/src/space.rs \
   's{\n            AND NOT EXISTS \(\{GIVEN_UP_ON_CURRENT_TEXT\}\)}{}' \
@@ -613,9 +635,89 @@ case_ "embed: a split that succeeded at nothing must condemn nothing" \
 # a split that DID corroborate its refusals reports nothing failed, and the
 # chunk the provider will not take goes back to being invisible — the silence
 # this cycle exists to remove.
+# ⚠️ Reddens at `.expect("run")` rather than at the `(embedded, failed)`
+# assertion: with the held rows never written, the chunks come back on the next
+# pass of the queue and the mock is exhausted.
 case_ "embed: a corroborated split must still write the rows it held" \
   crates/mnema-embed/src/lib.rs \
   's{    for chunk_id in condemned \{\n        db\.record_embedding_failure\(space, chunk_id\)\?;\n        tally\.failed \+= 1;\n    \}\n}{    let _ = &condemned;\n}' \
   '    let _ = &condemned;
     Ok(())' \
   mnema-embed 'one_success_in_a_split_corroborates_the_refusals_beside_it' --test queue
+
+# ── Task 6, fix round 1 ──────────────────────────────────────────────────────
+#
+# M2: the filter that makes the queue *the* queue had no case of its own. This
+# is the whole of "not done yet" — remove it and every chunk is offered again on
+# every pass, for ever, against a paid provider.
+case_ "index: the queue must exclude chunks that already have a vector" \
+  crates/mnema-index/src/space.rs \
+  's{\n            AND c\.id NOT IN \(SELECT chunk_id FROM \{table\}\)}{}' \
+  'WHERE d.status = \x27indexed\x27
+            AND NOT EXISTS' \
+  mnema-embed 'the_queue_is_the_chunks_with_no_vector' --test queue
+
+# I1: chunk ids are reused, so a vector written by id alone can land on a chunk
+# that was rebuilt while the request was in flight — search then answers with a
+# citation quoting text the file no longer contains. The comparison and the
+# write must be one transaction; this mutation keeps the write and drops the
+# comparison, which is exactly what `upsert_vector` on its own does.
+case_ "index: a vector must be written only onto the text it was made from (I1)" \
+  crates/mnema-index/src/space.rs \
+  's{            if still_this_text\.is_none\(\) \{\n                return Ok\(false\);\n            \}\n}{}' \
+  'let still_this_text: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM chunk WHERE id = ?1 AND content_hash = ?2",
+                    params![chunk_id, content_hash],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            tx.execute(' \
+  mnema-index 'a_vector_is_written_only_onto_the_text_it_was_made_from' --test space
+
+# The same guard, from the other side: a chunk that has gone entirely. Separate
+# test, separate case, because a comparison against a row that does not exist is
+# a different SQL outcome from one against a row whose hash moved.
+case_ "index: a vector for a chunk that has gone must not be written (I1)" \
+  crates/mnema-index/src/space.rs \
+  's{            if still_this_text\.is_none\(\) \{\n                return Ok\(false\);\n            \}\n}{}' \
+  'let still_this_text: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM chunk WHERE id = ?1 AND content_hash = ?2",
+                    params![chunk_id, content_hash],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            tx.execute(' \
+  mnema-index 'a_vector_for_a_chunk_that_has_gone_is_not_written' --test space
+
+# M5: `record_embedding_failure` writes nothing when the chunk has gone. Saying
+# it wrote makes the tally and `failed_chunk_count` disagree — the third number
+# lying about itself, and that number is the whole safety argument for letting a
+# chunk leave the queue.
+case_ "index: recording a failure must report whether it actually wrote a row (M5)" \
+  crates/mnema-index/src/space.rs \
+  's{        Ok\(written > 0\)}{        let _ = written;\n        Ok(true)}' \
+  '        let _ = written;
+        Ok(true)' \
+  mnema-index 'recording_a_failure_says_whether_it_wrote_one' --test space
+
+# I2: a split is up to `batch` network round trips and reported nothing until it
+# finished, so the bar froze exactly where the work is longest.
+case_ "embed: a split must report progress as it goes, not once at the end (I2)" \
+  crates/mnema-embed/src/lib.rs \
+  's{        on_progress\(EmbedProgress \{\n            done: tally\.embedded,\n            total: call\.total,\n            failed: tally\.failed,\n        \}\);\n    \}\n    if tally\.embedded == embedded_before \{}{    \}\n    if tally.embedded == embedded_before \{}' \
+  '        }
+    }
+    if tally.embedded == embedded_before {' \
+  mnema-embed 'progress_moves_inside_a_split_not_only_between_batches' --test queue
+
+# I3: the run must report the true counts before returning an error. The vectors
+# from the failing batch are already in the index, so a bare `return` leaves the
+# shell's last number short by up to a batch of embeddings that really are there.
+case_ "embed: an aborting run must report its true counts before returning (I3)" \
+  crates/mnema-embed/src/lib.rs \
+  's{        let outcome = one_batch\(&call, &pending, cancel, on_progress, &mut tally\);}{        one_batch(&call, \&pending, cancel, on_progress, \&mut tally)?;\n        let outcome: Result<(), Error> = Ok(());}' \
+  'one_batch(&call, &pending, cancel, on_progress, &mut tally)?;
+        let outcome: Result<(), Error> = Ok(());' \
+  mnema-embed 'the_last_number_is_true_even_when_the_run_stops' --test queue
