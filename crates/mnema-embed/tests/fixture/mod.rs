@@ -110,6 +110,26 @@ pub fn db_with_unindexed_chunks(count: usize) -> TempDb {
     db
 }
 
+/// Adds one more document to a database a test already built — its chunks
+/// written, its status left `'pending'`. [`db_with_unindexed_chunks`]'s
+/// scenario, but appended to an existing database rather than a fresh one,
+/// so a test can put it behind a space that is already `ready`: the ordinary
+/// way an archive grows once a first pass has already finished it, through
+/// exactly the window `crates/mnema-ingest/src/lib.rs:546-598`'s own comment
+/// names.
+///
+/// Shares `db_with_unindexed_chunks`'s document identity, `"d"` — the two
+/// are never called against the same database, so nothing collides.
+pub fn add_unindexed_document_with_chunks(db: &Db, count: usize) -> String {
+    let doc = db
+        .insert_document(&"d".repeat(64), "text/plain", 64, SourceKind::Document)
+        .expect("document");
+    for ord in 0..count {
+        write_chunk(db, &doc, ord as i64, &format!("{CHUNK_TEXT_PREFIX}d{ord}"));
+    }
+    doc
+}
+
 /// One `indexed` document holding one chunk whose text is `text` — for the
 /// test that reads what went onto the wire.
 pub fn db_with_display_text(text: &str) -> TempDb {

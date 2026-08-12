@@ -1274,3 +1274,33 @@ fn a_space_with_a_failed_chunk_behind_a_document_that_left_indexed_stays_buildin
     );
     assert_eq!(fixture::space_state(&db, space), "building");
 }
+
+/// Fix round 2: the write moved to `space_is_complete`'s wide scope, but the
+/// retraction on entry stayed on `total > 0` — `queued_chunk_count`, the
+/// queue's own `d.status = 'indexed'`-scoped question. A space already
+/// `ready`, then a second document's chunks arrive behind a status that is
+/// not yet `indexed` (I1's window, reached the ordinary way an archive
+/// grows): the queue never sees them, so `total` stays `0` and nothing asks
+/// for a retraction — and the queue being empty on the very next check means
+/// `space_is_complete` is never asked either. The space stays `ready` over
+/// chunks with no vector, and no later run can ever clear it, because no
+/// later run's queue will see them either.
+#[test]
+fn a_ready_space_is_retracted_by_chunks_behind_an_unindexed_document_too() {
+    let db = fixture::db_with_chunks(3);
+    let space = fixture::active_space_1024(&db);
+    let first_pass = fixture::mock(vec![fixture::reply_with(3)]);
+    mnema_embed::run(&db, first_pass.base(), "k", 10, &|| false, &mut |_| {}).expect("run");
+    assert_eq!(fixture::space_state(&db, space), "ready");
+
+    fixture::add_unindexed_document_with_chunks(&db, 2);
+
+    let mock = fixture::mock(vec![]);
+    mnema_embed::run(&db, mock.base(), "k", 10, &|| false, &mut |_| {}).expect("run");
+
+    assert!(
+        mock.request_if_any().is_none(),
+        "the provider was asked about a document that is not indexed"
+    );
+    assert_eq!(fixture::space_state(&db, space), "building");
+}

@@ -180,26 +180,36 @@ pub enum Error {
 /// anyway.
 ///
 /// **What this does to `embedding_space.state` (D95b).** Both writes are
-/// unconditional — neither reads the column first — because both are decided
-/// from facts this function already has on hand.
+/// unconditional in the sense that matters — neither reads the `state` column
+/// first, so neither can come to disagree with a stored value it never looked
+/// at — and, since fix round 2, both are decided by the *same* question:
+/// [`mnema_index::Db::space_is_complete`], does every chunk that exists have a
+/// vector in this space.
 ///
-/// - On entry, if the queue is not empty, the space is written `building`,
+/// - On entry, if the space is **not** complete, it is written `building`,
 ///   whatever it said a moment before. `ready` is a claim that every chunk in
-///   the space has a vector, and a chunk waiting in the queue makes that claim
-///   false from the moment it exists — a second document indexed, an archive
-///   grown since the space last finished — not from the moment this pass gets
-///   back around to it. A state that could only ever move the other way would
-///   go on reporting "complete" over an archive it no longer describes.
-/// - On exit, the moment the queue reads empty, [`mnema_index::Db::space_is_complete`]
-///   is asked the one question that decides `ready`: does every chunk that
-///   exists — not only the ones the queue looked at — have a vector in this
-///   space. **Not** "queue empty and no failures", which fix round 1 (D95b)
-///   found were two predicates over two different sets of chunks: the queue
-///   is `d.status = 'indexed'` only, and a chunk behind a document written
-///   but not yet indexed answered neither "pending" nor "failed" — it was
-///   simply invisible, and the old condition read that silence as `ready`.
-///   `space_is_complete` asks the wider question directly, so it cannot be
-///   fooled by a chunk the queue never looked at.
+///   the space has a vector, and a chunk that exists without one makes that
+///   claim false from the moment it exists — a second document indexed, an
+///   archive grown since the space last finished — not from the moment this
+///   pass gets back around to it. A state that could only ever move the other
+///   way would go on reporting "complete" over an archive it no longer
+///   describes.
+///
+///   **Not** `total > 0` (the queue), which fix round 1 (D95b) had already
+///   moved the *exit* write off of and fix round 2 found the *entry* write
+///   had not followed: `total` is `queued_chunk_count`, scoped to
+///   `d.status = 'indexed'` the same way the queue itself is, so a chunk
+///   behind a document written but not yet indexed left `total == 0` — no
+///   retraction asked for — while the space still claimed `ready` over it.
+///   Worse than I1's original shape: since the queue never sees that chunk on
+///   any later run either, nothing would ever have retracted the claim,
+///   permanently. `space_is_complete` cannot be fooled by a chunk the queue
+///   never looked at, on either write.
+/// - On exit, the moment the queue reads empty, the same
+///   [`mnema_index::Db::space_is_complete`] decides `ready`. **Not** "queue
+///   empty and no failures", which fix round 1 found were two predicates over
+///   two different sets of chunks — see that method's own doc for the full
+///   argument.
 pub fn run(
     db: &Db,
     base: &str,
@@ -217,9 +227,17 @@ pub fn run(
     let total = db.queued_chunk_count(space)? as u64;
     // Retracts a `ready` claim the moment this run has evidence it no longer
     // holds — see the function doc's "What this does to `embedding_space.state`"
-    // above. Decided from `total`, already measured, so this never has to read
-    // the column it is about to write.
-    if total > 0 {
+    // above. `space_is_complete`, not `total > 0` (fix round 2, D95b): `total`
+    // is the queue's own `d.status = 'indexed'`-scoped question, and a chunk
+    // behind a document not yet indexed is invisible to it — the same window
+    // I1 closed on the write side. A space already `ready` when such a chunk
+    // arrives would see `total == 0` and never ask for a retraction, and the
+    // queue reading empty next would never ask `space_is_complete` either: the
+    // claim would stand over a chunk with no vector, unretractable by any
+    // later run, because no later run's queue sees it either. Asking the wide
+    // question here is what closes that: one predicate governs both writes,
+    // not one each.
+    if !db.space_is_complete(space)? {
         db.mark_space_building(space)?;
     }
     let call = Call {
