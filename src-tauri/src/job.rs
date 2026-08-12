@@ -21,6 +21,27 @@ pub struct Progress {
     pub done: u64,
     pub total: u64,
     pub skipped: u64,
+    /// How many units this run has given up on for good. Always `0` for the
+    /// probe and for a walk; written only by `embed_job.rs`.
+    ///
+    /// **Not `mnema_ingest::WalkProgress::refused`**, which is a *file* phase 1
+    /// declined to open and which `walk_job.rs` merges into [`Progress::
+    /// skipped`]. This is a *chunk the provider refused*, and the difference is
+    /// the whole reason it is a field of its own rather than another thing
+    /// added into `skipped`: a skipped unit is one nobody has got to, and these
+    /// are the ones nobody ever will — the chunk leaves the embedding queue and
+    /// is not offered again until its text changes, so vector search stops
+    /// answering for it while the document still shows it and lexical search
+    /// still finds it. It is the number that makes that rule defensible instead
+    /// of silent.
+    ///
+    /// **It counts this run, not the space.** The cumulative number for the
+    /// active space is `crate::models::IndexRead::failed_chunks`, read from the
+    /// database on the settings screen; a second run starts this one again at
+    /// zero while that one goes on growing. Two numbers about two scopes, and
+    /// `ui/render.js` says which is which rather than letting either be read as
+    /// the other.
+    pub refused: u64,
     pub seconds_left: Option<u64>,
 }
 
@@ -146,6 +167,18 @@ pub struct Ended {
     /// see [`Ended::indexed`]'s own doc comment for why this does not fold
     /// into it.
     pub unchanged: u64,
+    /// How many units the run gave up on for good — always `0` for the probe
+    /// and for a walk, and written only by `embed_job.rs`. See
+    /// [`Progress::refused`]'s own doc comment for what it is, what it is not
+    /// (`WalkProgress::refused`), and why it is a run-scoped number that the
+    /// settings screen's cumulative `failed_chunks` must not be read as.
+    ///
+    /// On [`Ended::failed`]'s two callers it is `0` for the same reason
+    /// `indexed` and `removed` are: neither has anything to read it from. The
+    /// embedding job's own failure path does have something — the rows are
+    /// already written — and fills it in with `..Ended::failed(..)`, which is
+    /// the one place this field is set on a `Failed` ending.
+    pub refused: u64,
     /// Always `0` for the probe, which reconciles nothing. For a walk,
     /// mirrors `WalkReport::removed` — how many `path` rows phase 3 actually
     /// deleted, as opposed to `frozen`, which is every prefix it refused to.
@@ -187,6 +220,7 @@ impl Ended {
                 done: total,
                 total,
                 skipped: 0,
+                refused: 0,
                 complete: true,
                 frozen: Vec::new(),
                 indexed: 0,
@@ -199,6 +233,7 @@ impl Ended {
                 done,
                 total,
                 skipped: 0,
+                refused: 0,
                 complete: true,
                 frozen: Vec::new(),
                 indexed: 0,
@@ -214,8 +249,8 @@ impl Ended {
     /// pool). `done` is the last count the window was *shown*, not the loop's
     /// internal position: those differ by whatever the throttle dropped, and
     /// a number the user never saw is a worse answer than the one they did.
-    /// `frozen`, `indexed`, `unchanged` and `removed` are empty or zero and
-    /// `complete` is `false` because both callers reach this with no
+    /// `frozen`, `indexed`, `unchanged`, `removed` and `refused` are empty or
+    /// zero and `complete` is `false` because both callers reach this with no
     /// `WalkReport` to read any of them from — the job stopped before
     /// producing one, and
     /// `false` is the side that costs nothing to be wrong about: it can only
@@ -233,6 +268,7 @@ impl Ended {
             done,
             total,
             skipped: 0,
+            refused: 0,
             complete: false,
             frozen: Vec::new(),
             indexed: 0,
@@ -313,24 +349,43 @@ pub fn seconds_left(done: u64, total: u64, elapsed: Duration) -> Option<u64> {
 
 /// Whether a progress report should go out now: nothing has been sent yet,
 /// `interval` has elapsed since the last one, or this report is the one that
-/// reaches `total` — always sent regardless of timing, because a bar that
-/// stops one short of the end looks like a hang.
+/// **resolves the last unit** — always sent regardless of timing, because a bar
+/// that stops one short of the end looks like a hang.
 ///
-/// Shared by [`run_probe`]'s own loop and `walk_job::start_walk_job`'s
-/// progress closure. `walk_root` (`mnema-ingest`) calls its progress
-/// callback once per file with no throttle of its own — [`REPORT_INTERVAL`]'s
-/// own doc comment names the shape that produces: "a folder of a hundred
-/// thousand files would put a hundred thousand messages through the IPC" —
-/// so whoever owns the channel on the other end of that callback has to
-/// apply this rule, or flood it.
+/// Shared by [`run_probe`]'s own loop, `walk_job::start_walk_job`'s progress
+/// closure and `embed_job::start_embed_job`'s. `walk_root` (`mnema-ingest`)
+/// calls its progress callback once per file with no throttle of its own —
+/// [`REPORT_INTERVAL`]'s own doc comment names the shape that produces: "a
+/// folder of a hundred thousand files would put a hundred thousand messages
+/// through the IPC" — so whoever owns the channel on the other end of that
+/// callback has to apply this rule, or flood it.
+///
+/// ⚠️ **`refused` is in the condition, and that is a repair rather than a
+/// generalisation.** The arm used to read `done == total`, which silently never
+/// fires for a run that ends with refusals — `mnema_embed::EmbedProgress`'s own
+/// doc comment says so in as many words: "a run with `failed > 0` never reaches
+/// `done == total` at all". So the unthrottled last report was missing on
+/// exactly the runs whose numbers matter most, and the promise above held only
+/// for the two callers that cannot refuse anything. A resolved unit is one that
+/// was done *or* given up on, which is what the sum says; both existing callers
+/// pass `0` and keep the behaviour they had, and
+/// `progress_is_throttled_to_the_report_interval` is what still pins it.
+///
+/// `>=` rather than `==` for the reason the old `==` failed: a condition that
+/// has to be hit exactly stops firing altogether the moment something makes the
+/// left side overshoot, and it does it in silence. Nothing can overshoot today
+/// (`done + failed <= total` is `EmbedProgress`'s own invariant, `total` being
+/// the queue measured once at the start of a run that is the only writer), so
+/// this costs nothing and cannot fail that way later.
 pub fn progress_is_due(
     last: Option<Instant>,
     now: Instant,
     interval: Duration,
     done: u64,
+    refused: u64,
     total: u64,
 ) -> bool {
-    done == total || last.is_none_or(|last| now.duration_since(last) >= interval)
+    done + refused >= total || last.is_none_or(|last| now.duration_since(last) >= interval)
 }
 
 /// Runs the probe job, reporting to `on_progress` and stopping when `cancel` is
@@ -368,12 +423,16 @@ where
         done += 1;
 
         let now = Instant::now();
-        if progress_is_due(last_report, now, report_interval, done, total) {
+        // `0` refused: the probe does forty units of nothing and has nothing to
+        // give up on, so the arm above reduces to the `done == total` it was
+        // before `refused` existed.
+        if progress_is_due(last_report, now, report_interval, done, 0, total) {
             last_report = Some(now);
             on_progress(Progress {
                 done,
                 total,
                 skipped: 0,
+                refused: 0,
                 seconds_left: seconds_left(done, total, started.elapsed()),
             });
         }
@@ -396,6 +455,7 @@ mod tests {
                 done: 40,
                 total: 40,
                 skipped: 0,
+                refused: 0,
                 complete: true,
                 frozen: Vec::new(),
                 indexed: 0,
@@ -415,6 +475,7 @@ mod tests {
                 done: 7,
                 total: 40,
                 skipped: 0,
+                refused: 0,
                 complete: true,
                 frozen: Vec::new(),
                 indexed: 0,
@@ -498,6 +559,7 @@ mod tests {
             Instant::now(),
             Duration::from_millis(250),
             1,
+            0,
             100
         ));
     }
@@ -511,6 +573,7 @@ mod tests {
             now,
             Duration::from_millis(250),
             5,
+            0,
             100
         ));
     }
@@ -524,6 +587,7 @@ mod tests {
             now,
             Duration::from_millis(250),
             5,
+            0,
             100
         ));
     }
@@ -531,7 +595,7 @@ mod tests {
     #[test]
     fn the_report_that_reaches_total_is_always_due() {
         // One millisecond after the last one — nowhere near the interval —
-        // and still due, because `done == total` overrides the timer. Pins
+        // and still due, because reaching `total` overrides the timer. Pins
         // the exact exception `walk_job.rs`'s progress closure leans on to
         // avoid a bar that stops one file short of the end.
         let last = Instant::now();
@@ -541,8 +605,41 @@ mod tests {
             now,
             Duration::from_millis(250),
             100,
+            0,
             100
         ));
+    }
+
+    /// The arm as `done == total` never fires for a run that ends with
+    /// refusals, which is exactly the run whose numbers a person needs: an
+    /// embedding pass that gave up on three chunks stops at 97 done of 100 and
+    /// the last report is left to the throttle, so the bar can sit on whatever
+    /// number the timer last let through while the true one is never sent.
+    /// `mnema_embed::EmbedProgress`'s own doc comment states the arithmetic
+    /// this test is the other end of.
+    #[test]
+    fn the_report_that_resolves_the_last_unit_is_due_even_when_some_were_refused() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(1);
+        assert!(
+            progress_is_due(Some(last), now, Duration::from_millis(250), 97, 3, 100),
+            "97 embedded and 3 refused resolves all 100, and the report saying so was withheld"
+        );
+    }
+
+    /// The other direction, without which the test above is satisfied by a
+    /// function that answers `true` to everything — and so is the whole
+    /// throttle. One unit still unresolved, a millisecond after the last
+    /// report: not due.
+    #[test]
+    fn a_report_that_leaves_a_unit_unresolved_is_still_throttled() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(1);
+        assert!(
+            !progress_is_due(Some(last), now, Duration::from_millis(250), 96, 3, 100),
+            "96 embedded and 3 refused leaves one unit unaccounted for, so nothing forces \
+             this report out ahead of the interval"
+        );
     }
 
     #[test]

@@ -134,7 +134,13 @@ pub fn start_walk_job(
                     // `run_probe`'s own loop uses, pulled out so both share
                     // one tested definition of "due" rather than two.
                     let now = Instant::now();
-                    if !job::progress_is_due(last_report, now, job::REPORT_INTERVAL, done, total) {
+                    // `0` refused: a walk gives nothing up for good. Its own
+                    // `WalkProgress::refused` is a file phase 1 declined to
+                    // open, merged into `skipped` below, and a different fact
+                    // from the one `job::Progress::refused` carries — that
+                    // field's own doc comment is where the two are told apart.
+                    if !job::progress_is_due(last_report, now, job::REPORT_INTERVAL, done, 0, total)
+                    {
                         return;
                     }
                     last_report = Some(now);
@@ -152,6 +158,10 @@ pub fn start_walk_job(
                             // not what the bar is for. Nothing is lost: the
                             // journal, not the bar, is the record.
                             skipped: progress.skipped + progress.refused,
+                            // Not `progress.refused`, which is already inside
+                            // `skipped` one line up. See
+                            // `job::Progress::refused`.
+                            refused: 0,
                             seconds_left: job::seconds_left(done, total, started.elapsed()),
                         }))
                         .is_ok()
@@ -278,6 +288,9 @@ fn ended_from_report(report: &WalkReport) -> Ended {
         // Same merge `Progress` makes for the same reason — see the comment
         // where the live progress event is built, above.
         skipped: report.skipped + report.refused,
+        // A walk gives no unit up for good; `report.refused` is a file it
+        // declined to open, and it is already inside `skipped`.
+        refused: 0,
         complete: report.complete,
         frozen,
         indexed: report.indexed,
