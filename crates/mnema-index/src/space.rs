@@ -344,6 +344,83 @@ impl Db {
         })
     }
 
+    /// [`Db::upsert_vector`], but only if this chunk still holds the text the
+    /// vector was made from. Answers whether it wrote.
+    ///
+    /// **The window this closes.** An embedding pass reads `(chunk_id, text)`
+    /// from [`Db::chunks_needing_embedding`], sends the text over a network,
+    /// and comes back seconds later to write the answer by `chunk_id`. In
+    /// between, a rebuild can delete that chunk and write a new one — and
+    /// `chunk.id` is `INTEGER PRIMARY KEY` **without** `AUTOINCREMENT`, so the
+    /// new chunk can be handed the very same id. `tests/citation.rs`'s
+    /// `a_reused_chunk_id_gets_no_inherited_vector` asserts that the reuse
+    /// happens rather than assuming it. The unguarded write then binds the
+    /// vector for text A to a chunk that now holds text B, and vector search
+    /// answers with a citation quoting text the file no longer contains.
+    ///
+    /// D88 does not cover this and was never meant to: it removes a vector that
+    /// *outlived* its chunk, and here the vector arrives after the chunk is
+    /// already gone — the rows it sweeps do not exist yet when it runs.
+    ///
+    /// **The comparison and the write are one transaction, and that is the
+    /// whole mechanism.** A caller that reads the hash, compares it, and then
+    /// calls [`Db::upsert_vector`] has rebuilt the same window one layer up:
+    /// two statements with a gap between them is the thing being removed.
+    ///
+    /// **Today this is defensive, not load-bearing, and it matters that a later
+    /// session can tell which.** `src-tauri/src/state.rs` holds a single
+    /// `running` flag for the whole application, so no rebuild can be in flight
+    /// while an embedding pass is; the race is unreachable and this check is
+    /// expected to answer `true` every time it is asked. **It becomes
+    /// load-bearing the day indexing work gets a database connection of its
+    /// own** — already written down as deferred to the search cycle, and
+    /// exactly the change that would let a rebuild and the queue run at once.
+    /// Whoever makes that change should arrive at this sentence.
+    ///
+    /// `false` is not an error. The chunk is gone, or its text has moved on;
+    /// either way this vector describes nothing that is there, and the computed
+    /// queue offers the chunk again with its current text if it still exists.
+    /// Nothing has to be recorded for that to happen — which is the same
+    /// property that lets [`Db::clear_document_content`] write no replacement.
+    pub fn upsert_vector_for_text(
+        &self,
+        space_id: i64,
+        chunk_id: i64,
+        content_hash: &str,
+        v: &[f32],
+    ) -> Result<bool, Error> {
+        let space = self.space(space_id)?;
+        check_rankable(v, &space.metric, VectorRole::Stored(chunk_id))?;
+        self.transaction(|tx| {
+            let still_this_text: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM chunk WHERE id = ?1 AND content_hash = ?2",
+                    params![chunk_id, content_hash],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if still_this_text.is_none() {
+                return Ok(false);
+            }
+            tx.execute(
+                &format!("DELETE FROM {} WHERE chunk_id = ?1", space.table),
+                params![chunk_id],
+            )?;
+            tx.execute(
+                &format!(
+                    "INSERT INTO {} (chunk_id, embedding) VALUES (?1, ?2)",
+                    space.table
+                ),
+                params![chunk_id, as_blob(v)],
+            )?;
+            tx.execute(
+                "DELETE FROM chunk_embedding_state WHERE space_id = ?1 AND chunk_id = ?2",
+                params![space_id, chunk_id],
+            )?;
+            Ok(true)
+        })
+    }
+
     /// Removes one chunk's embedding from one space, and any
     /// `chunk_embedding_state` row for it, in one transaction. Absence of
     /// either is not an error: the caller retrying a partially failed batch
@@ -823,8 +900,19 @@ impl Db {
     /// from "try again later" depends on what the provider actually answers to
     /// an over-long chunk, and nobody has measured that. The column is a
     /// record, not a policy.
-    pub fn record_embedding_failure(&self, space_id: i64, chunk_id: i64) -> Result<(), Error> {
-        self.conn().execute(
+    /// Answers **whether it wrote**, and the caller is expected to count that
+    /// rather than the call.
+    ///
+    /// The `SELECT` finds no row when the chunk has gone, so this writes
+    /// nothing and returns `Ok(false)` — no foreign key is tripped and there is
+    /// nothing to report as an error. A caller that incremented a `failed`
+    /// counter regardless would put a number on the settings screen that
+    /// [`Db::failed_chunk_count`] disagrees with, and that number is the whole
+    /// safety argument for a chunk being allowed to leave the queue: a failure
+    /// count including rows nobody can find is the third number lying about
+    /// itself.
+    pub fn record_embedding_failure(&self, space_id: i64, chunk_id: i64) -> Result<bool, Error> {
+        let written = self.conn().execute(
             "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state, attempts)
              SELECT ?1, ?2, c.content_hash, 2, 1 FROM chunk c WHERE c.id = ?2
              ON CONFLICT(space_id, chunk_id) DO UPDATE
@@ -833,7 +921,7 @@ impl Db {
                    attempts     = attempts + 1",
             params![space_id, chunk_id],
         )?;
-        Ok(())
+        Ok(written > 0)
     }
 
     /// The rule below, asked only of a call that would actually move the

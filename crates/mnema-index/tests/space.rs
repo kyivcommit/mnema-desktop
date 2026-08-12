@@ -949,3 +949,113 @@ fn the_embeddings_everywhere_are_summed_over_spaces_and_distinct_within_one() {
         "what a retired space held is no longer owed to anybody"
     );
 }
+
+// ------------------------------------------- writing onto the text you read
+
+/// `chunk.id` is reused — `tests/citation.rs`'s
+/// `a_reused_chunk_id_gets_no_inherited_vector` asserts the reuse rather than
+/// assuming it — so an embedding pass that reads `(id, text)`, spends a network
+/// round trip on the text, and writes back by `id` alone can bind text A's
+/// vector to a chunk that now holds text B. This is the guard, and it is here
+/// rather than in the pass because a read-then-write at the caller is the same
+/// window one layer up.
+#[test]
+fn a_vector_is_written_only_onto_the_text_it_was_made_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+    let hash: String = db
+        .conn()
+        .query_row(
+            "SELECT content_hash FROM chunk WHERE id = ?1",
+            [chunk],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    assert!(
+        db.upsert_vector_for_text(space, chunk, &hash, &support::unit_vector_1024())
+            .unwrap(),
+        "the ordinary case — the chunk still holds the text — must write"
+    );
+    assert_eq!(db.embedded_chunk_count(space).unwrap(), 1);
+
+    // The text moves on under the pass. Nothing else changes: same space, same
+    // chunk id, a vector that was perfectly good a moment ago.
+    db.conn()
+        .execute(
+            "UPDATE chunk SET text = 'інший текст', content_hash = 'a-different-hash' \
+             WHERE id = ?1",
+            [chunk],
+        )
+        .unwrap();
+
+    assert!(
+        !db.upsert_vector_for_text(space, chunk, &hash, &support::other_unit_vector_1024())
+            .unwrap(),
+        "a vector for text that is no longer there must not be written"
+    );
+    assert_eq!(
+        support::stored_vector(&db, space, chunk),
+        support::unit_vector_1024(),
+        "the stale write replaced the vector that was already there"
+    );
+}
+
+/// A chunk that has gone entirely, which is the other half of the same window:
+/// the row the vector would name does not exist, and `false` says so rather
+/// than an error — the queue simply never offers that chunk again.
+#[test]
+fn a_vector_for_a_chunk_that_has_gone_is_not_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+    let hash: String = db
+        .conn()
+        .query_row(
+            "SELECT content_hash FROM chunk WHERE id = ?1",
+            [chunk],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn()
+        .execute("DELETE FROM chunk WHERE id = ?1", [chunk])
+        .unwrap();
+
+    assert!(
+        !db.upsert_vector_for_text(space, chunk, &hash, &support::unit_vector_1024())
+            .unwrap()
+    );
+    assert_eq!(db.embedded_chunk_count(space).unwrap(), 0);
+}
+
+/// `record_embedding_failure` writes nothing when the chunk has gone — its
+/// `INSERT … SELECT` finds no row — and the caller counts what it reports, not
+/// what it called. A `failed` number that includes rows nobody can find is the
+/// third number lying about itself, and that number is the entire reason a
+/// chunk is allowed to leave the queue.
+#[test]
+fn recording_a_failure_says_whether_it_wrote_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+
+    assert!(
+        db.record_embedding_failure(space, chunk).unwrap(),
+        "an ordinary refusal writes a row and must say so"
+    );
+    assert_eq!(db.failed_chunk_count(space).unwrap(), 1);
+
+    db.conn()
+        .execute("DELETE FROM chunk WHERE id = ?1", [chunk])
+        .unwrap();
+
+    assert!(
+        !db.record_embedding_failure(space, chunk).unwrap(),
+        "a chunk that has gone leaves no row, and the caller must not count one"
+    );
+    assert_eq!(db.failed_chunk_count(space).unwrap(), 0);
+}

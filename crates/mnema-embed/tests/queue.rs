@@ -969,3 +969,99 @@ fn a_refusal_neither_undoes_what_came_before_nor_stops_what_comes_after() {
         "the pass stopped at the refusal"
     );
 }
+
+/// The bar must move inside a split. A split is up to `batch` network round
+/// trips — the longest path in the whole pass — and reporting once at the end
+/// of it freezes the bar exactly where the work is slowest.
+///
+/// The sequence is asserted rather than the count: it says the reports arrive
+/// *as the work happens*, one per single call, and then once more from the
+/// loop that owns the batch. A pass that reported only at the end would show a
+/// single `4`.
+#[test]
+fn progress_moves_inside_a_split_not_only_between_batches() {
+    let db = fixture::db_with_chunks(4);
+    fixture::active_space_1024(&db);
+    let mock = fixture::mock(vec![
+        Reply::status(400, r#"{"error":{"message":"input is too long"}}"#),
+        fixture::reply_with(1),
+        fixture::reply_with(1),
+        fixture::reply_with(1),
+        fixture::reply_with(1),
+    ]);
+
+    let mut done: Vec<u64> = Vec::new();
+    mnema_embed::run(
+        &db,
+        mock.base(),
+        "k",
+        4,
+        &|| false,
+        &mut |p: EmbedProgress| {
+            assert_eq!(
+                p.total, 4,
+                "a report from inside a split invented its own total"
+            );
+            done.push(p.done);
+        },
+    )
+    .expect("run");
+
+    assert_eq!(
+        done,
+        vec![1, 2, 3, 4, 4],
+        "the bar stood still while the split made four round trips"
+    );
+}
+
+/// The last number the shell sees must be true even when the run ends in an
+/// error. The vectors from the batch that failed are already in the index; a
+/// pass that returns `Err` without reporting leaves the shell short by up to a
+/// batch of embeddings that really are there — the same class of defect as a
+/// `failed` count including rows nobody can find.
+///
+/// The `Err` itself is unchanged and asserted: an error must not be shaped like
+/// success. It simply goes back after the number is honest rather than before.
+///
+/// This path aborts without a split — `503` is never attributable, so the batch
+/// is not re-sent — which is what keeps it about the report and not about the
+/// split's own reporting.
+#[test]
+fn the_last_number_is_true_even_when_the_run_stops() {
+    let db = fixture::db_with_chunks(4);
+    let space = fixture::active_space_1024(&db);
+    let mock = fixture::mock(vec![
+        fixture::reply_with(2),
+        Reply::status(503, r#"{"error":{"message":"upstream is down"}}"#),
+    ]);
+
+    let mut reports: Vec<EmbedProgress> = Vec::new();
+    let out = mnema_embed::run(
+        &db,
+        mock.base(),
+        "k",
+        2,
+        &|| false,
+        &mut |p: EmbedProgress| {
+            reports.push(p);
+        },
+    );
+
+    assert!(matches!(out, Err(Error::Provider(_))), "got {out:?}");
+    assert_eq!(
+        reports.len(),
+        2,
+        "the batch that ended the run reported nothing at all"
+    );
+    let last = reports.last().expect("a report");
+    assert_eq!(
+        (last.done, last.failed),
+        (2, 0),
+        "the last number the shell saw is not what the run had done"
+    );
+    assert_eq!(
+        last.done as i64,
+        db.embedded_chunk_count(space).expect("count"),
+        "the last number on screen disagrees with the index"
+    );
+}

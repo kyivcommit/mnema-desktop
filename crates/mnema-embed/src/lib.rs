@@ -191,13 +191,17 @@ pub fn run(
     }
     let space = db.active_space()?.ok_or(Error::NoActiveSpace)?;
     let (model, width) = db.space_model(space)?;
+    // Measured once, before anything is taken out of it — see `EmbedProgress`.
+    let total = db.queued_chunk_count(space)? as u64;
     let call = Call {
+        db,
+        space,
+        width,
+        total,
         base,
         key,
         model: &model,
     };
-    // Measured once, before anything is taken out of it — see `EmbedProgress`.
-    let total = db.queued_chunk_count(space)? as u64;
 
     let mut tally = EmbedTally {
         embedded: 0,
@@ -214,51 +218,93 @@ pub fn run(
         if pending.is_empty() {
             break;
         }
-        let texts: Vec<String> = pending.iter().map(|c| c.text.clone()).collect();
-        match mnema_provider::embed(call.base, call.key, call.model, &texts) {
-            Ok(vectors) => store(db, space, width, &pending, &vectors, &mut tally)?,
-            Err(refusal) => {
-                // Asked first, and of every batch size: a failure that cannot be
-                // about these texts ends the run and condemns nobody.
-                if !speaks_only_about_these_texts(&refusal) {
-                    return Err(Error::Provider(refusal));
-                }
-                if pending.len() == 1 {
-                    // One text, and an answer that can only be about it — but
-                    // only once something else in this run has shown that the
-                    // provider answers at all. Nothing has, on the very first
-                    // chunk of an archive, and the first chunk is the worst
-                    // possible thing to condemn on no evidence: a provider that
-                    // is simply broken this morning would be recorded as nine
-                    // thousand texts that cannot be embedded, one batch at a
-                    // time, each of them needing an edit to the file before
-                    // anything will look at it again.
-                    if tally.embedded == 0 {
-                        return Err(Error::Provider(refusal));
-                    }
-                    // `content_hash` is read from the chunk inside
-                    // `record_embedding_failure`, so the row is about the text
-                    // that was actually sent and cannot be about anything else.
-                    db.record_embedding_failure(space, pending[0].id)?;
-                    tally.failed += 1;
-                } else {
-                    one_at_a_time(db, space, &call, width, &pending, cancel, &mut tally)?;
-                }
-            }
-        }
+        let outcome = one_batch(&call, &pending, cancel, on_progress, &mut tally);
+        // **Reported before the outcome is propagated, not after.** On every
+        // path that ends the run, the counts here are already true of the
+        // database — vectors from this batch are written and rows from a split
+        // are recorded — and returning `Err` first would leave the shell's last
+        // number short by up to a batch of embeddings that are really in the
+        // index. An error must not be shaped like success, so the `Err` still
+        // goes back; it goes back after the number is honest.
         on_progress(EmbedProgress {
             done: tally.embedded,
             total,
             failed: tally.failed,
         });
+        outcome?;
     }
     Ok(tally)
 }
 
-/// Where a request goes and what it asks for, carried together because the
-/// three travel together and none of them is this pass's to choose: `model`
-/// comes from the space, and `base`/`key` from the caller.
+/// One batch: send it, and deal with whatever comes back.
+///
+/// Split out of [`run`]'s loop for one reason — so that every way it can end,
+/// including the ones that end the whole run, passes through a single
+/// `on_progress` at the call site rather than through one that a `return` can
+/// step over.
+fn one_batch(
+    call: &Call<'_>,
+    pending: &[PendingChunk],
+    cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(EmbedProgress),
+    tally: &mut EmbedTally,
+) -> Result<(), Error> {
+    let texts: Vec<String> = pending.iter().map(|c| c.text.clone()).collect();
+    match mnema_provider::embed(call.base, call.key, call.model, &texts) {
+        Ok(vectors) => store(call, pending, &vectors, tally),
+        Err(refusal) => {
+            // Asked first, and of every batch size: a failure that cannot be
+            // about these texts ends the run and condemns nobody.
+            if !speaks_only_about_these_texts(&refusal) {
+                return Err(Error::Provider(refusal));
+            }
+            if pending.len() == 1 {
+                // One text, and an answer that can only be about it — but only
+                // once something else in this run has shown that the provider
+                // answers at all. Nothing has, on the very first chunk of an
+                // archive, and the first chunk is the worst possible thing to
+                // condemn on no evidence: a provider that is simply broken this
+                // morning would be recorded as nine thousand texts that cannot
+                // be embedded, one batch at a time, each of them needing an
+                // edit to the file before anything will look at it again.
+                if tally.embedded == 0 {
+                    return Err(Error::Provider(refusal));
+                }
+                // `content_hash` is read from the chunk inside
+                // `record_embedding_failure`, so the row is about the text that
+                // was actually sent and cannot be about anything else — and the
+                // count follows what it reports writing, not the fact that it
+                // was called.
+                if call
+                    .db
+                    .record_embedding_failure(call.space, pending[0].id)?
+                {
+                    tally.failed += 1;
+                }
+                Ok(())
+            } else {
+                one_at_a_time(call, pending, cancel, on_progress, tally)
+            }
+        }
+    }
+}
+
+/// Everything one batch needs that is not the batch: where the request goes,
+/// what it asks for, and where the answer is written.
+///
+/// `model` comes from the space and `base`/`key` from the caller, and none of
+/// the three is this pass's to choose. `db`, `space` and `width` travel with
+/// them because every function below needs all six and a parameter list that
+/// long is a place to pass two of them in the wrong order.
 struct Call<'a> {
+    db: &'a Db,
+    space: i64,
+    width: i64,
+    /// The queue as it stood when the run began — carried so that a progress
+    /// report raised from inside a split says the same `total` as one raised
+    /// from the main loop. A split that reported its own number, or a zero,
+    /// would make the bar jump every time a batch went wrong.
+    total: u64,
     base: &'a str,
     key: &'a str,
     model: &'a str,
@@ -306,12 +352,10 @@ struct Call<'a> {
 /// split, it is as many round trips as the batch is wide, and a person who
 /// pressed Stop would otherwise wait out all of them.
 fn one_at_a_time(
-    db: &Db,
-    space: i64,
     call: &Call<'_>,
-    width: i64,
     pending: &[PendingChunk],
     cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(EmbedProgress),
     tally: &mut EmbedTally,
 ) -> Result<(), Error> {
     let embedded_before = tally.embedded;
@@ -325,14 +369,7 @@ fn one_at_a_time(
         }
         let texts = [chunk.text.clone()];
         match mnema_provider::embed(call.base, call.key, call.model, &texts) {
-            Ok(vectors) => store(
-                db,
-                space,
-                width,
-                std::slice::from_ref(chunk),
-                &vectors,
-                tally,
-            )?,
+            Ok(vectors) => store(call, std::slice::from_ref(chunk), &vectors, tally)?,
             Err(refusal) => {
                 if !speaks_only_about_these_texts(&refusal) {
                     return Err(Error::Provider(refusal));
@@ -341,6 +378,18 @@ fn one_at_a_time(
                 last_refusal = Some(refusal);
             }
         }
+        // Reported per single call, not once for the whole split. This is the
+        // longest path in the pass — up to a whole batch of network round trips
+        // — and it is the one place a bar built from these numbers would
+        // otherwise sit still for the entire time the work is at its slowest.
+        // `failed` does not move here: the rows are held until something
+        // corroborates them, and reporting them before they are written would
+        // put a number on screen that the database does not have.
+        on_progress(EmbedProgress {
+            done: tally.embedded,
+            total: call.total,
+            failed: tally.failed,
+        });
     }
     if tally.embedded == embedded_before {
         // Nothing here corroborated anything. The held rows are dropped rather
@@ -351,8 +400,9 @@ fn one_at_a_time(
         };
     }
     for chunk_id in condemned {
-        db.record_embedding_failure(space, chunk_id)?;
-        tally.failed += 1;
+        if call.db.record_embedding_failure(call.space, chunk_id)? {
+            tally.failed += 1;
+        }
     }
     Ok(())
 }
@@ -426,9 +476,7 @@ fn speaks_only_about_these_texts(error: &mnema_provider::Error) -> bool {
 /// the mismatched vector at position three would be refused with the first two
 /// already stored, in a space they do not describe.
 fn store(
-    db: &Db,
-    space: i64,
-    width: i64,
+    call: &Call<'_>,
     pending: &[PendingChunk],
     vectors: &[Vec<f32>],
     tally: &mut EmbedTally,
@@ -440,24 +488,38 @@ fn store(
         });
     }
     for vector in vectors {
-        if vector.len() as i64 != width {
+        if vector.len() as i64 != call.width {
             return Err(Error::WidthMismatch {
-                expected: width,
+                expected: call.width,
                 got: vector.len() as i64,
             });
         }
     }
     for (chunk, vector) in pending.iter().zip(vectors) {
-        // `upsert_vector` rather than `insert_vector`: a run that stopped
-        // halfway through a batch must be able to finish without first asking
-        // which half landed. It also clears any `chunk_embedding_state` row
-        // for this chunk in the same transaction, which is what takes an
-        // earlier refusal off the screen the moment the chunk is embedded.
-        match db.upsert_vector(space, chunk.id, vector) {
-            Ok(()) => tally.embedded += 1,
+        // `upsert_vector_for_text` rather than `upsert_vector`: the write is
+        // conditional on the chunk still holding the text this vector was made
+        // from, checked in the same transaction as the write. Chunk ids are
+        // reused, so writing by id alone can bind this vector to a chunk that
+        // was rebuilt while the request was in flight — see that method's own
+        // doc comment for the full sequence and for why the guard is defensive
+        // today and load-bearing the day indexing gets its own connection.
+        //
+        // It also clears any `chunk_embedding_state` row for this chunk in the
+        // same transaction, which is what takes an earlier refusal off the
+        // screen the moment the chunk is embedded.
+        match call
+            .db
+            .upsert_vector_for_text(call.space, chunk.id, &chunk.content_hash, vector)
+        {
+            Ok(true) => tally.embedded += 1,
+            // The text moved on under us. Nothing is counted and nothing is
+            // recorded: this vector describes text that is not there, and the
+            // computed queue offers the chunk again with whatever it holds now.
+            Ok(false) => {}
             Err(refusal) if refuses_this_chunks_vector(&refusal, chunk.id) => {
-                db.record_embedding_failure(space, chunk.id)?;
-                tally.failed += 1;
+                if call.db.record_embedding_failure(call.space, chunk.id)? {
+                    tally.failed += 1;
+                }
             }
             Err(other) => return Err(Error::Index(other)),
         }
