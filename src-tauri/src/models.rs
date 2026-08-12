@@ -280,6 +280,36 @@ pub fn set_embedding_model(
     existing_vectors: ExistingVectors,
 ) -> Result<AdoptedModel, Error> {
     let key = key(&state)?;
+    // ⚠️ **This command takes the job slot, although it is not a job**, and the
+    // reason is `embed_job.rs`. `mnema_embed::run` reads `meta.active_space`
+    // once, at the start, and holds that space id for the whole run — so a model
+    // change landing mid-run repoints the index while the pass goes on writing
+    // into the space it started with. With [`ExistingVectors::Keep`] and an
+    // active space that is still **empty**, which is the state a run is in for
+    // its first batch, `Db::adopt_embedding_model` does not refuse: it repoints,
+    // and every vector that run then pays for lands in a space nothing points
+    // at. The settings screen reads `0` embedded while the run's own line
+    // climbs. With `Discard` it is loud instead — the table is dropped under the
+    // job and the run fails.
+    //
+    // Before there was a command that embeds, no job wrote vectors and a model
+    // change during one was harmless. `start_embed_job` is what made this
+    // reachable, so this is where it is closed.
+    //
+    // `claim_job` and not `job_is_running()`: the second is check-then-act, and
+    // the job it checks for can start in the gap. This is the mutual exclusion
+    // the flag already exists to provide, and it holds in both directions — a
+    // job cannot start while a change is in flight either.
+    //
+    // **`let _slot`, never `let _`**: the second drops the slot at once and
+    // leaves nothing held at all.
+    //
+    // Claimed **after** the key is read, for the reason `start_embed_job`'s own
+    // doc comment gives about that read: the credential store can put an
+    // authorisation dialog on screen, and the slot must not be held while
+    // somebody decides what to do about it. Everything after this point that
+    // touches the index is inside the claim.
+    let _slot = state.claim_job()?;
     let check = mnema_provider::check_embedding_model(state.provider_base(), &key, &model)?;
     let hash = mnema_chunk::chunker_hash();
     let dim = check.dim as i64;

@@ -1506,3 +1506,218 @@ fn a_run_with_no_model_chosen_ends_with_a_message_saying_so() {
         "a request left the machine before there was anywhere to put the answer"
     );
 }
+
+/// A model change is refused while a job holds the slot, and the configuration
+/// is exactly where it was afterwards.
+///
+/// Deterministic: the probe holds the slot for ten seconds and makes no provider
+/// call at all, so there is no race to lose and nothing queued behind anything.
+///
+/// **The state, not only the variant.** A test that checked `JobAlreadyRunning`
+/// and stopped would pass the day somebody changed which error this returns, and
+/// would say nothing about what the refusal is for. What it is for is that
+/// `meta.active_space` does not move and no space is minted while a pass is
+/// reading that pointer.
+#[test]
+fn a_model_change_is_refused_while_a_job_holds_the_slot() {
+    // Two embedding checks, although only one adoption is meant to happen: the
+    // second is what the refused change *would* make, and without it a build
+    // with the claim removed is stopped by the mock running out of replies
+    // rather than by anything in the product. Measured — that is exactly what
+    // happened on the first run of this test, and it would have been written up
+    // as a guard that works.
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    fx.adopt_default_model();
+    let before = fx.active_space().expect("a model was adopted");
+    let spaces_before = fx.space_ids();
+
+    // The two calls the setup above made — the credit check and one embedding
+    // check — taken off the queue and asserted rather than discarded, so that
+    // the assertion further down is about this refusal and not about a queue
+    // that was empty for some other reason.
+    for expected in [
+        "the credit check `set_key` made",
+        "the embedding check the adoption made",
+    ] {
+        assert!(
+            fx.provider_request().is_some(),
+            "{expected} never arrived, so the check below proves nothing"
+        );
+    }
+
+    let (probe, _probe_events) = job_channel();
+    bridge::start_probe_job(fx.state(), probe).expect("the probe job starts");
+
+    let outcome = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep);
+
+    // **The state before the variant**, and in that order deliberately: an
+    // `expect_err` first would panic on a change that succeeded and this test
+    // would never say what the success did to the index, which is the whole
+    // subject. What the refusal is for is that `meta.active_space` does not move
+    // and no space is minted while a pass is reading that pointer.
+    assert_eq!(
+        fx.active_space(),
+        Some(before),
+        "the index was repointed under a running job"
+    );
+    assert_eq!(
+        fx.space_ids(),
+        spaces_before,
+        "a space was minted while a job was running"
+    );
+
+    let refusal = outcome.expect_err("the model was changed while a job was running");
+    assert!(
+        matches!(refusal, Error::JobAlreadyRunning),
+        "the refusal must name the slot: {refusal:?}"
+    );
+    // And no provider call was made for the refused change: the claim is ahead
+    // of the check, so a refusal costs nothing and reaches the person at once
+    // rather than after a round trip. The fixture's own two calls — the credit
+    // check and one embedding check — are already off the queue by now.
+    assert!(
+        fx.provider_request().is_none(),
+        "a request left the machine for a change that was never going to happen"
+    );
+
+    bridge::cancel_job(fx.state());
+    wait_for_the_slot(&fx);
+}
+
+/// **The property, not the mechanism: a run's vectors are in the space the index
+/// points at, and there are none anywhere else.**
+///
+/// This is what the claim in `set_embedding_model` is for. The mechanism —
+/// "the command refuses while a job runs" — is the test above; this one attempts
+/// the change against a pass that is genuinely in flight and then asks the index
+/// the question that matters, which is where the vectors ended up.
+///
+/// The run is held open by a provider that answers correctly but late, so the
+/// window is two seconds rather than a race.
+///
+/// ⚠️ **Say what this reaches and what it does not.** Against a build with the
+/// claim removed, the timing decides which assertion fires. Both are this fix's
+/// own subject matter, and neither is a fixture artefact — the replies below are
+/// counted so that the mock never runs out and refuses on the product's behalf:
+///
+/// - The change reaches the index while the active space is **empty** — the run
+///   has not written yet — and is not refused: it repoints, and the run's
+///   vectors land in a space nothing points at. The two assertions on
+///   `embedded_chunks_everywhere` and `active_space` catch that, and nothing
+///   else in this suite would.
+/// - The change reaches the index **after** the batch landed, and
+///   `Db::refuse_unless_every_other_space_is_empty` refuses it as
+///   `SpaceNotEmpty`. The variant assertion catches that, and it is a
+///   neighbouring defence — named as one, because it protects the non-empty case
+///   only, which is exactly why the empty case needed a guard of its own.
+///
+/// **Measured, with the claim removed:** the second, as
+/// `Index(SpaceNotEmpty { space_id: 1, embedded_chunks: 3 })`. The mock answers
+/// one connection at a time and the change queues behind the run's delayed
+/// reply, so the run's three writes land first. The test above is the one whose
+/// *state* assertion fires on this mutation — there the job is a probe, which
+/// writes nothing, so nothing makes the space non-empty and nothing but the
+/// claim stands between the change and the pointer.
+#[test]
+fn a_run_leaves_no_vectors_in_a_space_nothing_points_at() {
+    const CHUNKS: usize = 3;
+    let fx = Fixture::with_provider_answering_a_run(vec![
+        // The run's one batch, answered correctly and two seconds late, so the
+        // pass is provably still in flight below rather than probably.
+        Reply::ok_after(2, &vectors_for(CHUNKS)),
+        // And the embedding check the refused change *would* make. Without it,
+        // a build with the claim removed is stopped by the mock running out of
+        // replies rather than by anything in the product — which is a fixture
+        // artefact wearing a guard's clothes, and it is what the first run of
+        // the test above actually did.
+        Reply::ok(&mnema_mock_provider::two_vectors(1024)),
+    ]);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    fx.adopt_default_model();
+    let space = fx.active_space().expect("a model was adopted");
+    fx.write_indexed_chunks(CHUNKS);
+
+    // The two calls the setup made, off the queue and asserted, so that the wait
+    // below is for the run's own request and not for one of theirs.
+    for expected in [
+        "the credit check `set_key` made",
+        "the embedding check the adoption made",
+    ] {
+        assert!(
+            fx.provider_request().is_some(),
+            "{expected} never arrived, so the wait below is watching for the wrong request"
+        );
+    }
+
+    let (channel, events) = job_channel();
+    start_embed_job(fx.state(), channel).expect("the embedding job starts");
+
+    // Wait until the mock has **read the run's request**, not merely until the
+    // slot is taken. The server answers one connection at a time in the order
+    // they arrive, so this is what fixes the order of the two callers below: the
+    // run is inside its two-second reply, and anything the change sends queues
+    // behind it. Without this the two race to connect, and a build with the
+    // claim removed crosses the replies — the change gets the run's batch answer
+    // and the run gets the change's. Measured on the first run of this test,
+    // where it surfaced as the run ending on the mock's own `599` sentinel: a
+    // red that says nothing about a model change.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut asked = false;
+    while !asked && std::time::Instant::now() < deadline {
+        asked = fx.provider_request().is_some();
+        if !asked {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    assert!(
+        asked,
+        "the run never reached the provider, so nothing below is about a pass in flight"
+    );
+    assert!(
+        fx.state().job_is_running(),
+        "the run is not holding the slot, so the refusal below would be about nothing"
+    );
+
+    let outcome = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep);
+
+    let (_progress, ending) = events_until_ended(&events);
+    assert_eq!(ending["reason"], json!("completed"), "{ending}");
+
+    // The index first, for the reason the test above gives: a change that
+    // succeeded has already done its damage, and an `expect_err` here would end
+    // the test before anything looked at it.
+    assert_eq!(
+        fx.active_space(),
+        Some(space),
+        "the index was repointed while a pass was writing into the space it named"
+    );
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(
+        read.embedded_chunks, CHUNKS as i64,
+        "the active space does not hold what the run says it embedded"
+    );
+    // The property itself. `embedded_chunks_everywhere` counts every space the
+    // index holds; `embedded_chunks` counts the one it points at. A vector in a
+    // space nothing points at is exactly the difference between them, and it is
+    // invisible to every other assertion in this file.
+    assert_eq!(
+        read.embedded_chunks_everywhere, read.embedded_chunks,
+        "the index holds vectors outside the space it points at — a run wrote into a space that \
+         was repointed away from it, and search will never see them"
+    );
+    assert_eq!(
+        ending["done"],
+        json!(read.embedded_chunks),
+        "what the window was told and what the active space holds are two different numbers"
+    );
+
+    let refusal = outcome.expect_err("the model was changed while an embedding pass was writing");
+    assert!(
+        matches!(refusal, Error::JobAlreadyRunning),
+        "the refusal must name the slot: {refusal:?}"
+    );
+}

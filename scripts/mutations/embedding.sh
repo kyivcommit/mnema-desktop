@@ -998,3 +998,39 @@ case_ "embed_job: the key must be read before the job slot is claimed (T8)" \
 
     let key = crate::models::key(&state)?;' \
   mnema-desktop 'the_key_is_read_before_the_job_slot_is_taken' --test model_commands
+
+# The claim `set_embedding_model` takes although it is not a job. Without it a
+# model change lands mid-run: `mnema_embed::run` holds the space id it read at
+# the start, so with `Keep` over a still-empty space the pointer moves and every
+# vector the run pays for goes into a space nothing points at — silently, with
+# the settings screen reading 0 while the run's own line climbs.
+#
+# The named test uses a **probe** as the running job, which writes nothing: no
+# space becomes non-empty, so `SpaceNotEmpty` — the neighbouring defence that
+# covers the other timing — cannot stand in for the claim, and the assertion
+# that fires is the one about the pointer having moved
+# (`left: Some(2), right: Some(1)`), not the one about which error came back.
+case_ "models: a model change must not be possible while a job holds the slot (T8)" \
+  src-tauri/src/models.rs \
+  's{    let _slot = state\.claim_job\(\)\?;\n}{}' \
+  'authorisation dialog on screen, and the slot must not be held while
+    // somebody decides what to do about it. Everything after this point that
+    // touches the index is inside the claim.
+    let check = mnema_provider::check_embedding_model' \
+  mnema-desktop 'a_model_change_is_refused_while_a_job_holds_the_slot' --test model_commands
+
+# The same removal, the test that drives it against a pass genuinely in flight.
+# One case per test, since `case_` names one at a time.
+case_ "models: a model change must not be possible while a pass is writing (T8)" \
+  src-tauri/src/models.rs \
+  's{    let _slot = state\.claim_job\(\)\?;\n}{}' \
+  'authorisation dialog on screen, and the slot must not be held while
+    // somebody decides what to do about it. Everything after this point that
+    // touches the index is inside the claim.
+    let check = mnema_provider::check_embedding_model' \
+  mnema-desktop 'a_run_leaves_no_vectors_in_a_space_nothing_points_at' --test model_commands
+
+# ⚠️ `let _slot` and not `let _`: the second drops the slot at once and holds
+# nothing. No case here reddens on that one character — distinguishing them
+# needs a second job started from another thread *during* the command, which is
+# a race rather than a test. It is written on the line itself instead.
