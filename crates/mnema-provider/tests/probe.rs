@@ -983,6 +983,15 @@ fn two_texts_are_sent_in_one_request() {
         "one text cannot reveal an averaging model: {body}"
     );
     assert_eq!(parsed["model"], "m");
+    // Task 5 fix round 1, Minor 3: `embed`'s doc comment now leans on this
+    // request shape being the one that measured the space's width, and
+    // nothing had ever asserted the body carries no `dimensions` parameter —
+    // only that it carries two texts and the model name.
+    assert!(
+        parsed.get("dimensions").is_none(),
+        "the probe must not send a dimensions parameter — the same model name can answer with a \
+         different width depending on it (probe.rs's own measured note): {body}"
+    );
 }
 
 #[test]
@@ -1615,13 +1624,24 @@ fn a_body_that_never_finishes_on_a_500_keeps_its_detail_on_the_model_check_too()
 // against, for the batch that actually goes into the index. Same endpoint,
 // same request shape as the probe above (`check_embedding_model` measured the
 // space's width by sending exactly this shape), so this section reuses `KEY`
-// and does not re-litigate the status table or the leak scans already proven
-// against `check_embedding_model` — only what is new here: the count check.
+// and does not re-litigate the status table already proven against
+// `check_embedding_model` — only what is new here: the count check, binding
+// by stated position rather than array order (fix round 1, Critical 1), and
+// the leak scans this entry point had none of (fix round 1, Important 2).
 
+/// Row 0 in the response answers text 1 and row 1 answers text 0 — array
+/// order and stated position disagree on purpose, so a `collect()` straight
+/// over the response array (what the first version of `embed` did) would
+/// silently swap the two vectors. This is also the request-shape assertion
+/// Minor 3 asked for, folded into the same test rather than a second one
+/// that would need its own mock: the two properties this test proves are
+/// "binding follows position" and "the request is the shape the space's
+/// width was measured against", and only the latter needs to read the
+/// request at all.
 #[test]
 fn embed_returns_one_vector_per_text_in_order() {
     let mock = MockServer::new(vec![Reply::ok(
-        r#"{"data":[{"embedding":[1.0,0.0]},{"embedding":[0.0,1.0]}]}"#,
+        r#"{"data":[{"embedding":[0.0,1.0],"index":1},{"embedding":[1.0,0.0],"index":0}]}"#,
     )]);
 
     let out = embed(
@@ -1632,7 +1652,23 @@ fn embed_returns_one_vector_per_text_in_order() {
     )
     .expect("embed");
 
-    assert_eq!(out, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+    assert_eq!(
+        out,
+        vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+        "binding must follow the row's stated position, not its place in the response array"
+    );
+
+    let request = mock.request();
+    assert!(
+        request.contains(r#""input":["one","two"]"#),
+        "the request must carry the texts under \"input\": {request}"
+    );
+    assert!(
+        !request.contains("dimensions"),
+        "the request must not send a dimensions parameter — the space's width is only known \
+         from what the model answers with, and a dimensions parameter can change that answer: \
+         {request}"
+    );
 }
 
 /// Fewer vectors than texts, silently zipped, would attach each embedding to
@@ -1640,7 +1676,9 @@ fn embed_returns_one_vector_per_text_in_order() {
 /// and wrong, and nothing in the index looks broken.
 #[test]
 fn embed_refuses_a_short_answer() {
-    let mock = MockServer::new(vec![Reply::ok(r#"{"data":[{"embedding":[1.0,0.0]}]}"#)]);
+    let mock = MockServer::new(vec![Reply::ok(
+        r#"{"data":[{"embedding":[1.0,0.0],"index":0}]}"#,
+    )]);
 
     let out = embed(
         mock.base(),
@@ -1663,7 +1701,8 @@ fn embed_refuses_a_short_answer() {
 #[test]
 fn embed_refuses_a_long_answer_too() {
     let mock = MockServer::new(vec![Reply::ok(
-        r#"{"data":[{"embedding":[1.0,0.0]},{"embedding":[0.0,1.0]},{"embedding":[0.5,0.5]}]}"#,
+        r#"{"data":[{"embedding":[1.0,0.0],"index":0},{"embedding":[0.0,1.0],"index":1},
+            {"embedding":[0.5,0.5],"index":2}]}"#,
     )]);
 
     let out = embed(
@@ -1677,4 +1716,130 @@ fn embed_refuses_a_long_answer_too() {
         out,
         Err(Error::CountMismatch { asked: 2, got: 3 })
     ));
+}
+
+/// A row that does not say which text it embeds cannot be bound safely at
+/// all — the count matches exactly, so `CountMismatch` never fires, and this
+/// is the door it does not watch (fix round 1, Critical 1).
+#[test]
+fn embed_refuses_a_row_with_no_stated_position() {
+    let mock = MockServer::new(vec![Reply::ok(
+        r#"{"data":[{"embedding":[1.0,0.0]},{"embedding":[0.0,1.0]}]}"#,
+    )]);
+
+    let out = embed(
+        mock.base(),
+        "k",
+        "some/model",
+        &["one".into(), "two".into()],
+    );
+
+    match out {
+        Err(Error::PositionMismatch(reason)) => {
+            assert!(reason.contains("did not state"), "got {reason:?}");
+        }
+        other => panic!("expected PositionMismatch, got {other:?}"),
+    }
+}
+
+/// Two rows naming the same position: the count is right, and binding both
+/// to one slot leaves the other slot's true vector nowhere.
+#[test]
+fn embed_refuses_two_rows_claiming_the_same_position() {
+    let mock = MockServer::new(vec![Reply::ok(
+        r#"{"data":[{"embedding":[1.0,0.0],"index":0},{"embedding":[0.0,1.0],"index":0}]}"#,
+    )]);
+
+    let out = embed(
+        mock.base(),
+        "k",
+        "some/model",
+        &["one".into(), "two".into()],
+    );
+
+    match out {
+        Err(Error::PositionMismatch(reason)) => {
+            assert!(reason.contains("same position"), "got {reason:?}");
+        }
+        other => panic!("expected PositionMismatch, got {other:?}"),
+    }
+}
+
+/// A position naming a text that was never sent. Distinct from the case
+/// above: this is the half of "no duplicate, none out of range" that a
+/// duplicate alone does not exercise, since two rows can disagree by landing
+/// outside the batch instead of colliding inside it.
+#[test]
+fn embed_refuses_a_position_outside_the_batch() {
+    let mock = MockServer::new(vec![Reply::ok(
+        r#"{"data":[{"embedding":[1.0,0.0],"index":0},{"embedding":[0.0,1.0],"index":5}]}"#,
+    )]);
+
+    let out = embed(
+        mock.base(),
+        "k",
+        "some/model",
+        &["one".into(), "two".into()],
+    );
+
+    match out {
+        Err(Error::PositionMismatch(reason)) => {
+            assert!(reason.contains("outside the batch"), "got {reason:?}");
+        }
+        other => panic!("expected PositionMismatch, got {other:?}"),
+    }
+}
+
+/// The same scan `no_transformation_of_the_key_reaches_a_model_check_failure`
+/// runs for `check_embedding_model`, now for `embed` (fix round 1, Important
+/// 2): `lib.rs`'s `Error` doc comment promises this scan for every failure
+/// path in the crate, and nothing had ever run any of `embed`'s.
+#[test]
+fn no_transformation_of_the_key_reaches_an_embed_failure() {
+    for (label, transformed, needle) in key_transformations(KEY) {
+        let body = format!(r#"{{"error":{{"message":"invalid credential: {transformed}"}}}}"#);
+        let server = MockServer::new(vec![Reply::status(401, &body)]);
+        let err =
+            embed(server.base(), KEY, "m", &["one".into(), "two".into()]).expect_err("must fail");
+        let rendered = format!("{err} / {err:?}");
+        let visually = strip_for_test_oracle(&rendered).to_ascii_lowercase();
+        assert!(
+            !visually.contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak from embed, even to a reader who cannot see \
+             an invisible character: {rendered}"
+        );
+        assert_a_defence_fired(label, &rendered);
+    }
+}
+
+/// The 200-envelope path is a second place this crate renders a response
+/// body (`unreadable_embeddings_answer`), scanned separately for
+/// `check_embedding_model` after a real gap was found there
+/// (`no_transformation_of_the_key_reaches_a_message_through_a_200_body`, fix
+/// round 2, item 1 on that task). `embed` calls the identical function with
+/// the identical arguments, but nothing had proven that for this entry point.
+#[test]
+fn no_transformation_of_the_key_reaches_a_message_through_embeds_200_body() {
+    for (label, transformed, needle) in key_transformations(KEY) {
+        let body = format!(r#"{{"error":{{"message":"invalid credential: {transformed}"}}}}"#);
+        let server = MockServer::new(vec![Reply::ok(&body)]);
+        let err =
+            embed(server.base(), KEY, "m", &["one".into(), "two".into()]).expect_err("must fail");
+        let sentence = err.to_string();
+        assert!(
+            !strip_for_test_oracle(&sentence)
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak into the sentence a person reads on a 200 \
+             from embed: {sentence}"
+        );
+        let debug = format!("{err:?}");
+        assert!(
+            !strip_for_test_oracle(&debug)
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak into the Debug form either: {debug}"
+        );
+        assert_a_defence_is_visible_to_a_reader(label, &sentence);
+    }
 }

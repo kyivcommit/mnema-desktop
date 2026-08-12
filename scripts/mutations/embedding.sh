@@ -232,3 +232,31 @@ case_ "provider: embed without the count check silently misattributes a short an
 
     Ok(parsed.data.into_iter()' \
   mnema-provider 'embed_refuses_a_short_answer' --test probe
+
+# ── Task 5, fix round 1 ────────────────────────────────────────────────────
+#
+# Critical 1: `embed` used to bind vectors by their position in the response
+# array, which `check_embedding_model` can get away with (it is
+# order-insensitive by construction) and `embed` cannot — a reordered answer
+# passes the count check exactly and binds every vector to the wrong chunk.
+# The fix binds by the row's own stated position instead. This mutation
+# reverts placement to array order while leaving the position VALIDATION
+# intact (duplicates/gaps/missing are still caught) — the only test that can
+# tell that apart is the one whose response is deliberately out of order.
+case_ "provider: embed must bind by the row's stated position, not by array order (fix round 1, Critical 1)" \
+  crates/mnema-provider/src/probe.rs \
+  's{out\[index\] = row\.embedding;}{out[filled.iter().filter(|f| **f).count() - 1] = row.embedding;}' \
+  'out[filled.iter().filter(|f| **f).count() - 1] = row.embedding;' \
+  mnema-provider 'embed_returns_one_vector_per_text_in_order' --test probe
+
+# Minor 4: the only mutation on the count check deleted the whole `if`, which
+# reddens both count tests and cannot tell `!=` apart from the weaker `<`. A
+# guard written as `<` would let a long answer (more vectors than texts)
+# through silently — this is the mutation that actually exercises the
+# asymmetry the second test (`embed_refuses_a_long_answer_too`) was written
+# to hold, and it must leave `embed_refuses_a_short_answer` green.
+case_ "provider: embed's count check must catch a long answer too, not only a short one (fix round 1, Minor 4)" \
+  crates/mnema-provider/src/probe.rs \
+  's{if parsed\.data\.len\(\) != texts\.len\(\) \{}{if parsed.data.len() < texts.len() {}' \
+  'if parsed.data.len() < texts.len() {' \
+  mnema-provider 'embed_refuses_a_long_answer_too' --test probe

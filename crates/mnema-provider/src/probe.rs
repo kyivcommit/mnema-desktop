@@ -847,6 +847,26 @@ struct EmbeddingsBody {
 #[derive(Deserialize)]
 struct EmbeddingRow {
     embedding: Vec<f32>,
+    /// The provider's own statement of which text in the batch this row
+    /// answers (Task 5 fix round 1, Critical 1) — `embed`, below, binds each
+    /// vector by this field rather than by the row's position in the answer
+    /// array. `check_embedding_model` never reads this field and does not
+    /// need it: it is order-insensitive by construction (it takes the width
+    /// from row 0 and compares row 0 against row 1, and a reordered answer
+    /// gives the same verdict either way), so this struct staying shared
+    /// costs that function nothing.
+    ///
+    /// `Option`, not required, and `#[serde(default)]` is why: without it, a
+    /// provider whose answer omits `index` would fail to parse at all — a
+    /// missing key elsewhere in this file gets exactly that annotation for
+    /// exactly that reason (`ProviderErrorDetail::message`, `Stated`'s own
+    /// fields above). Failing to parse would hide the very fact `embed`
+    /// needs to see and refuse — "this row did not say" — behind a generic
+    /// `Malformed`, the same way an unannotated field would have turned a
+    /// working key into a parse error in `balance_from` (Task 3 review,
+    /// item 1).
+    #[serde(default)]
+    index: Option<usize>,
 }
 
 /// The status table for `/embeddings`: `error_for_status`'s, plus the one
@@ -890,7 +910,7 @@ fn status_error(status: u16, model: &str, key: &str) -> Error {
 /// The sum of squares in the width the index sums it in, and the reason it is
 /// a named function rather than an inline fold (fix round 2, item 2).
 ///
-/// `f32`, matching `check_rankable` (`crates/mnema-index/src/space.rs:404`),
+/// `f32`, matching `check_rankable` (`crates/mnema-index/src/space.rs:1086-1100`),
 /// whose own doc comment says that width is load-bearing rather than
 /// incidental. A wider sum here would not be a more careful version of the
 /// same test — it would be a *different* test, waving through the vectors the
@@ -1055,7 +1075,7 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
     // The same refusal the index makes at insert time, in the same arithmetic,
     // on both vectors (fix round 2, item 2).
     //
-    // `check_rankable` (`crates/mnema-index/src/space.rs:395-409`) sums the
+    // `check_rankable` (`crates/mnema-index/src/space.rs:1086-1100`) sums the
     // squares in **f32** and refuses a squared norm that is not finite —
     // deliberately, and its own doc comment says the width is load-bearing
     // rather than incidental, because that is the width vec0 divides in. This
@@ -1143,15 +1163,48 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
 /// about the *model*, settled once by `check_embedding_model` before any
 /// indexing began. `embed` is only ever called on a model that already
 /// passed that check, so a wrong count here is a broken answer from an
-/// otherwise-good model, not a newly discovered model property. Zipping a
-/// short answer against the texts anyway would attach each embedding to the
-/// wrong chunk from that point on — confidently, and permanently, with
-/// nothing in the index looking broken.
+/// otherwise-good model, not a newly discovered model property.
+///
+/// **Binding is by the row's own stated position, never by its position in
+/// the response array** (Task 5 fix round 1, Critical 1). The first version
+/// of this function collected `parsed.data` straight through, in array
+/// order — the same thing `check_embedding_model` does, which is safe there
+/// only because that function is order-insensitive by construction (row 0's
+/// width is compared against row 1's; a reordered answer gives the same
+/// verdict). `embed` has no such shield: a reordered answer would pass the
+/// count check exactly and bind every vector to the wrong chunk, silently
+/// and permanently — the exact failure `CountMismatch` exists to catch,
+/// through a door the count check does not watch.
+///
+/// **This is a bet, made loud rather than silent, because it is unmeasured.**
+/// No response body from a real `/embeddings` call has ever been recorded by
+/// this project — `tests/fixtures/embeddings-2026-08-08.json` is the model
+/// list for `output_modalities=embeddings`, not an embeddings answer, and the
+/// live measurements this crate cites (2026-07-25, 2026-08-08) recorded
+/// counts, widths and norms, never a body. Whether any provider reachable
+/// through OpenRouter actually reorders rows is not known. What is chosen
+/// here is to require every row to state its position and refuse otherwise,
+/// rather than use the position when present and fall back to array order
+/// when absent: that fallback is a defence satisfied by exactly the case it
+/// exists for — a provider that both reorders rows and omits the field would
+/// get the old, silent behaviour, and nothing would ever say so. This crate
+/// already prefers a refusal to a plausible guess on this exact axis — every
+/// path in `check_embedding_model` that cannot name a width returns `Err`
+/// instead of reaching for one — and a wrong bet here costs an indexing run
+/// failing outright, not a wrong vector sitting in the index forever.
+///
+/// Duplicated and out-of-range positions are refused the same way a short or
+/// long answer is: `parsed.data.len() == texts.len()` is checked first, so by
+/// the time positions are read there are exactly as many rows as slots: an
+/// injective map from `texts.len()` rows into `texts.len()` slots with none
+/// out of range is necessarily a bijection (pigeonhole on a finite set of
+/// equal size), so checking "no duplicate, none out of range" is checking
+/// "every slot is filled" — no separate gap check is needed or added.
 ///
 /// **What this does NOT check, deliberately:** finiteness, width against the
 /// space, and rankable norms. `check_rankable`
-/// (`crates/mnema-index/src/space.rs:404-409`) refuses those at insert, and a
-/// refused insert becomes a recorded failure the caller surfaces — the same
+/// (`crates/mnema-index/src/space.rs:1086-1100`) refuses those at insert, and
+/// a refused insert becomes a recorded failure the caller surfaces — the same
 /// arithmetic `check_embedding_model` duplicates above for a different
 /// reason (that call has no insert to defer to; it runs before the archive
 /// exists at all). Repeating the guard here would be exactly the drift that
@@ -1186,7 +1239,35 @@ pub fn embed(base: &str, key: &str, model: &str, texts: &[String]) -> Result<Vec
         });
     }
 
-    Ok(parsed.data.into_iter().map(|row| row.embedding).collect())
+    // Placeholders, not `MaybeUninit` or an `Option<Vec<f32>>` per slot: an
+    // empty `Vec` is cheap (no allocation) and, if the pigeonhole argument
+    // above were ever wrong, an untouched slot reaching `Ok` as `vec![]`
+    // fails safely — `check_rankable` refuses an empty vector at insert
+    // (its squared norm is `0.0`, below `f32::MIN_POSITIVE`) rather than
+    // this function silently mis-binding or panicking.
+    let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
+    let mut filled = vec![false; texts.len()];
+    for row in parsed.data {
+        let Some(index) = row.index else {
+            return Err(Error::PositionMismatch(
+                "a row did not state which text it embeds",
+            ));
+        };
+        let Some(slot) = filled.get_mut(index) else {
+            return Err(Error::PositionMismatch(
+                "a row named a position outside the batch that was sent",
+            ));
+        };
+        if *slot {
+            return Err(Error::PositionMismatch(
+                "two rows claimed the same position",
+            ));
+        }
+        *slot = true;
+        out[index] = row.embedding;
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]
