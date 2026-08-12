@@ -855,15 +855,47 @@ case_ "embed: run must mark a space ready once its queue empties clean (D95b)" \
 # the same lie the space started in, just arriving later and more
 # convincingly.
 #
+# Regex updated for fix round 2: the condition this deletes moved from
+# `total > 0` to `!db.space_is_complete(space)?` — see the case below for what
+# that move was for.
+#
 # ⚠️ M1 (review round 1): also a pure deletion, same limitation as the case
 # above — `let call = Call { ... }` is unmutated code that exists either way,
 # so only `git diff --quiet` distinguishes a landed mutation from a no-op here.
 case_ "embed: run must retract a ready claim when it starts against a non-empty queue (D95b)" \
   crates/mnema-embed/src/lib.rs \
-  's{    if total > 0 \{\n        db\.mark_space_building\(space\)\?;\n    \}\n}{}' \
+  's{    if !db\.space_is_complete\(space\)\? \{\n        db\.mark_space_building\(space\)\?;\n    \}\n}{}' \
   'let call = Call {
         db,
         space,
         width,
         total,' \
   mnema-embed 'a_ready_space_goes_back_to_building_when_new_chunks_arrive' --test queue
+
+# Fix round 2's own finding, reverted: without `space_is_complete` governing
+# the retraction too, a chunk behind a document not yet `indexed` can never
+# get a space out of a stale `ready` claim, because the queue never sees that
+# chunk on any later run either — nothing would ever ask again. The marker is
+# the reintroduced `total > 0` itself: this exact text existed nowhere in the
+# file after fix round 2 landed, so its presence here can only mean the
+# mutation.
+case_ "embed: run must retract ready using space_is_complete, not the queue's total (D95b fix 2)" \
+  crates/mnema-embed/src/lib.rs \
+  's{    if !db\.space_is_complete\(space\)\? \{\n        db\.mark_space_building\(space\)\?;\n    \}\n}{    if total > 0 {\n        db.mark_space_building(space)?;\n    }\n}' \
+  'if total > 0 {
+        db.mark_space_building(space)?;' \
+  mnema-embed 'a_ready_space_is_retracted_by_chunks_behind_an_unindexed_document_too' --test queue
+
+# The property the controller named mandatory and forbade a carve-out for: a
+# chunk this space gave up on has no vector, and `space_is_complete` must not
+# look away from that. Reintroducing the queue's own exclusion
+# (`GIVEN_UP_ON_CURRENT_TEXT`) here is the literal shape of the mistake —
+# done properly this time, with the space id bound, so the mutation is a
+# valid query that answers wrong rather than a broken one that would redden
+# at a bind-parameter error instead of the assertion it names.
+case_ "space: space_is_complete must not carve out chunks this space gave up on (D95b fix 2)" \
+  crates/mnema-index/src/space.rs \
+  's{"SELECT NOT EXISTS \(\n                     SELECT 1 FROM chunk c\n                      WHERE c\.id NOT IN \(SELECT chunk_id FROM \{table\}\)\n                 \)"\n            \),\n            \[\],}{"SELECT NOT EXISTS (\n                     SELECT 1 FROM chunk c\n                      WHERE c.id NOT IN (SELECT chunk_id FROM \{table\})\n                        AND NOT EXISTS (\{GIVEN_UP_ON_CURRENT_TEXT\})\n                 )"\n            ),\n            params![space_id],}' \
+  'WHERE c.id NOT IN (SELECT chunk_id FROM {table})
+                        AND NOT EXISTS ({GIVEN_UP_ON_CURRENT_TEXT})' \
+  mnema-embed 'a_space_with_failures_does_not_become_ready' --test queue
