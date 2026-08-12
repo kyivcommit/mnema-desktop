@@ -556,6 +556,13 @@ fn a_split_that_meets_an_unclassified_failure_stops_and_condemns_nothing() {
         // The first single lands; the provider then falls over.
         fixture::reply_with(1),
         Reply::status(503, r#"{"error":{"message":"upstream is down"}}"#),
+        // A fourth reply nothing should ever reach, and that is the point.
+        // Without it the mock runs out here, the `599` is unattributable too,
+        // and this test would report `Err` and `failed_rows == 0` even in a
+        // world where 503 *was* attributed — passing for a reason that has
+        // nothing to do with what it claims. With it, that world gives
+        // `Ok(embedded 2, failed 1)` and both assertions below fire.
+        fixture::reply_with(1),
     ]);
 
     let out = mnema_embed::run(&db, mock.base(), "k", 3, &|| false, &mut |_| {});
@@ -779,6 +786,13 @@ fn a_refused_batch_stops_the_run_and_condemns_nothing() {
     let mock = fixture::mock(vec![
         fixture::reply_with(2),
         Reply::status(503, r#"{"error":{"message":"upstream is down"}}"#),
+        // Two replies nothing should reach. They are what make the assertions
+        // below mean something: without them the mock runs out during the
+        // split, the `599` is unattributable in its own right, and this test
+        // would still see `Err` and no failed rows in a world where 503 was
+        // attributed. With them, that world embeds all four and returns `Ok`.
+        fixture::reply_with(1),
+        fixture::reply_with(1),
     ]);
 
     let out = mnema_embed::run(&db, mock.base(), "k", 2, &|| false, &mut |_| {});
