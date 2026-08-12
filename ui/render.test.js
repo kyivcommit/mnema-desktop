@@ -828,6 +828,18 @@ test("a failed run with no message still says how far it got", () => {
   assert.doesNotMatch(text, /undefined/);
 });
 
+// The ending a run gets when it fails before it embeds anything — no model
+// chosen, a provider that refused the first call. "What was embedded stays"
+// would state that something was, on exactly the endings where nothing was.
+test("an ending that embedded nothing does not claim something was kept", () => {
+  for (const reason of ["cancelled", "failed"]) {
+    const text = embedEndingSentence({ reason, done: 0, total: 0, refused: 0, message: "boom" });
+    assert.doesNotMatch(text, /What was embedded stays/,
+      `"${reason}" told somebody who embedded nothing that their embeddings were kept`);
+    assert.match(text, /starting again continues/i);
+  }
+});
+
 // A refusal before anything starts — no key, no index, a job already running.
 // Each error already says what it is; this only says that nothing began, so that
 // a message about a key is not read as a run that failed halfway through.

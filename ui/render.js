@@ -829,7 +829,8 @@ export const embeddingProgressText = (index) => {
 // named as soon as there are any: a person watching the bar is the person the
 // third number is for.
 export const embedProgressLine = ({ done, total, refused, secondsLeft }) => {
-  const eta = secondsLeft === null || secondsLeft === undefined ? "estimating…" : `${secondsLeft}s left`;
+  const eta =
+    secondsLeft === null || secondsLeft === undefined ? "estimating…" : `${secondsLeft}s left`;
   const gaveUp = refused > 0 ? `, ${refused} refused in this run` : "";
   return `embedding: ${done} of ${total}${gaveUp} — ${eta}`;
 };
@@ -845,7 +846,13 @@ const embedRefusedTail = (refused) =>
 // the queue is computed from the index rather than stored, so nothing has to be
 // recovered and a second press simply carries on. It is what a person needs
 // after a network drops in the middle of a run.
-const EMBED_RESUMABLE = " What was embedded stays; starting again continues from there.";
+//
+// "Whatever this run embedded" and not "what was embedded", because the count
+// can be zero — a run that failed on its very first batch, or one stopped in the
+// same second it was started — and the shorter wording states that something was
+// embedded on exactly the endings where nothing was.
+const EMBED_RESUMABLE =
+  " Whatever this run embedded stays, and starting again continues from there.";
 
 // `EndReason`'s four walk-only variants. `walk_job.rs` is their only writer, so
 // no embedding run produces one — and they have an arm because a table with a

@@ -170,6 +170,20 @@ const followUntilIdle = async () => {
       "the job is no longer running, but this page has no channel to it and does not " +
       "know how it ended — whether it finished cleanly, or something was left unreconciled";
   }
+  // This is the only route the page has after a reload mid-job: the channel
+  // belongs to the page that started the job, so the two handlers that redraw
+  // the settings when an ending arrives are both out of reach here. Without
+  // this line a page that reloaded while an embedding run was finishing would
+  // go on showing the counts it read at load, for as long as it stayed open,
+  // with the run's own numbers nowhere on screen to contradict them.
+  //
+  // `refreshSettings` is declared below and is a `const`; see the note in the
+  // walk's own ending handler for why this is not a use before initialisation.
+  // The one path that reaches this during module evaluation — the `job_status`
+  // check near the top, which calls `follow()` without awaiting it — yields at
+  // its own `invoke` and cannot resume before the module has run past that
+  // declaration.
+  refreshSettings();
 };
 
 // Never leaves the buttons disabled. If the core cannot be reached, Cancel is
