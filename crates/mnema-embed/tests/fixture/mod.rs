@@ -132,6 +132,25 @@ fn write_chunk(db: &Db, doc: &str, ord: i64, text: &str) {
     .expect("chunk");
 }
 
+/// Adds one more `indexed` document, with `count` chunks of its own text, to a
+/// database a test already built — the ordinary way an archive grows once an
+/// earlier embedding pass has already finished it.
+///
+/// A third document identity: [`db_with_chunks`] uses `"a"` and
+/// [`db_with_chunks_in_two_documents`]'s second document uses `"b"`, so `"c"`
+/// here collides with neither.
+pub fn add_document_with_chunks(db: &Db, count: usize) -> String {
+    let doc = db
+        .insert_document(&"c".repeat(64), "text/plain", 64, SourceKind::Document)
+        .expect("document");
+    for ord in 0..count {
+        write_chunk(db, &doc, ord as i64, &format!("{CHUNK_TEXT_PREFIX}c{ord}"));
+    }
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .expect("status");
+    doc
+}
+
 /// Two `indexed` documents, with `first` and `second` chunks in them.
 ///
 /// Two rather than one because the test that needs this has to rebuild a
@@ -385,6 +404,41 @@ pub fn unit_vector_1024() -> Vec<f32> {
 
 pub fn mock(replies: Vec<Reply>) -> MockServer {
     MockServer::new(replies)
+}
+
+/// The raw `embedding_space.state` column — read the way `mark_space_ready`
+/// and `mark_space_building` write it, and nowhere else: nothing public hands
+/// this back out of a space, by design (D95b).
+pub fn space_state(db: &Db, space_id: i64) -> String {
+    db.conn()
+        .query_row(
+            "SELECT state FROM embedding_space WHERE id = ?1",
+            [space_id],
+            |r| r.get(0),
+        )
+        .expect("space exists")
+}
+
+/// A provider that answers one batch of three well-formed vectors — enough for
+/// [`db_with_chunks`]`(3)` embedded in a single batch of `batch = 10`. Built
+/// for the test proving a space becomes `ready` once the queue it was built
+/// against empties with nothing given up on.
+pub fn provider_returning_unit_vectors() -> MockServer {
+    mock(vec![reply_with(3)])
+}
+
+/// A provider that embeds the first and third texts and refuses the second
+/// with a `422` — squarely inside `speaks_only_about_these_texts`, the status
+/// an over-long chunk is expected to arrive as. At `batch = 1`, each of
+/// [`db_with_chunks`]`(3)`'s chunks is sent as its own request, so this makes
+/// the middle one a `failed` row while its neighbours succeed — enough for the
+/// test proving a space with any failure at all does not become `ready`.
+pub fn provider_refusing_the_second_text() -> MockServer {
+    mock(vec![
+        reply_with(1),
+        Reply::status(422, r#"{"error":"unusable"}"#),
+        reply_with(1),
+    ])
 }
 
 /// A well-formed answer for a request of `count` texts, at the width every

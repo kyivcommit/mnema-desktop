@@ -410,6 +410,28 @@ fn dropping_a_space_removes_its_row_its_table_and_its_shadows() {
     assert_eq!(rows, 0);
 }
 
+/// `create_space` writes `state = 'building'` (space.rs:190) and nothing
+/// before D95b ever moved it. `mark_space_ready` and `mark_space_building`
+/// are the two writers now, and both directions are exercised here because a
+/// state that this crate could only ever push one way would be the same lie
+/// the space started in, just arriving later.
+#[test]
+fn a_space_moves_between_building_and_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let cfg = db
+        .create_model_config("e", "openrouter", None, "baai/bge-m3", 8)
+        .unwrap();
+    let space = db.create_space(cfg, 8, "chunker-v1").unwrap();
+    assert_eq!(support::space_state(&db, space), "building");
+
+    db.mark_space_ready(space).unwrap();
+    assert_eq!(support::space_state(&db, space), "ready");
+
+    db.mark_space_building(space).unwrap();
+    assert_eq!(support::space_state(&db, space), "building");
+}
+
 /// Every entry point takes a space id, and an id that names nothing must say so.
 /// Read through `query_row` it arrives as `QueryReturnedNoRows`, which is
 /// indistinguishable from an empty index.
@@ -426,6 +448,8 @@ fn an_unknown_space_is_named_in_the_error() {
             .unwrap_err()
             .to_string(),
         db.drop_space(404).unwrap_err().to_string(),
+        db.mark_space_ready(404).unwrap_err().to_string(),
+        db.mark_space_building(404).unwrap_err().to_string(),
     ] {
         assert!(
             message.contains("404") && message.contains("space"),

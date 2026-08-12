@@ -98,6 +98,20 @@ pub fn stored_vector(db: &Db, space_id: i64, chunk_id: i64) -> Vec<f32> {
         .collect()
 }
 
+/// The raw `embedding_space.state` column — read the way `mark_space_ready`
+/// and `mark_space_building` write it, and nowhere else: nothing public hands
+/// this back out of a space, by design (D95b).
+#[allow(dead_code)]
+pub fn space_state(db: &Db, space_id: i64) -> String {
+    db.conn()
+        .query_row(
+            "SELECT state FROM embedding_space WHERE id = ?1",
+            [space_id],
+            |r| r.get(0),
+        )
+        .expect("space exists")
+}
+
 /// A document, a page, a block and one chunk — the shortest path to a
 /// `chunk_id` a vector may be attached to.
 ///

@@ -1148,3 +1148,76 @@ fn a_vector_is_not_written_onto_a_chunk_rebuilt_while_the_request_was_in_flight(
     }
     assert_eq!(db.embedded_chunk_count(space).expect("count"), 3);
 }
+
+// ── Task 7: a space stops being forever `building` (D95b) ─────────────────
+
+/// The whole point of D95b: a space that has actually finished must say so.
+/// Before this, `state` was written once, at creation, and never again — a
+/// fully embedded archive read exactly like one that had not started.
+#[test]
+fn a_space_becomes_ready_when_the_queue_empties() {
+    let db = fixture::db_with_chunks(3);
+    let space = fixture::active_space_1024(&db);
+    assert_eq!(fixture::space_state(&db, space), "building");
+
+    let mock = fixture::provider_returning_unit_vectors();
+    mnema_embed::run(&db, mock.base(), "k", 10, &|| false, &mut |_| {}).expect("run");
+
+    assert_eq!(fixture::space_state(&db, space), "ready");
+}
+
+/// A space with a chunk nobody could embed is not ready, and saying it is
+/// would make the state mean "the pass finished" rather than "the space is
+/// complete" — two different claims, and only one of them is useful.
+#[test]
+fn a_space_with_failures_does_not_become_ready() {
+    let db = fixture::db_with_chunks(3);
+    let space = fixture::active_space_1024(&db);
+    let mock = fixture::provider_refusing_the_second_text();
+
+    let out = mnema_embed::run(&db, mock.base(), "k", 1, &|| false, &mut |_| {}).expect("run");
+
+    assert_eq!(out.failed, 1, "the middle chunk was meant to fail");
+    assert_eq!(fixture::space_state(&db, space), "building");
+}
+
+/// The other direction, and the one a one-way state would get wrong: `ready`
+/// is a claim that every chunk in the space has a vector, and a chunk that
+/// arrives afterwards — a second document, an archive grown since the space
+/// last finished — makes that claim false again immediately, not once some
+/// later run gets back around to it.
+///
+/// The mid-run read is what proves the retraction actually happens rather
+/// than the state merely landing back on `ready` for reasons that have
+/// nothing to do with it: `on_progress` fires once, after the one batch that
+/// embeds the two new chunks, and by then `run` has already written
+/// `building` on entry (the queue was not empty) but has not yet written
+/// `ready` back (that happens on the loop iteration after this one, once the
+/// queue reads empty).
+#[test]
+fn a_ready_space_goes_back_to_building_when_new_chunks_arrive() {
+    let db = fixture::db_with_chunks(3);
+    let space = fixture::active_space_1024(&db);
+    let first_pass = fixture::mock(vec![fixture::reply_with(3)]);
+    mnema_embed::run(&db, first_pass.base(), "k", 10, &|| false, &mut |_| {}).expect("run");
+    assert_eq!(fixture::space_state(&db, space), "ready");
+
+    fixture::add_document_with_chunks(&db, 2);
+
+    let seen_mid_run = std::cell::RefCell::new(None);
+    let second_pass = fixture::mock(vec![fixture::reply_with(2)]);
+    mnema_embed::run(&db, second_pass.base(), "k", 10, &|| false, &mut |_| {
+        seen_mid_run
+            .borrow_mut()
+            .get_or_insert_with(|| fixture::space_state(&db, space));
+    })
+    .expect("run");
+
+    assert_eq!(
+        seen_mid_run.into_inner(),
+        Some("building".to_string()),
+        "the ready claim must be retracted before the new chunks are embedded, \
+         not only after"
+    );
+    assert_eq!(fixture::space_state(&db, space), "ready");
+}

@@ -936,6 +936,61 @@ impl Db {
         Ok(written > 0)
     }
 
+    /// Marks a space as holding a vector for every chunk it currently owes
+    /// one — `ready`, one of the three values the schema's own `CHECK` on
+    /// `embedding_space.state` allows (`schema.sql:356`) beside `building`
+    /// and the `stale` nothing writes yet.
+    ///
+    /// A write, not a decision: `mnema_embed::run` is the one caller (D95b),
+    /// and only once it has established both halves
+    /// of the claim itself — the queue empty and [`Db::failed_chunk_count`]
+    /// answering zero. Neither is re-read here, so this cannot come to
+    /// disagree with the facts that justified calling it.
+    ///
+    /// An id with no row is [`Error::NoSuchSpace`], the same answer every
+    /// other space method here gives for one, rather than a silent no-op: an
+    /// `UPDATE` matching zero rows is not an error SQLite raises on its own,
+    /// and a caller holding a stale id deserves to be told which one was
+    /// wrong rather than believe a write happened that did not.
+    pub fn mark_space_ready(&self, space_id: i64) -> Result<(), Error> {
+        let changed = self.conn().execute(
+            "UPDATE embedding_space SET state = 'ready' WHERE id = ?1",
+            params![space_id],
+        )?;
+        if changed == 0 {
+            return Err(Error::NoSuchSpace(space_id));
+        }
+        Ok(())
+    }
+
+    /// Retracts the claim [`Db::mark_space_ready`] makes. `ready` says every
+    /// chunk in the space has a vector, and a chunk that exists without one
+    /// makes that false from the moment it exists — not from the moment some
+    /// later run gets back around to embedding it. Without a way back, `state`
+    /// could only ever move one direction, which is the lie this space was
+    /// already in before D95b, arriving later and more convincingly: a screen
+    /// reading the column would go on saying "complete" about an archive a
+    /// second document had already outgrown.
+    ///
+    /// `mnema_embed::run` calls this unconditionally whenever it starts against
+    /// a non-empty queue — not only when the row currently says `ready` —
+    /// because checking first would make this crate a reader of a column it
+    /// has no other need to read: the queue being non-empty already is the
+    /// whole of the fact that matters, and writing `building` over a space
+    /// that already says `building` costs nothing to be wrong about.
+    ///
+    /// Same [`Error::NoSuchSpace`] convention as [`Db::mark_space_ready`].
+    pub fn mark_space_building(&self, space_id: i64) -> Result<(), Error> {
+        let changed = self.conn().execute(
+            "UPDATE embedding_space SET state = 'building' WHERE id = ?1",
+            params![space_id],
+        )?;
+        if changed == 0 {
+            return Err(Error::NoSuchSpace(space_id));
+        }
+        Ok(())
+    }
+
     /// The rule below, asked only of a call that would actually move the
     /// pointer — and asked of every call that would.
     ///

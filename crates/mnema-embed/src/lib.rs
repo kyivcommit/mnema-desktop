@@ -178,6 +178,24 @@ pub enum Error {
 /// reason `job::REPORT_INTERVAL`'s own doc gives; at one call per batch of tens
 /// of chunks over a network round trip, there is nothing here to flood it with
 /// anyway.
+///
+/// **What this does to `embedding_space.state` (D95b).** Both writes are
+/// unconditional — neither reads the column first — because both are decided
+/// from facts this function already has on hand.
+///
+/// - On entry, if the queue is not empty, the space is written `building`,
+///   whatever it said a moment before. `ready` is a claim that every chunk in
+///   the space has a vector, and a chunk waiting in the queue makes that claim
+///   false from the moment it exists — a second document indexed, an archive
+///   grown since the space last finished — not from the moment this pass gets
+///   back around to it. A state that could only ever move the other way would
+///   go on reporting "complete" over an archive it no longer describes.
+/// - On exit, the moment the queue is genuinely empty **and**
+///   [`mnema_index::Db::failed_chunk_count`] agrees nothing in the space was
+///   given up on, the space is written `ready`. The same count
+///   [`mnema_index::Db::chunks_needing_embedding`] itself excludes on, asked
+///   through the one method both share — not a second query that could come to
+///   disagree with it about what "no failures" means.
 pub fn run(
     db: &Db,
     base: &str,
@@ -193,6 +211,13 @@ pub fn run(
     let (model, width) = db.space_model(space)?;
     // Measured once, before anything is taken out of it — see `EmbedProgress`.
     let total = db.queued_chunk_count(space)? as u64;
+    // Retracts a `ready` claim the moment this run has evidence it no longer
+    // holds — see the function doc's "What this does to `embedding_space.state`"
+    // above. Decided from `total`, already measured, so this never has to read
+    // the column it is about to write.
+    if total > 0 {
+        db.mark_space_building(space)?;
+    }
     let call = Call {
         db,
         space,
@@ -216,6 +241,15 @@ pub fn run(
         }
         let pending = db.chunks_needing_embedding(space, batch)?;
         if pending.is_empty() {
+            // The queue is genuinely empty, and only here is that true: a
+            // `cancel` before this point never reaches this branch, so a
+            // stopped run never claims `ready` over work it did not finish.
+            // `failed_chunk_count` is the same predicate the queue itself
+            // excludes on — see `GIVEN_UP_ON_CURRENT_TEXT` — asked through the
+            // one method that names it, not counted a second way.
+            if db.failed_chunk_count(space)? == 0 {
+                db.mark_space_ready(space)?;
+            }
             break;
         }
         let outcome = one_batch(&call, &pending, cancel, on_progress, &mut tally);
