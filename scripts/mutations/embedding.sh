@@ -293,23 +293,26 @@ case_ "provider: PositionState must not fail the whole body on a wrong-shaped in
 # The embedding pass: the crate that writes vectors, and the failure it exists
 # to prevent is a chunk that reports as handled and is not in the index.
 #
-# ⚠️ **These cases do not name every test in `crates/mnema-embed/tests/queue.rs`,
-# and the claim that they did was false.** It said "every test that is not
-# protected by another case below has one of its own", which read as a
-# completeness guarantee and was not one — a review found five `queue.rs` tests
-# named by no case at all. That is the shape this project has already paid for
-# under "there are exactly three" when there were four: a number, or the word
-# "every", is a definition as surely as a name is.
+# ⚠️ **These cases do not name every test in `crates/mnema-embed/tests/queue.rs`.**
+# The comment here once claimed they did, which read as a completeness guarantee
+# and was not one. Its replacement then miscounted twice in the same breath —
+# while explaining that a number is a definition — so this version carries no
+# count at all. Anyone who wants one can take it from the code rather than from
+# a sentence that goes stale on the next commit:
 #
-# What is actually true: each case below breaks one thing and names one test
-# that must go red. Several tests are covered only as a side effect of a case
-# aimed at something else, and a few — `a_run_that_stopped_continues_where_it_
-# left_off`, `cancelling_keeps_what_was_already_written`,
-# `nothing_to_do_asks_the_provider_nothing`,
-# `the_tally_and_the_index_agree_after_a_run_with_both_kinds` — are named by no
-# case here. They are ordinary-path tests whose defects the cases below already
-# redden elsewhere; that is a judgement, not a guarantee, and anybody adding a
-# case is welcome to take one of them.
+#   diff <(grep -o "^fn [a-z_]*" crates/mnema-embed/tests/queue.rs | sed 's/fn //' | sort) \
+#        <(grep -o "'[a-z_]*' --test queue" scripts/mutations/embedding.sh \
+#          | tr -d "'" | sed 's/ --test queue//' | sort -u)
+#
+# Run, not guessed at: it prints the queue.rs tests no case here names.
+#
+# What is true without counting anything: each case below breaks one thing and
+# names one test that must go red. Some tests are reddened only as a side effect
+# of a case aimed at something else, and the ordinary-path ones — a run that
+# resumes, a cancellation that keeps its work, an empty queue, a refused batch
+# that condemns nothing, a tally that agrees with the index — are covered that
+# way rather than directly. That is a judgement, not a guarantee, and anybody
+# adding a case is welcome to take one of them.
 
 # The invariant the whole task exists to establish. There is no "filter by the
 # active space" to remove — the space is the active one by construction,
@@ -707,7 +710,7 @@ case_ "index: recording a failure must report whether it actually wrote a row (M
 case_ "embed: a split must report progress as it goes, not once at the end (I2)" \
   crates/mnema-embed/src/lib.rs \
   's{        on_progress\(EmbedProgress \{\n            done: tally\.embedded,\n            total: call\.total,\n            failed: tally\.failed,\n        \}\);\n    \}\n    if tally\.embedded == embedded_before \{}{    \}\n    if tally.embedded == embedded_before \{}' \
-  'put a number on screen that the database does not have.
+  '        // read, so this reports what the database holds either way.
     }
     if tally.embedded == embedded_before {' \
   mnema-embed 'progress_moves_inside_a_split_not_only_between_batches' --test queue
@@ -721,3 +724,19 @@ case_ "embed: an aborting run must report its true counts before returning (I3)"
   'one_batch(&call, &pending, cancel, on_progress, &mut tally)?;
         let outcome: Result<(), Error> = Ok(());' \
   mnema-embed 'the_last_number_is_true_even_when_the_run_stops' --test queue
+
+# ── Task 6, fix round 2 ──────────────────────────────────────────────────────
+#
+# N1. `mnema-index` proves the checked write behaves; this proves the pass calls
+# it. Measured before the test existed: with `store` reverted this way, every
+# test in the crate stayed green and the harness said STILL GREEN — the guard
+# against a vector landing on a rebuilt chunk was standing on nothing.
+#
+# `.map(|()| true)` keeps the match arms below it type-correct, so the mutation
+# is the one line it claims to be rather than a compile failure wearing the
+# same label.
+case_ "embed: the pass must use the checked write, not upsert_vector (N1)" \
+  crates/mnema-embed/src/lib.rs \
+  's{        match call\n            \.db\n            \.upsert_vector_for_text\(call\.space, chunk\.id, &chunk\.content_hash, vector\)\n        \{}{        match call.db.upsert_vector(call.space, chunk.id, vector).map(|()| true) \{}' \
+  'match call.db.upsert_vector(call.space, chunk.id, vector).map(|()| true) {' \
+  mnema-embed 'a_vector_is_not_written_onto_a_chunk_rebuilt_while_the_request_was_in_flight' --test queue
