@@ -740,3 +740,64 @@ case_ "embed: the pass must use the checked write, not upsert_vector (N1)" \
   's{        match call\n            \.db\n            \.upsert_vector_for_text\(call\.space, chunk\.id, &chunk\.content_hash, vector\)\n        \{}{        match call.db.upsert_vector(call.space, chunk.id, vector).map(|()| true) \{}' \
   'match call.db.upsert_vector(call.space, chunk.id, vector).map(|()| true) {' \
   mnema-embed 'a_vector_is_not_written_onto_a_chunk_rebuilt_while_the_request_was_in_flight' --test queue
+
+# ── Task 7 (D95b): a space stops being forever `building` ─────────────────────
+#
+# Two writers in `mnema-index`, and `run`'s two calls into them. Each case
+# below breaks exactly one of the four and names the one test that must
+# notice — the mnema-index pair proves the write itself, the mnema-embed pair
+# proves `run` calls it under the right condition and no other.
+
+# Without this, `mark_space_ready` writes the value its sibling writes instead
+# of its own — the two functions differ by one word each, and nothing but the
+# test tells them apart.
+case_ "space: mark_space_ready must write 'ready', not 'building' (D95b)" \
+  crates/mnema-index/src/space.rs \
+  's{"UPDATE embedding_space SET state = \x27ready\x27 WHERE id = \?1"}{"UPDATE embedding_space SET state = \x27building\x27 WHERE id = ?1"}' \
+  'pub fn mark_space_ready(&self, space_id: i64) -> Result<(), Error> {
+        let changed = self.conn().execute(' \
+  mnema-index 'a_space_moves_between_building_and_ready' --test space
+
+# The same swap from the other side. Without it, `mark_space_building` cannot
+# retract a `ready` claim at all — it would only ever restate one.
+case_ "space: mark_space_building must write 'building', not 'ready' (D95b)" \
+  crates/mnema-index/src/space.rs \
+  's{"UPDATE embedding_space SET state = \x27building\x27 WHERE id = \?1"}{"UPDATE embedding_space SET state = \x27ready\x27 WHERE id = ?1"}' \
+  'pub fn mark_space_building(&self, space_id: i64) -> Result<(), Error> {
+        let changed = self.conn().execute(' \
+  mnema-index 'a_space_moves_between_building_and_ready' --test space
+
+# Without the call, a fully embedded archive goes on reading exactly as it did
+# the moment `create_space` wrote its first row — the whole defect this task
+# exists to close.
+case_ "embed: run must mark a space ready once its queue empties clean (D95b)" \
+  crates/mnema-embed/src/lib.rs \
+  's{            if db\.failed_chunk_count\(space\)\? == 0 \{\n                db\.mark_space_ready\(space\)\?;\n            \}\n}{}' \
+  'break;
+        }
+        let outcome = one_batch(&call, &pending, cancel, on_progress, &mut tally);' \
+  mnema-embed 'a_space_becomes_ready_when_the_queue_empties' --test queue
+
+# The guard, not the call: without it every run ends in `ready`, whatever it
+# gave up on — the exact confusion between "the pass finished" and "the space
+# is complete" the state exists to keep apart.
+case_ "embed: run must not mark a space ready over a failure it gave up on (D95b)" \
+  crates/mnema-embed/src/lib.rs \
+  's{            if db\.failed_chunk_count\(space\)\? == 0 \{\n                db\.mark_space_ready\(space\)\?;\n            \}\n}{            db.mark_space_ready(space)?;\n}' \
+  'db.mark_space_ready(space)?;
+            break;' \
+  mnema-embed 'a_space_with_failures_does_not_become_ready' --test queue
+
+# Without this, a `ready` space never hears that new chunks arrived — the
+# back-transition this task adds specifically because a one-way state would be
+# the same lie the space started in, just arriving later and more
+# convincingly.
+case_ "embed: run must retract a ready claim when it starts against a non-empty queue (D95b)" \
+  crates/mnema-embed/src/lib.rs \
+  's{    if total > 0 \{\n        db\.mark_space_building\(space\)\?;\n    \}\n}{}' \
+  'let call = Call {
+        db,
+        space,
+        width,
+        total,' \
+  mnema-embed 'a_ready_space_goes_back_to_building_when_new_chunks_arrive' --test queue
