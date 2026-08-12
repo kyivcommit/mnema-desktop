@@ -342,16 +342,16 @@ case_ "embed: no active space is a refusal, not a guess at which space to use" \
 # look at the panic line the harness prints, not at the assertion in the title.
 case_ "embed: a refused chunk must leave a failed row behind" \
   crates/mnema-embed/src/lib.rs \
-  's{                    db\.record_embedding_failure\(space, pending\[0\]\.id\)\?;\n                    tally\.failed \+= 1;\n}{                    tally.failed += 1;\n}' \
-  'that was actually sent and cannot be about anything else.
-                    tally.failed += 1;' \
+  's{                if call\n                    \.db\n                    \.record_embedding_failure\(call\.space, pending\[0\]\.id\)\?\n                \{\n                    tally\.failed \+= 1;\n                \}\n}{                tally.failed += 1;\n}' \
+  'was called.
+                tally.failed += 1;' \
   mnema-embed 'a_refused_chunk_is_counted_as_failed_not_merely_missing' --test queue
 
 case_ "embed: a refused chunk must be counted, not merely recorded" \
   crates/mnema-embed/src/lib.rs \
-  's{                    db\.record_embedding_failure\(space, pending\[0\]\.id\)\?;\n                    tally\.failed \+= 1;\n}{                    db.record_embedding_failure(space, pending[0].id)?;\n}' \
-  'db.record_embedding_failure(space, pending[0].id)?;
-                } else {' \
+  's{                if call\n                    \.db\n                    \.record_embedding_failure\(call\.space, pending\[0\]\.id\)\?\n                \{\n                    tally\.failed \+= 1;\n                \}\n}{                call.db.record_embedding_failure(call.space, pending[0].id)?;\n}' \
+  'call.db.record_embedding_failure(call.space, pending[0].id)?;
+                Ok(())' \
   mnema-embed 'a_refused_chunk_is_counted_as_failed_not_merely_missing' --test queue
 
 # A refusal on one text must not end the run: the chunks after it are not at
@@ -359,9 +359,9 @@ case_ "embed: a refused chunk must be counted, not merely recorded" \
 # place on every restart.
 case_ "embed: one refused text must not stop the pass reaching the rest" \
   crates/mnema-embed/src/lib.rs \
-  's{                if !speaks_only_about_these_texts\(&refusal\) \{\n                    return Err\(Error::Provider\(refusal\)\);\n                \}\n}{                return Err(Error::Provider(refusal));\n                #[allow(unreachable_code)]\n}' \
+  's{            if !speaks_only_about_these_texts\(&refusal\) \{\n                return Err\(Error::Provider\(refusal\)\);\n            \}\n}{            return Err(Error::Provider(refusal));\n            #[allow(unreachable_code)]\n}' \
   'return Err(Error::Provider(refusal));
-                #[allow(unreachable_code)]' \
+            #[allow(unreachable_code)]' \
   mnema-embed 'a_refusal_neither_undoes_what_came_before_nor_stops_what_comes_after' --test queue
 
 # The batch that is refused for something that could be about its texts is
@@ -370,11 +370,9 @@ case_ "embed: one refused text must not stop the pass reaching the rest" \
 # row is never reconsidered until its text changes.
 case_ "embed: a refused batch must be split, not blamed on the chunk that happened to be first" \
   crates/mnema-embed/src/lib.rs \
-  's{                \} else \{\n                    one_at_a_time\(db, space, &call, width, &pending, cancel, &mut tally\)\?;\n                \}}{                \} else \{\n                    db.record_embedding_failure(space, pending[0].id)?;\n                    tally.failed += 1;\n                \}}' \
+  's{            \} else \{\n                one_at_a_time\(call, pending, cancel, on_progress, tally\)\n            \}}{            \} else \{\n                if call.db.record_embedding_failure(call.space, pending[0].id)? \{\n                    tally.failed += 1;\n                \}\n                Ok(())\n            \}}' \
   '} else {
-                    db.record_embedding_failure(space, pending[0].id)?;
-                    tally.failed += 1;
-                }' \
+                if call.db.record_embedding_failure(call.space, pending[0].id)? {' \
   mnema-embed 'a_batch_refused_for_its_content_is_re_sent_one_text_at_a_time' --test queue
 
 # A document that is `pending` is one `clear_document_content` has just emptied
@@ -422,7 +420,7 @@ case_ "index: a failed row must stop applying once the chunk's text changes" \
 # ranked at all, not whether it matches this space's width.
 case_ "embed: a vector of the wrong width must be refused before it is stored" \
   crates/mnema-embed/src/lib.rs \
-  's{    for vector in vectors \{\n        if vector\.len\(\) as i64 != width \{\n            return Err\(Error::WidthMismatch \{\n                expected: width,\n                got: vector\.len\(\) as i64,\n            \}\);\n        \}\n    \}\n}{}' \
+  's{    for vector in vectors \{\n        if vector\.len\(\) as i64 != call\.width \{\n            return Err\(Error::WidthMismatch \{\n                expected: call\.width,\n                got: vector\.len\(\) as i64,\n            \}\);\n        \}\n    \}\n}{}' \
   '    }
     for (chunk, vector) in pending.iter().zip(vectors) {' \
   mnema-embed 'a_vector_of_the_wrong_width_is_refused_before_it_is_stored' --test queue
@@ -433,9 +431,9 @@ case_ "embed: a vector of the wrong width must be refused before it is stored" \
 # own answer has just been declared incompatible with.
 case_ "embed: the whole batch's widths must be checked before any of it is stored" \
   crates/mnema-embed/src/lib.rs \
-  's{    for vector in vectors \{\n        if vector\.len\(\) as i64 != width \{\n            return Err\(Error::WidthMismatch \{\n                expected: width,\n                got: vector\.len\(\) as i64,\n            \}\);\n        \}\n    \}\n    for \(chunk, vector\) in pending\.iter\(\)\.zip\(vectors\) \{\n}{    for (chunk, vector) in pending.iter().zip(vectors) \{\n        if vector.len() as i64 != width \{\n            return Err(Error::WidthMismatch \{\n                expected: width,\n                got: vector.len() as i64,\n            \});\n        \}\n}' \
+  's{    for vector in vectors \{\n        if vector\.len\(\) as i64 != call\.width \{\n            return Err\(Error::WidthMismatch \{\n                expected: call\.width,\n                got: vector\.len\(\) as i64,\n            \}\);\n        \}\n    \}\n    for \(chunk, vector\) in pending\.iter\(\)\.zip\(vectors\) \{\n}{    for (chunk, vector) in pending.iter().zip(vectors) \{\n        if vector.len() as i64 != call.width \{\n            return Err(Error::WidthMismatch \{\n                expected: call.width,\n                got: vector.len() as i64,\n            \});\n        \}\n}' \
   '    for (chunk, vector) in pending.iter().zip(vectors) {
-        if vector.len() as i64 != width {' \
+        if vector.len() as i64 != call.width {' \
   mnema-embed 'a_batch_carrying_one_bad_width_stores_none_of_it' --test queue
 
 # The last hop of a binding that is carried by position the whole way down.
@@ -464,8 +462,8 @@ case_ "index: the queue must hand over the original text, not the prepared copy"
 # already paid for a batch of embeddings.
 case_ "embed: cancellation must be asked before the first batch, not only after it" \
   crates/mnema-embed/src/lib.rs \
-  's{        if cancel\(\) \{\n            break;\n        \}\n        let pending}{        let pending}; s{            failed: tally\.failed,\n        \}\);\n    \}\n    Ok\(tally\)}{            failed: tally.failed,\n        \});\n        if cancel() \{\n            break;\n        \}\n    \}\n    Ok(tally)}' \
-  '        });
+  's{        if cancel\(\) \{\n            break;\n        \}\n        let pending}{        let pending}; s{        outcome\?;\n    \}\n    Ok\(tally\)}{        outcome?;\n        if cancel() \{\n            break;\n        \}\n    \}\n    Ok(tally)}' \
+  '        outcome?;
         if cancel() {' \
   mnema-embed 'cancelling_before_the_first_batch_asks_the_provider_nothing' --test queue
 
@@ -492,10 +490,12 @@ case_ "embed: progress total must be the queue, not every chunk in the index" \
 # transaction as the write. With `insert_vector` a chunk that was refused once
 # and has since been embedded goes on being counted among the failures — a
 # number on the settings screen that nothing will ever clear.
-case_ "embed: storing a vector must clear the row that gave up on the chunk (D95a)" \
-  crates/mnema-embed/src/lib.rs \
-  's{match db\.upsert_vector\(space, chunk\.id, vector\)}{match db.insert_vector(space, chunk.id, vector)}' \
-  'match db.insert_vector(space, chunk.id, vector) {' \
+case_ "index: storing a vector must clear the row that gave up on the chunk (D95a)" \
+  crates/mnema-index/src/space.rs \
+  's{            tx\.execute\(\n                "DELETE FROM chunk_embedding_state WHERE space_id = \?1 AND chunk_id = \?2",\n                params!\[space_id, chunk_id\],\n            \)\?;\n            Ok\(true\)}{            Ok(true)}' \
+  '            Ok(true)
+        })
+    }' \
   mnema-embed 'an_edited_chunk_leaves_the_failed_number_and_is_tried_again' --test queue
 
 # A batch of nothing asks the database for zero chunks and gets zero back, so
@@ -616,9 +616,9 @@ case_ "embed: inside a split, an unclassified failure must stop the run too" \
 # the next, and the next, to the end of the archive, with `run` reporting Ok.
 case_ "embed: the first chunk of a run must not be condemned before anything has embedded" \
   crates/mnema-embed/src/lib.rs \
-  's{                    if tally\.embedded == 0 \{\n                        return Err\(Error::Provider\(refusal\)\);\n                    \}\n}{}' \
+  's{                if tally\.embedded == 0 \{\n                    return Err\(Error::Provider\(refusal\)\);\n                \}\n}{}' \
   'anything will look at it again.
-                    // `content_hash` is read from the chunk inside' \
+                // `content_hash` is read from the chunk inside' \
   mnema-embed 'the_first_chunk_of_a_run_is_not_condemned_on_no_evidence' --test queue
 
 # The same rule where the corroboration is the split's own successes. `<` rather
@@ -640,7 +640,7 @@ case_ "embed: a split that succeeded at nothing must condemn nothing" \
 # pass of the queue and the mock is exhausted.
 case_ "embed: a corroborated split must still write the rows it held" \
   crates/mnema-embed/src/lib.rs \
-  's{    for chunk_id in condemned \{\n        db\.record_embedding_failure\(space, chunk_id\)\?;\n        tally\.failed \+= 1;\n    \}\n}{    let _ = &condemned;\n}' \
+  's{    for chunk_id in condemned \{\n        if call\.db\.record_embedding_failure\(call\.space, chunk_id\)\? \{\n            tally\.failed \+= 1;\n        \}\n    \}\n}{    let _ = &condemned;\n}' \
   '    let _ = &condemned;
     Ok(())' \
   mnema-embed 'one_success_in_a_split_corroborates_the_refusals_beside_it' --test queue
@@ -653,8 +653,8 @@ case_ "embed: a corroborated split must still write the rows it held" \
 case_ "index: the queue must exclude chunks that already have a vector" \
   crates/mnema-index/src/space.rs \
   's{\n            AND c\.id NOT IN \(SELECT chunk_id FROM \{table\}\)}{}' \
-  'WHERE d.status = \x27indexed\x27
-            AND NOT EXISTS' \
+  'JOIN document d ON d.id = c.document_id
+          WHERE d.status' \
   mnema-embed 'the_queue_is_the_chunks_with_no_vector' --test queue
 
 # I1: chunk ids are reused, so a vector written by id alone can land on a chunk
@@ -707,7 +707,7 @@ case_ "index: recording a failure must report whether it actually wrote a row (M
 case_ "embed: a split must report progress as it goes, not once at the end (I2)" \
   crates/mnema-embed/src/lib.rs \
   's{        on_progress\(EmbedProgress \{\n            done: tally\.embedded,\n            total: call\.total,\n            failed: tally\.failed,\n        \}\);\n    \}\n    if tally\.embedded == embedded_before \{}{    \}\n    if tally.embedded == embedded_before \{}' \
-  '        }
+  'put a number on screen that the database does not have.
     }
     if tally.embedded == embedded_before {' \
   mnema-embed 'progress_moves_inside_a_split_not_only_between_batches' --test queue
