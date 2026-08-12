@@ -1680,11 +1680,18 @@ fn embed_returns_one_vector_per_text_in_order() {
 /// answer to this exact body fills slot 0, the loop ends with nothing left
 /// to complain about, and slot 1 — never visited — leaves the loop as the
 /// placeholder `Vec::new()`: an empty vector, reaching `Ok` as if it were a
-/// real embedding. That is the one path by which an empty vector reaches the
-/// index at all (`check_rankable` refuses it there, but only because it got
-/// that far in the first place) — which is why the count-check mutation in
-/// `scripts/mutations/embedding.sh` is the most important of the three this
-/// section carries.
+/// real embedding. That is the one path by which *this function* invents an
+/// empty vector, as opposed to passing along one the provider actually sent
+/// — `embed` deliberately does not inspect vector contents at all (see its
+/// own doc comment, "What this does NOT check"), so a provider that sends a
+/// genuinely empty embedding reaches `Ok` too, by the ordinary successful
+/// path, and is refused downstream instead: `check_rankable` catches it at
+/// insert as a recorded failure. That existing path is why this one is not
+/// the only way an empty vector ever reaches the index — it is the only way
+/// *`embed` manufactures* one out of an answer that never contained it,
+/// which is what the count-check mutation in `scripts/mutations/embedding.sh`
+/// exists to catch, and is the most important of the three this section
+/// carries.
 #[test]
 fn embed_refuses_a_short_answer() {
     let mock = MockServer::new(vec![Reply::ok(

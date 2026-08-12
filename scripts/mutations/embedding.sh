@@ -273,9 +273,15 @@ case_ "provider: embed's count check must catch a long answer too, not only a sh
 # `Option<usize>`-equivalent behaviour (same type name, so the crate still
 # compiles) while every other line stays untouched. The regression is
 # `check_embedding_model` becoming unable to read a body it never even looks
-# at `index` in — the named test is the one that would go red for that, not
-# any of `embed`'s own position tests, which cannot tell this mutation apart
-# from the ordinary `Malformed` an unreadable body already produces.
+# at `index` in — the named test is the one written to catch exactly that.
+# Measured (fix round 2 re-review, question 3): `embed`'s own
+# `embed_refuses_a_position_stated_in_a_shape_it_cannot_read` reddens under
+# this same mutation too — the body's parse now fails outright instead of
+# yielding `PositionMismatch`, which that test does not expect — while the
+# other eight `embed_*` tests in this file stay green. Two oracles, not one;
+# the named test is kept as this case's oracle because it is the one that
+# shows the actual regression (a model `check_embedding_model` should have
+# accepted, refused) rather than an assertion mismatch one level away from it.
 case_ "provider: PositionState must not fail the whole body on a wrong-shaped index (fix round 2, Important A)" \
   crates/mnema-provider/src/probe.rs \
   's{        Ok\(match Value::deserialize\(deserializer\)\? \{\n            Value::Null => PositionState::Absent,\n            Value::Number\(n\) => n\n                \.as_u64\(\)\n                \.and_then\(\|n\| usize::try_from\(n\)\.ok\(\)\)\n                \.map\(PositionState::Stated\)\n                \.unwrap_or\(PositionState::Unreadable\),\n            _ => PositionState::Unreadable,\n        \}\)}{        Ok(match Option::<usize>::deserialize(deserializer)? \{\n            Some(n) => PositionState::Stated(n),\n            None => PositionState::Absent,\n        \})}' \

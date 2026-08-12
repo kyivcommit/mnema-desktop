@@ -878,11 +878,18 @@ enum PositionState {
     Stated(usize),
     /// The key was present, and its value was not a plain non-negative
     /// integer this build can use as an array position: a string, a float, a
-    /// negative number, or any other shape. Distinct from `Absent` in
-    /// `embed`'s own refusal (`Error::PositionMismatch`): "the provider said
-    /// nothing" and "the provider said something this build could not read"
-    /// are different facts to hand a person and a later session, even though
-    /// neither can be bound safely.
+    /// negative number, or any other shape. **A deliberate departure from
+    /// `Stated` above, not an oversight** (Task 5 fix round 2 re-review,
+    /// question 2): `Stated` has a string branch and reads `"10.0"` as a
+    /// number, because a balance is a quantity and a quantity stated as text
+    /// is still the quantity. A position is not a quantity, it is an array
+    /// index — reading `"0"` as a binding would be exactly the quiet guess
+    /// this whole type exists to refuse, so this variant has no string
+    /// branch on purpose. Distinct from `Absent` in `embed`'s own refusal
+    /// (`Error::PositionMismatch`): "the provider said nothing" and "the
+    /// provider said something this build could not read" are different
+    /// facts to hand a person and a later session, even though neither can
+    /// be bound safely.
     Unreadable,
 }
 
