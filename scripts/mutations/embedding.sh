@@ -230,7 +230,7 @@ case_ "provider: embed without the count check silently misattributes a short an
   's{    if parsed\.data\.len\(\) != texts\.len\(\) \{\n        return Err\(Error::CountMismatch \{\n            asked: texts\.len\(\),\n            got: parsed\.data\.len\(\),\n        \}\);\n    \}\n\n}{}' \
   '.map_err(|e| unreadable_embeddings_answer(&answer, key, &e))?;
 
-    Ok(parsed.data.into_iter()' \
+    // Placeholders, not' \
   mnema-provider 'embed_refuses_a_short_answer' --test probe
 
 # ── Task 5, fix round 1 ────────────────────────────────────────────────────
@@ -257,6 +257,6 @@ case_ "provider: embed must bind by the row's stated position, not by array orde
 # to hold, and it must leave `embed_refuses_a_short_answer` green.
 case_ "provider: embed's count check must catch a long answer too, not only a short one (fix round 1, Minor 4)" \
   crates/mnema-provider/src/probe.rs \
-  's{if parsed\.data\.len\(\) != texts\.len\(\) \{}{if parsed.data.len() < texts.len() {}' \
+  's{if parsed\.data\.len\(\) != texts\.len\(\) \{}{if parsed.data.len() < texts.len() \{}' \
   'if parsed.data.len() < texts.len() {' \
   mnema-provider 'embed_refuses_a_long_answer_too' --test probe
