@@ -899,3 +899,102 @@ case_ "space: space_is_complete must not carve out chunks this space gave up on 
   'WHERE c.id NOT IN (SELECT chunk_id FROM {table})
                         AND NOT EXISTS ({GIVEN_UP_ON_CURRENT_TEXT})' \
   mnema-embed 'a_space_with_failures_does_not_become_ready' --test queue
+
+# ── Task 8: the job in the shell, the command, and the third number ───────────
+#
+# ⚠️ **Nothing here can reach `ui/`.** `mutation-check.sh` runs `cargo test` and
+# nothing else, so the window's half of this task — the settings line, the
+# embedding job's own ending sentences, the two scopes those sentences keep
+# apart — is held by `ui/render.test.js` and by review. The same limit this file
+# already states twice; it is restated here because this task is the first one
+# whose load-bearing requirement is a sentence on a screen.
+
+# The inherited defect, reverted. `done == total` never fires for a run that
+# ends with refusals — `mnema_embed::EmbedProgress`'s own doc says so — so the
+# unthrottled last report goes missing on exactly the runs whose numbers matter
+# most, and the bar is left wherever the timer last put it. The marker is the
+# reintroduced `done == total`: that text exists nowhere in the file otherwise.
+case_ "job: the last report must be forced by a resolved unit, not by done == total (T8)" \
+  src-tauri/src/job.rs \
+  's{    done \+ refused >= total \|\| last\.is_none_or}{    done == total || last.is_none_or}' \
+  '    done == total || last.is_none_or(|last| now.duration_since(last) >= interval)' \
+  mnema-desktop 'job::tests::the_report_that_resolves_the_last_unit_is_due_even_when_some_were_refused' --lib
+
+# The third number, dropped at the seam it crosses. Without it a run that gave
+# up on chunks and a run that finished cleanly reach the window as the same
+# message — which is the shape `WalkReport::removed` was already lost in once,
+# at this exact kind of seam.
+case_ "embed_job: refusals must cross into the ending, not be zeroed there (T8)" \
+  src-tauri/src/embed_job.rs \
+  's{        skipped: 0,\n        refused: tally\.failed,}{        skipped: 0,\n        refused: 0,}' \
+  '        skipped: 0,
+        refused: 0,
+        complete: true,' \
+  mnema-desktop 'embed_job::tests::refusals_cross_the_seam_separately_from_what_was_embedded' --lib
+
+# The same mutation, the test that reaches it through the command rather than
+# through the translation function — a run against a real index and a provider
+# that refuses one chunk. One case per test, since `case_` names one at a time.
+case_ "embed_job: refusals must cross into the ending — through the command (T8)" \
+  src-tauri/src/embed_job.rs \
+  's{        skipped: 0,\n        refused: tally\.failed,}{        skipped: 0,\n        refused: 0,}' \
+  '        skipped: 0,
+        refused: 0,
+        complete: true,' \
+  mnema-desktop 'a_chunk_the_provider_refused_is_counted_where_a_person_can_read_it' --test model_commands
+
+# The live half. A report that carries `done` and not the refusals leaves the
+# bar climbing towards a total it will never reach, with nothing saying why.
+case_ "embed_job: a live report must carry the refusals as well as the count (T8)" \
+  src-tauri/src/embed_job.rs \
+  's{        skipped: 0,\n        refused: progress\.failed,}{        skipped: 0,\n        refused: 0,}' \
+  '        skipped: 0,
+        refused: 0,
+        seconds_left:' \
+  mnema-desktop 'embed_job::tests::a_report_carries_the_refusals_as_well_as_the_count' --lib
+
+# The failure path's own copy. The rows are already written when the pass gives
+# up — `mnema_embed::run` records a refusal before it propagates anything — so
+# reporting zero here takes a number off the screen that the database still
+# holds.
+case_ "embed_job: a failed run must still say how many were refused (T8)" \
+  src-tauri/src/embed_job.rs \
+  's{    Ended \{\n        refused,\n        \.\.Ended::failed\(done, total, message\)\n    \}}{    let _ = refused;\n    Ended::failed(done, total, message)}' \
+  '    let _ = refused;
+    Ended::failed(done, total, message)' \
+  mnema-desktop 'embed_job::tests::a_failed_run_still_says_how_many_were_refused' --lib
+
+# A run somebody stopped, reported as one that finished. `mnema_embed::run`
+# answers `Ok` to both, so the flag is the only witness there is — and the
+# direction of this mistake is the bad one: "finished" told to somebody who
+# pressed Stop is a claim that the archive is fully embedded.
+case_ "embed_job: a stopped run must not be reported as a finished one (T8)" \
+  src-tauri/src/embed_job.rs \
+  's{        reason: if cancelled \{\n            EndReason::Cancelled\n        \} else \{\n            EndReason::Completed\n        \},}{        reason: EndReason::Completed,}' \
+  '        reason: EndReason::Completed,
+        done: tally.embedded,' \
+  mnema-desktop 'embed_job::tests::a_stopped_run_is_not_reported_as_a_finished_one' --lib
+
+# The number the whole task exists to put in front of a person, removed at the
+# last seam before the window. `Db::failed_chunk_count` goes back to having no
+# production caller, and with it the justification for a chunk being allowed to
+# leave the embedding queue for good.
+case_ "models: the settings must read the refusal count, not report zero (T8)" \
+  src-tauri/src/models.rs \
+  's{            failed_chunks: match active_space \{\n                Some\(id\) => db\.failed_chunk_count\(id\)\?,\n                None => 0,\n            \},}{            failed_chunks: 0,}' \
+  '            failed_chunks: 0,
+            space_count: db.space_count()?,' \
+  mnema-desktop 'a_chunk_the_provider_refused_is_counted_where_a_person_can_read_it' --test model_commands
+
+# The ordering `start_walk_job` argues for and this command inherits: every
+# fallible step before the slot is claimed. Reading the credential store can put
+# a modal authorisation dialog on screen, so claiming first disables Start and
+# refuses a walk for as long as somebody leaves it unanswered — for a call that
+# then fails with `NoKey` anyway.
+case_ "embed_job: the key must be read before the job slot is claimed (T8)" \
+  src-tauri/src/embed_job.rs \
+  's{    let key = crate::models::key\(&state\)\?;\n    let base = state\.provider_base\(\)\.to_string\(\);\n\n    let slot = state\.claim_job\(\)\?;}{    let slot = state.claim_job()?;\n\n    let key = crate::models::key(\&state)?;\n    let base = state.provider_base().to_string();}' \
+  '    let slot = state.claim_job()?;
+
+    let key = crate::models::key(&state)?;' \
+  mnema-desktop 'the_key_is_read_before_the_job_slot_is_taken' --test model_commands
