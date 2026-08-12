@@ -382,9 +382,13 @@ fn one_at_a_time(
         // longest path in the pass — up to a whole batch of network round trips
         // — and it is the one place a bar built from these numbers would
         // otherwise sit still for the entire time the work is at its slowest.
-        // `failed` does not move here: the rows are held until something
-        // corroborates them, and reporting them before they are written would
-        // put a number on screen that the database does not have.
+        // `failed` can move here, and only by one route: `store` writes the row
+        // for a vector the index will not rank, inside this loop. The refusals
+        // the *split* is collecting do not move it — those rows are held until
+        // something corroborates them, and reporting them before they are
+        // written would put a number on screen that the database does not have.
+        // Both halves of that are already true of `tally.failed` when it is
+        // read, so this reports what the database holds either way.
         on_progress(EmbedProgress {
             done: tally.embedded,
             total: call.total,

@@ -1079,3 +1079,72 @@ fn the_last_number_is_true_even_when_the_run_stops() {
         "the last number on screen disagrees with the index"
     );
 }
+
+/// **The pass must use the protected write, not merely have one available.**
+///
+/// `mnema-index` proves `upsert_vector_for_text` behaves correctly. Nothing in
+/// this crate proved that `store` *calls* it: reverting that one line to
+/// `upsert_vector` left all 36 tests green and the harness reported STILL
+/// GREEN. The guard against a vector landing on a rebuilt chunk was itself
+/// standing on nothing — the branch's oldest pattern, arriving one layer above
+/// the defence we had just built.
+///
+/// The seam is already in the signature. `run` calls `on_progress` from its own
+/// thread, and inside a split it calls it *between* the single requests — after
+/// the queue was read, before the rest of that batch is written. Rebuilding a
+/// document there is exactly the race: the chunks still to be written were read
+/// with one text, and by the time their vectors arrive they hold another.
+///
+/// The rebuild goes through `clear_document_content`, so the interaction is the
+/// real one rather than a staged version of it: the clear takes that document's
+/// vectors (D88), puts it back to `pending`, and frees chunk ids that the new
+/// chunks are handed straight back — which is what makes the stale write land
+/// on a *live* row instead of failing on a missing one.
+///
+/// The axes carry the verdict. The in-flight singles answer along 6 and 7,
+/// while the second round — over chunks read fresh after the rebuild — answers
+/// along 0 and 1. A rebuilt chunk holding axis 6 or 7 holds a vector made from
+/// text its file no longer contains, which is the whole thing being prevented.
+#[test]
+fn a_vector_is_not_written_onto_a_chunk_rebuilt_while_the_request_was_in_flight() {
+    let db = fixture::db_with_chunks_in_two_documents(1, 2);
+    let space = fixture::active_space_1024(&db);
+    let rebuilt = fixture::document_ids(&db)[1].clone();
+
+    let mock = fixture::mock(vec![
+        // Refused for its content, so the batch is split — which is what puts
+        // an `on_progress` between the queue read and the writes after it.
+        Reply::status(400, r#"{"error":{"message":"input is too long"}}"#),
+        // The untouched document. Its success is also what corroborates the
+        // split, so the run does not stop for an unrelated reason.
+        fixture::reply_of_axis(5),
+        // The two whose chunks are rebuilt while these are in flight.
+        fixture::reply_of_axis(6),
+        fixture::reply_of_axis(7),
+        // The second round, over the rebuilt chunks read fresh.
+        fixture::reply_with(2),
+    ]);
+
+    let rebuilt_once = std::cell::Cell::new(false);
+    mnema_embed::run(&db, mock.base(), "k", 3, &|| false, &mut |_| {
+        if !rebuilt_once.replace(true) {
+            fixture::rebuild_document(&db, &rebuilt, &["новий текст 1", "новий текст 2"]);
+        }
+    })
+    .expect("run");
+
+    assert!(
+        rebuilt_once.get(),
+        "the rebuild never happened, so nothing was tested"
+    );
+    for chunk in fixture::chunk_ids_of(&db, &rebuilt) {
+        let stored = fixture::stored_vector(&db, space, chunk);
+        let hot = stored.iter().position(|f| *f == 1.0);
+        assert!(
+            matches!(hot, Some(0) | Some(1)),
+            "chunk {chunk} holds a vector made from text the file no longer contains \
+             (hot axis {hot:?}; 6 and 7 are the answers that were in flight during the rebuild)"
+        );
+    }
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 3);
+}

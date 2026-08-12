@@ -132,6 +132,72 @@ fn write_chunk(db: &Db, doc: &str, ord: i64, text: &str) {
     .expect("chunk");
 }
 
+/// Two `indexed` documents, with `first` and `second` chunks in them.
+///
+/// Two rather than one because the test that needs this has to rebuild a
+/// document *while a run is in flight* and still have something left that the
+/// rebuild does not touch — the untouched one is what corroborates the split,
+/// and without it the run would stop for a different reason than the one under
+/// test.
+pub fn db_with_chunks_in_two_documents(first: usize, second: usize) -> TempDb {
+    let db = temp_db();
+    for (marker, count) in [("a", first), ("b", second)] {
+        let doc = db
+            .insert_document(&marker.repeat(64), "text/plain", 64, SourceKind::Document)
+            .expect("document");
+        for ord in 0..count {
+            write_chunk(
+                &db,
+                &doc,
+                ord as i64,
+                &format!("{CHUNK_TEXT_PREFIX}{marker}{ord}"),
+            );
+        }
+        db.set_document_status(&doc, DocumentStatus::Indexed)
+            .expect("status");
+    }
+    db
+}
+
+/// The documents in the index, in a stable order — `db_with_chunks_in_two_documents`
+/// names them so that the first is the one it built first.
+pub fn document_ids(db: &Db) -> Vec<String> {
+    db.conn()
+        .prepare("SELECT id FROM document ORDER BY id")
+        .expect("prepare")
+        .query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .expect("rows")
+}
+
+/// The chunks of one document, in queue order.
+pub fn chunk_ids_of(db: &Db, doc: &str) -> Vec<i64> {
+    db.conn()
+        .prepare("SELECT id FROM chunk WHERE document_id = ?1 ORDER BY id")
+        .expect("prepare")
+        .query_map([doc], |r| r.get(0))
+        .expect("query")
+        .collect::<rusqlite::Result<Vec<i64>>>()
+        .expect("rows")
+}
+
+/// What a rebuild does: clear the document's content and write it again.
+///
+/// The real path, through [`Db::clear_document_content`], because the
+/// interaction is the point — the clear takes the document's vectors with it
+/// (D88), sets the document back to `pending`, and frees chunk ids that the new
+/// chunks are then handed straight back. Anything that skipped the clear would
+/// be a different situation wearing the same name.
+pub fn rebuild_document(db: &Db, doc: &str, texts: &[&str]) {
+    db.clear_document_content(doc).expect("clear");
+    for (ord, text) in texts.iter().enumerate() {
+        write_chunk(db, doc, ord as i64, text);
+    }
+    db.set_document_status(doc, DocumentStatus::Indexed)
+        .expect("status");
+}
+
 /// A 1024-wide space that `meta.active_space` points at — what
 /// `adopt_embedding_model` leaves behind, which is the only way the pointer is
 /// ever written.
@@ -380,6 +446,22 @@ pub fn reply_with_a_degenerate_row(count: usize, degenerate: usize) -> Reply {
         })
         .collect();
     Reply::ok(&format!(r#"{{"data":[{}]}}"#, rows.join(",")))
+}
+
+/// One row, at the usual width, hot along the axis named.
+///
+/// So that a test can say *which request* a stored vector came from. The
+/// ordinary `reply_with` answers along axis 0 for a single text, which is
+/// indistinguishable from every other single-text answer; a vector that must
+/// not have been written needs to be recognisable when it has been.
+pub fn reply_of_axis(axis: usize) -> Reply {
+    let components: Vec<&str> = (0..1024)
+        .map(|c| if c == axis { "1.0" } else { "0.0" })
+        .collect();
+    Reply::ok(&format!(
+        r#"{{"data":[{{"embedding":[{}],"index":0}}]}}"#,
+        components.join(",")
+    ))
 }
 
 /// One row per entry in `widths`, each at the width named — so a single answer

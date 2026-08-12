@@ -321,6 +321,18 @@ impl Db {
     /// `insert_vector` is deliberately left alone. Its "exactly once" is a
     /// statement some caller may want enforced, and quietly turning it into
     /// a replace would remove an error worth seeing.
+    ///
+    /// ⚠️ **After the indexing cycle this method has no production call sites —
+    /// `grep -rn upsert_vector crates src-tauri --include='*.rs'` finds only
+    /// doc references and tests.** The embedding pass deliberately uses
+    /// [`Db::upsert_vector_for_text`] instead, because writing by `chunk_id`
+    /// alone binds a vector to whatever chunk holds that id *now*, and ids are
+    /// reused. This one is kept rather than removed or narrowed: a full space
+    /// migration — build the new space beside the old one and fill it — is
+    /// deferred to its own cycle, and a bulk copy between spaces has no text to
+    /// compare against and no reason to want one. It is written down here
+    /// because an unchecked public write with no callers is the thing a later
+    /// session reaches for first, and the reason not to is two functions away.
     pub fn upsert_vector(&self, space_id: i64, chunk_id: i64, v: &[f32]) -> Result<(), Error> {
         let space = self.space(space_id)?;
         check_rankable(v, &space.metric, VectorRole::Stored(chunk_id))?;
