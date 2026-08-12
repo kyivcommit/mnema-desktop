@@ -743,55 +743,121 @@ case_ "embed: the pass must use the checked write, not upsert_vector (N1)" \
 
 # ── Task 7 (D95b): a space stops being forever `building` ─────────────────────
 #
-# Two writers in `mnema-index`, and `run`'s two calls into them. Each case
-# below breaks exactly one of the four and names the one test that must
-# notice — the mnema-index pair proves the write itself, the mnema-embed pair
-# proves `run` calls it under the right condition and no other.
+# Two writers in `mnema-index`, and `run`'s two calls into them. Fix round 1
+# added a third method, `space_is_complete`, and collapsed the two-predicate
+# `ready` condition (queue empty ∧ `failed_chunk_count == 0`, two different
+# sets of chunks) into one call to it — see that method's own doc for why.
 
 # Without this, `mark_space_ready` writes the value its sibling writes instead
 # of its own — the two functions differ by one word each, and nothing but the
 # test tells them apart.
+#
+# The marker carries the swapped value itself, inside `mark_space_ready`'s own
+# body, not only the function name (M1, review round 1: the function-name-only
+# marker used before this existed in the file, in the sibling function, even
+# before the mutation ran, so the second guard could not tell a mutation that
+# landed here from one that landed there — this one can).
 case_ "space: mark_space_ready must write 'ready', not 'building' (D95b)" \
   crates/mnema-index/src/space.rs \
   's{"UPDATE embedding_space SET state = \x27ready\x27 WHERE id = \?1"}{"UPDATE embedding_space SET state = \x27building\x27 WHERE id = ?1"}' \
   'pub fn mark_space_ready(&self, space_id: i64) -> Result<(), Error> {
-        let changed = self.conn().execute(' \
+        let changed = self.conn().execute(
+            "UPDATE embedding_space SET state = '"'"'building'"'"' WHERE id = ?1",' \
   mnema-index 'a_space_moves_between_building_and_ready' --test space
 
-# The same swap from the other side. Without it, `mark_space_building` cannot
-# retract a `ready` claim at all — it would only ever restate one.
+# The same swap from the other side, same reason for the stronger marker.
+# Without it, `mark_space_building` cannot retract a `ready` claim at all — it
+# would only ever restate one.
 case_ "space: mark_space_building must write 'building', not 'ready' (D95b)" \
   crates/mnema-index/src/space.rs \
   's{"UPDATE embedding_space SET state = \x27building\x27 WHERE id = \?1"}{"UPDATE embedding_space SET state = \x27ready\x27 WHERE id = ?1"}' \
   'pub fn mark_space_building(&self, space_id: i64) -> Result<(), Error> {
-        let changed = self.conn().execute(' \
+        let changed = self.conn().execute(
+            "UPDATE embedding_space SET state = '"'"'ready'"'"' WHERE id = ?1",' \
   mnema-index 'a_space_moves_between_building_and_ready' --test space
 
-# Without the call, a fully embedded archive goes on reading exactly as it did
-# the moment `create_space` wrote its first row — the whole defect this task
-# exists to close.
+# ── Fix round 1 (D95b, I1/I2): `ready` collapsed into `space_is_complete` ──────
+#
+# Replaces the two cases that targeted the old `failed_chunk_count(space)? ==
+# 0` condition — that code is gone, deleted along with the commit that removed
+# it, so those cases would no longer apply against anything.
+
+# The outer `NOT`, flipped. Without it a full space reads exactly as an empty
+# one: `EXISTS` is true whenever a vector-less chunk exists, so a complete
+# space — none do — answers `false` where `space_is_complete` must answer
+# `true`.
+case_ "space: space_is_complete's NOT EXISTS must stay NOT, not EXISTS (D95b fix 1)" \
+  crates/mnema-index/src/space.rs \
+  's{"SELECT NOT EXISTS \(}{"SELECT EXISTS (}' \
+  'SELECT EXISTS (
+                     SELECT 1 FROM chunk c' \
+  mnema-embed 'a_space_becomes_ready_when_the_queue_empties' --test queue
+
+# The finding itself. Without the missing document-status filter staying
+# missing, this predicate goes back to covering only chunks behind an
+# `indexed` document — exactly the queue's narrower scope, and exactly what
+# let a document written but not yet `indexed` (the window
+# `crates/mnema-ingest/src/lib.rs:546-598` names) read as `ready` with zero
+# vectors. The marker anchors on the join text appearing *inside this
+# function's own query*, not merely anywhere in the file — `the_embedding_queue`
+# already has a join of its own, at different indentation, so a marker of the
+# join alone would have existed before this mutation too.
+case_ "space: space_is_complete must not filter by document status — I1 (D95b fix 1)" \
+  crates/mnema-index/src/space.rs \
+  's{                     SELECT 1 FROM chunk c\n                      WHERE c\.id NOT IN}{                     SELECT 1 FROM chunk c\n                      JOIN document d ON d.id = c.document_id\n                      WHERE d.status = \x27indexed\x27 AND c.id NOT IN}' \
+  'SELECT 1 FROM chunk c
+                      JOIN document d ON d.id = c.document_id
+                      WHERE d.status' \
+  mnema-embed 'a_space_with_chunks_behind_an_unindexed_document_does_not_become_ready' --test queue
+
+# The same mutation, the mirror test — I2, the direction fix round 1 keeps
+# rather than closes. A failed chunk behind a document that has since left
+# `indexed` would become invisible to a scope-narrowed check exactly the way
+# it is invisible to the queue, and the space would wrongly read `ready`.
+case_ "space: the document-status filter would also hide a failed chunk — I2 (D95b fix 1)" \
+  crates/mnema-index/src/space.rs \
+  's{                     SELECT 1 FROM chunk c\n                      WHERE c\.id NOT IN}{                     SELECT 1 FROM chunk c\n                      JOIN document d ON d.id = c.document_id\n                      WHERE d.status = \x27indexed\x27 AND c.id NOT IN}' \
+  'SELECT 1 FROM chunk c
+                      JOIN document d ON d.id = c.document_id
+                      WHERE d.status' \
+  mnema-embed 'a_space_with_a_failed_chunk_behind_a_document_that_left_indexed_stays_building' --test queue
+
+# The guard at the call site, not the predicate itself. Without it, every run
+# that empties the queue marks `ready`, whatever `space_is_complete` would
+# have answered — the exact confusion between "the pass finished" and "the
+# space is complete" the state exists to keep apart.
+case_ "embed: run must ask space_is_complete before marking a space ready (D95b fix 1)" \
+  crates/mnema-embed/src/lib.rs \
+  's{            if db\.space_is_complete\(space\)\? \{\n                db\.mark_space_ready\(space\)\?;\n            \}\n}{            db.mark_space_ready(space)?;\n}' \
+  'db.mark_space_ready(space)?;
+            break;' \
+  mnema-embed 'a_space_with_failures_does_not_become_ready' --test queue
+
+# Without the call at all, a fully embedded archive goes on reading exactly as
+# it did the moment `create_space` wrote its first row — the whole defect this
+# task exists to close.
+#
+# ⚠️ M1 (review round 1): a pure deletion, and no code-only marker can
+# distinguish it from the file's unmutated state — the leftover `break;` and
+# the `one_batch` call after it already sit there before the mutation runs.
+# `git diff --quiet` is the guard doing the real work on this case; the
+# second-line check is not credited with more than that.
 case_ "embed: run must mark a space ready once its queue empties clean (D95b)" \
   crates/mnema-embed/src/lib.rs \
-  's{            if db\.failed_chunk_count\(space\)\? == 0 \{\n                db\.mark_space_ready\(space\)\?;\n            \}\n}{}' \
+  's{            if db\.space_is_complete\(space\)\? \{\n                db\.mark_space_ready\(space\)\?;\n            \}\n}{}' \
   'break;
         }
         let outcome = one_batch(&call, &pending, cancel, on_progress, &mut tally);' \
   mnema-embed 'a_space_becomes_ready_when_the_queue_empties' --test queue
 
-# The guard, not the call: without it every run ends in `ready`, whatever it
-# gave up on — the exact confusion between "the pass finished" and "the space
-# is complete" the state exists to keep apart.
-case_ "embed: run must not mark a space ready over a failure it gave up on (D95b)" \
-  crates/mnema-embed/src/lib.rs \
-  's{            if db\.failed_chunk_count\(space\)\? == 0 \{\n                db\.mark_space_ready\(space\)\?;\n            \}\n}{            db.mark_space_ready(space)?;\n}' \
-  'db.mark_space_ready(space)?;
-            break;' \
-  mnema-embed 'a_space_with_failures_does_not_become_ready' --test queue
-
 # Without this, a `ready` space never hears that new chunks arrived — the
 # back-transition this task adds specifically because a one-way state would be
 # the same lie the space started in, just arriving later and more
 # convincingly.
+#
+# ⚠️ M1 (review round 1): also a pure deletion, same limitation as the case
+# above — `let call = Call { ... }` is unmutated code that exists either way,
+# so only `git diff --quiet` distinguishes a landed mutation from a no-op here.
 case_ "embed: run must retract a ready claim when it starts against a non-empty queue (D95b)" \
   crates/mnema-embed/src/lib.rs \
   's{    if total > 0 \{\n        db\.mark_space_building\(space\)\?;\n    \}\n}{}' \
