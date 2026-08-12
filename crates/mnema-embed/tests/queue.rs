@@ -154,11 +154,17 @@ fn a_refused_chunk_is_counted_as_failed_not_merely_missing() {
 /// fail here.
 #[test]
 fn a_refused_chunk_is_not_offered_again_while_its_text_is_unchanged() {
-    let db = fixture::db_with_chunks(1);
+    let db = fixture::db_with_chunks(2);
     let space = fixture::active_space_1024(&db);
-    let mock = fixture::mock(vec![Reply::status(400, r#"{"error":{"message":"nope"}}"#)]);
+    // The first chunk embeds, which is what makes the second one's refusal
+    // evidence about its text rather than about the provider — see
+    // `the_first_chunk_of_a_run_is_not_condemned_on_no_evidence`.
+    let mock = fixture::mock(vec![
+        fixture::reply_with(1),
+        Reply::status(400, r#"{"error":{"message":"nope"}}"#),
+    ]);
     let first = mnema_embed::run(&db, mock.base(), "k", 1, &|| false, &mut |_| {}).expect("run");
-    assert_eq!(first.failed, 1);
+    assert_eq!((first.embedded, first.failed), (1, 1));
 
     let second = mnema_embed::run(&db, mock.base(), "k", 1, &|| false, &mut |_| {}).expect("run");
 
@@ -179,16 +185,19 @@ fn a_refused_chunk_is_not_offered_again_while_its_text_is_unchanged() {
 /// is back in the queue and the failed number falls to zero on its own.
 #[test]
 fn an_edited_chunk_leaves_the_failed_number_and_is_tried_again() {
-    let db = fixture::db_with_chunks(1);
+    let db = fixture::db_with_chunks(2);
     let space = fixture::active_space_1024(&db);
+    // Chunk 0 embeds so that chunk 1's refusal is corroborated; chunk 1 is the
+    // one this test then edits.
     let mock = fixture::mock(vec![
+        fixture::reply_with(1),
         Reply::status(400, r#"{"error":{"message":"nope"}}"#),
         fixture::reply_with(1),
     ]);
     mnema_embed::run(&db, mock.base(), "k", 1, &|| false, &mut |_| {}).expect("first run");
     assert_eq!(db.failed_chunk_count(space).expect("failed count"), 1);
 
-    fixture::rewrite_chunk_text(&db, fixture::chunk_ids(&db)[0], "цілком інший текст");
+    fixture::rewrite_chunk_text(&db, fixture::chunk_ids(&db)[1], "цілком інший текст");
 
     // The count first, and while the row is still there. `failed_chunk_count`
     // is a predicate over rows, not a count of them: the pair below says the
@@ -571,14 +580,54 @@ fn a_split_that_meets_an_unclassified_failure_stops_and_condemns_nothing() {
 /// impossible to embed, permanently, and the third number would report a
 /// failure that was never about them.
 ///
-/// At a batch of one, so that the batch size cannot be what saves it.
+/// At a batch of one, so that the batch size cannot be what saves it — and
+/// **after a chunk has embedded**, so that the corroboration rule cannot be
+/// what saves it either. Without that first success this test would pass
+/// against a build that classified 402 as attributable, because the run would
+/// stop for the other reason and nothing here could tell the two apart.
 #[test]
 fn an_exhausted_account_stops_the_run_and_condemns_nothing() {
-    let db = fixture::db_with_chunks(2);
+    let db = fixture::db_with_chunks(3);
+    let space = fixture::active_space_1024(&db);
+    let mock = fixture::mock(vec![
+        fixture::reply_with(1),
+        Reply::status(402, r#"{"error":{"message":"insufficient credits"}}"#),
+    ]);
+
+    let out = mnema_embed::run(&db, mock.base(), "k", 1, &|| false, &mut |_| {});
+
+    assert!(matches!(out, Err(Error::Provider(_))), "got {out:?}");
+    assert_eq!(
+        db.embedded_chunk_count(space).expect("count"),
+        1,
+        "the corroborating success is what makes this test about 402"
+    );
+    assert_eq!(
+        fixture::failed_rows(&db),
+        0,
+        "an empty account condemned a chunk"
+    );
+    assert_eq!(db.failed_chunk_count(space).expect("failed"), 0);
+}
+
+/// The third clause of the corroboration rule: nothing in this run has embedded,
+/// so an attributable refusal is not evidence about the text — it is the first
+/// thing we have heard from this provider today.
+///
+/// The catastrophe it prevents is not the one chunk in front of it. A provider
+/// answering `400` to everything — a model withdrawn behind a gateway that says
+/// `400` rather than `404`, a rewriting proxy, a changed body format — would
+/// otherwise have the pass condemn the first chunk, then the next, then the
+/// next, to the end of the archive, and finish reporting `Ok` with nine
+/// thousand chunks that each need somebody to edit a file before anything will
+/// look at them again.
+#[test]
+fn the_first_chunk_of_a_run_is_not_condemned_on_no_evidence() {
+    let db = fixture::db_with_chunks(3);
     let space = fixture::active_space_1024(&db);
     let mock = fixture::mock(vec![Reply::status(
-        402,
-        r#"{"error":{"message":"insufficient credits"}}"#,
+        400,
+        r#"{"error":{"message":"input is too long"}}"#,
     )]);
 
     let out = mnema_embed::run(&db, mock.base(), "k", 1, &|| false, &mut |_| {});
@@ -587,9 +636,64 @@ fn an_exhausted_account_stops_the_run_and_condemns_nothing() {
     assert_eq!(
         fixture::failed_rows(&db),
         0,
-        "an empty account condemned a chunk"
+        "the first chunk of the archive was condemned on no evidence at all"
+    );
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 0);
+}
+
+/// The same clause at the other batch size, where the corroboration is the
+/// split's own successes rather than the run's history. Every one of the four
+/// single calls is refused, so the split has learned nothing about any text —
+/// it has learned something about the provider.
+///
+/// The request count is asserted too: the split must still happen (the batch
+/// refusal was attributable, so re-sending is the right move), and it must
+/// simply write nothing at the end of it.
+#[test]
+fn a_split_in_which_nothing_succeeded_condemns_nothing() {
+    let db = fixture::db_with_chunks(3);
+    let space = fixture::active_space_1024(&db);
+    let refusal = || Reply::status(400, r#"{"error":{"message":"input is too long"}}"#);
+    let mock = fixture::mock(vec![refusal(), refusal(), refusal(), refusal()]);
+
+    let out = mnema_embed::run(&db, mock.base(), "k", 3, &|| false, &mut |_| {});
+
+    assert!(matches!(out, Err(Error::Provider(_))), "got {out:?}");
+    assert_eq!(
+        fixture::failed_rows(&db),
+        0,
+        "a split that succeeded at nothing condemned every text in it"
     );
     assert_eq!(db.failed_chunk_count(space).expect("failed"), 0);
+    for _ in 0..4 {
+        let _ = mock.request();
+    }
+    assert!(
+        mock.request_if_any().is_none(),
+        "the batch was re-sent more times than it had texts"
+    );
+}
+
+/// And the boundary between the two: one success in the split is enough, and
+/// the rows held while it was in doubt are then written. Without this, the
+/// clause above could be satisfied by a build that simply never writes a
+/// `failed` row from a split at all.
+#[test]
+fn one_success_in_a_split_corroborates_the_refusals_beside_it() {
+    let db = fixture::db_with_chunks(3);
+    let space = fixture::active_space_1024(&db);
+    let refusal = || Reply::status(400, r#"{"error":{"message":"input is too long"}}"#);
+    let mock = fixture::mock(vec![
+        refusal(),
+        refusal(),
+        fixture::reply_with(1),
+        refusal(),
+    ]);
+
+    let out = mnema_embed::run(&db, mock.base(), "k", 3, &|| false, &mut |_| {}).expect("run");
+
+    assert_eq!((out.embedded, out.failed), (1, 2));
+    assert_eq!(db.failed_chunk_count(space).expect("failed"), 2);
 }
 
 /// The default arm, asked of a variant that is named rather than unclassified.

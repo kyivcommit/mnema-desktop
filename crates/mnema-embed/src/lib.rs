@@ -145,11 +145,27 @@ pub enum Error {
 ///   nothing is wrong, and one extra round of calls per bad chunk when
 ///   something is.
 /// - A failure that can be about the texts, over a batch of exactly one, is
-///   about that text. It becomes a `failed` row and the run carries on. What
-///   separates "this text can never be embedded" from "try again in an hour"
-///   needs a measurement of what a provider actually answers to an over-long
-///   chunk, and there is none, so this crate does not pretend to make that
-///   distinction: whoever eventually retries failures gets to.
+///   about that text — **provided something earlier in this run embedded**.
+///   It becomes a `failed` row and the run carries on. What separates "this
+///   text can never be embedded" from "try again in an hour" needs a
+///   measurement of what a provider actually answers to an over-long chunk, and
+///   there is none, so this crate does not pretend to make that distinction:
+///   whoever eventually retries failures gets to.
+/// - **Nothing in this run has embedded yet: an attributable refusal stops the
+///   run rather than blaming a chunk.** One rule, three clauses, one reason —
+///   a refusal is evidence about a text only if we have seen the same provider,
+///   in the same run, answer some other text correctly. On the first chunk of an
+///   archive there is no such evidence, and the first chunk is the worst thing
+///   to blame without it.
+///
+/// ⚠️ **Known limit, decided rather than missed.** At `batch == 1` the
+/// corroboration is any earlier success in the run, so a provider that breaks
+/// *midway* is corroborated by what it did before it broke, and chunks from
+/// that point on are condemned. It is accepted: the production batch size is
+/// above one, where the split's own successes are the evidence and the case is
+/// covered properly, and closing it at a batch of one needs a notion of
+/// recency — how recent a success has to be to still count — that nobody has
+/// measured.
 /// - A width that does not match the space stops the run before anything from
 ///   that batch is written. A vector of the *right* width that the index will
 ///   not rank — non-finite components, a norm that underflows — is the opposite
@@ -208,7 +224,18 @@ pub fn run(
                     return Err(Error::Provider(refusal));
                 }
                 if pending.len() == 1 {
-                    // One text, and an answer that can only be about it.
+                    // One text, and an answer that can only be about it — but
+                    // only once something else in this run has shown that the
+                    // provider answers at all. Nothing has, on the very first
+                    // chunk of an archive, and the first chunk is the worst
+                    // possible thing to condemn on no evidence: a provider that
+                    // is simply broken this morning would be recorded as nine
+                    // thousand texts that cannot be embedded, one batch at a
+                    // time, each of them needing an edit to the file before
+                    // anything will look at it again.
+                    if tally.embedded == 0 {
+                        return Err(Error::Provider(refusal));
+                    }
                     // `content_hash` is read from the chunk inside
                     // `record_embedding_failure`, so the row is about the text
                     // that was actually sent and cannot be about anything else.
@@ -249,10 +276,30 @@ struct Call<'a> {
 /// embedded, when the truth was one network that was down for a minute.
 ///
 /// A chunk whose own call succeeds is stored. A chunk whose own call fails
-/// with an answer that can be about its text gets the `failed` row. Anything
-/// else ends the run, mid-batch, with what landed left where it landed —
-/// there is nothing to undo, because the queue is recomputed from the index
-/// and not from a list.
+/// with an answer that can be about its text is **written down at the end, and
+/// only if some other text in this same split embedded**. Anything else ends
+/// the run, mid-batch, with what landed left where it landed — there is nothing
+/// to undo, because the queue is recomputed from the index and not from a list.
+///
+/// **The corroboration is what stops this from condemning an archive.** A
+/// refusal is evidence about a text only if we have seen the same provider, in
+/// the same run, answer some other text correctly. Without that, a provider
+/// answering `400` to everything — a model withdrawn and a gateway saying `400`
+/// instead of `404`, a rewriting proxy, a changed body format — would have this
+/// split write a `failed` row for all ten of its texts, then do it again for
+/// the next ten, to the end of the archive, and `run` would report `Ok` with
+/// nine thousand chunks that now need somebody to edit the file before anything
+/// will look at them again. Zero successes in a split is a fact about the
+/// provider, not about any of the texts, so the rows are held until there is
+/// one and the refusal is returned instead.
+///
+/// The successes counted are *stored vectors*, not merely calls that returned:
+/// it is the stricter of the two readings, and this whole rule is built on
+/// preferring the loud mistake to the silent one.
+///
+/// A cancelled split never turns into an error and never writes a held row.
+/// Stopping is not evidence either way, and the chunks stay in the queue for
+/// the next run exactly as if the split had not happened.
 ///
 /// `cancel` is asked between the single calls and not only between batches. A
 /// batch is normally one round trip and cancellation between them is prompt;
@@ -267,9 +314,14 @@ fn one_at_a_time(
     cancel: &dyn Fn() -> bool,
     tally: &mut EmbedTally,
 ) -> Result<(), Error> {
+    let embedded_before = tally.embedded;
+    let mut condemned: Vec<i64> = Vec::new();
+    let mut last_refusal: Option<mnema_provider::Error> = None;
+    let mut cancelled = false;
     for chunk in pending {
         if cancel() {
-            return Ok(());
+            cancelled = true;
+            break;
         }
         let texts = [chunk.text.clone()];
         match mnema_provider::embed(call.base, call.key, call.model, &texts) {
@@ -285,10 +337,22 @@ fn one_at_a_time(
                 if !speaks_only_about_these_texts(&refusal) {
                     return Err(Error::Provider(refusal));
                 }
-                db.record_embedding_failure(space, chunk.id)?;
-                tally.failed += 1;
+                condemned.push(chunk.id);
+                last_refusal = Some(refusal);
             }
         }
+    }
+    if tally.embedded == embedded_before {
+        // Nothing here corroborated anything. The held rows are dropped rather
+        // than written, and the chunks simply stay in the queue.
+        return match last_refusal {
+            Some(refusal) if !cancelled => Err(Error::Provider(refusal)),
+            _ => Ok(()),
+        };
+    }
+    for chunk_id in condemned {
+        db.record_embedding_failure(space, chunk_id)?;
+        tally.failed += 1;
     }
     Ok(())
 }
@@ -330,11 +394,17 @@ fn one_at_a_time(
 /// — the exact catastrophe the rule exists to prevent, arriving through a door
 /// nobody would think to look at. `408` and `425` fall on the safe side for
 /// free, and any status nobody has thought about at all falls there too.
-/// `ErrorInsteadOfEmbeddings` and `AveragedBatch` are also deliberately absent —
-/// see the module tests and the report; the first's own doc gives
-/// `{"error":{"message":"quota exceeded"}}` as its example, which is an account
-/// and not a text, and the second's says in as many words that it is a fact
-/// about a *model*, established once, rather than about anything that was sent.
+///
+/// `ErrorInsteadOfEmbeddings` and `AveragedBatch` are also deliberately absent.
+/// `ErrorInsteadOfEmbeddings` **is** reachable from `embed` — through
+/// `unreadable_embeddings_answer` (`probe.rs:1306` → `:1013`), so it is a live
+/// case rather than a theoretical one, and that is why it stops rather than a
+/// reason to attribute it: a `200` carrying the provider's own error envelope
+/// may be saying "input too long" or "quota exceeded", this build does not read
+/// it closely enough to tell which, and under the asymmetry above an answer we
+/// cannot interpret is one we must not blame a chunk for. `AveragedBatch`'s own
+/// doc says in as many words that it is a fact about a *model*, established
+/// once by `check_embedding_model`, rather than about anything that was sent.
 fn speaks_only_about_these_texts(error: &mnema_provider::Error) -> bool {
     use mnema_provider::Error as Refusal;
     match error {
