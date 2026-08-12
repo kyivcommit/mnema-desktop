@@ -1,0 +1,32 @@
+[package]
+name = "mnema-embed"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# The only crate that knows about both sides. `mnema-provider` must stay
+# database-free and `mnema-index` provider-free; this is where they meet.
+#
+# No `rusqlite`, deliberately. Everything this crate needs from the database
+# arrives through `Db`'s own methods — `chunks_needing_embedding`,
+# `record_embedding_failure`, `upsert_vector` — the same rule `mnema-ingest`
+# keeps: `Db::conn()` is public, and no crate outside `mnema-index` reaches
+# through it in `src/`.
+[dependencies]
+mnema-index = { path = "../mnema-index" }
+mnema-provider = { path = "../mnema-provider" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+mnema-core = { path = "../mnema-core" }
+mnema-mock-provider = { workspace = true }
+# The fixtures read the database directly — what a vector table actually holds,
+# what `chunk_embedding_state` actually says — because the point of every test
+# here is what is in the index, not what the pass reported.
+rusqlite = { workspace = true }
+# One fixture only, and for a stated reason: `rewrite_chunk_text` has to leave a
+# `content_hash` the product could have written, and the function that computes
+# one is private to `mnema-index`. `mnema-ingest`'s own harness carries this
+# dependency for the same shape of reason.
+sha2 = { workspace = true }
+tempfile = { workspace = true }

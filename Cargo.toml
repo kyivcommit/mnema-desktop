@@ -5,6 +5,7 @@ resolver = "3"
 members = [
     "crates/mnema-chunk",
     "crates/mnema-core",
+    "crates/mnema-embed",
     "crates/mnema-extract",
     "crates/mnema-index",
     "crates/mnema-ingest",
