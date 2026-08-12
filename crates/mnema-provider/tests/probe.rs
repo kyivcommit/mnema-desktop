@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use mnema_mock_provider::{MockServer, Reply, two_vectors};
 use mnema_provider::{
-    Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_embedding_model, check_key,
+    Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_embedding_model, check_key, embed,
     list_models,
 };
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -1606,4 +1606,75 @@ fn a_body_that_never_finishes_on_a_500_keeps_its_detail_on_the_model_check_too()
         }
         other => panic!("expected BodyUnreadable to survive a 500, got {other:?}"),
     }
+}
+
+// --- embed --------------------------------------------------------------
+//
+// Task 5: the sibling call `check_embedding_model` above exists to be run
+// before — a model that already passed that check is what `embed` is called
+// against, for the batch that actually goes into the index. Same endpoint,
+// same request shape as the probe above (`check_embedding_model` measured the
+// space's width by sending exactly this shape), so this section reuses `KEY`
+// and does not re-litigate the status table or the leak scans already proven
+// against `check_embedding_model` — only what is new here: the count check.
+
+#[test]
+fn embed_returns_one_vector_per_text_in_order() {
+    let mock = MockServer::new(vec![Reply::ok(
+        r#"{"data":[{"embedding":[1.0,0.0]},{"embedding":[0.0,1.0]}]}"#,
+    )]);
+
+    let out = embed(
+        mock.base(),
+        "k",
+        "some/model",
+        &["one".into(), "two".into()],
+    )
+    .expect("embed");
+
+    assert_eq!(out, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+}
+
+/// Fewer vectors than texts, silently zipped, would attach each embedding to
+/// the wrong chunk from that point on: every answer afterwards is confident
+/// and wrong, and nothing in the index looks broken.
+#[test]
+fn embed_refuses_a_short_answer() {
+    let mock = MockServer::new(vec![Reply::ok(r#"{"data":[{"embedding":[1.0,0.0]}]}"#)]);
+
+    let out = embed(
+        mock.base(),
+        "k",
+        "some/model",
+        &["one".into(), "two".into()],
+    );
+
+    assert!(matches!(
+        out,
+        Err(Error::CountMismatch { asked: 2, got: 1 })
+    ));
+}
+
+/// The other direction of the same check: `data.len() != texts.len()` is
+/// symmetric in the implementation, but nothing above proves that — a guard
+/// written as `< texts.len()` would pass the short-answer test above and
+/// still zip a longer answer against too few texts, silently dropping the
+/// extra vectors' true position instead of refusing them.
+#[test]
+fn embed_refuses_a_long_answer_too() {
+    let mock = MockServer::new(vec![Reply::ok(
+        r#"{"data":[{"embedding":[1.0,0.0]},{"embedding":[0.0,1.0]},{"embedding":[0.5,0.5]}]}"#,
+    )]);
+
+    let out = embed(
+        mock.base(),
+        "k",
+        "some/model",
+        &["one".into(), "two".into()],
+    );
+
+    assert!(matches!(
+        out,
+        Err(Error::CountMismatch { asked: 2, got: 3 })
+    ));
 }

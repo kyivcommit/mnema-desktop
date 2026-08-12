@@ -1123,6 +1123,72 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
     })
 }
 
+/// Sends a batch of texts and returns one vector per text, in the same order
+/// (spec §4.5 — the call the indexing queue makes once a model has passed
+/// `check_embedding_model` above). The sibling of that function: same
+/// endpoint, same request shape — the probe measured the space's width by
+/// sending exactly this shape, and a different shape here could come back a
+/// different width than the space was created for.
+///
+/// Status handling and an unreadable body are **not** duplicated from
+/// `check_embedding_model` — `status_error`, `attach_reason` and
+/// `unreadable_embeddings_answer` are called the same way, for the same
+/// reason: this crate already explained, in those functions' own doc
+/// comments, what each status and each unreadable shape means, and a second
+/// copy here would be the first place that explanation could drift from this
+/// one.
+///
+/// A short or long answer is `Error::CountMismatch`, not `AveragedBatch` or
+/// `Malformed` (Task 5, ruling from the owner): both of those name a fact
+/// about the *model*, settled once by `check_embedding_model` before any
+/// indexing began. `embed` is only ever called on a model that already
+/// passed that check, so a wrong count here is a broken answer from an
+/// otherwise-good model, not a newly discovered model property. Zipping a
+/// short answer against the texts anyway would attach each embedding to the
+/// wrong chunk from that point on — confidently, and permanently, with
+/// nothing in the index looking broken.
+///
+/// **What this does NOT check, deliberately:** finiteness, width against the
+/// space, and rankable norms. `check_rankable`
+/// (`crates/mnema-index/src/space.rs:404-409`) refuses those at insert, and a
+/// refused insert becomes a recorded failure the caller surfaces — the same
+/// arithmetic `check_embedding_model` duplicates above for a different
+/// reason (that call has no insert to defer to; it runs before the archive
+/// exists at all). Repeating the guard here would be exactly the drift that
+/// pair's own comments warn against, for a call that already has somewhere
+/// downstream to catch it.
+pub fn embed(base: &str, key: &str, model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
+    let request = serde_json::json!({ "model": model, "input": texts }).to_string();
+    let (status, answer) = match http::post_json(base, "/embeddings", key, &request) {
+        Ok(pair) => pair,
+        // The same trade `check_embedding_model` makes for a body-read
+        // failure, for the same four statuses — see that function's own
+        // comment on this match arm.
+        Err(Error::BodyUnreadable { status, .. }) if matches!(status, 401 | 403 | 404 | 429) => {
+            return Err(status_error(status, model, key));
+        }
+        Err(other) => return Err(other),
+    };
+    match status {
+        200 => {}
+        other => {
+            return Err(attach_reason(status_error(other, model, key), &answer, key));
+        }
+    }
+
+    let parsed: EmbeddingsBody = serde_json::from_str(&answer)
+        .map_err(|e| unreadable_embeddings_answer(&answer, key, &e))?;
+
+    if parsed.data.len() != texts.len() {
+        return Err(Error::CountMismatch {
+            asked: texts.len(),
+            got: parsed.data.len(),
+        });
+    }
+
+    Ok(parsed.data.into_iter().map(|row| row.embedding).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

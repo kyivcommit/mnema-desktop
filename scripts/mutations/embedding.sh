@@ -218,3 +218,17 @@ case_ "space: the embeddings everywhere must be summed, not overwritten (D96g, r
   's{            total \+= self\.embedded_chunk_count\(space_id\)\?;\n}{            total = self.embedded_chunk_count(space_id)?;\n}' \
   '            total = self.embedded_chunk_count(space_id)?;' \
   mnema-index 'the_embeddings_everywhere_are_summed_over_spaces_and_distinct_within_one' --test space
+
+# ── Task 5: `embed`, the batch call the indexing queue will call ──────────────
+#
+# Without the count check, a short answer is zipped against the texts anyway:
+# every embedding after the missing one lands on the wrong chunk, confidently
+# and permanently, with nothing in the index looking broken — the exact trap
+# `embed_refuses_a_short_answer` exists to catch.
+case_ "provider: embed without the count check silently misattributes a short answer" \
+  crates/mnema-provider/src/probe.rs \
+  's{    if parsed\.data\.len\(\) != texts\.len\(\) \{\n        return Err\(Error::CountMismatch \{\n            asked: texts\.len\(\),\n            got: parsed\.data\.len\(\),\n        \}\);\n    \}\n\n}{}' \
+  '.map_err(|e| unreadable_embeddings_answer(&answer, key, &e))?;
+
+    Ok(parsed.data.into_iter()' \
+  mnema-provider 'embed_refuses_a_short_answer' --test probe

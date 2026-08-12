@@ -15,7 +15,7 @@ pub use catalogue::{
 };
 pub use probe::{
     Balance, EmbeddingCheck, KeyCheck, ProviderMessage, SanitisedText, check_embedding_model,
-    check_key,
+    check_key, embed,
 };
 
 /// Where v1 goes. Not a configuration: v1 has one provider (spec §2.2).
@@ -341,4 +341,18 @@ pub enum Error {
     IdenticalVectors,
     #[error("the provider returned an empty vector")]
     EmptyVector,
+    /// The provider answered 200 with a readable body holding the wrong number
+    /// of vectors. Zipping them against the texts would bind each embedding to
+    /// the wrong chunk — silently, and permanently.
+    ///
+    /// A different verdict from `AveragedBatch`/`IdenticalVectors` above, on
+    /// purpose (Task 5): those two are facts about a *model*, established once
+    /// by `check_embedding_model` before any indexing began. `embed` is only
+    /// ever called on a model that already passed that check, so a wrong count
+    /// here is a broken answer from an otherwise-good model, not a newly
+    /// discovered model property — the same distinction `check_embedding_model`
+    /// draws between `AveragedBatch` (exactly one row) and `Malformed` (zero,
+    /// or more rows than texts), applied on the far side of that check instead.
+    #[error("asked for {asked} embeddings and got {got}")]
+    CountMismatch { asked: usize, got: usize },
 }
