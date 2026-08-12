@@ -287,3 +287,304 @@ case_ "provider: PositionState must not fail the whole body on a wrong-shaped in
   's{        Ok\(match Value::deserialize\(deserializer\)\? \{\n            Value::Null => PositionState::Absent,\n            Value::Number\(n\) => n\n                \.as_u64\(\)\n                \.and_then\(\|n\| usize::try_from\(n\)\.ok\(\)\)\n                \.map\(PositionState::Stated\)\n                \.unwrap_or\(PositionState::Unreadable\),\n            _ => PositionState::Unreadable,\n        \}\)}{        Ok(match Option::<usize>::deserialize(deserializer)? \{\n            Some(n) => PositionState::Stated(n),\n            None => PositionState::Absent,\n        \})}' \
   'Ok(match Option::<usize>::deserialize(deserializer)? {' \
   mnema-provider 'check_embedding_model_is_inert_to_a_position_stated_as_a_string' --test probe
+
+# ---------------------------------------------------------------- task 6
+#
+# The embedding pass. Every test in `crates/mnema-embed/tests/queue.rs` that
+# is not protected by another case below has one of its own: this is the crate
+# that writes vectors, and the failure it exists to prevent is a chunk that
+# reports as handled and is not in the index.
+
+# The invariant the whole task exists to establish. There is no "filter by the
+# active space" to remove — the space is the active one by construction,
+# because `run` takes no `space_id` and reads `active_space` itself — so the
+# mutation stands in for the only defect that shape still admits: the pass
+# holding some other space's id. The fixture builds the idle space first, so it
+# is the one with the lower id.
+case_ "embed: the pass must write into the active space and no other (§2.6 f)" \
+  crates/mnema-embed/src/lib.rs \
+  's{let space = db\.active_space\(\)\?\.ok_or\(Error::NoActiveSpace\)\?;}{let space = db.active_space()?.ok_or(Error::NoActiveSpace)? - 1;}' \
+  'let space = db.active_space()?.ok_or(Error::NoActiveSpace)? - 1;' \
+  mnema-embed 'the_pass_writes_only_into_the_active_space' --test queue
+
+# `active_space`'s own doc forbids itself a fallback and names this caller as
+# the one that would be tempted to add one here instead. "Use the only space
+# there is" is what that would look like.
+case_ "embed: no active space is a refusal, not a guess at which space to use" \
+  crates/mnema-embed/src/lib.rs \
+  's{let space = db\.active_space\(\)\?\.ok_or\(Error::NoActiveSpace\)\?;}{let space = db.active_space()?.unwrap_or(1);}' \
+  'let space = db.active_space()?.unwrap_or(1);' \
+  mnema-embed 'a_pass_with_no_active_space_refuses_rather_than_guessing' --test queue
+
+# The silent-disappearance case, from both sides. Without the row, the chunk is
+# offered again on every run for ever; without the count, the refusal never
+# reaches the person who could act on it. Two cases, because one test asserts
+# both and each half fails it alone.
+case_ "embed: a refused chunk must leave a failed row behind" \
+  crates/mnema-embed/src/lib.rs \
+  's{                    db\.record_embedding_failure\(space, pending\[0\]\.id\)\?;\n                    tally\.failed \+= 1;\n}{                    tally.failed += 1;\n}' \
+  'if pending.len() == 1 {
+                    // One text, and an answer that can only be about it.
+                    // `content_hash` is read from the chunk inside
+                    // `record_embedding_failure`, so the row is about the text
+                    // that was actually sent and cannot be about anything else.
+                    tally.failed += 1;' \
+  mnema-embed 'a_refused_chunk_is_counted_as_failed_not_merely_missing' --test queue
+
+case_ "embed: a refused chunk must be counted, not merely recorded" \
+  crates/mnema-embed/src/lib.rs \
+  's{                    db\.record_embedding_failure\(space, pending\[0\]\.id\)\?;\n                    tally\.failed \+= 1;\n}{                    db.record_embedding_failure(space, pending[0].id)?;\n}' \
+  'db.record_embedding_failure(space, pending[0].id)?;
+                } else {' \
+  mnema-embed 'a_refused_chunk_is_counted_as_failed_not_merely_missing' --test queue
+
+# A refusal on one text must not end the run: the chunks after it are not at
+# fault and would never be reached again, because the run stops at the same
+# place on every restart.
+case_ "embed: one refused text must not stop the pass reaching the rest" \
+  crates/mnema-embed/src/lib.rs \
+  's{                if !speaks_only_about_these_texts\(&refusal\) \{\n                    return Err\(Error::Provider\(refusal\)\);\n                \}\n}{                return Err(Error::Provider(refusal));\n                #[allow(unreachable_code)]\n}' \
+  'return Err(Error::Provider(refusal));
+                #[allow(unreachable_code)]' \
+  mnema-embed 'a_refusal_neither_undoes_what_came_before_nor_stops_what_comes_after' --test queue
+
+# The batch that is refused for something that could be about its texts is
+# split into single calls; condemning the batch's first chunk instead — or all
+# of them — takes good chunks out of vector search permanently, because a failed
+# row is never reconsidered until its text changes.
+case_ "embed: a refused batch must be split, not blamed on the chunk that happened to be first" \
+  crates/mnema-embed/src/lib.rs \
+  's{                \} else \{\n                    one_at_a_time\(db, space, &call, width, &pending, cancel, &mut tally\)\?;\n                \}}{                \} else \{\n                    db.record_embedding_failure(space, pending[0].id)?;\n                    tally.failed += 1;\n                \}}' \
+  '} else {
+                    db.record_embedding_failure(space, pending[0].id)?;
+                    tally.failed += 1;
+                }' \
+  mnema-embed 'a_batch_refused_for_its_content_is_re_sent_one_text_at_a_time' --test queue
+
+# A document that is `pending` is one `clear_document_content` has just emptied
+# and a rebuild is about to refill: its chunks are minutes from being deleted,
+# and embedding them spends the user's money on rows that will not exist. Two
+# cases, one per test, since `case_` names one test at a time — and the second
+# is not the same claim: `failed` and `skipped` are outside `'indexed'` too,
+# and a filter written as "not pending" would pass the first test and fail it.
+case_ "index: the queue must skip documents that are not indexed (D95 d)" \
+  crates/mnema-index/src/space.rs \
+  's{          WHERE d\.status = \x27indexed\x27\n            AND c\.id NOT IN}{          WHERE c.id NOT IN}' \
+  'WHERE c.id NOT IN (SELECT chunk_id FROM {table})' \
+  mnema-embed 'chunks_of_a_document_being_rebuilt_are_not_embedded' --test queue
+
+case_ "index: the queue must skip failed and skipped documents too, not only pending" \
+  crates/mnema-index/src/space.rs \
+  's{          WHERE d\.status = \x27indexed\x27\n            AND c\.id NOT IN}{          WHERE c.id NOT IN}' \
+  'WHERE c.id NOT IN (SELECT chunk_id FROM {table})' \
+  mnema-embed 'only_indexed_documents_are_embedded' --test queue
+
+# Without this the pass spins on the chunk the provider will not take: it is
+# offered again on the next batch, and on the next run, for as long as the
+# archive is open, against a provider that charges for the attempt.
+case_ "index: a chunk this space gave up on must leave the queue" \
+  crates/mnema-index/src/space.rs \
+  's{\n            AND NOT EXISTS \(\{GIVEN_UP_ON_CURRENT_TEXT\}\)}{}' \
+  'AND c.id NOT IN (SELECT chunk_id FROM {table})"' \
+  mnema-embed 'a_refused_chunk_is_not_offered_again_while_its_text_is_unchanged' --test queue
+
+# The half of that rule which keeps it from being a trap. The hash is what makes
+# a failed row a statement about *a text* rather than about a chunk id: without
+# it, editing the file never brings the chunk back, and `failed_chunk_count`
+# goes on reporting a refusal about text that no longer exists anywhere.
+case_ "index: a failed row must stop applying once the chunk's text changes" \
+  crates/mnema-index/src/space.rs \
+  's{\n                    AND s\.state = 2 AND s\.content_hash = c\.content_hash";}{\n                    AND s.state = 2";}' \
+  'AND s.state = 2";' \
+  mnema-embed 'an_edited_chunk_leaves_the_failed_number_and_is_tried_again' --test queue
+
+# vec0 accepts a vector of the wrong width without complaint at some call
+# shapes, and the damage shows up only as a confident wrong answer at query
+# time. `check_rankable` does not close this: it asks whether a vector can be
+# ranked at all, not whether it matches this space's width.
+case_ "embed: a vector of the wrong width must be refused before it is stored" \
+  crates/mnema-embed/src/lib.rs \
+  's{    for vector in vectors \{\n        if vector\.len\(\) as i64 != width \{\n            return Err\(Error::WidthMismatch \{\n                expected: width,\n                got: vector\.len\(\) as i64,\n            \}\);\n        \}\n    \}\n}{}' \
+  '    }
+    for (chunk, vector) in pending.iter().zip(vectors) {' \
+  mnema-embed 'a_vector_of_the_wrong_width_is_refused_before_it_is_stored' --test queue
+
+# "Before the write" is a claim about the batch, not about each vector, and a
+# batch of one cannot tell the two apart. Checked as each vector is stored, a
+# mismatch at position two leaves position one already written into a space its
+# own answer has just been declared incompatible with.
+case_ "embed: the whole batch's widths must be checked before any of it is stored" \
+  crates/mnema-embed/src/lib.rs \
+  's{    for vector in vectors \{\n        if vector\.len\(\) as i64 != width \{\n            return Err\(Error::WidthMismatch \{\n                expected: width,\n                got: vector\.len\(\) as i64,\n            \}\);\n        \}\n    \}\n    for \(chunk, vector\) in pending\.iter\(\)\.zip\(vectors\) \{\n}{    for (chunk, vector) in pending.iter().zip(vectors) \{\n        if vector.len() as i64 != width \{\n            return Err(Error::WidthMismatch \{\n                expected: width,\n                got: vector.len() as i64,\n            \});\n        \}\n}' \
+  '    for (chunk, vector) in pending.iter().zip(vectors) {
+        if vector.len() as i64 != width {' \
+  mnema-embed 'a_batch_carrying_one_bad_width_stores_none_of_it' --test queue
+
+# The last hop of a binding that is carried by position the whole way down.
+# Nothing above notices it swapped: `mnema-provider` has already placed the rows
+# by the index the provider stated, the widths all match, the count is right,
+# and the index stores whatever it is handed. What comes out is an archive that
+# answers every question with its neighbour's citation.
+case_ "embed: each chunk must get the vector made from its own text" \
+  crates/mnema-embed/src/lib.rs \
+  's{for \(chunk, vector\) in pending\.iter\(\)\.zip\(vectors\)}{for (chunk, vector) in pending.iter().rev().zip(vectors)}' \
+  'for (chunk, vector) in pending.iter().rev().zip(vectors) {' \
+  mnema-embed 'each_chunk_gets_the_vector_that_was_made_from_its_own_text' --test queue
+
+# The provider must see what a person will read in the citation. The prepared
+# copy is the lexical branch's — apostrophes unified, ґ→г, camelCase expanded —
+# and it exists in `chunk_search`, one join away, which is what makes this a
+# mutation somebody could write by accident.
+case_ "index: the queue must hand over the original text, not the prepared copy" \
+  crates/mnema-index/src/space.rs \
+  's{"SELECT c\.id, c\.text, c\.content_hash \{queue\} ORDER BY c\.id LIMIT \?2"}{"SELECT c.id, (SELECT s2.text FROM chunk_search s2 WHERE s2.chunk_id = c.id), c.content_hash \{queue\} ORDER BY c.id LIMIT ?2"}' \
+  'SELECT c.id, (SELECT s2.text FROM chunk_search s2 WHERE s2.chunk_id = c.id), c.content_hash' \
+  mnema-embed 'the_provider_is_sent_the_original_text_and_not_the_prepared_copy' --test queue
+
+# Between batches has to include before the first one. Checked after the batch
+# instead, a person who presses Start and then Stop in the same second has
+# already paid for a batch of embeddings.
+case_ "embed: cancellation must be asked before the first batch, not only after it" \
+  crates/mnema-embed/src/lib.rs \
+  's{        if cancel\(\) \{\n            break;\n        \}\n        let pending}{        let pending}; s{            failed: tally\.failed,\n        \}\);\n    \}\n    Ok\(tally\)}{            failed: tally.failed,\n        \});\n        if cancel() \{\n            break;\n        \}\n    \}\n    Ok(tally)}' \
+  '        });
+        if cancel() {' \
+  mnema-embed 'cancelling_before_the_first_batch_asks_the_provider_nothing' --test queue
+
+# `total` is the queue measured once, at the start. Re-read each batch it
+# answers a shrinking number — the bar sits at the same fraction from the first
+# report to the last and never moves.
+case_ "embed: progress total must be measured once, not re-read every batch" \
+  crates/mnema-embed/src/lib.rs \
+  's{            done: tally\.embedded,\n            total,\n}{            done: tally.embedded,\n            total: db.queued_chunk_count(space)? as u64,\n}' \
+  'total: db.queued_chunk_count(space)? as u64,' \
+  mnema-embed 'progress_counts_against_the_queue_as_it_was_when_the_run_began' --test queue
+
+# And it is the queue, not the archive: `chunk_count` is the plausible wrong
+# answer, and it stops the bar short by exactly the number of chunks that were
+# already embedded when the run began — which `job::progress_is_due` reads as a
+# job that never finished.
+case_ "embed: progress total must be the queue, not every chunk in the index" \
+  crates/mnema-embed/src/lib.rs \
+  's{let total = db\.queued_chunk_count\(space\)\? as u64;}{let total = db.chunk_count()? as u64;}' \
+  'let total = db.chunk_count()? as u64;' \
+  mnema-embed 'progress_counts_against_the_queue_as_it_was_when_the_run_began' --test queue
+
+# `upsert_vector` clears the chunk's `chunk_embedding_state` row in the same
+# transaction as the write. With `insert_vector` a chunk that was refused once
+# and has since been embedded goes on being counted among the failures — a
+# number on the settings screen that nothing will ever clear.
+case_ "embed: storing a vector must clear the row that gave up on the chunk (D95a)" \
+  crates/mnema-embed/src/lib.rs \
+  's{match db\.upsert_vector\(space, chunk\.id, vector\)}{match db.insert_vector(space, chunk.id, vector)}' \
+  'match db.insert_vector(space, chunk.id, vector) {' \
+  mnema-embed 'an_edited_chunk_leaves_the_failed_number_and_is_tried_again' --test queue
+
+# A batch of nothing asks the database for zero chunks and gets zero back, so
+# the pass reports a finished archive it never touched.
+case_ "embed: a batch size of zero must be refused rather than reported as done" \
+  crates/mnema-embed/src/lib.rs \
+  's{    if batch == 0 \{\n        return Err\(Error::EmptyBatch\);\n    \}\n}{}' \
+  ') -> Result<EmbedTally, Error> {
+    let space = db.active_space()' \
+  mnema-embed 'a_batch_size_of_zero_is_refused_rather_than_looped_on' --test queue
+
+# The model is the space's own and cannot be a parameter, because a space built
+# for one model filled with another's vectors ranks nonsense and says nothing.
+case_ "embed: the request must name the model the space was built for" \
+  crates/mnema-embed/src/lib.rs \
+  's{mnema_provider::embed\(call\.base, call\.key, call\.model, &texts\)}{mnema_provider::embed(call.base, call.key, "some/other-embedder", \&texts)}' \
+  'mnema_provider::embed(call.base, call.key, "some/other-embedder", &texts)' \
+  mnema-embed 'the_request_names_the_model_the_space_was_built_for' --test queue
+
+# `batch` has to reach the query. Ignored, the whole archive goes into one
+# request — nine thousand chunks in one body, past every provider's limit, and
+# the run then fails on the first call it makes.
+case_ "embed: the batch size must reach the query that fills the batch" \
+  crates/mnema-embed/src/lib.rs \
+  's{db\.chunks_needing_embedding\(space, batch\)\?}{db.chunks_needing_embedding(space, usize::MAX)?}' \
+  'db.chunks_needing_embedding(space, usize::MAX)?' \
+  mnema-embed 'chunks_go_out_in_batches_of_the_size_asked_for' --test queue
+
+# A vector the index will not rank — non-finite components, or a norm that
+# underflows to something vec0 ranks as NULL or -inf — arrives as an *index*
+# error on a request that succeeded in every other way. Propagated, it stops the
+# run at the same chunk on every restart, silently, and this was the second
+# permanent stall the pass could reach. Inverting the id comparison is the
+# smallest change that makes it propagate again.
+case_ "embed: a vector the index refuses must fail its chunk, not the whole run" \
+  crates/mnema-embed/src/lib.rs \
+  's{\} if \*id == chunk_id}{\} if *id != chunk_id}' \
+  '} if *id != chunk_id' \
+  mnema-embed 'a_vector_the_index_will_not_rank_fails_its_chunk_and_not_the_run' --test queue
+
+# And the direction that costs more if it is wrong. Widened to every index
+# error, a database that will not take a write for a second turns a whole batch
+# of good chunks into `failed` rows — and a `failed` row is not reconsidered
+# until its chunk's text changes, so those chunks leave vector search for good.
+case_ "embed: only a verdict on the vector may become a failed row, not any index error" \
+  crates/mnema-embed/src/lib.rs \
+  's{fn refuses_this_chunks_vector\(error: &mnema_index::Error, chunk_id: i64\) -> bool \{\n    matches!\(\n        error,\n        mnema_index::Error::NonFiniteVector \{\n            role: VectorRole::Stored\(id\),\n            \.\.\n        \} \| mnema_index::Error::UnrankableVector \{\n            role: VectorRole::Stored\(id\),\n            \.\.\n        \} if \*id == chunk_id\n    \)\n\}}{fn refuses_this_chunks_vector(error: \&mnema_index::Error, chunk_id: i64) -> bool \{\n    let _ = (error, chunk_id, VectorRole::Query);\n    true\n\}}' \
+  'let _ = (error, chunk_id, VectorRole::Query);
+    true
+}' \
+  mnema-embed 'an_index_error_that_is_not_about_the_vector_still_stops_the_run' --test queue
+
+# ── Task 6, the attribution rule ─────────────────────────────────────────────
+#
+# The default arm. Every failure not on the list stops the run; turned round, a
+# rate limit — the provider saying "later" in as many words — becomes a `failed`
+# row, which means "never", about a chunk there is nothing wrong with. This is
+# the case that keeps the safety from being a convention: with `_ => true` a
+# variant nobody classified is attributed to whatever chunk was in flight.
+case_ "embed: an unclassified provider failure must stop the run, not condemn a chunk" \
+  crates/mnema-embed/src/lib.rs \
+  's{        _ => false,\n    \}\n\}}{        _ => true,\n    \}\n\}}' \
+  '        _ => true,
+    }
+}' \
+  mnema-embed 'rate_limiting_stops_the_run_instead_of_condemning_the_chunk' --test queue
+
+# The same rule from the batch side, and it needs its own mutation rather than
+# the one above: `_ => true` cannot reach a `Provider { status }` at all, because
+# the `Provider` arm matches first — measured, the case written that way stayed
+# green. Widening that arm to the 5xx range is what a provider outage would need
+# to be attributed, and then the batch is split into four more calls that each
+# fail alone and are each written down as a chunk that cannot be embedded.
+case_ "embed: a 5xx must not be attributed, and must not send the batch round one at a time" \
+  crates/mnema-embed/src/lib.rs \
+  's{matches!\(status, 400 \| 413 \| 422\)}{matches!(status, 400..=599)}' \
+  'matches!(status, 400..=599)' \
+  mnema-embed 'a_batch_refused_for_something_that_is_not_about_the_texts_is_not_split' --test queue
+
+# `402 Payment Required` is what this provider answers for an exhausted account,
+# and it is 4xx. The rule as first drafted was "any 4xx may be attributed", and
+# this is the mutation that restores it: the moment a person's credit runs out
+# mid-run, every chunk in the batch in flight is written down as impossible to
+# embed, permanently, and the third number reports a failure that was never
+# about them.
+case_ "embed: the attributable statuses are three, not every 4xx (402 is an empty account)" \
+  crates/mnema-embed/src/lib.rs \
+  's{matches!\(status, 400 \| 413 \| 422\)}{matches!(status, 400..=499)}' \
+  'matches!(status, 400..=499)' \
+  mnema-embed 'an_exhausted_account_stops_the_run_and_condemns_nothing' --test queue
+
+# Stop has to be heard inside the split too. A batch is one round trip; split it
+# is as many as the batch is wide, and a person who pressed Stop would otherwise
+# wait out every one of them and pay for them.
+case_ "embed: cancellation must be heard between the single calls of a split" \
+  crates/mnema-embed/src/lib.rs \
+  's{    for chunk in pending \{\n        if cancel\(\) \{\n            return Ok\(\(\)\);\n        \}\n}{    for chunk in pending \{\n}' \
+  '    for chunk in pending {
+        let texts = [chunk.text.clone()];' \
+  mnema-embed 'cancelling_during_a_split_stops_it_between_the_single_calls' --test queue
+
+# Inside the split, a single call that fails for something that is not about its
+# text must still stop the run rather than condemn that chunk — the same rule as
+# at the batch level, and a separate line of code, so a separate case.
+case_ "embed: inside a split, an unclassified failure must stop the run too" \
+  crates/mnema-embed/src/lib.rs \
+  's{            Err\(refusal\) => \{\n                if !speaks_only_about_these_texts\(&refusal\) \{\n                    return Err\(Error::Provider\(refusal\)\);\n                \}\n                db\.record_embedding_failure\(space, chunk\.id\)\?;}{            Err(refusal) => \{\n                let _ = &refusal;\n                db.record_embedding_failure(space, chunk.id)?;}' \
+  'let _ = &refusal;
+                db.record_embedding_failure(space, chunk.id)?;' \
+  mnema-embed 'a_split_that_meets_an_unclassified_failure_stops_and_condemns_nothing' --test queue
