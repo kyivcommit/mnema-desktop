@@ -1671,9 +1671,20 @@ fn embed_returns_one_vector_per_text_in_order() {
     );
 }
 
-/// Fewer vectors than texts, silently zipped, would attach each embedding to
-/// the wrong chunk from that point on: every answer afterwards is confident
-/// and wrong, and nothing in the index looks broken.
+/// The direction where the count check is irreplaceable, not merely tidy
+/// (fix round 2, in answer to the reviewer's own question 1): after the
+/// ordering fix, a *long* answer cannot slip through undetected — three rows
+/// into two slots must collide or land out of range, by the same pigeonhole
+/// the fix relies on (see `embed_refuses_a_long_answer_too`, below). A
+/// *short* answer has no such shield. Remove the count check and a one-row
+/// answer to this exact body fills slot 0, the loop ends with nothing left
+/// to complain about, and slot 1 — never visited — leaves the loop as the
+/// placeholder `Vec::new()`: an empty vector, reaching `Ok` as if it were a
+/// real embedding. That is the one path by which an empty vector reaches the
+/// index at all (`check_rankable` refuses it there, but only because it got
+/// that far in the first place) — which is why the count-check mutation in
+/// `scripts/mutations/embedding.sh` is the most important of the three this
+/// section carries.
 #[test]
 fn embed_refuses_a_short_answer() {
     let mock = MockServer::new(vec![Reply::ok(
@@ -1695,9 +1706,23 @@ fn embed_refuses_a_short_answer() {
 
 /// The other direction of the same check: `data.len() != texts.len()` is
 /// symmetric in the implementation, but nothing above proves that — a guard
-/// written as `< texts.len()` would pass the short-answer test above and
-/// still zip a longer answer against too few texts, silently dropping the
-/// extra vectors' true position instead of refusing them.
+/// written as `< texts.len()` would pass the short-answer test above.
+///
+/// **What it protects is no longer data safety** (fix round 2, Minor B: the
+/// claim this comment made before the ordering fix — that a `<` guard would
+/// let a long answer's extra vectors slip through silently — stopped being
+/// true the moment binding started going by stated position. Measured under
+/// the `<` mutation: three rows into two slots cannot both land safely, by
+/// the same pigeonhole `embed`'s own doc comment relies on, so the third row
+/// either collides with an already-filled slot or names one out of range —
+/// either way `Err(Error::PositionMismatch(_))`, not a silent drop, and not
+/// `Ok`.). What survives, and what this test actually holds, is the
+/// *precision* of the refusal: `CountMismatch { asked: 2, got: 3 }` tells a
+/// person the batch came back the wrong size; `PositionMismatch` under the
+/// `<` mutation would tell them a position collided or ran out of range —
+/// true, and the wrong diagnosis for what actually went wrong. The short
+/// direction above is where the count check is irreplaceable; this direction
+/// is where it is merely the more honest error.
 #[test]
 fn embed_refuses_a_long_answer_too() {
     let mock = MockServer::new(vec![Reply::ok(
@@ -1788,6 +1813,93 @@ fn embed_refuses_a_position_outside_the_batch() {
         }
         other => panic!("expected PositionMismatch, got {other:?}"),
     }
+}
+
+/// A position present but not a plain non-negative integer — the shape
+/// `PositionState::Unreadable` exists for (fix round 2, Important A). Three
+/// cases the reviewer measured a bare `Option<usize>` could not survive at
+/// all: it would fail to parse the *whole* embeddings body for any of them,
+/// which is exactly why `check_embedding_model` needed its own test below
+/// rather than being provably safe by sharing this struct.
+#[test]
+fn embed_refuses_a_position_stated_in_a_shape_it_cannot_read() {
+    for (label, body) in [
+        (
+            "a string",
+            r#"{"data":[{"embedding":[1.0,0.0],"index":"0"},{"embedding":[0.0,1.0],"index":1}]}"#,
+        ),
+        (
+            "a float",
+            r#"{"data":[{"embedding":[1.0,0.0],"index":0.0},{"embedding":[0.0,1.0],"index":1}]}"#,
+        ),
+        (
+            "a negative number",
+            r#"{"data":[{"embedding":[1.0,0.0],"index":-1},{"embedding":[0.0,1.0],"index":1}]}"#,
+        ),
+    ] {
+        let mock = MockServer::new(vec![Reply::ok(body)]);
+
+        let out = embed(
+            mock.base(),
+            "k",
+            "some/model",
+            &["one".into(), "two".into()],
+        );
+
+        match out {
+            Err(Error::PositionMismatch(reason)) => {
+                assert!(reason.contains("cannot read"), "{label}: got {reason:?}");
+            }
+            other => panic!("{label}: expected PositionMismatch, got {other:?}"),
+        }
+    }
+}
+
+/// Explicit JSON `null` reads the same as a missing key — both are `Absent`,
+/// not `Unreadable` (`PositionState`'s own doc comment: a provider that
+/// states "no position" has not named one, the same as a provider that says
+/// nothing at all).
+#[test]
+fn embed_refuses_a_null_position_the_same_as_a_missing_one() {
+    let mock = MockServer::new(vec![Reply::ok(
+        r#"{"data":[{"embedding":[1.0,0.0],"index":null},{"embedding":[0.0,1.0],"index":1}]}"#,
+    )]);
+
+    let out = embed(
+        mock.base(),
+        "k",
+        "some/model",
+        &["one".into(), "two".into()],
+    );
+
+    match out {
+        Err(Error::PositionMismatch(reason)) => {
+            assert!(reason.contains("did not state"), "got {reason:?}");
+        }
+        other => panic!("expected PositionMismatch, got {other:?}"),
+    }
+}
+
+/// The half of Important A that protects `check_embedding_model`, not
+/// `embed` — this function never reads `index` and must stay provably inert
+/// to whatever shape a provider puts there. Before this fix, a bare
+/// `Option<usize>` failed to parse the *whole* body over exactly this shape
+/// (measured by the reviewer: `check_embedding_model` turned a model that
+/// answers perfectly well into `Malformed`), which is the regression this
+/// test is written to catch coming back — see the mutation case in
+/// `scripts/mutations/embedding.sh` that reverts `PositionState`'s own
+/// `Deserialize` to the `Option<usize>`-equivalent behaviour and must redden
+/// exactly this test.
+#[test]
+fn check_embedding_model_is_inert_to_a_position_stated_as_a_string() {
+    let body =
+        r#"{"data":[{"embedding":[1.0,0.0],"index":"0"},{"embedding":[0.0,1.0],"index":"1"}]}"#;
+    let server = MockServer::new(vec![Reply::ok(body)]);
+
+    check_embedding_model(server.base(), KEY, "m").expect(
+        "a model that answers perfectly well must not become unconfigurable over a field this \
+         function does not even read",
+    );
 }
 
 /// The same scan `no_transformation_of_the_key_reaches_a_model_check_failure`

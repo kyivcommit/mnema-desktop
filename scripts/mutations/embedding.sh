@@ -260,3 +260,24 @@ case_ "provider: embed's count check must catch a long answer too, not only a sh
   's{if parsed\.data\.len\(\) != texts\.len\(\) \{}{if parsed.data.len() < texts.len() \{}' \
   'if parsed.data.len() < texts.len() {' \
   mnema-provider 'embed_refuses_a_long_answer_too' --test probe
+
+# ── Task 5, fix round 2 ────────────────────────────────────────────────────
+#
+# Important A: a bare `#[serde(default)] Option<usize>` only falls back on a
+# *missing* key — a present `index` in the wrong shape (a string, a float, a
+# negative number) fails the WHOLE embeddings body, which turns a perfectly
+# usable model into `check_embedding_model`'s `Malformed` and makes it
+# unconfigurable. `PositionState`'s own `Deserialize` swallows that shape
+# into `Unreadable` instead of propagating the parse error, which is exactly
+# the property this mutation removes: it reverts the impl to the
+# `Option<usize>`-equivalent behaviour (same type name, so the crate still
+# compiles) while every other line stays untouched. The regression is
+# `check_embedding_model` becoming unable to read a body it never even looks
+# at `index` in — the named test is the one that would go red for that, not
+# any of `embed`'s own position tests, which cannot tell this mutation apart
+# from the ordinary `Malformed` an unreadable body already produces.
+case_ "provider: PositionState must not fail the whole body on a wrong-shaped index (fix round 2, Important A)" \
+  crates/mnema-provider/src/probe.rs \
+  's{        Ok\(match Value::deserialize\(deserializer\)\? \{\n            Value::Null => PositionState::Absent,\n            Value::Number\(n\) => n\n                \.as_u64\(\)\n                \.and_then\(\|n\| usize::try_from\(n\)\.ok\(\)\)\n                \.map\(PositionState::Stated\)\n                \.unwrap_or\(PositionState::Unreadable\),\n            _ => PositionState::Unreadable,\n        \}\)}{        Ok(match Option::<usize>::deserialize(deserializer)? \{\n            Some(n) => PositionState::Stated(n),\n            None => PositionState::Absent,\n        \})}' \
+  'Ok(match Option::<usize>::deserialize(deserializer)? {' \
+  mnema-provider 'check_embedding_model_is_inert_to_a_position_stated_as_a_string' --test probe

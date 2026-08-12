@@ -844,29 +844,92 @@ struct EmbeddingsBody {
     data: Vec<EmbeddingRow>,
 }
 
+/// A single row's own answer to "which text is this?" — never stated, stated
+/// and read, or stated in a shape this build does not understand (Task 5 fix
+/// round 2, Important A). The same three states `Stated` above draws for a
+/// credits balance, needed here for the same reason `Stated`'s own doc
+/// comment gives: a plain `#[serde(default)] Option<usize>` field only falls
+/// back to `Absent` when the *key* is absent — an `index` the provider states
+/// as `"0"`, `0.0` or `-1` is present, so a bare `Option<usize>` tries to read
+/// it as `usize`, fails, and fails the *whole* embeddings body.
+///
+/// That failure is not merely a worse message than this crate would like — it
+/// is the one the round-1 ruling on this field existed to rule out.
+/// `check_embedding_model` must stay genuinely inert to whatever `index`
+/// holds, in every shape a provider might send, so the `index` bet stays
+/// confined to `embed` and a model that answers perfectly well never becomes
+/// unconfigurable over a field that function does not even read. `Option`
+/// alone kept that promise only for a *missing* field; a present field in an
+/// unexpected shape used to fail the whole body as `Malformed` before either
+/// function got a chance to look at anything else — measured, not assumed
+/// (round-1 review, Important A): a string, a float, or a negative number in
+/// `index` turned a working model into a `check_embedding_model` failure.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum PositionState {
+    /// The row said nothing about its position — the key was absent, or its
+    /// value was explicit JSON `null`. Explicit `null` reads the same as
+    /// absent (the same choice `Stated` makes above): a provider that states
+    /// "no position" has not named one, the same as a provider that says
+    /// nothing at all.
+    #[default]
+    Absent,
+    /// A plain, non-negative integer that fits `usize` — the only shape
+    /// `embed` binds by.
+    Stated(usize),
+    /// The key was present, and its value was not a plain non-negative
+    /// integer this build can use as an array position: a string, a float, a
+    /// negative number, or any other shape. Distinct from `Absent` in
+    /// `embed`'s own refusal (`Error::PositionMismatch`): "the provider said
+    /// nothing" and "the provider said something this build could not read"
+    /// are different facts to hand a person and a later session, even though
+    /// neither can be bound safely.
+    Unreadable,
+}
+
+impl<'de> Deserialize<'de> for PositionState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // `Number::as_u64` returns `Some` only for a JSON integer literal
+        // with no sign and no decimal point (`serde_json`'s `PosInt`
+        // variant) — a literal written with a decimal point (`0.0`) or a
+        // minus sign (`-1`) is stored differently internally and returns
+        // `None` here regardless of its numeric value, which is exactly the
+        // refusal this type exists to produce for those two shapes. Chained
+        // through `usize::try_from` rather than `as`, so a JSON integer past
+        // `usize::MAX` on this platform is `Unreadable` too, not silently
+        // truncated into a different, in-range position.
+        Ok(match Value::deserialize(deserializer)? {
+            Value::Null => PositionState::Absent,
+            Value::Number(n) => n
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .map(PositionState::Stated)
+                .unwrap_or(PositionState::Unreadable),
+            _ => PositionState::Unreadable,
+        })
+    }
+}
+
 #[derive(Deserialize)]
 struct EmbeddingRow {
     embedding: Vec<f32>,
     /// The provider's own statement of which text in the batch this row
     /// answers (Task 5 fix round 1, Critical 1) — `embed`, below, binds each
     /// vector by this field rather than by the row's position in the answer
-    /// array. `check_embedding_model` never reads this field and does not
-    /// need it: it is order-insensitive by construction (it takes the width
-    /// from row 0 and compares row 0 against row 1, and a reordered answer
-    /// gives the same verdict either way), so this struct staying shared
-    /// costs that function nothing.
+    /// array. `check_embedding_model` never reads this field, and `PositionState`
+    /// (above) is what actually makes that free: see its own doc comment for
+    /// why a bare `Option<usize>` was not enough to keep this field's shape
+    /// from reaching that function's parse at all.
     ///
-    /// `Option`, not required, and `#[serde(default)]` is why: without it, a
-    /// provider whose answer omits `index` would fail to parse at all — a
-    /// missing key elsewhere in this file gets exactly that annotation for
-    /// exactly that reason (`ProviderErrorDetail::message`, `Stated`'s own
-    /// fields above). Failing to parse would hide the very fact `embed`
-    /// needs to see and refuse — "this row did not say" — behind a generic
-    /// `Malformed`, the same way an unannotated field would have turned a
-    /// working key into a parse error in `balance_from` (Task 3 review,
-    /// item 1).
+    /// `#[serde(default)]` — needed even with `PositionState`'s own
+    /// `Deserialize` impl, and for the usual reason: it closes the *missing
+    /// key* case, which no field-level `Deserialize` implementation can see
+    /// (there is no value to hand it). `PositionState::deserialize` closes
+    /// the complementary case, a *present* key in an unexpected shape.
     #[serde(default)]
-    index: Option<usize>,
+    index: PositionState,
 }
 
 /// The status table for `/embeddings`: `error_for_status`'s, plus the one
@@ -1199,7 +1262,10 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
 /// injective map from `texts.len()` rows into `texts.len()` slots with none
 /// out of range is necessarily a bijection (pigeonhole on a finite set of
 /// equal size), so checking "no duplicate, none out of range" is checking
-/// "every slot is filled" — no separate gap check is needed or added.
+/// "every slot is filled" — no separate gap check is needed or added. A row
+/// whose position could not be read at all (`PositionState::Unreadable` or
+/// `Absent`, below) refuses before it can be counted either way, so it never
+/// threatens that argument — it just never reaches the map.
 ///
 /// **What this does NOT check, deliberately:** finiteness, width against the
 /// space, and rankable norms. `check_rankable`
@@ -1248,10 +1314,22 @@ pub fn embed(base: &str, key: &str, model: &str, texts: &[String]) -> Result<Vec
     let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
     let mut filled = vec![false; texts.len()];
     for row in parsed.data {
-        let Some(index) = row.index else {
-            return Err(Error::PositionMismatch(
-                "a row did not state which text it embeds",
-            ));
+        let index = match row.index {
+            PositionState::Absent => {
+                return Err(Error::PositionMismatch(
+                    "a row did not state which text it embeds",
+                ));
+            }
+            // Distinct from `Absent` (Task 5 fix round 2, Important A): the
+            // provider said *something* here, and it was not a plain
+            // non-negative integer — a different fact from silence, worth a
+            // different sentence to a person and to a later session.
+            PositionState::Unreadable => {
+                return Err(Error::PositionMismatch(
+                    "a row stated its position in a shape this build cannot read",
+                ));
+            }
+            PositionState::Stated(index) => index,
         };
         let Some(slot) = filled.get_mut(index) else {
             return Err(Error::PositionMismatch(

@@ -357,14 +357,17 @@ pub enum Error {
     CountMismatch { asked: usize, got: usize },
     /// The provider's answer did not say which text each vector belongs to,
     /// or said so in a way this build cannot trust to be a real binding
-    /// (Task 5 fix round 1, Critical 1) — a row with no stated position, two
-    /// rows claiming the same one, or a position outside the batch that was
-    /// sent. `embed` binds each vector by this stated position rather than by
-    /// its place in the response array, because nothing establishes that a
-    /// provider preserves array order; see `embed`'s own doc comment for why
-    /// that requirement is a deliberate, unmeasured bet rather than an
-    /// assumption. Distinct from `CountMismatch`: the count can be exactly
-    /// right and the binding still wrong.
+    /// (Task 5 fix round 1, Critical 1) — a row with no stated position
+    /// (missing or explicit `null`), a row stating one in a shape this build
+    /// cannot read (a string, a float, a negative number — Task 5 fix round
+    /// 2, Important A), two rows claiming the same position, or a position
+    /// outside the batch that was sent. `embed` binds each vector by this
+    /// stated position rather than by its place in the response array,
+    /// because nothing establishes that a provider preserves array order;
+    /// see `embed`'s own doc comment for why that requirement is a
+    /// deliberate, unmeasured bet rather than an assumption. Distinct from
+    /// `CountMismatch`: the count can be exactly right and the binding still
+    /// wrong.
     #[error("the provider's answer does not say which text each vector belongs to: {0}")]
     PositionMismatch(&'static str),
 }
