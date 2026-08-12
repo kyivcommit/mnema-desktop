@@ -323,11 +323,7 @@ case_ "embed: no active space is a refusal, not a guess at which space to use" \
 case_ "embed: a refused chunk must leave a failed row behind" \
   crates/mnema-embed/src/lib.rs \
   's{                    db\.record_embedding_failure\(space, pending\[0\]\.id\)\?;\n                    tally\.failed \+= 1;\n}{                    tally.failed += 1;\n}' \
-  'if pending.len() == 1 {
-                    // One text, and an answer that can only be about it.
-                    // `content_hash` is read from the chunk inside
-                    // `record_embedding_failure`, so the row is about the text
-                    // that was actually sent and cannot be about anything else.
+  'that was actually sent and cannot be about anything else.
                     tally.failed += 1;' \
   mnema-embed 'a_refused_chunk_is_counted_as_failed_not_merely_missing' --test queue
 
@@ -574,8 +570,9 @@ case_ "embed: the attributable statuses are three, not every 4xx (402 is an empt
 # wait out every one of them and pay for them.
 case_ "embed: cancellation must be heard between the single calls of a split" \
   crates/mnema-embed/src/lib.rs \
-  's{    for chunk in pending \{\n        if cancel\(\) \{\n            return Ok\(\(\)\);\n        \}\n}{    for chunk in pending \{\n}' \
+  's{    for chunk in pending \{\n        if cancel\(\) \{\n            cancelled = true;\n            break;\n        \}\n}{    for chunk in pending \{\n        let _ = &cancelled;\n}' \
   '    for chunk in pending {
+        let _ = &cancelled;
         let texts = [chunk.text.clone()];' \
   mnema-embed 'cancelling_during_a_split_stops_it_between_the_single_calls' --test queue
 
@@ -584,7 +581,41 @@ case_ "embed: cancellation must be heard between the single calls of a split" \
 # at the batch level, and a separate line of code, so a separate case.
 case_ "embed: inside a split, an unclassified failure must stop the run too" \
   crates/mnema-embed/src/lib.rs \
-  's{            Err\(refusal\) => \{\n                if !speaks_only_about_these_texts\(&refusal\) \{\n                    return Err\(Error::Provider\(refusal\)\);\n                \}\n                db\.record_embedding_failure\(space, chunk\.id\)\?;}{            Err(refusal) => \{\n                let _ = &refusal;\n                db.record_embedding_failure(space, chunk.id)?;}' \
-  'let _ = &refusal;
-                db.record_embedding_failure(space, chunk.id)?;' \
+  's{                if !speaks_only_about_these_texts\(&refusal\) \{\n                    return Err\(Error::Provider\(refusal\)\);\n                \}\n                condemned\.push\(chunk\.id\);}{                condemned.push(chunk.id);}' \
+  'Err(refusal) => {
+                condemned.push(chunk.id);' \
   mnema-embed 'a_split_that_meets_an_unclassified_failure_stops_and_condemns_nothing' --test queue
+
+# ── Task 6, the corroboration rule ───────────────────────────────────────────
+#
+# A refusal is evidence about a text only if the same provider, in the same run,
+# has answered some other text correctly. Without the guard, the first chunk of
+# an archive is condemned on the first thing this provider says today — and then
+# the next, and the next, to the end of the archive, with `run` reporting Ok.
+case_ "embed: the first chunk of a run must not be condemned before anything has embedded" \
+  crates/mnema-embed/src/lib.rs \
+  's{                    if tally\.embedded == 0 \{\n                        return Err\(Error::Provider\(refusal\)\);\n                    \}\n}{}' \
+  'anything will look at it again.
+                    // `content_hash` is read from the chunk inside' \
+  mnema-embed 'the_first_chunk_of_a_run_is_not_condemned_on_no_evidence' --test queue
+
+# The same rule where the corroboration is the split's own successes. `<` rather
+# than a deleted block: the guard still exists, still compiles, and can simply
+# never fire — which is what an "it is only a tidy-up" edit to it would look
+# like.
+case_ "embed: a split that succeeded at nothing must condemn nothing" \
+  crates/mnema-embed/src/lib.rs \
+  's{    if tally\.embedded == embedded_before \{}{    if tally.embedded < embedded_before \{}' \
+  '    if tally.embedded < embedded_before {' \
+  mnema-embed 'a_split_in_which_nothing_succeeded_condemns_nothing' --test queue
+
+# And the boundary from the other side: with the held rows never written at all,
+# a split that DID corroborate its refusals reports nothing failed, and the
+# chunk the provider will not take goes back to being invisible — the silence
+# this cycle exists to remove.
+case_ "embed: a corroborated split must still write the rows it held" \
+  crates/mnema-embed/src/lib.rs \
+  's{    for chunk_id in condemned \{\n        db\.record_embedding_failure\(space, chunk_id\)\?;\n        tally\.failed \+= 1;\n    \}\n}{    let _ = &condemned;\n}' \
+  '    let _ = &condemned;
+    Ok(())' \
+  mnema-embed 'one_success_in_a_split_corroborates_the_refusals_beside_it' --test queue
