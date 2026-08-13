@@ -10,9 +10,10 @@
 # nearly serial, about two and a half cores busy out of twelve, so core count
 # is not the axis a CI runner loses on. What this does not transfer to: a
 # 2-core `ubuntu-24.04` runner with a cold target directory of its own is not
-# this machine, nobody has measured it, and `ci.yml`'s `timeout-minutes: 30`
-# was set from nothing at all — the first pull request is what measures that,
-# and the number belongs there once it runs. This asks a narrower question —
+# this machine — **measured there on the first pull request that leg ever ran
+# on: 6m17s, green**, so about twice this machine rather than the ten times a
+# core count would suggest, which is what "nearly serial" predicted. This asks
+# a narrower question —
 # whether each case's expression still matches the code it was written against,
 # and whether what it produces is still what its marker describes — and answers
 # in about a second. A file that passes here can still be full of tests that

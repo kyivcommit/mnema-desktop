@@ -29,9 +29,12 @@
 # harness is very nearly serial, about two and a half cores busy out of
 # twelve, so core count is not the axis a CI runner loses on. What this does
 # not transfer to: a 2-core `ubuntu-24.04` runner with a cold target directory
-# of its own is not this machine, nobody has measured it, and `ci.yml`'s
-# `timeout-minutes: 30` was set from nothing at all — the first pull request
-# is what measures that, and the number belongs there once it runs. That one
+# of its own is not this machine. **Measured there now, on the first pull
+# request this leg ever ran on: 6m17s, green.** So the runner costs roughly
+# twice this machine and not the ten times a core count would suggest — which
+# is what "nearly serial" predicted, and the prediction is now checked rather
+# than argued. `ci.yml`'s `timeout-minutes: 30` is about five times that,
+# which is the margin `check` justifies for itself in the same file. That one
 # answers "do the cases still apply, and do they still produce what they
 # claim" and takes about a second, so it is the one to run after a refactor.
 # It is not a substitute — it compiles nothing and runs no test — but it

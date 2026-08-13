@@ -100,10 +100,15 @@ jobs:
       #     resource path `binaries/mnema-extract-worker-<triple>` doesn't exist
       #
       # Both `cargo clippy --workspace --all-targets` and `cargo test --workspace`
-      # below end there, on both matrix arms, and `bundle` never runs at all
-      # because it declares `needs: check`. Measured by moving the staged file
+      # below end there, on both matrix arms. Measured by moving the staged file
       # aside and watching `cargo check -p mnema-desktop` fail, then pass — not
       # predicted from the configuration.
+      #
+      # `bundle` and `mutations` stage the sidecar themselves, for the same
+      # reason and by the same script. They used to be reached only through this
+      # job (`needs: check`) and so could once have been read as inheriting it;
+      # they no longer declare it — every job now starts from a bare checkout and
+      # provisions what it needs.
       #
       # `debug`, not `release`. `tauri-build` only checks that the declared file
       # exists — it does not care which profile produced it — and every other
@@ -293,8 +298,20 @@ jobs:
     # The instrument that proves a test is load-bearing. It ran by hand only
     # until now, which meant it protected exactly as much as someone
     # remembered to protect.
+    #
+    # No `needs:`. Every job here starts from a bare checkout and provisions
+    # itself, so the only thing `needs: check` ever bought was declining to
+    # spend runner minutes on a commit that would not compile — and on a public
+    # repository those minutes are free. What it cost was the whole of `check`
+    # in front of the longest job in the workflow, on every run. Serialising to
+    # save nothing is how a slow gate becomes one people work around.
     runs-on: ubuntu-24.04
-    needs: check
+    # Thirty was a guess when this leg was written, and it stayed one until the
+    # leg first executed: pull request #7, **6m17s, green**. So the limit is
+    # roughly five times the only run there has ever been — the same margin
+    # `check` argues for itself above, and now for the same reason: a measured
+    # slowest run rather than a number nobody had a basis for. Raise it from a
+    # measurement if the case file grows enough to want it, not from a feeling.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -346,8 +363,9 @@ jobs:
     # build carries both slices, so every user downloads roughly twice the
     # application they can run. Measured, not assumed — the numbers are in
     # docs/BUILD.md. macos-14 is arm64, which is what the artefact name claims.
+    #
+    # No `needs:`, for the reason written above `mutations`.
     runs-on: macos-14
-    needs: check
     # 1.4–2.1 minutes across the same three runs. The limit is here for the same
     # reason as the one on `check`, and it matters slightly more: this job is the
     # one that produces the download, so a wedged run leaves someone waiting on
