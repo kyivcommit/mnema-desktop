@@ -173,7 +173,7 @@ case_ "displaces: a build that lost a reader deletes nothing" \
 # say which way round the condition is written.
 case_ "displaces: the digest comparison is not inverted" \
   crates/mnema-ingest/src/lib.rs \
-  's{sha != recorded\.document_id}{sha == recorded.document_id}' \
+  's{(SkipRule::NotText => content\.is_none_or\(\|sha\| )sha != recorded\.document_id}{${1}sha == recorded.document_id}' \
   'sha == recorded.document_id' \
   mnema-ingest 'a_text_file_overwritten_by_a_photo_stops_answering' --test slice
 

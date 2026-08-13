@@ -35,8 +35,21 @@ import {
   emptyFieldSentence,
   keyFieldPlaceholder,
   keySubmitText,
+  embedProgressLine,
+  embedEndingSentence,
+  embedNotStartedSentence,
   embeddingModelNotRecordedSentence,
   roleNotRecordedSentence,
+  KEEP_EXISTING_VECTORS,
+  DISCARD_EXISTING_VECTORS,
+  discardOffer,
+  changeToConfirm,
+  discardVectorsLabel,
+  discardVectorsNote,
+  barState,
+  BAR_RUNNING,
+  BAR_STOPPED,
+  restatedEnding,
 } from "./render.js";
 
 const { invoke, Channel } = window.__TAURI__.core;
@@ -44,6 +57,37 @@ const { open } = window.__TAURI__.dialog;
 
 const el = (id) => document.getElementById(id);
 const results = el("results");
+
+// Every write to `#job-status`, and the count of them.
+//
+// ⚠️ **The question a late write has to ask is "is my line still the newest
+// thing anybody put here", and only this can answer it.** Three orderings have
+// now been measured against three different answers to that question, and the
+// first two were both wrong:
+//
+//   - `jobRunning` (`3b18859`) lags a press by one IPC round trip in both
+//     directions, so it let a stale ending paint over a live run *and*
+//     permanently withheld one after a run that ended before its own `invoke`
+//     resolved;
+//   - a per-press generation (`518e499`) fixed both of those and broke a third:
+//     Embed stays enabled during the press's own round trip, so an ordinary
+//     double-click produces a refusal that claims a generation the running job
+//     never used — and that job's ending is then suppressed for good.
+//
+// A refusal is not the only thing that can write here, and a press is not the
+// only thing that can invalidate a restatement. What invalidates it is somebody
+// having written to this line since — which is this number, and nothing else.
+// It is why the seam exists rather than fourteen assignments: a writer that
+// bypassed it would be invisible, and the next late write would paint over it.
+//
+// Returns the count at the moment of the write, for a caller that intends to
+// come back and revise its own line.
+let statusWrites = 0;
+const sayJobStatus = (text) => {
+  statusWrites += 1;
+  el("job-status").textContent = text;
+  return statusWrites;
+};
 
 // What `open_index` answered, kept because nothing on the core side can carry
 // it. `UnreadableCause::NotOpen` is one value over two situations — the window
@@ -87,8 +131,36 @@ try {
 let watchedRootId = null;
 let jobRunning = false;
 
+// How many times a press has claimed the job area — the bar, the Cancel button
+// and `#job-status`.
+//
+// ⚠️ **It exists because `jobRunning` cannot answer "is what I am about to draw
+// still the newest thing here", and the review of `3b18859` measured both ways
+// it gets that wrong.** Nothing sets that flag synchronously: both presses set
+// it *after* their await, and the comment above `followUntilIdle` states the
+// enabling fact in this file's own words — an ending can arrive before `invoke`
+// resolves. So the flag reads `false` while a newer run is already reporting
+// progress, and reads `true` for a run that ended before its own `invoke` came
+// back. A late draw asking it gets a wrong answer in one direction or the other.
+//
+// This is incremented by the press itself, **before** the await, so it never
+// lags. Every consumer compares a number it captured against this one; none of
+// them asks whether a job is running, which is a different question with a
+// different answer.
+//
+// **Not rolled back by a refused press, deliberately.** A refusal writes its own
+// sentence to `#job-status`, and that sentence is newer than whatever an earlier
+// run was about to restate there — so an earlier restatement must stay
+// suppressed, exactly as it would behind a run that really started.
+let jobGeneration = 0;
+
 const syncButtons = () => {
   el("walk").disabled = jobRunning || watchedRootId === null;
+  // Not gated on `watchedRootId`: embedding works off what the index already
+  // holds, so a reload that lost the chosen folder must not take it with it.
+  // One flag for the whole application, so the slot is the only thing that
+  // disables this.
+  el("embed").disabled = jobRunning;
   el("cancel").disabled = !jobRunning;
 };
 
@@ -153,10 +225,32 @@ const followUntilIdle = async () => {
     // else, which reads as "finished cleanly" to anyone who does not already
     // know the difference — the one thing this page can actually say is that
     // it does not know.
-    el("job-status").textContent =
+    sayJobStatus(
       "the job is no longer running, but this page has no channel to it and does not " +
-      "know how it ended — whether it finished cleanly, or something was left unreconciled";
+        "know how it ended — whether it finished cleanly, or something was left unreconciled",
+    );
+    // And the bar says the same. This path has no `Ended` to hand `barState`,
+    // so it takes the answer that function gives an ending it does not
+    // recognise, and for the same reason: "finished" is a claim, and a page
+    // with no channel has established nothing. Left alone the bar sits wherever
+    // the last report put it, in the colour of a run still going — the defect
+    // itself, on the one path that cannot even say how the job ended.
+    el("bar").dataset.state = BAR_STOPPED;
   }
+  // This is the only route the page has after a reload mid-job: the channel
+  // belongs to the page that started the job, so the two handlers that redraw
+  // the settings when an ending arrives are both out of reach here. Without
+  // this line a page that reloaded while an embedding run was finishing would
+  // go on showing the counts it read at load, for as long as it stayed open,
+  // with the run's own numbers nowhere on screen to contradict them.
+  //
+  // `refreshSettings` is declared below and is a `const`; see the note in the
+  // walk's own ending handler for why this is not a use before initialisation.
+  // The one path that reaches this during module evaluation — the `job_status`
+  // check near the top, which calls `follow()` without awaiting it — yields at
+  // its own `invoke` and cannot resume before the module has run past that
+  // declaration.
+  refreshSettings();
 };
 
 // Never leaves the buttons disabled. If the core cannot be reached, Cancel is
@@ -166,7 +260,7 @@ const follow = () =>
   followUntilIdle().catch((error) => {
     jobRunning = false;
     syncButtons();
-    el("job-status").textContent = `lost track of the job: ${error}`;
+    sayJobStatus(`lost track of the job: ${error}`);
   });
 
 try {
@@ -174,13 +268,13 @@ try {
   jobRunning = running;
   syncButtons();
   if (running) {
-    el("job-status").textContent = "a job started before this page loaded is still running";
+    sayJobStatus("a job started before this page loaded is still running");
     follow();
   }
 } catch (error) {
   jobRunning = false;
   syncButtons();
-  el("job-status").textContent = `${error}`;
+  sayJobStatus(`${error}`);
 }
 
 el("walk").addEventListener("click", async () => {
@@ -194,8 +288,13 @@ el("walk").addEventListener("click", async () => {
       const { done, total, skipped, secondsLeft } = data;
       el("bar").max = total;
       el("bar").value = done;
+      // Set on every report, not only at the start: this is the one place that
+      // is certain a job is moving, and a bar left grey by the previous run's
+      // ending would say the opposite for as long as it took the state to be
+      // put right somewhere else.
+      el("bar").dataset.state = BAR_RUNNING;
       const eta = secondsLeft === null ? "estimating…" : `${secondsLeft}s left`;
-      el("job-status").textContent = `${done} of ${total}, ${skipped} skipped — ${eta}`;
+      sayJobStatus(`${done} of ${total}, ${skipped} skipped — ${eta}`);
       return;
     }
 
@@ -209,8 +308,14 @@ el("walk").addEventListener("click", async () => {
     const ending = data;
     el("bar").max = ending.total;
     el("bar").value = ending.done;
+    // A walk gets this as much as an embedding run does: one bar, one Cancel,
+    // and a walk somebody stopped leaves the identical half-filled blue picture
+    // the acceptance run of 2026-08-13 waited in front of. The decision is
+    // `barState`'s, in `render.js`, where it can be tested; both handlers ask
+    // it rather than each deciding for its own job.
+    el("bar").dataset.state = barState(ending);
 
-    el("job-status").textContent = endingSentence(ending);
+    sayJobStatus(endingSentence(ending));
     endingDescribed = true;
     jobRunning = false;
     syncButtons();
@@ -218,12 +323,43 @@ el("walk").addEventListener("click", async () => {
     if (watchedRootId !== null) {
       renderSkips(watchedRootId);
     }
+    // A walk changes how many pieces the index holds, which is the denominator
+    // of the settings line further down — left alone, that line goes on
+    // describing the index as it was before this run. Redrawn from the
+    // database rather than adjusted from the ending, so the screen cannot come
+    // to hold a number the index does not.
+    //
+    // `refreshSettings` is declared below this handler and is a `const`, so it
+    // is worth saying why this is not a use before initialisation: the handler
+    // runs on a message from a job, a job is started by a click on a button
+    // that stays disabled until a folder has been chosen through a native
+    // dialog, and the whole module — this file's last line included — has
+    // finished evaluating long before any of that.
+    refreshSettings();
   };
 
   if (watchedRootId === null) {
-    el("job-status").textContent = "choose a folder above before indexing";
+    sayJobStatus("choose a folder above before indexing");
     return;
   }
+
+  // The bar comes back to life on the press rather than on the first report,
+  // and **before** the await rather than after it. Both halves are the point.
+  // A run's first report can be a batch away, and a bar still wearing the last
+  // run's ended colour for those seconds says the press did nothing — the same
+  // defect, inverted. And a job that ends before `invoke` resolves has its
+  // ending drawn during that await, so a line after it would put "running" back
+  // over the picture the ending had just drawn, with nothing left to correct it.
+  //
+  // Restored on a refusal, because a press that started nothing must not change
+  // what the bar says — least of all on the commonest refusal of all, where the
+  // bar belongs to the job that is already running.
+  const barWas = el("bar").dataset.state ?? "";
+  el("bar").dataset.state = BAR_RUNNING;
+  // This press claims the job area too, and it must, for the same reason the
+  // embedding press does: an embedding run's restatement is still in flight
+  // when somebody starts a walk, and it must not land on the walk's line.
+  jobGeneration += 1;
 
   try {
     endingDescribed = false;
@@ -236,8 +372,15 @@ el("walk").addEventListener("click", async () => {
     follow();
   } catch (error) {
     // Refused — most likely because a job is already running. Nothing started,
-    // so the buttons must not move.
-    el("job-status").textContent = `${error}`;
+    // so the buttons must not move, and neither must the bar.
+    el("bar").dataset.state = barWas;
+    sayJobStatus(`${error}`);
+    // The press bumped the generation before the await, and any settings draw
+    // that resolved inside it therefore suppressed its refusal clause on the
+    // strength of a job that never started. One read puts that right, on a path
+    // that has already failed and is paying for a round trip anyway. The
+    // embedding press's own refusal does the same.
+    refreshSettings();
   }
 });
 
@@ -245,7 +388,7 @@ el("cancel").addEventListener("click", async () => {
   // Only the button is disabled here. "Index it" comes back when the job says
   // it has ended, not when the user asks it to.
   el("cancel").disabled = true;
-  el("job-status").textContent = "stopping…";
+  sayJobStatus("stopping…");
   try {
     await invoke("cancel_job");
   } catch (error) {
@@ -254,7 +397,7 @@ el("cancel").addEventListener("click", async () => {
     // would read as true when it is not — this is the honest alternative:
     // the job is presumably still going, and the button is worth pressing
     // again.
-    el("job-status").textContent = `could not ask the job to stop: ${error}`;
+    sayJobStatus(`could not ask the job to stop: ${error}`);
     el("cancel").disabled = false;
   }
 });
@@ -371,6 +514,12 @@ const listState = Object.fromEntries(ROLES.map((role) => [role, listNotAsked()])
 // nobody had asked for.
 let keyState = keyNotAsked();
 
+// The model a refused change was trying to reach, or `null`. It is the only
+// thing that can make the discard button do anything, and it is set nowhere
+// except where a change was actually refused — so a button left on screen by a
+// stale draw cannot act on a model this window has stopped showing.
+let refusedChange = null;
+
 // Every option carries its own label, refused ones disabled. Refused rather
 // than absent: a model the provider lists and this window hides sends the user
 // looking for a fault here.
@@ -426,7 +575,25 @@ const showRecorded = (role, recorded) => {
   });
 };
 
-const drawSettings = (settings) => {
+// `askedAt` is `jobGeneration` as it stood when this draw's `model_settings`
+// was **issued**, not when it came back.
+const drawSettings = (settings, askedAt) => {
+  // ⚠️ **Whether a job has these counts, and why `jobRunning` alone is the
+  // wrong question.** Review of `3b18859`, Important 2, measured rather than
+  // argued: this function reads the flag when it runs, which is after its own
+  // await, and the flag is set only after a press's await — so a run that
+  // started inside this round trip and is already reporting progress is still
+  // `false` here. The line then printed `none were refused by the provider`
+  // beside a live run, which is the exact stale assertion the suppression was
+  // written for.
+  //
+  // The generation cannot lag, because the press increments it before awaiting
+  // anything. So the honest predicate is "a job is running, **or** a press has
+  // claimed the slot since this read was issued" — and the second half is what
+  // the flag could not say. A press that is then refused makes this briefly
+  // over-cautious rather than wrong; both refusal handlers redraw for exactly
+  // that reason.
+  const aJobHasTheSlot = jobRunning || askedAt !== jobGeneration;
   keyState = settings.key;
   el("disclosure").textContent = asSentence(disclosureSentence(settings.key));
   el("key-state").textContent = asSentence(keyStateSentence(settings.key));
@@ -447,11 +614,35 @@ const drawSettings = (settings) => {
   // line that is set once and never cleared outlives the state it described.
   el("key-note").textContent = asSentence(keyStoreNote(settings.platform, settings.key));
   el("index-state").textContent = asSentence(indexStateSentence(settings.index, indexOpening));
-  el("embedding-progress").textContent = asSentence(embeddingProgressText(settings.index));
+  // `aJobHasTheSlot` crosses, because these counts were read at a moment and
+  // that moment is in the past for the whole length of a run — and the line says
+  // "none were refused" at zero, so what it holds while it is stale is an
+  // assertion rather than a silence. `embeddingProgressText` is where the two
+  // are told apart; the predicate is built at the top of this function, where
+  // the measurement that made it a generation and not the flag is written down.
+  el("embedding-progress").textContent = asSentence(
+    embeddingProgressText(settings.index, aJobHasTheSlot),
+  );
   // An index that could not be read says nothing about which models are
   // recorded, so the pickers show nothing chosen and `index-state` carries the
   // reason. Leaving the first option selected would have the window state a
   // configuration it has not read.
+  // Redrawn from the settings on every pass rather than set once at the moment
+  // of refusal: the number on that button is what the index says now, and a
+  // number left over from an earlier draw is the one thing this control may not
+  // show. Written every time for the same reason `key-note` is — a line set once
+  // and never cleared outlives the state it described, and this one outliving it
+  // is a button offering to delete embeddings that are already gone.
+  // `aJobHasTheSlot` for the reason the line above it takes it: the counts these
+  // were read at are moving while a job runs, and a button whose label names a
+  // number that is changing is the same stale assertion, worn as a label. It
+  // takes the same predicate rather than the raw flag because it is stale in the
+  // same window and for the same reason — fixing one of the two and leaving its
+  // neighbour is the half-fix this cycle keeps catching.
+  const offer = discardOffer(refusedChange, settings.index, settings.key, aJobHasTheSlot);
+  el("discard-vectors").hidden = offer === null;
+  el("discard-vectors").textContent = discardVectorsLabel(offer);
+  el("discard-vectors-note").textContent = discardVectorsNote(offer);
   const read = settings.index?.kind === "read" ? settings.index : null;
   showRecorded("embedding", read && read.embeddingModel);
   showRecorded("rerank", read && read.rerankModel);
@@ -463,7 +654,47 @@ const drawSettings = (settings) => {
 // an answer, so this command has no rejection to catch. A blanket `.catch()`
 // here would never fire, and would read as though the two `Unreadable` states
 // were being handled — they are handled in `drawSettings`, by being drawn.
-const refreshSettings = async () => drawSettings(await invoke("model_settings"));
+//
+// It answers with what it drew. The embedding run's ending needs the same read
+// this draws from — the index's own pair, to say beside the run's — and asking
+// twice would put two reads taken at two instants in two lines of one window,
+// which is the disagreement every other number on this screen is arranged to
+// make impossible.
+// How many reads have been issued, and the newest one that has been drawn.
+//
+// ⚠️ **Two reads can be in flight and can come back in the other order**, and
+// then the older one is drawn last and wins. `main.test.js` produced it: a press
+// refused inside an earlier run's read redraws correctly, and the earlier read
+// then lands on top and puts the suppressed line back for a job that never
+// started. It is not only mine to have caused — a run's ending and
+// `followUntilIdle` both call this at the same moment, and have raced since the
+// day the poller was written — but the refusal handlers below make two reads
+// overlap deliberately, so it stops being theoretical here.
+//
+// A number rather than a timestamp: these are issue numbers, not instants, and
+// nothing needs to know how long a read took.
+let settingsAsked = 0;
+let settingsDrawn = 0;
+
+const refreshSettings = async () => {
+  settingsAsked += 1;
+  const issue = settingsAsked;
+  // Captured before the await, never after. This is the whole of what lets
+  // `drawSettings` tell "no job has touched these counts" from "one started
+  // while I was asking" — the distinction `jobRunning` cannot draw, because
+  // nothing sets that flag until a press's own await has returned.
+  const askedAt = jobGeneration;
+  const settings = await invoke("model_settings");
+  // A read older than one already on screen has nothing to add and can only
+  // take something away. The answer is still returned, because the caller that
+  // asked for it may have its own use and its own guard — the ending's
+  // restatement does.
+  if (issue > settingsDrawn) {
+    settingsDrawn = issue;
+    drawSettings(settings, askedAt);
+  }
+  return settings;
+};
 
 el("key-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -509,21 +740,177 @@ el("forget").addEventListener("click", async () => {
 });
 
 // The embedding role is not the other two and does not share their handler.
-// It answers `AdoptedModel` — a model, a width, a space and whether that space
-// was minted — while `set_rerank_model` and `set_chat_model` write a string and
-// answer nothing. One handler for both would have to throw the adoption away to
-// have something in common with the other two.
-el(selectId("embedding")).addEventListener("change", async (event) => {
-  const model = event.target.value;
+// It answers `AdoptedModel` — a model, a width, a space, whether that space was
+// minted and what it retired — while `set_rerank_model` and `set_chat_model`
+// write a string and answer nothing. One handler for both would have to throw
+// the adoption away to have something in common with the other two.
+//
+// Both presses that can record an embedding model go through this one function,
+// differing only in `existingVectors`. Two copies would be two places for the
+// destructive spelling to end up on the harmless press.
+const recordEmbeddingModel = async (model, existingVectors) => {
   try {
-    const adopted = await invoke("set_embedding_model", { model });
+    const adopted = await invoke("set_embedding_model", { model, existingVectors });
+    // Cleared on success, so the button below cannot survive the change it was
+    // offered for and act a second time on a model nobody is looking at.
+    refusedChange = null;
     el("model-status").textContent = asSentence(adoptedModelSentence(adopted, indexOpening));
   } catch (error) {
     // The refusal already says how many vectors stand in the way; showing it
     // whole is better than a sentence of our own that says less.
+    //
+    // Set on every failure this window cannot attribute, and narrowed by
+    // `discardOffer` rather than here. Not for tidiness: the refusal arrives as
+    // a string, so this `catch` cannot tell "a space blocks the change" from
+    // "you have entered no key" without matching on message text — the failure
+    // mode `crate::error::Error`'s own header says that type exists to avoid.
+    // What can be decided is decided from state, one line down, where the guards
+    // and their gaps are written out.
+    //
+    // The one exception is the one this window *does* know from state: with a
+    // job running, the refusal is the slot, and a slot refusal must leave
+    // nothing to confirm — otherwise the run's own ending redraws the button
+    // against a count that run has just made larger, and pressing it destroys
+    // what it paid for. `changeToConfirm` is where that is written.
+    refusedChange = changeToConfirm(model, jobRunning);
     el("model-status").textContent = asSentence(embeddingModelNotRecordedSentence(error));
   }
   await refreshSettings();
+};
+
+el(selectId("embedding")).addEventListener("change", async (event) => {
+  // Never the discarding value. A change nobody has been asked about must not
+  // be able to delete anything, whatever this window later offers.
+  await recordEmbeddingModel(event.target.value, KEEP_EXISTING_VECTORS);
+});
+
+// The confirmed half. It re-sends the model the refusal was about rather than
+// whatever the picker is showing: `drawSettings` puts the *recorded* model back
+// into the select, so by the time this button is on screen the select no longer
+// holds the model the person chose.
+el("discard-vectors").addEventListener("click", async () => {
+  if (refusedChange === null) {
+    return;
+  }
+  await recordEmbeddingModel(refusedChange, DISCARD_EXISTING_VECTORS);
+});
+
+// Starting the embedding pass.
+//
+// Its button sits in the job area at the top of the window, with "Index it" and
+// the one Cancel, because there is one job slot and one bar. The listener is
+// registered **here** for two reasons that both belong to this block: every
+// sentence it writes comes from `render.js`, which is this block's rule and is
+// checked by `render.test.js`; and it redraws the settings when the run is over,
+// which needs `refreshSettings` to have been declared.
+el("embed").addEventListener("click", async () => {
+  // This press claims the job area, before anything is awaited. It is read by
+  // the settings block, which has to know that a job may have taken the slot
+  // while its own read was in flight — see `jobGeneration` and `aJobHasTheSlot`.
+  //
+  // The ending's restatement deliberately does **not** use it: a press is the
+  // wrong event to count for "is my line still the newest thing here", because
+  // a refused press claims a number the running job never used. That question
+  // is `statusWrites`, at the seam.
+  jobGeneration += 1;
+
+  // A channel of its own, and a handler of its own. It is not the walk's with a
+  // flag: `endingSentence` appends a clause about folder reconciliation, which
+  // an embedding run neither did nor could do, and one handler serving both
+  // would be one sentence deciding which job it is about.
+  const onProgress = new Channel();
+  onProgress.onmessage = ({ event, data }) => {
+    if (event === "progress") {
+      el("bar").max = data.total;
+      el("bar").value = data.done;
+      // The walk's own handler says why this is on every report and not only
+      // at the start.
+      el("bar").dataset.state = BAR_RUNNING;
+      sayJobStatus(embedProgressLine(data));
+      return;
+    }
+
+    const ending = data;
+    el("bar").max = ending.total;
+    el("bar").value = ending.done;
+    // Half of why the owner waited: the bar stayed partly filled in the colour
+    // of a live run after the run had died. Drawn here, in the same tick as the
+    // ending's own sentence, so there is no moment where the two disagree.
+    el("bar").dataset.state = barState(ending);
+    // The count at the moment this line was written, kept so the restatement
+    // below can ask whether anything has been written here since.
+    const wroteAt = sayJobStatus(embedEndingSentence(ending));
+    endingDescribed = true;
+    jobRunning = false;
+    syncButtons();
+    // The counts this run reported are this run's; the settings line states the
+    // space's, and they have just changed. Read back from the database rather
+    // than added up from the ending, which is the only way the two numbers
+    // cannot come to disagree.
+    //
+    // And the ending's own line is written a second time from that same read,
+    // because "32 of 195" is this run's queue and says nothing about how much
+    // of the index now has a vector — the two consecutive runs that read as
+    // "nothing moved" are on `embedIndexTail`. It is a second write and not an
+    // await before the first, deliberately: awaiting the settings would hold a
+    // moving progress line and a live-looking bar on screen for the length of a
+    // database read, which is the defect this whole task is about.
+    //
+    // ⚠️ **Whether it may land at all is `restatedEnding`'s decision, not an
+    // `if` here.** A person can press Embed again inside that round trip, and a
+    // restatement landing afterwards would paint the previous run's ending —
+    // carrying numbers measured before the new run started — over a line
+    // describing a run in flight. Written as a branch in this file it would be a
+    // branch no test could reach; `render.test.js` asserts both directions, and
+    // `main.test.js` drives this handler through both orderings that made the
+    // flag the wrong thing to ask.
+    //
+    // The two numbers, and neither of them is `jobRunning` or a press: `wroteAt`
+    // is the count when this handler wrote its own line, `statusWrites` is the
+    // count now. Equal means nothing has been written here since, which is the
+    // only thing that makes revising this line safe.
+    //
+    // ⚠️ **A press was the wrong event to count, and an ordinary double-click
+    // is what showed it.** Embed stays enabled through its own round trip, so a
+    // second click gives a refusal that claimed a per-press generation the
+    // running job never used, and the running job's ending was then suppressed
+    // for good. Counting *writes to this line* has no such gap: a refusal writes
+    // here and is therefore respected when it is the newest thing, and ignored
+    // when — as in the double-click — it was written before the ending it would
+    // otherwise have silenced.
+    refreshSettings().then((settings) => {
+      const restated = restatedEnding(ending, settings.index, wroteAt, statusWrites);
+      if (restated !== null) {
+        sayJobStatus(restated);
+      }
+    });
+  };
+
+  // Before the await, and restored on a refusal; the walk's press carries the
+  // reasoning for both halves.
+  const barWas = el("bar").dataset.state ?? "";
+  el("bar").dataset.state = BAR_RUNNING;
+
+  try {
+    endingDescribed = false;
+    await invoke("start_embed_job", { onProgress });
+    jobRunning = true;
+    // After the await, for the reason the walk's own press gives: an ending
+    // that arrived first has already been overwritten by the line above, and
+    // only the core can put it right.
+    syncButtons();
+    follow();
+  } catch (error) {
+    // Refused before anything started — no key, no index, or a job already
+    // running. Nothing began, so the buttons must not move, and neither must
+    // the bar.
+    el("bar").dataset.state = barWas;
+    sayJobStatus(embedNotStartedSentence(error));
+    // For the reason the walk's own refusal gives: this press bumped the
+    // generation before awaiting, so a settings draw that resolved inside the
+    // refusal suppressed its refusal clause for a job that never started.
+    refreshSettings();
+  }
 });
 
 for (const [role, command] of [

@@ -500,17 +500,51 @@ impl Db {
     /// delete arrives through a cascade rather than directly — measured, and
     /// pinned by `tests/citation.rs`.
     ///
-    /// **What it does not reach: the vectors.** `chunk_embedding_state`
+    /// **What it reaches now: the vectors too.** `chunk_embedding_state`
     /// cascades from `chunk` and goes; the `vec_emb_<space_id>` tables are
-    /// created at runtime, are referenced by no foreign key, and stay. Nothing
-    /// today writes one — there is no embedder under D29 — so this is a trap
-    /// laid for the indexing-and-embedding spec rather than a live defect, and
-    /// it is sharper than it looks: `chunk.id` is `INTEGER PRIMARY KEY`
+    /// created at runtime and referenced by no foreign key, so the cascade
+    /// alone would never touch them —
+    /// [`crate::space::delete_vectors_for_document_in`] is what does, called
+    /// from [`Db::clear_document_content_in`] **before** the `DELETE FROM
+    /// page` that starts the cascade. That order is load-bearing, not
+    /// stylistic: once the cascade has taken the chunks there is no
+    /// `chunk.document_id` left to look their vector ids up by, and
+    /// [`Db::delete_watched_root`] (`write.rs:292`) keeps the same ordering
+    /// for the same reason.
+    ///
+    /// The sharper fact underneath is why leaving this unreached would have
+    /// been worse than clutter: `chunk.id` is `INTEGER PRIMARY KEY`
     /// **without** `AUTOINCREMENT`, so a rebuild reuses the ids it just freed.
     /// A surviving vector would then name a chunk whose text is different
-    /// content, with the row that recorded it as embedded already cleared. It
-    /// is the same shape as the block-id reuse D36 closed one level up, and it
-    /// needs the same kind of answer.
+    /// content, with the row that recorded it as embedded already gone with
+    /// the cascade — search answering with text the file no longer contains,
+    /// and nothing anywhere saying so. The same shape as the block-id reuse
+    /// D36 closed one level up. Nothing outside a test writes a vector yet —
+    /// there is no embedder under D29 — but this cycle is what starts
+    /// writing them, and the gap was closed ahead of that rather than after
+    /// it. D88.
+    ///
+    /// **What makes leaving it embedding-less correct, rather than merely
+    /// silent.** This method takes a document's vectors away and writes
+    /// nothing to replace them — on purpose, it is not this method's job to
+    /// re-embed. That is only safe because whatever decides what needs
+    /// embedding is meant to be a *computed* pass over `chunk` — "which chunks
+    /// have no vector yet, asked fresh" — rather than a list kept in its own
+    /// table. A computed pass notices a cleared document the same way it
+    /// notices a brand new one, with nothing here having to tell it so. No
+    /// such pass exists in this crate yet; it is later work in this cycle.
+    ///
+    /// The obligation this method would then owe is not a queue forgetting a
+    /// rebuilt document — a rebuild writes chunks again, same as a first
+    /// build, so a queue fed at write time picks it back up for free. It is a
+    /// *record that survives the clear* claiming the document is already
+    /// embedded, the same shape `status` had before D61: this method
+    /// deliberately leaves the `document` row itself in place (above), and if
+    /// "embedded" ever became a mark on that row or elsewhere instead of a
+    /// question answered fresh, it would still say so with the vectors gone —
+    /// a rebuilt document that looks embedded and answers nothing, and no test
+    /// in `tests/citation.rs` would catch it. This method would then owe that
+    /// mark the same reset the second statement above already gives `status`.
     ///
     /// [`Db::delete_document`] has never reached them either, so this is not a
     /// regression — it is written down here because this is the method a
@@ -529,6 +563,11 @@ impl Db {
     /// **this** `Db`'s connection, which [`same_connection`] is what enforces.
     pub fn clear_document_content_in(&self, tx: &Transaction<'_>, id: &str) -> Result<(), Error> {
         same_connection(self, tx);
+        // Before the pages go: once the cascade has taken the chunks there is
+        // no `chunk.document_id` left to look their ids up by — the same
+        // ordering `delete_watched_root` keeps (`write.rs:292`). A `vec0`
+        // table is the target of no foreign key, so nothing else reaches it.
+        crate::space::delete_vectors_for_document_in(tx, id)?;
         tx.execute("DELETE FROM page WHERE document_id = ?1", params![id])?;
         crate::journal::write_document_status(tx, id, DocumentStatus::Pending)
     }
@@ -545,18 +584,46 @@ impl Db {
     /// Every `&self` writer on `Db` goes through `self.conn().execute`, so it
     /// simply joins whatever transaction is open on that connection; calling
     /// them from inside `f` is how a whole document is written as one unit.
-    /// The exceptions are the methods that open a transaction of their own, and
-    /// the rule is the reliable form of that list rather than a count:
-    /// `grep -n 'Transaction::new_unchecked' crates/mnema-index/src/` names
-    /// every one of them, while a number written into prose goes stale the next
-    /// time somebody adds one. This sentence said "the one exception" and named
-    /// [`Db::insert_chunk`] while there were already three, and Task 6 made it
-    /// four. Today: [`Db::insert_chunk`] (use [`Db::insert_chunk_in`] here),
-    /// [`Db::create_space`], [`Db::drop_space`], and
-    /// [`Db::adopt_embedding_model`], which opens one through
-    /// [`Db::create_space`] and another through this method itself. Naming
-    /// those two rather than counting to them: the sentence you are reading
-    /// replaced a wrong count, and its first draft ended in a wrong ordinal.
+    /// The exceptions are the methods that open a transaction of their own —
+    /// either directly, with `Transaction::new_unchecked`, or by calling this
+    /// method itself — and none of them may be called from inside `f`: SQLite
+    /// has no nested `BEGIN`.
+    ///
+    /// The rule is a reliable form rather than a count written into prose, and
+    /// it takes two greps, not one. This sentence once named
+    /// [`Db::insert_chunk`] as "the one exception" while there were already
+    /// three, and Task 6 made it four — and the single grep that replaced that
+    /// count was itself only ever half right, because it named direct
+    /// `Transaction::new_unchecked` callers and stayed blind to every method
+    /// that opens its transaction by calling `self.transaction(...)` instead,
+    /// [`Db::insert_chunk`] among them. So: `grep -rn
+    /// 'Transaction::new_unchecked' crates/mnema-index/src/` for the direct
+    /// openers, and `grep -rn 'self\.transaction\(' crates/mnema-index/src/`
+    /// for everyone who goes through this one — each grep's hit inside this
+    /// doc comment and inside this function's own body is not itself a caller
+    /// and does not belong on the list either greps names.
+    ///
+    /// Today: [`Db::insert_chunk`] (use [`Db::insert_chunk_in`] here) and
+    /// [`Db::clear_document_content`] (use [`Db::clear_document_content_in`]
+    /// here) go through `self.transaction`, and so do [`Db::upsert_vector`]
+    /// and [`Db::delete_vector`], added in D95a to make a chunk's embedding
+    /// replaceable and removable, and [`Db::upsert_vector_for_text`], added
+    /// by Task 6 as the one the embedding pass actually calls.
+    /// [`Db::create_space`], [`Db::drop_space`] and
+    /// [`Db::delete_watched_root`] open one directly.
+    /// [`Db::adopt_embedding_model`] does both at once: one transaction
+    /// through [`Db::create_space`], another through `self.transaction` for
+    /// the pointer write itself.
+    ///
+    /// **Keeping this list current is the point of writing it as prose and
+    /// not only as the two greps above.** A reader who trusts the sentence
+    /// should not have to run either grep to discover it is one method
+    /// short — which is exactly what has happened to this list before, by
+    /// more than one task.
+    ///
+    /// [`Db::read_snapshot`], below, opens one directly too and belongs on both
+    /// greps' lists — it is the one opener that writes nothing, and the one a
+    /// caller may not nest anything from this list inside.
     pub fn transaction<T>(
         &self,
         f: impl FnOnce(&Transaction<'_>) -> Result<T, Error>,
@@ -564,6 +631,46 @@ impl Db {
         let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Immediate)?;
         let value = f(&tx)?;
         tx.commit()?;
+        Ok(value)
+    }
+
+    /// Runs `f` against **one snapshot** of the database: every read inside it
+    /// sees the same state, however many statements it takes and whatever
+    /// another connection commits meanwhile.
+    ///
+    /// Without it, a caller that reads several counts in a row reads each one in
+    /// its own implicit transaction, and a writer committing between two of them
+    /// leaves the set describing a state the index never held. `Db` is normally
+    /// used from one thread at a time, so this matters in exactly one shape and
+    /// it is the shape this product has: the shell keeps a second connection for
+    /// the indexing and embedding job (`src-tauri/src/state.rs`,
+    /// `AppState::open_job_index`), and the window's own mutex does nothing
+    /// about it. The settings screen reads how many chunks are embedded, how
+    /// many exist and how many were refused, and a person is asked to trust
+    /// those three against each other.
+    ///
+    /// `Deferred`, not `Immediate`: this takes no write lock and blocks no
+    /// writer. In WAL a read transaction fixes its snapshot at its first
+    /// statement and holds it until the end, which is the whole of what this
+    /// buys — and a `Deferred` transaction that never reads takes nothing at
+    /// all.
+    ///
+    /// It ends in `rollback`, and that is not a failure path: nothing here
+    /// wrote, so there is nothing to commit, and rolling back is how a read
+    /// transaction is closed. An error out of `f` drops `tx` and rolls back the
+    /// same way.
+    ///
+    /// ⚠️ **`f` must not write, and must not open a transaction of its own.**
+    /// SQLite has no nested `BEGIN`; a method from the list on
+    /// [`Db::transaction`] called inside this closure fails at run time rather
+    /// than at compile time. `&Self` and not `&Transaction` because what makes
+    /// this useful is that the ordinary reading methods — the ones a caller
+    /// already has — run inside it unchanged; the price is that nothing in the
+    /// type stops a writing one being called too.
+    pub fn read_snapshot<T>(&self, f: impl FnOnce(&Self) -> Result<T, Error>) -> Result<T, Error> {
+        let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Deferred)?;
+        let value = f(self)?;
+        tx.rollback()?;
         Ok(value)
     }
 

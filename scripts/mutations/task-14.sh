@@ -24,7 +24,7 @@
 # the document is complete and every marker is findable.
 case_ "ingest: a re-read file forgets the page skips it used to have" \
   crates/mnema-ingest/src/lib.rs \
-  's~    db\.forget_page_skips\(root_id, relative\)\?;~    let _ = \&db;~' \
+  's~(fn journal_skipped_pages\(.*?)    db\.forget_page_skips\(root_id, relative\)\?;~${1}    let _ = \&db;~s' \
   '    let _ = &db;' \
   mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
 

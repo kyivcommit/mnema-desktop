@@ -7,7 +7,7 @@
 //! store, and every answer here comes from asking it rather than from a flag
 //! this module could get wrong.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use mnema_provider::{Catalogue, Role};
@@ -224,24 +224,266 @@ pub fn provider_models(state: State<'_, AppState>, role: String) -> Result<Catal
 /// call that has just succeeded with it. The window does not need the answer in
 /// any case — a success here is a call that had the key, and the other arm is
 /// [`Error::NoKey`].
+/// **The one destructive path in this module, and what it is not.** With
+/// [`ExistingVectors::Discard`] this retires whatever vector space stands in the
+/// way and lets the new model be counted again from nothing. It is not a
+/// migration: nothing is copied, nothing is re-embedded here, and the archive is
+/// unsearchable by meaning until an embedder has refilled the new space. The
+/// honest migration — build the new space beside the old one, fill it, then
+/// switch — is a separate piece of work, and `Db::adopt_embedding_model`'s own
+/// doc is where the shape of it is written.
+///
+/// **What is atomic and what is not.** Retiring a space and adopting the model
+/// are two calls and cannot be made one transaction: `Db::drop_space` and
+/// `Db::adopt_embedding_model` each open their own, and SQLite has no nested
+/// `BEGIN` — `Db::transaction` keeps the list of the methods that do. They run
+/// inside a single [`AppState::with_index`], so no other thread in this process
+/// gets between them; a crash or a power cut still can.
+///
+/// ⚠️ **And so can an ordinary failure**, which is the part that reads as
+/// unlikely and is not: the adoption after a committed `DROP` can simply fail —
+/// `SQLITE_BUSY` from a second connection, a disk that is full, an I/O error —
+/// and that lands in exactly the state below without anything crashing. It is
+/// the one form of the state that is *reported*: it leaves through
+/// [`Error::RetiredThenFailed`], whose sentence names the space and the number
+/// of embeddings that went. A crash cannot tell anybody anything, so what the
+/// rest of this doc describes is what a person meets after one.
+///
+/// Interrupted exactly there, the index is left with:
+///
+/// - the retired space's row **and** its `vec_emb_<id>` table gone, and its
+///   vectors with them — that `DROP` had committed;
+/// - `meta.active_space` still naming the retired space, because the adoption is
+///   the only thing that writes that key and it had not run;
+/// - no space for the newly chosen model, because nothing had created one yet.
+///
+/// What the person meets on the next start is the settings screen drawn from
+/// [`IndexSettings::Unreadable`] with `cause: ReadFailed` — `Db::space_model`
+/// answers `NoSuchSpace` for a pointer naming a space that is gone — which the
+/// window renders as a defect worth reporting. That sentence is wrong about the
+/// cause in this one state, and saying so here is cheaper than a repair step
+/// that would have to be right about it.
+///
+/// **It needs no repair step, and recovers through the ordinary act**: choosing
+/// a model again succeeds and rewrites the pointer. The refusal that would
+/// otherwise block it enumerates `embedding_space` rather than reading
+/// `meta.active_space` (`Db::refuse_unless_every_other_space_is_empty`), and the
+/// retired space is no longer a row there. Nothing is lost beyond what the
+/// caller asked to lose: the vectors that went are the ones `Discard` named.
+/// Interrupted with more than one space still to retire, the same is true of
+/// each — the ones already dropped are gone, the rest are still there, and one
+/// more confirmed call finishes the job.
 #[tauri::command(async)]
 pub fn set_embedding_model(
     state: State<'_, AppState>,
     model: String,
+    existing_vectors: ExistingVectors,
 ) -> Result<AdoptedModel, Error> {
     let key = key(&state)?;
+    // ⚠️ **This command takes the job slot, although it is not a job**, and the
+    // reason is `embed_job.rs`. `mnema_embed::run` reads `meta.active_space`
+    // once, at the start, and holds that space id for the whole run — so a model
+    // change landing mid-run repoints the index while the pass goes on writing
+    // into the space it started with. With [`ExistingVectors::Keep`] and an
+    // active space that is still **empty**, which is the state a run is in for
+    // its first batch, `Db::adopt_embedding_model` does not refuse: it repoints,
+    // and every vector that run then pays for lands in a space nothing points
+    // at. The settings screen reads `0` embedded while the run's own line
+    // climbs. With `Discard` it is loud instead — the table is dropped under the
+    // job and the run fails.
+    //
+    // Before there was a command that embeds, no job wrote vectors and a model
+    // change during one was harmless. `start_embed_job` is what made this
+    // reachable, so this is where it is closed.
+    //
+    // `claim_job` and not `job_is_running()`: the second is check-then-act, and
+    // the job it checks for can start in the gap. This is the mutual exclusion
+    // the flag already exists to provide, and it holds in both directions — a
+    // job cannot start while a change is in flight either.
+    //
+    // **`let _slot`, never `let _`**: the second drops the slot at once and
+    // leaves nothing held at all.
+    //
+    // Claimed **after** the key is read, for the reason `start_embed_job`'s own
+    // doc comment gives about that read: the credential store can put an
+    // authorisation dialog on screen, and the slot must not be held while
+    // somebody decides what to do about it. Everything after this point that
+    // touches the index is inside the claim.
+    let _slot = state.claim_job()?;
     let check = mnema_provider::check_embedding_model(state.provider_base(), &key, &model)?;
     let hash = mnema_chunk::chunker_hash();
     let dim = check.dim as i64;
-    let adopted = state
-        .with_index(|db| db.adopt_embedding_model(&model, dim, state.credential_ref(), &hash))?;
+    // Two `?` for two failures that are not the same one. The outer is
+    // `with_index` never reaching the closure at all — a poisoned lock, an index
+    // nobody opened — where nothing was retired because nothing ran. The inner is
+    // the adoption's own, which may carry retirements with it. The closure's
+    // error type is fixed at `mnema_index::Error` by `with_index`'s signature, so
+    // the inner failure has to travel as a value rather than as an `Err`.
+    let (adopted, retired) = state.with_index(|db| {
+        Ok(adopt_retiring_whatever_blocks(
+            db,
+            &model,
+            dim,
+            state.credential_ref(),
+            &hash,
+            existing_vectors,
+        ))
+    })??;
     Ok(AdoptedModel {
         model,
         dim,
         space_id: adopted.space_id,
         created: adopted.created,
+        retired,
         index: index_settings(&state),
     })
+}
+
+/// Whether a model change may throw away what is already embedded.
+///
+/// A parameter rather than a decision taken in here, because it is not this
+/// layer's to take: what it discards cost the person hours of indexing and the
+/// money the provider charged for it.
+///
+/// **Two named values and not a `bool`.** `set_embedding_model(state, model,
+/// true)` states nothing at the call site about what `true` throws away, and
+/// this is the one command in the application that destroys data on purpose. It
+/// is also a required parameter with no `Default` and no `#[serde(default)]`, so
+/// a window that omits the field or misspells it has its call rejected before
+/// the command runs, rather than being given one of the two answers by a
+/// library. Only one of the two is reversible, so the default that suggests
+/// itself is a choice made by whoever wrote the typo.
+///
+/// `tests/commands.rs`'s `every_model_command_the_window_calls_is_registered` is
+/// what holds the spellings here and the ones `ui/main.js` sends together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExistingVectors {
+    /// Leave them where they are. A change that would strand them is refused —
+    /// which is what this command did for every caller before this parameter
+    /// existed, and is still the answer to every caller that does not ask
+    /// otherwise.
+    Keep,
+    /// Retire whatever space stands in the way of the change, vectors and all,
+    /// and let the new model be counted from nothing.
+    Discard,
+}
+
+/// Adopts the model, retiring the spaces the index itself names as being in the
+/// way — and only those.
+///
+/// **What blocks is decided by the index and never by this function.** The
+/// tempting shortcut is to drop `Db::active_space` up front whenever the caller
+/// confirmed, and it is wrong in both directions at once: re-adopting the model
+/// the index is already on moves nothing and would have its vectors destroyed
+/// for a press that changed nothing, while a full space that nothing points at
+/// would survive and go on blocking. So the loop reacts to
+/// `Error::SpaceNotEmpty` instead, which is raised by the one rule
+/// `Db::refuse_unless_every_other_space_is_empty` — the same rule the refusal
+/// with [`ExistingVectors::Keep`] comes from, so confirmation cannot end up
+/// disagreeing with refusal about which spaces matter. With nothing in the way
+/// there is no first iteration and nothing is dropped.
+///
+/// A loop and not one drop, because that rule returns on the **first** non-empty
+/// space it finds and an index can hold more than one.
+///
+/// **It terminates because each pass retires a space it has not retired
+/// before**, and `retired` is what says so: a `SpaceNotEmpty` naming a space
+/// already dropped means the drop did not remove the obstacle, and the refusal
+/// is then returned to the caller rather than driving another pass. Nothing
+/// exercises that guard — `Db::drop_space` deletes the `embedding_space` row the
+/// rule enumerates, so a repeat cannot happen through this crate's API — and it
+/// is here as the termination argument rather than as a defence.
+///
+/// `embedded_chunks` in the answer is taken from the refusal that named the
+/// space, not measured again after the drop: after the drop there is nothing
+/// left to count, and a second measurement before it could disagree with the one
+/// the decision was actually made on.
+///
+/// **Every exit carries what was already destroyed**, which is why this returns
+/// [`Error`] and not `mnema_index::Error`. Both failing exits — the drop itself,
+/// and the adoption after a drop has committed — go through
+/// [`failure_after_retiring`], and there is no third: the earlier version had a
+/// bare `Err(other) => return Err(other)` and a `?` on `drop_space`, and each
+/// threw the accumulated list away. What that looked like from the window is
+/// written on [`Error::RetiredThenFailed`].
+fn adopt_retiring_whatever_blocks(
+    db: &mnema_index::Db,
+    model: &str,
+    dim: i64,
+    credential_ref: &str,
+    chunker_hash: &str,
+    existing_vectors: ExistingVectors,
+) -> Result<(mnema_index::AdoptedSpace, Vec<RetiredSpace>), Error> {
+    let mut retired: Vec<RetiredSpace> = Vec::new();
+    loop {
+        match db.adopt_embedding_model(model, dim, credential_ref, chunker_hash) {
+            Ok(adopted) => return Ok((adopted, retired)),
+            Err(mnema_index::Error::SpaceNotEmpty {
+                space_id,
+                embedded_chunks,
+            }) if existing_vectors == ExistingVectors::Discard
+                && !retired.iter().any(|r| r.space_id == space_id) =>
+            {
+                // Not `?`. A drop that fails after an earlier one committed is
+                // the same "something was destroyed and this did not finish" as
+                // the arm below, and `?` would have reported it as though
+                // nothing had gone.
+                if let Err(e) = db.drop_space(space_id) {
+                    return Err(failure_after_retiring(e, retired));
+                }
+                retired.push(RetiredSpace {
+                    space_id,
+                    embedded_chunks,
+                });
+            }
+            Err(other) => return Err(failure_after_retiring(other, retired)),
+        }
+    }
+}
+
+/// A failure of the adoption, said so that anything already destroyed is in the
+/// sentence rather than only in the database.
+///
+/// **The two arms are two different messages for a person, not two spellings.**
+/// With nothing retired this is an ordinary refusal — the overwhelmingly common
+/// one is `SpaceNotEmpty` answering a change the caller did not confirm — and it
+/// keeps travelling as [`Error::Index`] so that everything already matching on
+/// that shape goes on working, `changing_the_model_without_confirmation_leaves_the_space_alone`
+/// included. With something retired the failure is no longer only a failure:
+/// embeddings are gone, the caller asked for that but not for this ending, and a
+/// message that mentions only what went wrong states that nothing happened.
+///
+/// **This is the only place `retired` can be lost**, which is the point of it
+/// being a function rather than two `match` arms written twice: there is no
+/// `retired` binding at `set_embedding_model`'s call site to forget.
+fn failure_after_retiring(cause: mnema_index::Error, retired: Vec<RetiredSpace>) -> Error {
+    if retired.is_empty() {
+        return Error::Index(cause);
+    }
+    Error::RetiredThenFailed {
+        retired,
+        source: cause,
+    }
+}
+
+/// A vector space that a confirmed model change threw away, and what it held.
+///
+/// It reaches the window so that the sentence after the act can name what the
+/// act cost, measured by the index at the moment it was destroyed. The number
+/// the window puts on the confirmation *before* the act is a different one — it
+/// comes from `IndexRead::embedded_chunks`, which counts the active space, and
+/// the space that blocks need not be the active one. Two numbers about two
+/// moments; the window says which is which rather than letting the earlier one
+/// stand as a report of what happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetiredSpace {
+    pub space_id: i64,
+    /// Chunks with an embedding recorded, not rows — `Db::embedded_chunk_count`
+    /// is where the difference is argued, and adding the two records of one
+    /// embedded chunk would report twice what the change cost.
+    pub embedded_chunks: i64,
 }
 
 /// What [`set_embedding_model`] recorded, said rather than implied.
@@ -261,12 +503,38 @@ pub struct AdoptedModel {
     /// `create_space`'s own answer precisely because the neighbouring fact ("the
     /// active space moved") is a different one, and agrees with it everywhere
     /// except on a model chosen, abandoned and chosen again. Deriving it from
-    /// `embeddedChunks` would be worse still: that number is identically zero in
-    /// this build (D29), so the derivation is wrong in exactly one direction.
+    /// `embeddedChunks` would still be wrong, in exactly **one** direction: a
+    /// space this call *found* rather than minted reads as freshly minted
+    /// whenever it happens to be empty, because a genuinely new space is
+    /// always zero too — a fresh `embedding_space.id` (`AUTOINCREMENT`, never
+    /// reused) and `chunk_embedding_state.space_id`'s foreign key mean no row
+    /// can pre-exist for it. The reverse — a minted space misread as found —
+    /// cannot happen: minted is always zero, so it never crosses into "looks
+    /// found". D29 made the true direction fire on *every* found space,
+    /// because nothing embedded yet; with real embeddings it only fires on
+    /// found-and-empty ones. Narrower, not a second direction.
     pub created: bool,
+    /// The spaces this call threw away, in the order it threw them away, and
+    /// empty for every call that threw nothing away — which is every call with
+    /// [`ExistingVectors::Keep`] and every confirmed call that met nothing in
+    /// the way.
+    ///
+    /// **Stated rather than left to be inferred.** Without it the window's only
+    /// account of a destructive act is the number it read *before* asking for
+    /// confirmation, which counts the active space at a moment that has passed;
+    /// this is what the index destroyed, counted as it went. The two can differ
+    /// — see [`RetiredSpace`] — and a person who paid for embeddings is owed the
+    /// second, not the first.
+    ///
+    /// A list and not an `Option`, because more than one space can be in the way
+    /// and reporting the first would understate the bill.
+    pub retired: Vec<RetiredSpace>,
     /// The settings as they now stand, or why they could not be read — see
-    /// [`IndexSettings`]. A failure here does not take the four fields above
-    /// with it, which is the whole point of answering with this type.
+    /// [`IndexSettings`]. A failure here does not take the fields above with it,
+    /// which is the whole point of answering with this type. Said without a
+    /// count on purpose: this doc said "the four fields above" while `retired`
+    /// was being added beside them, and a total is a definition that goes stale
+    /// the moment the list it describes grows.
     ///
     /// ⚠️ **No test reaches the [`IndexSettings::Unreadable`] arm on *this*
     /// type**, and it is worth knowing that before relying on it. The adoption
@@ -614,12 +882,81 @@ pub struct IndexRead {
     ///   chunk it embeds; `Db::chunk_count` sets out why, and
     ///   `a_vector_outlives_the_chunk_it_embeds` in the index crate's
     ///   `tests/adopt.rs` holds the storage half of it in the gate.
-    /// - Both are zero in this build, because nothing embeds yet (D29).
     /// - Zero with `active_space == null` is not "nothing is embedded", it is
     ///   "the question does not arise". Tell them apart by `active_space`, never
     ///   by the zero.
+    /// - `embedded_chunks + failed_chunks` is what the run has *settled*; the
+    ///   remainder against `total_chunks` is what is still waiting. Neither
+    ///   subtraction on its own means anything — see [`IndexRead::
+    ///   failed_chunks`].
     pub embedded_chunks: i64,
     pub total_chunks: i64,
+    /// How many chunks the provider refused, in the active space — **the third
+    /// number, and the reason the pass is allowed to be as unforgiving as it
+    /// is.**
+    ///
+    /// `Db::chunks_needing_embedding` lets a refused chunk leave the queue and
+    /// does not offer it again until its text changes. That chunk is still in
+    /// the database, the document still shows it, keyword search still finds
+    /// it — and vector search will not return it again. The only thing standing
+    /// between that and silence is this count being in front of a person:
+    /// `total_chunks − embedded_chunks` reads as "not got to them yet", and for
+    /// these chunks nobody ever will.
+    ///
+    /// **It is the space's number, not a run's.** It counts every chunk this
+    /// space has given up on and still holds a refusal for, whatever run wrote
+    /// it and whatever the document's status is now; `job::Ended::refused` is
+    /// the count for *one* run and starts again at zero on the next one. The
+    /// two are different numbers about different scopes, and `ui/render.js`
+    /// words them so that neither can be read as the other.
+    ///
+    /// `0` with `active_space == null` is "the question does not arise", the
+    /// same way it is for `embedded_chunks` — and for the same reason, told
+    /// apart by `active_space` and never by the zero.
+    pub failed_chunks: i64,
+    /// How many vector spaces the index holds at all, empty ones included.
+    ///
+    /// **It is here so the window can tell what `embedded_chunks` is a count
+    /// of.** That field counts the active space; the space that would block a
+    /// model change need not be the active one and need not be pointed at by
+    /// anything (`mnema_index::Error::SpaceNotEmpty`). So a window offering to
+    /// destroy "the 3 embeddings in space #1" cannot know whether 3 is the whole
+    /// bill or part of one it cannot read — unless the active space is the only
+    /// space there is, which is what this number and only this number says.
+    ///
+    /// With `active_space` set, a `Read` guarantees that space exists —
+    /// `index_settings` reads `space_model` for it and a missing row makes the
+    /// whole answer `Unreadable` — so `space_count == 1` beside a set
+    /// `active_space` means the active one is it.
+    ///
+    /// ⚠️ **Nothing in `ui/` reads it today, and it is not the number to gate a
+    /// confirmation on.** It was, for one commit, and `space_count == 1` turned
+    /// out to be the *rare* state rather than the ordinary one:
+    /// `Db::adopt_embedding_model` mints a space and repoints, and never removes
+    /// the one it moved off, so anybody who has ever tried a second model has two
+    /// spaces for the life of the index and the confirmation would never appear
+    /// again. What replaced it is [`IndexRead::embedded_chunks_everywhere`],
+    /// which is the honest number rather than a guard around a misleading one.
+    pub space_count: i64,
+    /// Every embedding the index holds, across every space — the number a
+    /// confirmed model change actually costs.
+    ///
+    /// **Not `embedded_chunks`, and the difference is the ordinary case rather
+    /// than a corner.** That field counts the active space; a space left behind
+    /// by an earlier model change is still there holding whatever it held, and
+    /// `Db::adopt_embedding_model` never removes what it moves off. A window
+    /// naming the active space's count while the change retires every non-empty
+    /// space understates the bill by exactly the spaces it forgot.
+    ///
+    /// **It is what will go, not merely what exists**, and the two coincide for
+    /// a reason worth writing down rather than assuming: a confirmed change
+    /// retires every space in the way and adopts a destination that is empty —
+    /// either newly minted, or an earlier empty one — so the spaces spared are
+    /// spaces holding nothing. Two full spaces at once would break that
+    /// equality, and cannot arise through this window: vectors are written into
+    /// the active space, and adoption refuses to move the pointer off a full one
+    /// unless the caller confirmed, which retires it.
+    pub embedded_chunks_everywhere: i64,
     pub rerank_model: Option<String>,
     pub chat_model: Option<String>,
 }
@@ -628,28 +965,22 @@ pub struct IndexRead {
 /// point: a caller building [`ModelSettings`] must not be able to lose the key
 /// half by writing `?` here.
 fn index_settings(state: &AppState) -> IndexSettings {
-    let read = state.with_index(|db| {
-        let active_space = db.active_space()?;
-        let (embedding_model, embedding_dim) = match active_space {
-            Some(id) => {
-                let (model, dim) = db.space_model(id)?;
-                (Some(model), Some(dim))
-            }
-            None => (None, None),
-        };
-        Ok(IndexSettings::Read(IndexRead {
-            embedding_model,
-            embedding_dim,
-            active_space,
-            embedded_chunks: match active_space {
-                Some(id) => db.embedded_chunk_count(id)?,
-                None => 0,
-            },
-            total_chunks: db.chunk_count()?,
-            rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
-            chat_model: db.meta_get(mnema_index::META_CHAT_MODEL)?,
-        }))
-    });
+    // `read_snapshot`, and it is what makes the sentence below true rather than
+    // hopeful. Review round 1 found this comment claiming "one connection at one
+    // moment" over seven autocommit reads: `with_index` takes the window's mutex
+    // and calls the closure, and each `query_row` then took its own implicit
+    // snapshot. The mutex excludes other *window* commands — it says nothing
+    // about the job's second connection (`AppState::open_job_index`), which is
+    // the only writer that matters here, and a batch committing between two of
+    // these reads leaves the trio describing a state the index never held.
+    // "One connection" was measured; "one moment" was assumed.
+    //
+    // A read transaction and not a narrower fix, because the claim is what the
+    // screen leans on: a person is asked to read `embedded_chunks`,
+    // `total_chunks` and `failed_chunks` against each other, and against the
+    // run's own line beside them. `Db::read_snapshot` takes no write lock and
+    // blocks no writer — see its own doc comment.
+    let read = state.with_index(|db| db.read_snapshot(read_settings));
     match read {
         Ok(settings) => settings,
         Err(e) => IndexSettings::Unreadable {
@@ -657,6 +988,56 @@ fn index_settings(state: &AppState) -> IndexSettings {
             reason: e.to_string(),
         },
     }
+}
+
+/// The seven values the settings screen draws, read from one index.
+///
+/// A named function rather than a closure inside [`index_settings`] for a reason
+/// that is not style: it is passed to `Db::read_snapshot`, which is what makes
+/// the seven one moment, and nesting the body in a second closure would have
+/// shifted every line of it four columns to the right. Two mutation cases quote
+/// this code with its indentation — measured, they broke — and a case file that
+/// has to be re-indented every time a wrapper appears is a case file that will
+/// one day be re-indented wrong.
+///
+/// ⚠️ **Every read in here belongs to one snapshot, and nothing in the type says
+/// so.** Called outside `read_snapshot` it still compiles and still answers,
+/// with each read taking its own; called with a write added it would fail at run
+/// time on SQLite's missing nested `BEGIN`. The obligation sits on the one call
+/// site.
+fn read_settings(db: &mnema_index::Db) -> Result<IndexSettings, mnema_index::Error> {
+    let active_space = db.active_space()?;
+    let (embedding_model, embedding_dim) = match active_space {
+        Some(id) => {
+            let (model, dim) = db.space_model(id)?;
+            (Some(model), Some(dim))
+        }
+        None => (None, None),
+    };
+    Ok(IndexSettings::Read(IndexRead {
+        embedding_model,
+        embedding_dim,
+        active_space,
+        embedded_chunks: match active_space {
+            Some(id) => db.embedded_chunk_count(id)?,
+            None => 0,
+        },
+        total_chunks: db.chunk_count()?,
+        // Inside the same snapshot as the two counts above, so all three
+        // describe one state of the index rather than three — see the comment on
+        // `read_snapshot` in [`index_settings`]. This is the number a person is
+        // asked to trust the no-retry rule on, and it is read after
+        // `embedded_chunks`, so without the snapshot the pair could straddle a
+        // committed batch.
+        failed_chunks: match active_space {
+            Some(id) => db.failed_chunk_count(id)?,
+            None => 0,
+        },
+        space_count: db.space_count()?,
+        embedded_chunks_everywhere: db.embedded_chunks_everywhere()?,
+        rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
+        chat_model: db.meta_get(mnema_index::META_CHAT_MODEL)?,
+    }))
 }
 
 /// The key half, asked and answered — and never an `Err`, for the same reason
@@ -678,15 +1059,21 @@ fn key_state(state: &AppState) -> KeyState {
 
 /// What the window draws on the settings screen.
 ///
-/// The index half is read inside one closure, so its numbers come from a single
-/// connection at a single moment rather than being assembled from several.
+/// The index half is read inside one closure **and one read transaction**, so
+/// its numbers come from a single connection at a single moment rather than
+/// being assembled from several. The closure alone bought only the first half of
+/// that, and this doc comment claimed both for a while: see the `read_snapshot`
+/// comment inside [`index_settings`] for what the difference is and which writer
+/// it is about.
 ///
 /// An active space naming a space that is gone arrives as
 /// `mnema_index::Error::NoSuchSpace` rather than as "nothing chosen" — see
 /// `Db::space_model`, where the argument for that is written down. It reaches
-/// the window as [`IndexSettings::Unreadable`] with `kind: ReadFailed`, and no
-/// longer takes the key half down with it. Nothing in this build can produce the
-/// state: `Db::drop_space` has no caller outside the index crate's own tests.
+/// the window as [`IndexSettings::Unreadable`] with `cause: ReadFailed`, and no
+/// longer takes the key half down with it. **The state is reachable**:
+/// `Db::drop_space` now has a production caller, `adopt_retiring_whatever_blocks`
+/// above (Task 4) — its own doc comment spells out exactly this state and what
+/// a person meets in it, so it is not repeated here.
 ///
 /// **It returns no `Result`, and that is the guarantee rather than a
 /// convenience.** Every state of the credential store and every state of the
@@ -751,6 +1138,9 @@ mod tests {
             active_space: None,
             embedded_chunks: 0,
             total_chunks: 0,
+            failed_chunks: 0,
+            space_count: 0,
+            embedded_chunks_everywhere: 0,
             rerank_model: None,
             chat_model: None,
         }
@@ -1144,6 +1534,88 @@ mod tests {
                 "{l:?} serialised differently than this test's own spelling of it"
             );
         }
+    }
+
+    /// An ordinary refusal keeps the shape everything already matches on, and a
+    /// refusal that destroyed something first does not.
+    ///
+    /// **Both directions, because each is separately satisfiable by the wrong
+    /// build.** A function answering [`Error::Index`] to everything is the
+    /// defect review found — the retirements are lost and the window says the
+    /// model was not recorded, to somebody whose embeddings have just gone. A
+    /// function answering [`Error::RetiredThenFailed`] to everything is the
+    /// mirror: it would put "vector space … was already deleted" in front of
+    /// every caller who simply chose a model without confirming, which is a
+    /// sentence about a deletion that did not happen.
+    #[test]
+    fn a_failure_that_destroyed_something_first_says_so_and_one_that_did_not_does_not() {
+        let cause = || mnema_index::Error::SpaceNotEmpty {
+            space_id: 1,
+            embedded_chunks: 3,
+        };
+
+        assert!(
+            matches!(
+                failure_after_retiring(cause(), Vec::new()),
+                Error::Index(mnema_index::Error::SpaceNotEmpty { .. })
+            ),
+            "a refusal that retired nothing must keep arriving as the index error it is"
+        );
+
+        let after = failure_after_retiring(
+            cause(),
+            vec![RetiredSpace {
+                space_id: 4,
+                embedded_chunks: 7,
+            }],
+        );
+        assert!(
+            matches!(after, Error::RetiredThenFailed { .. }),
+            "a failure that had already retired a space arrived as an ordinary index error"
+        );
+    }
+
+    /// The sentence, and not only the variant. This type crosses the IPC as its
+    /// `Display` string and nothing above it can branch on the shape, so a
+    /// variant that carries the retirements and does not say them is the same
+    /// silence with a different name.
+    ///
+    /// Every number is asserted separately, and they are all distinct from one
+    /// another, so a sentence built from one field twice cannot pass. The cause
+    /// is asserted too: it is what the person needs in a bug report, and a
+    /// message that replaced it with the retirement would trade one missing
+    /// fact for another.
+    #[test]
+    fn the_sentence_for_a_failure_after_a_retirement_names_every_space_and_its_count() {
+        let said = Error::RetiredThenFailed {
+            retired: vec![
+                RetiredSpace {
+                    space_id: 4,
+                    embedded_chunks: 7,
+                },
+                RetiredSpace {
+                    space_id: 9,
+                    embedded_chunks: 11,
+                },
+            ],
+            source: mnema_index::Error::NoSuchSpace(2),
+        }
+        .to_string();
+
+        for named in ["4", "7", "9", "11"] {
+            assert!(
+                said.contains(named),
+                "the sentence loses {named}, so the person is not told what it cost: {said}"
+            );
+        }
+        assert!(
+            said.contains("deleted"),
+            "the sentence never says anything was deleted: {said}"
+        );
+        assert!(
+            said.contains(&mnema_index::Error::NoSuchSpace(2).to_string()),
+            "the sentence dropped what actually went wrong: {said}"
+        );
     }
 
     /// The three ways out of `AppState::with_index`, sorted as

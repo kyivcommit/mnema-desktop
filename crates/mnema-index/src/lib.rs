@@ -11,7 +11,7 @@ pub use journal::{DocumentStatus, SkipEntry, SkipRule, SkippedFile};
 pub use meta::{META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL, META_VEC_VERSION};
 pub use migrations::SCHEMA_VERSION;
 pub use open::{Db, open, register_vector_extension};
-pub use space::{AdoptedSpace, VectorRole};
+pub use space::{AdoptedSpace, PendingChunk, VectorRole};
 pub use text_prep::prepare_for_search;
 pub use write::{Citation, INDEX_FORMAT_VERSION, PathEntry};
 

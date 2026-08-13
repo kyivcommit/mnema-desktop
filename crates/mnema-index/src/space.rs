@@ -11,6 +11,77 @@ use crate::{Db, Error, INDEX_FORMAT_VERSION};
 /// disagree on the first result, not on some tail.
 const METRIC: &str = "cosine";
 
+/// Whether this space has given up on a chunk **for the text it holds now** —
+/// one SQL fragment, read by the two methods that must never disagree about it.
+///
+/// [`Db::chunks_needing_embedding`] excludes what this matches;
+/// [`Db::failed_chunk_count`] counts it. Written once because the two are the
+/// same sentence read in opposite directions, and a second copy of it would be
+/// free to drift into saying that a chunk is both permanently failed and about
+/// to be retried — a screen showing a failure the next run silently clears.
+///
+/// State `2` is `failed`; the hash comparison is what makes it "for the text it
+/// holds now", since an edited chunk's refusal was about text that no longer
+/// exists anywhere. Expects the outer query to expose the chunk as `c` and to
+/// bind the space id as `?1`.
+const GIVEN_UP_ON_CURRENT_TEXT: &str = "SELECT 1 FROM chunk_embedding_state s
+                  WHERE s.space_id = ?1 AND s.chunk_id = c.id
+                    AND s.state = 2 AND s.content_hash = c.content_hash";
+
+/// The queue itself: the `FROM` and `WHERE` of "which chunks does this space
+/// still owe a vector", shared by the query that hands them over and the count
+/// that measures how many are left.
+///
+/// One string for the same reason [`GIVEN_UP_ON_CURRENT_TEXT`] is one string,
+/// and a sharper one: a count that disagreed with the query it describes is a
+/// progress bar that stops at 8 400 of 9 000 with an empty queue, and the
+/// person reading it has no way to tell that from work that stalled.
+///
+/// `table` is a `vec_emb_<id>` name and never caller text —
+/// [`Db::embedded_chunk_count`]'s own comment gives that argument in full.
+/// Binds the space id as `?1`; a caller adding `LIMIT` uses `?2`.
+///
+/// **This depends on `NOT IN` never meeting a NULL, and that argument belongs
+/// here.** A single NULL among `{table}.chunk_id` would make `NOT IN` answer
+/// NULL for every row of the outer query, emptying this queue over a full
+/// archive — silently, and in the direction nobody would notice. It cannot
+/// happen: `chunk_id` is declared `INTEGER PRIMARY KEY` on the `vec0` table
+/// (`Db::create_space`'s DDL, `space.rs:220`), and every writer —
+/// [`Db::insert_vector`], [`Db::upsert_vector`], [`Db::upsert_vector_for_text`]
+/// — binds it a real `i64`, never a NULL.
+fn the_embedding_queue(table: &str) -> String {
+    format!(
+        "FROM chunk c
+           JOIN document d ON d.id = c.document_id
+          WHERE d.status = 'indexed'
+            AND c.id NOT IN (SELECT chunk_id FROM {table})
+            AND NOT EXISTS ({GIVEN_UP_ON_CURRENT_TEXT})"
+    )
+}
+
+/// A chunk the embedding pass still has to send, as
+/// [`Db::chunks_needing_embedding`] hands it over.
+///
+/// A struct and not the `(i64, String, String)` it would otherwise be: two of
+/// the three fields are strings, one is what goes on the wire to a paid
+/// provider and the other is what decides whether a refusal is ever
+/// reconsidered, and nothing about a tuple would notice them swapped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingChunk {
+    pub id: i64,
+    /// `chunk.text` — the original, which the schema documents as "the
+    /// original, for display", and **not** the [`crate::prepare_for_search`]
+    /// copy. The prepared text exists for the lexical index; a vector is
+    /// searched against what a person reads in the citation, so the provider
+    /// has to see that.
+    pub text: String,
+    /// Carried out with the text so a caller can tell, without asking again,
+    /// which version of it a refusal would be about. Nothing may pass it back
+    /// in — [`Db::record_embedding_failure`] reads the hash itself, and its
+    /// doc comment says why.
+    pub content_hash: String,
+}
+
 /// What [`Db::adopt_embedding_model`] settled on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdoptedSpace {
@@ -194,9 +265,14 @@ impl Db {
     /// index is not pointing never asks it anything, so no guard sees that at
     /// all. The obligation is the caller's: embed into [`Db::active_space`],
     /// unless you are rebuilding a space you are about to switch to. That
-    /// obligation belongs in the indexing subsystem's spec and is written down
-    /// in no spec today; it is said here because this is the call that breaks
-    /// it.
+    /// obligation is written down now, and enforced — not here, but by the one
+    /// caller that has it: `mnema_embed::run` takes **no** `space_id`, reads
+    /// [`Db::active_space`] itself, and so has no way to name any other space.
+    /// The enforcement is a test, `the_pass_writes_only_into_the_active_space`
+    /// in `crates/mnema-embed/tests/queue.rs`, which stands an idle space
+    /// beside the active one and fails if a vector lands in the wrong one.
+    /// A test is all it can ever be, and the paragraph above is why: this
+    /// function has to keep letting the obligation be broken.
     pub fn insert_vector(&self, space_id: i64, chunk_id: i64, v: &[f32]) -> Result<(), Error> {
         let space = self.space(space_id)?;
         check_rankable(v, &space.metric, VectorRole::Stored(chunk_id))?;
@@ -208,6 +284,197 @@ impl Db {
             params![chunk_id, as_blob(v)],
         )?;
         Ok(())
+    }
+
+    /// Stores one embedding, replacing whatever this chunk already had in
+    /// this space — and clearing any stale `chunk_embedding_state` row for
+    /// it, in the same transaction.
+    ///
+    /// The check `insert_vector` documents applies here for the same reason
+    /// and is not weakened: a degenerate vector is degenerate whether it is
+    /// the first write for a chunk or the second. What differs is only the
+    /// collision rule — a retry that already wrote half a batch must be able
+    /// to finish without first asking which half landed.
+    ///
+    /// Delete then insert, rather than one statement that does both. Not for
+    /// lack of an `ON CONFLICT`: measured directly (`INSERT INTO vec_emb_1 ...
+    /// ON CONFLICT(chunk_id) DO UPDATE ...` against a live space), SQLite
+    /// itself answers `"UPSERT not implemented for virtual table"` — this is
+    /// SQLite refusing the statement before it ever reaches `vec0`'s own
+    /// `xUpdate`, not a gap `vec0` could close. `vec0` does implement `UPDATE`
+    /// on its own — `UPDATE vec_emb_1 SET embedding = ? WHERE chunk_id = ?`
+    /// measured `Ok(1)` with the new bytes on read-back — so a single-`UPDATE`
+    /// form is available and delete+insert is a choice, not a workaround: it
+    /// is what makes "no row for this chunk yet" and "replacing this chunk's
+    /// row" the same code path, rather than an `UPDATE` that silently touches
+    /// zero rows the one time there was nothing to replace. `INSERT OR
+    /// REPLACE` was checked too, and fails exactly like a plain `INSERT` —
+    /// `"UNIQUE constraint failed on ... primary key"` — because `vec0`'s
+    /// `xUpdate` (`vec0Update` → `vec0Update_Insert` →
+    /// `vec0Update_InsertRowidStep`, `sqlite-vec.c` 0.1.9, the version
+    /// `create_space` records into `meta`) never calls
+    /// `sqlite3_vtab_on_conflict()`, so the `OR REPLACE` conflict-resolution
+    /// mode it would need to read is never looked at.
+    ///
+    /// The `chunk_embedding_state` row is cleared for the same reason as
+    /// [`Db::delete_vector`]'s own doc gives, in the direction that matters
+    /// here: a row from before this write — `state = 1` from an interrupted
+    /// earlier run, or `state != 1` recording a failure this write has now
+    /// superseded — no longer describes the chunk once this call succeeds,
+    /// and a caller reading that table (Task 6's queue) must not find a
+    /// chunk marked failed the moment after it was embedded.
+    ///
+    /// **The narrower true sentence, now that Task 6 writes this table:**
+    /// nothing in this crate writes `state = 1` — only `state = 2`
+    /// ([`Db::record_embedding_failure`]) is ever written, `state = 0`
+    /// deliberately never (that method's own doc says why) — so the `DELETE`
+    /// below removes a `failed` row, not nothing. This method has no
+    /// production caller of its own, but the identical `DELETE` in its
+    /// sibling [`Db::upsert_vector_for_text`] does, and there the removal is
+    /// load-bearing: it is what takes a refusal off
+    /// [`Db::embedded_chunk_count`]'s third number the moment a chunk embeds.
+    ///
+    /// `insert_vector` is deliberately left alone. Its "exactly once" is a
+    /// statement some caller may want enforced, and quietly turning it into
+    /// a replace would remove an error worth seeing.
+    ///
+    /// ⚠️ **After the indexing cycle this method has no production call sites —
+    /// `grep -rn upsert_vector crates src-tauri --include='*.rs'` finds only
+    /// doc references and tests.** The embedding pass deliberately uses
+    /// [`Db::upsert_vector_for_text`] instead, because writing by `chunk_id`
+    /// alone binds a vector to whatever chunk holds that id *now*, and ids are
+    /// reused. This one is kept rather than removed or narrowed: a full space
+    /// migration — build the new space beside the old one and fill it — is
+    /// deferred to its own cycle, and a bulk copy between spaces has no text to
+    /// compare against and no reason to want one. It is written down here
+    /// because an unchecked public write with no callers is the thing a later
+    /// session reaches for first, and the reason not to is two functions away.
+    pub fn upsert_vector(&self, space_id: i64, chunk_id: i64, v: &[f32]) -> Result<(), Error> {
+        let space = self.space(space_id)?;
+        check_rankable(v, &space.metric, VectorRole::Stored(chunk_id))?;
+        self.transaction(|tx| {
+            tx.execute(
+                &format!("DELETE FROM {} WHERE chunk_id = ?1", space.table),
+                params![chunk_id],
+            )?;
+            tx.execute(
+                &format!(
+                    "INSERT INTO {} (chunk_id, embedding) VALUES (?1, ?2)",
+                    space.table
+                ),
+                params![chunk_id, as_blob(v)],
+            )?;
+            tx.execute(
+                "DELETE FROM chunk_embedding_state WHERE space_id = ?1 AND chunk_id = ?2",
+                params![space_id, chunk_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// [`Db::upsert_vector`], but only if this chunk still holds the text the
+    /// vector was made from. Answers whether it wrote.
+    ///
+    /// **The window this closes.** An embedding pass reads `(chunk_id, text)`
+    /// from [`Db::chunks_needing_embedding`], sends the text over a network,
+    /// and comes back seconds later to write the answer by `chunk_id`. In
+    /// between, a rebuild can delete that chunk and write a new one — and
+    /// `chunk.id` is `INTEGER PRIMARY KEY` **without** `AUTOINCREMENT`, so the
+    /// new chunk can be handed the very same id. `tests/citation.rs`'s
+    /// `a_reused_chunk_id_gets_no_inherited_vector` asserts that the reuse
+    /// happens rather than assuming it. The unguarded write then binds the
+    /// vector for text A to a chunk that now holds text B, and vector search
+    /// answers with a citation quoting text the file no longer contains.
+    ///
+    /// D88 does not cover this and was never meant to: it removes a vector that
+    /// *outlived* its chunk, and here the vector arrives after the chunk is
+    /// already gone — the rows it sweeps do not exist yet when it runs.
+    ///
+    /// **The comparison and the write are one transaction, and that is the
+    /// whole mechanism.** A caller that reads the hash, compares it, and then
+    /// calls [`Db::upsert_vector`] has rebuilt the same window one layer up:
+    /// two statements with a gap between them is the thing being removed.
+    ///
+    /// **Today this is defensive, not load-bearing, and it matters that a later
+    /// session can tell which.** `src-tauri/src/state.rs` holds a single
+    /// `running` flag for the whole application, so no rebuild can be in flight
+    /// while an embedding pass is; the race is unreachable and this check is
+    /// expected to answer `true` every time it is asked. **It becomes
+    /// load-bearing the day indexing work gets a database connection of its
+    /// own** — already written down as deferred to the search cycle, and
+    /// exactly the change that would let a rebuild and the queue run at once.
+    /// Whoever makes that change should arrive at this sentence.
+    ///
+    /// `false` is not an error. The chunk is gone, or its text has moved on;
+    /// either way this vector describes nothing that is there, and the computed
+    /// queue offers the chunk again with its current text if it still exists.
+    /// Nothing has to be recorded for that to happen — which is the same
+    /// property that lets [`Db::clear_document_content`] write no replacement.
+    pub fn upsert_vector_for_text(
+        &self,
+        space_id: i64,
+        chunk_id: i64,
+        content_hash: &str,
+        v: &[f32],
+    ) -> Result<bool, Error> {
+        let space = self.space(space_id)?;
+        check_rankable(v, &space.metric, VectorRole::Stored(chunk_id))?;
+        self.transaction(|tx| {
+            let still_this_text: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM chunk WHERE id = ?1 AND content_hash = ?2",
+                    params![chunk_id, content_hash],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if still_this_text.is_none() {
+                return Ok(false);
+            }
+            tx.execute(
+                &format!("DELETE FROM {} WHERE chunk_id = ?1", space.table),
+                params![chunk_id],
+            )?;
+            tx.execute(
+                &format!(
+                    "INSERT INTO {} (chunk_id, embedding) VALUES (?1, ?2)",
+                    space.table
+                ),
+                params![chunk_id, as_blob(v)],
+            )?;
+            tx.execute(
+                "DELETE FROM chunk_embedding_state WHERE space_id = ?1 AND chunk_id = ?2",
+                params![space_id, chunk_id],
+            )?;
+            Ok(true)
+        })
+    }
+
+    /// Removes one chunk's embedding from one space, and any
+    /// `chunk_embedding_state` row for it, in one transaction. Absence of
+    /// either is not an error: the caller retrying a partially failed batch
+    /// cannot know which rows already landed, and a delete that refused on
+    /// "nothing to delete" would turn every retry into a special case.
+    ///
+    /// The bookkeeping row has to go too, and atomically with the vector,
+    /// because [`Db::embedded_chunk_count`]'s own doc explains why leaving it
+    /// is not merely untidy: its `UNION` counts a `chunk_embedding_state` row
+    /// with `state = 1` as an embedded chunk on its own, the same way
+    /// `tests/adopt.rs`'s `bookkeeping_without_a_vector_also_makes_a_space_not_empty`
+    /// demonstrates. A vector deleted without its bookkeeping would leave a
+    /// chunk counted as embedded with nothing to show for it.
+    pub fn delete_vector(&self, space_id: i64, chunk_id: i64) -> Result<(), Error> {
+        let space = self.space(space_id)?;
+        self.transaction(|tx| {
+            tx.execute(
+                &format!("DELETE FROM {} WHERE chunk_id = ?1", space.table),
+                params![chunk_id],
+            )?;
+            tx.execute(
+                "DELETE FROM chunk_embedding_state WHERE space_id = ?1 AND chunk_id = ?2",
+                params![space_id, chunk_id],
+            )?;
+            Ok(())
+        })
     }
 
     /// Nearest neighbours, optionally restricted to a set of chunk ids — which is
@@ -374,28 +641,91 @@ impl Db {
     ///
     /// ⚠️ **The two are not counted over the same population, and the
     /// difference has a direction.** A `vec_emb_<id>` row is referenced by no
-    /// foreign key and outlives the chunk it embeds:
-    /// [`Db::clear_document_content`] takes the `chunk` rows and their
-    /// `chunk_embedding_state` rows and leaves the vectors, and
-    /// [`Db::delete_document`] has never reached them either. So once anything
-    /// writes vectors, the numerator can exceed this denominator, and whatever
-    /// renders the pair has to be able to show that rather than a percentage
-    /// above one hundred. Both are zero today, because nothing embeds yet
-    /// (D29) — this is the shape of the trap, written where the second half of
-    /// it is read.
+    /// foreign key, so nothing forces it to go when the chunk it embeds does.
+    /// [`Db::clear_document_content`] closed this for a rebuild (D88): it now
+    /// sweeps a document's vectors, in every space, before the `chunk` rows
+    /// and their `chunk_embedding_state` rows go with it. [`Db::delete_document`]
+    /// has not — deleting a document outright still leaves its vectors behind.
+    /// So the numerator can still exceed this denominator through that path,
+    /// and whatever renders the pair has to be able to show that rather than a
+    /// percentage above one hundred. Neither is zero today — D29 described a
+    /// build with nothing embedded, and this branch built the thing that
+    /// embeds — so the trap is no longer hypothetical: a document's vectors
+    /// can genuinely outlive it through [`Db::delete_document`], and whatever
+    /// renders the pair has to show a numerator above the denominator rather
+    /// than clamp it away.
     pub fn chunk_count(&self) -> Result<i64, Error> {
         Ok(self
             .conn()
             .query_row("SELECT count(*) FROM chunk", [], |r| r.get(0))?)
     }
 
+    /// How many vector spaces the index holds at all.
+    ///
+    /// **Not a diagnostic.** It exists so a caller holding
+    /// [`Db::embedded_chunk_count`] for one space can say whether that space is
+    /// the only one there is — and therefore whether the number it holds is the
+    /// whole of what a model change would cost. Without it, a caller that can
+    /// count one space has no way to tell "this is the bill" from "this is part
+    /// of a bill I cannot read", and [`Error::SpaceNotEmpty`]'s own doc is where
+    /// the difference is argued: the space that blocks need not be the active
+    /// one, nor pointed at by anything.
+    ///
+    /// It counts rows in `embedding_space`, empty ones included. That is the
+    /// question a caller asking "is what I can see all there is" is asking; an
+    /// empty space is one this caller cannot see either.
+    pub fn space_count(&self) -> Result<i64, Error> {
+        Ok(self
+            .conn()
+            .query_row("SELECT count(*) FROM embedding_space", [], |r| r.get(0))?)
+    }
+
+    /// How many chunk embeddings the index holds **across every space**, which
+    /// is what a model change with the old spaces retired actually costs.
+    ///
+    /// **Summed over spaces, distinct within one.** The same chunk embedded in
+    /// two spaces is two embeddings, because two calls to a provider made them
+    /// and two would have to be made again; the same chunk recorded twice inside
+    /// one space is one, for the reason [`Db::embedded_chunk_count`]'s own doc
+    /// gives. Built by calling that method per space rather than by a second
+    /// query that does its own arithmetic: the `UNION` in there is load-bearing
+    /// and a copy of it here could disagree with it, in a number somebody reads
+    /// before deciding to destroy something.
+    ///
+    /// **Why this and not [`Db::embedded_chunk_count`] of the active space.** A
+    /// space left behind by an earlier model change is still in
+    /// `embedding_space` — `Db::adopt_embedding_model` mints and repoints, and
+    /// never removes what it moved off, which `tests/adopt.rs`'s
+    /// `returning_to_a_model_already_tried_creates_nothing` pins at two spaces —
+    /// so "the active space's count" is not what a retiring change throws away
+    /// the moment anybody has ever tried a second model.
+    pub fn embedded_chunks_everywhere(&self) -> Result<i64, Error> {
+        let ids: Vec<i64> = self
+            .conn()
+            .prepare("SELECT id FROM embedding_space")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut total = 0;
+        for space_id in ids {
+            total += self.embedded_chunk_count(space_id)?;
+        }
+        Ok(total)
+    }
+
     /// Whether moving the index off this space would throw anything away.
     ///
-    /// Reads **both** places a chunk can be recorded as embedded, because they
-    /// are allowed to disagree: a `vec0` table cannot be the target of a
-    /// foreign key, so a vector outlives the chunk it embeds and the
-    /// bookkeeping row that cascaded away with it. A check that read one of
-    /// them would be an assertion satisfied by zero from the wrong side.
+    /// Reads **both** places a chunk can be recorded as embedded, because
+    /// neither alone is trustworthy, in either direction. Nothing in this
+    /// crate writes `state = 1` to `chunk_embedding_state` — only `state = 2`
+    /// is, by [`Db::record_embedding_failure`]; [`Db::insert_vector`] writes
+    /// only the `vec0` table — so a check reading that table alone would call
+    /// a space full of vectors empty: an assertion satisfied by zero from one
+    /// side. And a `vec0` table takes no foreign key, so a
+    /// vector can still outlive the chunk it embeds and the
+    /// `chunk_embedding_state` row that cascaded away with it —
+    /// [`Db::clear_document_content`] closed that for a rebuild (D88), but
+    /// [`Db::delete_document`] has not — so a check reading only `vec_emb_<id>`
+    /// would be satisfied by zero from the other side instead.
     ///
     /// A space that does not exist is **not** empty — it is absent, and that
     /// arrives as [`Error::NoSuchSpace`] rather than as `Ok(true)`. Two facts
@@ -421,8 +751,10 @@ impl Db {
     /// **Reading only `chunk_embedding_state` would answer zero for a full
     /// space today**, which is why the `UNION` is load-bearing for the second
     /// caller as well as the first: [`Db::insert_vector`] writes the `vec0`
-    /// table and nothing in this crate writes a `chunk_embedding_state` row at
-    /// all — `grep -rn chunk_embedding_state crates/*/src` finds no INSERT.
+    /// table, and the only writer of `chunk_embedding_state` writes
+    /// `state = 2` — `grep -rn chunk_embedding_state crates/*/src` now finds
+    /// [`Db::record_embedding_failure`]'s `INSERT`, but nothing writes
+    /// `state = 1`, which is the value this `UNION` selects from that table.
     /// The narrower query would put "0 of 900 embedded" in front of someone
     /// whose archive is embedded, and send them to pay for it again.
     ///
@@ -451,6 +783,291 @@ impl Db {
             params![space_id],
             |r| r.get(0),
         )?)
+    }
+
+    /// The next `limit` chunks this space has no embedding for — the computed
+    /// queue, asked fresh, which is the shape [`Db::clear_document_content`]'s
+    /// own doc comment already argued for before anything asked it.
+    ///
+    /// **Nothing is stored anywhere that says "this chunk is waiting".** A
+    /// chunk is in the queue because there is no row for it in `vec_emb_<id>`,
+    /// and for no other reason, so a document cleared for a rebuild rejoins it
+    /// by the same route a brand new one arrives: the rows went, the question
+    /// is asked again, the answer changed. `chunk_embedding_state` state `0`
+    /// — the schema's `pending` — is never written by anybody, and this
+    /// method is why it does not need to be.
+    ///
+    /// **Three filters, three different facts, and the one in the middle is
+    /// the only one that is obvious.**
+    ///
+    /// - `document.status = 'indexed'`, because a document that is `pending`
+    ///   is a document [`Db::clear_document_content`] has just emptied and a
+    ///   rebuild is about to refill: its chunks are minutes from being deleted
+    ///   and replaced, and embedding them spends the user's money on rows that
+    ///   will not exist. This is the first reader in the product to depend on
+    ///   that column's permitted values, which are `'pending'`, `'indexed'`,
+    ///   `'failed'` and `'skipped'` (the schema's own CHECK) —
+    ///   [`crate::DocumentStatus`] is the enum, and it is spelled out here
+    ///   rather than compared against because this is SQL.
+    /// - No row in the vector table. This is the whole of "not done yet".
+    /// - No `chunk_embedding_state` row that is *still about this text* — see
+    ///   [`GIVEN_UP_ON_CURRENT_TEXT`], which is the same string
+    ///   [`Db::failed_chunk_count`] reads. A chunk refused once is out of the
+    ///   queue until its text changes; a chunk whose text has since changed is
+    ///   back in it, because the refusal was about text that no longer exists.
+    ///
+    /// **What that costs, said plainly rather than left to be discovered: a
+    /// chunk refused for a reason that had nothing to do with it — a provider
+    /// having a bad minute — is not tried again until somebody edits the file.**
+    /// That is deliberate. The alternative is a pass that spins on the same
+    /// chunk for as long as the archive is open, and the design pays for the
+    /// standstill instead, on the condition that it is never silent:
+    /// [`Db::failed_chunk_count`] is what puts the number in front of a person.
+    /// Whatever eventually retries a failure needs to know what the provider
+    /// answers to an over-long chunk, and nothing has measured that yet, so it
+    /// is not decided here.
+    ///
+    /// `limit` is the caller's batch size, and this is the reason the caller
+    /// may ask again in a loop without tracking anything: every chunk it takes
+    /// leaves the queue by one of the two routes above before the next ask.
+    pub fn chunks_needing_embedding(
+        &self,
+        space_id: i64,
+        limit: usize,
+    ) -> Result<Vec<PendingChunk>, Error> {
+        let queue = the_embedding_queue(&self.space(space_id)?.table);
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT c.id, c.text, c.content_hash {queue} ORDER BY c.id LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![space_id, limit as i64], |r| {
+            Ok(PendingChunk {
+                id: r.get(0)?,
+                text: r.get(1)?,
+                content_hash: r.get(2)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// How many chunks [`Db::chunks_needing_embedding`] has left to hand over —
+    /// the denominator of one run, not of the archive.
+    ///
+    /// Built from the same `FROM`/`WHERE` as the query it counts, so the two
+    /// cannot come to disagree about what "queued" means. A progress bar is the
+    /// caller: it wants the number measured once, at the start, because the
+    /// queue shrinks as the run empties it and a total re-read every batch is a
+    /// bar that never moves.
+    ///
+    /// Not the same question as [`Db::chunk_count`] minus
+    /// [`Db::embedded_chunk_count`]: that difference also contains every chunk
+    /// this space has given up on, and every chunk of a document that is not
+    /// `indexed`. Those are [`Db::failed_chunk_count`] and the pass's own
+    /// business respectively, and folding all three into one subtraction is how
+    /// "8 400 of 9 000" comes to mean four different things at once.
+    pub fn queued_chunk_count(&self, space_id: i64) -> Result<i64, Error> {
+        let queue = the_embedding_queue(&self.space(space_id)?.table);
+        Ok(self.conn().query_row(
+            &format!("SELECT count(*) {queue}"),
+            params![space_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// How many chunks this space has given up on — the third number, beside
+    /// [`Db::embedded_chunk_count`] and [`Db::chunk_count`].
+    ///
+    /// It exists because `M − N` is a lie in exactly one state, and it is the
+    /// state that matters: "embedded 8 400 of 9 000" reads as *not yet*, and
+    /// for a chunk the provider refused it means *never*. That chunk is still
+    /// in the database, the document still shows it, keyword search still
+    /// finds it — and vector search will not return it again, with nothing
+    /// anywhere saying why. This method is the only thing standing between
+    /// that and silence, which is why [`Db::chunks_needing_embedding`] is
+    /// allowed to be as unforgiving as it is.
+    ///
+    /// **A failed row whose `content_hash` no longer matches its chunk is not
+    /// counted, and that is not tidiness.** The two methods share
+    /// [`GIVEN_UP_ON_CURRENT_TEXT`] — one string, read by both — precisely so
+    /// they cannot answer differently: a chunk that this method calls failed
+    /// while the queue is about to hand it back would put a number on the
+    /// screen that the very next run disproves.
+    ///
+    /// Counted over chunks that exist, whatever their document's status.
+    /// "Given up on" and "will be reached" are two questions, and a chunk
+    /// belonging to a document that is being rebuilt is out of the queue for a
+    /// reason that has nothing to do with a refusal.
+    pub fn failed_chunk_count(&self, space_id: i64) -> Result<i64, Error> {
+        Ok(self.conn().query_row(
+            &format!("SELECT count(*) FROM chunk c WHERE EXISTS ({GIVEN_UP_ON_CURRENT_TEXT})"),
+            params![space_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Records that the provider refused this chunk's text, and counts the
+    /// attempt.
+    ///
+    /// The hash is **read from the chunk row here** rather than accepted as a
+    /// parameter. A caller passing one is a caller that can pass a stale one,
+    /// and a stale hash does not fail loudly: the row it writes matches no
+    /// chunk, [`Db::chunks_needing_embedding`] hands the chunk straight back,
+    /// and a batching loop that trusts the queue to shrink runs forever
+    /// against a paid provider. There is exactly one place the hash can come
+    /// from, so there is nothing to keep in step.
+    ///
+    /// `INSERT … SELECT` and not `VALUES`, for the same reason: a chunk that
+    /// has gone in the meantime selects no row, so this writes nothing and
+    /// says so with `Ok`, rather than tripping the foreign key.
+    ///
+    /// State `2` is `failed` (the schema's own comment on the CHECK). State
+    /// `0`, `pending`, is deliberately never written by anything: it would be
+    /// a record of intent, and [`Db::upsert_vector`] clears this whole row
+    /// unconditionally when it writes — so a `pending` marker left for a new
+    /// text version would be erased by an in-flight embedding of the *old*
+    /// text landing afterwards, and the chunk would then read as embedded,
+    /// with the superseded vector, permanently.
+    ///
+    /// `attempts` is counted and nothing reads it as a threshold. There is no
+    /// maximum, on purpose: what separates "this text can never be embedded"
+    /// from "try again later" depends on what the provider actually answers to
+    /// an over-long chunk, and nobody has measured that. The column is a
+    /// record, not a policy.
+    /// Answers **whether it wrote**, and the caller is expected to count that
+    /// rather than the call.
+    ///
+    /// The `SELECT` finds no row when the chunk has gone, so this writes
+    /// nothing and returns `Ok(false)` — no foreign key is tripped and there is
+    /// nothing to report as an error. A caller that incremented a `failed`
+    /// counter regardless would put a number on the settings screen that
+    /// [`Db::failed_chunk_count`] disagrees with, and that number is the whole
+    /// safety argument for a chunk being allowed to leave the queue: a failure
+    /// count including rows nobody can find is the third number lying about
+    /// itself.
+    pub fn record_embedding_failure(&self, space_id: i64, chunk_id: i64) -> Result<bool, Error> {
+        let written = self.conn().execute(
+            "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state, attempts)
+             SELECT ?1, ?2, c.content_hash, 2, 1 FROM chunk c WHERE c.id = ?2
+             ON CONFLICT(space_id, chunk_id) DO UPDATE
+               SET content_hash = excluded.content_hash,
+                   state        = 2,
+                   attempts     = attempts + 1",
+            params![space_id, chunk_id],
+        )?;
+        Ok(written > 0)
+    }
+
+    /// Whether every chunk that exists has a vector in this space — the one
+    /// question [`Db::mark_space_ready`] is decided by (D95b, fix round 1).
+    ///
+    /// **Not the queue's question, and deliberately wider.**
+    /// [`Db::chunks_needing_embedding`]'s queue is right to ignore a chunk
+    /// behind a document whose `status` is not yet `'indexed'` — its own
+    /// comment argues that case, and this method does not relitigate it. But
+    /// "the queue found nothing to do" and "the space is complete" used to be
+    /// treated as the same fact, and they are not: a document can have chunks
+    /// written and no `'indexed'` status yet — the window
+    /// `crates/mnema-ingest/src/lib.rs:546-598`'s own comment names, between
+    /// writing chunks and writing the status, kept a separate transaction on
+    /// purpose so a crash there "costs a re-index rather than a lie" — and
+    /// those chunks exist, right now, with no vector, invisible to a queue
+    /// that is asking a narrower question than this one.
+    ///
+    /// Same scope as [`Db::failed_chunk_count`]: every chunk that exists,
+    /// whatever its document's status — not a third copy of that predicate,
+    /// but the same one asked from the vector side instead of the failure
+    /// side. A chunk this space gave up on has no vector by construction
+    /// (nothing writes both a `failed` row and a vector for the same chunk),
+    /// so this single question already answers what used to take two: no
+    /// carve-out for a failed chunk is needed or added, and a space with one
+    /// permanently refused chunk stays `building` for ever. That is correct,
+    /// not a bug this state should hide — the space genuinely is not
+    /// complete, and `failed_chunk_count` is what tells a person why, once
+    /// something reads it.
+    ///
+    /// **This depends on `NOT IN` never meeting a NULL, the same argument
+    /// [`the_embedding_queue`] makes for the same SQL shape.** A single NULL
+    /// among `{table}.chunk_id` would make `NOT IN` answer NULL for every
+    /// row, and `NOT EXISTS` of an always-NULL comparison is true — this
+    /// method would then answer `true` over a space full of chunks with no
+    /// vector, silently, which is the one direction this predicate must never
+    /// be wrong in. It cannot happen, for the same reason it cannot for the
+    /// queue: `chunk_id` is `INTEGER PRIMARY KEY` on the `vec0` table
+    /// (`space.rs:220`), and every writer binds it a real `i64`.
+    pub fn space_is_complete(&self, space_id: i64) -> Result<bool, Error> {
+        let table = self.space(space_id)?.table;
+        // `table` is never caller text: the same reasoning `embedded_chunk_count`
+        // and `knn` already rely on for interpolating a table name into SQL.
+        Ok(self.conn().query_row(
+            &format!(
+                "SELECT NOT EXISTS (
+                     SELECT 1 FROM chunk c
+                      WHERE c.id NOT IN (SELECT chunk_id FROM {table})
+                 )"
+            ),
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Marks a space as holding a vector for every chunk it currently owes
+    /// one — `ready`, one of the three values the schema's own `CHECK` on
+    /// `embedding_space.state` allows (`schema.sql:356`) beside `building`
+    /// and the `stale` nothing writes yet.
+    ///
+    /// A write, not a decision: `mnema_embed::run` is the one caller (D95b),
+    /// and only once [`Db::space_is_complete`] has answered `true`. Not
+    /// re-read here, so this cannot come to disagree with the fact that
+    /// justified calling it.
+    ///
+    /// An id with no row is [`Error::NoSuchSpace`], the same answer every
+    /// other space method here gives for one, rather than a silent no-op: an
+    /// `UPDATE` matching zero rows is not an error SQLite raises on its own,
+    /// and a caller holding a stale id deserves to be told which one was
+    /// wrong rather than believe a write happened that did not.
+    pub fn mark_space_ready(&self, space_id: i64) -> Result<(), Error> {
+        let changed = self.conn().execute(
+            "UPDATE embedding_space SET state = 'ready' WHERE id = ?1",
+            params![space_id],
+        )?;
+        if changed == 0 {
+            return Err(Error::NoSuchSpace(space_id));
+        }
+        Ok(())
+    }
+
+    /// Retracts the claim [`Db::mark_space_ready`] makes. `ready` says every
+    /// chunk in the space has a vector, and a chunk that exists without one
+    /// makes that false from the moment it exists — not from the moment some
+    /// later run gets back around to embedding it. Without a way back, `state`
+    /// could only ever move one direction, which is the lie this space was
+    /// already in before D95b, arriving later and more convincingly: a screen
+    /// reading the column would go on saying "complete" about an archive a
+    /// second document had already outgrown.
+    ///
+    /// `mnema_embed::run` calls this unconditionally whenever it starts against
+    /// a non-empty queue — not only when the row currently says `ready` —
+    /// because checking first would make this crate a reader of a column it
+    /// has no other need to read: the queue being non-empty already is the
+    /// whole of the fact that matters, and writing `building` over a space
+    /// that already says `building` costs nothing to be wrong about.
+    ///
+    /// ⚠️ Unconditional in the literal sense: this retracts *any* current
+    /// value, `'stale'` included. Nothing writes `'stale'` today, so there is
+    /// nothing this can erase yet — but the day something does, the next
+    /// `run` against a non-empty queue overwrites it silently, with no
+    /// carve-out and no warning.
+    ///
+    /// Same [`Error::NoSuchSpace`] convention as [`Db::mark_space_ready`].
+    pub fn mark_space_building(&self, space_id: i64) -> Result<(), Error> {
+        let changed = self.conn().execute(
+            "UPDATE embedding_space SET state = 'building' WHERE id = ?1",
+            params![space_id],
+        )?;
+        if changed == 0 {
+            return Err(Error::NoSuchSpace(space_id));
+        }
+        Ok(())
     }
 
     /// The rule below, asked only of a call that would actually move the

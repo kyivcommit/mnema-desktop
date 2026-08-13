@@ -21,6 +21,54 @@
 # Everything runs in a throwaway git worktree at HEAD with its own
 # CARGO_TARGET_DIR, so an interrupted run cannot leave a mutation in the tree
 # you are working in.
+#
+# **Its cheap sibling: `scripts/mutation-staleness.sh <case-file>`.** This script
+# answers "does the test still go red" and takes 3:17 on an Apple M2 Max, cold
+# `CARGO_TARGET_DIR`, 80 cases over 69 baseline tests — measured with `time`
+# around the whole invocation. `236% cpu` in that same measurement means this
+# harness is very nearly serial, about two and a half cores busy out of
+# twelve, so core count is not the axis a CI runner loses on. What this does
+# not transfer to: a 2-core `ubuntu-24.04` runner with a cold target directory
+# of its own is not this machine. **Measured there now, on the first pull
+# request this leg ever ran on: 6m17s, green.** So the runner costs roughly
+# twice this machine and not the ten times a core count would suggest — which
+# is what "nearly serial" predicted, and the prediction is now checked rather
+# than argued. `ci.yml`'s `timeout-minutes: 30` is about five times that,
+# which is the margin `check` justifies for itself in the same file. That one
+# answers "do the cases still apply, and do they still produce what they
+# claim" and takes about a second, so it is the one to run after a refactor.
+# It is not a substitute — it compiles nothing and runs no test — but it
+# catches the thing 3:17 here does not: a case quoting code that has moved.
+# Measured on this branch, one four-column re-indentation broke three cases
+# and this script reported them one run apart, because a `perl` pattern's
+# leading spaces are not anchored and one of the three had been substituting
+# into the middle of an indent, passing both guards for a reason unrelated to
+# its meaning.
+#
+# ⚠️ **A third guard, for the same failure, that the two above cannot see.**
+# `s///` without `/g` stops at the first match and returns 1 whether that match
+# was the one the case meant or a different place with the same shape — it
+# cannot tell "matched correctly" from "matched a wrong place first, which
+# happened to be byte-identical". So this guard counts occurrences separately,
+# on a copy nothing else reads, by forcing `/g` onto whatever the expression
+# already has (a no-op if it already carries one): no `g` requires exactly one
+# occurrence, `g` requires at least one. No exception list — the one
+# legitimate many-match case (`linux-resource.sh`'s "no case arm sets a
+# library any more") declares its own multiplicity in its own syntax. Applied
+# for real against all 546 expressions in this repository, it found eight
+# cases sharing a pattern with a sibling function or match arm — one of them
+# the exact shape above, an unanchored 4-space pattern matching inside a
+# 12-space-indented sibling as a substring — each narrowed to name its
+# function or arm rather than loosened, and verified to still produce the
+# byte-identical mutation it always had.
+#
+# ⚠️ **Read the exit code from the script, not from a pipeline.** `… | tail`
+# reports `tail`'s status. Measured here: a run of this harness with two broken
+# cases was written up as "exit code 0" for exactly that reason. Redirect and
+# capture instead:
+#
+#   scripts/mutation-check.sh scripts/mutations/embedding.sh > out.txt 2>&1
+#   echo "EXIT=$?"
 
 # No `set -e`, deliberately: nearly every command in this script is expected to
 # fail — that is what a red mutation is — and `-e` would abort the run on the
@@ -80,6 +128,11 @@ cd "$TREE" || exit 1
 red=0
 green=0
 broken=0
+# N6: counted the same way `mutation-staleness.sh` counts it, and printed
+# beside `red`/`green`/`broken` for the same reason — `/g` is a self-declaring
+# opt-out from guard 3, and an opt-out nobody counts is one nobody would
+# notice growing.
+every_match_count=0
 
 restore() { git -C "$TREE" checkout -q -- . ; }
 
@@ -90,6 +143,15 @@ restore() { git -C "$TREE" checkout -q -- . ; }
 # is split, not the pattern. Measured before this was written.
 contains() {
   MUTATION_MARKER="$1" perl -0777 -ne 'exit(index($_, $ENV{MUTATION_MARKER}) < 0)' "$2"
+}
+
+# Whether `expr`'s own trailing flags carry a `g` — "every arm" rather than
+# "this one place". In `perl`, not bash's `[[ =~ ]]`: the obvious bash regex
+# for "trailing run of letters", `([a-zA-Z]*)$`, matched empty on this
+# platform's bash even against a string that plainly ends in letters —
+# measured, not assumed.
+expr_wants_every_match() {
+  printf '%s' "$1" | perl -ne 'exit(/([a-zA-Z]*)$/ && $1 =~ /g/ ? 0 : 1)'
 }
 
 seen=""
@@ -108,7 +170,7 @@ case_() {
     # unmutated first and must be green. Deduplicated: several cases usually
     # target one test.
     local key="|$pkg $* $test|"
-    case "$seen" in *"$key"*) return ;; esac
+    case "$seen" in *"$key"*) return 0 ;; esac
     seen="$seen$key"
 
     local out
@@ -128,25 +190,47 @@ case_() {
       printf '%s' "$out" | grep -E "panicked at|^error" | head -3 | sed 's/^/  /'
       baseline_bad=$((baseline_bad + 1))
     fi
-    return
+    # Deterministic, for the reason given at the end of this function.
+    return 0
   fi
 
   printf '%s\n' "-- $label"
   restore
+  cp "$file" "$WORK/count-copy"
   perl -0pi -e "$expr" "$file"
 
   # The authoritative guard. A mutation that left the file byte-for-byte
   # identical is a broken case, not a test result, and must never count as either.
   if git -C "$TREE" diff --quiet -- "$file"; then
     echo "   BROKEN CASE: the mutation left $file unchanged"
-    broken=$((broken + 1)); restore; return
+    broken=$((broken + 1)); restore; return 0
   fi
   # Second guard: it changed, but into what the case says? Redundant with the
   # first for detecting a no-op; kept because it also catches a perl expression
   # that matched somewhere unintended.
   if ! contains "$marker" "$file"; then
     echo "   BROKEN CASE: $file changed, but not into what the case describes"
-    broken=$((broken + 1)); restore; return
+    broken=$((broken + 1)); restore; return 0
+  fi
+  # Third guard — see the header for why counting occurrences needs `/g`
+  # forced on a copy, rather than trusting what `$expr` itself returned.
+  # `$WORK/count-copy` was saved above, before the real mutation touched
+  # `$file`, so this counts against the same pre-mutation text the real
+  # substitution just read.
+  local forced="$expr"
+  expr_wants_every_match "$expr" || forced="${expr}g"
+  local occurrences
+  occurrences=$(perl -0pi -e "my \$mnema_subs = do { $forced }; print STDERR ((\$mnema_subs) + 0);" "$WORK/count-copy" 2>&1 1>/dev/null)
+  if expr_wants_every_match "$expr"; then
+    every_match_count=$((every_match_count + 1))
+    if [ "$occurrences" -lt 1 ]; then
+      echo "   BROKEN CASE: the expression carries /g and should match at least once; it matched $occurrences times"
+      broken=$((broken + 1)); restore; return 0
+    fi
+  elif [ "$occurrences" -ne 1 ]; then
+    echo "   BROKEN CASE: the pattern matches $file $occurrences times, not exactly once — it may be"
+    echo "   substituting into code it was not written against"
+    broken=$((broken + 1)); restore; return 0
   fi
 
   # `local out` is deliberately on its own line: `local out=$(...)` would make
@@ -175,6 +259,9 @@ case_() {
     green=$((green + 1))
   fi
   restore
+  # Deterministic, so that the status of `. "$CASES"` is only ever about the
+  # sourcing and never about whichever branch the file's last case took.
+  return 0
 }
 
 # Pass one: every named test, unmutated, must be green.
@@ -183,7 +270,21 @@ baseline_ok=0
 baseline_bad=0
 # shellcheck disable=SC1090
 . "$CASES"
+sourced=$?
 echo "baseline: $baseline_ok green"
+# ⚠️ **`baseline: N green` is a claim about the cases that were READ, and until
+# this line nothing checked that they were all of them.** A syntax error part way
+# through a case file stops the sourcing there; bash prints it, this script
+# carried on with whatever it had, and the numbers below described a subset while
+# exiting 0 — measured, on a scoped file of five cases that reported
+# `baseline: 1 green`. It is the same shape as everything else this harness
+# guards against, sitting in the harness: a result over less than was asked for,
+# presented as a result.
+if [ "$sourced" -ne 0 ]; then
+  echo "COULD NOT READ $CASES to the end (status $sourced): $baseline_ok case(s) were read and"
+  echo "whatever follows the failure was never seen. The numbers above are about a subset."
+  exit 1
+fi
 if [ "$baseline_bad" -ne 0 ]; then
   echo "refusing to mutate against $baseline_bad test(s) that are not green to begin with"
   exit 1
@@ -194,10 +295,33 @@ echo
 mode=mutate
 # shellcheck disable=SC1090
 . "$CASES"
+sourced=$?
+# Checked again rather than trusted from pass one. The two passes take different
+# branches through `case_` — one runs `cargo test` against an unmutated tree, the
+# other rewrites a file and restores it — so they can fail independently, and a
+# file that sources cleanly for the baseline and not for the mutations is a
+# stranger failure than either alone.
+#
+# ⚠️ **Nothing reaches this today, and it is here as the argument rather than as
+# a defence.** The two passes read the same text, so a syntax error fails the
+# first one and exits above; what would reach this is a failure in the mutate
+# branch alone — an unbound variable under `set -u`, a `case_` shape only that
+# branch dislikes. The half above IS exercised: seen red on a case file whose
+# fifth case is an unterminated quote, which reported `baseline: 3 green` and
+# then refused, where before it would have gone on to mutate against a subset
+# and exited 0.
+if [ "$sourced" -ne 0 ]; then
+  restore
+  echo
+  echo "COULD NOT READ $CASES to the end on the mutation pass (status $sourced), although the"
+  echo "baseline pass read it whole. The counts below cover only what was reached."
+  echo "red: $red   still green: $green   broken cases: $broken   exempted by /g: $every_match_count"
+  exit 1
+fi
 
 restore
 echo
-echo "red: $red   still green: $green   broken cases: $broken"
+echo "red: $red   still green: $green   broken cases: $broken   exempted by /g: $every_match_count"
 # `red > 0` is not decoration on the other two, it is the condition they cannot
 # express: zero green and zero broken is exactly what a file containing NO CASES
 # reports, and it reported it with exit 0. So `red: 0 / still green: 0` — a

@@ -844,9 +844,99 @@ struct EmbeddingsBody {
     data: Vec<EmbeddingRow>,
 }
 
+/// A single row's own answer to "which text is this?" — never stated, stated
+/// and read, or stated in a shape this build does not understand (Task 5 fix
+/// round 2, Important A). The same three states `Stated` above draws for a
+/// credits balance, needed here for the same reason `Stated`'s own doc
+/// comment gives: a plain `#[serde(default)] Option<usize>` field only falls
+/// back to `Absent` when the *key* is absent — an `index` the provider states
+/// as `"0"`, `0.0` or `-1` is present, so a bare `Option<usize>` tries to read
+/// it as `usize`, fails, and fails the *whole* embeddings body.
+///
+/// That failure is not merely a worse message than this crate would like — it
+/// is the one the round-1 ruling on this field existed to rule out.
+/// `check_embedding_model` must stay genuinely inert to whatever `index`
+/// holds, in every shape a provider might send, so the `index` bet stays
+/// confined to `embed` and a model that answers perfectly well never becomes
+/// unconfigurable over a field that function does not even read. `Option`
+/// alone kept that promise only for a *missing* field; a present field in an
+/// unexpected shape used to fail the whole body as `Malformed` before either
+/// function got a chance to look at anything else — measured, not assumed
+/// (round-1 review, Important A): a string, a float, or a negative number in
+/// `index` turned a working model into a `check_embedding_model` failure.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum PositionState {
+    /// The row said nothing about its position — the key was absent, or its
+    /// value was explicit JSON `null`. Explicit `null` reads the same as
+    /// absent (the same choice `Stated` makes above): a provider that states
+    /// "no position" has not named one, the same as a provider that says
+    /// nothing at all.
+    #[default]
+    Absent,
+    /// A plain, non-negative integer that fits `usize` — the only shape
+    /// `embed` binds by.
+    Stated(usize),
+    /// The key was present, and its value was not a plain non-negative
+    /// integer this build can use as an array position: a string, a float, a
+    /// negative number, or any other shape. **A deliberate departure from
+    /// `Stated` above, not an oversight** (Task 5 fix round 2 re-review,
+    /// question 2): `Stated` has a string branch and reads `"10.0"` as a
+    /// number, because a balance is a quantity and a quantity stated as text
+    /// is still the quantity. A position is not a quantity, it is an array
+    /// index — reading `"0"` as a binding would be exactly the quiet guess
+    /// this whole type exists to refuse, so this variant has no string
+    /// branch on purpose. Distinct from `Absent` in `embed`'s own refusal
+    /// (`Error::PositionMismatch`): "the provider said nothing" and "the
+    /// provider said something this build could not read" are different
+    /// facts to hand a person and a later session, even though neither can
+    /// be bound safely.
+    Unreadable,
+}
+
+impl<'de> Deserialize<'de> for PositionState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // `Number::as_u64` returns `Some` only for a JSON integer literal
+        // with no sign and no decimal point (`serde_json`'s `PosInt`
+        // variant) — a literal written with a decimal point (`0.0`) or a
+        // minus sign (`-1`) is stored differently internally and returns
+        // `None` here regardless of its numeric value, which is exactly the
+        // refusal this type exists to produce for those two shapes. Chained
+        // through `usize::try_from` rather than `as`, so a JSON integer past
+        // `usize::MAX` on this platform is `Unreadable` too, not silently
+        // truncated into a different, in-range position.
+        Ok(match Value::deserialize(deserializer)? {
+            Value::Null => PositionState::Absent,
+            Value::Number(n) => n
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .map(PositionState::Stated)
+                .unwrap_or(PositionState::Unreadable),
+            _ => PositionState::Unreadable,
+        })
+    }
+}
+
 #[derive(Deserialize)]
 struct EmbeddingRow {
     embedding: Vec<f32>,
+    /// The provider's own statement of which text in the batch this row
+    /// answers (Task 5 fix round 1, Critical 1) — `embed`, below, binds each
+    /// vector by this field rather than by the row's position in the answer
+    /// array. `check_embedding_model` never reads this field, and `PositionState`
+    /// (above) is what actually makes that free: see its own doc comment for
+    /// why a bare `Option<usize>` was not enough to keep this field's shape
+    /// from reaching that function's parse at all.
+    ///
+    /// `#[serde(default)]` — needed even with `PositionState`'s own
+    /// `Deserialize` impl, and for the usual reason: it closes the *missing
+    /// key* case, which no field-level `Deserialize` implementation can see
+    /// (there is no value to hand it). `PositionState::deserialize` closes
+    /// the complementary case, a *present* key in an unexpected shape.
+    #[serde(default)]
+    index: PositionState,
 }
 
 /// The status table for `/embeddings`: `error_for_status`'s, plus the one
@@ -890,7 +980,7 @@ fn status_error(status: u16, model: &str, key: &str) -> Error {
 /// The sum of squares in the width the index sums it in, and the reason it is
 /// a named function rather than an inline fold (fix round 2, item 2).
 ///
-/// `f32`, matching `check_rankable` (`crates/mnema-index/src/space.rs:404`),
+/// `f32`, matching `check_rankable` (`crates/mnema-index/src/space.rs:1086-1100`),
 /// whose own doc comment says that width is load-bearing rather than
 /// incidental. A wider sum here would not be a more careful version of the
 /// same test — it would be a *different* test, waving through the vectors the
@@ -1055,7 +1145,7 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
     // The same refusal the index makes at insert time, in the same arithmetic,
     // on both vectors (fix round 2, item 2).
     //
-    // `check_rankable` (`crates/mnema-index/src/space.rs:395-409`) sums the
+    // `check_rankable` (`crates/mnema-index/src/space.rs:1086-1100`) sums the
     // squares in **f32** and refuses a squared norm that is not finite —
     // deliberately, and its own doc comment says the width is load-bearing
     // rather than incidental, because that is the width vec0 divides in. This
@@ -1121,6 +1211,148 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
         dim: first.len(),
         norm,
     })
+}
+
+/// Sends a batch of texts and returns one vector per text, in the same order
+/// (spec §4.5 — the call the indexing queue makes once a model has passed
+/// `check_embedding_model` above). The sibling of that function: same
+/// endpoint, same request shape — the probe measured the space's width by
+/// sending exactly this shape, and a different shape here could come back a
+/// different width than the space was created for.
+///
+/// Status handling and an unreadable body are **not** duplicated from
+/// `check_embedding_model` — `status_error`, `attach_reason` and
+/// `unreadable_embeddings_answer` are called the same way, for the same
+/// reason: this crate already explained, in those functions' own doc
+/// comments, what each status and each unreadable shape means, and a second
+/// copy here would be the first place that explanation could drift from this
+/// one.
+///
+/// A short or long answer is `Error::CountMismatch`, not `AveragedBatch` or
+/// `Malformed` (Task 5, ruling from the owner): both of those name a fact
+/// about the *model*, settled once by `check_embedding_model` before any
+/// indexing began. `embed` is only ever called on a model that already
+/// passed that check, so a wrong count here is a broken answer from an
+/// otherwise-good model, not a newly discovered model property.
+///
+/// **Binding is by the row's own stated position, never by its position in
+/// the response array** (Task 5 fix round 1, Critical 1). The first version
+/// of this function collected `parsed.data` straight through, in array
+/// order — the same thing `check_embedding_model` does, which is safe there
+/// only because that function is order-insensitive by construction (row 0's
+/// width is compared against row 1's; a reordered answer gives the same
+/// verdict). `embed` has no such shield: a reordered answer would pass the
+/// count check exactly and bind every vector to the wrong chunk, silently
+/// and permanently — the exact failure `CountMismatch` exists to catch,
+/// through a door the count check does not watch.
+///
+/// **This is a bet, made loud rather than silent, because it is unmeasured.**
+/// No response body from a real `/embeddings` call has ever been recorded by
+/// this project — `tests/fixtures/embeddings-2026-08-08.json` is the model
+/// list for `output_modalities=embeddings`, not an embeddings answer, and the
+/// live measurements this crate cites (2026-07-25, 2026-08-08) recorded
+/// counts, widths and norms, never a body. Whether any provider reachable
+/// through OpenRouter actually reorders rows is not known. What is chosen
+/// here is to require every row to state its position and refuse otherwise,
+/// rather than use the position when present and fall back to array order
+/// when absent: that fallback is a defence satisfied by exactly the case it
+/// exists for — a provider that both reorders rows and omits the field would
+/// get the old, silent behaviour, and nothing would ever say so. This crate
+/// already prefers a refusal to a plausible guess on this exact axis — every
+/// path in `check_embedding_model` that cannot name a width returns `Err`
+/// instead of reaching for one — and a wrong bet here costs an indexing run
+/// failing outright, not a wrong vector sitting in the index forever.
+///
+/// Duplicated and out-of-range positions are refused the same way a short or
+/// long answer is: `parsed.data.len() == texts.len()` is checked first, so by
+/// the time positions are read there are exactly as many rows as slots: an
+/// injective map from `texts.len()` rows into `texts.len()` slots with none
+/// out of range is necessarily a bijection (pigeonhole on a finite set of
+/// equal size), so checking "no duplicate, none out of range" is checking
+/// "every slot is filled" — no separate gap check is needed or added. A row
+/// whose position could not be read at all (`PositionState::Unreadable` or
+/// `Absent`, below) refuses before it can be counted either way, so it never
+/// threatens that argument — it just never reaches the map.
+///
+/// **What this does NOT check, deliberately:** finiteness, width against the
+/// space, and rankable norms. `check_rankable`
+/// (`crates/mnema-index/src/space.rs:1086-1100`) refuses those at insert, and
+/// a refused insert becomes a recorded failure the caller surfaces — the same
+/// arithmetic `check_embedding_model` duplicates above for a different
+/// reason (that call has no insert to defer to; it runs before the archive
+/// exists at all). Repeating the guard here would be exactly the drift that
+/// pair's own comments warn against, for a call that already has somewhere
+/// downstream to catch it.
+pub fn embed(base: &str, key: &str, model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
+    let request = serde_json::json!({ "model": model, "input": texts }).to_string();
+    let (status, answer) = match http::post_json(base, "/embeddings", key, &request) {
+        Ok(pair) => pair,
+        // The same trade `check_embedding_model` makes for a body-read
+        // failure, for the same four statuses — see that function's own
+        // comment on this match arm.
+        Err(Error::BodyUnreadable { status, .. }) if matches!(status, 401 | 403 | 404 | 429) => {
+            return Err(status_error(status, model, key));
+        }
+        Err(other) => return Err(other),
+    };
+    match status {
+        200 => {}
+        other => {
+            return Err(attach_reason(status_error(other, model, key), &answer, key));
+        }
+    }
+
+    let parsed: EmbeddingsBody = serde_json::from_str(&answer)
+        .map_err(|e| unreadable_embeddings_answer(&answer, key, &e))?;
+
+    if parsed.data.len() != texts.len() {
+        return Err(Error::CountMismatch {
+            asked: texts.len(),
+            got: parsed.data.len(),
+        });
+    }
+
+    // Placeholders, not `MaybeUninit` or an `Option<Vec<f32>>` per slot: an
+    // empty `Vec` is cheap (no allocation) and, if the pigeonhole argument
+    // above were ever wrong, an untouched slot reaching `Ok` as `vec![]`
+    // fails safely — `check_rankable` refuses an empty vector at insert
+    // (its squared norm is `0.0`, below `f32::MIN_POSITIVE`) rather than
+    // this function silently mis-binding or panicking.
+    let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
+    let mut filled = vec![false; texts.len()];
+    for row in parsed.data {
+        let index = match row.index {
+            PositionState::Absent => {
+                return Err(Error::PositionMismatch(
+                    "a row did not state which text it embeds",
+                ));
+            }
+            // Distinct from `Absent` (Task 5 fix round 2, Important A): the
+            // provider said *something* here, and it was not a plain
+            // non-negative integer — a different fact from silence, worth a
+            // different sentence to a person and to a later session.
+            PositionState::Unreadable => {
+                return Err(Error::PositionMismatch(
+                    "a row stated its position in a shape this build cannot read",
+                ));
+            }
+            PositionState::Stated(index) => index,
+        };
+        let Some(slot) = filled.get_mut(index) else {
+            return Err(Error::PositionMismatch(
+                "a row named a position outside the batch that was sent",
+            ));
+        };
+        if *slot {
+            return Err(Error::PositionMismatch(
+                "two rows claimed the same position",
+            ));
+        }
+        *slot = true;
+        out[index] = row.embedding;
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]

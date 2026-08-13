@@ -4,6 +4,8 @@ use mnema_index::{
 };
 use rusqlite::{Transaction, TransactionBehavior};
 
+mod support;
+
 fn fresh(dir: &tempfile::TempDir) -> Db {
     register_vector_extension().unwrap();
     open(&dir.path().join("index.sqlite")).unwrap()
@@ -1170,4 +1172,154 @@ fn deleting_a_document_takes_every_path_that_names_it() {
         0,
         "a rebuild that went through this would lose the other copy's place"
     );
+}
+
+// -------------------------------------------------- vectors and rebuilds
+
+/// Fixtures for the two tests below, kept in one place so a helper the next
+/// one needs is added here rather than grown a second time inside a test
+/// body. `document_with_one_chunk` and `rebuild_with_one_chunk` share their
+/// write, on purpose: a rebuild is not a different operation from a first
+/// build, only a second call to it against a document id that already
+/// exists.
+mod fixture {
+    use super::*;
+
+    /// A fresh, empty index. `support::TempDb` and not a second copy of it:
+    /// `support/mod.rs`'s own doc says it is written there so this is not
+    /// grown a second time, and a second copy is exactly what a `TempDb`
+    /// local to this module would be.
+    pub fn db() -> support::TempDb {
+        support::temp_db()
+    }
+
+    /// A 1024-wide embedding space — the width `unit_vector_1024` is built
+    /// for, and the ordinary one under D95's default model.
+    ///
+    /// Delegates to `support::space_1024`, which Task 3's upsert/delete
+    /// tests (`tests/space.rs`) need too: one definition rather than a
+    /// second copy that can drift from this one.
+    pub fn space_1024(db: &Db) -> i64 {
+        support::space_1024(db)
+    }
+
+    /// A document with one page, one block and one chunk holding `text`.
+    /// Returns the document id.
+    pub fn document_with_one_chunk(db: &Db, text: &str) -> String {
+        let doc = db
+            .insert_document(
+                &"9".repeat(64),
+                "text/plain",
+                text.len() as i64,
+                SourceKind::Document,
+            )
+            .unwrap();
+        write_one_chunk(db, &doc, text);
+        doc
+    }
+
+    /// What a rebuild does after `clear_document_content`: writes a fresh
+    /// page, block and chunk back onto a document id that already exists.
+    pub fn rebuild_with_one_chunk(db: &Db, doc: &str, text: &str) {
+        write_one_chunk(db, doc, text);
+    }
+
+    fn write_one_chunk(db: &Db, doc: &str, text: &str) {
+        let page = db.insert_page(doc, 1, "native:txt", None).unwrap();
+        let block = db
+            .insert_block(page, &paragraph(0, text, None, None))
+            .unwrap();
+        db.insert_chunk(
+            doc,
+            0,
+            text,
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block,
+                    start: 0,
+                    end: text.chars().count() as u32,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        )
+        .unwrap();
+    }
+
+    /// The sole chunk id belonging to `doc` — every fixture above leaves it
+    /// with exactly one.
+    pub fn only_chunk_id(db: &Db, doc: &str) -> i64 {
+        db.conn()
+            .query_row(
+                "SELECT id FROM chunk WHERE document_id = ?1",
+                rusqlite::params![doc],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A unit vector along axis 0: valid for the cosine space `space_1024`
+    /// builds, and — unlike an all-zero vector — one `check_rankable` accepts.
+    ///
+    /// Delegates to `support::unit_vector_1024`, for the same reason
+    /// `space_1024` above does.
+    pub fn unit_vector_1024() -> Vec<f32> {
+        support::unit_vector_1024()
+    }
+}
+
+/// A rebuild reuses chunk ids — `chunk.id` is `INTEGER PRIMARY KEY` without
+/// `AUTOINCREMENT` — so a vector that outlives the clear does not merely take
+/// up room: it names a chunk whose text is now different content, and the row
+/// that recorded it as embedded went with the cascade. Search would answer
+/// with text the file no longer contains.
+#[test]
+fn clearing_a_document_takes_its_vectors() {
+    let db = fixture::db();
+    let space = fixture::space_1024(&db);
+    let doc = fixture::document_with_one_chunk(&db, "the original text");
+    let chunk = fixture::only_chunk_id(&db, &doc);
+
+    db.insert_vector(space, chunk, &fixture::unit_vector_1024())
+        .expect("insert");
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 1);
+
+    db.clear_document_content(&doc).expect("clear");
+
+    assert_eq!(
+        db.embedded_chunk_count(space).expect("count"),
+        0,
+        "the vector outlived the chunk it embeds"
+    );
+}
+
+/// The first test asks whether the vector is gone. This one asks the question
+/// that makes it matter: after a rebuild hands the freed id to a different
+/// chunk, does anything of the old embedding attach to the new text.
+#[test]
+fn a_reused_chunk_id_gets_no_inherited_vector() {
+    let db = fixture::db();
+    let space = fixture::space_1024(&db);
+    let doc = fixture::document_with_one_chunk(&db, "the original text");
+    let first = fixture::only_chunk_id(&db, &doc);
+    db.insert_vector(space, first, &fixture::unit_vector_1024())
+        .expect("insert");
+    // Without this, a version of `embedded_chunk_count` narrowed to
+    // `chunk_embedding_state` alone would pass this test whether or not the
+    // fix below exists: it would answer 0 before the clear too, and the
+    // assertion at the end would be satisfied by a count that was never
+    // anything else. This is the same "asks nothing" failure the first test's
+    // own assertion above is written to avoid.
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 1);
+
+    db.clear_document_content(&doc).expect("clear");
+    fixture::rebuild_with_one_chunk(&db, &doc, "entirely different content");
+    let second = fixture::only_chunk_id(&db, &doc);
+
+    assert_eq!(
+        second, first,
+        "this test is pointless unless the id was reused"
+    );
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 0);
 }

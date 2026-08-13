@@ -100,10 +100,15 @@ jobs:
       #     resource path `binaries/mnema-extract-worker-<triple>` doesn't exist
       #
       # Both `cargo clippy --workspace --all-targets` and `cargo test --workspace`
-      # below end there, on both matrix arms, and `bundle` never runs at all
-      # because it declares `needs: check`. Measured by moving the staged file
+      # below end there, on both matrix arms. Measured by moving the staged file
       # aside and watching `cargo check -p mnema-desktop` fail, then pass — not
       # predicted from the configuration.
+      #
+      # `bundle` and `mutations` stage the sidecar themselves, for the same
+      # reason and by the same script. They used to be reached only through this
+      # job (`needs: check`) and so could once have been read as inheriting it;
+      # they no longer declare it — every job now starts from a bare checkout and
+      # provisions what it needs.
       #
       # `debug`, not `release`. `tauri-build` only checks that the declared file
       # exists — it does not care which profile produced it — and every other
@@ -165,12 +170,21 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 'lts/*'
+      # ⚠️ **`npm test`, not a list of files.** This step named
+      # `ui/render.test.js` explicitly, so `ui/main.test.js` — added to drive
+      # `main.js` through the two IPC orderings a source-text assertion cannot
+      # decide — would have been a suite that runs on a developer's machine and
+      # never in CI. A gate reached by accident is not a gate, and this
+      # repository has already paid for one: a whole leg of the mutation harness
+      # went unexecuted for sixteen tasks. `package.json`'s script is
+      # `node --test`, which discovers every `*.test.js` under `ui/`, so a suite
+      # added later is run here without this file being touched again.
       - name: ui/'s own tests
         if: runner.os == 'Linux'
         run: |
           node --check ui/main.js
           node --check ui/render.js
-          node --test ui/render.test.js
+          npm test --prefix ui
       # mnema-extract binds to a prebuilt Pdfium library, which is not committed:
       # it is 7.7 MB and reproducible from a pinned, checksum-verified release.
       # The tests need it too — they fail on a missing library rather than on
@@ -280,13 +294,78 @@ jobs:
           # rest of the crate's tests already ran under `cargo test --workspace`.
           cargo test -p mnema-secrets --test roundtrip -- --include-ignored
 
+  mutations:
+    # The instrument that proves a test is load-bearing. It ran by hand only
+    # until now, which meant it protected exactly as much as someone
+    # remembered to protect.
+    #
+    # No `needs:`. Every job here starts from a bare checkout and provisions
+    # itself, so the only thing `needs: check` ever bought was declining to
+    # spend runner minutes on a commit that would not compile — and on a public
+    # repository those minutes are free. What it cost was the whole of `check`
+    # in front of the longest job in the workflow, on every run. Serialising to
+    # save nothing is how a slow gate becomes one people work around.
+    runs-on: ubuntu-24.04
+    # Thirty was a guess when this leg was written, and it stayed one until the
+    # leg first executed: pull request #7, **6m17s, green**. So the limit is
+    # roughly five times the only run there has ever been — the same margin
+    # `check` argues for itself above, and now for the same reason: a measured
+    # slowest run rather than a number nobody had a basis for. Raise it from a
+    # measurement if the case file grows enough to want it, not from a feeling.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # **First, and before anything is provisioned**, because it needs nothing
+      # provisioned: no toolchain, no sidecar, no Pdfium, about a second for the
+      # whole directory. A case file that has stopped applying should fail this
+      # job before two minutes of setup, not after.
+      #
+      # It answers the question the step at the bottom cannot. That one runs ONE
+      # case file and proves its tests still go red; this reads all twenty-four
+      # and asks whether the cases still match the code they were written
+      # against. On the branch this was added on, three cases in two files had
+      # stopped applying — one of them behind the very test cited as proof a
+      # repair was still pinned — and nothing else was looking: `branch-review.sh`
+      # is a case file like any other and was clean while they rotted.
+      #
+      # No argument, so it sweeps every file. The single-file form exists and is
+      # deliberately not what runs here: a green line about one file gets read as
+      # a green line about the directory, which is exactly how those three
+      # survived a full branch review.
+      #
+      # What it needs on the runner: `perl`, `head`, `basename` and `mktemp`, all
+      # of which the harness step below already depends on, plus `cmp` — the one
+      # addition, from diffutils, present on every image this workflow uses.
+      - name: Check that every mutation case still applies
+        run: scripts/mutation-staleness.sh
+      - name: Provision the toolchain named in rust-toolchain.toml
+        run: rustup toolchain install
+      # The harness's own worktree only carries vendor/ and
+      # src-tauri/binaries/ if this checkout already has them
+      # (mutation-check.sh:57, :75-76) — both are git-ignored, so a case
+      # touching mnema-desktop needs the same setup `check` uses to build it
+      # at all.
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Stage the extraction worker that src-tauri declares as a sidecar
+        run: scripts/stage-sidecar.sh debug
+      - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
+        run: scripts/fetch-pdfium.sh
+      - name: Run this cycle's mutation cases
+        run: scripts/mutation-check.sh scripts/mutations/embedding.sh
+
   bundle:
     # One architecture per package rather than a universal binary: a universal
     # build carries both slices, so every user downloads roughly twice the
     # application they can run. Measured, not assumed — the numbers are in
     # docs/BUILD.md. macos-14 is arm64, which is what the artefact name claims.
+    #
+    # No `needs:`, for the reason written above `mutations`.
     runs-on: macos-14
-    needs: check
     # 1.4–2.1 minutes across the same three runs. The limit is here for the same
     # reason as the one on `check`, and it matters slightly more: this job is the
     # one that produces the download, so a wedged run leaves someone waiting on

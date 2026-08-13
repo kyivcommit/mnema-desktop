@@ -15,7 +15,7 @@ pub use catalogue::{
 };
 pub use probe::{
     Balance, EmbeddingCheck, KeyCheck, ProviderMessage, SanitisedText, check_embedding_model,
-    check_key,
+    check_key, embed,
 };
 
 /// Where v1 goes. Not a configuration: v1 has one provider (spec §2.2).
@@ -341,4 +341,33 @@ pub enum Error {
     IdenticalVectors,
     #[error("the provider returned an empty vector")]
     EmptyVector,
+    /// The provider answered 200 with a readable body holding the wrong number
+    /// of vectors. Zipping them against the texts would bind each embedding to
+    /// the wrong chunk — silently, and permanently.
+    ///
+    /// A different verdict from `AveragedBatch`/`IdenticalVectors` above, on
+    /// purpose (Task 5): those two are facts about a *model*, established once
+    /// by `check_embedding_model` before any indexing began. `embed` is only
+    /// ever called on a model that already passed that check, so a wrong count
+    /// here is a broken answer from an otherwise-good model, not a newly
+    /// discovered model property — the same distinction `check_embedding_model`
+    /// draws between `AveragedBatch` (exactly one row) and `Malformed` (zero,
+    /// or more rows than texts), applied on the far side of that check instead.
+    #[error("asked for {asked} embeddings and got {got}")]
+    CountMismatch { asked: usize, got: usize },
+    /// The provider's answer did not say which text each vector belongs to,
+    /// or said so in a way this build cannot trust to be a real binding
+    /// (Task 5 fix round 1, Critical 1) — a row with no stated position
+    /// (missing or explicit `null`), a row stating one in a shape this build
+    /// cannot read (a string, a float, a negative number — Task 5 fix round
+    /// 2, Important A), two rows claiming the same position, or a position
+    /// outside the batch that was sent. `embed` binds each vector by this
+    /// stated position rather than by its place in the response array,
+    /// because nothing establishes that a provider preserves array order;
+    /// see `embed`'s own doc comment for why that requirement is a
+    /// deliberate, unmeasured bet rather than an assumption. Distinct from
+    /// `CountMismatch`: the count can be exactly right and the binding still
+    /// wrong.
+    #[error("the provider's answer does not say which text each vector belongs to: {0}")]
+    PositionMismatch(&'static str),
 }

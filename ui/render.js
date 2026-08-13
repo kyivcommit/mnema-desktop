@@ -57,6 +57,22 @@ export const FROZEN_REASON_TEXT = {
 export const frozenSentence = (f) =>
   (FROZEN_REASON_TEXT[f.reason] ?? ((prefix) => `${prefix}: left untouched by cleanup`))(f.prefix);
 
+// Close a run of text off so that a **sentence** can be put after it.
+//
+// ⚠️ Used only where the thing being appended is a new sentence — one that
+// starts with a capital and carries its own full stop. It is **not** a general
+// tidier and must not become one: `reconciliationClause` is appended to the
+// walk's ending as a parenthetical continuation, deliberately lower case and
+// deliberately not a sentence, and running that through this would put a stop
+// in front of it and turn a clause into a fragment.
+//
+// It is also not applied at the joins in `EMBED_ENDING_TEXT`, and that is the
+// point: an arm there writes its own terminated sentence, and the test that
+// walks every arm is what says so. Auto-correcting at the join would make that
+// test unable to fail, which is the difference between enforcing a rule and
+// hiding its violations.
+const terminated = (text) => (/[.!?]$/.test(text) ? text : `${text}.`);
+
 // One sentence per `EndReason`. `rulesNotApplied`, `rootUnavailable`,
 // `brokenWorker`, `volumeMissing` and `cancelled` read as five different
 // things because they are five different things — collapsing any pair of
@@ -155,7 +171,19 @@ export function endingSentence(ended) {
   }
   text += reconciliationClause(ended);
   if (ended.frozen && ended.frozen.length) {
-    text += " " + ended.frozen.map(frozenSentence).join(" ");
+    // ⚠️ **Closed off first.** Every `frozenSentence` is a whole sentence — it
+    // opens with a path and ends in a full stop — and what it is being joined
+    // to is not: `ENDING_TEXT`'s own arms carry no terminator, and
+    // `reconciliationClause` is a parenthetical. Appended raw, a clean walk
+    // over a folder that had gone empty read as
+    // `… 4 removed (12 total) docs/x now looks empty — …`, one run-on
+    // sentence with the two facts fused at the seam.
+    //
+    // Found by the test the live acceptance run of 2026-08-13 asked for: it was
+    // written for `EMBED_ENDING_TEXT.completed`, whose own version of this the
+    // owner read on screen, and walking every arm of both composers is what
+    // turned one line into the class it belongs to.
+    text = terminated(text) + " " + ended.frozen.map(frozenSentence).join(" ");
   }
   return text;
 }
@@ -730,7 +758,7 @@ export const indexStateSentence = (index, opening) =>
     (() => "The state of the index is unknown: this build did not understand what it answered.")
   )(index, opening);
 
-// ⚠️ **Not a fraction, and never divided.** Four measured rules, all of which
+// ⚠️ **Not a fraction, and never divided.** Three measured rules, all of which
 // the obvious rendering breaks (`IndexRead::embedded_chunks`):
 //
 // - `embeddedChunks` counts the active space, `totalChunks` the whole index, so
@@ -740,15 +768,85 @@ export const indexStateSentence = (index, opening) =>
 //   embeds, and `a_vector_outlives_the_chunk_it_embeds` holds the storage half
 //   of that in the gate. A percentage of it is above 100, and clamping would be
 //   this window inventing a number nobody measured.
-// - Both are zero in this build, because nothing embeds yet (D29).
 // - Zero with `activeSpace == null` is not "nothing is embedded", it is "the
 //   question does not arise" — told apart by `activeSpace`, never by the zero.
+//
+// A fourth rule said "both are zero in this build, because nothing embeds yet
+// (D29)". It is gone because it stopped being true the moment there was a
+// command that embeds; it is recorded here rather than deleted silently,
+// because a stale rule in a list of measured ones is worse than no list.
 const PROGRESS_NO_MODEL = "no embedding model chosen";
 // And an index that could not be read is neither of those: drawn as "nothing
 // chosen" it is the entrance to the harm `NoSuchSpace` was written to prevent.
 const PROGRESS_UNKNOWN = "how many pieces have embeddings is unknown until the index can be read";
 
-export const embeddingProgressText = (index) => {
+// "1 pieces" is the kind of sentence that makes a person doubt the number beside
+// it, the same reason `embeddingsCount` exists further down.
+const piecesCount = (n) => (n === 1 ? "1 piece" : `${n} pieces`);
+
+// **The third number, and the whole safety argument for the queue's own rule.**
+//
+// `Db::chunks_needing_embedding` lets a chunk the provider refused leave the
+// queue and does not offer it again until its text changes. That chunk stays in
+// the database, the document still shows it and keyword search still finds it —
+// and search by meaning will not return it again. `totalChunks −
+// embeddedChunks` reads as "not got to them yet", and for these pieces nobody
+// ever will, so the difference is exactly the wrong way to learn about them.
+// Until this sentence existed, `Db::failed_chunk_count` had no caller outside
+// the tests and the number was in front of nobody.
+//
+// **Said at zero as well**, and that is deliberate rather than noise: a clause
+// that appears only when something is wrong cannot be told apart from a build
+// that does not report refusals at all, which is the silence this exists to
+// break. The harsh half — that they are not retried — is said only when there is
+// something for it to be about.
+//
+// A third arm for "the window was not told", because `failedChunks` absent is
+// not `failedChunks: 0`. Saying "none were refused" about a payload that carries
+// no such number states a fact this window did not receive — the mistake
+// `KeyState`, `Balance` and `Refusal` are each split into named states to avoid.
+const refusedClause = (failed) => {
+  if (typeof failed !== "number") {
+    return "; how many pieces the provider refused is not in what this window was sent";
+  }
+  return failed > 0
+    ? `; ${piecesCount(failed)} the provider refused, and it will not try again until their ` +
+        "text changes, so search by meaning does not return them"
+    : "; none were refused by the provider";
+};
+
+// ⚠️ **While a job is running these counts are stale, and the refusal clause is
+// the one that must not be said anyway.**
+//
+// This line is redrawn only when `model_settings` is asked again, which on the
+// embedding path happens at the run's *ending*. So for the whole length of the
+// only operation that changes the third number, it holds whatever was true
+// before the run began — and because the clause above states the zero case
+// rather than omitting it, what it holds is not a stale silence but a stale
+// assertion: `none were refused by the provider`, on screen at the same moment
+// as `2 refused in this run` beside the progress bar. Review round 1, Important
+// 2. Saying the count at zero is still right; saying it about a moment that has
+// passed is not.
+//
+// **Suppressed rather than redrawn**, and the choice is between two honest
+// options:
+//
+// - Redrawing during the run would make it approximately live and drag the whole
+//   settings block with it four times a second — including `showRecorded`, which
+//   writes `select.value` and would fight a person using the picker — and two
+//   live numbers read at different instants would go on disagreeing by up to a
+//   batch, which is the trap they were worded apart to avoid in the first place.
+// - This says what is true: the counts are from before the run, the run's own
+//   line is the one that is moving, and no claim is made about refusals at a
+//   moment this window has not read.
+//
+// It covers a walk as well as an embedding run, deliberately: a walk moves
+// `totalChunks`, so the same staleness applies to the denominator.
+const PROGRESS_DURING_A_RUN =
+  "; a job is running, so these are the counts from before it started — the line beside the " +
+  "progress bar is the one with this run's own";
+
+export const embeddingProgressText = (index, jobRunning) => {
   if (index?.kind !== "read") {
     return PROGRESS_UNKNOWN;
   }
@@ -758,11 +856,322 @@ export const embeddingProgressText = (index) => {
   const head =
     `embeddings in the active space: ${index.embeddedChunks} of ${index.totalChunks} ` +
     "pieces in the whole index";
-  return index.embeddedChunks > index.totalChunks
-    ? `${head} — the first number counts one space and the second the whole index, and a vector ` +
-        "can outlive the piece it embeds, so the first is sometimes larger; this is not an error"
-    : head;
+  const counted =
+    index.embeddedChunks > index.totalChunks
+      ? `${head} — the first number counts one space and the second the whole index, and a ` +
+        "vector can outlive the piece it embeds, so the first is sometimes larger; this is not " +
+        "an error"
+      : head;
+  return counted + (jobRunning ? PROGRESS_DURING_A_RUN : refusedClause(index.failedChunks));
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The one bar, and the picture it must stop showing when a run is over.
+//
+// Found by the live acceptance run of 2026-08-13, and by nothing else here. A
+// run died when the network dropped; the owner turned the network back on and
+// then **waited**, because the window still looked like it was working. It was
+// not — the run had ended, the slot was free, nothing was running. The bar was
+// half of why: it stayed partly filled, in the same blue a live run draws, and
+// a partly-filled blue bar is the visual language of "in progress". No test in
+// this repository can see that, because what was wrong was not a value but what
+// a person concludes from a picture.
+//
+// Three states rather than two. Drawing every ending the same way would trade
+// this defect for its mirror — a run that embedded everything must go on
+// looking finished — so "ran to the end" and "ended with work left" are kept
+// apart here exactly as they are in the sentences below.
+//
+// The strings are exported rather than written into `main.js` for the reason
+// every other wire spelling in this file is: `"stoped"` assigned to a dataset
+// key is a selector in `style.css` that silently matches nothing, and nothing
+// reddens. `render.test.js` checks the stylesheet against these same constants.
+export const BAR_RUNNING = "running";
+export const BAR_FINISHED = "finished";
+export const BAR_STOPPED = "stopped";
+
+// One arm per `EndReason`, and it is **not `STOPPED_CLEANLY` under a second
+// name.** That table answers whether phase 2 finished everything phase 1 handed
+// it, and is never read without `complete` beside it (`reconciliationRan`);
+// this answers only whether the bar reached the end of what it was drawn
+// against. The two agree on every value today and are answers to two different
+// questions — the pair this file keeps apart everywhere else — so folding them
+// together would make a later change to either silently move the other.
+export const BAR_RAN_TO_THE_END = {
+  completed: true,
+  cancelled: false,
+  failed: false,
+  brokenWorker: false,
+  rulesNotApplied: false,
+  rootUnavailable: false,
+  volumeMissing: false,
+};
+
+// An ending this build does not recognise is drawn as stopped: "finished" is
+// the claim, and an unknown reason establishes nothing. It is the cautious side
+// to be wrong on, and the same choice `reconciliationRan` makes about a `reason`
+// it has never seen.
+export const barState = (ended) =>
+  BAR_RAN_TO_THE_END[ended?.reason] ?? false ? BAR_FINISHED : BAR_STOPPED;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The embedding job.
+//
+// A run's sentences, kept apart from the walk's above. `endingSentence` appends
+// a reconciliation clause — "nothing was removed from the index, a file deleted
+// from the folder could still answer a search" — which is a statement about a
+// folder walk and would be both irrelevant and misleading after a run that
+// reconciled nothing and walked nothing. The two jobs share a slot, a bar and a
+// Cancel button, and they do not share a vocabulary.
+//
+// ⚠️ **Every count the ending itself carries is this run's, and the settings
+// line above is the space's.** `job::Ended::refused` starts again at zero on the
+// next run; `IndexRead::failed_chunks` counts every refusal the space still
+// holds. They are different numbers that could otherwise be read as one, so the
+// sentences below say "in this run" wherever they name one.
+//
+// **The ending now states the index's pair as well, and that is the one place
+// the rule above is deliberately crossed** — see `embedIndexTail`, and note
+// that it is crossed by *naming the other scope out loud* rather than by
+// leaving a number unattributed. The pair comes from the same `model_settings`
+// read the settings line is drawn from, so the two cannot disagree; what they
+// must not do is read as each other, and each says whose number it is.
+
+// What one report says while a run is going.
+//
+// `secondsLeft` is `null` before anything is measured — a real state, and one
+// that must not render as `0` (`job::Progress::seconds_left`). The refusals are
+// named as soon as there are any: a person watching the bar is the person the
+// third number is for.
+export const embedProgressLine = ({ done, total, refused, secondsLeft }) => {
+  const eta =
+    secondsLeft === null || secondsLeft === undefined ? "estimating…" : `${secondsLeft}s left`;
+  const gaveUp = refused > 0 ? `, ${refused} refused in this run` : "";
+  return `embedding: ${done} of ${total}${gaveUp} — ${eta}`;
+};
+
+// What a run leaves on the screen when it is over, in this run's own terms.
+const embedRefusedTail = (refused) =>
+  refused > 0
+    ? `, ${piecesCount(refused)} the provider refused in this run — they stay in the index and ` +
+      "in keyword search, and search by meaning will not return them until their text changes"
+    : "";
+
+// Where the index stands now, read back rather than worked out.
+//
+// **Never `embeddedChunks` from before the run plus the ending's own `done`.**
+// That is the arithmetic `main.js` refuses at both endings for the reason it
+// states there: two numbers added together can come to disagree with the
+// database, and one read from it cannot. So this takes the `IndexRead` that
+// `model_settings` answered *after* the run and states what it says.
+//
+// `null` — not a zero, not an empty pair — for every state where this window
+// cannot say: before `model_settings` has been asked again, which is the first
+// draw of every ending; an index that could not be read; and no active space at
+// all, where by `IndexRead::embedded_chunks`'s own third rule the question does
+// not arise rather than answering zero.
+const indexNow = (index) => {
+  if (index?.kind !== "read") return null;
+  if (index.activeSpace === null || index.activeSpace === undefined) return null;
+  if (typeof index.embeddedChunks !== "number" || typeof index.totalChunks !== "number") {
+    return null;
+  }
+  return { embedded: index.embeddedChunks, total: index.totalChunks };
+};
+
+// The pair, with both scopes named. `embeddedChunks` counts the active space
+// and `totalChunks` the whole index, so a bare ratio is already an inexact
+// sentence — the rule `embeddingProgressText` is written to further up, and the
+// reason this says which is which instead of printing `64 of 227`.
+//
+// When the first number is the larger — a vector outliving the piece it embeds,
+// which is legitimate — this reads as odd rather than as an error, and the
+// settings line one element further down, drawn from the same read at the same
+// moment, is what explains it. That paragraph is not repeated here.
+const withAVector = (now) =>
+  `${piecesCount(now.embedded)} with a vector, of ${now.total} in the whole index`;
+
+// **What this run did is not how much of the index is done, and the window said
+// only the first.** Two consecutive runs on the owner's archive printed
+// `32 of 227` and then `32 of 195`: both true, both this run's, the right-hand
+// number the queue as it stood when that run started. The first run taught the
+// wrong meaning, because there the queue happened to equal the whole index — so
+// the second read as "it did 32 again, nothing moved" when 64 pieces had a
+// vector by then. Live acceptance run of 2026-08-13.
+//
+// Empty when `indexNow` could not say, which is the honest answer and also the
+// first draw of every ending: `main.js` writes the run's own sentence the
+// instant the ending arrives and restates it with this when the settings come
+// back, rather than holding a moving progress line on screen across a database
+// read.
+const embedIndexTail = (now) =>
+  now === null ? "" : ` The active space now has ${withAVector(now)}.`;
+
+// Both endings that leave work behind say so, and it is the same fact in both:
+// the queue is computed from the index rather than stored, so nothing has to be
+// recovered and a second press simply carries on. It is what a person needs
+// after a network drops in the middle of a run.
+//
+// **It names the press, not only the property.** "Whatever this run embedded
+// stays, and starting again continues from there" was true and was a statement
+// about the system; what somebody sitting in front of a run that died needs is
+// what to do and where it will resume — and the number is what makes that an
+// instruction rather than a reassurance. The owner waited in front of exactly
+// this sentence.
+//
+// "Whatever this run embedded" and not "what was embedded", because the count
+// can be zero — a run that failed on its very first batch, or one stopped in the
+// same second it was started — and the shorter wording states that something was
+// embedded on exactly the endings where nothing was.
+//
+// "Embed" and not the button's whole label. The control says "Embed what is
+// indexed" today and the React interface will relabel it; the first word is
+// what a person scans a row of buttons for, and it is the part of the label
+// least likely to move.
+const embedResumable = (now) =>
+  now === null
+    ? " Whatever this run embedded stays: press Embed again to continue from there."
+    : ` Whatever this run embedded stays: press Embed again to continue from ${withAVector(now)}.`;
+
+// `EndReason`'s four walk-only variants. `walk_job.rs` is their only writer, so
+// no embedding run produces one — and they have an arm because a table with a
+// missing key renders a fallback instead of failing, and this file's rule is one
+// arm per variant so that a variant added later reddens a test rather than
+// disappearing into a default. It says what it was told rather than inventing a
+// sentence about a folder.
+const notAnEmbeddingEnding = ({ reason, done, total }) =>
+  `ended (${reason}) after ${done} of ${total}.`;
+
+// Every arm takes the run's own payload and, second, the index pair `indexNow`
+// derived — or `null`, which every arm has to render as a complete sentence
+// rather than as a gap, because it is what the first draw of every ending gets.
+//
+// **"in this run" on the counts, and it is not decoration.** The head of each
+// sentence states a pair the reader now sees beside a second pair from another
+// scope, and this file's own rule two blocks up is that a sentence says "in this
+// run" wherever it names one of this run's numbers. The head did not, and the
+// heads are the numbers the owner misread.
+//
+// ⚠️ **Every arm terminates its own sentence, on every branch, and that is a
+// rule with a test behind it rather than a habit.** The tails appended here —
+// `embedIndexTail` and `embedResumable` — both open with a space and a capital,
+// because each is a *new sentence*. An arm that does not close its own leaves
+// the two fused: the live acceptance run of 2026-08-13 put
+// `nothing was waiting to be embedded The active space now has 227 pieces…` on
+// screen, and it was the only arm of the three that had forgotten. `cancelled`
+// and `failed` were right on every branch, which is exactly why nothing
+// noticed — no test compared the arms with each other. One now does, over both
+// composers in this file, and it found four more (`notAnEmbeddingEnding`'s).
+export const EMBED_ENDING_TEXT = {
+  // `total === 0` is the ordinary answer to a second press, and it is not "all
+  // done": the queue is what has no vector *and* is not already refused, so
+  // zero can also mean everything left has been given up on. This says only
+  // what this run did, which is nothing — and then, since that is exactly the
+  // ending after which somebody asks "so is it finished?", where the index
+  // stands.
+  completed: ({ done, total, refused }, now) =>
+    (total === 0
+      ? "nothing was waiting to be embedded."
+      : `finished: ${done} of ${total} embedded in this run${embedRefusedTail(refused)}.`) +
+    embedIndexTail(now),
+  // `total === 0` here is **not** the empty queue it is on the arm above, and
+  // must not borrow its sentence. `mnema_embed::run` asks whether it was
+  // cancelled before its first batch, so a Stop landing in that instant has the
+  // pass measuring a queue and reporting none of it, and the `0` that reaches
+  // this window is "not known" rather than "there was nothing". A run stopped
+  // that early says how far it got — nowhere — and states no total, because
+  // nobody measured one it could state.
+  cancelled: ({ done, total, refused }, now) =>
+    (total === 0
+      ? `stopped before anything was embedded, at your request${embedRefusedTail(refused)}.`
+      : `stopped after ${done} of ${total} embedded in this run, at your request` +
+        `${embedRefusedTail(refused)}.`) + embedResumable(now),
+  failed: ({ done, total, refused, message }, now) =>
+    `failed after ${done} of ${total} embedded in this run${embedRefusedTail(refused)}` +
+    (message ? `: ${message}.` : ".") +
+    embedResumable(now),
+  brokenWorker: notAnEmbeddingEnding,
+  rulesNotApplied: notAnEmbeddingEnding,
+  rootUnavailable: notAnEmbeddingEnding,
+  volumeMissing: notAnEmbeddingEnding,
+};
+
+// `index` is the whole `IndexRead` — the field of `ModelSettings`, the same one
+// `embeddingProgressText` and `discardOffer` are handed — and it is optional:
+// called with one argument this answers the run's own sentence and nothing
+// about the index, which is what the ending's first draw needs and what every
+// caller that has no settings to hand should get.
+export const embedEndingSentence = (ended, index) =>
+  (EMBED_ENDING_TEXT[ended.reason] ?? notAnEmbeddingEnding)(ended, indexNow(index));
+
+// The same line a second time, from the settings read back after the run — or
+// `null` for "leave the line alone".
+//
+// **`null` rather than a sentence, and the caller writes nothing at all for
+// it.** This is `discardOffer`'s shape, for `discardOffer`'s reason: a decision
+// is not an empty sentence, and it belongs where `render.test.js` can reach it.
+// Written in `main.js` as an `if`, the decision would be a branch no test in
+// this repository can see — the argument this file's header makes, and the one
+// the bar's own state was moved here under.
+//
+// The one thing it refuses on: **the status line having been claimed by a
+// newer press.** The read is an IPC round trip wide and somebody can press
+// Embed inside it. Landing then, this would paint the previous run's ending —
+// carrying a pair of numbers measured before the new run started — over a line
+// describing a run in flight. That is the stale assertion this cycle has
+// already removed from the settings line (Important 2), from the discard
+// button's label (Minor C) and from the bar, and it must not come back in
+// through the door built to fix it.
+//
+// ⚠️ **It counts writes to that line, and the two things it counted before were
+// both wrong — each measured, not argued.**
+//
+// The first version asked `jobRunning`, which is set *after* the await on both
+// press paths — so the flag lags the truth by one IPC round trip, in **both**
+// directions, and the review of `3b18859` drove `main.js` and produced both:
+//
+//   - reads `false` while a newer run is live, because that run's first
+//     progress event can arrive before its own `invoke` resolves (`main.js`
+//     says so itself, above `followUntilIdle`) — so the guard let exactly the
+//     paint-over it was written to stop happen anyway; and
+//   - reads `true` with nothing live at all, because a run that ends before its
+//     own `invoke` resolves has the flag set for a run already over — so the
+//     guard suppressed a restatement that nothing was competing with, and
+//     **nothing ever retries it**. That lands on `total === 0`, the ordinary
+//     answer to a second press. The guard defended the rare case by breaking
+//     the common one, which is the shape this branch has now paid for twice.
+//
+// The second version counted **presses**, incremented before the await so it
+// could not lag. That closed both orderings above and opened a third, which an
+// ordinary double-click reaches: Embed stays enabled through its own round trip,
+// so a second click is refused — and the refusal still claimed a generation the
+// *running* job never used, so that job's ending was suppressed for good. Under
+// the flag a double-click had cost nothing, so it was a regression, and it was
+// found by driving the window rather than by reading it.
+//
+// **The question was never about presses or jobs. It is about this line.** What
+// makes revising it unsafe is somebody having written to it since — so that is
+// what is counted, at the one seam every write in `main.js` goes through. It
+// answers all three orderings without a special case for any of them:
+//
+//   - a newer run's progress is a write, so the stale restatement is refused;
+//   - a run that ended before its `invoke` returned wrote nothing after its own
+//     ending, so its restatement lands;
+//   - a double-click's refusal is written *before* the running job's ending, so
+//     it does not silence it — and a refusal written *after* an ending is the
+//     newest thing on the line and is not painted over. Both, from one rule.
+export const restatedEnding = (ended, index, wroteAt, latestWrite) =>
+  wroteAt === latestWrite ? embedEndingSentence(ended, index) : null;
+
+// A run that never started. The refusals are `Error::NoKey`, `Error::Secrets`,
+// `Error::JobAlreadyRunning` and `Error::Index(_)` — the last from
+// `open_job_index`, which this command calls instead of `with_index`, so
+// `Error::IndexNotOpen` is not among them. The first three already say what
+// they are and what to do about it; `Error::Index(_)` does not — its
+// `Display` just forwards whatever SQLite said. This sentence only says that
+// nothing started, so a message about a key (or an unreadable index) is not
+// read as a run that failed halfway.
+export const embedNotStartedSentence = (error) => `nothing was embedded: ${error}`;
 
 // `set_embedding_model` answers `AdoptedModel`, not `ModelSettings`, and its
 // `model`, `dim`, `spaceId` and `created` sit **outside** `index` precisely so a
@@ -775,9 +1184,166 @@ export const embeddingProgressText = (index) => {
 // separate clause rather than letting it rewrite the first one.
 //
 // `created` comes from the field that states it and is never re-derived.
-// `embeddedChunks` is the tempting proxy and is wrong in exactly one direction:
-// it is identically zero in this build (D29), so every adoption would read as a
-// freshly minted space.
+// `embeddedChunks` is the tempting proxy — wrong in exactly one direction, a
+// found-but-empty space reading as freshly minted, never the reverse (minted
+// is always zero, so it never reads as found). See the note above for why
+// that direction now fires only on found-and-empty spaces instead of every
+// found space.
+// The two values `existingVectors` may take on the wire, spelled once. They are
+// here and not in `main.js` for the reason every other wire spelling is: a typo
+// in a literal over there is a rejected command with a message about arguments,
+// on the one press in this window that a person had to be asked about first.
+// `tests/commands.rs` sends both through the real handler, which is what makes
+// these two strings checked rather than agreed.
+export const KEEP_EXISTING_VECTORS = "keep";
+export const DISCARD_EXISTING_VECTORS = "discard";
+
+// `1 embeddings` is the kind of sentence that makes a person doubt the number
+// beside it, and this number is the whole content of the confirmation.
+const embeddingsCount = (n) => (n === 1 ? "1 embedding" : `${n} embeddings`);
+
+// Whether this window may offer to throw vectors away, and what it would say
+// they cost — `null` for "do not offer", never a partly-filled offer.
+//
+// `model` is the change that was refused; without one there is nothing to
+// confirm. The rest is one rule: **the number on the button is the number that
+// will go, and there is no button when there is nothing to go.**
+//
+// - An index it could not read has no number in it, so the button would have to
+//   fall back to "are you sure?", which is the sentence this whole control
+//   exists instead of.
+// - `embeddedChunksEverywhere === 0` is nothing to destroy — no space in the
+//   index holds anything — so a confirmation would be a question about nothing.
+// - `key.kind !== "present"` is not about price but about the offer being real.
+//   `refusedChange` is set on every failed change, and `set_embedding_model`
+//   fails on the credential store before it ever reaches the index — so without
+//   this, a refusal that means "you have entered no key" produces a button
+//   offering to delete embeddings, which is destruction proposed as the cure for
+//   somebody else's ailment.
+// - **A job running is the same rule as an index that could not be read.** The
+//   counts here were taken before the run and are moving while it goes, so this
+//   window cannot state what the button costs — and the whole control exists
+//   instead of a button that says "are you sure?". Without it, a button left
+//   from an earlier refusal sits there through the run still naming the count it
+//   was drawn with, which is Important 2's stale assertion wearing a label
+//   instead of a sentence. Pressing it is refused by the slot in any case, so
+//   what is withdrawn is a control that could not have worked.
+//
+// **The number is `embeddedChunksEverywhere` and not `embeddedChunks`, and the
+// guard that stood here instead is gone.** Review round 1 fixed the divergence —
+// the command retires every space in the way while the label named one — by
+// withholding the button unless `spaceCount === 1`. That was the wrong half to
+// fix: `Db::adopt_embedding_model` never removes the space it moves off, so
+// anybody who has ever tried a second model has two spaces for the life of the
+// index (`tests/adopt.rs`, `returning_to_a_model_already_tried_creates_nothing`,
+// pins it at two), and the button would then never appear again — with no other
+// way to change the model at all. The number was already right in that state,
+// because an abandoned space is empty and contributes nothing; what was wrong
+// was naming one space in the sentence. So the sum is stated and no space is
+// named, and the guard has nothing left to hide.
+//
+// ⚠️ **What this does not reach**, since a guard's gaps belong beside it. **Two
+// of them, listed rather than counted** — this said "one gap" and a second
+// arrived with the embedding job one commit later, which is the shape this
+// project pays for most often:
+//
+// 1. A change refused by the *provider* — unreachable, or a model it does not
+//    have — leaves this window with a key present, a full index and no way to
+//    tell that refusal from the index's. The button appears, and its sentence
+//    about what the index holds is still true; pressing it destroys nothing,
+//    because the provider check runs before the index is touched, and produces
+//    the same provider refusal again.
+// 2. A change refused because **a job holds the slot** does not survive that
+//    argument, because a job ends and a provider outage does not. Refused
+//    mid-run, redrawn at the run's ending against a count the run has just made
+//    *larger*, the button would then succeed — destroying exactly what the run
+//    paid for, for a refusal that had nothing to do with vectors and that
+//    waiting would have resolved. That one is closed one layer up, by
+//    [`changeToConfirm`], because it is decidable from state and this function
+//    is not given the reason. Review round 1, Important 1.
+//
+// Telling refusals apart in general needs them to carry their own shape rather
+// than a string, which is deliberately not this cycle's work — so gap 1 stands,
+// and **one more thing is deferred with it rather than separately**, because the
+// same typed refusal closes both: [`changeToConfirm`] is given `jobRunning` read
+// *after* the await, so it answers "is a job running now" rather than "was this
+// refusal about the slot". The window is one IPC return wide. Whoever gives
+// `Error` a shape the wire carries closes gap 1 and that at once; closing either
+// alone leaves the other looking handled.
+export const discardOffer = (model, index, key, jobRunning) => {
+  if (model === null || model === undefined) return null;
+  if (jobRunning) return null;
+  if (key?.kind !== "present") return null;
+  if (index?.kind !== "read") return null;
+  if (!(index.embeddedChunksEverywhere > 0)) return null;
+  return { model, embeddedChunks: index.embeddedChunksEverywhere };
+};
+
+// What a refused change leaves behind for the confirmation button to act on, or
+// `null` for "nothing to confirm".
+//
+// **The one reason for a refusal this window can name from state**, and it has
+// to be named here rather than in `discardOffer`, which is given the model and
+// the index and never the reason. A change refused while a job holds the slot is
+// not a change anything should be offered about: nothing is in the way, no
+// vectors need destroying, and the answer is to wait. Setting it anyway is what
+// turned the one destructive control in this window into the cure for "a job is
+// already running" — see gap 2 on `discardOffer`.
+//
+// It **clears** rather than leaving whatever was there. A refusal is the last
+// thing this window knows about the person's attempt, and the last one was not
+// about vectors; an offer surviving from an earlier one would be a button
+// answering a question nobody asked twice. Pressing the picker again brings the
+// real refusal, and the offer with it.
+export const changeToConfirm = (model, jobRunning) => (jobRunning ? null : model);
+
+// The label on the button, and the line under it. Both take the offer `null`
+// included and answer with the empty string for it, so that `main.js` writes no
+// literal of its own — including the empty one that clears them.
+//
+// **It names no space**, which is a correction rather than an omission. It said
+// "in vector space #N" while the change retires every space in the way, so the
+// number and the place disagreed the moment there was more than one. The number
+// is now the whole index's and the sentence says so; which spaces actually went
+// is `retiredSpacesClause`, afterwards, from what the command measured.
+export const discardVectorsLabel = (offer) =>
+  offer === null
+    ? ""
+    : `Change to ${offer.model} and delete the ${embeddingsCount(offer.embeddedChunks)} ` +
+      "this index holds";
+
+// What it costs, in the two directions that matter: what goes, and what does
+// not. The second half is not reassurance — it is the difference between this
+// button and one that would look identical and remove the archive.
+export const discardVectorsNote = (offer) =>
+  offer === null
+    ? ""
+    : `${embeddingsCount(offer.embeddedChunks)} will be deleted from this machine, and the new ` +
+      "model has to embed everything again before search by meaning finds anything. Your " +
+      "documents, their text and the keyword search are not touched.";
+
+// What a confirmed change actually destroyed, reported by the command rather
+// than by the button.
+//
+// They are two different numbers about two different moments and this window
+// says the second: the button's came from `embeddedChunks`, which counts the
+// active space at the moment before the press, and `retired` is what the index
+// counted as it destroyed it. A person who paid for embeddings is owed the
+// second.
+//
+// Empty for every call that retired nothing, which is every refused change and
+// every confirmed one that met nothing in the way.
+export const retiredSpacesClause = (retired) =>
+  !retired || retired.length === 0
+    ? ""
+    : ` ${retired
+        .map(
+          (space) =>
+            `Vector space #${space.spaceId} was retired and its ` +
+            `${embeddingsCount(space.embeddedChunks)} deleted.`,
+        )
+        .join(" ")}`;
+
 export const adoptedModelSentence = (adopted, opening) => {
   const head =
     `The embedding model was recorded: ${adopted.model}, width ${adopted.dim}, ` +
@@ -785,6 +1351,10 @@ export const adoptedModelSentence = (adopted, opening) => {
   const space = adopted.created
     ? " A new vector space was created."
     : " An existing vector space was used.";
+  // Conditional for the reason the read-back clause below is: an unconditional
+  // tail is a sentence no assertion in this suite distinguishes from its own
+  // absence, which is how one of these got through a whole round.
+  const retired = retiredSpacesClause(adopted.retired);
   // Only when the read-back actually failed. An unconditional tail passed every
   // assertion this file had for one round — the `created` test's only
   // `doesNotMatch` looked for the words "new vector space", which the tail does
@@ -794,7 +1364,7 @@ export const adoptedModelSentence = (adopted, opening) => {
       ? ""
       : " The settings could not be read back — that does not affect the model that was " +
         `recorded. ${indexStateSentence(adopted.index, opening)}`;
-  return head + space + tail;
+  return head + space + retired + tail;
 };
 
 // A stated zero, a number that cannot be a price, a value this build cannot

@@ -2658,6 +2658,7 @@ dependencies = [
  "anyhow",
  "mnema-chunk",
  "mnema-core",
+ "mnema-embed",
  "mnema-index",
  "mnema-ingest",
  "mnema-mock-provider",
@@ -2672,6 +2673,20 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-single-instance",
  "tauri-utils",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "mnema-embed"
+version = "0.0.0"
+dependencies = [
+ "mnema-core",
+ "mnema-index",
+ "mnema-mock-provider",
+ "mnema-provider",
+ "rusqlite",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
 ]

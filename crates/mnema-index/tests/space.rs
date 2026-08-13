@@ -12,6 +12,8 @@
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_index::{Db, DocumentStatus, open, register_vector_extension};
 
+mod support;
+
 fn fresh(dir: &tempfile::TempDir) -> Db {
     register_vector_extension().unwrap();
     open(&dir.path().join("index.sqlite")).unwrap()
@@ -408,6 +410,28 @@ fn dropping_a_space_removes_its_row_its_table_and_its_shadows() {
     assert_eq!(rows, 0);
 }
 
+/// `create_space` writes `state = 'building'` (space.rs:190) and nothing
+/// before D95b ever moved it. `mark_space_ready` and `mark_space_building`
+/// are the two writers now, and both directions are exercised here because a
+/// state that this crate could only ever push one way would be the same lie
+/// the space started in, just arriving later.
+#[test]
+fn a_space_moves_between_building_and_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let cfg = db
+        .create_model_config("e", "openrouter", None, "baai/bge-m3", 8)
+        .unwrap();
+    let space = db.create_space(cfg, 8, "chunker-v1").unwrap();
+    assert_eq!(support::space_state(&db, space), "building");
+
+    db.mark_space_ready(space).unwrap();
+    assert_eq!(support::space_state(&db, space), "ready");
+
+    db.mark_space_building(space).unwrap();
+    assert_eq!(support::space_state(&db, space), "building");
+}
+
 /// Every entry point takes a space id, and an id that names nothing must say so.
 /// Read through `query_row` it arrives as `QueryReturnedNoRows`, which is
 /// indistinguishable from an empty index.
@@ -424,6 +448,8 @@ fn an_unknown_space_is_named_in_the_error() {
             .unwrap_err()
             .to_string(),
         db.drop_space(404).unwrap_err().to_string(),
+        db.mark_space_ready(404).unwrap_err().to_string(),
+        db.mark_space_building(404).unwrap_err().to_string(),
     ] {
         assert!(
             message.contains("404") && message.contains("space"),
@@ -714,4 +740,346 @@ fn a_second_space_with_the_same_identity_names_the_first() {
     // A different chunker version is a different space, not a duplicate.
     db.create_space(cfg, 4, "chunker-v2")
         .expect("a new identity tuple");
+}
+
+// -------------------------------------------------- upsert and delete (D95a)
+
+/// `insert_vector` refuses a second write for the same chunk; `upsert_vector`
+/// is the retry-safe alternative a batch resumed after a partial failure
+/// needs. The row count alone is not proof: a delete-then-insert that failed
+/// halfway, or one that inserted without deleting, would also leave exactly
+/// one row — just the wrong one. The stored vector's content is what tells
+/// the two apart.
+#[test]
+fn upserting_a_vector_replaces_the_previous_one() {
+    let db = support::temp_db();
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .expect("first");
+    db.upsert_vector(space, chunk, &support::other_unit_vector_1024())
+        .expect("second");
+
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 1);
+    assert_eq!(
+        support::stored_vector(&db, space, chunk),
+        support::other_unit_vector_1024(),
+        "the second write did not replace the first"
+    );
+}
+
+/// The other half of retry-safety: a batch that already deleted its half of
+/// a failed run must be able to delete it again without first checking
+/// whether the row is still there.
+#[test]
+fn deleting_a_vector_is_idempotent() {
+    let db = support::temp_db();
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .expect("insert");
+
+    db.delete_vector(space, chunk).expect("first delete");
+    db.delete_vector(space, chunk)
+        .expect("second delete on nothing");
+
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 0);
+}
+
+/// `embedded_chunk_count`'s own `UNION` counts a `chunk_embedding_state` row
+/// with `state = 1` as an embedded chunk on its own — `tests/adopt.rs`'s
+/// `bookkeeping_without_a_vector_also_makes_a_space_not_empty` is exactly that
+/// case. `delete_vector` used to touch only the vector table, so a
+/// bookkeeping row surviving from an earlier run — Task 6's queue is what will
+/// start writing them — would keep a chunk counted as embedded after its
+/// vector was gone. Written by hand, the same way `tests/adopt.rs` does:
+/// nothing in this crate writes that table yet.
+#[test]
+fn deleting_a_vector_also_clears_its_bookkeeping_row() {
+    let db = support::temp_db();
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .expect("insert");
+    db.conn()
+        .execute(
+            "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state)
+             VALUES (?1, ?2, 'hash', 1)",
+            rusqlite::params![space, chunk],
+        )
+        .expect("bookkeeping row");
+
+    db.delete_vector(space, chunk).expect("delete");
+
+    assert_eq!(
+        db.embedded_chunk_count(space).expect("count"),
+        0,
+        "a leftover chunk_embedding_state row kept the chunk counted as embedded"
+    );
+}
+
+/// The other direction of the same fix: a stale row — success or failure —
+/// no longer describes a chunk once `upsert_vector` gives it a fresh
+/// embedding. Read directly against `chunk_embedding_state` rather than
+/// through `embedded_chunk_count`: a `state = 1` row is already folded into
+/// that count by the vector's own presence in the `UNION`, so this
+/// particular leftover has no symptom through the public count yet — only
+/// Task 6's queue will read the table directly enough for a stale row to be
+/// wrong out loud.
+#[test]
+fn upserting_a_vector_clears_a_stale_bookkeeping_row() {
+    let db = support::temp_db();
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+    db.conn()
+        .execute(
+            "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state)
+             VALUES (?1, ?2, 'hash', 2)",
+            rusqlite::params![space, chunk],
+        )
+        .expect("stale failure row");
+
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .expect("upsert");
+
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM chunk_embedding_state WHERE space_id = ?1 AND chunk_id = ?2",
+            rusqlite::params![space, chunk],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(
+        rows, 0,
+        "a stale bookkeeping row survived a successful upsert"
+    );
+}
+
+/// `space_count` answers the question a caller cannot answer from
+/// `embedded_chunk_count`: whether the space it can count is the only one.
+///
+/// Three values and not one, because a count that always answered `1` — or
+/// always the number of *non-empty* spaces — would satisfy a single case. The
+/// empty space in the middle is the load-bearing one: it is invisible to
+/// `embedded_chunk_count` from every side, and it is exactly the kind of space
+/// a caller asking "is this all there is" must be told about.
+#[test]
+fn the_number_of_spaces_counts_the_empty_ones_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    assert_eq!(db.space_count().unwrap(), 0, "a fresh index has no spaces");
+
+    let cfg = db
+        .create_model_config("a", "openrouter", None, "vendor/a", 8)
+        .unwrap();
+    let full = db.create_space(cfg, 8, "chunker-v1").unwrap();
+    db.insert_vector(full, 1, &vec_of(8, 1.0)).unwrap();
+    assert_eq!(db.space_count().unwrap(), 1);
+
+    // A second space with nothing in it. `embedded_chunk_count` says zero about
+    // it and `space_is_empty` says true, so neither can tell a caller it exists.
+    let other = db
+        .create_model_config("b", "openrouter", None, "vendor/b", 8)
+        .unwrap();
+    let empty = db.create_space(other, 8, "chunker-v1").unwrap();
+    assert_eq!(db.embedded_chunk_count(empty).unwrap(), 0);
+    assert_eq!(
+        db.space_count().unwrap(),
+        2,
+        "an empty space is still a space this index holds"
+    );
+
+    // And down again, so the count is read rather than accumulated.
+    db.drop_space(full).unwrap();
+    assert_eq!(db.space_count().unwrap(), 1);
+}
+
+/// The number a confirmed model change actually costs: every embedding in the
+/// index, not the active space's share of them.
+///
+/// **The two spaces hold different counts, and neither is the total.** A sum
+/// that read one space, or that answered the largest, or that counted spaces
+/// instead of embeddings, all give something other than 5 here — which a fixture
+/// with equal halves would not have caught.
+///
+/// The chunk ids overlap on purpose. Chunk 1 is embedded in both spaces and is
+/// two embeddings, because two provider calls made them and two would have to be
+/// made again; a sum written as `count(DISTINCT chunk_id)` over the union of the
+/// tables would answer 4 and understate what a rebuild costs.
+#[test]
+fn the_embeddings_everywhere_are_summed_over_spaces_and_distinct_within_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    assert_eq!(
+        db.embedded_chunks_everywhere().unwrap(),
+        0,
+        "a fresh index has nothing to rebuild"
+    );
+
+    // A real chunk, because the bookkeeping row at the end of this test has a
+    // foreign key to `chunk` and the vector table has none. The other ids are
+    // invented, which is what a `vec0` table permits and what
+    // `Db::delete_vectors_for_document` exists because of.
+    let shared = support::one_chunk(&db);
+
+    let first = db
+        .create_model_config("a", "openrouter", None, "vendor/a", 8)
+        .unwrap();
+    let a = db.create_space(first, 8, "chunker-v1").unwrap();
+    for chunk in [shared, 101, 102] {
+        db.insert_vector(a, chunk, &vec_of(8, chunk as f32))
+            .unwrap();
+    }
+    assert_eq!(db.embedded_chunks_everywhere().unwrap(), 3);
+
+    let second = db
+        .create_model_config("b", "openrouter", None, "vendor/b", 8)
+        .unwrap();
+    let b = db.create_space(second, 8, "chunker-v1").unwrap();
+    for chunk in [shared, 103] {
+        db.insert_vector(b, chunk, &vec_of(8, chunk as f32))
+            .unwrap();
+    }
+
+    assert_eq!(db.embedded_chunk_count(a).unwrap(), 3);
+    assert_eq!(db.embedded_chunk_count(b).unwrap(), 2);
+    assert_eq!(
+        db.embedded_chunks_everywhere().unwrap(),
+        5,
+        "chunk 1 is embedded twice, by two models, and is two embeddings to pay for again"
+    );
+
+    // Two records of ONE embedded chunk stay one, which is the rule
+    // `embedded_chunk_count` draws and this must not undo by summing rows.
+    db.conn()
+        .execute(
+            "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state)
+             VALUES (?1, ?2, 'h', 1)",
+            [a, shared],
+        )
+        .unwrap();
+    assert_eq!(
+        db.embedded_chunks_everywhere().unwrap(),
+        5,
+        "a bookkeeping row beside the vector it describes is not a second embedding"
+    );
+
+    db.drop_space(a).unwrap();
+    assert_eq!(
+        db.embedded_chunks_everywhere().unwrap(),
+        2,
+        "what a retired space held is no longer owed to anybody"
+    );
+}
+
+// ------------------------------------------- writing onto the text you read
+
+/// `chunk.id` is reused — `tests/citation.rs`'s
+/// `a_reused_chunk_id_gets_no_inherited_vector` asserts the reuse rather than
+/// assuming it — so an embedding pass that reads `(id, text)`, spends a network
+/// round trip on the text, and writes back by `id` alone can bind text A's
+/// vector to a chunk that now holds text B. This is the guard, and it is here
+/// rather than in the pass because a read-then-write at the caller is the same
+/// window one layer up.
+#[test]
+fn a_vector_is_written_only_onto_the_text_it_was_made_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+    let hash: String = db
+        .conn()
+        .query_row(
+            "SELECT content_hash FROM chunk WHERE id = ?1",
+            [chunk],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    assert!(
+        db.upsert_vector_for_text(space, chunk, &hash, &support::unit_vector_1024())
+            .unwrap(),
+        "the ordinary case — the chunk still holds the text — must write"
+    );
+    assert_eq!(db.embedded_chunk_count(space).unwrap(), 1);
+
+    // The text moves on under the pass. Nothing else changes: same space, same
+    // chunk id, a vector that was perfectly good a moment ago.
+    db.conn()
+        .execute(
+            "UPDATE chunk SET text = 'інший текст', content_hash = 'a-different-hash' \
+             WHERE id = ?1",
+            [chunk],
+        )
+        .unwrap();
+
+    assert!(
+        !db.upsert_vector_for_text(space, chunk, &hash, &support::other_unit_vector_1024())
+            .unwrap(),
+        "a vector for text that is no longer there must not be written"
+    );
+    assert_eq!(
+        support::stored_vector(&db, space, chunk),
+        support::unit_vector_1024(),
+        "the stale write replaced the vector that was already there"
+    );
+}
+
+/// A chunk that has gone entirely, which is the other half of the same window:
+/// the row the vector would name does not exist, and `false` says so rather
+/// than an error — the queue simply never offers that chunk again.
+#[test]
+fn a_vector_for_a_chunk_that_has_gone_is_not_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+    let hash: String = db
+        .conn()
+        .query_row(
+            "SELECT content_hash FROM chunk WHERE id = ?1",
+            [chunk],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn()
+        .execute("DELETE FROM chunk WHERE id = ?1", [chunk])
+        .unwrap();
+
+    assert!(
+        !db.upsert_vector_for_text(space, chunk, &hash, &support::unit_vector_1024())
+            .unwrap()
+    );
+    assert_eq!(db.embedded_chunk_count(space).unwrap(), 0);
+}
+
+/// `record_embedding_failure` writes nothing when the chunk has gone — its
+/// `INSERT … SELECT` finds no row — and the caller counts what it reports, not
+/// what it called. A `failed` number that includes rows nobody can find is the
+/// third number lying about itself, and that number is the entire reason a
+/// chunk is allowed to leave the queue.
+#[test]
+fn recording_a_failure_says_whether_it_wrote_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+    let chunk = support::one_chunk(&db);
+
+    assert!(
+        db.record_embedding_failure(space, chunk).unwrap(),
+        "an ordinary refusal writes a row and must say so"
+    );
+    assert_eq!(db.failed_chunk_count(space).unwrap(), 1);
+
+    db.conn()
+        .execute("DELETE FROM chunk WHERE id = ?1", [chunk])
+        .unwrap();
+
+    assert!(
+        !db.record_embedding_failure(space, chunk).unwrap(),
+        "a chunk that has gone leaves no row, and the caller must not count one"
+    );
+    assert_eq!(db.failed_chunk_count(space).unwrap(), 0);
 }

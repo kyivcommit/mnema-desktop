@@ -961,23 +961,18 @@ fn the_settings_read_names_the_model_the_width_and_what_is_embedded() {
     );
 }
 
-/// A vector outlives the chunk it embeds, so the settings screen's numerator can
-/// exceed its denominator.
+/// A rebuild takes a chunk's vector with it, so the settings screen's
+/// numerator can no longer run ahead of its denominator.
 ///
-/// This is a fact about the storage, measurable **today** — both calls it needs
-/// are public and one of them is used two tests up — and it was very nearly left
-/// as a comment on the ground that it needed a subsystem that does not exist.
-/// It does not: `clear_document_content` is the method a rebuild goes through,
-/// and `write.rs` already records that it deliberately does not reach the
-/// vectors.
-///
-/// What it buys is not a fix. There is nothing to fix — the vec0 table can carry
-/// no foreign key, so a surviving vector is the storage telling the truth. It
-/// buys the invariant being **red-able**: this test stops passing the day
-/// somebody makes `clear_document_content` take the vectors with it, or the day
-/// a second, narrower counter is put behind `embedded_chunk_count`.
+/// Until D88 this test asserted the opposite and said so in these words: "this
+/// test stops passing the day somebody makes `clear_document_content` take the
+/// vectors with it." That day is this one —
+/// `Db::clear_document_content_in` (`write.rs`) now calls
+/// `crate::space::delete_vectors_for_document_in` before the page delete that
+/// starts the cascade, the same call `Db::delete_watched_root` already made —
+/// and the test now pins the invariant it used to document the absence of.
 #[test]
-fn a_vector_outlives_the_chunk_it_embeds() {
+fn clearing_a_document_takes_its_vector_with_the_chunk() {
     let db = temp_db();
     let adopted = db
         .adopt_embedding_model("baai/bge-m3", 4, REF, HASH)
@@ -986,8 +981,8 @@ fn a_vector_outlives_the_chunk_it_embeds() {
     db.insert_vector(adopted.space_id, chunk_id, &[1.0, 0.0, 0.0, 0.0])
         .expect("vector");
     // Both directions, because the whole claim is that these two numbers move
-    // apart: without this, the pair below is satisfied by a fixture that never
-    // had a chunk or never had a vector.
+    // together: without this, the pair below is satisfied by a fixture that
+    // never had a chunk or never had a vector.
     assert_eq!(db.chunk_count().expect("count"), 1);
     assert_eq!(db.embedded_chunk_count(adopted.space_id).expect("count"), 1);
 
@@ -1004,9 +999,9 @@ fn a_vector_outlives_the_chunk_it_embeds() {
     );
     assert_eq!(
         db.embedded_chunk_count(adopted.space_id).expect("count"),
-        1,
-        "and its vector stayed. embedded > total is a reachable state of this database, so \
-         whatever renders the two must never divide them"
+        0,
+        "and its vector went with it — a surviving vector here would again let \
+         embedded exceed total, the state this test used to document"
     );
 }
 

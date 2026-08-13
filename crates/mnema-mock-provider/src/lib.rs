@@ -49,6 +49,28 @@ impl Reply {
         }
     }
 
+    /// A perfectly good `200`, answered `seconds` late.
+    ///
+    /// Not [`Reply::slow`], whose body is `{}` — that one exists to be timed
+    /// out, and a caller that ever received it would fail on the shape rather
+    /// than on the wait. This one exists for the opposite test: a call that
+    /// *succeeds*, slowly, so that whatever made it is provably still in flight
+    /// while the test does something else. A job holding the single job slot is
+    /// the case it was added for.
+    ///
+    /// ⚠️ The server answers one connection at a time, in the order they
+    /// arrive: a request that lands behind this one waits out the whole delay
+    /// too. That is a fact to design a test around, not a bug — see
+    /// [`MockServer::new`].
+    pub fn ok_after(seconds: u64, body: &str) -> Self {
+        Self {
+            status: 200,
+            body: body.to_string(),
+            delay: Duration::from_secs(seconds),
+            declared_extra: 0,
+        }
+    }
+
     /// A `200` whose `content-length` promises more bytes than the connection
     /// ever sends before closing — the real wire shape of a response cut off
     /// mid-transfer (spec review round 1, item A). This is not the same thing

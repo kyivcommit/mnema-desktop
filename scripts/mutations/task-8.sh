@@ -21,7 +21,7 @@ case_ "startup: the index goes to the LOCAL data directory, not the cache" \
 
 case_ "startup: the state is actually managed" \
   src-tauri/src/lib.rs \
-  's{    app\.manage\(state::AppState::new\(dir, worker\)\);\n}{    let _ = (dir, worker);\n}' \
+  's{    app\.manage\(state::AppState::new\(\n        dir,\n        worker,\n        mnema_provider::OPENROUTER_BASE\.to_string\(\),\n        models::CREDENTIAL_REF\.to_string\(\),\n    \)\);\n}{    let _ = (dir, worker);\n}' \
   'let _ = (dir, worker);' \
   mnema-desktop 'the_application_puts_the_index_in_the_local_data_directory' --test commands
 
@@ -45,15 +45,15 @@ case_ "job: a finished job has nothing left" \
 
 case_ "job: every unit is reported when the interval is zero" \
   src-tauri/src/job.rs \
-  's{done == total \|\| last\.is_none_or\(\|last\| now\.duration_since\(last\) >= interval\)}{done == total}' \
+  's{done \+ refused >= total \|\| last\.is_none_or\(\|last\| now\.duration_since\(last\) >= interval\)}{done + refused >= total}' \
   ') -> bool {
-    done == total
+    done + refused >= total
 }' \
   mnema-desktop 'job::tests::every_unit_is_reported_when_the_interval_is_zero' --lib
 
 case_ "job: progress is throttled" \
   src-tauri/src/job.rs \
-  's{done == total \|\| last\.is_none_or\(\|last\| now\.duration_since\(last\) >= interval\)}{true}' \
+  's{done \+ refused >= total \|\| last\.is_none_or\(\|last\| now\.duration_since\(last\) >= interval\)}{true}' \
   ') -> bool {
     true
 }' \
@@ -207,7 +207,7 @@ case_ "commands: job_status is registered" \
   src-tauri/src/lib.rs \
   's{        bridge::job_status,\n}{}' \
   'bridge::cancel_job,
-        walk_job::start_walk_job,' \
+        models::provider_models,' \
   mnema-desktop 'the_window_can_ask_whether_a_job_is_running' --test commands
 
 case_ "commands: a new job does not inherit the last cancellation" \
