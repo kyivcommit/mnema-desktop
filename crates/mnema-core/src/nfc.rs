@@ -43,17 +43,29 @@ pub fn normalise(s: &str) -> Cow<'_, str> {
 /// string has no diacritic in it.
 ///
 /// NFD-decomposes, drops a combining mark that immediately follows an ASCII
-/// Latin base letter, and re-composes what is left. Re-composing matters for
+/// base letter, and re-composes what is left. Re-composing matters for
 /// exactly the case this module exists for: `й` NFD-decomposes to `и` plus a
 /// combining breve too, and since its base is not ASCII the breve survives
 /// this function untouched — but decomposed, until `nfc()` at the end puts it
 /// back together into the one character the rest of this pipeline expects.
 ///
-/// Latin base only, deliberately: a combining mark can also be the *whole
-/// point* of a word rather than a decoration on it — Hebrew niqqud, a
-/// Devanagari virama — and `remove_diacritics` does not touch those either,
-/// so stripping every mark regardless of its base would fix Latin at the cost
-/// of breaking scripts this function was never asked about.
+/// ASCII base, deliberately named that rather than "Latin": a combining mark
+/// can also be the *whole point* of a word rather than a decoration on it —
+/// Hebrew niqqud, a Devanagari virama — and `remove_diacritics` does not
+/// touch those either, so stripping every mark regardless of its base would
+/// fix accented Latin at the cost of breaking scripts this function was
+/// never asked about.
+///
+/// `ł`, `ø` and `æ` are not this rule's exception; they are outside its
+/// input entirely. Unicode gives each of them no canonical decomposition —
+/// they are atomic legacy letters, not a base plus a stroke or a ligature
+/// mark — so `nfd()` never hands this function a combining mark to drop for
+/// any of them, and `remove_diacritics 2` leaves them alone for what is
+/// measured to be the same reason: `mnema-index`'s
+/// `search_terms_reports_the_terms_fts5_actually_stored` indexes `łódź` and
+/// `Ærø` through the real tokenizer and reads back what it actually stored
+/// — `łodz` and `ærø`, agreeing with this function exactly, `ó` and `ź`
+/// (which do decompose to an ASCII base) folding while `ł` does not.
 pub fn strip_latin_diacritics(s: &str) -> String {
     let mut base_is_ascii_letter = false;
     s.nfd()
@@ -118,5 +130,18 @@ mod tests {
         let decomposed = "\u{0438}\u{0306}од";
         assert_eq!(strip_latin_diacritics(precomposed), "йод");
         assert_eq!(strip_latin_diacritics(decomposed), "йод");
+    }
+
+    #[test]
+    fn atomic_legacy_latin_letters_have_no_mark_to_strip() {
+        // `ł`, `ø` and `æ` are not exceptions carved out for this function —
+        // Unicode gives them no canonical decomposition at all, so `nfd()`
+        // never produces a combining mark after them for this function to
+        // drop. Measured to agree with the real tokenizer in
+        // `mnema-index`'s `search_terms_reports_the_terms_fts5_actually_stored`:
+        // `łódź` stores as `łodz` (only `ó`/`ź`, which do decompose, fold)
+        // and `Ærø` stores as `ærø`.
+        assert_eq!(strip_latin_diacritics("łódź"), "łodz");
+        assert_eq!(strip_latin_diacritics("Ærø"), "Ærø");
     }
 }

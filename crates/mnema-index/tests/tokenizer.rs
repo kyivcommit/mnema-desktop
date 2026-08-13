@@ -546,12 +546,19 @@ fn search_terms_are_the_words_the_index_demands() {
 /// pass through the same tokenizer.
 ///
 /// Covers a Latin word with a diaeresis, one with an acute accent, plain
-/// ASCII, and two Ukrainian words — one carrying `й`, one carrying `ї` —
-/// because `remove_diacritics 2` is measured (`mnema_core::nfc`, D32) to fold
-/// the first two and leave the last two exactly as written.
+/// ASCII, two Ukrainian words — one carrying `й`, one carrying `ї` — and two
+/// words carrying letters with no NFD decomposition at all (`ł`, `ø`, `æ`
+/// are atomic legacy Latin letters, not a base plus a combining mark).
+/// `remove_diacritics 2` is measured (`mnema_core::nfc`, D32) to fold the
+/// first two, leave the Ukrainian pair exactly as written, and — measured
+/// here rather than assumed — leave `ł`, `ø` and `æ` untouched too: `łódź`
+/// stores as `łodz` (only `ó`/`ź`, which do decompose, fold) and `Ærø`
+/// stores as `ærø`. `mnema_core::nfc::strip_latin_diacritics` agrees on all
+/// seven because it strips a mark it finds by decomposing, not a letter it
+/// recognises by name, and there is no mark to find on any of the three.
 #[test]
 fn search_terms_reports_the_terms_fts5_actually_stored() {
-    let texts = ["Zürich", "café", "hello", "йод", "їжак"];
+    let texts = ["Zürich", "café", "hello", "йод", "їжак", "łódź", "Ærø"];
     let (_d, db, ids) = db_with(&texts.map(|t| (t, SourceKind::Document)));
 
     db.conn()
