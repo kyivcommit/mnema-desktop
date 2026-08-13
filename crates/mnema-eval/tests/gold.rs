@@ -71,6 +71,27 @@ fn a_decomposed_sentence_finds_its_precomposed_chunk() {
     );
 }
 
+/// `canonical` must NOT strip combining marks, and this is the only test that
+/// says so. A sister change is making `mnema-index`'s term reporting mirror
+/// FTS5, which removes every mark in U+0300–U+0331 — and copying that here would
+/// be wrong in a way every other test in this file is blind to: measured, an
+/// implementation that strips marks passes all seven. If it decomposes first it
+/// folds `й` into `и` and `ї` into `і`, which this project forbids outright, and
+/// the oracle would then answer `One` for a chunk holding a **different word**.
+///
+/// The oracle compares against `chunk.text`, which the index never folds; being
+/// stricter than the search here is correct, and the cost — a question that must
+/// reproduce a stress mark exactly — is paid in the corpus rules and in
+/// pre-flight, not by loosening this.
+#[test]
+fn folding_i_kratke_into_i_would_match_a_different_word() {
+    // The chunk says `новий`. The needle says `новии` — which is exactly what
+    // `новий` becomes if a mark-stripping implementation decomposes first. They
+    // are different words and must not match.
+    let chunk = vec![(10, "Комісія ухвалила новий склад.".to_string())];
+    assert_eq!(resolve_gold(&chunk, "ухвалила новии склад."), Gold::Missing);
+}
+
 /// A hard-wrapped paragraph keeps its newline in the chunk; nobody types the
 /// answer sentence with it.
 #[test]

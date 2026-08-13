@@ -3,16 +3,26 @@
 pub enum Gold {
     /// Exactly one — the only shape a question may ship with.
     One(i64),
-    /// None, and there are THREE causes, not two: the corpus was edited and the
-    /// question was not; the sentence was mistyped; or the sentence was quoted
-    /// from text the chunk does not hold in that form. The third is the one a
-    /// reader will not think of: the markdown reader stores raw source lines
+    /// None. The causes are listed rather than counted, because a count is a
+    /// definition too and this one has already been short once:
+    ///
+    /// - the corpus was edited and the question was not;
+    /// - the sentence was mistyped;
+    /// - the sentence was quoted from text the chunk does not hold in that form;
+    /// - the sentence is longer than the chunker's carry and was cut by a chunk
+    ///   boundary, so it lies whole in no chunk. Rare — boundaries prefer
+    ///   sentence ends (`crates/mnema-chunk/src/units.rs:76-81`) — and not
+    ///   invented: a long legal sentence reaches it.
+    ///
+    /// The third is the one a reader will not think of: the markdown reader
+    /// stores raw source lines
     /// (`crates/mnema-extract/src/markdown.rs:130`), so inline markup — `**`,
     /// backticks, link syntax — is part of the chunk's text and no
     /// canonicalisation here removes it.
     ///
     /// The chunker's own separator between non-adjacent pieces
-    /// (`crates/mnema-chunk/src/pack.rs:44-48`) is **not** a cause: it is
+    /// (`JOIN`, defined at `crates/mnema-chunk/src/lib.rs:42`, inserted at
+    /// `crates/mnema-chunk/src/pack.rs:66`) is **not** a cause: it is
     /// whitespace, and `canonical` collapses it. Said explicitly because the
     /// obvious guess is that it is.
     ///
@@ -46,7 +56,11 @@ fn canonical(text: &str) -> String {
         .join(" ")
 }
 
-/// Finds the chunks whose stored text contains `sentence`.
+/// Finds the chunks whose text holds `sentence`, once both are canonicalised.
+///
+/// The summary line says "once both are canonicalised" because that is the line
+/// a module listing shows, and "contains the stored text" was true only before
+/// this function learned that the two sides are never byte-comparable.
 ///
 /// **The caller owes chunks of a document whose `document.status` is
 /// `indexed`.** `Db::chunks_of_document` (`crates/mnema-index/src/write.rs:799`)
