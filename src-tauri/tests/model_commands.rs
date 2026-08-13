@@ -1613,13 +1613,20 @@ fn a_model_change_is_refused_while_a_job_holds_the_slot() {
 ///   neighbouring defence — named as one, because it protects the non-empty case
 ///   only, which is exactly why the empty case needed a guard of its own.
 ///
-/// **Measured, with the claim removed:** the second, as
-/// `Index(SpaceNotEmpty { space_id: 1, embedded_chunks: 3 })`. The mock answers
-/// one connection at a time and the change queues behind the run's delayed
-/// reply, so the run's three writes land first. The test above is the one whose
-/// *state* assertion fires on this mutation — there the job is a probe, which
-/// writes nothing, so nothing makes the space non-empty and nothing but the
-/// claim stands between the change and the pointer.
+/// **Both have been measured with the claim removed, on this machine**, which is
+/// worth knowing before anybody trusts one of them: first as
+/// `Index(SpaceNotEmpty { space_id: 1, embedded_chunks: 3 })` — the run's three
+/// writes landing before the change reached the index — and then, on a later
+/// run of the harness, as `the index was repointed while a pass was writing into
+/// the space it named`, `left: Some(2), right: Some(1)`. The order the two
+/// finish in after the mock's delay expires is not fixed, so this test reddens
+/// through whichever it gets, and the pair of assertions is why it reddens
+/// either way rather than intermittently.
+///
+/// The test above is the one that fires on its *state* assertion every time:
+/// there the job is a probe, which writes nothing, so nothing can make the space
+/// non-empty and nothing but the claim stands between the change and the
+/// pointer.
 #[test]
 fn a_run_leaves_no_vectors_in_a_space_nothing_points_at() {
     const CHUNKS: usize = 3;

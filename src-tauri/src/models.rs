@@ -972,42 +972,7 @@ fn index_settings(state: &AppState) -> IndexSettings {
     // `total_chunks` and `failed_chunks` against each other, and against the
     // run's own line beside them. `Db::read_snapshot` takes no write lock and
     // blocks no writer — see its own doc comment.
-    let read = state.with_index(|db| {
-        db.read_snapshot(|db| {
-            let active_space = db.active_space()?;
-            let (embedding_model, embedding_dim) = match active_space {
-                Some(id) => {
-                    let (model, dim) = db.space_model(id)?;
-                    (Some(model), Some(dim))
-                }
-                None => (None, None),
-            };
-            Ok(IndexSettings::Read(IndexRead {
-                embedding_model,
-                embedding_dim,
-                active_space,
-                embedded_chunks: match active_space {
-                    Some(id) => db.embedded_chunk_count(id)?,
-                    None => 0,
-                },
-                total_chunks: db.chunk_count()?,
-                // Inside the same snapshot as the two counts above, so all three
-                // describe one state of the index rather than three — see the
-                // comment on `read_snapshot` at the top of this function. This is
-                // the number a person is asked to trust the no-retry rule on, and
-                // it is read after `embedded_chunks`, so without the snapshot the
-                // pair could straddle a committed batch.
-                failed_chunks: match active_space {
-                    Some(id) => db.failed_chunk_count(id)?,
-                    None => 0,
-                },
-                space_count: db.space_count()?,
-                embedded_chunks_everywhere: db.embedded_chunks_everywhere()?,
-                rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
-                chat_model: db.meta_get(mnema_index::META_CHAT_MODEL)?,
-            }))
-        })
-    });
+    let read = state.with_index(|db| db.read_snapshot(read_settings));
     match read {
         Ok(settings) => settings,
         Err(e) => IndexSettings::Unreadable {
@@ -1015,6 +980,56 @@ fn index_settings(state: &AppState) -> IndexSettings {
             reason: e.to_string(),
         },
     }
+}
+
+/// The seven values the settings screen draws, read from one index.
+///
+/// A named function rather than a closure inside [`index_settings`] for a reason
+/// that is not style: it is passed to `Db::read_snapshot`, which is what makes
+/// the seven one moment, and nesting the body in a second closure would have
+/// shifted every line of it four columns to the right. Two mutation cases quote
+/// this code with its indentation — measured, they broke — and a case file that
+/// has to be re-indented every time a wrapper appears is a case file that will
+/// one day be re-indented wrong.
+///
+/// ⚠️ **Every read in here belongs to one snapshot, and nothing in the type says
+/// so.** Called outside `read_snapshot` it still compiles and still answers,
+/// with each read taking its own; called with a write added it would fail at run
+/// time on SQLite's missing nested `BEGIN`. The obligation sits on the one call
+/// site.
+fn read_settings(db: &mnema_index::Db) -> Result<IndexSettings, mnema_index::Error> {
+    let active_space = db.active_space()?;
+    let (embedding_model, embedding_dim) = match active_space {
+        Some(id) => {
+            let (model, dim) = db.space_model(id)?;
+            (Some(model), Some(dim))
+        }
+        None => (None, None),
+    };
+    Ok(IndexSettings::Read(IndexRead {
+        embedding_model,
+        embedding_dim,
+        active_space,
+        embedded_chunks: match active_space {
+            Some(id) => db.embedded_chunk_count(id)?,
+            None => 0,
+        },
+        total_chunks: db.chunk_count()?,
+        // Inside the same snapshot as the two counts above, so all three
+        // describe one state of the index rather than three — see the comment on
+        // `read_snapshot` in [`index_settings`]. This is the number a person is
+        // asked to trust the no-retry rule on, and it is read after
+        // `embedded_chunks`, so without the snapshot the pair could straddle a
+        // committed batch.
+        failed_chunks: match active_space {
+            Some(id) => db.failed_chunk_count(id)?,
+            None => 0,
+        },
+        space_count: db.space_count()?,
+        embedded_chunks_everywhere: db.embedded_chunks_everywhere()?,
+        rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
+        chat_model: db.meta_get(mnema_index::META_CHAT_MODEL)?,
+    }))
 }
 
 /// The key half, asked and answered — and never an `Err`, for the same reason

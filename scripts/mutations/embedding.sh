@@ -172,11 +172,18 @@ case_ "models: an ordinary refusal must not claim a deletion (D96g, review 1)" \
 # "one space" over an index holding two, and the button offers to delete a
 # number that is not the whole bill — which is exactly review 1's Important 2
 # reopened, from the side the window cannot check.
+# ⚠️ Re-indented in Task 8's fix round 1, and the reason belongs beside it: the
+# body of `index_settings` moved out into `read_settings` so that
+# `Db::read_snapshot` could wrap it, and every line this case quotes lost four
+# columns. The harness said `BROKEN CASE: changed, but not into what the case
+# describes` — the expression still matched (a leading-space run is not
+# anchored), the marker did not. That is the guard working; a case file nobody
+# re-reads after a refactor is a case file that goes quietly green.
 case_ "models: the number of spaces must be measured, not asserted (D96g, review 1)" \
   src-tauri/src/models.rs \
-  's{            space_count: db\.space_count\(\)\?,\n}{            space_count: 1,\n}' \
-  '            space_count: 1,
-            embedded_chunks_everywhere:' \
+  's{        space_count: db\.space_count\(\)\?,\n}{        space_count: 1,\n}' \
+  '        space_count: 1,
+        embedded_chunks_everywhere:' \
   mnema-desktop 'the_settings_tell_the_active_space_apart_from_the_whole_index' --test model_commands
 
 # The argument that must be the caller's. Made optional, a window that sends
@@ -981,9 +988,9 @@ case_ "embed_job: a stopped run must not be reported as a finished one (T8)" \
 # leave the embedding queue for good.
 case_ "models: the settings must read the refusal count, not report zero (T8)" \
   src-tauri/src/models.rs \
-  's{            failed_chunks: match active_space \{\n                Some\(id\) => db\.failed_chunk_count\(id\)\?,\n                None => 0,\n            \},}{            failed_chunks: 0,}' \
-  '            failed_chunks: 0,
-            space_count: db.space_count()?,' \
+  's{        failed_chunks: match active_space \{\n            Some\(id\) => db\.failed_chunk_count\(id\)\?,\n            None => 0,\n        \},}{        failed_chunks: 0,}' \
+  '        failed_chunks: 0,
+        space_count: db.space_count()?,' \
   mnema-desktop 'a_chunk_the_provider_refused_is_counted_where_a_person_can_read_it' --test model_commands
 
 # The ordering `start_walk_job` argues for and this command inherits: every
