@@ -125,6 +125,11 @@ cd "$TREE" || exit 1
 red=0
 green=0
 broken=0
+# N6: counted the same way `mutation-staleness.sh` counts it, and printed
+# beside `red`/`green`/`broken` for the same reason — `/g` is a self-declaring
+# opt-out from guard 3, and an opt-out nobody counts is one nobody would
+# notice growing.
+every_match_count=0
 
 restore() { git -C "$TREE" checkout -q -- . ; }
 
@@ -214,6 +219,7 @@ case_() {
   local occurrences
   occurrences=$(perl -0pi -e "my \$mnema_subs = do { $forced }; print STDERR ((\$mnema_subs) + 0);" "$WORK/count-copy" 2>&1 1>/dev/null)
   if expr_wants_every_match "$expr"; then
+    every_match_count=$((every_match_count + 1))
     if [ "$occurrences" -lt 1 ]; then
       echo "   BROKEN CASE: the expression carries /g and should match at least once; it matched $occurrences times"
       broken=$((broken + 1)); restore; return 0
@@ -306,13 +312,13 @@ if [ "$sourced" -ne 0 ]; then
   echo
   echo "COULD NOT READ $CASES to the end on the mutation pass (status $sourced), although the"
   echo "baseline pass read it whole. The counts below cover only what was reached."
-  echo "red: $red   still green: $green   broken cases: $broken"
+  echo "red: $red   still green: $green   broken cases: $broken   exempted by /g: $every_match_count"
   exit 1
 fi
 
 restore
 echo
-echo "red: $red   still green: $green   broken cases: $broken"
+echo "red: $red   still green: $green   broken cases: $broken   exempted by /g: $every_match_count"
 # `red > 0` is not decoration on the other two, it is the condition they cannot
 # express: zero green and zero broken is exactly what a file containing NO CASES
 # reports, and it reported it with exit 0. So `red: 0 / still green: 0` — a

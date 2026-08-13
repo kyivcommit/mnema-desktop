@@ -178,6 +178,12 @@ skipped=""
 read_names=""
 hidden=0
 unreadable=0
+# N6: `/g` is a self-declaring opt-out from guard 3's "exactly one" — a case
+# earns "at least one" just by carrying the flag, no review required. An
+# exemption nobody counts is an exemption nobody would notice growing, so this
+# is printed in the summary the same way the skipped-file list already makes
+# its own exclusions visible.
+every_match_count=0
 
 # case_ <label> <file> <perl-expr> <marker> <package> <test-name> <cargo args...>
 #
@@ -233,6 +239,7 @@ case_() {
   occurrences=$(perl -0pi -e "my \$mnema_subs = do { $forced }; print STDERR ((\$mnema_subs) + 0);" "$count_copy" 2>&1 1>/dev/null)
 
   if expr_wants_every_match "$expr"; then
+    every_match_count=$((every_match_count + 1))
     if [ "$occurrences" -lt 1 ]; then
       echo "MATCHES NOTHING: $label"
       echo "   the expression carries /g and should match at least once; it matched $occurrences times"
@@ -308,7 +315,7 @@ echo "read $files_read case file(s), $checked cases:$read_names"
 if [ -n "$skipped" ]; then
   echo "skipped, not case files (they declare an interpreter — stand-in workers):$skipped"
 fi
-echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable"
+echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable   exempted by /g: $every_match_count"
 echo "nothing was compiled and no test was run — that is scripts/mutation-check.sh"
 
 # `checked > 0` is not decoration on `stale == 0`, it is the condition that one
