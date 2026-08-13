@@ -213,7 +213,7 @@ case_ "space: the number of spaces counts the empty ones too (D96g, review 1)" \
 # active space, the button offers to delete less than it will.
 case_ "models: the confirmation's number must count the index, not the active space (D96g, review 2)" \
   src-tauri/src/models.rs \
-  's{            embedded_chunks_everywhere: db\.embedded_chunks_everywhere\(\)\?,\n}{            embedded_chunks_everywhere: db.embedded_chunk_count(active_space.unwrap_or(0)).unwrap_or(0),\n}' \
+  's{        embedded_chunks_everywhere: db\.embedded_chunks_everywhere\(\)\?,\n}{        embedded_chunks_everywhere: db.embedded_chunk_count(active_space.unwrap_or(0)).unwrap_or(0),\n}' \
   'embedded_chunks_everywhere: db.embedded_chunk_count(active_space.unwrap_or(0)).unwrap_or(0),' \
   mnema-desktop 'the_settings_tell_the_active_space_apart_from_the_whole_index' --test model_commands
 
