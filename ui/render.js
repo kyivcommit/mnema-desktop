@@ -1023,7 +1023,13 @@ const embeddingsCount = (n) => (n === 1 ? "1 embedding" : `${n} embeddings`);
 //    is not given the reason. Review round 1, Important 1.
 //
 // Telling refusals apart in general needs them to carry their own shape rather
-// than a string, which is deliberately not this cycle's work — so gap 1 stands.
+// than a string, which is deliberately not this cycle's work — so gap 1 stands,
+// and **one more thing is deferred with it rather than separately**, because the
+// same typed refusal closes both: [`changeToConfirm`] is given `jobRunning` read
+// *after* the await, so it answers "is a job running now" rather than "was this
+// refusal about the slot". The window is one IPC return wide. Whoever gives
+// `Error` a shape the wire carries closes gap 1 and that at once; closing either
+// alone leaves the other looking handled.
 export const discardOffer = (model, index, key, jobRunning) => {
   if (model === null || model === undefined) return null;
   if (jobRunning) return null;
