@@ -8,17 +8,14 @@ pub enum Gold {
     /// refuses a question that resolves here before anything is scored, so a
     /// dropped configuration is never blamed for a miss that isn't one.
     Missing,
-    /// Several. Legitimate — chunks overlap — and still not shippable: with two
-    /// right answers a rank means two things. Preflight refuses it and the
+    /// Several. Legitimate — chunks overlap — and still not shippable: with
+    /// two right answers a rank means two things
+    /// (`a_sentence_in_two_chunks_names_both`). Preflight refuses it and the
     /// author moves the sentence.
     ///
     /// Ids come back in the order the caller supplied the chunks. The caller is
     /// `Db::chunks_of_document`, which orders by `chunk.ord`; saying so here is
     /// what keeps a `GoldSeveral` message stable between runs.
-    ///
-    /// Written as plain text, not an intra-doc link: `mnema-index` is not a
-    /// dependency of this crate, so the link would never resolve and
-    /// `rustdoc::broken_intra_doc_links` is not in the gates to catch it.
     Several(Vec<i64>),
 }
 
@@ -36,16 +33,16 @@ fn canonical(text: &str) -> String {
         .join(" ")
 }
 
-/// Finds the chunks whose text holds `sentence`, canonicalised on both sides. Substring, not
-/// tokens, so word order still counts
-/// (`the_same_words_in_another_order_are_not_the_sentence`). NFC bridges decomposed vs.
-/// precomposed text on either side (`a_decomposed_sentence_finds_its_precomposed_chunk`,
-/// `a_decomposed_chunk_holds_a_precomposed_sentence`); collapsing (not deleting) whitespace
-/// bridges a hard wrap vs. a doubled space on either side
-/// (`words_run_together_are_not_the_sentence`,
-/// `a_doubled_space_in_the_sentence_still_finds_the_chunk`). The caller owes chunks of an
-/// `indexed` document — `Db::chunks_of_document` (`crates/mnema-index/src/write.rs:812`) does
-/// not filter by status; task 9's preflight is where that is checked.
+/// Finds the chunks whose text holds `sentence`, canonicalised on both sides.
+/// NFC: decomposed vs. precomposed, needle side
+/// (`a_decomposed_sentence_finds_its_precomposed_chunk`), chunk side
+/// (`a_decomposed_chunk_holds_a_precomposed_sentence`). Collapse, not delete
+/// (`words_run_together_are_not_the_sentence`): a doubled space, needle side
+/// (`a_doubled_space_in_the_sentence_still_finds_the_chunk`); a hard wrap,
+/// chunk side (`a_line_break_inside_the_chunk_does_not_hide_the_sentence`). The
+/// caller owes chunks of an `indexed` document —
+/// `crates/mnema-index/src/write.rs:812` does not filter by status; task 9's
+/// preflight checks it.
 pub fn resolve_gold(chunks: &[(i64, String)], sentence: &str) -> Gold {
     let needle = canonical(sentence);
     let hits: Vec<i64> = chunks
