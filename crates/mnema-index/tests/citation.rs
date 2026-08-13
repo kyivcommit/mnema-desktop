@@ -1341,19 +1341,33 @@ impl std::ops::Deref for WithChunks {
     }
 }
 
-/// One document, one page, one block, two chunks at `ord` 0 and 1 — built the
-/// same way `fixture_one_page` above assembles the four-level model, extended
-/// to more than one chunk.
-fn fixture_with_two_chunks(document_id: &str, texts: &[&str; 2]) -> WithChunks {
-    let dir = tempfile::tempdir().unwrap();
-    let db = fresh(&dir);
+/// Inserts one document, one page, one block, and its two chunks at `ord` 0
+/// and 1, into a database the caller already has open — split out from
+/// `fixture_with_two_chunks` below so a second document can be added to the
+/// *same* database instead of an isolated one of its own.
+///
+/// Finished, the same way `fixture_one_page` above and `db_with` in
+/// `tests/tokenizer.rs` both are: under D61 a search does not answer with a
+/// document still at `pending`, and `insert_document` leaves one there. A
+/// fixture that skipped this would satisfy every assertion here whether or
+/// not the document could ever be found, which `citation.rs:436-441` already
+/// names as coverage that is not coverage.
+///
+/// Inserted `ord` 1 then `ord` 0 — reversed on purpose. `chunk.id` is
+/// `INTEGER PRIMARY KEY`, so inserting in `ord` order would make `ORDER BY
+/// id`, `ORDER BY ord` and no ordering at all agree by accident; reversed,
+/// only `ORDER BY ord` — what `chunks_of_document` actually uses — still
+/// puts `texts[0]` first.
+fn insert_two_chunks(db: &Db, document_id: &str, texts: &[&str; 2]) {
     db.insert_document(document_id, "text/plain", 4, SourceKind::Document)
+        .unwrap();
+    db.set_document_status(document_id, DocumentStatus::Indexed)
         .unwrap();
     let page = db.insert_page(document_id, 1, "native:txt", None).unwrap();
     let block = db
         .insert_block(page, &paragraph(0, texts[0], Some(1), Some(1)))
         .unwrap();
-    for (ord, text) in texts.iter().enumerate() {
+    for (ord, text) in texts.iter().enumerate().rev() {
         db.insert_chunk(
             document_id,
             ord as i64,
@@ -1371,6 +1385,17 @@ fn fixture_with_two_chunks(document_id: &str, texts: &[&str; 2]) -> WithChunks {
         )
         .unwrap();
     }
+}
+
+/// One document, one page, one block, two chunks at `ord` 0 and 1 — built the
+/// same way `fixture_one_page` above assembles the four-level model
+/// (including declaring the document finished), extended to more than one
+/// chunk and returned in the `WithChunks`/`Deref` shape `fixture_one_page`
+/// uses too, so the test below can call `Db` methods on it directly.
+fn fixture_with_two_chunks(document_id: &str, texts: &[&str; 2]) -> WithChunks {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    insert_two_chunks(&db, document_id, texts);
     WithChunks { db, _dir: dir }
 }
 
@@ -1380,6 +1405,11 @@ fn fixture_with_two_chunks(document_id: &str, texts: &[&str; 2]) -> WithChunks {
 #[test]
 fn chunks_of_document_come_back_in_order_with_their_text() {
     let db = fixture_with_two_chunks("doc-1", &["перший шматок", "другий шматок"]);
+    // A second, unrelated document in the same database — without it,
+    // `WHERE document_id = ?1` is only ever tested against an id nobody
+    // wrote, and a method that dropped the clause entirely would still pass
+    // every assertion below.
+    insert_two_chunks(&db, "doc-2", &["третій шматок", "четвертий шматок"]);
 
     let chunks = db.chunks_of_document("doc-1").unwrap();
     assert_eq!(chunks.len(), 2, "got {chunks:?}");
@@ -1394,5 +1424,57 @@ fn chunks_of_document_come_back_in_order_with_their_text() {
         db.chunks_of_document("no-such-document")
             .unwrap()
             .is_empty()
+    );
+}
+
+/// `chunks_of_document` disagrees with `search_lexical` on purpose — see the
+/// method's own doc comment for why the disagreement stands rather than
+/// being filtered away. Pinned here rather than left to the doc comment
+/// alone, in both directions: a document left at `pending` still gives up
+/// its chunks through this method, and `search_lexical` still finds nothing
+/// in it (`search.rs:42`, `document.status = 'indexed'`). Either half alone
+/// would pass a version of `chunks_of_document` that quietly started
+/// agreeing with search — the first if it kept filtering pending documents
+/// out, the second if `search_lexical` stopped filtering at all.
+#[test]
+fn chunks_of_document_answers_for_a_pending_document_search_cannot_see() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+
+    // Left at `pending`: `insert_document`'s own starting state, never
+    // advanced by `set_document_status`.
+    db.insert_document("doc-pending", "text/plain", 4, SourceKind::Document)
+        .unwrap();
+    let page = db
+        .insert_page("doc-pending", 1, "native:txt", None)
+        .unwrap();
+    let block = db
+        .insert_block(page, &paragraph(0, "кошторис на ремонт", Some(1), Some(1)))
+        .unwrap();
+    db.insert_chunk(
+        "doc-pending",
+        0,
+        "кошторис на ремонт",
+        &Locator {
+            spans: vec![Segment {
+                block_id: block,
+                start: 0,
+                end: "кошторис на ремонт".chars().count() as u32,
+                block_start: 0,
+            }],
+            coordinate: Coordinate::None,
+        },
+        SourceKind::Document,
+    )
+    .unwrap();
+
+    let chunks = db.chunks_of_document("doc-pending").unwrap();
+    assert_eq!(chunks.len(), 1, "got {chunks:?}");
+    assert_eq!(chunks[0].1, "кошторис на ремонт");
+
+    assert!(
+        db.search_lexical("кошторис", 10).unwrap().is_empty(),
+        "a pending document must stay invisible to search (D61), even though \
+         chunks_of_document just answered for it above"
     );
 }
