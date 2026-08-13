@@ -1075,19 +1075,40 @@ export const embedEndingSentence = (ended, index) =>
 // this repository can see — the argument this file's header makes, and the one
 // the bar's own state was moved here under.
 //
-// The one thing it refuses on: **a job holding the slot again.** The read is an
-// IPC round trip wide and somebody can press Embed inside it. Landing then, this
-// would paint the previous run's ending — carrying a pair of numbers measured
-// before the new run started — over a line describing a run in flight. That is
-// the stale assertion this cycle has already removed from the settings line
-// (Important 2), from the discard button's label (Minor C) and from the bar, and
-// it must not come back in through the door built to fix it.
+// The one thing it refuses on: **the status line having been claimed by a
+// newer press.** The read is an IPC round trip wide and somebody can press
+// Embed inside it. Landing then, this would paint the previous run's ending —
+// carrying a pair of numbers measured before the new run started — over a line
+// describing a run in flight. That is the stale assertion this cycle has
+// already removed from the settings line (Important 2), from the discard
+// button's label (Minor C) and from the bar, and it must not come back in
+// through the door built to fix it.
 //
-// It asks `jobRunning` **after** the await, so it answers "is a job running
-// now", which is exactly the question here — unlike `changeToConfirm`, whose
-// own note explains why the same reading is the wrong one for a refusal.
-export const restatedEnding = (ended, index, jobRunning) =>
-  jobRunning ? null : embedEndingSentence(ended, index);
+// ⚠️ **It asks a generation and not `jobRunning`, and that is a measured
+// correction rather than a refinement.** The first version of this guard asked
+// the flag, which is set *after* the await on both press paths — so the flag
+// lags the truth by one IPC round trip, in **both** directions, and the review
+// of `3b18859` drove `main.js` and produced both:
+//
+//   - reads `false` while a newer run is live, because that run's first
+//     progress event can arrive before its own `invoke` resolves (`main.js`
+//     says so itself, above `followUntilIdle`) — so the guard let exactly the
+//     paint-over it was written to stop happen anyway; and
+//   - reads `true` with nothing live at all, because a run that ends before its
+//     own `invoke` resolves has the flag set for a run already over — so the
+//     guard suppressed a restatement that nothing was competing with, and
+//     **nothing ever retries it**. That lands on `total === 0`, the ordinary
+//     answer to a second press. The guard defended the rare case by breaking
+//     the common one, which is the shape this branch has now paid for twice.
+//
+// A generation is exact in both directions because it is incremented **before**
+// the await, by the press itself, so there is no window in which it lags. It
+// counts presses that claim the status line, not jobs that are running, and it
+// is deliberately not rolled back by a refused press: a refusal writes its own
+// sentence to that same line, and that sentence is newer than this one and is
+// what the person needs to read.
+export const restatedEnding = (ended, index, ownGeneration, latestGeneration) =>
+  ownGeneration === latestGeneration ? embedEndingSentence(ended, index) : null;
 
 // A run that never started. The refusals are `Error::NoKey`, `Error::Secrets`,
 // `Error::JobAlreadyRunning` and `Error::Index(_)` — the last from

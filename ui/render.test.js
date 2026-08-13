@@ -10,7 +10,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -794,14 +794,34 @@ test("a stale line still carries the counts it is stale about", () => {
   assert.match(text, /\b9\b/);
 });
 
-test("the settings line is told whether a job is running", () => {
+// ⚠️ **The predicate is no longer `jobRunning`, and that is the point.** Review
+// of `3b18859`, Important 2, measured: `drawSettings` reads that flag after its
+// own await, and nothing sets it until a press's await returns — so a run that
+// started inside this read and is already reporting progress leaves it `false`,
+// and the line stated `none were refused by the provider` beside a live run.
+// The predicate now also asks whether a press has claimed the slot since the
+// read was issued, which is a question a generation can answer and the flag
+// cannot. `main.test.js` drives that ordering; this pins the wiring.
+test("the settings line is told whether a job has the slot, by something that cannot lag", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const main = readFileSync(join(here, "main.js"), "utf8");
   assert.match(
     main,
-    /embeddingProgressText\(\s*settings\.index,\s*jobRunning,?\s*\)/,
-    "the settings line is drawn without being told a job is running, so it goes back to \
+    /embeddingProgressText\(\s*settings\.index,\s*aJobHasTheSlot,?\s*\)/,
+    "the settings line is drawn without being told a job has the slot, so it goes back to \
      asserting that nothing was refused for the whole length of a run",
+  );
+  assert.match(
+    main,
+    /const aJobHasTheSlot = jobRunning \|\| askedAt !== jobGeneration;/,
+    "the predicate is back to a flag that is set only after a press's await, so a run that \
+     started inside this read is invisible to it",
+  );
+  assert.match(
+    main,
+    /const askedAt = jobGeneration;\s*const settings = await invoke\("model_settings"\);/,
+    "the generation is captured after the await rather than before it, which measures nothing: \
+     it would always equal itself",
   );
 });
 
@@ -877,13 +897,16 @@ test("no offer is made while a job is moving the number it would name", () => {
   assert.equal(discardVectorsNote(discardOffer("vendor/m", index, key, true)), "");
 });
 
-test("the discard offer is told whether a job is running", () => {
+// The same predicate as the line above it, and for the same measurement: the
+// button's label is stale in exactly the window the settings line is, so fixing
+// one and leaving its neighbour is the half-fix this cycle keeps catching.
+test("the discard offer is told whether a job has the slot", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const main = readFileSync(join(here, "main.js"), "utf8");
   assert.match(
     main,
-    /discardOffer\(refusedChange, settings\.index, settings\.key, jobRunning\)/,
-    "the offer is drawn without being told a job is running, so its label goes on naming a \
+    /discardOffer\(refusedChange, settings\.index, settings\.key, aJobHasTheSlot\)/,
+    "the offer is drawn without being told a job has the slot, so its label goes on naming a \
      count that is moving",
   );
 });
@@ -1194,6 +1217,12 @@ test("an index this window has not read leaves the second pair unsaid", () => {
 // The decision is `restatedEnding`'s rather than an `if` in `main.js`, for the
 // reason the whole of `render.js` exists: a branch over there is a branch this
 // file cannot reach.
+//
+// **It compares two generations and not a flag, and that is a correction with a
+// measurement behind it.** The first version asked `jobRunning`, which is set
+// only after a press's await; `main.test.js` drives both orderings in which
+// that answered wrongly, and the worse of the two withheld this sentence for
+// good on `total === 0`.
 test("the ending is restated only while nothing newer has taken the slot", () => {
   const ending = {
     reason: "failed",
@@ -1205,7 +1234,7 @@ test("the ending is restated only while nothing newer has taken the slot", () =>
   const index = readWith({ embeddedChunks: 8, totalChunks: 9 });
 
   assert.equal(
-    restatedEnding(ending, index, true),
+    restatedEnding(ending, index, 1, 2),
     null,
     "a run that started inside the round trip gets the previous run's ending, and a pair of \
      numbers from before it began, painted over its own live line",
@@ -1213,12 +1242,20 @@ test("the ending is restated only while nothing newer has taken the slot", () =>
 
   // Both directions, or this is satisfied by a restatement that never lands and
   // the second pair is never on screen at all — which is the defect it was
-  // written for, not a fix for it.
-  const landed = restatedEnding(ending, index, false);
+  // written for, not a fix for it. This is the half the `jobRunning` version
+  // failed: it read `true` for a run that had already ended, so the pair was
+  // suppressed with nothing to suppress it for, and nothing ever retried.
+  const landed = restatedEnding(ending, index, 2, 2);
   assert.notEqual(landed, null, "the restatement never lands, so the index's pair is never said");
   assert.match(landed, /3 of 5 embedded in this run/);
   assert.match(landed, /8 pieces with a vector, of 9 in the whole index/);
   assert.match(landed, /press Embed/);
+
+  // The first press of a window is generation 1, and the comparison must be of
+  // the two numbers rather than of either against a constant — `0` is a real
+  // generation for a window where nothing has been pressed yet.
+  assert.notEqual(restatedEnding(ending, index, 0, 0), null);
+  assert.equal(restatedEnding(ending, index, 0, 1), null);
 });
 
 // The seam: the pair only exists if the ending is restated from the read that
@@ -1238,10 +1275,27 @@ test("the ending is written at once, and restated through the guard afterwards",
   );
   assert.match(
     main,
-    /const restated = restatedEnding\(ending, settings\.index, jobRunning\);/,
-    "the ending is not restated from the index that was read back, or is restated without \
-     asking whether a newer run has taken the slot — and the test above this one, which is \
+    /const restated = restatedEnding\(ending, settings\.index, generation, jobGeneration\);/,
+    "the ending is not restated from the index that was read back, or is restated against \
+     something other than the press's own generation — and the test above this one, which is \
      the one that can actually decide that question, is then aimed at nothing",
+  );
+  // The generation is taken before anything is awaited, which is the whole of
+  // why it does not lag the way `jobRunning` does. Captured after the await it
+  // would be the same defect with a new name.
+  assert.match(
+    main,
+    /jobGeneration \+= 1;\s*const generation = jobGeneration;\s*\n\s*\/\/ A channel of its own/,
+    "the press's generation is not taken before it awaits anything, so it can no longer say \
+     which press this ending belongs to",
+  );
+  // Both presses claim the line, or an embedding run's restatement lands on a
+  // walk that was started after it.
+  assert.equal(
+    [...main.matchAll(/jobGeneration \+= 1;/g)].length,
+    2,
+    "one of the two presses does not claim the job area, so a restatement can land on the \
+     other one's line",
   );
   assert.match(
     main,
@@ -2394,6 +2448,50 @@ test("every sentence in the model configuration block comes from render.js", () 
       `a sentence in the model configuration block starts with ${first} — it is a literal in ` +
       "main.js, where render.test.js cannot reach it, and main.js's own header says there are none");
   }
+});
+
+// ⚠️ **A gate reached by accident is not a gate**, and this repository has the
+// receipt: a whole leg of the mutation harness went unexecuted for sixteen
+// tasks because nothing checked that it was reached. `ui/` had one suite and CI
+// named its file; the moment a second suite existed — `main.test.js`, which
+// drives `main.js` through the IPC orderings a source-text assertion cannot
+// decide — that spelling would have run it on a developer's machine and never
+// once in CI, silently, and a green pipeline would have said so.
+//
+// So the rule is checked rather than remembered: the script discovers suites
+// instead of naming one, and CI goes through the script. Both halves are
+// asserted, because either alone is satisfied by the other's absence — a
+// discovering script that CI bypasses runs nothing extra, and a CI step calling
+// `npm test` runs only what a file-naming script names.
+test("every ui suite is run by the gate, not only the one somebody remembered", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const suites = readdirSync(here).filter((name) => name.endsWith(".test.js"));
+  assert.ok(
+    suites.length >= 2,
+    `only ${suites.length} suite(s) in ui/ — this test is about a second one existing at all, and \
+     if that is no longer true it is the premise that has gone, not the rule`,
+  );
+
+  const script = JSON.parse(readFileSync(join(here, "package.json"), "utf8")).scripts.test;
+  assert.match(script, /node --test/);
+  assert.doesNotMatch(
+    script,
+    /\.test\.js/,
+    `the test script names a file (${script}), so every suite but that one is invisible to the gate`,
+  );
+
+  const ci = readFileSync(join(here, "..", ".github", "workflows", "ci.yml"), "utf8");
+  assert.match(
+    ci,
+    /npm test --prefix ui/,
+    "CI does not go through ui/'s own test script, so what it runs is whatever this step happens \
+     to spell out",
+  );
+  assert.doesNotMatch(
+    ci,
+    /node --test ui\//,
+    "CI names a suite file directly, which is the spelling that runs one and skips the rest",
+  );
 });
 
 // The acceptance run of 2026-08-11 found the longer placeholder cut to "leave

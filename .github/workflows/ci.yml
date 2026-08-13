@@ -165,12 +165,21 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 'lts/*'
+      # ⚠️ **`npm test`, not a list of files.** This step named
+      # `ui/render.test.js` explicitly, so `ui/main.test.js` — added to drive
+      # `main.js` through the two IPC orderings a source-text assertion cannot
+      # decide — would have been a suite that runs on a developer's machine and
+      # never in CI. A gate reached by accident is not a gate, and this
+      # repository has already paid for one: a whole leg of the mutation harness
+      # went unexecuted for sixteen tasks. `package.json`'s script is
+      # `node --test`, which discovers every `*.test.js` under `ui/`, so a suite
+      # added later is run here without this file being touched again.
       - name: ui/'s own tests
         if: runner.os == 'Linux'
         run: |
           node --check ui/main.js
           node --check ui/render.js
-          node --test ui/render.test.js
+          npm test --prefix ui
       # mnema-extract binds to a prebuilt Pdfium library, which is not committed:
       # it is 7.7 MB and reproducible from a pinned, checksum-verified release.
       # The tests need it too — they fail on a missing library rather than on

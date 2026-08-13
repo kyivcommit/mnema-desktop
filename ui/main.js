@@ -100,6 +100,29 @@ try {
 let watchedRootId = null;
 let jobRunning = false;
 
+// How many times a press has claimed the job area — the bar, the Cancel button
+// and `#job-status`.
+//
+// ⚠️ **It exists because `jobRunning` cannot answer "is what I am about to draw
+// still the newest thing here", and the review of `3b18859` measured both ways
+// it gets that wrong.** Nothing sets that flag synchronously: both presses set
+// it *after* their await, and the comment above `followUntilIdle` states the
+// enabling fact in this file's own words — an ending can arrive before `invoke`
+// resolves. So the flag reads `false` while a newer run is already reporting
+// progress, and reads `true` for a run that ended before its own `invoke` came
+// back. A late draw asking it gets a wrong answer in one direction or the other.
+//
+// This is incremented by the press itself, **before** the await, so it never
+// lags. Every consumer compares a number it captured against this one; none of
+// them asks whether a job is running, which is a different question with a
+// different answer.
+//
+// **Not rolled back by a refused press, deliberately.** A refusal writes its own
+// sentence to `#job-status`, and that sentence is newer than whatever an earlier
+// run was about to restate there — so an earlier restatement must stay
+// suppressed, exactly as it would behind a run that really started.
+let jobGeneration = 0;
+
 const syncButtons = () => {
   el("walk").disabled = jobRunning || watchedRootId === null;
   // Not gated on `watchedRootId`: embedding works off what the index already
@@ -301,6 +324,10 @@ el("walk").addEventListener("click", async () => {
   // bar belongs to the job that is already running.
   const barWas = el("bar").dataset.state ?? "";
   el("bar").dataset.state = BAR_RUNNING;
+  // This press claims the job area too, and it must, for the same reason the
+  // embedding press does: an embedding run's restatement is still in flight
+  // when somebody starts a walk, and it must not land on the walk's line.
+  jobGeneration += 1;
 
   try {
     endingDescribed = false;
@@ -316,6 +343,12 @@ el("walk").addEventListener("click", async () => {
     // so the buttons must not move, and neither must the bar.
     el("bar").dataset.state = barWas;
     el("job-status").textContent = `${error}`;
+    // The press bumped the generation before the await, and any settings draw
+    // that resolved inside it therefore suppressed its refusal clause on the
+    // strength of a job that never started. One read puts that right, on a path
+    // that has already failed and is paying for a round trip anyway. The
+    // embedding press's own refusal does the same.
+    refreshSettings();
   }
 });
 
@@ -510,7 +543,25 @@ const showRecorded = (role, recorded) => {
   });
 };
 
-const drawSettings = (settings) => {
+// `askedAt` is `jobGeneration` as it stood when this draw's `model_settings`
+// was **issued**, not when it came back.
+const drawSettings = (settings, askedAt) => {
+  // ⚠️ **Whether a job has these counts, and why `jobRunning` alone is the
+  // wrong question.** Review of `3b18859`, Important 2, measured rather than
+  // argued: this function reads the flag when it runs, which is after its own
+  // await, and the flag is set only after a press's await — so a run that
+  // started inside this round trip and is already reporting progress is still
+  // `false` here. The line then printed `none were refused by the provider`
+  // beside a live run, which is the exact stale assertion the suppression was
+  // written for.
+  //
+  // The generation cannot lag, because the press increments it before awaiting
+  // anything. So the honest predicate is "a job is running, **or** a press has
+  // claimed the slot since this read was issued" — and the second half is what
+  // the flag could not say. A press that is then refused makes this briefly
+  // over-cautious rather than wrong; both refusal handlers redraw for exactly
+  // that reason.
+  const aJobHasTheSlot = jobRunning || askedAt !== jobGeneration;
   keyState = settings.key;
   el("disclosure").textContent = asSentence(disclosureSentence(settings.key));
   el("key-state").textContent = asSentence(keyStateSentence(settings.key));
@@ -531,13 +582,14 @@ const drawSettings = (settings) => {
   // line that is set once and never cleared outlives the state it described.
   el("key-note").textContent = asSentence(keyStoreNote(settings.platform, settings.key));
   el("index-state").textContent = asSentence(indexStateSentence(settings.index, indexOpening));
-  // `jobRunning` crosses, because these counts were read at a moment and that
-  // moment is in the past for the whole length of a run — and the line says
+  // `aJobHasTheSlot` crosses, because these counts were read at a moment and
+  // that moment is in the past for the whole length of a run — and the line says
   // "none were refused" at zero, so what it holds while it is stale is an
   // assertion rather than a silence. `embeddingProgressText` is where the two
-  // are told apart.
+  // are told apart; the predicate is built at the top of this function, where
+  // the measurement that made it a generation and not the flag is written down.
   el("embedding-progress").textContent = asSentence(
-    embeddingProgressText(settings.index, jobRunning),
+    embeddingProgressText(settings.index, aJobHasTheSlot),
   );
   // An index that could not be read says nothing about which models are
   // recorded, so the pickers show nothing chosen and `index-state` carries the
@@ -549,10 +601,13 @@ const drawSettings = (settings) => {
   // show. Written every time for the same reason `key-note` is — a line set once
   // and never cleared outlives the state it described, and this one outliving it
   // is a button offering to delete embeddings that are already gone.
-  // `jobRunning` for the reason the line above it takes it: the counts these
+  // `aJobHasTheSlot` for the reason the line above it takes it: the counts these
   // were read at are moving while a job runs, and a button whose label names a
-  // number that is changing is the same stale assertion, worn as a label.
-  const offer = discardOffer(refusedChange, settings.index, settings.key, jobRunning);
+  // number that is changing is the same stale assertion, worn as a label. It
+  // takes the same predicate rather than the raw flag because it is stale in the
+  // same window and for the same reason — fixing one of the two and leaving its
+  // neighbour is the half-fix this cycle keeps catching.
+  const offer = discardOffer(refusedChange, settings.index, settings.key, aJobHasTheSlot);
   el("discard-vectors").hidden = offer === null;
   el("discard-vectors").textContent = discardVectorsLabel(offer);
   el("discard-vectors-note").textContent = discardVectorsNote(offer);
@@ -573,9 +628,39 @@ const drawSettings = (settings) => {
 // twice would put two reads taken at two instants in two lines of one window,
 // which is the disagreement every other number on this screen is arranged to
 // make impossible.
+// How many reads have been issued, and the newest one that has been drawn.
+//
+// ⚠️ **Two reads can be in flight and can come back in the other order**, and
+// then the older one is drawn last and wins. `main.test.js` produced it: a press
+// refused inside an earlier run's read redraws correctly, and the earlier read
+// then lands on top and puts the suppressed line back for a job that never
+// started. It is not only mine to have caused — a run's ending and
+// `followUntilIdle` both call this at the same moment, and have raced since the
+// day the poller was written — but the refusal handlers below make two reads
+// overlap deliberately, so it stops being theoretical here.
+//
+// A number rather than a timestamp: these are issue numbers, not instants, and
+// nothing needs to know how long a read took.
+let settingsAsked = 0;
+let settingsDrawn = 0;
+
 const refreshSettings = async () => {
+  settingsAsked += 1;
+  const issue = settingsAsked;
+  // Captured before the await, never after. This is the whole of what lets
+  // `drawSettings` tell "no job has touched these counts" from "one started
+  // while I was asking" — the distinction `jobRunning` cannot draw, because
+  // nothing sets that flag until a press's own await has returned.
+  const askedAt = jobGeneration;
   const settings = await invoke("model_settings");
-  drawSettings(settings);
+  // A read older than one already on screen has nothing to add and can only
+  // take something away. The answer is still returned, because the caller that
+  // asked for it may have its own use and its own guard — the ending's
+  // restatement does.
+  if (issue > settingsDrawn) {
+    settingsDrawn = issue;
+    drawSettings(settings, askedAt);
+  }
   return settings;
 };
 
@@ -687,6 +772,14 @@ el("discard-vectors").addEventListener("click", async () => {
 // checked by `render.test.js`; and it redraws the settings when the run is over,
 // which needs `refreshSettings` to have been declared.
 el("embed").addEventListener("click", async () => {
+  // This press's own number, taken before anything is awaited and closed over by
+  // the handler below. It is what the ending's late second write compares
+  // against, so that "is my line still the newest thing here" is answered by a
+  // value that cannot lag — see `jobGeneration`, and `restatedEnding`, which
+  // holds the two orderings the flag got wrong.
+  jobGeneration += 1;
+  const generation = jobGeneration;
+
   // A channel of its own, and a handler of its own. It is not the walk's with a
   // flag: `endingSentence` appends a clause about folder reconciliation, which
   // an embedding run neither did nor could do, and one handler serving both
@@ -732,17 +825,16 @@ el("embed").addEventListener("click", async () => {
     // restatement landing afterwards would paint the previous run's ending —
     // carrying numbers measured before the new run started — over a line
     // describing a run in flight. Written as a branch in this file it would be a
-    // branch no test can reach; `render.test.js` asserts both directions of it.
-    // Nothing runs between the decision and the write — the language guarantees
-    // that much — so the answer cannot go stale between them.
+    // branch no test could reach; `render.test.js` asserts both directions, and
+    // `main.test.js` drives this handler through both orderings that made the
+    // flag the wrong thing to ask.
     //
-    // The settings block `refreshSettings` redraws on the way is safe in the
-    // same situation for its own reason, checked rather than assumed:
-    // `drawSettings` reads this same `jobRunning` when it runs, which is after
-    // the await, so a run that started inside the round trip suppresses the
-    // refusal clause exactly as it does during any other run.
+    // The two numbers, and neither of them is `jobRunning`: `generation` is the
+    // press this ending belongs to, taken before that press awaited anything,
+    // and `jobGeneration` is whatever has claimed the line since. Equal means
+    // nothing newer is here.
     refreshSettings().then((settings) => {
-      const restated = restatedEnding(ending, settings.index, jobRunning);
+      const restated = restatedEnding(ending, settings.index, generation, jobGeneration);
       if (restated !== null) {
         el("job-status").textContent = restated;
       }
@@ -769,6 +861,10 @@ el("embed").addEventListener("click", async () => {
     // the bar.
     el("bar").dataset.state = barWas;
     el("job-status").textContent = embedNotStartedSentence(error);
+    // For the reason the walk's own refusal gives: this press bumped the
+    // generation before awaiting, so a settings draw that resolved inside the
+    // refusal suppressed its refusal clause for a job that never started.
+    refreshSettings();
   }
 });
 
