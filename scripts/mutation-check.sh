@@ -23,15 +23,24 @@
 # you are working in.
 #
 # **Its cheap sibling: `scripts/mutation-staleness.sh <case-file>`.** This script
-# answers "does the test still go red" and takes twenty minutes; that one answers
-# "do the cases still apply, and do they still produce what they claim" and takes
-# about a second, so it is the one to run after a refactor. It is not a
-# substitute — it compiles nothing and runs no test — but it catches the thing
-# twenty minutes here does not: a case quoting code that has moved. Measured on
-# this branch, one four-column re-indentation broke three cases and this script
-# reported them one run apart, because a `perl` pattern's leading spaces are not
-# anchored and one of the three had been substituting into the middle of an
-# indent, passing both guards for a reason unrelated to its meaning.
+# answers "does the test still go red" and takes 3:17 on an Apple M2 Max, cold
+# `CARGO_TARGET_DIR`, 80 cases over 69 baseline tests — measured with `time`
+# around the whole invocation. `236% cpu` in that same measurement means this
+# harness is very nearly serial, about two and a half cores busy out of
+# twelve, so core count is not the axis a CI runner loses on. What this does
+# not transfer to: a 2-core `ubuntu-24.04` runner with a cold target directory
+# of its own is not this machine, nobody has measured it, and `ci.yml`'s
+# `timeout-minutes: 30` was set from nothing at all — the first pull request
+# is what measures that, and the number belongs there once it runs. That one
+# answers "do the cases still apply, and do they still produce what they
+# claim" and takes about a second, so it is the one to run after a refactor.
+# It is not a substitute — it compiles nothing and runs no test — but it
+# catches the thing 3:17 here does not: a case quoting code that has moved.
+# Measured on this branch, one four-column re-indentation broke three cases
+# and this script reported them one run apart, because a `perl` pattern's
+# leading spaces are not anchored and one of the three had been substituting
+# into the middle of an indent, passing both guards for a reason unrelated to
+# its meaning.
 #
 # ⚠️ **A third guard, for the same failure, that the two above cannot see.**
 # `s///` without `/g` stops at the first match and returns 1 whether that match
