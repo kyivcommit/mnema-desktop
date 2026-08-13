@@ -1416,7 +1416,14 @@ fn fixture_with_two_chunks(document_id: &str, texts: &[&str; 2]) -> (WithChunks,
 /// document, in order, with their text.
 #[test]
 fn chunks_of_document_come_back_in_order_with_their_text() {
-    let (db, ids) = fixture_with_two_chunks("doc-1", &["перший шматок", "другий шматок"]);
+    // The apostrophe is the whole point of this fixture string. Every text
+    // here used to survive `prepare_for_search` unchanged, so a
+    // `chunks_of_document` that read `chunk_search.text` — the prepared copy —
+    // passed identically to one reading `chunk.text`. It must be `chunk.text`:
+    // the harness matches answer sentences against exactly that column, and
+    // preparation folds U+0027 to U+02BC, so the prepared copy holds a
+    // character no answer sentence will contain.
+    let (db, ids) = fixture_with_two_chunks("doc-1", &["п'ять шматків", "другий шматок"]);
     // A second, unrelated document in the same database — without it,
     // `WHERE document_id = ?1` is only ever tested against an id nobody
     // wrote, and a method that dropped the clause entirely would still pass
@@ -1425,7 +1432,7 @@ fn chunks_of_document_come_back_in_order_with_their_text() {
 
     let chunks = db.chunks_of_document("doc-1").unwrap();
     assert_eq!(chunks.len(), 2, "got {chunks:?}");
-    assert_eq!(chunks[0].1, "перший шматок");
+    assert_eq!(chunks[0].1, "п'ять шматків");
     assert_eq!(chunks[1].1, "другий шматок");
     // Not just "the two differ": with `ord` 0 and 1 and ids 2 and 1
     // (reversed insertion), a `!=` check is satisfied whichever column
