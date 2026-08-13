@@ -980,6 +980,14 @@ const embeddingsCount = (n) => (n === 1 ? "1 embedding" : `${n} embeddings`);
 //   this, a refusal that means "you have entered no key" produces a button
 //   offering to delete embeddings, which is destruction proposed as the cure for
 //   somebody else's ailment.
+// - **A job running is the same rule as an index that could not be read.** The
+//   counts here were taken before the run and are moving while it goes, so this
+//   window cannot state what the button costs — and the whole control exists
+//   instead of a button that says "are you sure?". Without it, a button left
+//   from an earlier refusal sits there through the run still naming the count it
+//   was drawn with, which is Important 2's stale assertion wearing a label
+//   instead of a sentence. Pressing it is refused by the slot in any case, so
+//   what is withdrawn is a control that could not have worked.
 //
 // **The number is `embeddedChunksEverywhere` and not `embeddedChunks`, and the
 // guard that stood here instead is gone.** Review round 1 fixed the divergence —
@@ -1016,8 +1024,9 @@ const embeddingsCount = (n) => (n === 1 ? "1 embedding" : `${n} embeddings`);
 //
 // Telling refusals apart in general needs them to carry their own shape rather
 // than a string, which is deliberately not this cycle's work — so gap 1 stands.
-export const discardOffer = (model, index, key) => {
+export const discardOffer = (model, index, key, jobRunning) => {
   if (model === null || model === undefined) return null;
+  if (jobRunning) return null;
   if (key?.kind !== "present") return null;
   if (index?.kind !== "read") return null;
   if (!(index.embeddedChunksEverywhere > 0)) return null;

@@ -834,6 +834,47 @@ test("a slot refusal produces no offer even after the run that caused it has end
   );
 });
 
+// Review round 2, Minor C. `syncButtons` does not touch `#discard-vectors` and
+// nothing redraws the settings during a run, so a button left from an earlier
+// refusal sat there through the whole run still naming the count it was drawn
+// with — Important 2's stale assertion, worn as a label instead of a sentence.
+// Fixing one and leaving its neighbour is the half-fix this cycle keeps
+// catching.
+test("no offer is made while a job is moving the number it would name", () => {
+  const index = {
+    kind: "read",
+    activeSpace: 1,
+    embeddedChunks: 9,
+    totalChunks: 9,
+    failedChunks: 0,
+    embeddedChunksEverywhere: 9,
+  };
+  const key = { kind: "present" };
+  assert.equal(
+    discardOffer("vendor/m", index, key, true),
+    null,
+    "a button naming a count a run is changing under it",
+  );
+  // Both directions, or this is satisfied by a control that never appears.
+  assert.notEqual(discardOffer("vendor/m", index, key, false), null);
+
+  // And the two lines it draws clear rather than keeping their last text —
+  // `main.js` writes whatever these answer, including the empty string.
+  assert.equal(discardVectorsLabel(discardOffer("vendor/m", index, key, true)), "");
+  assert.equal(discardVectorsNote(discardOffer("vendor/m", index, key, true)), "");
+});
+
+test("the discard offer is told whether a job is running", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const main = readFileSync(join(here, "main.js"), "utf8");
+  assert.match(
+    main,
+    /discardOffer\(refusedChange, settings\.index, settings\.key, jobRunning\)/,
+    "the offer is drawn without being told a job is running, so its label goes on naming a \
+     count that is moving",
+  );
+});
+
 test("the refused change is recorded through the guard rather than raw", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const main = readFileSync(join(here, "main.js"), "utf8");

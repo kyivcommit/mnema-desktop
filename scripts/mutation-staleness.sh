@@ -44,24 +44,42 @@
 #   echo "EXIT=$?"
 #
 # Usage:
-#   scripts/mutation-staleness.sh <case-file>
+#   scripts/mutation-staleness.sh                 # every case file, the default
+#   scripts/mutation-staleness.sh <case-file>…    # only these
+#
+# **Sweeping is the default because a green line about one file gets read as a
+# green line about the directory.** The first honest run of this script reported
+# `cases checked: 80  stale: 0` — true of `embedding.sh`, and true of one file
+# out of twenty-four while three cases in two other files had stopped applying
+# altogether. A count from a limited query, presented as a total, is the mistake
+# this project has now paid for four times. So the summary names the files it
+# read, and the single-file form is still there for when somebody wants it.
+#
+# **What is a case file, and why the seven scripts beside them are not.**
+# `scripts/mutations/` holds two kinds of file: lists of `case_` calls, and
+# stand-in worker binaries (`pdf-*.sh`) that tests execute as a fake extraction
+# worker. A shebang is what tells them apart — a file that declares an
+# interpreter is a program, and every one of the seven has one while none of the
+# twenty-four case files does. It is checked before anything is sourced, which
+# matters: sourcing a stand-in worker would *run* it, and one of them blocks
+# reading its stdin.
+#
+# That test is deliberately not "does it contain any cases", because then a case
+# file emptied by an edit would classify itself out of the sweep and be reported
+# as nothing at all. A file with no shebang and no cases is a **failure** here.
 #
 # Nothing is written outside a temporary directory: every case is applied to a
 # copy, and the working tree is never touched.
 
 set -uo pipefail
 
-if [ $# -ne 1 ]; then
-  echo "usage: $0 <case-file>" >&2
-  exit 2
-fi
-
-CASES=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-if [ ! -f "$CASES" ]; then
-  echo "no case file at $CASES" >&2
-  exit 2
-fi
 REPO=$(git rev-parse --show-toplevel) || exit 2
+
+if [ $# -eq 0 ]; then
+  FILES=("$REPO"/scripts/mutations/*.sh)
+else
+  FILES=("$@")
+fi
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/mnema-staleness.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
@@ -72,6 +90,10 @@ contains() {
 
 checked=0
 stale=0
+files_read=0
+empty=0
+skipped=""
+read_names=""
 
 # case_ <label> <file> <perl-expr> <marker> <package> <test-name> <cargo args...>
 #
@@ -105,19 +127,49 @@ case_() {
   fi
 }
 
-# shellcheck disable=SC1090
-. "$CASES"
+for file in "${FILES[@]}"; do
+  if [ ! -f "$file" ]; then
+    echo "no case file at $file" >&2
+    exit 2
+  fi
+  # Before sourcing, not after: a stand-in worker that got sourced would run.
+  case "$(head -1 "$file")" in
+    '#!'*)
+      skipped="$skipped $(basename "$file")"
+      continue
+      ;;
+  esac
 
+  before=$checked
+  # shellcheck disable=SC1090
+  . "$file"
+  files_read=$((files_read + 1))
+  name=$(basename "$file")
+  count=$((checked - before))
+  read_names="$read_names $name($count)"
+  if [ "$count" -eq 0 ]; then
+    echo "NO CASES: $name declares no interpreter, so it is a case file, and it holds none"
+    empty=$((empty + 1))
+  fi
+done
+
+# **Say what was read, by name.** A bare "stale: 0" is the sentence that got
+# this script's own first run believed about twenty-three files it never opened.
 echo
-echo "cases checked: $checked   stale: $stale"
+echo "read $files_read case file(s), $checked cases:$read_names"
+if [ -n "$skipped" ]; then
+  echo "skipped, not case files (they declare an interpreter — stand-in workers):$skipped"
+fi
+echo "stale: $stale   case files holding no cases: $empty"
+echo "nothing was compiled and no test was run — that is scripts/mutation-check.sh"
 
 # `checked > 0` is not decoration on `stale == 0`, it is the condition that one
 # cannot express: a case file containing no cases reports zero stale, and would
 # otherwise pass. That is the assertion-satisfied-by-zero failure this project
 # has now found eleven times in the code and twice inside the tools built to find
 # it.
-if [ "$checked" -eq 0 ]; then
-  echo "no cases found in $CASES — a result derived from nothing is not a result"
+if [ "$files_read" -eq 0 ] || [ "$checked" -eq 0 ]; then
+  echo "no cases anywhere in what was asked for — a result derived from nothing is not a result"
   exit 1
 fi
-[ "$stale" -eq 0 ]
+[ "$stale" -eq 0 ] && [ "$empty" -eq 0 ]

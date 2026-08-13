@@ -289,6 +289,29 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # **First, and before anything is provisioned**, because it needs nothing
+      # provisioned: no toolchain, no sidecar, no Pdfium, about a second for the
+      # whole directory. A case file that has stopped applying should fail this
+      # job before two minutes of setup, not after.
+      #
+      # It answers the question the step at the bottom cannot. That one runs ONE
+      # case file and proves its tests still go red; this reads all twenty-four
+      # and asks whether the cases still match the code they were written
+      # against. On the branch this was added on, three cases in two files had
+      # stopped applying — one of them behind the very test cited as proof a
+      # repair was still pinned — and nothing else was looking: `branch-review.sh`
+      # is a case file like any other and was clean while they rotted.
+      #
+      # No argument, so it sweeps every file. The single-file form exists and is
+      # deliberately not what runs here: a green line about one file gets read as
+      # a green line about the directory, which is exactly how those three
+      # survived a full branch review.
+      #
+      # What it needs on the runner: `perl`, `head`, `basename` and `mktemp`, all
+      # of which the harness step below already depends on, plus `cmp` — the one
+      # addition, from diffutils, present on every image this workflow uses.
+      - name: Check that every mutation case still applies
+        run: scripts/mutation-staleness.sh
       - name: Provision the toolchain named in rust-toolchain.toml
         run: rustup toolchain install
       # The harness's own worktree only carries vendor/ and

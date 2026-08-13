@@ -512,7 +512,10 @@ const drawSettings = (settings) => {
   // show. Written every time for the same reason `key-note` is — a line set once
   // and never cleared outlives the state it described, and this one outliving it
   // is a button offering to delete embeddings that are already gone.
-  const offer = discardOffer(refusedChange, settings.index, settings.key);
+  // `jobRunning` for the reason the line above it takes it: the counts these
+  // were read at are moving while a job runs, and a button whose label names a
+  // number that is changing is the same stale assertion, worn as a label.
+  const offer = discardOffer(refusedChange, settings.index, settings.key, jobRunning);
   el("discard-vectors").hidden = offer === null;
   el("discard-vectors").textContent = discardVectorsLabel(offer);
   el("discard-vectors-note").textContent = discardVectorsNote(offer);
