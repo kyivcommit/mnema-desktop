@@ -6,6 +6,7 @@ members = [
     "crates/mnema-chunk",
     "crates/mnema-core",
     "crates/mnema-embed",
+    "crates/mnema-eval",
     "crates/mnema-extract",
     "crates/mnema-index",
     "crates/mnema-ingest",

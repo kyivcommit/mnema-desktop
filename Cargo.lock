@@ -2692,6 +2692,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnema-eval"
+version = "0.0.0"
+dependencies = [
+ "mnema-core",
+ "mnema-index",
+ "mnema-ingest",
+ "mnema-pool",
+ "mnema-walk",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "mnema-extract"
 version = "0.0.0"
 dependencies = [
