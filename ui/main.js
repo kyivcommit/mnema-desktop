@@ -58,6 +58,37 @@ const { open } = window.__TAURI__.dialog;
 const el = (id) => document.getElementById(id);
 const results = el("results");
 
+// Every write to `#job-status`, and the count of them.
+//
+// ⚠️ **The question a late write has to ask is "is my line still the newest
+// thing anybody put here", and only this can answer it.** Three orderings have
+// now been measured against three different answers to that question, and the
+// first two were both wrong:
+//
+//   - `jobRunning` (`3b18859`) lags a press by one IPC round trip in both
+//     directions, so it let a stale ending paint over a live run *and*
+//     permanently withheld one after a run that ended before its own `invoke`
+//     resolved;
+//   - a per-press generation (`518e499`) fixed both of those and broke a third:
+//     Embed stays enabled during the press's own round trip, so an ordinary
+//     double-click produces a refusal that claims a generation the running job
+//     never used — and that job's ending is then suppressed for good.
+//
+// A refusal is not the only thing that can write here, and a press is not the
+// only thing that can invalidate a restatement. What invalidates it is somebody
+// having written to this line since — which is this number, and nothing else.
+// It is why the seam exists rather than fourteen assignments: a writer that
+// bypassed it would be invisible, and the next late write would paint over it.
+//
+// Returns the count at the moment of the write, for a caller that intends to
+// come back and revise its own line.
+let statusWrites = 0;
+const sayJobStatus = (text) => {
+  statusWrites += 1;
+  el("job-status").textContent = text;
+  return statusWrites;
+};
+
 // What `open_index` answered, kept because nothing on the core side can carry
 // it. `UnreadableCause::NotOpen` is one value over two situations — the window
 // has not asked for an index yet, and an open that failed and left none, since
@@ -194,9 +225,10 @@ const followUntilIdle = async () => {
     // else, which reads as "finished cleanly" to anyone who does not already
     // know the difference — the one thing this page can actually say is that
     // it does not know.
-    el("job-status").textContent =
+    sayJobStatus(
       "the job is no longer running, but this page has no channel to it and does not " +
-      "know how it ended — whether it finished cleanly, or something was left unreconciled";
+        "know how it ended — whether it finished cleanly, or something was left unreconciled",
+    );
     // And the bar says the same. This path has no `Ended` to hand `barState`,
     // so it takes the answer that function gives an ending it does not
     // recognise, and for the same reason: "finished" is a claim, and a page
@@ -228,7 +260,7 @@ const follow = () =>
   followUntilIdle().catch((error) => {
     jobRunning = false;
     syncButtons();
-    el("job-status").textContent = `lost track of the job: ${error}`;
+    sayJobStatus(`lost track of the job: ${error}`);
   });
 
 try {
@@ -236,13 +268,13 @@ try {
   jobRunning = running;
   syncButtons();
   if (running) {
-    el("job-status").textContent = "a job started before this page loaded is still running";
+    sayJobStatus("a job started before this page loaded is still running");
     follow();
   }
 } catch (error) {
   jobRunning = false;
   syncButtons();
-  el("job-status").textContent = `${error}`;
+  sayJobStatus(`${error}`);
 }
 
 el("walk").addEventListener("click", async () => {
@@ -262,7 +294,7 @@ el("walk").addEventListener("click", async () => {
       // put right somewhere else.
       el("bar").dataset.state = BAR_RUNNING;
       const eta = secondsLeft === null ? "estimating…" : `${secondsLeft}s left`;
-      el("job-status").textContent = `${done} of ${total}, ${skipped} skipped — ${eta}`;
+      sayJobStatus(`${done} of ${total}, ${skipped} skipped — ${eta}`);
       return;
     }
 
@@ -283,7 +315,7 @@ el("walk").addEventListener("click", async () => {
     // it rather than each deciding for its own job.
     el("bar").dataset.state = barState(ending);
 
-    el("job-status").textContent = endingSentence(ending);
+    sayJobStatus(endingSentence(ending));
     endingDescribed = true;
     jobRunning = false;
     syncButtons();
@@ -307,7 +339,7 @@ el("walk").addEventListener("click", async () => {
   };
 
   if (watchedRootId === null) {
-    el("job-status").textContent = "choose a folder above before indexing";
+    sayJobStatus("choose a folder above before indexing");
     return;
   }
 
@@ -342,7 +374,7 @@ el("walk").addEventListener("click", async () => {
     // Refused — most likely because a job is already running. Nothing started,
     // so the buttons must not move, and neither must the bar.
     el("bar").dataset.state = barWas;
-    el("job-status").textContent = `${error}`;
+    sayJobStatus(`${error}`);
     // The press bumped the generation before the await, and any settings draw
     // that resolved inside it therefore suppressed its refusal clause on the
     // strength of a job that never started. One read puts that right, on a path
@@ -356,7 +388,7 @@ el("cancel").addEventListener("click", async () => {
   // Only the button is disabled here. "Index it" comes back when the job says
   // it has ended, not when the user asks it to.
   el("cancel").disabled = true;
-  el("job-status").textContent = "stopping…";
+  sayJobStatus("stopping…");
   try {
     await invoke("cancel_job");
   } catch (error) {
@@ -365,7 +397,7 @@ el("cancel").addEventListener("click", async () => {
     // would read as true when it is not — this is the honest alternative:
     // the job is presumably still going, and the button is worth pressing
     // again.
-    el("job-status").textContent = `could not ask the job to stop: ${error}`;
+    sayJobStatus(`could not ask the job to stop: ${error}`);
     el("cancel").disabled = false;
   }
 });
@@ -772,13 +804,15 @@ el("discard-vectors").addEventListener("click", async () => {
 // checked by `render.test.js`; and it redraws the settings when the run is over,
 // which needs `refreshSettings` to have been declared.
 el("embed").addEventListener("click", async () => {
-  // This press's own number, taken before anything is awaited and closed over by
-  // the handler below. It is what the ending's late second write compares
-  // against, so that "is my line still the newest thing here" is answered by a
-  // value that cannot lag — see `jobGeneration`, and `restatedEnding`, which
-  // holds the two orderings the flag got wrong.
+  // This press claims the job area, before anything is awaited. It is read by
+  // the settings block, which has to know that a job may have taken the slot
+  // while its own read was in flight — see `jobGeneration` and `aJobHasTheSlot`.
+  //
+  // The ending's restatement deliberately does **not** use it: a press is the
+  // wrong event to count for "is my line still the newest thing here", because
+  // a refused press claims a number the running job never used. That question
+  // is `statusWrites`, at the seam.
   jobGeneration += 1;
-  const generation = jobGeneration;
 
   // A channel of its own, and a handler of its own. It is not the walk's with a
   // flag: `endingSentence` appends a clause about folder reconciliation, which
@@ -792,7 +826,7 @@ el("embed").addEventListener("click", async () => {
       // The walk's own handler says why this is on every report and not only
       // at the start.
       el("bar").dataset.state = BAR_RUNNING;
-      el("job-status").textContent = embedProgressLine(data);
+      sayJobStatus(embedProgressLine(data));
       return;
     }
 
@@ -803,7 +837,9 @@ el("embed").addEventListener("click", async () => {
     // of a live run after the run had died. Drawn here, in the same tick as the
     // ending's own sentence, so there is no moment where the two disagree.
     el("bar").dataset.state = barState(ending);
-    el("job-status").textContent = embedEndingSentence(ending);
+    // The count at the moment this line was written, kept so the restatement
+    // below can ask whether anything has been written here since.
+    const wroteAt = sayJobStatus(embedEndingSentence(ending));
     endingDescribed = true;
     jobRunning = false;
     syncButtons();
@@ -829,14 +865,23 @@ el("embed").addEventListener("click", async () => {
     // `main.test.js` drives this handler through both orderings that made the
     // flag the wrong thing to ask.
     //
-    // The two numbers, and neither of them is `jobRunning`: `generation` is the
-    // press this ending belongs to, taken before that press awaited anything,
-    // and `jobGeneration` is whatever has claimed the line since. Equal means
-    // nothing newer is here.
+    // The two numbers, and neither of them is `jobRunning` or a press: `wroteAt`
+    // is the count when this handler wrote its own line, `statusWrites` is the
+    // count now. Equal means nothing has been written here since, which is the
+    // only thing that makes revising this line safe.
+    //
+    // ⚠️ **A press was the wrong event to count, and an ordinary double-click
+    // is what showed it.** Embed stays enabled through its own round trip, so a
+    // second click gives a refusal that claimed a per-press generation the
+    // running job never used, and the running job's ending was then suppressed
+    // for good. Counting *writes to this line* has no such gap: a refusal writes
+    // here and is therefore respected when it is the newest thing, and ignored
+    // when — as in the double-click — it was written before the ending it would
+    // otherwise have silenced.
     refreshSettings().then((settings) => {
-      const restated = restatedEnding(ending, settings.index, generation, jobGeneration);
+      const restated = restatedEnding(ending, settings.index, wroteAt, statusWrites);
       if (restated !== null) {
-        el("job-status").textContent = restated;
+        sayJobStatus(restated);
       }
     });
   };
@@ -860,7 +905,7 @@ el("embed").addEventListener("click", async () => {
     // running. Nothing began, so the buttons must not move, and neither must
     // the bar.
     el("bar").dataset.state = barWas;
-    el("job-status").textContent = embedNotStartedSentence(error);
+    sayJobStatus(embedNotStartedSentence(error));
     // For the reason the walk's own refusal gives: this press bumped the
     // generation before awaiting, so a settings draw that resolved inside the
     // refusal suppressed its refusal clause for a job that never started.

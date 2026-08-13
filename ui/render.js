@@ -57,6 +57,22 @@ export const FROZEN_REASON_TEXT = {
 export const frozenSentence = (f) =>
   (FROZEN_REASON_TEXT[f.reason] ?? ((prefix) => `${prefix}: left untouched by cleanup`))(f.prefix);
 
+// Close a run of text off so that a **sentence** can be put after it.
+//
+// ⚠️ Used only where the thing being appended is a new sentence — one that
+// starts with a capital and carries its own full stop. It is **not** a general
+// tidier and must not become one: `reconciliationClause` is appended to the
+// walk's ending as a parenthetical continuation, deliberately lower case and
+// deliberately not a sentence, and running that through this would put a stop
+// in front of it and turn a clause into a fragment.
+//
+// It is also not applied at the joins in `EMBED_ENDING_TEXT`, and that is the
+// point: an arm there writes its own terminated sentence, and the test that
+// walks every arm is what says so. Auto-correcting at the join would make that
+// test unable to fail, which is the difference between enforcing a rule and
+// hiding its violations.
+const terminated = (text) => (/[.!?]$/.test(text) ? text : `${text}.`);
+
 // One sentence per `EndReason`. `rulesNotApplied`, `rootUnavailable`,
 // `brokenWorker`, `volumeMissing` and `cancelled` read as five different
 // things because they are five different things — collapsing any pair of
@@ -155,7 +171,19 @@ export function endingSentence(ended) {
   }
   text += reconciliationClause(ended);
   if (ended.frozen && ended.frozen.length) {
-    text += " " + ended.frozen.map(frozenSentence).join(" ");
+    // ⚠️ **Closed off first.** Every `frozenSentence` is a whole sentence — it
+    // opens with a path and ends in a full stop — and what it is being joined
+    // to is not: `ENDING_TEXT`'s own arms carry no terminator, and
+    // `reconciliationClause` is a parenthetical. Appended raw, a clean walk
+    // over a folder that had gone empty read as
+    // `… 4 removed (12 total) docs/x now looks empty — …`, one run-on
+    // sentence with the two facts fused at the seam.
+    //
+    // Found by the test the live acceptance run of 2026-08-13 asked for: it was
+    // written for `EMBED_ENDING_TEXT.completed`, whose own version of this the
+    // owner read on screen, and walking every arm of both composers is what
+    // turned one line into the class it belongs to.
+    text = terminated(text) + " " + ended.frozen.map(frozenSentence).join(" ");
   }
   return text;
 }
@@ -1012,7 +1040,7 @@ const embedResumable = (now) =>
 // disappearing into a default. It says what it was told rather than inventing a
 // sentence about a folder.
 const notAnEmbeddingEnding = ({ reason, done, total }) =>
-  `ended (${reason}) after ${done} of ${total}`;
+  `ended (${reason}) after ${done} of ${total}.`;
 
 // Every arm takes the run's own payload and, second, the index pair `indexNow`
 // derived — or `null`, which every arm has to render as a complete sentence
@@ -1023,6 +1051,17 @@ const notAnEmbeddingEnding = ({ reason, done, total }) =>
 // scope, and this file's own rule two blocks up is that a sentence says "in this
 // run" wherever it names one of this run's numbers. The head did not, and the
 // heads are the numbers the owner misread.
+//
+// ⚠️ **Every arm terminates its own sentence, on every branch, and that is a
+// rule with a test behind it rather than a habit.** The tails appended here —
+// `embedIndexTail` and `embedResumable` — both open with a space and a capital,
+// because each is a *new sentence*. An arm that does not close its own leaves
+// the two fused: the live acceptance run of 2026-08-13 put
+// `nothing was waiting to be embedded The active space now has 227 pieces…` on
+// screen, and it was the only arm of the three that had forgotten. `cancelled`
+// and `failed` were right on every branch, which is exactly why nothing
+// noticed — no test compared the arms with each other. One now does, over both
+// composers in this file, and it found four more (`notAnEmbeddingEnding`'s).
 export const EMBED_ENDING_TEXT = {
   // `total === 0` is the ordinary answer to a second press, and it is not "all
   // done": the queue is what has no vector *and* is not already refused, so
@@ -1032,8 +1071,8 @@ export const EMBED_ENDING_TEXT = {
   // stands.
   completed: ({ done, total, refused }, now) =>
     (total === 0
-      ? "nothing was waiting to be embedded"
-      : `finished: ${done} of ${total} embedded in this run${embedRefusedTail(refused)}`) +
+      ? "nothing was waiting to be embedded."
+      : `finished: ${done} of ${total} embedded in this run${embedRefusedTail(refused)}.`) +
     embedIndexTail(now),
   // `total === 0` here is **not** the empty queue it is on the arm above, and
   // must not borrow its sentence. `mnema_embed::run` asks whether it was
@@ -1084,11 +1123,12 @@ export const embedEndingSentence = (ended, index) =>
 // button's label (Minor C) and from the bar, and it must not come back in
 // through the door built to fix it.
 //
-// ⚠️ **It asks a generation and not `jobRunning`, and that is a measured
-// correction rather than a refinement.** The first version of this guard asked
-// the flag, which is set *after* the await on both press paths — so the flag
-// lags the truth by one IPC round trip, in **both** directions, and the review
-// of `3b18859` drove `main.js` and produced both:
+// ⚠️ **It counts writes to that line, and the two things it counted before were
+// both wrong — each measured, not argued.**
+//
+// The first version asked `jobRunning`, which is set *after* the await on both
+// press paths — so the flag lags the truth by one IPC round trip, in **both**
+// directions, and the review of `3b18859` drove `main.js` and produced both:
 //
 //   - reads `false` while a newer run is live, because that run's first
 //     progress event can arrive before its own `invoke` resolves (`main.js`
@@ -1101,14 +1141,27 @@ export const embedEndingSentence = (ended, index) =>
 //     answer to a second press. The guard defended the rare case by breaking
 //     the common one, which is the shape this branch has now paid for twice.
 //
-// A generation is exact in both directions because it is incremented **before**
-// the await, by the press itself, so there is no window in which it lags. It
-// counts presses that claim the status line, not jobs that are running, and it
-// is deliberately not rolled back by a refused press: a refusal writes its own
-// sentence to that same line, and that sentence is newer than this one and is
-// what the person needs to read.
-export const restatedEnding = (ended, index, ownGeneration, latestGeneration) =>
-  ownGeneration === latestGeneration ? embedEndingSentence(ended, index) : null;
+// The second version counted **presses**, incremented before the await so it
+// could not lag. That closed both orderings above and opened a third, which an
+// ordinary double-click reaches: Embed stays enabled through its own round trip,
+// so a second click is refused — and the refusal still claimed a generation the
+// *running* job never used, so that job's ending was suppressed for good. Under
+// the flag a double-click had cost nothing, so it was a regression, and it was
+// found by driving the window rather than by reading it.
+//
+// **The question was never about presses or jobs. It is about this line.** What
+// makes revising it unsafe is somebody having written to it since — so that is
+// what is counted, at the one seam every write in `main.js` goes through. It
+// answers all three orderings without a special case for any of them:
+//
+//   - a newer run's progress is a write, so the stale restatement is refused;
+//   - a run that ended before its `invoke` returned wrote nothing after its own
+//     ending, so its restatement lands;
+//   - a double-click's refusal is written *before* the running job's ending, so
+//     it does not silence it — and a refusal written *after* an ending is the
+//     newest thing on the line and is not painted over. Both, from one rule.
+export const restatedEnding = (ended, index, wroteAt, latestWrite) =>
+  wroteAt === latestWrite ? embedEndingSentence(ended, index) : null;
 
 // A run that never started. The refusals are `Error::NoKey`, `Error::Secrets`,
 // `Error::JobAlreadyRunning` and `Error::Index(_)` — the last from

@@ -1104,6 +1104,111 @@ test("a run with an empty queue says nothing was waiting, not that all is done",
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Where two sentences are joined, and the arm that forgot.
+//
+// The owner read this on screen, live, thirty seconds after a rebuild:
+//
+//   nothing was waiting to be embedded The active space now has 227 pieces
+//   with a vector, of 227 in the whole index.
+//
+// `embedIndexTail` opens with a space and a capital because it is a new
+// sentence. `cancelled` terminates on both its branches and `failed` on both of
+// its message cases; `completed` terminated on neither — one arm of three, and
+// **nothing compared the arms**. Every test in this file asserts on a part, and
+// a part cannot see a join.
+//
+// So these two walk every arm of both composers. Written for the arm the owner
+// found, they immediately named four more (`notAnEmbeddingEnding`'s, which had
+// never terminated) and one in the walk's own sentence, where each frozen-folder
+// sentence was being appended to a head that does not terminate either.
+
+const EVERY_SHAPE = [];
+for (const total of [0, 5]) {
+  for (const refused of [0, 2]) {
+    for (const message of [undefined, "the network went away"]) {
+      EVERY_SHAPE.push({ done: 3, total, refused, message });
+    }
+  }
+}
+
+test("every embedding ending is a terminated sentence, with and without the index", () => {
+  for (const reason of [...END_REASONS, "somethingFutureAndUnknown"]) {
+    for (const shape of EVERY_SHAPE) {
+      const ended = { reason, ...shape };
+
+      // Without the index, the arm's own sentence is the whole output — so this
+      // is the arm's own terminator, and nothing else can be supplying it.
+      const alone = embedEndingSentence(ended);
+      assert.match(
+        alone,
+        /[.!?]$/,
+        `"${reason}" does not end its own sentence, so anything appended to it fuses: "${alone}"`,
+      );
+
+      // With it, the composed line must still read as sentences — and the two
+      // joins are named rather than sniffed for, because a heuristic over
+      // "space then capital" cannot tell a fused sentence from the word Embed.
+      const composed = embedEndingSentence(ended, readWith({ embeddedChunks: 8, totalChunks: 9 }));
+      assert.match(composed, /[.!?]$/, `"${reason}" composed does not end a sentence: "${composed}"`);
+      assert.doesNotMatch(
+        composed,
+        /[^.!?] The active space/,
+        `"${reason}" runs into the index's sentence: "${composed}"`,
+      );
+      assert.doesNotMatch(
+        composed,
+        /[^.!?] Whatever this run/,
+        `"${reason}" runs into the resumable sentence: "${composed}"`,
+      );
+    }
+  }
+});
+
+test("a walk's ending does not run into the folders reconciliation left alone", () => {
+  for (const reason of [...END_REASONS, "somethingFutureAndUnknown"]) {
+    for (const complete of [true, false]) {
+      for (const skipped of [0, 2]) {
+        const text = endingSentence({
+          reason,
+          complete,
+          skipped,
+          done: 3,
+          indexed: 0,
+          unchanged: 12,
+          removed: 4,
+          total: 12,
+          // A prefix nothing else in the sentence can look like, so the join is
+          // located exactly rather than guessed at.
+          frozen: FROZEN_REASONS.map((f) => ({ reason: f, prefix: "ZPREFIX" })),
+        });
+        assert.doesNotMatch(
+          text,
+          /[^.!?] ZPREFIX/,
+          `"${reason}" (complete: ${complete}, skipped: ${skipped}) fuses its ending into the \
+           first folder's sentence: "${text}"`,
+        );
+      }
+    }
+  }
+
+  // Both directions: with nothing frozen the ending is left exactly as it was,
+  // and in particular does not acquire a full stop it never had — the walk's
+  // sentence is not passed through the settings block's seam and nothing else
+  // shapes it.
+  const clean = endingSentence({
+    reason: "completed",
+    complete: true,
+    skipped: 0,
+    indexed: 0,
+    unchanged: 12,
+    removed: 4,
+    total: 12,
+    frozen: [],
+  });
+  assert.doesNotMatch(clean, /\.$/, "a walk with nothing frozen was given a terminator anyway");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Two pairs of numbers, and the one that was not on screen.
 //
 // The live acceptance run of 2026-08-13. Two consecutive runs printed
@@ -1270,36 +1375,64 @@ test("the ending is written at once, and restated through the guard afterwards",
 
   assert.match(
     main,
-    /el\("job-status"\)\.textContent = embedEndingSentence\(ending\);/,
+    /const wroteAt = sayJobStatus\(embedEndingSentence\(ending\)\);/,
     "the run's own sentence is no longer written the instant the ending arrives",
   );
   assert.match(
     main,
-    /const restated = restatedEnding\(ending, settings\.index, generation, jobGeneration\);/,
+    /const restated = restatedEnding\(ending, settings\.index, wroteAt, statusWrites\);/,
     "the ending is not restated from the index that was read back, or is restated against \
-     something other than the press's own generation — and the test above this one, which is \
-     the one that can actually decide that question, is then aimed at nothing",
+     something other than the count of writes to that line — and the test above this one, \
+     which is the one that can actually decide that question, is then aimed at nothing",
   );
-  // The generation is taken before anything is awaited, which is the whole of
-  // why it does not lag the way `jobRunning` does. Captured after the await it
-  // would be the same defect with a new name.
-  assert.match(
-    main,
-    /jobGeneration \+= 1;\s*const generation = jobGeneration;\s*\n\s*\/\/ A channel of its own/,
-    "the press's generation is not taken before it awaits anything, so it can no longer say \
-     which press this ending belongs to",
-  );
-  // Both presses claim the line, or an embedding run's restatement lands on a
-  // walk that was started after it.
+  // Both presses still claim the job area for the settings block's sake, which
+  // is a different question from the one above and keeps its own counter.
   assert.equal(
     [...main.matchAll(/jobGeneration \+= 1;/g)].length,
     2,
-    "one of the two presses does not claim the job area, so a restatement can land on the \
-     other one's line",
+    "one of the two presses does not claim the job area, so a settings read in flight over it \
+     goes on asserting that nothing was refused",
+  );
+});
+
+// ⚠️ **The seam is only a seam if every write goes through it.** `statusWrites`
+// decides whether a late restatement may overwrite the line, so a writer that
+// assigned `#job-status` directly would be invisible to it — and the next
+// restatement would paint over whatever that writer had just said. There is one
+// legitimate direct assignment, inside the seam itself.
+//
+// This is the same rule, and the same shape of check, as `every sentence in the
+// model configuration block comes from render.js` — and it exists because that
+// one's own history says a rule nobody checks is a rule that is already broken.
+test("every write to the job status goes through the one seam that counts it", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const main = readFileSync(join(here, "main.js"), "utf8");
+
+  const direct = [...main.matchAll(/el\("job-status"\)\.textContent\s*\+?=/g)];
+  assert.equal(
+    direct.length,
+    1,
+    `${direct.length} direct writes to #job-status — every one but the seam's own is a write \
+     the restatement cannot see, and will overwrite`,
   );
   assert.match(
     main,
-    /if \(restated !== null\) \{\s*el\("job-status"\)\.textContent = restated;\s*\}/,
+    /const sayJobStatus = \(text\) => \{\s*statusWrites \+= 1;\s*el\("job-status"\)\.textContent = text;\s*return statusWrites;\s*\};/,
+    "the seam no longer counts the write it performs, or no longer hands the count back",
+  );
+
+  // A floor, for the reason the two source-reading tests above carry one: an
+  // assertion over an empty list passes, and a regexp that has rotted produces
+  // exactly that. Fourteen writes today.
+  const throughTheSeam = [...main.matchAll(/sayJobStatus\(/g)];
+  assert.ok(
+    throughTheSeam.length >= 14,
+    `only ${throughTheSeam.length} calls to the seam — the regexp has rotted, or writes have \
+     moved back out of it`,
+  );
+  assert.match(
+    main,
+    /if \(restated !== null\) \{\s*sayJobStatus\(restated\);\s*\}/,
     "the guard's refusal is written to the line anyway, so `null` reaches a person as a word",
   );
 });
@@ -2429,9 +2562,17 @@ test("every sentence in the model configuration block comes from render.js", () 
   // `value` is deliberately **not** here. `el("key").value = ""` is not a
   // sentence, it is the field being cleared so a credential does not sit in the
   // DOM, and a rule that reddened on it would be read as a reason to stop.
+  // `sayJobStatus(` is in the alternation because the job status line now goes
+  // through a seam that counts its writes, and a literal handed to that seam
+  // reaches a person exactly as a literal assigned to `textContent` did. Adding
+  // it is what keeps this check following the sentences rather than following
+  // one spelling of how they are written — the floor below moved with it rather
+  // than being lowered, which would have been the same test proving less.
   const assignments = [
-    ...block.matchAll(/\.(?:textContent|innerText|innerHTML|placeholder)\s*\+?=\s*(\S)/g),
-  ].map((m) => m[1]);
+    ...block.matchAll(
+      /\.(?:textContent|innerText|innerHTML|placeholder)\s*\+?=\s*(\S)|sayJobStatus\(\s*(\S)/g,
+    ),
+  ].map((m) => m[1] ?? m[2]);
   // A floor, because an assertion over an empty list passes and a rotted regexp
   // produces exactly that. **25 today**, re-measured with the Embed press; it
   // was 22 with the discard control (D96g), and the margin is what a legitimate
@@ -2441,8 +2582,8 @@ test("every sentence in the model configuration block comes from render.js", () 
   // parity claim pointing at a floor that had been stale for six commits. Both
   // numbers are re-measured whenever this file's regexps or main.js's block
   // change, which is the whole point of naming the actual beside them.
-  assert.ok(assignments.length >= 23,
-    `only ${assignments.length} textContent assignments found — the regexp has rotted, or the block shrank`);
+  assert.ok(assignments.length >= 25,
+    `only ${assignments.length} sentence writes found — the regexp has rotted, or the block shrank`);
   for (const first of assignments) {
     assert.ok(!["'", '"', "`"].includes(first),
       `a sentence in the model configuration block starts with ${first} — it is a literal in ` +

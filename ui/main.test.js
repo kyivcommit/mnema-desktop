@@ -209,9 +209,27 @@ test("a run that ended before its own invoke resolved still gets the index's pai
   await w.press("embed");
   const channel = w.channels[w.channels.length - 1];
 
+  // ⚠️ **The precondition, asserted rather than arranged.** This scenario is
+  // only about anything while the press's own `invoke` is still outstanding —
+  // `jobRunning` is set after it returns, and `syncButtons` disables Embed from
+  // that flag, so an enabled Embed is this window saying it has not come back.
+  // 1A's own history is the argument for spelling this out: it was green about
+  // nothing until its premise was made explicit (review, Minor 3).
+  assert.equal(
+    w.el("embed").disabled,
+    false,
+    "premise: the press's invoke has already resolved, so this is no longer the ordering \
+     under test",
+  );
+
   // The ending arrives first — before the press's own `invoke` has come back.
   await w.send(channel, ending({ reason: "completed", done: 0, total: 0, refused: 0 }));
   assert.match(w.status(), /nothing was waiting/, "the run's own sentence is not on screen");
+  assert.doesNotMatch(
+    w.status(),
+    /with a vector/,
+    "premise: the restatement is still in flight, so the guard is what decides it",
+  );
 
   // Now the press resolves, which is what sets the flag for a run already over.
   start.resolve(null);
@@ -237,6 +255,114 @@ test("a run that ended before its own invoke resolved still gets the index's pai
     /8 pieces with a vector, of 9 in the whole index/,
     "the run's line never got the index's pair, and nothing retries it — the person is left \
      with 'nothing was waiting to be embedded' and no answer to 'so is it finished?'",
+  );
+  poll.resolve({ running: false });
+  await settleEverything();
+});
+
+// **Important 3, and the ordinary way in: a double-click.** Embed stays enabled
+// through its own round trip, so two clicks give a refusal while the first run
+// is starting. Counting *presses* let that refusal claim a number the running
+// job never used, and the running job's ending was then suppressed for good —
+// a regression against the flag, which had cost a double-click nothing.
+test("a double-click's refusal does not silence the run that is actually starting", async () => {
+  // The first press starts a run and its `invoke` is left hanging — which is
+  // the whole window this defect lives in. The second is refused by the slot,
+  // exactly as the core does. ⚠️ Answered here rather than through `hold`,
+  // because `hold` is consumed before `answers` runs, so the counter would
+  // never see the first call and the second click would succeed instead of
+  // being refused. Measured: the premise assertion below caught it.
+  const startA = deferred();
+  let started = 0;
+  const w = await boot({
+    start_embed_job: () => {
+      started += 1;
+      return started === 1 ? startA.promise : new Error("a job is already running");
+    },
+  });
+
+  const poll = w.hold("job_status");
+  const read = w.hold("model_settings");
+
+  await w.press("embed");
+  // The second click of the double-click, inside the first press's round trip.
+  await w.press("embed");
+  assert.match(w.status(), /nothing was embedded/, "premise: the second click was refused");
+
+  startA.resolve(null);
+  await settleEverything();
+
+  const channel = w.channels[0];
+  await w.send(channel, ending({ reason: "completed", done: 3, total: 5, refused: 0 }));
+  assert.match(w.status(), /3 of 5 embedded in this run/, "premise: the run that started ended");
+
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+    },
+  });
+  await settleEverything();
+
+  assert.match(
+    w.status(),
+    /8 pieces with a vector, of 9 in the whole index/,
+    `a double-click cost the run its index pair, permanently: "${w.status()}"`,
+  );
+  poll.resolve({ running: false });
+  await settleEverything();
+});
+
+// The other side of the same rule, and the reason a refused press must not
+// simply give its number back: a refusal that lands **after** an ending is the
+// newest thing on the line and is what the person needs to read. Rolling the
+// press's number back would let the older ending paint over it.
+test("a refusal after an ending is not painted over by that ending's restatement", async () => {
+  let started = 0;
+  const w = await boot({
+    start_embed_job: () => {
+      started += 1;
+      return started === 1 ? null : new Error("no provider key has been entered");
+    },
+  });
+
+  const poll = w.hold("job_status");
+  const read = w.hold("model_settings");
+
+  await w.press("embed");
+  const channel = w.channels[0];
+  await w.send(channel, ending({ reason: "completed", done: 3, total: 5, refused: 0 }));
+  assert.match(w.status(), /3 of 5 embedded in this run/, "premise: the run's ending is on the line");
+
+  // Pressed after the ending, and refused for a reason of its own.
+  await w.press("embed");
+  assert.match(w.status(), /no provider key/, "premise: the refusal is the newest thing said");
+
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+    },
+  });
+  await settleEverything();
+
+  assert.match(
+    w.status(),
+    /no provider key/,
+    `the previous run's ending was painted over the reason this person's press failed: \
+     "${w.status()}"`,
   );
   poll.resolve({ running: false });
   await settleEverything();
