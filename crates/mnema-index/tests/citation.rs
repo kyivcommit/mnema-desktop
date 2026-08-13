@@ -1358,7 +1358,13 @@ impl std::ops::Deref for WithChunks {
 /// id`, `ORDER BY ord` and no ordering at all agree by accident; reversed,
 /// only `ORDER BY ord` — what `chunks_of_document` actually uses — still
 /// puts `texts[0]` first.
-fn insert_two_chunks(db: &Db, document_id: &str, texts: &[&str; 2]) {
+///
+/// Returns the two `chunk.id`s `insert_chunk` actually produced, indexed by
+/// `ord` (`[0]` is `ord` 0's id) — so a caller can assert `chunks_of_document`
+/// reports `chunk.id` and not, say, `chunk.ord` mistaken for it. A bare
+/// "the two differ" check does not do that: with `ord` 0 and 1 and ids 2 and
+/// 1 (reversed insertion), *both* columns satisfy "not equal to each other".
+fn insert_two_chunks(db: &Db, document_id: &str, texts: &[&str; 2]) -> [i64; 2] {
     db.insert_document(document_id, "text/plain", 4, SourceKind::Document)
         .unwrap();
     db.set_document_status(document_id, DocumentStatus::Indexed)
@@ -1367,36 +1373,42 @@ fn insert_two_chunks(db: &Db, document_id: &str, texts: &[&str; 2]) {
     let block = db
         .insert_block(page, &paragraph(0, texts[0], Some(1), Some(1)))
         .unwrap();
+    let mut ids = [0i64; 2];
     for (ord, text) in texts.iter().enumerate().rev() {
-        db.insert_chunk(
-            document_id,
-            ord as i64,
-            text,
-            &Locator {
-                spans: vec![Segment {
-                    block_id: block,
-                    start: 0,
-                    end: text.chars().count() as u32,
-                    block_start: 0,
-                }],
-                coordinate: Coordinate::None,
-            },
-            SourceKind::Document,
-        )
-        .unwrap();
+        let id = db
+            .insert_chunk(
+                document_id,
+                ord as i64,
+                text,
+                &Locator {
+                    spans: vec![Segment {
+                        block_id: block,
+                        start: 0,
+                        end: text.chars().count() as u32,
+                        block_start: 0,
+                    }],
+                    coordinate: Coordinate::None,
+                },
+                SourceKind::Document,
+            )
+            .unwrap();
+        ids[ord] = id;
     }
+    ids
 }
 
 /// One document, one page, one block, two chunks at `ord` 0 and 1 — built the
 /// same way `fixture_one_page` above assembles the four-level model
 /// (including declaring the document finished), extended to more than one
 /// chunk and returned in the `WithChunks`/`Deref` shape `fixture_one_page`
-/// uses too, so the test below can call `Db` methods on it directly.
-fn fixture_with_two_chunks(document_id: &str, texts: &[&str; 2]) -> WithChunks {
+/// uses too, so the test below can call `Db` methods on it directly. The
+/// second element is `insert_two_chunks`'s own return: the two `chunk.id`s,
+/// by `ord`.
+fn fixture_with_two_chunks(document_id: &str, texts: &[&str; 2]) -> (WithChunks, [i64; 2]) {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh(&dir);
-    insert_two_chunks(&db, document_id, texts);
-    WithChunks { db, _dir: dir }
+    let ids = insert_two_chunks(&db, document_id, texts);
+    (WithChunks { db, _dir: dir }, ids)
 }
 
 /// The harness resolves its gold chunk by looking for a sentence in the text,
@@ -1404,7 +1416,7 @@ fn fixture_with_two_chunks(document_id: &str, texts: &[&str; 2]) -> WithChunks {
 /// document, in order, with their text.
 #[test]
 fn chunks_of_document_come_back_in_order_with_their_text() {
-    let db = fixture_with_two_chunks("doc-1", &["перший шматок", "другий шматок"]);
+    let (db, ids) = fixture_with_two_chunks("doc-1", &["перший шматок", "другий шматок"]);
     // A second, unrelated document in the same database — without it,
     // `WHERE document_id = ?1` is only ever tested against an id nobody
     // wrote, and a method that dropped the clause entirely would still pass
@@ -1415,7 +1427,16 @@ fn chunks_of_document_come_back_in_order_with_their_text() {
     assert_eq!(chunks.len(), 2, "got {chunks:?}");
     assert_eq!(chunks[0].1, "перший шматок");
     assert_eq!(chunks[1].1, "другий шматок");
-    assert!(chunks[0].0 != chunks[1].0, "two chunks, two ids");
+    // Not just "the two differ": with `ord` 0 and 1 and ids 2 and 1
+    // (reversed insertion), a `!=` check is satisfied whichever column
+    // `chunks_of_document` actually selected. This compares against the
+    // real `chunk.id`s `insert_chunk` returned, so a method that reported
+    // `chunk.ord` instead — or anything else — is caught.
+    assert_eq!(
+        (chunks[0].0, chunks[1].0),
+        (ids[0], ids[1]),
+        "chunks_of_document must report chunk.id, not chunk.ord or anything else"
+    );
 
     // The other direction: an id nobody wrote is an empty answer, not an error
     // and not the whole table. A one-sided assertion here would be satisfied by
@@ -1430,12 +1451,17 @@ fn chunks_of_document_come_back_in_order_with_their_text() {
 /// `chunks_of_document` disagrees with `search_lexical` on purpose — see the
 /// method's own doc comment for why the disagreement stands rather than
 /// being filtered away. Pinned here rather than left to the doc comment
-/// alone, in both directions: a document left at `pending` still gives up
-/// its chunks through this method, and `search_lexical` still finds nothing
-/// in it (`search.rs:42`, `document.status = 'indexed'`). Either half alone
-/// would pass a version of `chunks_of_document` that quietly started
-/// agreeing with search — the first if it kept filtering pending documents
-/// out, the second if `search_lexical` stopped filtering at all.
+/// alone, in both directions — and the two halves pin two *different*
+/// functions, neither standing in for the other: the first two assertions
+/// below pin `chunks_of_document`'s own policy (it answers for a `pending`
+/// document at all), and the last pin proves the disagreement is real —
+/// that `search.rs:42`'s `document.status = 'indexed'` genuinely blinds
+/// `search_lexical` to the same document, not that this fixture simply
+/// never got indexed. Losing either one leaves the other function's
+/// behaviour unpinned: a `chunks_of_document` that started filtering
+/// `pending` out would still leave `search_lexical` correctly blind, and a
+/// `search_lexical` that stopped filtering by status would still leave
+/// `chunks_of_document` correctly unfiltered.
 #[test]
 fn chunks_of_document_answers_for_a_pending_document_search_cannot_see() {
     let dir = tempfile::tempdir().unwrap();
@@ -1476,5 +1502,17 @@ fn chunks_of_document_answers_for_a_pending_document_search_cannot_see() {
         db.search_lexical("кошторис", 10).unwrap().is_empty(),
         "a pending document must stay invisible to search (D61), even though \
          chunks_of_document just answered for it above"
+    );
+
+    // The other side of that emptiness: it must be the `pending` status that
+    // discriminates, not some other reason the same query happens to return
+    // nothing (a stale fixture, a broken search-row write). Advancing the
+    // document and finding it now is what tells the two apart.
+    db.set_document_status("doc-pending", DocumentStatus::Indexed)
+        .unwrap();
+    assert_eq!(
+        db.search_lexical("кошторис", 10).unwrap().len(),
+        1,
+        "once indexed, the same chunk must become searchable"
     );
 }
