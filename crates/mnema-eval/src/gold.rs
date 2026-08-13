@@ -12,7 +12,15 @@ pub enum Gold {
     /// - the sentence is longer than the chunker's carry and was cut by a chunk
     ///   boundary, so it lies whole in no chunk. Rare — boundaries prefer
     ///   sentence ends (`crates/mnema-chunk/src/units.rs:76-81`) — and not
-    ///   invented: a long legal sentence reaches it.
+    ///   invented: a long legal sentence reaches it. The repair is to quote a
+    ///   shorter span that sits inside one chunk;
+    /// - no chunks were supplied at all, or they belong to another document.
+    ///   `resolve_gold(&[], s)` is `Missing`, and the caller reaches that
+    ///   ordinarily: a question naming a document the walk skipped, a mistyped
+    ///   document id, chunks that were never written. Nothing is wrong with the
+    ///   sentence or the corpus — the **input** is wrong, and this is the most
+    ///   misleading of the five, because the author goes looking in a file where
+    ///   the sentence plainly is.
     ///
     /// The third is the one a reader will not think of: the markdown reader
     /// stores raw source lines
@@ -26,9 +34,13 @@ pub enum Gold {
     /// whitespace, and `canonical` collapses it. Said explicitly because the
     /// obvious guess is that it is.
     ///
-    /// All three are preflight failures, and none may be silently scored as a
+    /// All of them are preflight failures, and none may be silently scored as a
     /// miss: a question with no right answer makes every configuration look
     /// worse for a reason that is not search.
+    ///
+    /// "All of them", not a number. The count was removed from the top of this
+    /// comment once and survived at the bottom, where it then read as excluding
+    /// the cause that had just been added.
     Missing,
     /// Several. Legitimate — chunks overlap — and still not shippable: with two
     /// right answers a rank means two things. Preflight refuses it and the
@@ -58,9 +70,11 @@ fn canonical(text: &str) -> String {
 
 /// Finds the chunks whose text holds `sentence`, once both are canonicalised.
 ///
-/// The summary line says "once both are canonicalised" because that is the line
-/// a module listing shows, and "contains the stored text" was true only before
-/// this function learned that the two sides are never byte-comparable.
+/// The summary line names canonicalisation because that is the line a module
+/// listing shows on its own. The earlier wording — "whose stored text contains
+/// `sentence`" — described a byte comparison, which is what the two sides are
+/// **not reliably** doing: usually they do match byte for byte, and the cases
+/// where they do not are the whole reason this function exists.
 ///
 /// **The caller owes chunks of a document whose `document.status` is
 /// `indexed`.** `Db::chunks_of_document` (`crates/mnema-index/src/write.rs:799`)

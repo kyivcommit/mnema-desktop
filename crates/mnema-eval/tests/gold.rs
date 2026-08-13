@@ -83,6 +83,25 @@ fn a_decomposed_sentence_finds_its_precomposed_chunk() {
 /// stricter than the search here is correct, and the cost — a question that must
 /// reproduce a stress mark exactly — is paid in the corpus rules and in
 /// pre-flight, not by loosening this.
+/// The other half of the same danger, and the likelier edit of the two. The
+/// repository already contains a function that strips marks **without**
+/// decomposing — `mnema_core::nfc::strip_latin_diacritics`, built deliberately
+/// so that `й` survives. Swapping `canonical`'s `normalise` for it is the change
+/// someone will reach for ("use the one that mirrors the index"), and measured,
+/// **all eight other tests stay green** while the oracle quietly stops telling
+/// `сло́во` from `слово` — the exact opposite of what the comment below argues.
+///
+/// The two tests together cover both halves: this one catches strip-without-
+/// decompose, the next catches decompose-then-strip.
+#[test]
+fn a_stress_mark_is_part_of_the_word_here() {
+    // `о` + U+0301. No precomposed form exists, so NFC keeps the mark and the
+    // oracle keeps it too. FTS5 removes it, and being stricter than the index
+    // here is the decision — paid for by the corpus rules, not by loosening.
+    let chunk = vec![(10, "Комісія ухвалила сло\u{301}во.".to_string())];
+    assert_eq!(resolve_gold(&chunk, "ухвалила слово."), Gold::Missing);
+}
+
 #[test]
 fn folding_i_kratke_into_i_would_match_a_different_word() {
     // The chunk says `новий`. The needle says `новии` — which is exactly what
