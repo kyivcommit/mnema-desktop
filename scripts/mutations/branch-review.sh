@@ -82,7 +82,7 @@ case_ "workflow: the matrix must actually run the tests" \
 
 case_ "workflow: the tests need the library vendored first" \
   .github/workflows/ci.yml \
-  's{        run: scripts/fetch-pdfium\.sh\n}{}' \
+  's{        run: scripts/fetch-pdfium\.sh\n(      - run: cargo clippy)}{$1}' \
   'which src-tauri now needs to compile
       - run: cargo clippy' \
   mnema-desktop 'the_check_job_keeps_the_lines_whose_loss_would_not_show' --test packaging_workflow

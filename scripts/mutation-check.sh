@@ -33,6 +33,23 @@
 # anchored and one of the three had been substituting into the middle of an
 # indent, passing both guards for a reason unrelated to its meaning.
 #
+# ⚠️ **A third guard, for the same failure, that the two above cannot see.**
+# `s///` without `/g` stops at the first match and returns 1 whether that match
+# was the one the case meant or a different place with the same shape — it
+# cannot tell "matched correctly" from "matched a wrong place first, which
+# happened to be byte-identical". So this guard counts occurrences separately,
+# on a copy nothing else reads, by forcing `/g` onto whatever the expression
+# already has (a no-op if it already carries one): no `g` requires exactly one
+# occurrence, `g` requires at least one. No exception list — the one
+# legitimate many-match case (`linux-resource.sh`'s "no case arm sets a
+# library any more") declares its own multiplicity in its own syntax. Applied
+# for real against all 546 expressions in this repository, it found eight
+# cases sharing a pattern with a sibling function or match arm — one of them
+# the exact shape above, an unanchored 4-space pattern matching inside a
+# 12-space-indented sibling as a substring — each narrowed to name its
+# function or arm rather than loosened, and verified to still produce the
+# byte-identical mutation it always had.
+#
 # ⚠️ **Read the exit code from the script, not from a pipeline.** `… | tail`
 # reports `tail`'s status. Measured here: a run of this harness with two broken
 # cases was written up as "exit code 0" for exactly that reason. Redirect and
@@ -111,6 +128,15 @@ contains() {
   MUTATION_MARKER="$1" perl -0777 -ne 'exit(index($_, $ENV{MUTATION_MARKER}) < 0)' "$2"
 }
 
+# Whether `expr`'s own trailing flags carry a `g` — "every arm" rather than
+# "this one place". In `perl`, not bash's `[[ =~ ]]`: the obvious bash regex
+# for "trailing run of letters", `([a-zA-Z]*)$`, matched empty on this
+# platform's bash even against a string that plainly ends in letters —
+# measured, not assumed.
+expr_wants_every_match() {
+  printf '%s' "$1" | perl -ne 'exit(/([a-zA-Z]*)$/ && $1 =~ /g/ ? 0 : 1)'
+}
+
 seen=""
 
 # case_ <label> <file> <perl-expr> <marker> <package> <test-name> <cargo target args...>
@@ -153,6 +179,7 @@ case_() {
 
   printf '%s\n' "-- $label"
   restore
+  cp "$file" "$WORK/count-copy"
   perl -0pi -e "$expr" "$file"
 
   # The authoritative guard. A mutation that left the file byte-for-byte
@@ -166,6 +193,25 @@ case_() {
   # that matched somewhere unintended.
   if ! contains "$marker" "$file"; then
     echo "   BROKEN CASE: $file changed, but not into what the case describes"
+    broken=$((broken + 1)); restore; return 0
+  fi
+  # Third guard — see the header for why counting occurrences needs `/g`
+  # forced on a copy, rather than trusting what `$expr` itself returned.
+  # `$WORK/count-copy` was saved above, before the real mutation touched
+  # `$file`, so this counts against the same pre-mutation text the real
+  # substitution just read.
+  local forced="$expr"
+  expr_wants_every_match "$expr" || forced="${expr}g"
+  local occurrences
+  occurrences=$(perl -0pi -e "my \$mnema_subs = do { $forced }; print STDERR ((\$mnema_subs) + 0);" "$WORK/count-copy" 2>&1 1>/dev/null)
+  if expr_wants_every_match "$expr"; then
+    if [ "$occurrences" -lt 1 ]; then
+      echo "   BROKEN CASE: the expression carries /g and should match at least once; it matched $occurrences times"
+      broken=$((broken + 1)); restore; return 0
+    fi
+  elif [ "$occurrences" -ne 1 ]; then
+    echo "   BROKEN CASE: the pattern matches $file $occurrences times, not exactly once — it may be"
+    echo "   substituting into code it was not written against"
     broken=$((broken + 1)); restore; return 0
   fi
 

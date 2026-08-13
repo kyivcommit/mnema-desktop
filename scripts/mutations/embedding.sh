@@ -42,7 +42,7 @@ case_ "write: the vector sweep must run before the page delete, not after (D88, 
 # reaches.
 case_ "space: upsert_vector without the delete stops being a replace (D95a)" \
   crates/mnema-index/src/space.rs \
-  's{            tx\.execute\(\n                &format!\("DELETE FROM \{\} WHERE chunk_id = \?1", space\.table\),\n                params!\[chunk_id\],\n            \)\?;\n}{}' \
+  's{(pub fn upsert_vector\(&self.*?self\.transaction\(\|tx\| \{\n)            tx\.execute\(\n                &format!\("DELETE FROM \{\} WHERE chunk_id = \?1", space\.table\),\n                params!\[chunk_id\],\n            \)\?;\n}{$1}s' \
   'self.transaction(|tx| {
             tx.execute(
                 &format!(
@@ -56,7 +56,7 @@ case_ "space: upsert_vector without the delete stops being a replace (D95a)" \
 # `upsert_vector`. Two cases, one per method, since each clears its own row.
 case_ "space: upsert_vector without clearing chunk_embedding_state leaves a stale row (D95a, review 1)" \
   crates/mnema-index/src/space.rs \
-  's{                params!\[chunk_id, as_blob\(v\)\],\n            \)\?;\n            tx\.execute\(\n                "DELETE FROM chunk_embedding_state WHERE space_id = \?1 AND chunk_id = \?2",\n                params!\[space_id, chunk_id\],\n            \)\?;\n}{                params![chunk_id, as_blob(v)],\n            )?;\n}' \
+  's{(pub fn upsert_vector\(&self.*?)                params!\[chunk_id, as_blob\(v\)\],\n            \)\?;\n            tx\.execute\(\n                "DELETE FROM chunk_embedding_state WHERE space_id = \?1 AND chunk_id = \?2",\n                params!\[space_id, chunk_id\],\n            \)\?;\n}{$1                params![chunk_id, as_blob(v)],\n            )?;\n}s' \
   'params![chunk_id, as_blob(v)],
             )?;
             Ok(())' \
@@ -521,7 +521,7 @@ case_ "embed: a batch size of zero must be refused rather than reported as done"
 # for one model filled with another's vectors ranks nonsense and says nothing.
 case_ "embed: the request must name the model the space was built for" \
   crates/mnema-embed/src/lib.rs \
-  's{mnema_provider::embed\(call\.base, call\.key, call\.model, &texts\)}{mnema_provider::embed(call.base, call.key, "some/other-embedder", \&texts)}' \
+  's{(fn one_batch\(.*?)mnema_provider::embed\(call\.base, call\.key, call\.model, &texts\)}{$1mnema_provider::embed(call.base, call.key, "some/other-embedder", \&texts)}s' \
   'mnema_provider::embed(call.base, call.key, "some/other-embedder", &texts)' \
   mnema-embed 'the_request_names_the_model_the_space_was_built_for' --test queue
 

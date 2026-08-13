@@ -21,15 +21,42 @@
 # said so. What finds that is checking every case at once, cheaply enough to do
 # after every refactor.
 #
-# The two guards below are `mutation-check.sh`'s own, and deliberately the same:
+# The three guards below are `mutation-check.sh`'s own, and deliberately the same:
 #
-#   1. the expression changed the file at all, and
-#   2. it changed it into what the marker describes.
+#   1. the expression changed the file at all,
+#   2. it changed it into what the marker describes, and
+#   3. it changed it exactly once — unless the expression itself says otherwise.
 #
 # `contains` is the multi-line-safe test that file argues for at length, copied
 # rather than approximated: `grep -F` given a pattern with a newline splits the
 # PATTERN and matches if ANY one of its lines appears anywhere, which is what let
 # a mutation that changed nothing pass its own check once already.
+#
+# Guard 3 is what the re-indentation above actually needed. One of its three
+# broken cases substituted into the middle of a *different* function's
+# matching indentation and reported still-green — it passed guards 1 and 2 for
+# a reason unrelated to what it meant, because `perl` patterns are unanchored.
+# `s///` without `/g` cannot tell that story from its own return value — it
+# stops at the first match and reports 1 either way — so this guard counts
+# occurrences separately, on a copy nothing else reads, by forcing `/g` onto
+# whatever expression is given (a no-op for one that already has it). No `g`
+# means exactly one occurrence is required; `g` means at least one — because
+# the one legitimate many-match case, `linux-resource.sh`'s "no case arm sets
+# a library any more", declares its own multiplicity in its own syntax, and
+# needs no exception list to be told apart from the rest.
+#
+# Applying that, for real, against every one of this repository's 546
+# expressions found eight cases sharing a pattern with a sibling function —
+# boilerplate the pattern did not name specifically enough to tell apart —
+# not the one exception a smaller check had assumed. All eight were real
+# ambiguity (one, `journal_skipped_pages`'s, was the *exact* shape of the bug
+# above: an unanchored 4-space pattern matching inside a 12-space-indented
+# sibling as a substring), and all eight still mutated the correct line every
+# time, by luck of definition order rather than by what the pattern named.
+# Each was narrowed to name its enclosing function or arm rather than loosened
+# or exempted, verified to produce the byte-identical mutation it always had,
+# and this sweep is the record that all 546 now match exactly what their own
+# flag says they should.
 #
 # What it does **not** check: that the case names a test that exists (the
 # harness's baseline pass does that), that the mutation compiles, or that
@@ -96,6 +123,24 @@ REPO=$(git rev-parse --show-toplevel) || exit 2
 
 if [ $# -eq 0 ]; then
   FILES=("$REPO"/scripts/mutations/*.sh)
+  # ⚠️ **The glob above has no floor.** A case file renamed to something other
+  # than `*.sh`, or moved into a subdirectory, would leave the sweep silently
+  # — `files_read` and `checked` simply come back smaller, and nothing below
+  # asserted the size, only `files_read == 0` did. `git ls-files` names every
+  # tracked file under the directory regardless of name or nesting, so a file
+  # it names that the glob did not match is exactly that hole — the same
+  # shape as the shebang hole above, closed the same way: a skip has to be
+  # checked too.
+  while IFS= read -r tracked; do
+    found=0
+    for f in "${FILES[@]}"; do
+      [ "$f" = "$REPO/$tracked" ] && found=1 && break
+    done
+    if [ "$found" -eq 0 ]; then
+      echo "TRACKED BUT NOT SWEPT: $tracked — scripts/mutations/*.sh did not match it" >&2
+      exit 2
+    fi
+  done < <(git -C "$REPO" ls-files scripts/mutations)
 else
   FILES=("$@")
 fi
@@ -105,6 +150,16 @@ trap 'rm -rf "$WORK"' EXIT
 # Exact multi-line substring test. NOT `grep -F` — see the header.
 contains() {
   MUTATION_MARKER="$1" perl -0777 -ne 'exit(index($_, $ENV{MUTATION_MARKER}) < 0)' "$2"
+}
+
+# Whether `expr`'s own trailing flags carry a `g` — "every arm" rather than
+# "this one place". Done in `perl`, not bash's `[[ =~ ]]`: the obvious bash
+# regex for "trailing run of letters", `([a-zA-Z]*)$`, matched empty on this
+# platform's bash even against a string that plainly ends in letters —
+# measured, not assumed — so the one tool already relied on for exact text
+# matching everywhere else in this script does this too.
+expr_wants_every_match() {
+  printf '%s' "$1" | perl -ne 'exit(/([a-zA-Z]*)$/ && $1 =~ /g/ ? 0 : 1)'
 }
 
 checked=0
@@ -144,6 +199,41 @@ case_() {
   if ! contains "$marker" "$scratch"; then
     echo "MARKER NO LONGER DESCRIBES IT: $label"
     echo "   $file changed, but not into what the case says it becomes"
+    stale=$((stale + 1))
+  fi
+  # Guard 3. `s///` without `/g` always returns 0 or 1 — it stops at the
+  # first match — so its own return value cannot tell "matched the one
+  # intended place" from "matched a wrong place first and stopped there",
+  # which is exactly the indentation bug in the header: the pattern DID
+  # match, once, just not where it meant to. The question this guard answers
+  # is how many places the pattern matches at all, and that needs `/g` on a
+  # copy nothing else reads — appending it where it is not already there
+  # turns "did it substitute" into "how many times could it have"; an
+  # expression that already carries `g` is unchanged by appending it again.
+  # A compound expression chaining two statements with `;` (`task-2.sh`'s
+  # journal case) only gets this on its last statement — appending to a
+  # string can only land at the end — so the first statement's own
+  # multiplicity is not independently checked here; the one case in this
+  # position is not the shape this guard exists for (two distinct removals,
+  # not one ambiguous pattern), and the cost of covering it exactly is not
+  # one line any more.
+  local count_copy="$WORK/count-copy"
+  cp "$REPO/$file" "$count_copy"
+  local forced="$expr"
+  expr_wants_every_match "$expr" || forced="${expr}g"
+  local occurrences
+  occurrences=$(perl -0pi -e "my \$mnema_subs = do { $forced }; print STDERR ((\$mnema_subs) + 0);" "$count_copy" 2>&1 1>/dev/null)
+
+  if expr_wants_every_match "$expr"; then
+    if [ "$occurrences" -lt 1 ]; then
+      echo "MATCHES NOTHING: $label"
+      echo "   the expression carries /g and should match at least once; it matched $occurrences times"
+      stale=$((stale + 1))
+    fi
+  elif [ "$occurrences" -ne 1 ]; then
+    echo "MATCHES MORE THAN ONCE: $label"
+    echo "   the pattern matches $file $occurrences times, not exactly once — it may be substituting"
+    echo "   into code it was not written against"
     stale=$((stale + 1))
   fi
   # Deterministic, so that the status of `. "$file"` below is only ever about

@@ -444,7 +444,7 @@ case_ "the key travels in the query string of the list request" \
 # else is a different request with the same credential on it.
 case_ "the embedding check posts to an endpoint other than the one it names" \
   crates/mnema-provider/src/probe.rs \
-  's~    let \(status, answer\) = match http::post_json\(base, "/embeddings", key, &request\) \{~    let (status, answer) = match http::post_json(base, "/embed", key, \&request) {~' \
+  's~(pub fn check_embedding_model\(.*?)    let \(status, answer\) = match http::post_json\(base, "/embeddings", key, &request\) \{~$1    let (status, answer) = match http::post_json(base, "/embed", key, \&request) {~s' \
   'http::post_json(base, "/embed", key, &request)' \
   mnema-provider 'the_model_check_posts_to_the_embeddings_endpoint_with_the_key_only_in_a_header' --test probe
 

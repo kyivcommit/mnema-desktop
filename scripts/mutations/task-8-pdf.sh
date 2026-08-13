@@ -106,7 +106,7 @@ case_ "worker: the no_text_layer refusal carries the digest it read" \
 # skip list, and — through `SkipRule` — two different `displaces` decisions.
 case_ "worker: a scan is refused under its own rule, not unsupported" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{rule: "no_text_layer"\.to_string\(\),}{rule: "unsupported".to_string(),}' \
+  's{(Ok\(doc\) if doc\.pages\.is_empty\(\) => vec!\[Frame::Refused \{\n                )rule: "no_text_layer"\.to_string\(\),}{${1}rule: "unsupported".to_string(),}' \
   'rule: "unsupported".to_string(),
                 reason: format!(' \
   mnema-extract 'a_pdf_with_no_text_layer_on_any_page_is_refused_under_its_own_rule' --test worker_cli
