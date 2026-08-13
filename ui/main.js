@@ -46,6 +46,9 @@ import {
   changeToConfirm,
   discardVectorsLabel,
   discardVectorsNote,
+  barState,
+  BAR_RUNNING,
+  BAR_STOPPED,
 } from "./render.js";
 
 const { invoke, Channel } = window.__TAURI__.core;
@@ -170,6 +173,13 @@ const followUntilIdle = async () => {
     el("job-status").textContent =
       "the job is no longer running, but this page has no channel to it and does not " +
       "know how it ended — whether it finished cleanly, or something was left unreconciled";
+    // And the bar says the same. This path has no `Ended` to hand `barState`,
+    // so it takes the answer that function gives an ending it does not
+    // recognise, and for the same reason: "finished" is a claim, and a page
+    // with no channel has established nothing. Left alone the bar sits wherever
+    // the last report put it, in the colour of a run still going — the defect
+    // itself, on the one path that cannot even say how the job ended.
+    el("bar").dataset.state = BAR_STOPPED;
   }
   // This is the only route the page has after a reload mid-job: the channel
   // belongs to the page that started the job, so the two handlers that redraw
@@ -222,6 +232,11 @@ el("walk").addEventListener("click", async () => {
       const { done, total, skipped, secondsLeft } = data;
       el("bar").max = total;
       el("bar").value = done;
+      // Set on every report, not only at the start: this is the one place that
+      // is certain a job is moving, and a bar left grey by the previous run's
+      // ending would say the opposite for as long as it took the state to be
+      // put right somewhere else.
+      el("bar").dataset.state = BAR_RUNNING;
       const eta = secondsLeft === null ? "estimating…" : `${secondsLeft}s left`;
       el("job-status").textContent = `${done} of ${total}, ${skipped} skipped — ${eta}`;
       return;
@@ -237,6 +252,12 @@ el("walk").addEventListener("click", async () => {
     const ending = data;
     el("bar").max = ending.total;
     el("bar").value = ending.done;
+    // A walk gets this as much as an embedding run does: one bar, one Cancel,
+    // and a walk somebody stopped leaves the identical half-filled blue picture
+    // the acceptance run of 2026-08-13 waited in front of. The decision is
+    // `barState`'s, in `render.js`, where it can be tested; both handlers ask
+    // it rather than each deciding for its own job.
+    el("bar").dataset.state = barState(ending);
 
     el("job-status").textContent = endingSentence(ending);
     endingDescribed = true;
@@ -266,6 +287,20 @@ el("walk").addEventListener("click", async () => {
     return;
   }
 
+  // The bar comes back to life on the press rather than on the first report,
+  // and **before** the await rather than after it. Both halves are the point.
+  // A run's first report can be a batch away, and a bar still wearing the last
+  // run's ended colour for those seconds says the press did nothing — the same
+  // defect, inverted. And a job that ends before `invoke` resolves has its
+  // ending drawn during that await, so a line after it would put "running" back
+  // over the picture the ending had just drawn, with nothing left to correct it.
+  //
+  // Restored on a refusal, because a press that started nothing must not change
+  // what the bar says — least of all on the commonest refusal of all, where the
+  // bar belongs to the job that is already running.
+  const barWas = el("bar").dataset.state ?? "";
+  el("bar").dataset.state = BAR_RUNNING;
+
   try {
     endingDescribed = false;
     await invoke("start_walk_job", { rootId: watchedRootId, onProgress });
@@ -277,7 +312,8 @@ el("walk").addEventListener("click", async () => {
     follow();
   } catch (error) {
     // Refused — most likely because a job is already running. Nothing started,
-    // so the buttons must not move.
+    // so the buttons must not move, and neither must the bar.
+    el("bar").dataset.state = barWas;
     el("job-status").textContent = `${error}`;
   }
 });
@@ -530,7 +566,17 @@ const drawSettings = (settings) => {
 // an answer, so this command has no rejection to catch. A blanket `.catch()`
 // here would never fire, and would read as though the two `Unreadable` states
 // were being handled — they are handled in `drawSettings`, by being drawn.
-const refreshSettings = async () => drawSettings(await invoke("model_settings"));
+//
+// It answers with what it drew. The embedding run's ending needs the same read
+// this draws from — the index's own pair, to say beside the run's — and asking
+// twice would put two reads taken at two instants in two lines of one window,
+// which is the disagreement every other number on this screen is arranged to
+// make impossible.
+const refreshSettings = async () => {
+  const settings = await invoke("model_settings");
+  drawSettings(settings);
+  return settings;
+};
 
 el("key-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -649,6 +695,9 @@ el("embed").addEventListener("click", async () => {
     if (event === "progress") {
       el("bar").max = data.total;
       el("bar").value = data.done;
+      // The walk's own handler says why this is on every report and not only
+      // at the start.
+      el("bar").dataset.state = BAR_RUNNING;
       el("job-status").textContent = embedProgressLine(data);
       return;
     }
@@ -656,6 +705,10 @@ el("embed").addEventListener("click", async () => {
     const ending = data;
     el("bar").max = ending.total;
     el("bar").value = ending.done;
+    // Half of why the owner waited: the bar stayed partly filled in the colour
+    // of a live run after the run had died. Drawn here, in the same tick as the
+    // ending's own sentence, so there is no moment where the two disagree.
+    el("bar").dataset.state = barState(ending);
     el("job-status").textContent = embedEndingSentence(ending);
     endingDescribed = true;
     jobRunning = false;
@@ -664,8 +717,33 @@ el("embed").addEventListener("click", async () => {
     // space's, and they have just changed. Read back from the database rather
     // than added up from the ending, which is the only way the two numbers
     // cannot come to disagree.
-    refreshSettings();
+    //
+    // And the ending's own line is written a second time from that same read,
+    // because "32 of 195" is this run's queue and says nothing about how much
+    // of the index now has a vector — the two consecutive runs that read as
+    // "nothing moved" are on `embedIndexTail`. It is a second write and not an
+    // await before the first, deliberately: awaiting the settings would hold a
+    // moving progress line and a live-looking bar on screen for the length of a
+    // database read, which is the defect this whole task is about.
+    //
+    // ⚠️ **Guarded on `jobRunning`, which is not caution but the same rule
+    // every other stale draw on this screen follows.** A person can press Embed
+    // again inside that round trip; without the guard this resolves afterwards
+    // and paints the *previous* run's ending over the new run's progress line.
+    // Nothing runs between the check and the write — the language guarantees
+    // that much — so the check is exact rather than hopeful.
+    refreshSettings().then((settings) => {
+      if (jobRunning) {
+        return;
+      }
+      el("job-status").textContent = embedEndingSentence(ending, settings.index);
+    });
   };
+
+  // Before the await, and restored on a refusal; the walk's press carries the
+  // reasoning for both halves.
+  const barWas = el("bar").dataset.state ?? "";
+  el("bar").dataset.state = BAR_RUNNING;
 
   try {
     endingDescribed = false;
@@ -678,7 +756,9 @@ el("embed").addEventListener("click", async () => {
     follow();
   } catch (error) {
     // Refused before anything started — no key, no index, or a job already
-    // running. Nothing began, so the buttons must not move.
+    // running. Nothing began, so the buttons must not move, and neither must
+    // the bar.
+    el("bar").dataset.state = barWas;
     el("job-status").textContent = embedNotStartedSentence(error);
   }
 });

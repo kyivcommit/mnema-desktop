@@ -48,3 +48,28 @@ progress {
   width: 100%;
   margin: 0.75rem 0;
 }
+
+/* A run that ended with work left must stop looking like one that is working.
+   The live acceptance run of 2026-08-13: a run died when the network dropped,
+   and the bar stayed half full in the platform's own blue — the colour of
+   something in progress — so the owner turned the network back on and waited
+   for a run that had already ended.
+
+   `filter` rather than `appearance: none` and a hand-drawn bar. Styling
+   `::-webkit-progress-value` needs the native control switched off first, which
+   would mean choosing every colour of the running bar here as well — a design
+   decision in the one file whose header says it makes none, and one the ported
+   interface would immediately overwrite. A filter leaves the platform's own
+   drawing in place and takes the colour out of it, which is the whole of what
+   this has to say.
+
+   Only the ended-incomplete state is touched. `running` and `finished` are
+   deliberately absent: a run that embedded everything must go on looking
+   finished, and giving both endings one appearance would trade this defect for
+   its mirror. The three names come from `render.js` — `BAR_RUNNING`,
+   `BAR_FINISHED`, `BAR_STOPPED` — and `render.test.js` reads this file to check
+   that the selector below still spells one of them. */
+progress[data-state="stopped"] {
+  filter: grayscale(1);
+  opacity: 0.55;
+}

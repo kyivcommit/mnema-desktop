@@ -85,6 +85,11 @@ import {
   embedEndingSentence,
   embedNotStartedSentence,
   changeToConfirm,
+  barState,
+  BAR_RAN_TO_THE_END,
+  BAR_RUNNING,
+  BAR_FINISHED,
+  BAR_STOPPED,
 } from "./render.js";
 
 // The canonical list of `EndReason` discriminants, in the exact camelCase
@@ -120,6 +125,13 @@ test("every EndReason has a table entry in EMBED_ENDING_TEXT too", () => {
 test("every EndReason has a table entry in both ENDING_TEXT and STOPPED_CLEANLY", () => {
   assert.deepEqual(Object.keys(ENDING_TEXT).sort(), [...END_REASONS].sort());
   assert.deepEqual(Object.keys(STOPPED_CLEANLY).sort(), [...END_REASONS].sort());
+});
+
+// The bar's own table, over the same union and for the same reason: an eighth
+// `EndReason` must redden this rather than fall through a default into
+// whichever of the two pictures the default happened to pick.
+test("every EndReason has a table entry in BAR_RAN_TO_THE_END", () => {
+  assert.deepEqual(Object.keys(BAR_RAN_TO_THE_END).sort(), [...END_REASONS].sort());
 });
 
 test("every FrozenReason has a table entry in FROZEN_REASON_TEXT", () => {
@@ -887,6 +899,119 @@ test("the refused change is recorded through the guard rather than raw", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The bar, and the picture a run leaves behind.
+//
+// The live acceptance run of 2026-08-13. A run died when the network dropped;
+// the owner turned the network back on and waited, because the window still
+// looked like it was working. The run had ended, the slot was free, nothing was
+// running — and the bar was half of the reason, because it stayed partly filled
+// in the same blue a live run draws.
+//
+// Nothing in this file can see a colour. What it can hold is the decision — one
+// value per ending, taken in `render.js` rather than in either handler — and
+// then that `main.js` asks for it and that `style.css` still draws it.
+
+test("a run that ended with work left does not leave the bar looking alive", () => {
+  for (const reason of ["cancelled", "failed", "brokenWorker", "volumeMissing"]) {
+    assert.equal(
+      barState({ reason, done: 3, total: 5 }),
+      BAR_STOPPED,
+      `"${reason}" left the bar in the picture of a run still going`,
+    );
+  }
+  // Both directions, or this is satisfied by a bar that always looks stopped —
+  // which is this defect's mirror, and costs a person the one ending that is
+  // genuinely good news.
+  assert.equal(barState({ reason: "completed", done: 5, total: 5 }), BAR_FINISHED);
+  // And the two pictures are two pictures. A pair of names rendering the same
+  // way is the fold this whole file exists to keep from happening at the last
+  // seam — here, one CSS rule away from it.
+  assert.notEqual(BAR_FINISHED, BAR_STOPPED);
+  assert.notEqual(BAR_RUNNING, BAR_STOPPED);
+  assert.notEqual(BAR_RUNNING, BAR_FINISHED);
+});
+
+// An ending this build has never seen is not evidence a run finished, and the
+// bar is the one place where "finished" is asserted without a word being
+// written. The same cautious side `reconciliationRan` takes about an unknown
+// `reason`, and the same one `barState`'s own `??` is written for.
+test("an ending this build does not know is not drawn as a finished one", () => {
+  assert.equal(barState({ reason: "somethingFutureAndUnknown", done: 3, total: 5 }), BAR_STOPPED);
+  assert.equal(barState({}), BAR_STOPPED);
+  assert.equal(barState(undefined), BAR_STOPPED);
+});
+
+// The decision is only worth anything if both handlers ask for it. One bar and
+// one Cancel serve both jobs, so a walk somebody stopped leaves the identical
+// picture — and the embedding run is the one the owner met, which is exactly
+// why the walk is the one that would be forgotten.
+test("both endings ask the bar what to look like, and a press brings it back", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const main = readFileSync(join(here, "main.js"), "utf8");
+
+  const asked = [...main.matchAll(/el\("bar"\)\.dataset\.state = barState\(ending\)/g)];
+  assert.equal(
+    asked.length,
+    2,
+    `${asked.length} of the two ending handlers draw the bar from barState — a run that ended \
+     is left wearing the colour of one that has not`,
+  );
+
+  // Both directions: a bar that is only ever set to an ended state never comes
+  // back, and the second run of the day would look over before it began.
+  const revived = [...main.matchAll(/el\("bar"\)\.dataset\.state = BAR_RUNNING/g)];
+  assert.ok(
+    revived.length >= 4,
+    `only ${revived.length} places put the bar back into a running state — a press whose first \
+     report is a batch away leaves the last run's ended colour on screen, which reads as a \
+     button that did nothing`,
+  );
+
+  // And the press restores rather than guesses when the start is refused: the
+  // commonest refusal of all is a job already running, whose bar must go on
+  // saying so.
+  assert.ok(
+    main.includes('const barWas = el("bar").dataset.state ?? "";'),
+    "nothing remembers what the bar was showing before a press that may be refused",
+  );
+  assert.equal(
+    [...main.matchAll(/el\("bar"\)\.dataset\.state = barWas;/g)].length,
+    2,
+    "a refused press leaves the bar claiming a run it did not start",
+  );
+});
+
+// The last seam, and the only one in this window that is a stylesheet. The
+// three names live in `render.js`; a rule spelling a fourth would match nothing
+// and redden nothing, which is the same failure a mistyped string literal is
+// everywhere else in this file.
+test("the ended-incomplete bar is drawn differently, and the finished one is left alone", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const css = readFileSync(join(here, "style.css"), "utf8");
+
+  const rule = new RegExp(`progress\\[data-state="${BAR_STOPPED}"\\]\\s*\\{([^}]*)\\}`);
+  const found = css.match(rule);
+  assert.ok(found, `style.css draws no bar for the "${BAR_STOPPED}" state, so it looks like a live one`);
+  assert.match(
+    found[1],
+    /filter|background|opacity|border/,
+    `the rule for "${BAR_STOPPED}" changes nothing about how the bar looks: ${found[1]}`,
+  );
+
+  // Both directions, and this is the half that keeps the mirror defect out: a
+  // stylesheet that gave the finished state the same treatment would satisfy
+  // everything above and flatten the two endings into one appearance.
+  for (const state of [BAR_RUNNING, BAR_FINISHED]) {
+    assert.doesNotMatch(
+      css,
+      new RegExp(`\\[data-state="${state}"\\]`),
+      `"${state}" is drawn as something other than the platform's own bar, which is the ` +
+        "picture a run in progress and a run that finished everything are supposed to keep",
+    );
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The embedding job's own sentences.
 
 test("a live report says how far it has got and how long is left", () => {
@@ -954,28 +1079,194 @@ test("a run with an empty queue says nothing was waiting, not that all is done",
   assert.doesNotMatch(text, /0 of 0/);
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Two pairs of numbers, and the one that was not on screen.
+//
+// The live acceptance run of 2026-08-13. Two consecutive runs printed
+// `32 of 227` and then `32 of 195` — both true, both this run's, the right-hand
+// number the queue as it stood when that run started. The first run taught the
+// wrong meaning, because there the queue happened to equal the whole index, so
+// the second read as "it did 32 again, nothing moved" when 64 pieces had a
+// vector by then.
+//
+// The fixtures are single digits for the reason `readWith` states: the real
+// counts belong to the acceptance run, and a test carrying them reads as
+// something measured.
+
+test("the run's line says what this run did and how much of the index now has a vector", () => {
+  const text = embedEndingSentence(
+    { reason: "completed", done: 3, total: 5, refused: 0 },
+    readWith({ embeddedChunks: 8, totalChunks: 9 }),
+  );
+  assert.match(text, /3 of 5 embedded in this run/, "what this run did went missing, or unmarked");
+  assert.match(text, /\b8 pieces with a vector\b/, "how much of the index is done is not said");
+  assert.match(text, /\b9 in the whole index\b/, "how much there is altogether is not said");
+});
+
+// The two runs that produced the misreading, as close as single digits get to
+// them: the same `done` twice, a queue that shrank, and an index that moved.
+// The assertion is that the second run's line says the index moved — which the
+// pair `3 of 6` cannot, at any wording.
+test("a second run with the same count still shows the index moving", () => {
+  const first = embedEndingSentence(
+    { reason: "failed", done: 3, total: 9, refused: 0, message: "the network went away" },
+    readWith({ embeddedChunks: 3, totalChunks: 9 }),
+  );
+  const second = embedEndingSentence(
+    { reason: "failed", done: 3, total: 6, refused: 0, message: "the network went away" },
+    readWith({ embeddedChunks: 6, totalChunks: 9 }),
+  );
+  assert.match(first, /\b3 pieces with a vector\b/);
+  assert.match(second, /\b6 pieces with a vector\b/);
+  assert.notEqual(
+    first,
+    second,
+    "two runs that each embedded 3 read identically, which is exactly what taught the owner \
+     that the second one had moved nothing",
+  );
+});
+
+// ⚠️ The line now carries a pair from each scope, which is the arrangement the
+// settings line and the run's line were worded apart to avoid — so each pair
+// says whose it is. The test above this one pins the settings line's half;
+// this pins that neither pair here is left unattributed.
+//
+// ⚠️ `refused: 0`, and that is the whole reliability of the first assertion.
+// With a refusal, `embedRefusedTail` says "in this run" too — so the head could
+// lose its marker entirely and this would still pass, on a neighbour's defence.
+// Measured: it did, on the revert that unmarks the head.
+test("neither pair in the run's line is left for the reader to attribute", () => {
+  const text = embedEndingSentence(
+    { reason: "completed", done: 3, total: 5, refused: 0 },
+    readWith({ embeddedChunks: 8, totalChunks: 9 }),
+  );
+  assert.match(text, /in this run/, "the run's own numbers are not marked as the run's");
+  assert.match(text, /active space/, "the index's numbers do not say which scope they count");
+  // The same line with refusals in it, where three numbers from two scopes sit
+  // together and every one of them still has to say whose it is.
+  const refusing = embedEndingSentence(
+    { reason: "completed", done: 3, total: 5, refused: 2 },
+    readWith({ embeddedChunks: 8, totalChunks: 9 }),
+  );
+  assert.match(refusing, /3 of 5 embedded in this run/);
+  assert.match(refusing, /2 pieces the provider refused in this run/);
+  assert.match(refusing, /8 pieces with a vector, of 9 in the whole index/);
+  // And it is still the run's line and not the settings line: the same
+  // assertion the pair above makes from the other side.
+  assert.notEqual(text, embeddingProgressText(readWith({ embeddedChunks: 8, totalChunks: 9 })));
+});
+
+// An index the window cannot read states no pair, on every ending — and that
+// is not a rare path but the first draw of all of them, since `model_settings`
+// is asked only after the ending has already been written.
+test("an index this window has not read leaves the second pair unsaid", () => {
+  for (const index of [
+    undefined,
+    { kind: "unreadable", cause: "notOpen", reason: "" },
+    readWith({ activeSpace: null }),
+    readWith({ embeddedChunks: undefined }),
+  ]) {
+    for (const reason of ["completed", "cancelled", "failed"]) {
+      const text = embedEndingSentence({ reason, done: 3, total: 5, refused: 0 }, index);
+      assert.doesNotMatch(text, /undefined|NaN|\[object Object\]/, `${reason}: ${text}`);
+      assert.doesNotMatch(
+        text,
+        /with a vector/,
+        `${reason} stated a pair about an index nobody read: ${text}`,
+      );
+    }
+  }
+  // Both directions, or this is satisfied by an ending that never says it.
+  assert.match(
+    embedEndingSentence({ reason: "completed", done: 3, total: 5, refused: 0 }, readWith({})),
+    /with a vector/,
+  );
+});
+
+// The seam: the pair only exists if the ending is restated from the read that
+// follows it, and the restatement is only safe if the ending is written first.
+// Both halves are asserted, because either alone is satisfied by the other's
+// absence — writing only once with the settings holds a moving progress line
+// and a live-looking bar on screen for the length of a database read, which is
+// this whole task's defect.
+test("the ending is written at once, and restated from what the index says after", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const main = readFileSync(join(here, "main.js"), "utf8");
+
+  assert.match(
+    main,
+    /el\("job-status"\)\.textContent = embedEndingSentence\(ending\);/,
+    "the run's own sentence is no longer written the instant the ending arrives",
+  );
+  assert.match(
+    main,
+    /if \(jobRunning\) \{\s*return;\s*\}\s*el\("job-status"\)\.textContent = embedEndingSentence\(ending, settings\.index\);/,
+    "the ending is not restated from the index that was read back, or is restated without \
+     asking whether a newer run has taken the slot — in which case a person who pressed Embed \
+     again gets the previous run's ending painted over their new run's progress line",
+  );
+});
+
 // The two endings that leave work behind. Both are resumable and for the same
 // reason — the queue is computed from the index rather than stored — and that is
 // the sentence a person needs after a network drops mid-run.
-test("a stopped run and a failed one both say what survives and that it can go on", () => {
-  const stopped = embedEndingSentence({ reason: "cancelled", done: 6, total: 9, refused: 0 });
+//
+// **It has to name the press, and that is what the live acceptance run of
+// 2026-08-13 changed.** The sentence said "whatever this run embedded stays, and
+// starting again continues from there": true, and a statement about the system.
+// The owner, watching a run that had died with the network, read it and waited.
+// What a person in front of a dead run needs is what to do — so this asserts the
+// action, and the test that asserted the property is what it replaces.
+test("a stopped run and a failed one both say what survives and what to press", () => {
+  const stopped = embedEndingSentence({ reason: "cancelled", done: 3, total: 5, refused: 0 });
   assert.match(stopped, /at your request/);
-  assert.match(stopped, /starting again continues/i);
+  assert.match(stopped, /press Embed/, "it says what survives and not what to do about it");
 
   const failed = embedEndingSentence({
     reason: "failed",
-    done: 6,
-    total: 9,
+    done: 3,
+    total: 5,
     refused: 0,
     message: "provider: the key was refused",
   });
   assert.match(failed, /the key was refused/, "the ending's own message is what says why");
-  assert.match(failed, /starting again continues/i);
+  assert.match(failed, /press Embed/);
 
   // Both directions: a run that finished has nothing to resume, and telling
   // somebody to start it again would be advice about a state they are not in.
-  const finished = embedEndingSentence({ reason: "completed", done: 9, total: 9, refused: 0 });
-  assert.doesNotMatch(finished, /starting again continues/i);
+  const finished = embedEndingSentence({ reason: "completed", done: 5, total: 5, refused: 0 });
+  assert.doesNotMatch(finished, /press Embed/);
+});
+
+// **And where it will carry on from, which is the half that makes it an
+// instruction.** "Press Embed" alone is still only half the answer to somebody
+// looking at a run that stopped at 3 of 5 for the second time: what they cannot
+// tell from that pair is whether the archive is nearly done or barely started.
+test("a run that can be resumed says how much of the index is already done", () => {
+  const failed = embedEndingSentence(
+    { reason: "failed", done: 3, total: 5, refused: 0, message: "the provider stopped answering" },
+    readWith({ embeddedChunks: 8, totalChunks: 9 }),
+  );
+  assert.match(failed, /press Embed/);
+  assert.match(failed, /\b8 pieces with a vector\b/, "the resume point is not in the sentence");
+  assert.match(failed, /\b9\b/, "how much there is to do is not in the sentence");
+  // The run's own pair survives beside it, or the sentence answers the second
+  // question by dropping the first.
+  assert.match(failed, /3 of 5/);
+
+  // Both directions, and it is the direction the first draw of every ending
+  // takes: with no settings read back yet this window cannot state a resume
+  // point, and the sentence must still name the press rather than invent one.
+  const unknown = embedEndingSentence({
+    reason: "failed",
+    done: 3,
+    total: 5,
+    refused: 0,
+    message: "the provider stopped answering",
+  });
+  assert.match(unknown, /press Embed/);
+  assert.doesNotMatch(unknown, /with a vector/, "a resume point nobody read was stated anyway");
+  assert.doesNotMatch(unknown, /undefined|NaN|null/);
 });
 
 test("a failed run with no message still says how far it got", () => {
@@ -1010,7 +1301,7 @@ test("an ending that embedded nothing does not claim something was kept", () => 
     const text = embedEndingSentence({ reason, done: 0, total: 0, refused: 0, message: "boom" });
     assert.doesNotMatch(text, /What was embedded stays/,
       `"${reason}" told somebody who embedded nothing that their embeddings were kept`);
-    assert.match(text, /starting again continues/i);
+    assert.match(text, /press Embed/);
   }
 });
 

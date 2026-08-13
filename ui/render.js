@@ -838,6 +838,55 @@ export const embeddingProgressText = (index, jobRunning) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The one bar, and the picture it must stop showing when a run is over.
+//
+// Found by the live acceptance run of 2026-08-13, and by nothing else here. A
+// run died when the network dropped; the owner turned the network back on and
+// then **waited**, because the window still looked like it was working. It was
+// not — the run had ended, the slot was free, nothing was running. The bar was
+// half of why: it stayed partly filled, in the same blue a live run draws, and
+// a partly-filled blue bar is the visual language of "in progress". No test in
+// this repository can see that, because what was wrong was not a value but what
+// a person concludes from a picture.
+//
+// Three states rather than two. Drawing every ending the same way would trade
+// this defect for its mirror — a run that embedded everything must go on
+// looking finished — so "ran to the end" and "ended with work left" are kept
+// apart here exactly as they are in the sentences below.
+//
+// The strings are exported rather than written into `main.js` for the reason
+// every other wire spelling in this file is: `"stoped"` assigned to a dataset
+// key is a selector in `style.css` that silently matches nothing, and nothing
+// reddens. `render.test.js` checks the stylesheet against these same constants.
+export const BAR_RUNNING = "running";
+export const BAR_FINISHED = "finished";
+export const BAR_STOPPED = "stopped";
+
+// One arm per `EndReason`, and it is **not `STOPPED_CLEANLY` under a second
+// name.** That table answers whether phase 2 finished everything phase 1 handed
+// it, and is never read without `complete` beside it (`reconciliationRan`);
+// this answers only whether the bar reached the end of what it was drawn
+// against. The two agree on every value today and are answers to two different
+// questions — the pair this file keeps apart everywhere else — so folding them
+// together would make a later change to either silently move the other.
+export const BAR_RAN_TO_THE_END = {
+  completed: true,
+  cancelled: false,
+  failed: false,
+  brokenWorker: false,
+  rulesNotApplied: false,
+  rootUnavailable: false,
+  volumeMissing: false,
+};
+
+// An ending this build does not recognise is drawn as stopped: "finished" is
+// the claim, and an unknown reason establishes nothing. It is the cautious side
+// to be wrong on, and the same choice `reconciliationRan` makes about a `reason`
+// it has never seen.
+export const barState = (ended) =>
+  BAR_RAN_TO_THE_END[ended?.reason] ?? false ? BAR_FINISHED : BAR_STOPPED;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The embedding job.
 //
 // A run's sentences, kept apart from the walk's above. `endingSentence` appends
@@ -847,11 +896,18 @@ export const embeddingProgressText = (index, jobRunning) => {
 // reconciled nothing and walked nothing. The two jobs share a slot, a bar and a
 // Cancel button, and they do not share a vocabulary.
 //
-// ⚠️ **Every count here is this run's, and the settings line above is the
-// space's.** `job::Ended::refused` starts again at zero on the next run;
-// `IndexRead::failed_chunks` counts every refusal the space still holds. They
-// are different numbers that could otherwise be read as one, so the sentences
-// below say "in this run" wherever they name one.
+// ⚠️ **Every count the ending itself carries is this run's, and the settings
+// line above is the space's.** `job::Ended::refused` starts again at zero on the
+// next run; `IndexRead::failed_chunks` counts every refusal the space still
+// holds. They are different numbers that could otherwise be read as one, so the
+// sentences below say "in this run" wherever they name one.
+//
+// **The ending now states the index's pair as well, and that is the one place
+// the rule above is deliberately crossed** — see `embedIndexTail`, and note
+// that it is crossed by *naming the other scope out loud* rather than by
+// leaving a number unattributed. The pair comes from the same `model_settings`
+// read the settings line is drawn from, so the two cannot disagree; what they
+// must not do is read as each other, and each says whose number it is.
 
 // What one report says while a run is going.
 //
@@ -873,17 +929,81 @@ const embedRefusedTail = (refused) =>
       "in keyword search, and search by meaning will not return them until their text changes"
     : "";
 
+// Where the index stands now, read back rather than worked out.
+//
+// **Never `embeddedChunks` from before the run plus the ending's own `done`.**
+// That is the arithmetic `main.js` refuses at both endings for the reason it
+// states there: two numbers added together can come to disagree with the
+// database, and one read from it cannot. So this takes the `IndexRead` that
+// `model_settings` answered *after* the run and states what it says.
+//
+// `null` — not a zero, not an empty pair — for every state where this window
+// cannot say: before `model_settings` has been asked again, which is the first
+// draw of every ending; an index that could not be read; and no active space at
+// all, where by `IndexRead::embedded_chunks`'s own third rule the question does
+// not arise rather than answering zero.
+const indexNow = (index) => {
+  if (index?.kind !== "read") return null;
+  if (index.activeSpace === null || index.activeSpace === undefined) return null;
+  if (typeof index.embeddedChunks !== "number" || typeof index.totalChunks !== "number") {
+    return null;
+  }
+  return { embedded: index.embeddedChunks, total: index.totalChunks };
+};
+
+// The pair, with both scopes named. `embeddedChunks` counts the active space
+// and `totalChunks` the whole index, so a bare ratio is already an inexact
+// sentence — the rule `embeddingProgressText` is written to further up, and the
+// reason this says which is which instead of printing `64 of 227`.
+//
+// When the first number is the larger — a vector outliving the piece it embeds,
+// which is legitimate — this reads as odd rather than as an error, and the
+// settings line one element further down, drawn from the same read at the same
+// moment, is what explains it. That paragraph is not repeated here.
+const withAVector = (now) =>
+  `${piecesCount(now.embedded)} with a vector, of ${now.total} in the whole index`;
+
+// **What this run did is not how much of the index is done, and the window said
+// only the first.** Two consecutive runs on the owner's archive printed
+// `32 of 227` and then `32 of 195`: both true, both this run's, the right-hand
+// number the queue as it stood when that run started. The first run taught the
+// wrong meaning, because there the queue happened to equal the whole index — so
+// the second read as "it did 32 again, nothing moved" when 64 pieces had a
+// vector by then. Live acceptance run of 2026-08-13.
+//
+// Empty when `indexNow` could not say, which is the honest answer and also the
+// first draw of every ending: `main.js` writes the run's own sentence the
+// instant the ending arrives and restates it with this when the settings come
+// back, rather than holding a moving progress line on screen across a database
+// read.
+const embedIndexTail = (now) =>
+  now === null ? "" : ` The active space now has ${withAVector(now)}.`;
+
 // Both endings that leave work behind say so, and it is the same fact in both:
 // the queue is computed from the index rather than stored, so nothing has to be
 // recovered and a second press simply carries on. It is what a person needs
 // after a network drops in the middle of a run.
 //
+// **It names the press, not only the property.** "Whatever this run embedded
+// stays, and starting again continues from there" was true and was a statement
+// about the system; what somebody sitting in front of a run that died needs is
+// what to do and where it will resume — and the number is what makes that an
+// instruction rather than a reassurance. The owner waited in front of exactly
+// this sentence.
+//
 // "Whatever this run embedded" and not "what was embedded", because the count
 // can be zero — a run that failed on its very first batch, or one stopped in the
 // same second it was started — and the shorter wording states that something was
 // embedded on exactly the endings where nothing was.
-const EMBED_RESUMABLE =
-  " Whatever this run embedded stays, and starting again continues from there.";
+//
+// "Embed" and not the button's whole label. The control says "Embed what is
+// indexed" today and the React interface will relabel it; the first word is
+// what a person scans a row of buttons for, and it is the part of the label
+// least likely to move.
+const embedResumable = (now) =>
+  now === null
+    ? " Whatever this run embedded stays: press Embed again to continue from there."
+    : ` Whatever this run embedded stays: press Embed again to continue from ${withAVector(now)}.`;
 
 // `EndReason`'s four walk-only variants. `walk_job.rs` is their only writer, so
 // no embedding run produces one — and they have an arm because a table with a
@@ -894,16 +1014,27 @@ const EMBED_RESUMABLE =
 const notAnEmbeddingEnding = ({ reason, done, total }) =>
   `ended (${reason}) after ${done} of ${total}`;
 
+// Every arm takes the run's own payload and, second, the index pair `indexNow`
+// derived — or `null`, which every arm has to render as a complete sentence
+// rather than as a gap, because it is what the first draw of every ending gets.
+//
+// **"in this run" on the counts, and it is not decoration.** The head of each
+// sentence states a pair the reader now sees beside a second pair from another
+// scope, and this file's own rule two blocks up is that a sentence says "in this
+// run" wherever it names one of this run's numbers. The head did not, and the
+// heads are the numbers the owner misread.
 export const EMBED_ENDING_TEXT = {
   // `total === 0` is the ordinary answer to a second press, and it is not "all
   // done": the queue is what has no vector *and* is not already refused, so
-  // zero can also mean everything left has been given up on. The settings line
-  // beside it carries the numbers; this says only what this run did, which is
-  // nothing.
-  completed: ({ done, total, refused }) =>
-    total === 0
+  // zero can also mean everything left has been given up on. This says only
+  // what this run did, which is nothing — and then, since that is exactly the
+  // ending after which somebody asks "so is it finished?", where the index
+  // stands.
+  completed: ({ done, total, refused }, now) =>
+    (total === 0
       ? "nothing was waiting to be embedded"
-      : `finished: ${done} of ${total} embedded${embedRefusedTail(refused)}`,
+      : `finished: ${done} of ${total} embedded in this run${embedRefusedTail(refused)}`) +
+    embedIndexTail(now),
   // `total === 0` here is **not** the empty queue it is on the arm above, and
   // must not borrow its sentence. `mnema_embed::run` asks whether it was
   // cancelled before its first batch, so a Stop landing in that instant has the
@@ -911,23 +1042,28 @@ export const EMBED_ENDING_TEXT = {
   // this window is "not known" rather than "there was nothing". A run stopped
   // that early says how far it got — nowhere — and states no total, because
   // nobody measured one it could state.
-  cancelled: ({ done, total, refused }) =>
+  cancelled: ({ done, total, refused }, now) =>
     (total === 0
       ? `stopped before anything was embedded, at your request${embedRefusedTail(refused)}.`
-      : `stopped after ${done} of ${total} embedded, at your request${embedRefusedTail(refused)}.`) +
-    EMBED_RESUMABLE,
-  failed: ({ done, total, refused, message }) =>
-    `failed after ${done} of ${total} embedded${embedRefusedTail(refused)}` +
+      : `stopped after ${done} of ${total} embedded in this run, at your request` +
+        `${embedRefusedTail(refused)}.`) + embedResumable(now),
+  failed: ({ done, total, refused, message }, now) =>
+    `failed after ${done} of ${total} embedded in this run${embedRefusedTail(refused)}` +
     (message ? `: ${message}.` : ".") +
-    EMBED_RESUMABLE,
+    embedResumable(now),
   brokenWorker: notAnEmbeddingEnding,
   rulesNotApplied: notAnEmbeddingEnding,
   rootUnavailable: notAnEmbeddingEnding,
   volumeMissing: notAnEmbeddingEnding,
 };
 
-export const embedEndingSentence = (ended) =>
-  (EMBED_ENDING_TEXT[ended.reason] ?? notAnEmbeddingEnding)(ended);
+// `index` is the whole `IndexRead` — the field of `ModelSettings`, the same one
+// `embeddingProgressText` and `discardOffer` are handed — and it is optional:
+// called with one argument this answers the run's own sentence and nothing
+// about the index, which is what the ending's first draw needs and what every
+// caller that has no settings to hand should get.
+export const embedEndingSentence = (ended, index) =>
+  (EMBED_ENDING_TEXT[ended.reason] ?? notAnEmbeddingEnding)(ended, indexNow(index));
 
 // A run that never started. The refusals are `Error::NoKey`, `Error::Secrets`,
 // `Error::JobAlreadyRunning` and `Error::Index(_)` — the last from

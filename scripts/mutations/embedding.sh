@@ -1043,3 +1043,42 @@ case_ "models: a model change must not be possible while a pass is writing (T8)"
 # nothing. No case here reddens on that one character — distinguishing them
 # needs a second job started from another thread *during* the command, which is
 # a race rather than a test. It is written on the line itself instead.
+
+# ── Task 9: what the live acceptance run found, and why none of it is here ────
+#
+# ⚠️ **Three defects, zero cases, and that is not an omission — it is the limit
+# this file states twice above, met head on.** The live acceptance run of
+# 2026-08-13 found that a run which stopped or failed is visually and verbally
+# indistinguishable from one still going: the owner turned the network back on
+# after a failure and waited for a run that had already ended. All three fixes
+# are in `ui/` — the ending's sentence, the bar's appearance, and the pair of
+# numbers the run's line was missing — and `mutation-check.sh` runs `cargo test`
+# and nothing else. A case naming a `node --test` test does not merely prove
+# nothing: it fails the baseline pass, and a non-zero `baseline_bad` exits 1 for
+# the WHOLE FILE before pass two starts, so one such case would take every case
+# above it down with it. That is the 58-case silence `mutation-check.sh`'s own
+# header describes, and it is not worth re-enacting to look thorough.
+#
+# **What was done instead**, because "held by review" is what the last three
+# notes of this kind said and it is not a measurement. Each of the eleven new
+# assertions in `ui/render.test.js` was seen red from the broken thing, by
+# reverting that thing and running the whole suite — twenty-one reverts across
+# `render.js`, `main.js` and `style.css`, each landing on the assertion it names
+# and none on a module that would not load. The reverts, and which test each
+# reddened, are written out in this cycle's task-9 report; they are the same
+# shape as the cases above and would be cases if this harness could run them.
+#
+# Two of the twenty-one are worth naming here, because they are what a reviewer
+# would otherwise have to take on trust:
+#
+#   - Reverting the ended bar's own decision to "every ending looks finished"
+#     reddens the bar test at `"cancelled" left the bar in the picture of a run
+#     still going`, and reverting it to "every ending looks stopped" reddens the
+#     same test at its `completed` half. Both directions, one mutation each.
+#   - The first version of `neither pair in the run's line is left for the
+#     reader to attribute` passed a revert that stripped "in this run" from the
+#     head, because `embedRefusedTail` says the same words and its fixture had a
+#     refusal in it. The fixture now has none, and the revert reddens it. A test
+#     standing on a neighbouring defence is the failure this repository has
+#     already paid for, and it was found here by running the revert rather than
+#     by reading the test.
