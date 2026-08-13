@@ -500,7 +500,7 @@ fn fts5_operators_are_not_a_query_language_here() {
 /// itself would be inventing a second definition of "term".
 #[test]
 fn search_terms_are_the_words_the_index_demands() {
-    let t = mnema_index::search_terms("hello world", SourceKind::Document);
+    let t = mnema_index::search_terms("hello world");
     assert_eq!(t, vec!["hello".to_string(), "world".to_string()]);
 
     // Case is folded here rather than left to FTS5. The tokenizer lowercases at
@@ -508,7 +508,7 @@ fn search_terms_are_the_words_the_index_demands() {
     // with an answer's would otherwise miss `Договір` against `договір` — a
     // difference the search itself does not have.
     assert_eq!(
-        mnema_index::search_terms("Договір Оренди", SourceKind::Document),
+        mnema_index::search_terms("Договір Оренди"),
         vec!["договір".to_string(), "оренди".to_string()]
     );
 
@@ -516,5 +516,5 @@ fn search_terms_are_the_words_the_index_demands() {
     // separators alone are no terms at all. This is the same emptiness
     // `search_lexical` turns into "no rows" instead of a syntax error
     // (`search.rs:34-37`).
-    assert!(mnema_index::search_terms("(((", SourceKind::Document).is_empty());
+    assert!(mnema_index::search_terms("(((").is_empty());
 }

@@ -59,9 +59,23 @@ pub fn prepare_for_search(text: &str, kind: SourceKind) -> String {
 
 /// The terms the lexical index will demand for `text`.
 ///
-/// `search_lexical` runs `prepare_for_search` and then `terms` (`search.rs:31-32`);
-/// this is those two halves, joined and owned, because `terms` borrows from a
-/// string the caller does not hold and is `pub(crate)` besides.
+/// `search_lexical` runs `prepare_for_search(query, SourceKind::Document)`
+/// (`search.rs:31`) and then `terms`, one call deeper inside `as_fts5_phrases`
+/// (`search.rs:91`); this is those two halves, joined and owned, because
+/// `terms` borrows from a string the caller does not hold and is `pub(crate)`
+/// besides.
+///
+/// No `kind` parameter, on purpose: `search_lexical` hardcodes
+/// `SourceKind::Document` for every query, not the kind of the thing being
+/// searched, because code chunks are indexed with camelCase expanded and
+/// preparing the query the same way would turn one identifier into four
+/// demanded terms instead of one (`search.rs:14-23`). A caller reasoning
+/// about "the words the engine demands" therefore has no legitimate second
+/// reading to ask for here — offering one would let it model a query the
+/// engine never actually runs. If a caller ever needs the corpus-side reading
+/// of a code chunk for something else, that is a different question and
+/// belongs behind a new, visible parameter rather than a silently wrong
+/// answer from this one.
 ///
 /// Lowercased here on purpose. FTS5's `unicode61` folds case on both sides of a
 /// MATCH, so `Договір` and `договір` are one term to the *search* — a caller
@@ -70,8 +84,8 @@ pub fn prepare_for_search(text: &str, kind: SourceKind) -> String {
 /// for every script on earth; for the languages this product's corpus is
 /// written in it agrees, and where it would not, the disagreement belongs in a
 /// test rather than in a promise.
-pub fn search_terms(text: &str, kind: SourceKind) -> Vec<String> {
-    let prepared = prepare_for_search(text, kind);
+pub fn search_terms(text: &str) -> Vec<String> {
+    let prepared = prepare_for_search(text, SourceKind::Document);
     terms(&prepared).map(|t| t.to_lowercase()).collect()
 }
 
