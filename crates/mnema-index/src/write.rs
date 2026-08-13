@@ -612,6 +612,10 @@ impl Db {
     /// [`Db::adopt_embedding_model`] does both at once: one transaction
     /// through [`Db::create_space`], another through `self.transaction` for
     /// the pointer write itself.
+    ///
+    /// [`Db::read_snapshot`], below, opens one directly too and belongs on both
+    /// greps' lists — it is the one opener that writes nothing, and the one a
+    /// caller may not nest anything from this list inside.
     pub fn transaction<T>(
         &self,
         f: impl FnOnce(&Transaction<'_>) -> Result<T, Error>,
@@ -619,6 +623,46 @@ impl Db {
         let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Immediate)?;
         let value = f(&tx)?;
         tx.commit()?;
+        Ok(value)
+    }
+
+    /// Runs `f` against **one snapshot** of the database: every read inside it
+    /// sees the same state, however many statements it takes and whatever
+    /// another connection commits meanwhile.
+    ///
+    /// Without it, a caller that reads several counts in a row reads each one in
+    /// its own implicit transaction, and a writer committing between two of them
+    /// leaves the set describing a state the index never held. `Db` is normally
+    /// used from one thread at a time, so this matters in exactly one shape and
+    /// it is the shape this product has: the shell keeps a second connection for
+    /// the indexing and embedding job (`src-tauri/src/state.rs`,
+    /// `AppState::open_job_index`), and the window's own mutex does nothing
+    /// about it. The settings screen reads how many chunks are embedded, how
+    /// many exist and how many were refused, and a person is asked to trust
+    /// those three against each other.
+    ///
+    /// `Deferred`, not `Immediate`: this takes no write lock and blocks no
+    /// writer. In WAL a read transaction fixes its snapshot at its first
+    /// statement and holds it until the end, which is the whole of what this
+    /// buys — and a `Deferred` transaction that never reads takes nothing at
+    /// all.
+    ///
+    /// It ends in `rollback`, and that is not a failure path: nothing here
+    /// wrote, so there is nothing to commit, and rolling back is how a read
+    /// transaction is closed. An error out of `f` drops `tx` and rolls back the
+    /// same way.
+    ///
+    /// ⚠️ **`f` must not write, and must not open a transaction of its own.**
+    /// SQLite has no nested `BEGIN`; a method from the list on
+    /// [`Db::transaction`] called inside this closure fails at run time rather
+    /// than at compile time. `&Self` and not `&Transaction` because what makes
+    /// this useful is that the ordinary reading methods — the ones a caller
+    /// already has — run inside it unchanged; the price is that nothing in the
+    /// type stops a writing one being called too.
+    pub fn read_snapshot<T>(&self, f: impl FnOnce(&Self) -> Result<T, Error>) -> Result<T, Error> {
+        let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Deferred)?;
+        let value = f(self)?;
+        tx.rollback()?;
         Ok(value)
     }
 

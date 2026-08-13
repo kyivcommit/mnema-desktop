@@ -110,9 +110,20 @@ pub fn start_embed_job(
         // report — so this is a fact about the run, and the honest denominator
         // for an ending even when every send failed.
         //
-        // `0` when the pass reported nothing at all, which is exactly the state
-        // it describes: an empty queue breaks out of the loop before the first
-        // report, and the total really is zero.
+        // ⚠️ **`0` when the pass reported nothing at all, and that stands for
+        // two different states.** One is an empty queue, where the total really
+        // is zero: the loop breaks before the first report and `0 of 0` is the
+        // truth. The other is a Stop landing in the first instant —
+        // `mnema_embed::run` asks `cancel()` *before* its first batch, so a run
+        // stopped there has measured a queue and reported none of it, and `0`
+        // here is "not known" wearing a number's clothes.
+        //
+        // Not repaired by reading the queue again from this side: that would be
+        // a second measurement of a number the pass already has, taken after it
+        // stopped, and it would disagree with the one the run actually used.
+        // What is repaired is the sentence — `reason` tells the two apart, and
+        // `ui/render.js` says "stopped before anything was embedded" for the
+        // cancelled one rather than claiming a total nobody measured.
         let queue_total = AtomicU64::new(0);
         let started = Instant::now();
         // Throttling state, a plain local rather than an atomic for the reason

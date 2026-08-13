@@ -957,39 +957,56 @@ pub struct IndexRead {
 /// point: a caller building [`ModelSettings`] must not be able to lose the key
 /// half by writing `?` here.
 fn index_settings(state: &AppState) -> IndexSettings {
+    // `read_snapshot`, and it is what makes the sentence below true rather than
+    // hopeful. Review round 1 found this comment claiming "one connection at one
+    // moment" over seven autocommit reads: `with_index` takes the window's mutex
+    // and calls the closure, and each `query_row` then took its own implicit
+    // snapshot. The mutex excludes other *window* commands — it says nothing
+    // about the job's second connection (`AppState::open_job_index`), which is
+    // the only writer that matters here, and a batch committing between two of
+    // these reads leaves the trio describing a state the index never held.
+    // "One connection" was measured; "one moment" was assumed.
+    //
+    // A read transaction and not a narrower fix, because the claim is what the
+    // screen leans on: a person is asked to read `embedded_chunks`,
+    // `total_chunks` and `failed_chunks` against each other, and against the
+    // run's own line beside them. `Db::read_snapshot` takes no write lock and
+    // blocks no writer — see its own doc comment.
     let read = state.with_index(|db| {
-        let active_space = db.active_space()?;
-        let (embedding_model, embedding_dim) = match active_space {
-            Some(id) => {
-                let (model, dim) = db.space_model(id)?;
-                (Some(model), Some(dim))
-            }
-            None => (None, None),
-        };
-        Ok(IndexSettings::Read(IndexRead {
-            embedding_model,
-            embedding_dim,
-            active_space,
-            embedded_chunks: match active_space {
-                Some(id) => db.embedded_chunk_count(id)?,
-                None => 0,
-            },
-            total_chunks: db.chunk_count()?,
-            // Read inside the same closure as the two counts above, so all
-            // three come from one connection at one moment — see
-            // [`model_settings`]'s own doc comment. Three numbers assembled
-            // from three reads can disagree with each other about an index
-            // that changed between them, and this one is the number a person
-            // is asked to trust the no-retry rule on.
-            failed_chunks: match active_space {
-                Some(id) => db.failed_chunk_count(id)?,
-                None => 0,
-            },
-            space_count: db.space_count()?,
-            embedded_chunks_everywhere: db.embedded_chunks_everywhere()?,
-            rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
-            chat_model: db.meta_get(mnema_index::META_CHAT_MODEL)?,
-        }))
+        db.read_snapshot(|db| {
+            let active_space = db.active_space()?;
+            let (embedding_model, embedding_dim) = match active_space {
+                Some(id) => {
+                    let (model, dim) = db.space_model(id)?;
+                    (Some(model), Some(dim))
+                }
+                None => (None, None),
+            };
+            Ok(IndexSettings::Read(IndexRead {
+                embedding_model,
+                embedding_dim,
+                active_space,
+                embedded_chunks: match active_space {
+                    Some(id) => db.embedded_chunk_count(id)?,
+                    None => 0,
+                },
+                total_chunks: db.chunk_count()?,
+                // Inside the same snapshot as the two counts above, so all three
+                // describe one state of the index rather than three — see the
+                // comment on `read_snapshot` at the top of this function. This is
+                // the number a person is asked to trust the no-retry rule on, and
+                // it is read after `embedded_chunks`, so without the snapshot the
+                // pair could straddle a committed batch.
+                failed_chunks: match active_space {
+                    Some(id) => db.failed_chunk_count(id)?,
+                    None => 0,
+                },
+                space_count: db.space_count()?,
+                embedded_chunks_everywhere: db.embedded_chunks_everywhere()?,
+                rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
+                chat_model: db.meta_get(mnema_index::META_CHAT_MODEL)?,
+            }))
+        })
     });
     match read {
         Ok(settings) => settings,
@@ -1019,8 +1036,12 @@ fn key_state(state: &AppState) -> KeyState {
 
 /// What the window draws on the settings screen.
 ///
-/// The index half is read inside one closure, so its numbers come from a single
-/// connection at a single moment rather than being assembled from several.
+/// The index half is read inside one closure **and one read transaction**, so
+/// its numbers come from a single connection at a single moment rather than
+/// being assembled from several. The closure alone bought only the first half of
+/// that, and this doc comment claimed both for a while: see the `read_snapshot`
+/// comment inside [`index_settings`] for what the difference is and which writer
+/// it is about.
 ///
 /// An active space naming a space that is gone arrives as
 /// `mnema_index::Error::NoSuchSpace` rather than as "nothing chosen" — see
