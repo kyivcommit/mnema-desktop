@@ -68,6 +68,25 @@
 # file emptied by an edit would classify itself out of the sweep and be reported
 # as nothing at all. A file with no shebang and no cases is a **failure** here.
 #
+# ⚠️ **The whole question this script has to keep asking of itself: is there an
+# input for which it reports success by checking LESS?** Asked deliberately in
+# review round 3, and the answer was two, both measured rather than reasoned:
+#
+#   1. A case file that gains a shebang was skipped — one file and thirty-four
+#      cases quietly out of the sweep, `stale: 0`, exit 0. The mirror of the hole
+#      this script exists to close, inside it. A skipped file holding a `case_`
+#      call is now a failure, not a skip.
+#   2. A case file with a syntax error part way through sourced as far as the
+#      error and stopped. The cases before it were checked, the rest were never
+#      seen, and the run exited 0. The status of `.` is now read.
+#
+# Not a hole, checked: a `case_` call with too few arguments dies on `set -u`
+# and takes the run with it, loudly. And a glob that matches nothing exits 2
+# naming the path rather than passing over an empty list.
+#
+# That list is what it is because somebody asked once. It is worth asking again
+# of any new branch added below.
+#
 # Nothing is written outside a temporary directory: every case is applied to a
 # copy, and the working tree is never touched.
 
@@ -94,6 +113,8 @@ files_read=0
 empty=0
 skipped=""
 read_names=""
+hidden=0
+unreadable=0
 
 # case_ <label> <file> <perl-expr> <marker> <package> <test-name> <cargo args...>
 #
@@ -125,6 +146,9 @@ case_() {
     echo "   $file changed, but not into what the case says it becomes"
     stale=$((stale + 1))
   fi
+  # Deterministic, so that the status of `. "$file"` below is only ever about
+  # the sourcing and never about whichever branch the last case took.
+  return 0
 }
 
 for file in "${FILES[@]}"; do
@@ -132,10 +156,25 @@ for file in "${FILES[@]}"; do
     echo "no case file at $file" >&2
     exit 2
   fi
+  name=$(basename "$file")
+
   # Before sourcing, not after: a stand-in worker that got sourced would run.
   case "$(head -1 "$file")" in
     '#!'*)
-      skipped="$skipped $(basename "$file")"
+      # ⚠️ **A skip is a claim that there was nothing to check, and it has to be
+      # checked too.** Measured: prepend a shebang to a case file and the sweep
+      # reported one file and thirty-four cases fewer, `stale: 0`, exit 0 — the
+      # mirror of the hole this script exists to close, in the script itself.
+      # The file was named in the skipped list, so the only thing between a case
+      # file and silent exclusion was somebody reading it.
+      if grep -q '^case_ ' "$file"; then
+        echo "SHEBANG OVER CASES: $name"
+        echo "   it declares an interpreter, so it would be skipped as a stand-in worker — and it"
+        echo "   holds cases, which would go unchecked. One or the other, not both."
+        hidden=$((hidden + 1))
+      else
+        skipped="$skipped $name"
+      fi
       continue
       ;;
   esac
@@ -143,10 +182,21 @@ for file in "${FILES[@]}"; do
   before=$checked
   # shellcheck disable=SC1090
   . "$file"
+  sourced=$?
   files_read=$((files_read + 1))
-  name=$(basename "$file")
   count=$((checked - before))
   read_names="$read_names $name($count)"
+  # ⚠️ **The second door of the same shape, and it is not hypothetical.** A
+  # syntax error part way through a case file stops the sourcing there; bash
+  # prints it, and without this the sweep reported the cases it happened to
+  # reach and exited 0 with the rest silently unchecked. Measured — and measured
+  # twice, because `mutation-check.sh` did exactly this to a scoped file of mine
+  # in this same round and reported `baseline: 1 green` for five cases.
+  if [ "$sourced" -ne 0 ]; then
+    echo "COULD NOT BE READ: $name"
+    echo "   sourcing it failed after $count case(s); whatever follows was never checked"
+    unreadable=$((unreadable + 1))
+  fi
   if [ "$count" -eq 0 ]; then
     echo "NO CASES: $name declares no interpreter, so it is a case file, and it holds none"
     empty=$((empty + 1))
@@ -160,7 +210,7 @@ echo "read $files_read case file(s), $checked cases:$read_names"
 if [ -n "$skipped" ]; then
   echo "skipped, not case files (they declare an interpreter — stand-in workers):$skipped"
 fi
-echo "stale: $stale   case files holding no cases: $empty"
+echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable"
 echo "nothing was compiled and no test was run — that is scripts/mutation-check.sh"
 
 # `checked > 0` is not decoration on `stale == 0`, it is the condition that one
@@ -172,4 +222,8 @@ if [ "$files_read" -eq 0 ] || [ "$checked" -eq 0 ]; then
   echo "no cases anywhere in what was asked for — a result derived from nothing is not a result"
   exit 1
 fi
-[ "$stale" -eq 0 ] && [ "$empty" -eq 0 ]
+# Four conditions, and three of them are the same one: **a green line must not be
+# reachable by checking less.** `stale` is the finding this script is for;
+# `empty`, `hidden` and `unreadable` are the three ways it could otherwise report
+# success over cases it never looked at.
+[ "$stale" -eq 0 ] && [ "$empty" -eq 0 ] && [ "$hidden" -eq 0 ] && [ "$unreadable" -eq 0 ]
