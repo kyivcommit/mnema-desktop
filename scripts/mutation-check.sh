@@ -21,6 +21,25 @@
 # Everything runs in a throwaway git worktree at HEAD with its own
 # CARGO_TARGET_DIR, so an interrupted run cannot leave a mutation in the tree
 # you are working in.
+#
+# **Its cheap sibling: `scripts/mutation-staleness.sh <case-file>`.** This script
+# answers "does the test still go red" and takes twenty minutes; that one answers
+# "do the cases still apply, and do they still produce what they claim" and takes
+# about a second, so it is the one to run after a refactor. It is not a
+# substitute — it compiles nothing and runs no test — but it catches the thing
+# twenty minutes here does not: a case quoting code that has moved. Measured on
+# this branch, one four-column re-indentation broke three cases and this script
+# reported them one run apart, because a `perl` pattern's leading spaces are not
+# anchored and one of the three had been substituting into the middle of an
+# indent, passing both guards for a reason unrelated to its meaning.
+#
+# ⚠️ **Read the exit code from the script, not from a pipeline.** `… | tail`
+# reports `tail`'s status. Measured here: a run of this harness with two broken
+# cases was written up as "exit code 0" for exactly that reason. Redirect and
+# capture instead:
+#
+#   scripts/mutation-check.sh scripts/mutations/embedding.sh > out.txt 2>&1
+#   echo "EXIT=$?"
 
 # No `set -e`, deliberately: nearly every command in this script is expected to
 # fail — that is what a red mutation is — and `-e` would abort the run on the
