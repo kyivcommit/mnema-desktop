@@ -80,16 +80,19 @@ pub fn prepare_for_search(text: &str, kind: SourceKind) -> String {
 /// Lowercased here on purpose. FTS5's `unicode61` folds case on both sides of a
 /// MATCH, so `Договір` and `договір` are one term to the *search* — a caller
 /// comparing two texts' terms has to see the same thing. `to_lowercase` is
-/// Unicode's default full lowercase *mapping*, which is a different operation
-/// from case *folding* (they disagree on `ß` and `ﬁ`) and is not
-/// byte-identical to FTS5's own fold for every script on earth; for the
-/// languages this product's corpus is written in it agrees, and where it
-/// would not, the disagreement belongs in a test rather than in a promise.
-/// One is now measured and pinned there: FTS5 case folds U+0345 to ι and
-/// `to_lowercase` does not, so this over-reports for a Greek iota subscript —
-/// `search_terms_matches_what_fts5_stores_for_every_mark` holds the exception
-/// and proves the affected text is still findable by its own spelling, since
-/// a real query folds on both sides.
+/// Unicode's default full lowercase *mapping*, a different operation from case
+/// *folding* — Unicode's fold maps `ß` to `ss` and `ﬁ` to `fi` while
+/// `to_lowercase` leaves both alone — and it is not byte-identical to FTS5's
+/// own fold for every script on earth. Where the two disagree, the
+/// disagreement belongs in a test rather than in a promise.
+///
+/// Exactly one is measured, and it is not `ß` or `ﬁ`: `unicode61` leaves those
+/// two alone as well, so this function and the index agree on them and there
+/// is nothing there to close. The one real divergence is U+0345, which FTS5
+/// case folds to ι and `to_lowercase` does not, so this over-reports for a
+/// Greek iota subscript. `search_terms_matches_what_fts5_stores_for_every_mark`
+/// pins both sides of it by value and proves the affected text is still
+/// findable by its own spelling, since a real query folds on both sides.
 ///
 /// Diacritics stripped here too, for the same reason: `schema.sql` configures
 /// the tokenizer with `remove_diacritics 2`, which folds a Latin word's

@@ -593,6 +593,10 @@ fn search_terms_reports_the_terms_fts5_actually_stored() {
         "łĺ",
         "øō",
         "ŋðþœı",
+        // Three stroke letters no other test names, so that `mnema_core::nfc`'s
+        // assertion about them stands on a measurement rather than on the same
+        // reasoning it is trying to check.
+        "ƀɏƶ",
     ];
     let (_d, db, ids) = db_with(&texts.map(|t| (t, SourceKind::Document)));
 
@@ -638,18 +642,51 @@ fn search_terms_reports_the_terms_fts5_actually_stored() {
 /// stress accents fall into. `a` composes with many of them, so the same
 /// sweep also exercises the precomposed-letter half without a second test.
 ///
-/// The floor at the end is not decoration. Every assertion above is satisfied
-/// by a sweep in which nothing was stored at all, or in which every mark
-/// behaved identically — so the run has to show it actually saw both
-/// outcomes, or it proves nothing about a predicate whose whole job is to
-/// tell them apart.
+/// Hebrew, Arabic and Devanagari are swept too, and not for symmetry.
+/// `is_stripped_mark`'s doc comment claims their marks are outside the set
+/// and that this is the whole of their protection — a claim that named this
+/// sweep as its evidence while the sweep ran only U+0300–U+036F, so the
+/// evidence did not exist. U+0591–U+05C7, U+064B–U+0652 and U+0900–U+0954
+/// are now in the loop, and for them the check is stronger than agreement:
+/// every code point Unicode calls a combining mark must still be *present* in
+/// what the tokenizer stored. Agreement alone would be satisfied by both
+/// sides deleting a mark, which is precisely the outcome those ranges are
+/// claimed to be safe from.
+///
+/// The counts at the end are a floor, no more: they catch a sweep that stored
+/// nothing, or one in which every mark went the same way. The per-input
+/// equality is what does the real work, and a floor of one-and-one cannot
+/// stand in for it.
+///
+/// **What this instrument cannot see.** Both sides of the comparison run
+/// through `prepare_for_search`. If diacritic stripping ever moved *into*
+/// that function, the query side and the indexed side would fold identically,
+/// every input here would agree, and this test would stay green — while
+/// `chunk.text` and the index diverged, which is the exact failure this cycle
+/// exists to prevent. The harness matches answer sentences against
+/// `chunk.text`, so that divergence would be silent and this is the wrong
+/// instrument to notice it. Anything that moves folding earlier in the
+/// pipeline needs its own check against the unprepared column.
 #[test]
 fn search_terms_matches_what_fts5_stores_for_every_mark() {
-    let texts: Vec<String> = ['ф', 'a']
+    use unicode_general_category::{GeneralCategory, get_general_category};
+
+    // The Latin marks behind both bases; the non-Latin ranges behind `ф`
+    // alone, since none of them composes with either base and a second base
+    // would only repeat the same measurement.
+    let latin: Vec<(char, u32)> = ['ф', 'a']
         .into_iter()
-        .flat_map(|base| {
-            (0x0300u32..=0x036F).map(move |m| format!("{base}{}", char::from_u32(m).unwrap()))
-        })
+        .flat_map(|base| (0x0300u32..=0x036F).map(move |m| (base, m)))
+        .collect();
+    let non_latin: Vec<(char, u32)> = (0x0591u32..=0x05C7)
+        .chain(0x064Bu32..=0x0652)
+        .chain(0x0900u32..=0x0954)
+        .map(|m| ('ф', m))
+        .collect();
+    let marks: Vec<(char, u32)> = latin.iter().chain(non_latin.iter()).copied().collect();
+    let texts: Vec<String> = marks
+        .iter()
+        .map(|(base, m)| format!("{base}{}", char::from_u32(*m).unwrap()))
         .collect();
     let pairs: Vec<(&str, SourceKind)> = texts
         .iter()
@@ -671,11 +708,16 @@ fn search_terms_matches_what_fts5_stores_for_every_mark() {
     //
     // Asserted as a *live* disagreement, not skipped: if a later change makes
     // it agree, this goes red and says so, instead of leaving a stale
-    // exception nobody revisits.
+    // exception nobody revisits. The measured values are pinned rather than
+    // merely required to differ — `assert_ne!` alone is satisfied by a
+    // `search_terms` broken on this input for any reason at all, including the
+    // one thing this branch is meant to rule out, a predicate that started
+    // stripping U+0345 as if it were a diacritic.
     const KNOWN_FOLD_GAP: char = '\u{0345}';
 
     let mut disagreements = Vec::new();
     let (mut mark_deleted, mut mark_survived, mut gaps_seen) = (0, 0, 0);
+    let mut non_latin_marks_checked = 0;
     for (i, text) in texts.iter().enumerate() {
         let mut stmt = db
             .conn()
@@ -696,11 +738,42 @@ fn search_terms_matches_what_fts5_stores_for_every_mark() {
             mark_deleted += 1;
         }
 
+        // For the non-Latin ranges the claim is survival, not just agreement:
+        // both sides deleting the mark would agree perfectly and would be
+        // exactly the outcome `is_stripped_mark`'s doc comment says cannot
+        // happen. Only real combining marks are held to it — these ranges also
+        // contain Hebrew punctuation and Devanagari consonants, which are not
+        // marks and have no business surviving as one.
+        let (base, mark) = marks[i];
+        let mark = char::from_u32(mark).unwrap();
+        if !latin.contains(&(base, mark as u32))
+            && matches!(
+                get_general_category(mark),
+                GeneralCategory::NonspacingMark | GeneralCategory::SpacingMark
+            )
+        {
+            non_latin_marks_checked += 1;
+            assert!(
+                stored.iter().all(|t| t.contains(mark)),
+                "U+{:04X} is a combining mark outside the Latin block and the tokenizer dropped it: \
+                 stored {stored:?}",
+                mark as u32
+            );
+        }
+
         if text.contains(KNOWN_FOLD_GAP) {
             gaps_seen += 1;
-            assert_ne!(
-                reported, stored,
-                "{text:?} now agrees — the case-folding gap is closed, so delete this exception"
+            // The measured values, not merely "these differ". FTS5 case folds
+            // U+0345 to ι; `to_lowercase` leaves it standing.
+            assert_eq!(
+                stored,
+                std::collections::BTreeSet::from([format!("{base}\u{03B9}")]),
+                "the stored side of the known gap changed"
+            );
+            assert_eq!(
+                reported,
+                std::collections::BTreeSet::from([format!("{base}{KNOWN_FOLD_GAP}")]),
+                "the reported side of the known gap changed"
             );
             // And the gap is the *report's*, not the search's: both sides of a
             // real query fold identically, so the chunk is still findable by
@@ -729,9 +802,18 @@ fn search_terms_matches_what_fts5_stores_for_every_mark() {
         disagreements.join("\n")
     );
     assert_eq!(gaps_seen, 2, "both bases must have exercised the known gap");
+    // Floors, not coverage. The per-input equality above is what proves the
+    // predicate; these only rule out a run that stored nothing, swept an empty
+    // range, or saw every mark go the same way — states in which the equality
+    // assertions would pass without having been asked anything.
     assert!(
         mark_deleted > 0 && mark_survived > 0,
         "the sweep saw only one outcome ({mark_deleted} deleted, {mark_survived} survived), so \
          agreement here says nothing about telling them apart"
+    );
+    assert!(
+        non_latin_marks_checked > 50,
+        "only {non_latin_marks_checked} non-Latin combining marks were reached, so the claim that \
+         Hebrew, Arabic and Devanagari marks are outside the set rests on almost nothing"
     );
 }

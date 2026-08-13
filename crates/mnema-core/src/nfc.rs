@@ -49,12 +49,18 @@ pub fn normalise(s: &str) -> Cow<'_, str> {
 /// back what the tokenizer actually stored.
 ///
 /// **The set is not the range**, which is the trap this function exists to
-/// avoid. Twenty-one code points inside U+0300–U+0331 are kept — U+0305,
-/// U+030D–U+030E, U+0310, U+0312–U+031A, U+031C–U+0322, U+0329–U+032C,
-/// U+032F — so a predicate written as the whole window strips marks the index
-/// keeps, and `search_terms` then under-reports: it would claim a term the
-/// index never stored, and a caller comparing the two would record a miss the
-/// engine never made.
+/// avoid. Inside U+0300–U+0331 these are kept — U+0305, U+030D–U+030E,
+/// U+0310, U+0312–U+031A, U+031C–U+0322, U+0329–U+032C, U+032F — so a
+/// predicate written as the whole window strips marks the index keeps, and
+/// `search_terms` then under-reports: it would claim a term the index never
+/// stored, and a caller comparing the two would record a miss the engine
+/// never made.
+///
+/// No count stands beside that list, deliberately. The enumeration is the
+/// definition, and a number next to it is a second definition that can only
+/// drift from the first — one did, said "twenty-one" beside twenty-five
+/// listed, and was copied onward twice with the correct list printed next to
+/// it each time. If you want the count, count the list.
 ///
 /// Nothing above U+0331 belongs to it. U+0340, U+0341 and U+0344 measure as
 /// deleted and are not exceptions: each is a canonical singleton that NFC
@@ -62,9 +68,12 @@ pub fn normalise(s: &str) -> Cow<'_, str> {
 /// `strip_latin_diacritics` normalises first rather than trusting a caller to.
 ///
 /// Hebrew niqqud, the Devanagari virama and matra, and Arabic harakat are
-/// outside the set — measured in the same sweep. That is the whole of their
-/// protection here, and it is the real one: this predicate does not consult
-/// the base character, so nothing about their base is doing the work.
+/// outside the set. The sweep named above covers them for this reason —
+/// U+0591–U+05C7, U+064B–U+0652 and U+0900–U+0954 are swept alongside the
+/// Latin marks, and every combining mark in them is asserted to survive into
+/// what the tokenizer stored. That is the whole of their protection here, and
+/// it is the real one: this predicate does not consult the base character, so
+/// nothing about their base is doing the work.
 fn is_stripped_mark(c: char) -> bool {
     matches!(c,
         '\u{0300}'..='\u{0304}'
@@ -208,6 +217,72 @@ mod tests {
         assert_eq!(strip_latin_diacritics("ŋðþœı"), "ŋðþœı");
         assert_eq!(strip_latin_diacritics("łódź"), "łodz");
         assert_eq!(strip_latin_diacritics("Ærø"), "Ærø");
+
+        // And three letters no other test in either crate mentions. Everything
+        // above is a letter some test names, so an implementation carrying an
+        // exception list copied out of this suite would satisfy the whole of
+        // it — these are the ones such a list has no reason to contain, and
+        // they fold to `b`, `y` and `z` under any by-name reading. FTS5 stores
+        // all three unchanged, measured in `mnema-index`'s
+        // `search_terms_reports_the_terms_fts5_actually_stored`.
+        assert_eq!(strip_latin_diacritics("ƀɏƶ"), "ƀɏƶ");
+    }
+
+    #[test]
+    fn no_ascii_based_letter_carries_a_mark_the_tokenizer_keeps() {
+        // `strip_latin_diacritics` takes the ASCII base of a precomposed letter
+        // and drops the rest of its decomposition unexamined. That is only safe
+        // if every mark reachable that way is one the tokenizer deletes too —
+        // otherwise the function would strip a mark FTS5 keeps and report a
+        // term the index never stored.
+        //
+        // The claim was true when swept by hand and no committed test
+        // reproduced it, which made it an assertion about Unicode rather than
+        // a guarded invariant. This walks the assigned code space and checks it
+        // against `is_stripped_mark` directly — no SQLite, so it costs a
+        // fraction of a second.
+        let mut counterexamples = Vec::new();
+        let mut checked = 0;
+        for cp in 0..=0x10FFFFu32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let mut decomposed = c.nfd();
+            let Some(base) = decomposed.next() else {
+                continue;
+            };
+            if !base.is_ascii_alphabetic() {
+                continue;
+            }
+            let rest: Vec<char> = decomposed.collect();
+            if rest.is_empty() {
+                continue;
+            }
+            checked += 1;
+            if let Some(&kept) = rest.iter().find(|&&m| !is_stripped_mark(m)) {
+                counterexamples.push(format!("U+{cp:04X} -> {base:?} + U+{:04X}", kept as u32));
+            }
+        }
+        assert!(
+            counterexamples.is_empty(),
+            "{} precomposed letters decompose to an ASCII base plus a mark the tokenizer keeps:\n{}",
+            counterexamples.len(),
+            counterexamples.join("\n")
+        );
+        // The floor: without it an empty walk — a `nfd()` that stopped
+        // decomposing, a range that silently shrank — reads exactly like a
+        // clean one, since both report zero counterexamples.
+        //
+        // 489 under the UCD this crate builds against, measured rather than
+        // guessed: the first draft of this floor said 500 and went red, which
+        // is the cheapest possible demonstration that it discriminates. Kept
+        // well below the measured value so a Unicode update that adds or
+        // removes a handful of precomposed letters does not fail a test that
+        // is not about the count.
+        assert!(
+            checked > 400,
+            "only {checked} ASCII-based precomposed letters were examined, so this proves nothing"
+        );
     }
 
     #[test]
