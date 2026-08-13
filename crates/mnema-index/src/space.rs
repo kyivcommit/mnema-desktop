@@ -40,6 +40,15 @@ const GIVEN_UP_ON_CURRENT_TEXT: &str = "SELECT 1 FROM chunk_embedding_state s
 /// `table` is a `vec_emb_<id>` name and never caller text —
 /// [`Db::embedded_chunk_count`]'s own comment gives that argument in full.
 /// Binds the space id as `?1`; a caller adding `LIMIT` uses `?2`.
+///
+/// **This depends on `NOT IN` never meeting a NULL, and that argument belongs
+/// here.** A single NULL among `{table}.chunk_id` would make `NOT IN` answer
+/// NULL for every row of the outer query, emptying this queue over a full
+/// archive — silently, and in the direction nobody would notice. It cannot
+/// happen: `chunk_id` is declared `INTEGER PRIMARY KEY` on the `vec0` table
+/// (`Db::create_space`'s DDL, `space.rs:211`), and every writer —
+/// [`Db::insert_vector`], [`Db::upsert_vector`], [`Db::upsert_vector_for_text`]
+/// — binds it a real `i64`, never a NULL.
 fn the_embedding_queue(table: &str) -> String {
     format!(
         "FROM chunk c
@@ -313,10 +322,17 @@ impl Db {
     /// earlier run, or `state != 1` recording a failure this write has now
     /// superseded — no longer describes the chunk once this call succeeds,
     /// and a caller reading that table (Task 6's queue) must not find a
-    /// chunk marked failed the moment after it was embedded. Nothing in this
-    /// crate writes that table yet — `embedded_chunk_count`'s own doc names
-    /// the grep — so today the `DELETE` below removes nothing; it is here so
-    /// the first writer does not have to remember to add it.
+    /// chunk marked failed the moment after it was embedded.
+    ///
+    /// **The narrower true sentence, now that Task 6 writes this table:**
+    /// nothing in this crate writes `state = 1` — only `state = 2`
+    /// ([`Db::record_embedding_failure`]) is ever written, `state = 0`
+    /// deliberately never (that method's own doc says why) — so the `DELETE`
+    /// below removes a `failed` row, not nothing. This method has no
+    /// production caller of its own, but the identical `DELETE` in its
+    /// sibling [`Db::upsert_vector_for_text`] does, and there the removal is
+    /// load-bearing: it is what takes a refusal off
+    /// [`Db::embedded_chunk_count`]'s third number the moment a chunk embeds.
     ///
     /// `insert_vector` is deliberately left alone. Its "exactly once" is a
     /// statement some caller may want enforced, and quietly turning it into
@@ -632,9 +648,12 @@ impl Db {
     /// has not — deleting a document outright still leaves its vectors behind.
     /// So the numerator can still exceed this denominator through that path,
     /// and whatever renders the pair has to be able to show that rather than a
-    /// percentage above one hundred. Both are zero today, because nothing
-    /// embeds yet (D29) — this is the shape of the trap, written where the
-    /// second half of it is read.
+    /// percentage above one hundred. Neither is zero today — D29 described a
+    /// build with nothing embedded, and this branch built the thing that
+    /// embeds — so the trap is no longer hypothetical: a document's vectors
+    /// can genuinely outlive it through [`Db::delete_document`], and whatever
+    /// renders the pair has to show a numerator above the denominator rather
+    /// than clamp it away.
     pub fn chunk_count(&self) -> Result<i64, Error> {
         Ok(self
             .conn()
@@ -697,11 +716,11 @@ impl Db {
     ///
     /// Reads **both** places a chunk can be recorded as embedded, because
     /// neither alone is trustworthy, in either direction. Nothing in this
-    /// crate writes a `chunk_embedding_state` row — [`Db::insert_vector`]
-    /// writes only the `vec0` table, [`Db::embedded_chunk_count`]'s own doc
-    /// names the grep that proves it — so a check reading that table alone
-    /// would call a space full of vectors empty: an assertion satisfied by
-    /// zero from one side. And a `vec0` table takes no foreign key, so a
+    /// crate writes `state = 1` to `chunk_embedding_state` — only `state = 2`
+    /// is, by [`Db::record_embedding_failure`]; [`Db::insert_vector`] writes
+    /// only the `vec0` table — so a check reading that table alone would call
+    /// a space full of vectors empty: an assertion satisfied by zero from one
+    /// side. And a `vec0` table takes no foreign key, so a
     /// vector can still outlive the chunk it embeds and the
     /// `chunk_embedding_state` row that cascaded away with it —
     /// [`Db::clear_document_content`] closed that for a rebuild (D88), but
@@ -732,8 +751,10 @@ impl Db {
     /// **Reading only `chunk_embedding_state` would answer zero for a full
     /// space today**, which is why the `UNION` is load-bearing for the second
     /// caller as well as the first: [`Db::insert_vector`] writes the `vec0`
-    /// table and nothing in this crate writes a `chunk_embedding_state` row at
-    /// all — `grep -rn chunk_embedding_state crates/*/src` finds no INSERT.
+    /// table, and the only writer of `chunk_embedding_state` writes
+    /// `state = 2` — `grep -rn chunk_embedding_state crates/*/src` now finds
+    /// [`Db::record_embedding_failure`]'s `INSERT`, but nothing writes
+    /// `state = 1`, which is the value this `UNION` selects from that table.
     /// The narrower query would put "0 of 900 embedded" in front of someone
     /// whose archive is embedded, and send them to pay for it again.
     ///
@@ -963,6 +984,16 @@ impl Db {
     /// not a bug this state should hide — the space genuinely is not
     /// complete, and `failed_chunk_count` is what tells a person why, once
     /// something reads it.
+    ///
+    /// **This depends on `NOT IN` never meeting a NULL, the same argument
+    /// [`the_embedding_queue`] makes for the same SQL shape.** A single NULL
+    /// among `{table}.chunk_id` would make `NOT IN` answer NULL for every
+    /// row, and `NOT EXISTS` of an always-NULL comparison is true — this
+    /// method would then answer `true` over a space full of chunks with no
+    /// vector, silently, which is the one direction this predicate must never
+    /// be wrong in. It cannot happen, for the same reason it cannot for the
+    /// queue: `chunk_id` is `INTEGER PRIMARY KEY` on the `vec0` table
+    /// (`space.rs:211`), and every writer binds it a real `i64`.
     pub fn space_is_complete(&self, space_id: i64) -> Result<bool, Error> {
         let table = self.space(space_id)?.table;
         // `table` is never caller text: the same reasoning `embedded_chunk_count`

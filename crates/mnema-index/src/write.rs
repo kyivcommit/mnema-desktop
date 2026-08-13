@@ -607,11 +607,19 @@ impl Db {
     /// [`Db::clear_document_content`] (use [`Db::clear_document_content_in`]
     /// here) go through `self.transaction`, and so do [`Db::upsert_vector`]
     /// and [`Db::delete_vector`], added in D95a to make a chunk's embedding
-    /// replaceable and removable. [`Db::create_space`], [`Db::drop_space`] and
+    /// replaceable and removable, and [`Db::upsert_vector_for_text`], added
+    /// by Task 6 as the one the embedding pass actually calls.
+    /// [`Db::create_space`], [`Db::drop_space`] and
     /// [`Db::delete_watched_root`] open one directly.
     /// [`Db::adopt_embedding_model`] does both at once: one transaction
     /// through [`Db::create_space`], another through `self.transaction` for
     /// the pointer write itself.
+    ///
+    /// **Keeping this list current is the point of writing it as prose and
+    /// not only as the two greps above.** A reader who trusts the sentence
+    /// should not have to run either grep to discover it is one method
+    /// short — which is exactly what happened to this list once already,
+    /// twice by two different tasks.
     ///
     /// [`Db::read_snapshot`], below, opens one directly too and belongs on both
     /// greps' lists — it is the one opener that writes nothing, and the one a

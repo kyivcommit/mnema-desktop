@@ -503,8 +503,11 @@ pub struct AdoptedModel {
     /// `create_space`'s own answer precisely because the neighbouring fact ("the
     /// active space moved") is a different one, and agrees with it everywhere
     /// except on a model chosen, abandoned and chosen again. Deriving it from
-    /// `embeddedChunks` would be worse still: that number is identically zero in
-    /// this build (D29), so the derivation is wrong in exactly one direction.
+    /// `embeddedChunks` would be worse still, and worse than it was written
+    /// against: that number is no longer identically zero — D29 described a
+    /// build with nothing to embed, and this branch built the thing that
+    /// embeds — so with real embeddings the derivation is wrong in **both**
+    /// directions, not the one direction the sentence used to name.
     pub created: bool,
     /// The spaces this call threw away, in the order it threw them away, and
     /// empty for every call that threw nothing away — which is every call with
@@ -1061,9 +1064,11 @@ fn key_state(state: &AppState) -> KeyState {
 /// An active space naming a space that is gone arrives as
 /// `mnema_index::Error::NoSuchSpace` rather than as "nothing chosen" — see
 /// `Db::space_model`, where the argument for that is written down. It reaches
-/// the window as [`IndexSettings::Unreadable`] with `kind: ReadFailed`, and no
-/// longer takes the key half down with it. Nothing in this build can produce the
-/// state: `Db::drop_space` has no caller outside the index crate's own tests.
+/// the window as [`IndexSettings::Unreadable`] with `cause: ReadFailed`, and no
+/// longer takes the key half down with it. **The state is reachable**:
+/// `Db::drop_space` now has a production caller, `adopt_retiring_whatever_blocks`
+/// above (Task 4) — its own doc comment spells out exactly this state and what
+/// a person meets in it, so it is not repeated here.
 ///
 /// **It returns no `Result`, and that is the guarantee rather than a
 /// convenience.** Every state of the credential store and every state of the

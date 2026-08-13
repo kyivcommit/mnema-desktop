@@ -930,9 +930,13 @@ export const embedEndingSentence = (ended) =>
   (EMBED_ENDING_TEXT[ended.reason] ?? notAnEmbeddingEnding)(ended);
 
 // A run that never started. The refusals are `Error::NoKey`, `Error::Secrets`,
-// `Error::JobAlreadyRunning` and `Error::IndexNotOpen`, and each already says
-// what it is and what to do about it — this only says that nothing started, so
-// that a message about a key is not read as a run that failed halfway.
+// `Error::JobAlreadyRunning` and `Error::Index(_)` — the last from
+// `open_job_index`, which this command calls instead of `with_index`, so
+// `Error::IndexNotOpen` is not among them. The first three already say what
+// they are and what to do about it; `Error::Index(_)` does not — its
+// `Display` just forwards whatever SQLite said. This sentence only says that
+// nothing started, so a message about a key (or an unreadable index) is not
+// read as a run that failed halfway.
 export const embedNotStartedSentence = (error) => `nothing was embedded: ${error}`;
 
 // `set_embedding_model` answers `AdoptedModel`, not `ModelSettings`, and its
@@ -946,9 +950,8 @@ export const embedNotStartedSentence = (error) => `nothing was embedded: ${error
 // separate clause rather than letting it rewrite the first one.
 //
 // `created` comes from the field that states it and is never re-derived.
-// `embeddedChunks` is the tempting proxy and is wrong in exactly one direction:
-// it is identically zero in this build (D29), so every adoption would read as a
-// freshly minted space.
+// `embeddedChunks` is the tempting proxy — see the note above about why it is
+// no longer identically zero, and now wrong in both directions rather than one.
 // The two values `existingVectors` may take on the wire, spelled once. They are
 // here and not in `main.js` for the reason every other wire spelling is: a typo
 // in a literal over there is a rejected command with a message about arguments,

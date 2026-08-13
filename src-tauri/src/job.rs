@@ -331,6 +331,19 @@ pub const PROBE_UNIT: Duration = Duration::from_millis(250);
 /// `None` before anything is done: with nothing measured the honest answer is
 /// "unknown", and a webview showing nothing is better than one showing a number
 /// derived from a constant that will not survive the first real document.
+///
+/// ⚠️ **Does not know about `refused`, unlike its neighbour.**
+/// [`progress_is_due`], eight lines below and fed from the same report, was
+/// repaired to treat a unit as resolved at `done + refused >= total`. This
+/// function was not: `remaining` below is `total - done` alone, so on the run
+/// that repair exists for — one ending in refusals — the forced final report
+/// carries an estimate that still counts the refused chunks as work to come.
+/// Left rather than fixed, because it self-corrects within that one message:
+/// the ending text replaces this line the moment the window renders it. See
+/// `embed_job::progress_from`'s doc for the separate, existing reason `done`
+/// alone (not `done + refused`) is also the right choice for the *rate* half
+/// of this estimate — that argument still holds; it is only the `remaining`
+/// half this note is about.
 pub fn seconds_left(done: u64, total: u64, elapsed: Duration) -> Option<u64> {
     if done == 0 {
         return None;
