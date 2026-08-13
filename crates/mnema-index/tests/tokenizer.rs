@@ -493,3 +493,28 @@ fn fts5_operators_are_not_a_query_language_here() {
     assert_eq!(db.search_lexical("витрати бюджет", 10).unwrap().len(), 1);
     assert_eq!(db.search_lexical("витрати OR бюджет", 10).unwrap().len(), 0);
 }
+
+/// The harness reasons about "the words the engine will demand". That is
+/// `prepare_for_search` plus the index's own splitting, and the second half is
+/// `pub(crate)` — so a caller outside this crate that split the prepared string
+/// itself would be inventing a second definition of "term".
+#[test]
+fn search_terms_are_the_words_the_index_demands() {
+    let t = mnema_index::search_terms("hello world", SourceKind::Document);
+    assert_eq!(t, vec!["hello".to_string(), "world".to_string()]);
+
+    // Case is folded here rather than left to FTS5. The tokenizer lowercases at
+    // index time and at query time, so a caller comparing a question's terms
+    // with an answer's would otherwise miss `Договір` against `договір` — a
+    // difference the search itself does not have.
+    assert_eq!(
+        mnema_index::search_terms("Договір Оренди", SourceKind::Document),
+        vec!["договір".to_string(), "оренди".to_string()]
+    );
+
+    // The other direction, which a length assertion alone would not catch:
+    // separators alone are no terms at all. This is the same emptiness
+    // `search_lexical` turns into "no rows" instead of a syntax error
+    // (`search.rs:34-37`).
+    assert!(mnema_index::search_terms("(((", SourceKind::Document).is_empty());
+}

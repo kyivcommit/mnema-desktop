@@ -57,6 +57,24 @@ pub fn prepare_for_search(text: &str, kind: SourceKind) -> String {
     }
 }
 
+/// The terms the lexical index will demand for `text`.
+///
+/// `search_lexical` runs `prepare_for_search` and then `terms` (`search.rs:31-32`);
+/// this is those two halves, joined and owned, because `terms` borrows from a
+/// string the caller does not hold and is `pub(crate)` besides.
+///
+/// Lowercased here on purpose. FTS5's `unicode61` folds case on both sides of a
+/// MATCH, so `Договір` and `договір` are one term to the *search* — a caller
+/// comparing two texts' terms has to see the same thing. `to_lowercase` is
+/// Unicode's default full case folding, which is not byte-identical to FTS5's
+/// for every script on earth; for the languages this product's corpus is
+/// written in it agrees, and where it would not, the disagreement belongs in a
+/// test rather than in a promise.
+pub fn search_terms(text: &str, kind: SourceKind) -> Vec<String> {
+    let prepared = prepare_for_search(text, kind);
+    terms(&prepared).map(|t| t.to_lowercase()).collect()
+}
+
 /// Splits prepared text into the terms the tokenizer will see: letters, digits
 /// and word-internal apostrophes, with everything else a separator.
 ///
