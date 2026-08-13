@@ -85,15 +85,23 @@ pub fn prepare_for_search(text: &str, kind: SourceKind) -> String {
 /// byte-identical to FTS5's own fold for every script on earth; for the
 /// languages this product's corpus is written in it agrees, and where it
 /// would not, the disagreement belongs in a test rather than in a promise.
+/// One is now measured and pinned there: FTS5 case folds U+0345 to ι and
+/// `to_lowercase` does not, so this over-reports for a Greek iota subscript —
+/// `search_terms_matches_what_fts5_stores_for_every_mark` holds the exception
+/// and proves the affected text is still findable by its own spelling, since
+/// a real query folds on both sides.
 ///
 /// Diacritics stripped here too, for the same reason: `schema.sql` configures
 /// the tokenizer with `remove_diacritics 2`, which folds a Latin word's
 /// accented and unaccented spellings onto one token — `Zürich` and `Zurich`
-/// are one term to the index — but leaves Cyrillic untouched, so `й` and `ї`
-/// keep their marks (measured in `mnema_core::nfc`'s doc comment, D32).
-/// `strip_latin_diacritics` is that same asymmetry, made callable, so this
-/// reports the string the index actually stores rather than the merely
-/// lowercased one.
+/// are one term to the index. It does **not** leave Cyrillic alone, which is
+/// the correction this line carries: the tokenizer strips by code point
+/// without consulting the base, so the Ukrainian stress accent goes and
+/// `сло́во` is stored as `слово`. What survives is the *precomposed* letter —
+/// `й` and `ї` keep their marks because U+0439 and U+0457 are not in the
+/// tokenizer's table, not because their script is spared (D32).
+/// `strip_latin_diacritics` mirrors both halves, so this reports the string
+/// the index actually stores rather than the merely lowercased one.
 pub fn search_terms(text: &str) -> Vec<String> {
     let prepared = prepare_for_search(text, SourceKind::Document);
     let prepared = mnema_core::nfc::strip_latin_diacritics(&prepared);

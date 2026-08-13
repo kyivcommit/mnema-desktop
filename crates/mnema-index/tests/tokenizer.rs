@@ -57,12 +57,18 @@ fn db_with(texts: &[(&str, SourceKind)]) -> (tempfile::TempDir, Db, Vec<i64>) {
 }
 
 /// D32's correction, and the test that would have caught the defect it names:
-/// `remove_diacritics 2` does not touch the Cyrillic breve, so a precomposed
-/// `й` (U+0439) and its decomposed spelling `и` (U+0438) + combining breve
-/// (U+0306) are two different tokens without NFC. macOS hands over the
-/// decomposed form; a query typed on another machine is precomposed — so
-/// without normalisation the document is unfindable by its own spelling, in
+/// a precomposed `й` (U+0439) and its decomposed spelling `и` (U+0438) +
+/// combining breve (U+0306) are two different tokens without NFC. macOS hands
+/// over the decomposed form; a query typed on another machine is precomposed —
+/// so without normalisation the document is unfindable by its own spelling, in
 /// either direction.
+///
+/// Not because `remove_diacritics 2` spares the breve. Measured in
+/// `search_terms_matches_what_fts5_stores_for_every_mark`, a standalone U+0306
+/// is deleted whatever precedes it; what the tokenizer's table does not carry
+/// is the *precomposed* U+0439. So the decomposed spelling tokenizes as plain
+/// `и` and the precomposed one as `й` — still two tokens, by the opposite
+/// mechanism to the one this comment used to give.
 #[test]
 fn both_forms_of_the_same_ukrainian_word_produce_one_token() {
     let precomposed = "йод"; // й = U+0439
@@ -546,19 +552,48 @@ fn search_terms_are_the_words_the_index_demands() {
 /// pass through the same tokenizer.
 ///
 /// Covers a Latin word with a diaeresis, one with an acute accent, plain
-/// ASCII, two Ukrainian words — one carrying `й`, one carrying `ї` — and two
-/// words carrying letters with no NFD decomposition at all (`ł`, `ø`, `æ`
-/// are atomic legacy Latin letters, not a base plus a combining mark).
-/// `remove_diacritics 2` is measured (`mnema_core::nfc`, D32) to fold the
-/// first two, leave the Ukrainian pair exactly as written, and — measured
-/// here rather than assumed — leave `ł`, `ø` and `æ` untouched too: `łódź`
-/// stores as `łodz` (only `ó`/`ź`, which do decompose, fold) and `Ærø`
-/// stores as `ærø`. `mnema_core::nfc::strip_latin_diacritics` agrees on all
-/// seven because it strips a mark it finds by decomposing, not a letter it
-/// recognises by name, and there is no mark to find on any of the three.
+/// ASCII, two Ukrainian words — one carrying `й`, one carrying `ї` — a
+/// Ukrainian word carrying the stress accent, and a set of Latin letters
+/// straddling the boundary between those with a canonical decomposition and
+/// those without.
+///
+/// `сло́во` is the case this fixture was extended for. U+043E has no
+/// precomposed acute form, so the mark survives NFC and stands alone in the
+/// text the tokenizer receives — the tokenizer deletes it and stores `слово`,
+/// while a `search_terms` that required an ASCII base before stripping
+/// reported `сло́во`. Quoted from the run that found it: `search_terms
+/// reported {"сло\u{301}во"}, FTS5 actually stored {"слово"}`.
+///
+/// What is claimed here is agreement, and only agreement. Both sides fold
+/// `Zürich`, `łódź`, `ō`, `ď`, `ĥ` and `ĺ` the same way and leave `й`, `ї`,
+/// `ł`, `ø`, `æ`, `đ`, `ħ`, `ŋ`, `ð`, `þ`, `œ` and `ı` alone; the mechanisms
+/// behind that are **not** the same and this test does not say they are.
+/// `strip_latin_diacritics` asks NFD for a base and takes it when it is
+/// ASCII; SQLite's `fts5_remove_diacritic` binary-searches a hardcoded code
+/// point table and never decomposes anything. Two mechanisms landing on one
+/// result is exactly what a test can establish and a comment cannot, which is
+/// why the agreement is measured here per input rather than argued anywhere.
 #[test]
 fn search_terms_reports_the_terms_fts5_actually_stored() {
-    let texts = ["Zürich", "café", "hello", "йод", "їжак", "łódź", "Ærø"];
+    let texts = [
+        "Zürich",
+        "café",
+        "hello",
+        "йод",
+        "їжак",
+        "łódź",
+        "Ærø",
+        "сло\u{0301}во",
+        // The decomposition boundary, measured rather than reasoned about:
+        // each atomic letter is paired with a look-alike that decomposes, so
+        // this fixture is what backs `mnema_core::nfc`'s claim that the two
+        // columns fold differently.
+        "đď",
+        "ħĥ",
+        "łĺ",
+        "øō",
+        "ŋðþœı",
+    ];
     let (_d, db, ids) = db_with(&texts.map(|t| (t, SourceKind::Document)));
 
     db.conn()
@@ -584,4 +619,119 @@ fn search_terms_reports_the_terms_fts5_actually_stored() {
             "{text:?}: search_terms reported {reported:?}, FTS5 actually stored {stored:?}"
         );
     }
+}
+
+/// Where `mnema_core::nfc::is_stripped_mark`'s set comes from, and what stops
+/// it drifting from the tokenizer it claims to mirror.
+///
+/// The set is hand-written, so on its own it is an assertion about SQLite's
+/// internals — the kind this project has already paid for believing. This
+/// sweeps the whole combining-marks block through the real index and compares
+/// what `search_terms` reports against what FTS5 stored, mark by mark, so the
+/// set is measured on every run rather than decoded once from `sqlite3.c`.
+/// It goes red in both directions: a mark added to the set that the tokenizer
+/// keeps, and a mark dropped from it that the tokenizer deletes.
+///
+/// Two bases, because the fold has two independent halves. `ф` composes with
+/// none of these marks, so each one reaches the tokenizer standing alone —
+/// the case a base-conditional predicate got wrong, and the case Ukrainian
+/// stress accents fall into. `a` composes with many of them, so the same
+/// sweep also exercises the precomposed-letter half without a second test.
+///
+/// The floor at the end is not decoration. Every assertion above is satisfied
+/// by a sweep in which nothing was stored at all, or in which every mark
+/// behaved identically — so the run has to show it actually saw both
+/// outcomes, or it proves nothing about a predicate whose whole job is to
+/// tell them apart.
+#[test]
+fn search_terms_matches_what_fts5_stores_for_every_mark() {
+    let texts: Vec<String> = ['ф', 'a']
+        .into_iter()
+        .flat_map(|base| {
+            (0x0300u32..=0x036F).map(move |m| format!("{base}{}", char::from_u32(m).unwrap()))
+        })
+        .collect();
+    let pairs: Vec<(&str, SourceKind)> = texts
+        .iter()
+        .map(|t| (t.as_str(), SourceKind::Document))
+        .collect();
+    let (_d, db, ids) = db_with(&pairs);
+
+    db.conn()
+        .execute_batch("CREATE VIRTUAL TABLE chunk_vocab USING fts5vocab('chunk_fts', 'instance')")
+        .unwrap();
+
+    // U+0345 is not a diacritics case and is excluded on purpose, with the
+    // measurement recorded rather than the input quietly dropped. FTS5 *case
+    // folds* it to ι (U+03B9) — `"ф\u{0345}"` stores as `"фι"` — while
+    // `to_lowercase` leaves it alone, which is the `to_lowercase`-is-not-
+    // case-folding gap `search_terms`'s own doc comment names. Closing it
+    // needs a case-folding dependency and a decision about which fold this
+    // product owes; both are outside a fix round about diacritics.
+    //
+    // Asserted as a *live* disagreement, not skipped: if a later change makes
+    // it agree, this goes red and says so, instead of leaving a stale
+    // exception nobody revisits.
+    const KNOWN_FOLD_GAP: char = '\u{0345}';
+
+    let mut disagreements = Vec::new();
+    let (mut mark_deleted, mut mark_survived, mut gaps_seen) = (0, 0, 0);
+    for (i, text) in texts.iter().enumerate() {
+        let mut stmt = db
+            .conn()
+            .prepare("SELECT DISTINCT term FROM chunk_vocab WHERE doc = ?1")
+            .unwrap();
+        let stored: std::collections::BTreeSet<String> = stmt
+            .query_map([ids[i]], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let reported: std::collections::BTreeSet<String> =
+            mnema_index::search_terms(text).into_iter().collect();
+
+        assert!(!stored.is_empty(), "{text:?} stored no term at all");
+        if stored.iter().any(|t| t.chars().count() > 1) {
+            mark_survived += 1;
+        } else {
+            mark_deleted += 1;
+        }
+
+        if text.contains(KNOWN_FOLD_GAP) {
+            gaps_seen += 1;
+            assert_ne!(
+                reported, stored,
+                "{text:?} now agrees — the case-folding gap is closed, so delete this exception"
+            );
+            // And the gap is the *report's*, not the search's: both sides of a
+            // real query fold identically, so the chunk is still findable by
+            // its own spelling. Without this the exception would be hiding an
+            // actual search defect behind a note about reporting.
+            assert_eq!(
+                db.search_lexical(text, 10).unwrap(),
+                vec![ids[i]],
+                "{text:?} must still be findable by its own spelling"
+            );
+            continue;
+        }
+
+        if reported != stored {
+            disagreements.push(format!(
+                "{text:?}: reported {reported:?}, stored {stored:?}"
+            ));
+        }
+    }
+
+    assert!(
+        disagreements.is_empty(),
+        "{} of {} inputs disagreed:\n{}",
+        disagreements.len(),
+        texts.len(),
+        disagreements.join("\n")
+    );
+    assert_eq!(gaps_seen, 2, "both bases must have exercised the known gap");
+    assert!(
+        mark_deleted > 0 && mark_survived > 0,
+        "the sweep saw only one outcome ({mark_deleted} deleted, {mark_survived} survived), so \
+         agreement here says nothing about telling them apart"
+    );
 }
