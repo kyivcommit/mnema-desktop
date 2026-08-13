@@ -127,7 +127,7 @@ case_() {
     # unmutated first and must be green. Deduplicated: several cases usually
     # target one test.
     local key="|$pkg $* $test|"
-    case "$seen" in *"$key"*) return ;; esac
+    case "$seen" in *"$key"*) return 0 ;; esac
     seen="$seen$key"
 
     local out
@@ -147,7 +147,8 @@ case_() {
       printf '%s' "$out" | grep -E "panicked at|^error" | head -3 | sed 's/^/  /'
       baseline_bad=$((baseline_bad + 1))
     fi
-    return
+    # Deterministic, for the reason given at the end of this function.
+    return 0
   fi
 
   printf '%s\n' "-- $label"
@@ -158,14 +159,14 @@ case_() {
   # identical is a broken case, not a test result, and must never count as either.
   if git -C "$TREE" diff --quiet -- "$file"; then
     echo "   BROKEN CASE: the mutation left $file unchanged"
-    broken=$((broken + 1)); restore; return
+    broken=$((broken + 1)); restore; return 0
   fi
   # Second guard: it changed, but into what the case says? Redundant with the
   # first for detecting a no-op; kept because it also catches a perl expression
   # that matched somewhere unintended.
   if ! contains "$marker" "$file"; then
     echo "   BROKEN CASE: $file changed, but not into what the case describes"
-    broken=$((broken + 1)); restore; return
+    broken=$((broken + 1)); restore; return 0
   fi
 
   # `local out` is deliberately on its own line: `local out=$(...)` would make
@@ -194,6 +195,9 @@ case_() {
     green=$((green + 1))
   fi
   restore
+  # Deterministic, so that the status of `. "$CASES"` is only ever about the
+  # sourcing and never about whichever branch the file's last case took.
+  return 0
 }
 
 # Pass one: every named test, unmutated, must be green.
@@ -202,7 +206,21 @@ baseline_ok=0
 baseline_bad=0
 # shellcheck disable=SC1090
 . "$CASES"
+sourced=$?
 echo "baseline: $baseline_ok green"
+# ⚠️ **`baseline: N green` is a claim about the cases that were READ, and until
+# this line nothing checked that they were all of them.** A syntax error part way
+# through a case file stops the sourcing there; bash prints it, this script
+# carried on with whatever it had, and the numbers below described a subset while
+# exiting 0 — measured, on a scoped file of five cases that reported
+# `baseline: 1 green`. It is the same shape as everything else this harness
+# guards against, sitting in the harness: a result over less than was asked for,
+# presented as a result.
+if [ "$sourced" -ne 0 ]; then
+  echo "COULD NOT READ $CASES to the end (status $sourced): $baseline_ok case(s) were read and"
+  echo "whatever follows the failure was never seen. The numbers above are about a subset."
+  exit 1
+fi
 if [ "$baseline_bad" -ne 0 ]; then
   echo "refusing to mutate against $baseline_bad test(s) that are not green to begin with"
   exit 1
@@ -213,6 +231,29 @@ echo
 mode=mutate
 # shellcheck disable=SC1090
 . "$CASES"
+sourced=$?
+# Checked again rather than trusted from pass one. The two passes take different
+# branches through `case_` — one runs `cargo test` against an unmutated tree, the
+# other rewrites a file and restores it — so they can fail independently, and a
+# file that sources cleanly for the baseline and not for the mutations is a
+# stranger failure than either alone.
+#
+# ⚠️ **Nothing reaches this today, and it is here as the argument rather than as
+# a defence.** The two passes read the same text, so a syntax error fails the
+# first one and exits above; what would reach this is a failure in the mutate
+# branch alone — an unbound variable under `set -u`, a `case_` shape only that
+# branch dislikes. The half above IS exercised: seen red on a case file whose
+# fifth case is an unterminated quote, which reported `baseline: 3 green` and
+# then refused, where before it would have gone on to mutate against a subset
+# and exited 0.
+if [ "$sourced" -ne 0 ]; then
+  restore
+  echo
+  echo "COULD NOT READ $CASES to the end on the mutation pass (status $sourced), although the"
+  echo "baseline pass read it whole. The counts below cover only what was reached."
+  echo "red: $red   still green: $green   broken cases: $broken"
+  exit 1
+fi
 
 restore
 echo
