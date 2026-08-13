@@ -49,6 +49,7 @@ import {
   barState,
   BAR_RUNNING,
   BAR_STOPPED,
+  restatedEnding,
 } from "./render.js";
 
 const { invoke, Channel } = window.__TAURI__.core;
@@ -726,17 +727,25 @@ el("embed").addEventListener("click", async () => {
     // moving progress line and a live-looking bar on screen for the length of a
     // database read, which is the defect this whole task is about.
     //
-    // ⚠️ **Guarded on `jobRunning`, which is not caution but the same rule
-    // every other stale draw on this screen follows.** A person can press Embed
-    // again inside that round trip; without the guard this resolves afterwards
-    // and paints the *previous* run's ending over the new run's progress line.
-    // Nothing runs between the check and the write — the language guarantees
-    // that much — so the check is exact rather than hopeful.
+    // ⚠️ **Whether it may land at all is `restatedEnding`'s decision, not an
+    // `if` here.** A person can press Embed again inside that round trip, and a
+    // restatement landing afterwards would paint the previous run's ending —
+    // carrying numbers measured before the new run started — over a line
+    // describing a run in flight. Written as a branch in this file it would be a
+    // branch no test can reach; `render.test.js` asserts both directions of it.
+    // Nothing runs between the decision and the write — the language guarantees
+    // that much — so the answer cannot go stale between them.
+    //
+    // The settings block `refreshSettings` redraws on the way is safe in the
+    // same situation for its own reason, checked rather than assumed:
+    // `drawSettings` reads this same `jobRunning` when it runs, which is after
+    // the await, so a run that started inside the round trip suppresses the
+    // refusal clause exactly as it does during any other run.
     refreshSettings().then((settings) => {
-      if (jobRunning) {
-        return;
+      const restated = restatedEnding(ending, settings.index, jobRunning);
+      if (restated !== null) {
+        el("job-status").textContent = restated;
       }
-      el("job-status").textContent = embedEndingSentence(ending, settings.index);
     });
   };
 

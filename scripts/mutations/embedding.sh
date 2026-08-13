@@ -1044,41 +1044,48 @@ case_ "models: a model change must not be possible while a pass is writing (T8)"
 # needs a second job started from another thread *during* the command, which is
 # a race rather than a test. It is written on the line itself instead.
 
-# ── Task 9: what the live acceptance run found, and why none of it is here ────
+# ── Task 9: what the live acceptance run found, and what holds it ────────────
 #
-# ⚠️ **Three defects, zero cases, and that is not an omission — it is the limit
-# this file states twice above, met head on.** The live acceptance run of
-# 2026-08-13 found that a run which stopped or failed is visually and verbally
+# ⚠️ **Out of this harness's reach, and named rather than counted** — a number
+# here is a definition somebody has to keep current, and the two this file
+# already carried were wrong within a commit of being written. The live
+# acceptance run of 2026-08-13 found that a run which stopped or failed is
 # indistinguishable from one still going: the owner turned the network back on
-# after a failure and waited for a run that had already ended. All three fixes
-# are in `ui/` — the ending's sentence, the bar's appearance, and the pair of
-# numbers the run's line was missing — and `mutation-check.sh` runs `cargo test`
-# and nothing else. A case naming a `node --test` test does not merely prove
+# after a failure and waited for a run that had already ended. What was changed:
+#
+#   - the ending's sentence, which named a property of the system and now names
+#     the press and the resume point;
+#   - the bar's appearance, which stayed partly filled in the colour of a live
+#     run and now says an ended-incomplete run is over while leaving a
+#     finished-complete one alone;
+#   - the run's line, which carried the run's own pair and now carries the
+#     index's beside it, each saying whose it is;
+#   - and the guard on the second of those, which decides whether a restatement
+#     arriving an IPC round trip late may land on a line a newer run has taken.
+#
+# Every one of them is in `ui/`, and `mutation-check.sh` runs `cargo test` and
+# nothing else. A case naming a `node --test` test does not merely prove
 # nothing: it fails the baseline pass, and a non-zero `baseline_bad` exits 1 for
-# the WHOLE FILE before pass two starts, so one such case would take every case
-# above it down with it. That is the 58-case silence `mutation-check.sh`'s own
-# header describes, and it is not worth re-enacting to look thorough.
+# the WHOLE FILE before pass two starts — so one such case here would take every
+# case above it down with it. That is the silence this script's own header
+# describes, and it is not worth re-enacting to look thorough.
 #
-# **What was done instead**, because "held by review" is what the last three
-# notes of this kind said and it is not a measurement. Each of the eleven new
-# assertions in `ui/render.test.js` was seen red from the broken thing, by
-# reverting that thing and running the whole suite — twenty-one reverts across
-# `render.js`, `main.js` and `style.css`, each landing on the assertion it names
-# and none on a module that would not load. The reverts, and which test each
-# reddened, are written out in this cycle's task-9 report; they are the same
-# shape as the cases above and would be cases if this harness could run them.
+# **What holds them instead**, stated as a guard rather than as an apology:
+# `ui/render.test.js`, and review. Each of that task's new assertions was seen
+# red from the thing it names, by reverting that thing and running the whole
+# suite — the reverts are written out in this cycle's task-9 report, in the same
+# shape as the cases above, and would be cases if this harness could run them.
+# Two are worth naming here, because they are what a reviewer would otherwise
+# take on trust:
 #
-# Two of the twenty-one are worth naming here, because they are what a reviewer
-# would otherwise have to take on trust:
-#
-#   - Reverting the ended bar's own decision to "every ending looks finished"
-#     reddens the bar test at `"cancelled" left the bar in the picture of a run
-#     still going`, and reverting it to "every ending looks stopped" reddens the
-#     same test at its `completed` half. Both directions, one mutation each.
-#   - The first version of `neither pair in the run's line is left for the
-#     reader to attribute` passed a revert that stripped "in this run" from the
-#     head, because `embedRefusedTail` says the same words and its fixture had a
-#     refusal in it. The fixture now has none, and the revert reddens it. A test
-#     standing on a neighbouring defence is the failure this repository has
-#     already paid for, and it was found here by running the revert rather than
-#     by reading the test.
+#   - The bar's decision reverted to "every ending looks finished" reddens at
+#     `"cancelled" left the bar in the picture of a run still going`; reverted
+#     to "every ending looks stopped" it reddens the same test at its
+#     `completed` half. One mutation per direction, and the second is the
+#     mirror defect — a run that embedded everything must go on looking so.
+#   - `neither pair in the run's line is left for the reader to attribute`
+#     survived the revert that strips "in this run" from the head, because
+#     `embedRefusedTail` says the same words and the fixture had a refusal in
+#     it: a test standing on a neighbouring defence, which is a failure this
+#     repository has already paid for. The fixture now has none, and the revert
+#     reddens it. Found by running the revert, not by reading the test.

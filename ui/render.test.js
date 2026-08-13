@@ -90,6 +90,7 @@ import {
   BAR_RUNNING,
   BAR_FINISHED,
   BAR_STOPPED,
+  restatedEnding,
 } from "./render.js";
 
 // The canonical list of `EndReason` discriminants, in the exact camelCase
@@ -1183,13 +1184,50 @@ test("an index this window has not read leaves the second pair unsaid", () => {
   );
 });
 
+// ⚠️ **The restatement is a second write arriving an IPC round trip late, and
+// a person can press Embed inside that window.** Landing then, it would paint
+// the previous run's ending — carrying a pair measured before the new run
+// started — over a line describing a run in flight: the stale assertion this
+// cycle has already taken out of the settings line, the discard button's label
+// and the bar, coming back in through the door built to fix them.
+//
+// The decision is `restatedEnding`'s rather than an `if` in `main.js`, for the
+// reason the whole of `render.js` exists: a branch over there is a branch this
+// file cannot reach.
+test("the ending is restated only while nothing newer has taken the slot", () => {
+  const ending = {
+    reason: "failed",
+    done: 3,
+    total: 5,
+    refused: 0,
+    message: "the network went away",
+  };
+  const index = readWith({ embeddedChunks: 8, totalChunks: 9 });
+
+  assert.equal(
+    restatedEnding(ending, index, true),
+    null,
+    "a run that started inside the round trip gets the previous run's ending, and a pair of \
+     numbers from before it began, painted over its own live line",
+  );
+
+  // Both directions, or this is satisfied by a restatement that never lands and
+  // the second pair is never on screen at all — which is the defect it was
+  // written for, not a fix for it.
+  const landed = restatedEnding(ending, index, false);
+  assert.notEqual(landed, null, "the restatement never lands, so the index's pair is never said");
+  assert.match(landed, /3 of 5 embedded in this run/);
+  assert.match(landed, /8 pieces with a vector, of 9 in the whole index/);
+  assert.match(landed, /press Embed/);
+});
+
 // The seam: the pair only exists if the ending is restated from the read that
 // follows it, and the restatement is only safe if the ending is written first.
 // Both halves are asserted, because either alone is satisfied by the other's
 // absence — writing only once with the settings holds a moving progress line
 // and a live-looking bar on screen for the length of a database read, which is
 // this whole task's defect.
-test("the ending is written at once, and restated from what the index says after", () => {
+test("the ending is written at once, and restated through the guard afterwards", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const main = readFileSync(join(here, "main.js"), "utf8");
 
@@ -1200,10 +1238,15 @@ test("the ending is written at once, and restated from what the index says after
   );
   assert.match(
     main,
-    /if \(jobRunning\) \{\s*return;\s*\}\s*el\("job-status"\)\.textContent = embedEndingSentence\(ending, settings\.index\);/,
+    /const restated = restatedEnding\(ending, settings\.index, jobRunning\);/,
     "the ending is not restated from the index that was read back, or is restated without \
-     asking whether a newer run has taken the slot — in which case a person who pressed Embed \
-     again gets the previous run's ending painted over their new run's progress line",
+     asking whether a newer run has taken the slot — and the test above this one, which is \
+     the one that can actually decide that question, is then aimed at nothing",
+  );
+  assert.match(
+    main,
+    /if \(restated !== null\) \{\s*el\("job-status"\)\.textContent = restated;\s*\}/,
+    "the guard's refusal is written to the line anyway, so `null` reaches a person as a word",
   );
 });
 

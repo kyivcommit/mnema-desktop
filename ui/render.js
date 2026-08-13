@@ -1065,6 +1065,30 @@ export const EMBED_ENDING_TEXT = {
 export const embedEndingSentence = (ended, index) =>
   (EMBED_ENDING_TEXT[ended.reason] ?? notAnEmbeddingEnding)(ended, indexNow(index));
 
+// The same line a second time, from the settings read back after the run — or
+// `null` for "leave the line alone".
+//
+// **`null` rather than a sentence, and the caller writes nothing at all for
+// it.** This is `discardOffer`'s shape, for `discardOffer`'s reason: a decision
+// is not an empty sentence, and it belongs where `render.test.js` can reach it.
+// Written in `main.js` as an `if`, the decision would be a branch no test in
+// this repository can see — the argument this file's header makes, and the one
+// the bar's own state was moved here under.
+//
+// The one thing it refuses on: **a job holding the slot again.** The read is an
+// IPC round trip wide and somebody can press Embed inside it. Landing then, this
+// would paint the previous run's ending — carrying a pair of numbers measured
+// before the new run started — over a line describing a run in flight. That is
+// the stale assertion this cycle has already removed from the settings line
+// (Important 2), from the discard button's label (Minor C) and from the bar, and
+// it must not come back in through the door built to fix it.
+//
+// It asks `jobRunning` **after** the await, so it answers "is a job running
+// now", which is exactly the question here — unlike `changeToConfirm`, whose
+// own note explains why the same reading is the wrong one for a refusal.
+export const restatedEnding = (ended, index, jobRunning) =>
+  jobRunning ? null : embedEndingSentence(ended, index);
+
 // A run that never started. The refusals are `Error::NoKey`, `Error::Secrets`,
 // `Error::JobAlreadyRunning` and `Error::Index(_)` — the last from
 // `open_job_index`, which this command calls instead of `with_index`, so
