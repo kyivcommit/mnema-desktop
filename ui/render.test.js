@@ -84,6 +84,7 @@ import {
   embedProgressLine,
   embedEndingSentence,
   embedNotStartedSentence,
+  changeToConfirm,
 } from "./render.js";
 
 // The canonical list of `EndReason` discriminants, in the exact camelCase
@@ -731,6 +732,120 @@ test("a run's refusal count and the space's are worded so neither reads as the o
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Review round 1, Important 2: the property, not the redraw.
+//
+// This line is written only when `model_settings` is asked again, and on the
+// embedding path that is the run's *ending*. So for the whole length of the only
+// operation that moves the third number, it holds what was true before the run —
+// and because the clause states the zero case rather than omitting it, what it
+// holds is an assertion and not a silence.
+
+// **The property.** There must be no moment where this window asserts that
+// nothing was refused while the run beside it is reporting refusals. Asserted
+// over the pair of sentences that are on screen together, not over the mechanism
+// that keeps them apart.
+test("the two lines the window holds at once never contradict each other", () => {
+  const run = embedProgressLine({ done: 6, total: 9, refused: 2, secondsLeft: 12 });
+  const settings = embeddingProgressText(readWith({ failedChunks: 0 }), true);
+
+  assert.match(run, /2 refused in this run/, "this test's premise is a run that refused something");
+  assert.doesNotMatch(
+    settings,
+    /none were refused/,
+    `the window says "${settings}" beside "${run}" — the second is the database, the first is a \
+     claim about a moment that has passed`,
+  );
+});
+
+// Every value of the count, because the claim must not survive any of them:
+// zero is the false one, and a stale non-zero is a number about the wrong
+// moment.
+test("while a job runs the settings line makes no claim about refusals at all", () => {
+  for (const failedChunks of [0, 1, 7]) {
+    const text = embeddingProgressText(readWith({ failedChunks }), true);
+    assert.doesNotMatch(text, /none were refused/, `claimed none at failedChunks: ${failedChunks}`);
+    assert.doesNotMatch(text, /will not try again/, `claimed a verdict at ${failedChunks}`);
+    assert.match(text, /counts from before it started/, `said nothing about being stale`);
+  }
+  // Both directions: with no job running the clause is back, or this test is
+  // satisfied by a window that never says anything about refusals at all.
+  assert.match(embeddingProgressText(readWith({ failedChunks: 0 }), false), /none were refused/);
+  assert.match(embeddingProgressText(readWith({ failedChunks: 2 }), false), /will not try again/);
+});
+
+// The counts themselves stay: they are the last state this window read, and a
+// line that vanished during a run would be a third thing to explain.
+test("a stale line still carries the counts it is stale about", () => {
+  const text = embeddingProgressText(readWith({}), true);
+  assert.match(text, /\b6\b/);
+  assert.match(text, /\b9\b/);
+});
+
+test("the settings line is told whether a job is running", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const main = readFileSync(join(here, "main.js"), "utf8");
+  assert.match(
+    main,
+    /embeddingProgressText\(\s*settings\.index,\s*jobRunning,?\s*\)/,
+    "the settings line is drawn without being told a job is running, so it goes back to \
+     asserting that nothing was refused for the whole length of a run",
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Review round 1, Important 1: the destructive control, and the one refusal this
+// window can attribute from state.
+
+test("a change refused while a job runs leaves nothing to confirm", () => {
+  assert.equal(
+    changeToConfirm("vendor/m", true),
+    null,
+    "a slot refusal became an offer to destroy embeddings",
+  );
+  // Both directions, or this is satisfied by a function that answers `null` to
+  // everything and there is no confirmation button left at all.
+  assert.equal(changeToConfirm("vendor/m", false), "vendor/m");
+});
+
+// The two together, which is the shape that actually reaches a person: the
+// refusal happens mid-run, the run ends, the settings are redrawn with a
+// *larger* count, and the button must not be there.
+test("a slot refusal produces no offer even after the run that caused it has ended", () => {
+  const refused = changeToConfirm("vendor/m", true);
+  const afterTheRun = {
+    kind: "read",
+    activeSpace: 1,
+    embeddedChunks: 9,
+    totalChunks: 9,
+    failedChunks: 0,
+    embeddedChunksEverywhere: 9,
+  };
+  assert.equal(
+    discardOffer(refused, afterTheRun, { kind: "present" }),
+    null,
+    "the button offering to delete what the run just paid for is on screen",
+  );
+  // And the control is otherwise alive: a change refused with no job running
+  // still produces the offer, so the assertion above is about the slot and not
+  // about a button that has stopped working.
+  assert.notEqual(
+    discardOffer(changeToConfirm("vendor/m", false), afterTheRun, { kind: "present" }),
+    null,
+  );
+});
+
+test("the refused change is recorded through the guard rather than raw", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const main = readFileSync(join(here, "main.js"), "utf8");
+  assert.match(
+    main,
+    /refusedChange = changeToConfirm\(model, jobRunning\)/,
+    "a refusal is recorded without asking whether a job caused it, so a mid-run refusal offers \
+     to destroy the embeddings that run is writing",
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The embedding job's own sentences.
 
 test("a live report says how far it has got and how long is left", () => {
@@ -826,6 +941,24 @@ test("a failed run with no message still says how far it got", () => {
   const text = embedEndingSentence({ reason: "failed", done: 6, total: 9, refused: 0 });
   assert.match(text, /6 of 9/);
   assert.doesNotMatch(text, /undefined/);
+});
+
+// Review round 1, Minor 5. `mnema_embed::run` asks whether it was cancelled
+// *before* its first batch, so a Stop landing in that instant has the pass
+// measuring a queue and reporting none of it: the `0` that reaches this window
+// is "not known", not "there was nothing". A run stopped there must not borrow
+// the empty queue's sentence, and must not state a total nobody measured.
+test("a run stopped in the first instant states no total, rather than 0 of 0", () => {
+  const text = embedEndingSentence({ reason: "cancelled", done: 0, total: 0, refused: 0 });
+  assert.doesNotMatch(text, /0 of 0/, "a total nobody measured was put on screen as a fact");
+  assert.doesNotMatch(text, /nothing was waiting/, "it borrowed the empty queue's sentence");
+  assert.match(text, /stopped before anything was embedded/);
+  assert.match(text, /at your request/);
+
+  // Both directions: a run stopped with a measured queue behind it still says
+  // how far it got, or this is satisfied by a sentence that never states counts.
+  const later = embedEndingSentence({ reason: "cancelled", done: 6, total: 9, refused: 0 });
+  assert.match(later, /6 of 9/);
 });
 
 // The ending a run gets when it fails before it embeds anything — no model

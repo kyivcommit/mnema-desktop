@@ -787,7 +787,38 @@ const refusedClause = (failed) => {
     : "; none were refused by the provider";
 };
 
-export const embeddingProgressText = (index) => {
+// ⚠️ **While a job is running these counts are stale, and the refusal clause is
+// the one that must not be said anyway.**
+//
+// This line is redrawn only when `model_settings` is asked again, which on the
+// embedding path happens at the run's *ending*. So for the whole length of the
+// only operation that changes the third number, it holds whatever was true
+// before the run began — and because the clause above states the zero case
+// rather than omitting it, what it holds is not a stale silence but a stale
+// assertion: `none were refused by the provider`, on screen at the same moment
+// as `2 refused in this run` beside the progress bar. Review round 1, Important
+// 2. Saying the count at zero is still right; saying it about a moment that has
+// passed is not.
+//
+// **Suppressed rather than redrawn**, and the choice is between two honest
+// options:
+//
+// - Redrawing during the run would make it approximately live and drag the whole
+//   settings block with it four times a second — including `showRecorded`, which
+//   writes `select.value` and would fight a person using the picker — and two
+//   live numbers read at different instants would go on disagreeing by up to a
+//   batch, which is the trap they were worded apart to avoid in the first place.
+// - This says what is true: the counts are from before the run, the run's own
+//   line is the one that is moving, and no claim is made about refusals at a
+//   moment this window has not read.
+//
+// It covers a walk as well as an embedding run, deliberately: a walk moves
+// `totalChunks`, so the same staleness applies to the denominator.
+const PROGRESS_DURING_A_RUN =
+  "; a job is running, so these are the counts from before it started — the line beside the " +
+  "progress bar is the one with this run's own";
+
+export const embeddingProgressText = (index, jobRunning) => {
   if (index?.kind !== "read") {
     return PROGRESS_UNKNOWN;
   }
@@ -803,7 +834,7 @@ export const embeddingProgressText = (index) => {
         "vector can outlive the piece it embeds, so the first is sometimes larger; this is not " +
         "an error"
       : head;
-  return counted + refusedClause(index.failedChunks);
+  return counted + (jobRunning ? PROGRESS_DURING_A_RUN : refusedClause(index.failedChunks));
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -873,8 +904,17 @@ export const EMBED_ENDING_TEXT = {
     total === 0
       ? "nothing was waiting to be embedded"
       : `finished: ${done} of ${total} embedded${embedRefusedTail(refused)}`,
+  // `total === 0` here is **not** the empty queue it is on the arm above, and
+  // must not borrow its sentence. `mnema_embed::run` asks whether it was
+  // cancelled before its first batch, so a Stop landing in that instant has the
+  // pass measuring a queue and reporting none of it, and the `0` that reaches
+  // this window is "not known" rather than "there was nothing". A run stopped
+  // that early says how far it got — nowhere — and states no total, because
+  // nobody measured one it could state.
   cancelled: ({ done, total, refused }) =>
-    `stopped after ${done} of ${total} embedded, at your request${embedRefusedTail(refused)}.` +
+    (total === 0
+      ? `stopped before anything was embedded, at your request${embedRefusedTail(refused)}.`
+      : `stopped after ${done} of ${total} embedded, at your request${embedRefusedTail(refused)}.`) +
     EMBED_RESUMABLE,
   failed: ({ done, total, refused, message }) =>
     `failed after ${done} of ${total} embedded${embedRefusedTail(refused)}` +
@@ -954,14 +994,28 @@ const embeddingsCount = (n) => (n === 1 ? "1 embedding" : `${n} embeddings`);
 // was naming one space in the sentence. So the sum is stated and no space is
 // named, and the guard has nothing left to hide.
 //
-// ⚠️ **What this does not reach**, since a guard's gaps belong beside it: a
-// change refused by the *provider* — unreachable, or a model it does not have —
-// leaves this window with a key present, a full index and no way to tell that
-// refusal from the index's. The button appears, and its sentence about what the
-// index holds is still true; pressing it destroys nothing, because the provider
-// check runs before the index is touched, and produces the same provider refusal
-// again. Telling the two apart needs the refusal to carry its own shape rather
-// than a string, which is deliberately not this cycle's work.
+// ⚠️ **What this does not reach**, since a guard's gaps belong beside it. **Two
+// of them, listed rather than counted** — this said "one gap" and a second
+// arrived with the embedding job one commit later, which is the shape this
+// project pays for most often:
+//
+// 1. A change refused by the *provider* — unreachable, or a model it does not
+//    have — leaves this window with a key present, a full index and no way to
+//    tell that refusal from the index's. The button appears, and its sentence
+//    about what the index holds is still true; pressing it destroys nothing,
+//    because the provider check runs before the index is touched, and produces
+//    the same provider refusal again.
+// 2. A change refused because **a job holds the slot** does not survive that
+//    argument, because a job ends and a provider outage does not. Refused
+//    mid-run, redrawn at the run's ending against a count the run has just made
+//    *larger*, the button would then succeed — destroying exactly what the run
+//    paid for, for a refusal that had nothing to do with vectors and that
+//    waiting would have resolved. That one is closed one layer up, by
+//    [`changeToConfirm`], because it is decidable from state and this function
+//    is not given the reason. Review round 1, Important 1.
+//
+// Telling refusals apart in general needs them to carry their own shape rather
+// than a string, which is deliberately not this cycle's work — so gap 1 stands.
 export const discardOffer = (model, index, key) => {
   if (model === null || model === undefined) return null;
   if (key?.kind !== "present") return null;
@@ -969,6 +1023,24 @@ export const discardOffer = (model, index, key) => {
   if (!(index.embeddedChunksEverywhere > 0)) return null;
   return { model, embeddedChunks: index.embeddedChunksEverywhere };
 };
+
+// What a refused change leaves behind for the confirmation button to act on, or
+// `null` for "nothing to confirm".
+//
+// **The one reason for a refusal this window can name from state**, and it has
+// to be named here rather than in `discardOffer`, which is given the model and
+// the index and never the reason. A change refused while a job holds the slot is
+// not a change anything should be offered about: nothing is in the way, no
+// vectors need destroying, and the answer is to wait. Setting it anyway is what
+// turned the one destructive control in this window into the cure for "a job is
+// already running" — see gap 2 on `discardOffer`.
+//
+// It **clears** rather than leaving whatever was there. A refusal is the last
+// thing this window knows about the person's attempt, and the last one was not
+// about vectors; an offer surviving from an earlier one would be a button
+// answering a question nobody asked twice. Pressing the picker again brings the
+// real refusal, and the offer with it.
+export const changeToConfirm = (model, jobRunning) => (jobRunning ? null : model);
 
 // The label on the button, and the line under it. Both take the offer `null`
 // included and answer with the empty string for it, so that `main.js` writes no

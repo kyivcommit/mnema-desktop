@@ -43,6 +43,7 @@ import {
   KEEP_EXISTING_VECTORS,
   DISCARD_EXISTING_VECTORS,
   discardOffer,
+  changeToConfirm,
   discardVectorsLabel,
   discardVectorsNote,
 } from "./render.js";
@@ -493,7 +494,14 @@ const drawSettings = (settings) => {
   // line that is set once and never cleared outlives the state it described.
   el("key-note").textContent = asSentence(keyStoreNote(settings.platform, settings.key));
   el("index-state").textContent = asSentence(indexStateSentence(settings.index, indexOpening));
-  el("embedding-progress").textContent = asSentence(embeddingProgressText(settings.index));
+  // `jobRunning` crosses, because these counts were read at a moment and that
+  // moment is in the past for the whole length of a run — and the line says
+  // "none were refused" at zero, so what it holds while it is stale is an
+  // assertion rather than a silence. `embeddingProgressText` is where the two
+  // are told apart.
+  el("embedding-progress").textContent = asSentence(
+    embeddingProgressText(settings.index, jobRunning),
+  );
   // An index that could not be read says nothing about which models are
   // recorded, so the pickers show nothing chosen and `index-state` carries the
   // reason. Leaving the first option selected would have the window state a
@@ -584,13 +592,20 @@ const recordEmbeddingModel = async (model, existingVectors) => {
     // The refusal already says how many vectors stand in the way; showing it
     // whole is better than a sentence of our own that says less.
     //
-    // Set on **every** failure, and narrowed by `discardOffer` rather than here.
-    // Not for tidiness: the refusal arrives as a string, so this `catch` cannot
-    // tell "a space blocks the change" from "you have entered no key" without
-    // matching on message text — the failure mode `crate::error::Error`'s own
-    // header says that type exists to avoid. What can be decided is decided from
-    // state, one line down, where the guards and their gaps are written out.
-    refusedChange = model;
+    // Set on every failure this window cannot attribute, and narrowed by
+    // `discardOffer` rather than here. Not for tidiness: the refusal arrives as
+    // a string, so this `catch` cannot tell "a space blocks the change" from
+    // "you have entered no key" without matching on message text — the failure
+    // mode `crate::error::Error`'s own header says that type exists to avoid.
+    // What can be decided is decided from state, one line down, where the guards
+    // and their gaps are written out.
+    //
+    // The one exception is the one this window *does* know from state: with a
+    // job running, the refusal is the slot, and a slot refusal must leave
+    // nothing to confirm — otherwise the run's own ending redraws the button
+    // against a count that run has just made larger, and pressing it destroys
+    // what it paid for. `changeToConfirm` is where that is written.
+    refusedChange = changeToConfirm(model, jobRunning);
     el("model-status").textContent = asSentence(embeddingModelNotRecordedSentence(error));
   }
   await refreshSettings();
