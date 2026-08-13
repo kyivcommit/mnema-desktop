@@ -1012,24 +1012,26 @@ case_ "embed_job: the key must be read before the job slot is claimed (T8)" \
 # (`left: Some(2), right: Some(1)`), not the one about which error came back.
 case_ "models: a model change must not be possible while a job holds the slot (T8)" \
   src-tauri/src/models.rs \
-  's{    let _slot = state\.claim_job\(\)\?;\n}{}' \
-  'authorisation dialog on screen, and the slot must not be held while
-    // somebody decides what to do about it. Everything after this point that
-    // touches the index is inside the claim.
-    let check = mnema_provider::check_embedding_model' \
+  's{    let _slot = state\.claim_job\(\)\?;}{    let _slot = ();}' \
+  '    let _slot = ();' \
   mnema-desktop 'a_model_change_is_refused_while_a_job_holds_the_slot' --test model_commands
 
 # The same removal, the test that drives it against a pass genuinely in flight.
 # One case per test, since `case_` names one at a time.
 case_ "models: a model change must not be possible while a pass is writing (T8)" \
   src-tauri/src/models.rs \
-  's{    let _slot = state\.claim_job\(\)\?;\n}{}' \
-  'authorisation dialog on screen, and the slot must not be held while
-    // somebody decides what to do about it. Everything after this point that
-    // touches the index is inside the claim.
-    let check = mnema_provider::check_embedding_model' \
+  's{    let _slot = state\.claim_job\(\)\?;}{    let _slot = ();}' \
+  '    let _slot = ();' \
   mnema-desktop 'a_run_leaves_no_vectors_in_a_space_nothing_points_at' --test model_commands
 
+# Both cases above replace the claim with `let _slot = ();` rather than deleting
+# the line, and the marker is that text alone — code, and text that exists
+# nowhere in the file unmutated. Review round 1, Minor 7: they quoted three lines
+# of comment prose plus one line of code, because a pure deletion leaves no
+# contiguous code the marker can anchor on (the doc comment sits between the two
+# statements that would become adjacent). Substituting instead of deleting is
+# what makes a code-only discriminator exist at all here.
+#
 # ⚠️ `let _slot` and not `let _`: the second drops the slot at once and holds
 # nothing. No case here reddens on that one character — distinguishing them
 # needs a second job started from another thread *during* the command, which is
