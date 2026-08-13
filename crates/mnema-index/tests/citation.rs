@@ -1323,3 +1323,76 @@ fn a_reused_chunk_id_gets_no_inherited_vector() {
     );
     assert_eq!(db.embedded_chunk_count(space).expect("count"), 0);
 }
+
+// ------------------------------------------------------ chunks of a document
+
+/// A `Db` bundled with the `TempDir` backing it, so the fixture below can
+/// return one value the test calls methods on directly — the same shape
+/// `OnePage` gives `fixture_one_page` above.
+struct WithChunks {
+    db: Db,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for WithChunks {
+    type Target = Db;
+    fn deref(&self) -> &Db {
+        &self.db
+    }
+}
+
+/// One document, one page, one block, two chunks at `ord` 0 and 1 — built the
+/// same way `fixture_one_page` above assembles the four-level model, extended
+/// to more than one chunk.
+fn fixture_with_two_chunks(document_id: &str, texts: &[&str; 2]) -> WithChunks {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    db.insert_document(document_id, "text/plain", 4, SourceKind::Document)
+        .unwrap();
+    let page = db.insert_page(document_id, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(page, &paragraph(0, texts[0], Some(1), Some(1)))
+        .unwrap();
+    for (ord, text) in texts.iter().enumerate() {
+        db.insert_chunk(
+            document_id,
+            ord as i64,
+            text,
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block,
+                    start: 0,
+                    end: text.chars().count() as u32,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        )
+        .unwrap();
+    }
+    WithChunks { db, _dir: dir }
+}
+
+/// The harness resolves its gold chunk by looking for a sentence in the text,
+/// because `chunk.id` does not survive a re-index. That needs the chunks of one
+/// document, in order, with their text.
+#[test]
+fn chunks_of_document_come_back_in_order_with_their_text() {
+    let db = fixture_with_two_chunks("doc-1", &["перший шматок", "другий шматок"]);
+
+    let chunks = db.chunks_of_document("doc-1").unwrap();
+    assert_eq!(chunks.len(), 2, "got {chunks:?}");
+    assert_eq!(chunks[0].1, "перший шматок");
+    assert_eq!(chunks[1].1, "другий шматок");
+    assert!(chunks[0].0 != chunks[1].0, "two chunks, two ids");
+
+    // The other direction: an id nobody wrote is an empty answer, not an error
+    // and not the whole table. A one-sided assertion here would be satisfied by
+    // a method that ignores its argument.
+    assert!(
+        db.chunks_of_document("no-such-document")
+            .unwrap()
+            .is_empty()
+    );
+}
