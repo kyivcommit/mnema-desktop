@@ -6,10 +6,15 @@ pub enum Gold {
     /// None, and there are THREE causes, not two: the corpus was edited and the
     /// question was not; the sentence was mistyped; or the sentence was quoted
     /// from text the chunk does not hold in that form. The third is the one a
-    /// reader will not think of — the markdown reader stores raw source lines
-    /// (`crates/mnema-extract/src/markdown.rs:130`), so inline markup is part of
-    /// the chunk's text, and the chunker joins non-adjacent pieces with a
-    /// separator of its own (`crates/mnema-chunk/src/pack.rs:44-48`).
+    /// reader will not think of: the markdown reader stores raw source lines
+    /// (`crates/mnema-extract/src/markdown.rs:130`), so inline markup — `**`,
+    /// backticks, link syntax — is part of the chunk's text and no
+    /// canonicalisation here removes it.
+    ///
+    /// The chunker's own separator between non-adjacent pieces
+    /// (`crates/mnema-chunk/src/pack.rs:44-48`) is **not** a cause: it is
+    /// whitespace, and `canonical` collapses it. Said explicitly because the
+    /// obvious guess is that it is.
     ///
     /// All three are preflight failures, and none may be silently scored as a
     /// miss: a question with no right answer makes every configuration look
@@ -20,9 +25,25 @@ pub enum Gold {
     /// author moves the sentence.
     ///
     /// Ids come back in the order the caller supplied the chunks. The caller is
-    /// [`Db::chunks_of_document`], which orders by `chunk.ord`; saying so here
-    /// is what keeps a `GoldSeveral` message stable between runs.
+    /// `Db::chunks_of_document`, which orders by `chunk.ord`; saying so here is
+    /// what keeps a `GoldSeveral` message stable between runs.
+    ///
+    /// Written as plain text, not an intra-doc link: `mnema-index` is not a
+    /// dependency of this crate, so the link would never resolve and
+    /// `rustdoc::broken_intra_doc_links` is not in the gates to catch it.
     Several(Vec<i64>),
+}
+
+/// NFC, then every run of whitespace collapsed to one space, then trimmed.
+///
+/// Nothing else: no case folding, no punctuation, no reordering. Kept private
+/// and kept small because [`resolve_gold`] documents the reasoning, and a
+/// helper that grew a second job would put that reasoning out of date.
+fn canonical(text: &str) -> String {
+    mnema_core::nfc::normalise(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Finds the chunks whose stored text contains `sentence`.
@@ -47,14 +68,11 @@ pub enum Gold {
 /// sentence is typed by hand into a file — on macOS, decomposed. Raw byte
 /// comparison would report `Missing` for a sentence the document holds in full.
 /// Whitespace runs collapse for the same reason: a hard-wrapped paragraph keeps
-/// its newline in the chunk, and nobody types the answer with it.
-fn canonical(text: &str) -> String {
-    mnema_core::nfc::normalise(text)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
+/// its newline in the chunk, and nobody types the answer with it. Collapsing —
+/// not deleting: with whitespace removed entirely, `Комісіярозглянула` and
+/// `Комісія розглянула` become the same string and a needle can match across a
+/// join no reader would call the same sentence. A test pins the difference,
+/// because every other test in this file passes either way.
 pub fn resolve_gold(chunks: &[(i64, String)], sentence: &str) -> Gold {
     let needle = canonical(sentence);
     let hits: Vec<i64> = chunks

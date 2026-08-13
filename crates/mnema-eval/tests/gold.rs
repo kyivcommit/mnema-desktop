@@ -31,9 +31,27 @@ fn a_sentence_in_no_chunk_is_missing_not_a_guess() {
 /// one step too far.
 #[test]
 fn the_same_words_in_another_order_are_not_the_sentence() {
-    let scrambled = vec![(10, "У заявника зберігається примірник другий.".to_string())];
+    // The chunk differs from the sentence in word ORDER and in nothing else:
+    // same words, same capitalisation, full stop in the same place. An earlier
+    // fixture also moved capitals and punctuation around, and that made a
+    // naive token-subset implementation fail for a reason unrelated to order —
+    // the test passed while isolating nothing.
+    let scrambled = vec![(10, "Другий зберігається примірник у заявника.".to_string())];
     assert_eq!(
         resolve_gold(&scrambled, "Другий примірник зберігається у заявника."),
+        Gold::Missing
+    );
+}
+
+/// `canonical` collapses whitespace; it must not delete it. Every other test in
+/// this file passes under deletion too — measured, not assumed — and deletion is
+/// materially worse: it erases word boundaries, so a needle can match across a
+/// join that is not the sentence anybody wrote.
+#[test]
+fn words_run_together_are_not_the_sentence() {
+    let glued = vec![(10, "Комісіярозглянула заяву.".to_string())];
+    assert_eq!(
+        resolve_gold(&glued, "Комісія розглянула заяву."),
         Gold::Missing
     );
 }
