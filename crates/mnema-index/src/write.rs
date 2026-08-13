@@ -618,8 +618,8 @@ impl Db {
     /// **Keeping this list current is the point of writing it as prose and
     /// not only as the two greps above.** A reader who trusts the sentence
     /// should not have to run either grep to discover it is one method
-    /// short — which is exactly what happened to this list once already,
-    /// twice by two different tasks.
+    /// short — which is exactly what has happened to this list before, by
+    /// more than one task.
     ///
     /// [`Db::read_snapshot`], below, opens one directly too and belongs on both
     /// greps' lists — it is the one opener that writes nothing, and the one a

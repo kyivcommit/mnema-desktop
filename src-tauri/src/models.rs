@@ -503,11 +503,16 @@ pub struct AdoptedModel {
     /// `create_space`'s own answer precisely because the neighbouring fact ("the
     /// active space moved") is a different one, and agrees with it everywhere
     /// except on a model chosen, abandoned and chosen again. Deriving it from
-    /// `embeddedChunks` would be worse still, and worse than it was written
-    /// against: that number is no longer identically zero — D29 described a
-    /// build with nothing to embed, and this branch built the thing that
-    /// embeds — so with real embeddings the derivation is wrong in **both**
-    /// directions, not the one direction the sentence used to name.
+    /// `embeddedChunks` would still be wrong, in exactly **one** direction: a
+    /// space this call *found* rather than minted reads as freshly minted
+    /// whenever it happens to be empty, because a genuinely new space is
+    /// always zero too — a fresh `embedding_space.id` (`AUTOINCREMENT`, never
+    /// reused) and `chunk_embedding_state.space_id`'s foreign key mean no row
+    /// can pre-exist for it. The reverse — a minted space misread as found —
+    /// cannot happen: minted is always zero, so it never crosses into "looks
+    /// found". D29 made the true direction fire on *every* found space,
+    /// because nothing embedded yet; with real embeddings it only fires on
+    /// found-and-empty ones. Narrower, not a second direction.
     pub created: bool,
     /// The spaces this call threw away, in the order it threw them away, and
     /// empty for every call that threw nothing away — which is every call with

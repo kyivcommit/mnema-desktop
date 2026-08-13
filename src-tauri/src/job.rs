@@ -333,8 +333,8 @@ pub const PROBE_UNIT: Duration = Duration::from_millis(250);
 /// derived from a constant that will not survive the first real document.
 ///
 /// ⚠️ **Does not know about `refused`, unlike its neighbour.**
-/// [`progress_is_due`], eight lines below and fed from the same report, was
-/// repaired to treat a unit as resolved at `done + refused >= total`. This
+/// [`progress_is_due`], below and fed from the same report, was repaired to
+/// treat a unit as resolved at `done + refused >= total`. This
 /// function was not: `remaining` below is `total - done` alone, so on the run
 /// that repair exists for — one ending in refusals — the forced final report
 /// carries an estimate that still counts the refused chunks as work to come.

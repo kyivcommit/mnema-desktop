@@ -46,7 +46,7 @@ const GIVEN_UP_ON_CURRENT_TEXT: &str = "SELECT 1 FROM chunk_embedding_state s
 /// NULL for every row of the outer query, emptying this queue over a full
 /// archive — silently, and in the direction nobody would notice. It cannot
 /// happen: `chunk_id` is declared `INTEGER PRIMARY KEY` on the `vec0` table
-/// (`Db::create_space`'s DDL, `space.rs:211`), and every writer —
+/// (`Db::create_space`'s DDL, `space.rs:220`), and every writer —
 /// [`Db::insert_vector`], [`Db::upsert_vector`], [`Db::upsert_vector_for_text`]
 /// — binds it a real `i64`, never a NULL.
 fn the_embedding_queue(table: &str) -> String {
@@ -993,7 +993,7 @@ impl Db {
     /// vector, silently, which is the one direction this predicate must never
     /// be wrong in. It cannot happen, for the same reason it cannot for the
     /// queue: `chunk_id` is `INTEGER PRIMARY KEY` on the `vec0` table
-    /// (`space.rs:211`), and every writer binds it a real `i64`.
+    /// (`space.rs:220`), and every writer binds it a real `i64`.
     pub fn space_is_complete(&self, space_id: i64) -> Result<bool, Error> {
         let table = self.space(space_id)?.table;
         // `table` is never caller text: the same reasoning `embedded_chunk_count`

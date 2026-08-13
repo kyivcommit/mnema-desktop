@@ -950,8 +950,11 @@ export const embedNotStartedSentence = (error) => `nothing was embedded: ${error
 // separate clause rather than letting it rewrite the first one.
 //
 // `created` comes from the field that states it and is never re-derived.
-// `embeddedChunks` is the tempting proxy — see the note above about why it is
-// no longer identically zero, and now wrong in both directions rather than one.
+// `embeddedChunks` is the tempting proxy — wrong in exactly one direction, a
+// found-but-empty space reading as freshly minted, never the reverse (minted
+// is always zero, so it never reads as found). See the note above for why
+// that direction now fires only on found-and-empty spaces instead of every
+// found space.
 // The two values `existingVectors` may take on the wire, spelled once. They are
 // here and not in `main.js` for the reason every other wire spelling is: a typo
 // in a literal over there is a rejected command with a message about arguments,
