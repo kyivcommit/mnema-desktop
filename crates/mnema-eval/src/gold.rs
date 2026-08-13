@@ -3,44 +3,10 @@
 pub enum Gold {
     /// Exactly one — the only shape a question may ship with.
     One(i64),
-    /// None. The causes are listed rather than counted, because a count is a
-    /// definition too and this one has already been short once:
-    ///
-    /// - the corpus was edited and the question was not;
-    /// - the sentence was mistyped;
-    /// - the sentence was quoted from text the chunk does not hold in that form;
-    /// - the sentence is longer than the chunker's carry and was cut by a chunk
-    ///   boundary, so it lies whole in no chunk. Rare — boundaries prefer
-    ///   sentence ends (`crates/mnema-chunk/src/units.rs:76-81`) — and not
-    ///   invented: a long legal sentence reaches it. The repair is to quote a
-    ///   shorter span that sits inside one chunk;
-    /// - no chunks were supplied at all, or they belong to another document.
-    ///   `resolve_gold(&[], s)` is `Missing`, and the caller reaches that
-    ///   ordinarily: a question naming a document the walk skipped, a mistyped
-    ///   document id, chunks that were never written. Nothing is wrong with the
-    ///   sentence or the corpus — the **input** is wrong, and this is the most
-    ///   misleading of the five, because the author goes looking in a file where
-    ///   the sentence plainly is.
-    ///
-    /// The third is the one a reader will not think of: the markdown reader
-    /// stores raw source lines
-    /// (`crates/mnema-extract/src/markdown.rs:130`), so inline markup — `**`,
-    /// backticks, link syntax — is part of the chunk's text and no
-    /// canonicalisation here removes it.
-    ///
-    /// The chunker's own separator between non-adjacent pieces
-    /// (`JOIN`, defined at `crates/mnema-chunk/src/lib.rs:42`, inserted at
-    /// `crates/mnema-chunk/src/pack.rs:66`) is **not** a cause: it is
-    /// whitespace, and `canonical` collapses it. Said explicitly because the
-    /// obvious guess is that it is.
-    ///
-    /// All of them are preflight failures, and none may be silently scored as a
-    /// miss: a question with no right answer makes every configuration look
-    /// worse for a reason that is not search.
-    ///
-    /// "All of them", not a number. The count was removed from the top of this
-    /// comment once and survived at the bottom, where it then read as excluding
-    /// the cause that had just been added.
+    /// None. Every cause is a defect in the input — question, corpus, or the
+    /// pairing of the two — never a failure of search. Task 9's preflight
+    /// refuses a question that resolves here before anything is scored, so a
+    /// dropped configuration is never blamed for a miss that isn't one.
     Missing,
     /// Several. Legitimate — chunks overlap — and still not shippable: with two
     /// right answers a rank means two things. Preflight refuses it and the
@@ -58,8 +24,10 @@ pub enum Gold {
 
 /// NFC, then every run of whitespace collapsed to one space, then trimmed.
 ///
-/// Nothing else: no case folding, no punctuation, no reordering. Kept private
-/// and kept small because [`resolve_gold`] documents the reasoning, and a
+/// Nothing else: no case folding (`case_is_part_of_the_sentence`), no
+/// punctuation stripping (`punctuation_is_part_of_the_sentence`), no
+/// reordering (`the_same_words_in_another_order_are_not_the_sentence`). Kept
+/// private and small because [`resolve_gold`] documents the reasoning, and a
 /// helper that grew a second job would put that reasoning out of date.
 fn canonical(text: &str) -> String {
     mnema_core::nfc::normalise(text)
@@ -68,39 +36,16 @@ fn canonical(text: &str) -> String {
         .join(" ")
 }
 
-/// Finds the chunks whose text holds `sentence`, once both are canonicalised.
-///
-/// The summary line names canonicalisation because that is the line a module
-/// listing shows on its own. The earlier wording — "whose stored text contains
-/// `sentence`" — described a byte comparison, which is what the two sides are
-/// **not reliably** doing: usually they do match byte for byte, and the cases
-/// where they do not are the whole reason this function exists.
-///
-/// **The caller owes chunks of a document whose `document.status` is
-/// `indexed`.** `Db::chunks_of_document` (`crates/mnema-index/src/write.rs:799`)
-/// returns a document's chunks whatever its status, while `search_lexical`
-/// (`crates/mnema-index/src/search.rs:42`) returns only those of an `indexed`
-/// one. Resolve a gold chunk from a `pending` document and this answers
-/// confidently with a chunk the search can never return — every question
-/// against it scores a miss, and the number reads as "search is bad". Preflight
-/// is where that is checked; this comment is where the obligation is legible.
-///
-/// Substring, not tokens: the sentence is quoted from the document, and the
-/// chunk stores the original text (`schema.sql:153`, "the original, for
-/// display"). Matching on prepared terms instead would let a sentence match a
-/// chunk that merely shares its words in another order.
-///
-/// **Canonicalised on both sides, and that is not cosmetic.** Extraction
-/// NFC-normalises before a block's text is emitted
-/// (`crates/mnema-extract/src/text.rs:40`, `markdown.rs:91`), while an answer
-/// sentence is typed by hand into a file — on macOS, decomposed. Raw byte
-/// comparison would report `Missing` for a sentence the document holds in full.
-/// Whitespace runs collapse for the same reason: a hard-wrapped paragraph keeps
-/// its newline in the chunk, and nobody types the answer with it. Collapsing —
-/// not deleting: with whitespace removed entirely, `Комісіярозглянула` and
-/// `Комісія розглянула` become the same string and a needle can match across a
-/// join no reader would call the same sentence. A test pins the difference,
-/// because every other test in this file passes either way.
+/// Finds the chunks whose text holds `sentence`, canonicalised on both sides. Substring, not
+/// tokens, so word order still counts
+/// (`the_same_words_in_another_order_are_not_the_sentence`). NFC bridges decomposed vs.
+/// precomposed text on either side (`a_decomposed_sentence_finds_its_precomposed_chunk`,
+/// `a_decomposed_chunk_holds_a_precomposed_sentence`); collapsing (not deleting) whitespace
+/// bridges a hard wrap vs. a doubled space on either side
+/// (`words_run_together_are_not_the_sentence`,
+/// `a_doubled_space_in_the_sentence_still_finds_the_chunk`). The caller owes chunks of an
+/// `indexed` document — `Db::chunks_of_document` (`crates/mnema-index/src/write.rs:812`) does
+/// not filter by status; task 9's preflight is where that is checked.
 pub fn resolve_gold(chunks: &[(i64, String)], sentence: &str) -> Gold {
     let needle = canonical(sentence);
     let hits: Vec<i64> = chunks

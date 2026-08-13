@@ -71,28 +71,12 @@ fn a_decomposed_sentence_finds_its_precomposed_chunk() {
     );
 }
 
-/// `canonical` must NOT strip combining marks, and this is the only test that
-/// says so. A sister change is making `mnema-index`'s term reporting mirror
-/// FTS5, which removes every mark in U+0300–U+0331 — and copying that here would
-/// be wrong in a way every other test in this file is blind to: measured, an
-/// implementation that strips marks passes all seven. If it decomposes first it
-/// folds `й` into `и` and `ї` into `і`, which this project forbids outright, and
-/// the oracle would then answer `One` for a chunk holding a **different word**.
-///
-/// The oracle compares against `chunk.text`, which the index never folds; being
-/// stricter than the search here is correct, and the cost — a question that must
-/// reproduce a stress mark exactly — is paid in the corpus rules and in
-/// pre-flight, not by loosening this.
-/// The other half of the same danger, and the likelier edit of the two. The
-/// repository already contains a function that strips marks **without**
-/// decomposing — `mnema_core::nfc::strip_latin_diacritics`, built deliberately
-/// so that `й` survives. Swapping `canonical`'s `normalise` for it is the change
-/// someone will reach for ("use the one that mirrors the index"), and measured,
-/// **all eight other tests stay green** while the oracle quietly stops telling
-/// `сло́во` from `слово` — the exact opposite of what the comment below argues.
-///
-/// The two tests together cover both halves: this one catches strip-without-
-/// decompose, the next catches decompose-then-strip.
+/// `canonical` must not strip combining marks — the danger has two independent
+/// shapes. This test pins stripping without first decomposing, which would fold
+/// away the stress mark on `сло́во`. Its sibling,
+/// `folding_i_kratke_into_i_would_match_a_different_word`, pins decomposing
+/// first and then stripping, which folds `й` into `и` and would answer `One`
+/// for a chunk holding a different word than the question names.
 #[test]
 fn a_stress_mark_is_part_of_the_word_here() {
     // `о` + U+0301. No precomposed form exists, so NFC keeps the mark and the
@@ -142,4 +126,52 @@ fn a_sentence_in_two_chunks_names_both() {
         Gold::Several(ids) => assert_eq!(ids, vec![10, 11]),
         other => panic!("expected Several, got {other:?}"),
     }
+}
+
+#[test]
+fn case_is_part_of_the_sentence() {
+    // `canonical` promises no case folding. Under a folding implementation the
+    // needle would find this chunk, and every other test in this file stays
+    // green either way.
+    let chunk = vec![(10, "Комісія розглянула заяву.".to_string())];
+    assert_eq!(
+        resolve_gold(&chunk, "комісія розглянула заяву."),
+        Gold::Missing
+    );
+}
+
+#[test]
+fn punctuation_is_part_of_the_sentence() {
+    // The chunk drops the full stop the needle carries. Strip punctuation on
+    // both sides and this becomes a match.
+    let chunk = vec![(10, "Ухвалено передати справу далі".to_string())];
+    assert_eq!(
+        resolve_gold(&chunk, "Ухвалено передати справу далі."),
+        Gold::Missing
+    );
+}
+
+#[test]
+fn a_decomposed_chunk_holds_a_precomposed_sentence() {
+    // The mirror of `a_decomposed_sentence_finds_its_precomposed_chunk`:
+    // normalising only the needle passes that one and fails this one.
+    let chunk = vec![(
+        10,
+        "Комісія ухвалила \u{456}\u{308}хнє рішення.".to_string(),
+    )];
+    assert_eq!(
+        resolve_gold(&chunk, "ухвалила \u{457}хнє рішення."),
+        Gold::One(10)
+    );
+}
+
+#[test]
+fn a_doubled_space_in_the_sentence_still_finds_the_chunk() {
+    // The mirror of `a_line_break_inside_the_chunk_does_not_hide_the_sentence`:
+    // collapsing only the chunk passes that one and fails this one.
+    let chunk = vec![(10, "Договір складено у двох примірниках.".to_string())];
+    assert_eq!(
+        resolve_gold(&chunk, "Договір  складено у двох примірниках."),
+        Gold::One(10)
+    );
 }
