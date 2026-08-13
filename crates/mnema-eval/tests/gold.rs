@@ -24,11 +24,11 @@ fn a_sentence_in_no_chunk_is_missing_not_a_guess() {
     );
 }
 
-/// The doc comment argues "substring, not tokens", and until this test nothing
-/// held it: an implementation reading "all the words, in any order" passes every
-/// other test in this file. It matters because canonicalisation loosens the
-/// comparison deliberately, and nothing else would go red if the loosening went
-/// one step too far.
+/// `canonical` promises no reordering, and this is the test that pins it.
+/// An implementation comparing word sets instead of running canonicalised
+/// text through `.contains` would find this chunk, since it holds the same
+/// words in a different order — canonicalisation loosens the comparison
+/// deliberately, and this pins how far.
 #[test]
 fn the_same_words_in_another_order_are_not_the_sentence() {
     // The chunk differs from the sentence in word ORDER and in nothing else:
