@@ -653,10 +653,18 @@ fn search_terms_reports_the_terms_fts5_actually_stored() {
 /// sides deleting a mark, which is precisely the outcome those ranges are
 /// claimed to be safe from.
 ///
-/// The counts at the end are a floor, no more: they catch a sweep that stored
-/// nothing, or one in which every mark went the same way. The per-input
-/// equality is what does the real work, and a floor of one-and-one cannot
-/// stand in for it.
+/// The counts at the end are floors, no more: they catch a sweep that stored
+/// nothing, one in which every mark went the same way, or one that quietly
+/// stopped covering a script. The per-input equality is what does the real
+/// work, and a floor of one-and-one cannot stand in for it.
+///
+/// **One floor per script, and that is the point.** A single floor summed over
+/// the three non-Latin ranges was measured to let two of them vanish in
+/// silence: dropping Devanagari left 59 marks and dropping Arabic left 80,
+/// both clear of a combined floor of 50, so only Hebrew was ever really
+/// guarded. A floor an entire script can walk under is not a floor for that
+/// script — and Devanagari, the one the doc comment names most concretely, was
+/// the least protected of the three.
 ///
 /// **What this instrument cannot see.** Both sides of the comparison run
 /// through `prepare_for_search`. If diacritic stripping ever moved *into*
@@ -674,19 +682,37 @@ fn search_terms_matches_what_fts5_stores_for_every_mark() {
     // The Latin marks behind both bases; the non-Latin ranges behind `ф`
     // alone, since none of them composes with either base and a second base
     // would only repeat the same measurement.
-    let latin: Vec<(char, u32)> = ['ф', 'a']
+    // Each non-Latin range carries its own name and its own floor, because one
+    // floor summed over all three is a guard a whole script can walk under.
+    // Measured: Hebrew contributes 51 combining marks, Devanagari 29, Arabic 8
+    // — so a combined floor of 50 fired only when Hebrew vanished, and dropping
+    // Devanagari (59 left) or Arabic (80 left) passed in silence. Devanagari is
+    // the script `is_stripped_mark`'s doc comment names most concretely, "the
+    // Devanagari virama and matra", so it was the one least protected.
+    //
+    // Each floor is about half its measured count: enough that a range going to
+    // zero or being truncated fails, loose enough that a Unicode update moving
+    // a few marks does not fail a test which is not about the count. The
+    // measured numbers are here rather than in the assertion for the reason
+    // `is_stripped_mark`'s own list carries no total — a number beside a
+    // definition is a second definition, and it drifts.
+    const NON_LATIN: &[(&str, u32, u32, usize)] = &[
+        ("Hebrew", 0x0591, 0x05C7, 25),
+        ("Arabic", 0x064B, 0x0652, 4),
+        ("Devanagari", 0x0900, 0x0954, 14),
+    ];
+
+    // `None` marks the Latin block, `Some(i)` indexes `NON_LATIN`.
+    let mut marks: Vec<(char, u32, Option<usize>)> = ['ф', 'a']
         .into_iter()
-        .flat_map(|base| (0x0300u32..=0x036F).map(move |m| (base, m)))
+        .flat_map(|base| (0x0300u32..=0x036F).map(move |m| (base, m, None)))
         .collect();
-    let non_latin: Vec<(char, u32)> = (0x0591u32..=0x05C7)
-        .chain(0x064Bu32..=0x0652)
-        .chain(0x0900u32..=0x0954)
-        .map(|m| ('ф', m))
-        .collect();
-    let marks: Vec<(char, u32)> = latin.iter().chain(non_latin.iter()).copied().collect();
+    for (i, (_, first, last, _)) in NON_LATIN.iter().enumerate() {
+        marks.extend((*first..=*last).map(|m| ('ф', m, Some(i))));
+    }
     let texts: Vec<String> = marks
         .iter()
-        .map(|(base, m)| format!("{base}{}", char::from_u32(*m).unwrap()))
+        .map(|(base, m, _)| format!("{base}{}", char::from_u32(*m).unwrap()))
         .collect();
     let pairs: Vec<(&str, SourceKind)> = texts
         .iter()
@@ -717,7 +743,7 @@ fn search_terms_matches_what_fts5_stores_for_every_mark() {
 
     let mut disagreements = Vec::new();
     let (mut mark_deleted, mut mark_survived, mut gaps_seen) = (0, 0, 0);
-    let mut non_latin_marks_checked = 0;
+    let mut non_latin_marks_checked = vec![0usize; NON_LATIN.len()];
     for (i, text) in texts.iter().enumerate() {
         let mut stmt = db
             .conn()
@@ -744,20 +770,20 @@ fn search_terms_matches_what_fts5_stores_for_every_mark() {
         // happen. Only real combining marks are held to it — these ranges also
         // contain Hebrew punctuation and Devanagari consonants, which are not
         // marks and have no business surviving as one.
-        let (base, mark) = marks[i];
+        let (base, mark, range) = marks[i];
         let mark = char::from_u32(mark).unwrap();
-        if !latin.contains(&(base, mark as u32))
+        if let Some(range) = range
             && matches!(
                 get_general_category(mark),
                 GeneralCategory::NonspacingMark | GeneralCategory::SpacingMark
             )
         {
-            non_latin_marks_checked += 1;
+            non_latin_marks_checked[range] += 1;
             assert!(
                 stored.iter().all(|t| t.contains(mark)),
-                "U+{:04X} is a combining mark outside the Latin block and the tokenizer dropped it: \
-                 stored {stored:?}",
-                mark as u32
+                "U+{:04X} is a {} combining mark and the tokenizer dropped it: stored {stored:?}",
+                mark as u32,
+                NON_LATIN[range].0
             );
         }
 
@@ -811,9 +837,24 @@ fn search_terms_matches_what_fts5_stores_for_every_mark() {
         "the sweep saw only one outcome ({mark_deleted} deleted, {mark_survived} survived), so \
          agreement here says nothing about telling them apart"
     );
+    // Collected rather than asserted in place, so one run names every script
+    // that fell under its floor. Asserting inside the loop would stop at the
+    // first, and "the other two were fine" would be an inference rather than
+    // something the output says.
+    let starved: Vec<String> = NON_LATIN
+        .iter()
+        .enumerate()
+        .filter(|(range, (_, _, _, floor))| non_latin_marks_checked[*range] <= *floor)
+        .map(|(range, &(script, _, _, floor))| {
+            format!(
+                "{script}: {} marks reached, floor {floor}",
+                non_latin_marks_checked[range]
+            )
+        })
+        .collect();
     assert!(
-        non_latin_marks_checked > 50,
-        "only {non_latin_marks_checked} non-Latin combining marks were reached, so the claim that \
-         Hebrew, Arabic and Devanagari marks are outside the set rests on almost nothing"
+        starved.is_empty(),
+        "a script stopped being covered and the sweep still agreed on everything it did reach:\n{}",
+        starved.join("\n")
     );
 }
