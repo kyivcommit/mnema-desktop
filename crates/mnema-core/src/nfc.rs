@@ -31,6 +31,44 @@ pub fn normalise(s: &str) -> Cow<'_, str> {
     }
 }
 
+/// Strips the diacritics `remove_diacritics 2` strips, and leaves everything
+/// else — Cyrillic among it — untouched. The module doc comment above is the
+/// measurement this follows: folds a decomposed-or-precomposed Latin accented
+/// letter down to its bare base (`Zürich` and `Zurich` converge), but does
+/// not touch the Cyrillic breve or diaeresis, so `й` and `ї` keep theirs.
+///
+/// `mnema-index::search_terms` is why this is callable rather than staying an
+/// implementation detail of the tokenizer: it reports the string the index
+/// actually stores as a term, and for a Latin word carrying a diacritic that
+/// string has no diacritic in it.
+///
+/// NFD-decomposes, drops a combining mark that immediately follows an ASCII
+/// Latin base letter, and re-composes what is left. Re-composing matters for
+/// exactly the case this module exists for: `й` NFD-decomposes to `и` plus a
+/// combining breve too, and since its base is not ASCII the breve survives
+/// this function untouched — but decomposed, until `nfc()` at the end puts it
+/// back together into the one character the rest of this pipeline expects.
+///
+/// Latin base only, deliberately: a combining mark can also be the *whole
+/// point* of a word rather than a decoration on it — Hebrew niqqud, a
+/// Devanagari virama — and `remove_diacritics` does not touch those either,
+/// so stripping every mark regardless of its base would fix Latin at the cost
+/// of breaking scripts this function was never asked about.
+pub fn strip_latin_diacritics(s: &str) -> String {
+    let mut base_is_ascii_letter = false;
+    s.nfd()
+        .filter(|&c| {
+            if unicode_normalization::char::is_combining_mark(c) {
+                !base_is_ascii_letter
+            } else {
+                base_is_ascii_letter = c.is_ascii_alphabetic();
+                true
+            }
+        })
+        .nfc()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +91,32 @@ mod tests {
     fn decomposed_text_is_owned() {
         let decomposed = "\u{0438}\u{0306}од";
         assert!(matches!(normalise(decomposed), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn latin_diacritics_are_stripped_from_both_spellings() {
+        // Precomposed and NFD-decomposed must agree: both are what a caller
+        // could plausibly hand in, and the index's own `remove_diacritics 2`
+        // does not care which one it received either.
+        assert_eq!(strip_latin_diacritics("Zürich"), "Zurich");
+        assert_eq!(strip_latin_diacritics("Zu\u{0308}rich"), "Zurich");
+        assert_eq!(strip_latin_diacritics("café"), "cafe");
+    }
+
+    #[test]
+    fn a_plain_ascii_word_is_returned_unchanged() {
+        assert_eq!(strip_latin_diacritics("hello"), "hello");
+    }
+
+    #[test]
+    fn cyrillic_marks_survive_and_stay_one_character() {
+        // The asymmetry this function exists for: `remove_diacritics 2` does
+        // not touch the Cyrillic breve, so `й` must come back whole — not
+        // stripped to `и`, and not left permanently split into `и` plus a
+        // trailing combining breve by the NFD/NFC round trip inside.
+        let precomposed = "йод";
+        let decomposed = "\u{0438}\u{0306}од";
+        assert_eq!(strip_latin_diacritics(precomposed), "йод");
+        assert_eq!(strip_latin_diacritics(decomposed), "йод");
     }
 }

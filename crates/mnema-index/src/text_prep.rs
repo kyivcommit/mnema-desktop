@@ -80,12 +80,23 @@ pub fn prepare_for_search(text: &str, kind: SourceKind) -> String {
 /// Lowercased here on purpose. FTS5's `unicode61` folds case on both sides of a
 /// MATCH, so `Договір` and `договір` are one term to the *search* — a caller
 /// comparing two texts' terms has to see the same thing. `to_lowercase` is
-/// Unicode's default full case folding, which is not byte-identical to FTS5's
-/// for every script on earth; for the languages this product's corpus is
-/// written in it agrees, and where it would not, the disagreement belongs in a
-/// test rather than in a promise.
+/// Unicode's default full lowercase *mapping*, which is a different operation
+/// from case *folding* (they disagree on `ß` and `ﬁ`) and is not
+/// byte-identical to FTS5's own fold for every script on earth; for the
+/// languages this product's corpus is written in it agrees, and where it
+/// would not, the disagreement belongs in a test rather than in a promise.
+///
+/// Diacritics stripped here too, for the same reason: `schema.sql` configures
+/// the tokenizer with `remove_diacritics 2`, which folds a Latin word's
+/// accented and unaccented spellings onto one token — `Zürich` and `Zurich`
+/// are one term to the index — but leaves Cyrillic untouched, so `й` and `ї`
+/// keep their marks (measured in `mnema_core::nfc`'s doc comment, D32).
+/// `strip_latin_diacritics` is that same asymmetry, made callable, so this
+/// reports the string the index actually stores rather than the merely
+/// lowercased one.
 pub fn search_terms(text: &str) -> Vec<String> {
     let prepared = prepare_for_search(text, SourceKind::Document);
+    let prepared = mnema_core::nfc::strip_latin_diacritics(&prepared);
     terms(&prepared).map(|t| t.to_lowercase()).collect()
 }
 

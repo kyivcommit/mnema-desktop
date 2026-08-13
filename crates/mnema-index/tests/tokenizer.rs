@@ -517,4 +517,64 @@ fn search_terms_are_the_words_the_index_demands() {
     // `search_lexical` turns into "no rows" instead of a syntax error
     // (`search.rs:34-37`).
     assert!(mnema_index::search_terms("(((").is_empty());
+
+    // The discriminating case for the hardcoded `SourceKind::Document`: every
+    // assertion above holds identically whether `search_terms` prepares as
+    // Document or as Code, because `expand_camel_case` leaves a word that
+    // does not split untouched. An identifier is what tells the two apart —
+    // as Code this prepares to `"getUserName get User Name"` and yields four
+    // terms, so only the Document reading collapses it to one.
+    assert_eq!(
+        mnema_index::search_terms("getUserName"),
+        vec!["getusername".to_string()]
+    );
+}
+
+/// The proof for `search_terms`'s diacritics fold. Not a check that
+/// `search_lexical` finds the chunk when queried with the reported term —
+/// that does not discriminate, because `search_lexical` re-runs
+/// `remove_diacritics 2`'s fold on whatever query string it is handed, so an
+/// *unstripped* term would be found too, by a second, independent pass
+/// through the same fold, and the check would pass whether or not
+/// `search_terms` stripped anything at all. Measured: it still passed with
+/// the stripping step removed.
+///
+/// This reads FTS5's own vocabulary instead. `fts5vocab('chunk_fts',
+/// 'instance')` names, per occurrence, the term actually stored and the
+/// rowid (chunk id) it occurs in — so this compares `search_terms`'s output
+/// against the term FTS5 truly recorded for the chunk, not against a second
+/// pass through the same tokenizer.
+///
+/// Covers a Latin word with a diaeresis, one with an acute accent, plain
+/// ASCII, and two Ukrainian words — one carrying `й`, one carrying `ї` —
+/// because `remove_diacritics 2` is measured (`mnema_core::nfc`, D32) to fold
+/// the first two and leave the last two exactly as written.
+#[test]
+fn search_terms_reports_the_terms_fts5_actually_stored() {
+    let texts = ["Zürich", "café", "hello", "йод", "їжак"];
+    let (_d, db, ids) = db_with(&texts.map(|t| (t, SourceKind::Document)));
+
+    db.conn()
+        .execute_batch("CREATE VIRTUAL TABLE chunk_vocab USING fts5vocab('chunk_fts', 'instance')")
+        .unwrap();
+
+    for (i, text) in texts.iter().enumerate() {
+        let mut stmt = db
+            .conn()
+            .prepare("SELECT DISTINCT term FROM chunk_vocab WHERE doc = ?1")
+            .unwrap();
+        let stored: std::collections::BTreeSet<String> = stmt
+            .query_map([ids[i]], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        let reported: std::collections::BTreeSet<String> =
+            mnema_index::search_terms(text).into_iter().collect();
+
+        assert_eq!(
+            reported, stored,
+            "{text:?}: search_terms reported {reported:?}, FTS5 actually stored {stored:?}"
+        );
+    }
 }
