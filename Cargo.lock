@@ -2696,6 +2696,7 @@ name = "mnema-eval"
 version = "0.0.0"
 dependencies = [
  "mnema-core",
+ "mnema-index",
  "serde",
  "serde_json",
  "tempfile",
