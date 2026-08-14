@@ -23,9 +23,12 @@ pub enum Gold {
 ///
 /// Nothing else: no case folding (`case_is_part_of_the_sentence`), no
 /// punctuation stripping (`punctuation_is_part_of_the_sentence`), no
-/// reordering (`the_same_words_in_another_order_are_not_the_sentence`). Kept
-/// private and small because [`resolve_gold`] documents the reasoning, and a
-/// helper that grew a second job would put that reasoning out of date.
+/// reordering (`the_same_words_in_another_order_are_not_the_sentence`).
+/// `pub(crate)`: both [`resolve_gold`] and `QuestionSet::load`'s
+/// duplicate-answer guard rely on this same reasoning — two sentences that
+/// differ only in whitespace name the same chunk — and a second,
+/// independently-drifting implementation of it would be worse than one
+/// small enough to read in full.
 pub(crate) fn canonical(text: &str) -> String {
     mnema_core::nfc::normalise(text)
         .split_whitespace()

@@ -48,15 +48,19 @@ fn an_empty_answer_sentence_is_refused() {
     );
 
     // A mix of one real sentence and one empty one is `.any()` true but
-    // `.all()` false — the only shape that tells the two functions apart. A
-    // list of only-empty (above) does not.
-    let mixed = OK.replace(
-        r#"["Договір складено у двох примірниках."]"#,
-        r#"["Один.",""]"#,
-    );
+    // `.all()` false. `class` is `topical` (1-3 answers allowed) on purpose:
+    // under `literal` (max 1) the count guard alone would refuse a two-item
+    // list regardless of which function checked emptiness, masking the very
+    // difference this case exists to catch.
+    let mixed = OK
+        .replace(r#""class":"literal""#, r#""class":"topical""#)
+        .replace(
+            r#"["Договір складено у двох примірниках."]"#,
+            r#"["Один.",""]"#,
+        );
     let err = QuestionSet::load(file(&[&mixed]).path()).unwrap_err();
     assert!(
-        matches!(&err, EvalError::Questions(m) if m.contains("uk-01")),
+        matches!(&err, EvalError::Questions(m) if m.contains("answer sentence is empty")),
         "got {err:?}"
     );
 }
