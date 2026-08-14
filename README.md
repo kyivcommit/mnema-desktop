@@ -64,3 +64,4 @@ The source is published to be read. It is **not** open source: see [`LICENSE`](L
 are reserved, and no permission to use, modify or redistribute is granted by publication here.
 
 <!-- test PR: verifying automated PR review integration; not intended to merge -->
+<!-- second check-in: confirming the review bot re-triggers on a follow-up commit -->
