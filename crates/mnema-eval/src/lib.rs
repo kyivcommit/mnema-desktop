@@ -3,6 +3,8 @@
 //! It builds no search. It builds the corpus, the questions and the number, so
 //! that the search cycle has something to be judged by before it starts.
 
+mod corpus;
 mod gold;
 
+pub use corpus::{Corpus, Document, EvalError, Language, corpus_dir};
 pub use gold::{Gold, resolve_gold};
