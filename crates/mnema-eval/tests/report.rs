@@ -82,3 +82,29 @@ fn the_configurations_that_do_not_exist_are_named_not_zeroed() {
         );
     }
 }
+
+#[test]
+fn a_class_that_was_never_asked_says_so_where_its_numbers_would_be() {
+    // Only literal questions were put, so two of the three rows have nothing
+    // to report. A zero there would read as "every one of them failed" — the
+    // substitution the spec spends a section refusing, and the one `recall_at`
+    // returning `None` is not enough to prevent, because `render` could print
+    // a zero anyway. Both directions: the word is in those rows AND no
+    // percentage is.
+    let text = Report::of(&[outcome("q-1", Class::Literal, Some(1))], 70).render();
+    let unmeasured: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("недоступно"))
+        .collect();
+    assert_eq!(
+        unmeasured.len(),
+        2,
+        "two classes were never asked, so two rows should say so:\n{text}"
+    );
+    for row in unmeasured {
+        assert!(
+            !row.contains('%'),
+            "a class with no questions still printed a number:\n{row}"
+        );
+    }
+}
