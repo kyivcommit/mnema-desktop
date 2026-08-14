@@ -1,5 +1,6 @@
 //! Terms come from `mnema_index::search_terms`, the exact preparation
-//! `search_lexical` runs on every query (`crates/mnema-index/src/search.rs:14,31`).
+//! `search_lexical` runs on every query
+//! (`crates/mnema-index/src/search.rs:14,31`).
 //! A term this crate calls universal or shared is therefore a term search
 //! itself would, or would not, match on.
 
