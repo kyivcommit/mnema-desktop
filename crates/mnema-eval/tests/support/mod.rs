@@ -12,17 +12,14 @@ use std::sync::OnceLock;
 
 /// The extraction worker binary.
 ///
-/// **A deliberate copy of `crates/mnema-ingest/tests/support/mod.rs:61-117`.**
+/// **A deliberate copy of `crates/mnema-ingest/tests/support/mod.rs:61-118`.**
 /// `cargo` sets `CARGO_BIN_EXE_*` only for binaries of the package being
-/// tested, and the worker belongs to `mnema-extract` — so neither crate can
-/// name it that way, and there is no place a test helper can live that both
-/// crates can reach. Nor does declaring a dev-dependency help; cargo builds a
-/// dependency's library, not its binaries.
+/// tested, and the worker belongs to `mnema-extract`, which this crate must
+/// not depend on; a dev-dependency would not help either, since cargo builds
+/// a dependency's library and not its binaries.
 ///
-/// So the path is derived from where this test binary itself was put, and the
-/// worker is built before it is named — otherwise `cargo test -p mnema-eval`
-/// on a clean tree would either fail or, worse, silently use a stale binary
-/// from a previous build.
+/// So the path is derived from this test binary's own, and the worker is built
+/// before it is named — a clean tree would otherwise fail or use a stale one.
 pub fn worker() -> &'static Path {
     static WORKER: OnceLock<PathBuf> = OnceLock::new();
     WORKER.get_or_init(|| {

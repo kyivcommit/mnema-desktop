@@ -14,11 +14,31 @@ fn index_error(e: mnema_index::Error) -> EvalError {
 }
 
 /// A corpus laid out on disk and walked into a fresh index.
+///
+/// **No `PartialEq`, deliberately, against the crate's general rule.** This
+/// holds a live database connection and a temporary directory; equality of two
+/// of them is not a question with an answer. `Debug` is written by hand below
+/// for the same reason — neither `Db` nor `TempDir` derives it.
+///
+/// **Field order is load-bearing.** Rust drops fields in declaration order, so
+/// `db` closes its connection before `_dir` deletes the directory the database
+/// file sits in. Windows refuses to delete a file that is still open, which
+/// would turn a reversed order into a leaked temporary directory there and
+/// nothing at all here.
 pub struct IndexedCorpus {
     db: Db,
     root_id: i64,
     report: WalkReport,
     _dir: tempfile::TempDir,
+}
+
+impl std::fmt::Debug for IndexedCorpus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexedCorpus")
+            .field("root_id", &self.root_id)
+            .field("report", &self.report)
+            .finish_non_exhaustive()
+    }
 }
 
 impl IndexedCorpus {
@@ -33,12 +53,9 @@ impl IndexedCorpus {
             std::fs::write(&path, &document.text)?;
         }
 
-        // No `register_vector_extension()` first: `open` calls it itself before
-        // it opens the connection (`mnema-index/src/open.rs:94`), and repeat
-        // calls are free. That line's own comment says nothing in the
-        // repository exercises it, because every other caller reaches `open`
-        // through a helper that has already registered — this one does not, so
-        // it is the first caller that does.
+        // No `register_vector_extension()` first: `open` calls it itself
+        // (`mnema-index/src/open.rs:94`) before it opens the connection, and
+        // repeat calls are free.
         let db = open(&dir.path().join("index.sqlite")).map_err(index_error)?;
         let root_str = root
             .to_str()
@@ -99,7 +116,9 @@ impl IndexedCorpus {
         &self.report
     }
 
-    /// The `document.id` a corpus path was indexed under, if it was.
+    /// Looks up `relative` — a corpus path, as it appears in `Document::id` —
+    /// and answers the document it was indexed under, or `None` if the walk
+    /// left no `path` row for it.
     pub fn document_id(&self, relative: &str) -> Result<Option<String>, EvalError> {
         Ok(self
             .db
