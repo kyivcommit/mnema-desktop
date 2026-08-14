@@ -8,6 +8,7 @@ mod gold;
 mod indexed;
 mod preflight;
 mod questions;
+mod report;
 mod run;
 mod terms;
 
@@ -16,5 +17,6 @@ pub use gold::{Gold, resolve_gold};
 pub use indexed::IndexedCorpus;
 pub use preflight::{Problem, preflight};
 pub use questions::{Class, Question, QuestionSet, questions_path};
+pub use report::Report;
 pub use run::{Outcome, SEARCH_LIMIT, run_lexical};
 pub use terms::{ClassVerdict, check_class, universal_terms};

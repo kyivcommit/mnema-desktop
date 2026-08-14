@@ -1,0 +1,84 @@
+use mnema_eval::{Class, Outcome, Report};
+
+fn outcome(question: &str, class: Class, rank: Option<usize>) -> Outcome {
+    Outcome {
+        question: question.to_string(),
+        class,
+        rank,
+        returned: vec![7, 8],
+        gold: vec![42],
+    }
+}
+
+#[test]
+fn recall_at_one_counts_only_the_first_position() {
+    let outcomes = vec![
+        outcome("q-1", Class::Literal, Some(1)),
+        outcome("q-2", Class::Literal, Some(3)),
+    ];
+    let report = Report::of(&outcomes, 70);
+    assert_eq!(report.recall_at(Class::Literal, 1), Some(0.5));
+    assert_eq!(report.recall_at(Class::Literal, 5), Some(1.0));
+}
+
+#[test]
+fn a_class_with_no_questions_has_no_recall_rather_than_zero() {
+    // Zero would read as "every paraphrase failed"; None reads as "nothing was
+    // measured". The distinction is the one the spec spends a section on.
+    let report = Report::of(&[outcome("q-1", Class::Literal, Some(1))], 70);
+    assert_eq!(report.recall_at(Class::Paraphrase, 1), None);
+}
+
+#[test]
+fn a_question_with_no_rank_counts_against_every_k() {
+    let report = Report::of(&[outcome("q-1", Class::Literal, None)], 70);
+    assert_eq!(report.recall_at(Class::Literal, 20), Some(0.0));
+}
+
+#[test]
+fn every_number_is_printed_beside_its_chance_level() {
+    // 20 of 70 chunks is 28.6%: printing recall@20 alone would let 30% read as
+    // a result. Both directions — the chance level is there AND it is the
+    // right one for this k.
+    let report = Report::of(&[outcome("q-1", Class::Literal, Some(2))], 70);
+    let text = report.render();
+    assert!(
+        text.contains("28.6"),
+        "chance level for k=20 missing from:\n{text}"
+    );
+    assert!(
+        text.contains("1.4"),
+        "chance level for k=1 missing from:\n{text}"
+    );
+}
+
+#[test]
+fn the_failures_are_in_the_report_not_appended_to_it() {
+    let outcomes = vec![
+        outcome("q-1", Class::Literal, Some(1)),
+        outcome("q-2", Class::Literal, None),
+    ];
+    let text = Report::of(&outcomes, 70).render();
+    assert!(
+        text.contains("q-2"),
+        "the failed question is not named:\n{text}"
+    );
+    assert!(
+        !text.contains("q-1"),
+        "a question that succeeded should not be listed:\n{text}"
+    );
+}
+
+#[test]
+fn the_configurations_that_do_not_exist_are_named_not_zeroed() {
+    // Both directions in one render: the two unbuilt configurations are named,
+    // AND the word that says they are unbuilt is there. Naming them beside a
+    // number would be the failure this guards.
+    let text = Report::of(&[outcome("q-1", Class::Literal, Some(1))], 70).render();
+    for word in ["вмістом", "суміш", "не збудован"] {
+        assert!(
+            text.contains(word),
+            "{word} is not accounted for in:\n{text}"
+        );
+    }
+}
