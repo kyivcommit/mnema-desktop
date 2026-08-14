@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::gold::canonical;
 use crate::{EvalError, Language};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -40,6 +41,7 @@ pub struct QuestionSet {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Row {
     id: String,
     language: String,
@@ -60,17 +62,16 @@ impl QuestionSet {
         let mut questions: Vec<Question> = Vec::new();
         let mut seen: BTreeSet<String> = BTreeSet::new();
 
+        // One JSON object per line, not a JSON array: a diff that adds one
+        // question is one added line, so the authoring tasks appending to
+        // this file can never conflict with each other by construction.
         for (n, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
             let row: Row = serde_json::from_str(line)
                 .map_err(|e| EvalError::Questions(format!("line {}: {e}", n + 1)))?;
-            // Owned, not borrowed from `row`: `row.id` is moved into the
-            // question below, and a closure holding a reference to it would
-            // still be alive at that point.
-            let id = row.id.clone();
-            let refuse = move |why: &str| EvalError::Questions(format!("{id}: {why}"));
+            let refuse = |why: &str| EvalError::Questions(format!("{}: {why}", row.id));
 
             let language = match row.language.as_str() {
                 "uk" => Language::Uk,
@@ -102,10 +103,20 @@ impl QuestionSet {
             if row.answers.iter().any(|a| a.trim().is_empty()) {
                 return Err(refuse("an answer sentence is empty"));
             }
-            let unique: BTreeSet<&String> = row.answers.iter().collect();
+            // Canonicalised the same way `resolve_gold` compares
+            // (`a_sentence_in_two_chunks_names_both`'s reasoning applies here
+            // too): two answers differing only in whitespace still name the
+            // same chunk.
+            // Pinned by `answer_sentences_that_canonicalise_the_same_are_still_a_duplicate`.
+            let unique: BTreeSet<String> = row.answers.iter().map(|a| canonical(a)).collect();
             if unique.len() != row.answers.len() {
                 return Err(refuse("two answer sentences are the same"));
             }
+            // Literal and paraphrase carry exactly one answer sentence;
+            // topical carries up to three. Pinned by
+            // `a_literal_question_carries_exactly_one_answer`,
+            // `a_paraphrase_question_carries_exactly_one_answer`,
+            // `a_topical_question_carries_one_to_three_answers`.
             let allowed = match class {
                 Class::Topical => 1..=3,
                 Class::Literal | Class::Paraphrase => 1..=1,

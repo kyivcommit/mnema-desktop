@@ -26,7 +26,7 @@ pub enum Gold {
 /// reordering (`the_same_words_in_another_order_are_not_the_sentence`). Kept
 /// private and small because [`resolve_gold`] documents the reasoning, and a
 /// helper that grew a second job would put that reasoning out of date.
-fn canonical(text: &str) -> String {
+pub(crate) fn canonical(text: &str) -> String {
     mnema_core::nfc::normalise(text)
         .split_whitespace()
         .collect::<Vec<_>>()
