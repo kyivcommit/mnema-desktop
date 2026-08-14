@@ -20,10 +20,9 @@ const CELL_WIDTH: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
-    /// Outcomes grouped by class. `BTreeMap`, so the list of failed questions
-    /// comes out in class order every run and a printed report can be diffed
-    /// against the last. It does not order the table: `render` walks
-    /// `Class::ALL`, which also reaches a class this map has no key for.
+    /// Outcomes grouped by class. Does not order the table: `render` walks
+    /// `Class::ALL`, which also reaches a class this map has no key for
+    /// (`a_class_that_was_never_asked_says_so_where_its_numbers_would_be`).
     pub by_class: BTreeMap<Class, Vec<Outcome>>,
     /// Chunks in the index this run measured — the denominator of the chance
     /// level, and the reason it is carried rather than recomputed.
