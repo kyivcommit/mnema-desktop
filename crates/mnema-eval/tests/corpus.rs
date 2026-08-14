@@ -75,10 +75,7 @@ fn a_non_directory_entry_at_the_corpus_root_is_refused_not_skipped() {
     let dir = tree(&[("uk/one.md", "текст")]);
     std::fs::write(dir.path().join("notes.md"), "текст").unwrap();
     let err = Corpus::load(dir.path()).unwrap_err();
-    assert!(
-        matches!(&err, EvalError::Corpus(msg) if msg.contains("notes.md")),
-        "expected the refusal to name the entry, got {err:?}"
-    );
+    assert_eq!(err, EvalError::Corpus("notes.md is not a directory".into()));
 }
 
 #[test]
@@ -99,10 +96,11 @@ fn an_empty_corpus_is_refused() {
     // corpus — the same preflight failure as one empty file, one level up.
     let dir = tree(&[]);
     std::fs::create_dir_all(dir.path().join("uk")).unwrap();
+    let path = dir.path().display().to_string();
     let err = Corpus::load(dir.path()).unwrap_err();
     assert!(
-        matches!(&err, EvalError::Corpus(_)),
-        "expected the empty corpus to be refused, got {err:?}"
+        matches!(&err, EvalError::Corpus(msg) if msg.contains(&path)),
+        "expected the refusal to name the corpus directory, got {err:?}"
     );
 }
 

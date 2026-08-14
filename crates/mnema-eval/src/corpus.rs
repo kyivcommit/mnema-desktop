@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 /// Which language a document is in, taken from the directory it sits in.
+/// Pinned by `language_comes_from_the_directory_not_from_the_text`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Language {
     Uk,
@@ -64,10 +65,10 @@ impl Corpus {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
+            // Refused, not skipped:
+            // `a_non_directory_entry_at_the_corpus_root_is_refused_not_skipped`
             if !entry.file_type()?.is_dir() {
-                return Err(EvalError::Corpus(format!(
-                    "{name} is not a language directory"
-                )));
+                return Err(EvalError::Corpus(format!("{name} is not a directory")));
             }
             // Refused, not skipped:
             // `a_directory_that_is_not_a_language_is_refused_not_skipped`.
