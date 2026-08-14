@@ -11,14 +11,13 @@ use crate::{
 /// Something that would make a score describe an input defect rather than
 /// search. Every variant is one row of the spec's "what can quietly lie" table.
 ///
-/// Four variants have no test, each for a reason of its own, and this is where
-/// that is said rather than left to be discovered: `WalkStoppedEarly`, because
-/// `IndexedCorpus::build` refuses an early stop before `preflight` can be
-/// handed one (`indexed.rs:86`); `WalkSkippedFiles`, because this crate's
-/// fixture writes plain text files and the walk skips none of them;
-/// `DocumentNotIndexed`, because every fixture document extracts and reaches
-/// the index; and `SentenceInSeveralChunks`, because no fixture sentence is
-/// placed where the chunk overlap would copy it into a second chunk.
+/// Every variant below that no test reaches says why, rather than leaving it
+/// to be discovered: `WalkStoppedEarly` and `WalkSkippedFiles`, because
+/// `IndexedCorpus::build` refuses an early stop before `preflight` sees one
+/// (`indexed.rs:86`), and this crate's fixture writes plain text files the
+/// walk skips none of; `DocumentNotIndexed`, because every fixture document
+/// reaches the index; `SentenceInSeveralChunks`, because no fixture
+/// sentence sits where the chunk overlap would copy it into a second one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     DocumentMissing {
@@ -67,8 +66,8 @@ pub enum Problem {
 /// their own order (`every_problem_names_the_question_it_came_from`), and
 /// inside a question its answer sentences in theirs
 /// (`two_missing_sentences_come_back_in_the_order_the_question_lists_them`).
-/// Where the four untested variants sit in that order is **not** claimed
-/// here; `Problem` names all four and why each has no test.
+/// Where the untested variants sit in that order is **not** claimed here;
+/// `Problem` names each and why it has no test.
 pub fn preflight(
     corpus: &Corpus,
     questions: &QuestionSet,
