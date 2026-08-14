@@ -246,3 +246,11 @@ fn two_missing_sentences_come_back_in_the_order_the_question_lists_them() {
         ]
     );
 }
+
+#[test]
+fn the_shipped_corpus_and_questions_have_no_problems() {
+    let corpus = Corpus::load(&mnema_eval::corpus_dir()).unwrap();
+    let questions = QuestionSet::load(&mnema_eval::questions_path()).unwrap();
+    let indexed = IndexedCorpus::build(&corpus, support::worker()).unwrap();
+    assert_eq!(preflight(&corpus, &questions, &indexed).unwrap(), vec![]);
+}
