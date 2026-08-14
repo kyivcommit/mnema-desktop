@@ -55,6 +55,14 @@ fn a_term_missing_from_one_document_is_not_universal() {
         !uk.contains("договір"),
         "«договір» is in one document only, got {uk:?}"
     );
+    // A fold that kept the LAST document's terms instead of intersecting
+    // would pass the assertion above (the first document's unique word is
+    // gone either way) but miss this one: the second document's unique word
+    // would still be sitting in the result.
+    assert!(
+        !uk.contains("протокол"),
+        "«протокол» is in one document only, got {uk:?}"
+    );
 }
 
 #[test]
@@ -140,14 +148,17 @@ fn a_universal_term_does_not_violate_a_paraphrase() {
 
 #[test]
 fn all_answer_sentences_of_a_topical_question_are_checked() {
-    // The first sentence shares nothing; the second does. Checking only the
-    // first would let a topical question through with a literal half.
+    // The shared word sits in the MIDDLE sentence; the first and third are
+    // harmless. An implementation that checked only the first answer, or
+    // only the last, would both report `Holds` here — only one that checks
+    // every sentence explains `Violated`.
     let q = question(
         Class::Topical,
         "Скільки примірників?",
         &[
             "Комісія розглянула заяву.",
             "Другий примірників зберігається у заявника.",
+            "Заявник підписав протокол.",
         ],
     );
     assert_eq!(
@@ -160,19 +171,26 @@ fn all_answer_sentences_of_a_topical_question_are_checked() {
 
 #[test]
 fn the_shared_list_comes_back_in_one_fixed_order() {
-    // The question lists the two words in the opposite order to the answer, so
-    // an implementation that preserved either side's order would come back the
-    // other way round and this fails. Re-sorting the result and comparing it
-    // with itself is the shape that cannot fail — it is not what this asserts.
+    // Neither side lists the three words in alphabetical order (question:
+    // примірник, договір, угода; answer: угода, примірник, договір), so an
+    // implementation that collected `shared` in either side's scan order
+    // would come back in a different order than the sorted one asserted
+    // here — only an implementation that actually sorts survives this
+    // fixture. Re-sorting the result and comparing it with itself is the
+    // shape that cannot fail — it is not what this asserts.
     let q = question(
         Class::Paraphrase,
-        "примірник договір",
-        &["договір примірник"],
+        "примірник договір угода",
+        &["угода примірник договір"],
     );
     assert_eq!(
         check_class(&q, &BTreeSet::new()),
         ClassVerdict::Violated {
-            shared: vec!["договір".to_string(), "примірник".to_string()]
+            shared: vec![
+                "договір".to_string(),
+                "примірник".to_string(),
+                "угода".to_string()
+            ]
         }
     );
 }
