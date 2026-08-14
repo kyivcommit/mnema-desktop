@@ -62,9 +62,9 @@ fn a_directory_that_is_not_a_language_is_refused_not_skipped() {
     // number would describe a smaller corpus than the one on disk.
     let dir = tree(&[("uk/one.md", "текст"), ("de/two.md", "Text")]);
     let err = Corpus::load(dir.path()).unwrap_err();
-    assert!(
-        matches!(&err, EvalError::Corpus(msg) if msg.contains("de")),
-        "expected the refusal to name the directory, got {err:?}"
+    assert_eq!(
+        err,
+        EvalError::Corpus("de is not a language directory".into())
     );
 }
 
