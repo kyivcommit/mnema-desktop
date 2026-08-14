@@ -62,3 +62,5 @@ yet embed, search or answer, and there is no packaged release to install.
 
 The source is published to be read. It is **not** open source: see [`LICENSE`](LICENSE). All rights
 are reserved, and no permission to use, modify or redistribute is granted by publication here.
+
+<!-- test PR: verifying automated PR review integration; not intended to merge -->
