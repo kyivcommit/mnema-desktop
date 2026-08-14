@@ -46,6 +46,8 @@ pub enum EvalError {
     Corpus(String),
     #[error("io: {0}")]
     Io(String),
+    #[error("questions: {0}")]
+    Questions(String),
 }
 
 impl From<std::io::Error> for EvalError {

@@ -5,6 +5,8 @@
 
 mod corpus;
 mod gold;
+mod questions;
 
 pub use corpus::{Corpus, Document, EvalError, Language, corpus_dir};
 pub use gold::{Gold, resolve_gold};
+pub use questions::{Class, Question, QuestionSet, questions_path};
