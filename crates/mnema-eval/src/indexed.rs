@@ -16,19 +16,17 @@ fn index_error(e: mnema_index::Error) -> EvalError {
 /// A corpus laid out on disk and walked into a fresh index.
 ///
 /// **No `PartialEq`, deliberately, against the crate's general rule.** This
-/// holds a live database connection and a temporary directory; equality of two
-/// of them is not a question with an answer. `Debug` is written by hand below
-/// for the same reason — neither `Db` nor `TempDir` derives it.
-///
-/// **Field order is load-bearing.** Rust drops fields in declaration order, so
-/// `db` closes its connection before `_dir` deletes the directory the database
-/// file sits in. Windows refuses to delete a file that is still open, which
-/// would turn a reversed order into a leaked temporary directory there and
-/// nothing at all here.
+/// holds a live database connection and a temporary directory; equality of
+/// two of them is not a question with an answer. `Debug` is written by hand
+/// below for the same reason — `Db` itself has none.
 pub struct IndexedCorpus {
     db: Db,
     root_id: i64,
     report: WalkReport,
+    /// Field order is load-bearing: Rust drops fields in declaration order,
+    /// so `db` closes its connection before this directory is deleted.
+    /// Windows refuses to delete a file that is still open, which would
+    /// turn a reversed order into a leaked temporary directory there.
     _dir: tempfile::TempDir,
 }
 

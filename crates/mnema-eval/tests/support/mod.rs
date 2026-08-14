@@ -14,9 +14,9 @@ use std::sync::OnceLock;
 ///
 /// **A deliberate copy of `crates/mnema-ingest/tests/support/mod.rs:61-118`.**
 /// `cargo` sets `CARGO_BIN_EXE_*` only for binaries of the package being
-/// tested, and the worker belongs to `mnema-extract`, which this crate must
-/// not depend on; a dev-dependency would not help either, since cargo builds
-/// a dependency's library and not its binaries.
+/// tested, and the worker belongs to `mnema-extract`, a separate crate; a
+/// dev-dependency would not help either, since cargo builds a dependency's
+/// library and not its binaries.
 ///
 /// So the path is derived from this test binary's own, and the worker is built
 /// before it is named — a clean tree would otherwise fail or use a stale one.
