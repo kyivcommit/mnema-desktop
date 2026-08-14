@@ -191,3 +191,58 @@ fn every_problem_names_the_question_it_came_from() {
         ]
     );
 }
+
+#[test]
+fn a_question_with_a_missing_document_still_has_its_class_checked() {
+    // `check_class` reads the question, its answers and terms taken from the
+    // in-memory corpus — never a chunk — so a question whose document never
+    // arrived still has a computable verdict. Both problems come back. Behind
+    // the document guard the class one would be lost, and the author would
+    // learn about the second defect only after fixing the first and rerunning.
+    let questions = set(vec![question(
+        Class::Paraphrase,
+        QUESTION,
+        "uk/nowhere.md",
+        &[ANSWER],
+    )]);
+    match run(&corpus(), &questions).as_slice() {
+        [
+            Problem::ClassViolated { question, shared },
+            Problem::DocumentMissing { document, .. },
+        ] => {
+            assert_eq!(question, "q-1");
+            assert_eq!(shared, &vec!["складено".to_string()]);
+            assert_eq!(document, "uk/nowhere.md");
+        }
+        other => panic!("expected ClassViolated then DocumentMissing, got {other:?}"),
+    }
+}
+
+#[test]
+fn two_missing_sentences_come_back_in_the_order_the_question_lists_them() {
+    // The other half of the order claim, and the one no other test reaches:
+    // every question above produces at most one sentence-level problem, so a
+    // preflight that gathered them into a set — or walked the answers
+    // backwards — would pass all of them.
+    let first = "Договір складено у трьох примірниках.";
+    let second = "Комісія оголосила перерву до понеділка.";
+    let questions = set(vec![question(
+        Class::Topical,
+        "Що вирішили?",
+        "uk/one.md",
+        &[first, second],
+    )]);
+    assert_eq!(
+        run(&corpus(), &questions),
+        vec![
+            Problem::SentenceNotFound {
+                question: "q-1".to_string(),
+                sentence: first.to_string(),
+            },
+            Problem::SentenceNotFound {
+                question: "q-1".to_string(),
+                sentence: second.to_string(),
+            },
+        ]
+    );
+}

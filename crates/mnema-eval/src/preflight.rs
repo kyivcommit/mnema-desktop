@@ -58,10 +58,13 @@ pub enum Problem {
 
 /// Every reason the corpus and the question set are not yet worth scoring.
 ///
-/// The order is fixed, because the list goes into a report: the walk first,
-/// then the questions in their own order, and inside a question its answer
-/// sentences in theirs. Pinned by
-/// `every_problem_names_the_question_it_came_from`.
+/// The order is fixed, because the list goes into a report: the questions in
+/// their own order (`every_problem_names_the_question_it_came_from`), and
+/// inside a question its answer sentences in theirs
+/// (`two_missing_sentences_come_back_in_the_order_the_question_lists_them`).
+/// Where the two walk problems sit is **not** claimed here: no test reaches
+/// them, because this crate's fixture always completes its walk with nothing
+/// skipped.
 pub fn preflight(
     corpus: &Corpus,
     questions: &QuestionSet,
@@ -90,10 +93,27 @@ pub fn preflight(
     let nothing = BTreeSet::new();
 
     for q in &questions.questions {
-        // A question whose document never reached the index has one cause and
-        // would otherwise grow one derived problem per answer sentence, plus a
-        // class verdict read against chunks that are not there. Both document
-        // branches therefore end the question.
+        // First, because it does not need the index: `check_class` reads the
+        // question's own text, its answer sentences and terms derived from the
+        // in-memory corpus (`terms.rs:19-27`). A question whose document never
+        // arrived still has a computable class verdict, and dropping it behind
+        // the document guards would hide a second, independent defect until
+        // the next run. Pinned by
+        // `a_question_with_a_missing_document_still_has_its_class_checked`.
+        if let ClassVerdict::Violated { shared } =
+            check_class(q, universal.get(&q.language).unwrap_or(&nothing))
+        {
+            problems.push(Problem::ClassViolated {
+                question: q.id.clone(),
+                shared,
+            });
+        }
+
+        // The document branches end the question: every check below them reads
+        // chunks, so one missing document would otherwise grow one derived
+        // `SentenceNotFound` per answer sentence from a single cause. Pinned
+        // by `a_question_naming_a_document_that_is_not_there_is_a_problem`,
+        // which asserts the whole list and would see the extra ones.
         let Some(document_id) = indexed.document_id(&q.document)? else {
             problems.push(Problem::DocumentMissing {
                 question: q.id.clone(),
@@ -112,15 +132,6 @@ pub fn preflight(
                 status: status.as_str().to_string(),
             });
             continue;
-        }
-
-        if let ClassVerdict::Violated { shared } =
-            check_class(q, universal.get(&q.language).unwrap_or(&nothing))
-        {
-            problems.push(Problem::ClassViolated {
-                question: q.id.clone(),
-                shared,
-            });
         }
 
         let chunks = indexed
