@@ -43,10 +43,10 @@ fn the_same_words_in_another_order_are_not_the_sentence() {
     );
 }
 
-/// `canonical` collapses whitespace; it must not delete it. Every other test in
-/// this file passes under deletion too — measured, not assumed — and deletion is
-/// materially worse: it erases word boundaries, so a needle can match across a
-/// join that is not the sentence anybody wrote.
+/// `canonical` collapses whitespace; it must not delete it. Every other test
+/// in this file passes under deletion too — measured, not assumed — and
+/// deletion is materially worse: it erases word boundaries, so a needle can
+/// match across a join that is not the sentence anybody wrote.
 #[test]
 fn words_run_together_are_not_the_sentence() {
     let glued = vec![(10, "Комісіярозглянула заяву.".to_string())];
@@ -56,8 +56,8 @@ fn words_run_together_are_not_the_sentence() {
     );
 }
 
-/// Decomposed on one side, precomposed on the other — the shape macOS hands over
-/// against the shape a question file is typed in. Byte comparison reports
+/// Decomposed on one side, precomposed on the other — the shape macOS hands
+/// over against the shape a question file is typed in. Byte comparison reports
 /// Missing here and the corpus is blameless.
 #[test]
 fn a_decomposed_sentence_finds_its_precomposed_chunk() {

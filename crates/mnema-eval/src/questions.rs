@@ -73,15 +73,13 @@ impl QuestionSet {
                 .map_err(|e| EvalError::Questions(format!("line {}: {e}", n + 1)))?;
             let refuse = |why: &str| EvalError::Questions(format!("{}: {why}", row.id));
 
-            let language = match row.language.as_str() {
-                "uk" => Language::Uk,
-                "en" => Language::En,
-                other => {
-                    return Err(EvalError::Questions(format!(
-                        "{}: {other} is not a language",
-                        row.id
-                    )));
-                }
+            // `Corpus::load`'s own mapping, called rather than copied: a third
+            // language added to one of two copies would compile.
+            let Some(language) = Language::parse(&row.language) else {
+                return Err(EvalError::Questions(format!(
+                    "{}: {} is not a language",
+                    row.id, row.language
+                )));
             };
             let class = match row.class.as_str() {
                 "literal" => Class::Literal,
@@ -106,8 +104,8 @@ impl QuestionSet {
             // Canonicalised the same way `resolve_gold` compares
             // (`a_sentence_in_two_chunks_names_both`'s reasoning applies here
             // too): two answers differing only in whitespace still name the
-            // same chunk.
-            // Pinned by `answer_sentences_that_canonicalise_the_same_are_still_a_duplicate`.
+            // same chunk. Pinned by
+            // answer_sentences_that_canonicalise_the_same_are_still_a_duplicate
             let unique: BTreeSet<String> = row.answers.iter().map(|a| canonical(a)).collect();
             if unique.len() != row.answers.len() {
                 return Err(refuse("two answer sentences are the same"));

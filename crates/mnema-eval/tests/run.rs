@@ -1,5 +1,5 @@
 use mnema_eval::{
-    Class, Corpus, Document, IndexedCorpus, Language, Question, QuestionSet, run_lexical,
+    Class, Corpus, Document, IndexedCorpus, Language, Question, QuestionSet, Report, run_lexical,
 };
 
 mod support;
@@ -160,6 +160,37 @@ fn a_chunk_that_is_returned_but_is_not_gold_does_not_count() {
     assert!(
         !outcomes[0].returned.is_empty(),
         "search did return something, and the outcome must record it"
+    );
+}
+
+#[test]
+fn a_returned_chunk_is_reported_with_its_path_and_first_line() {
+    // The same near miss as above, carried all the way to the rendered report:
+    // the near-miss document comes back and the gold one does not, and the
+    // report has to say WHICH document that was. Ids are reassigned every run
+    // and the index goes with the process, so a bare number diagnoses nothing
+    // afterwards — spec §7 asks for the path and the first lines for that
+    // reason. Both directions: the path AND the text.
+    let indexed = IndexedCorpus::build(&corpus(), support::worker()).unwrap();
+    let questions = QuestionSet {
+        questions: vec![question(
+            "q-1",
+            "комісія",
+            "uk/one.md",
+            "Договір складено у двох примірниках.",
+        )],
+    };
+    let outcomes = run_lexical(&indexed, &questions).unwrap();
+    assert_eq!(outcomes[0].rank, None, "outcome: {:?}", outcomes[0]);
+    let chunk_count = indexed.db().chunk_count().unwrap();
+    let text = Report::of(&outcomes, chunk_count).render();
+    assert!(
+        text.contains("uk/two.md"),
+        "the returned chunk's document is not named:\n{text}"
+    );
+    assert!(
+        text.contains("Комісія відклала"),
+        "the returned chunk's text is not shown:\n{text}"
     );
 }
 

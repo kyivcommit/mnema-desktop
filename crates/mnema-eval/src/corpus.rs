@@ -16,7 +16,12 @@ impl Language {
         }
     }
 
-    fn parse(s: &str) -> Option<Language> {
+    /// The one place `"uk"`/`"en"` is spelled out. `pub(crate)` because
+    /// `QuestionSet::load` reads the same two strings out of the question
+    /// file: two copies would let a third language be added to one of them
+    /// and leave the two halves disagreeing about what a language is, with
+    /// nothing to go red.
+    pub(crate) fn parse(s: &str) -> Option<Language> {
         match s {
             "uk" => Some(Language::Uk),
             "en" => Some(Language::En),

@@ -102,10 +102,6 @@ impl IndexedCorpus {
         &self.db
     }
 
-    pub fn root_id(&self) -> i64 {
-        self.root_id
-    }
-
     pub fn report(&self) -> &WalkReport {
         &self.report
     }

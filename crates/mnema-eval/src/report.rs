@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::{Class, Outcome, SEARCH_LIMIT};
+use crate::{Class, Location, Outcome, SEARCH_LIMIT};
 
 /// The positions every class is read at. The last one is `SEARCH_LIMIT` rather
 /// than a literal twenty: no rank can exceed the number of chunks search was
@@ -17,6 +17,11 @@ const UNMEASURED: &str = "недоступно";
 
 const LABEL_WIDTH: usize = 15;
 const CELL_WIDTH: usize = 16;
+
+/// How much of a chunk's first line the failure list shows: wide enough to
+/// tell two documents of the corpus apart, narrow enough that a question whose
+/// every position is filled still reads as a list.
+const SNIPPET_CHARS: usize = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
@@ -113,11 +118,24 @@ impl Report {
             for outcome in failed {
                 let _ = writeln!(
                     out,
-                    "  {}  золоті чанки: {}; прийшли: {}",
+                    "  {}  золоті чанки: {}",
                     outcome.question,
-                    ids(&outcome.gold),
-                    ids(&outcome.returned)
+                    ids(&outcome.gold)
                 );
+                if outcome.returned.is_empty() {
+                    out.push_str("    прийшли: нічого\n");
+                    continue;
+                }
+                out.push_str("    прийшли:\n");
+                // Indexed rather than zipped with `returned_locations`: `zip`
+                // stops at the shorter side, so a locations list that ever
+                // fell short would drop returned ids out of the list without
+                // saying so — and a list this exists to diagnose from must
+                // lose nothing quietly.
+                for (i, id) in outcome.returned.iter().enumerate() {
+                    let placed = outcome.returned_locations.get(i).and_then(Option::as_ref);
+                    let _ = writeln!(out, "      {}", place(*id, placed));
+                }
             }
         }
         out
@@ -155,4 +173,28 @@ fn ids(chunks: &[i64]) -> String {
         .map(i64::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// One returned chunk as a line: its id, the document it is in, and the start
+/// of its text.
+///
+/// A chunk the index could not place says so rather than standing as a bare
+/// number. The id is kept either way — it cross-references the rest of the
+/// same run, and only that. Pinned by
+/// `a_chunk_the_index_cannot_place_says_so_instead_of_a_bare_number`.
+fn place(id: i64, location: Option<&Location>) -> String {
+    match location {
+        Some(location) => format!("{id}  {}  {}", location.path, snippet(&location.first_line)),
+        None => format!("{id}  <немає у покажчику>"),
+    }
+}
+
+/// The start of a line, cut on a character boundary: the corpus is Ukrainian
+/// as often as not, and cutting bytes would split one in half.
+fn snippet(line: &str) -> String {
+    let mut cut: String = line.chars().take(SNIPPET_CHARS).collect();
+    if line.chars().count() > SNIPPET_CHARS {
+        cut.push('…');
+    }
+    cut
 }
