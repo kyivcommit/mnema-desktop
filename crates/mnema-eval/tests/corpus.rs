@@ -69,6 +69,19 @@ fn a_directory_that_is_not_a_language_is_refused_not_skipped() {
 }
 
 #[test]
+fn a_non_directory_entry_at_the_corpus_root_is_refused_not_skipped() {
+    // A stray file at the root is the same harm as a wrongly named
+    // directory: silently skipping it would shrink the measured corpus.
+    let dir = tree(&[("uk/one.md", "текст")]);
+    std::fs::write(dir.path().join("notes.md"), "текст").unwrap();
+    let err = Corpus::load(dir.path()).unwrap_err();
+    assert!(
+        matches!(&err, EvalError::Corpus(msg) if msg.contains("notes.md")),
+        "expected the refusal to name the entry, got {err:?}"
+    );
+}
+
+#[test]
 fn an_empty_document_is_refused() {
     // An empty document indexes to no chunks, so every question against it
     // resolves Missing — a preflight failure disguised as a search miss.
@@ -77,6 +90,19 @@ fn an_empty_document_is_refused() {
     assert!(
         matches!(&err, EvalError::Corpus(msg) if msg.contains("uk/one.md")),
         "expected the refusal to name the document, got {err:?}"
+    );
+}
+
+#[test]
+fn an_empty_corpus_is_refused() {
+    // Zero documents means every question resolves Missing for the whole
+    // corpus — the same preflight failure as one empty file, one level up.
+    let dir = tree(&[]);
+    std::fs::create_dir_all(dir.path().join("uk")).unwrap();
+    let err = Corpus::load(dir.path()).unwrap_err();
+    assert!(
+        matches!(&err, EvalError::Corpus(_)),
+        "expected the empty corpus to be refused, got {err:?}"
     );
 }
 
@@ -90,12 +116,16 @@ fn documents_in_a_language_are_exactly_that_language() {
     let corpus = Corpus::load(dir.path()).unwrap();
     assert_eq!(corpus.documents_in(Language::Uk).count(), 2);
     assert_eq!(corpus.documents_in(Language::En).count(), 1);
+    assert!(
+        corpus
+            .documents_in(Language::Uk)
+            .all(|d| d.language == Language::Uk)
+    );
 }
 
 #[test]
 fn the_shipped_corpus_directory_is_where_the_crate_is() {
-    // `corpus_dir` resolves against the crate manifest, so it works whatever
-    // the working directory of the test runner is.
+    // The path ends in `mnema-eval/corpus`.
     let dir = mnema_eval::corpus_dir();
     assert!(
         dir.ends_with(Path::new("mnema-eval").join("corpus")),

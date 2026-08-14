@@ -26,6 +26,9 @@ impl Language {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
+    /// Relative path from the corpus root, `/`-separated — the same string
+    /// that lands in `path.relative_path`.
+    /// Pinned by `the_id_is_the_relative_path_with_forward_slashes`.
     pub id: String,
     pub language: Language,
     pub text: String,
@@ -36,12 +39,18 @@ pub struct Corpus {
     pub documents: Vec<Document>,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EvalError {
     #[error("corpus: {0}")]
     Corpus(String),
     #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    Io(String),
+}
+
+impl From<std::io::Error> for EvalError {
+    fn from(err: std::io::Error) -> Self {
+        EvalError::Io(err.to_string())
+    }
 }
 
 /// The corpus shipped with this crate.
@@ -54,13 +63,23 @@ impl Corpus {
         let mut documents = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
             let name = entry.file_name().to_string_lossy().into_owned();
+            if !entry.file_type()?.is_dir() {
+                return Err(EvalError::Corpus(format!(
+                    "{name} is not a language directory"
+                )));
+            }
+            // Refused, not skipped:
+            // `a_directory_that_is_not_a_language_is_refused_not_skipped`.
             let language = Language::parse(&name)
                 .ok_or_else(|| EvalError::Corpus(format!("{name} is not a language directory")))?;
             collect(&entry.path(), &name, language, &mut documents)?;
+        }
+        if documents.is_empty() {
+            return Err(EvalError::Corpus(format!(
+                "{} has no documents",
+                dir.display()
+            )));
         }
         documents.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(Corpus { documents })
@@ -93,6 +112,8 @@ fn collect(
         }
         let text = std::fs::read_to_string(entry.path())?;
         if text.trim().is_empty() {
+            // Refused: an empty document indexes to no chunks.
+            // Pinned by `an_empty_document_is_refused`.
             return Err(EvalError::Corpus(format!("{id} is empty")));
         }
         out.push(Document { id, language, text });
