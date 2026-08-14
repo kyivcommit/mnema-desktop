@@ -24,3 +24,7 @@ serde_json = { workspace = true }
 # `src/`. For a crate that ships nowhere this is not a debt.
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+
+[[bin]]
+name = "eval"
+path = "src/bin/eval.rs"
