@@ -46,6 +46,12 @@ pub enum EvalError {
     Corpus(String),
     #[error("io: {0}")]
     Io(String),
+    /// A string rather than `mnema_index::Error`, for the same reason `Io` is
+    /// one: this enum derives `PartialEq`/`Eq` — `tests/corpus.rs` compares
+    /// whole errors — and neither `mnema_index::Error` nor `std::io::Error`
+    /// implements them. Nothing here branches on which index error it was.
+    #[error("index: {0}")]
+    Index(String),
     #[error("questions: {0}")]
     Questions(String),
 }

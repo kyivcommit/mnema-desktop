@@ -14,9 +14,13 @@ publish.workspace = true
 [dependencies]
 mnema-core = { path = "../mnema-core" }
 mnema-index = { path = "../mnema-index" }
+mnema-ingest = { path = "../mnema-ingest" }
+mnema-pool = { path = "../mnema-pool" }
+mnema-walk = { path = "../mnema-walk" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
+# A dependency, not a dev-dependency: `IndexedCorpus` holds the `TempDir` whose
+# lifetime *is* the "a temporary directory per run" guarantee, and it lives in
+# `src/`. For a crate that ships nowhere this is not a debt.
 tempfile = { workspace = true }
+thiserror = { workspace = true }
