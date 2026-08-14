@@ -15,8 +15,8 @@ use mnema_eval::{
 /// Preflight found something, so no number was taken: one describing the
 /// corpus rather than the search is worse than none.
 const PREFLIGHT_FAILED: i32 = 1;
-/// The worker was not named. Distinct from `PREFLIGHT_FAILED` because it is
-/// the caller's mistake and not the corpus's.
+/// Not exactly one argument, so no worker path to run with. Distinct from
+/// `PREFLIGHT_FAILED` because it is the caller's mistake and not the corpus's.
 const NO_WORKER: i32 = 2;
 
 fn main() {
@@ -36,10 +36,11 @@ fn main() {
     std::process::exit(evaluate(Path::new(worker)));
 }
 
-/// A broken corpus, unreadable questions or a failed walk panic rather than
-/// returning a code. They are not conditions this tool handles — they mean the
-/// instrument itself is broken, and a panic says so with a message and an exit
-/// status (101) that neither of the two codes above can be confused with.
+/// A failure at any step before there is a report to print — loading the
+/// corpus or questions, indexing, running the search, counting chunks —
+/// panics rather than returning a code. These are not conditions this tool
+/// handles: they mean the instrument itself is broken, and a panic says so
+/// with a message and an exit status (101) the codes above never use.
 fn evaluate(worker: &Path) -> i32 {
     let corpus = Corpus::load(&corpus_dir()).expect("the shipped corpus loads");
     let questions = QuestionSet::load(&questions_path()).expect("the shipped questions load");
