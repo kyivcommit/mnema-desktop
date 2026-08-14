@@ -8,10 +8,6 @@ use crate::{
     universal_terms,
 };
 
-fn index_error(e: mnema_index::Error) -> EvalError {
-    EvalError::Index(e.to_string())
-}
-
 /// Something that would make a score describe an input defect rather than
 /// search. Every variant is one row of the spec's "what can quietly lie" table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +69,7 @@ pub fn preflight(
     let mut problems = Vec::new();
 
     let report = indexed.report();
-    // `IndexedCorpus::build` refuses an early stop itself (`indexed.rs:90`), so
+    // `IndexedCorpus::build` refuses an early stop itself (`indexed.rs:86`), so
     // today this branch cannot fire through that constructor. It stays because
     // the counts it guards are the ones every question below is read against,
     // and a second way to hand this function a report must not walk past it.
@@ -121,10 +117,7 @@ pub fn preflight(
             });
             continue;
         };
-        let status = indexed
-            .db()
-            .document_status(&document_id)
-            .map_err(index_error)?;
+        let status = indexed.db().document_status(&document_id)?;
         if status != DocumentStatus::Indexed {
             problems.push(Problem::DocumentNotIndexed {
                 question: q.id.clone(),
@@ -134,10 +127,7 @@ pub fn preflight(
             continue;
         }
 
-        let chunks = indexed
-            .db()
-            .chunks_of_document(&document_id)
-            .map_err(index_error)?;
+        let chunks = indexed.db().chunks_of_document(&document_id)?;
         let mut claimed: Vec<i64> = Vec::new();
         for sentence in &q.answers {
             match resolve_gold(&chunks, sentence) {
@@ -175,10 +165,7 @@ pub fn preflight(
                 let Some(other_id) = indexed.document_id(&other.id)? else {
                     continue;
                 };
-                let other_chunks = indexed
-                    .db()
-                    .chunks_of_document(&other_id)
-                    .map_err(index_error)?;
+                let other_chunks = indexed.db().chunks_of_document(&other_id)?;
                 if resolve_gold(&other_chunks, sentence) != Gold::Missing {
                     problems.push(Problem::SentenceInAnotherDocument {
                         question: q.id.clone(),

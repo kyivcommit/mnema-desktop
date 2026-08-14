@@ -9,10 +9,6 @@ use mnema_walk::WalkRules;
 
 use crate::{Corpus, EvalError};
 
-fn index_error(e: mnema_index::Error) -> EvalError {
-    EvalError::Index(e.to_string())
-}
-
 /// A corpus laid out on disk and walked into a fresh index.
 ///
 /// **No `PartialEq`, deliberately, against the crate's general rule.** This
@@ -54,11 +50,11 @@ impl IndexedCorpus {
         // No `register_vector_extension()` first: `open` calls it itself
         // (`mnema-index/src/open.rs:94`) before it opens the connection, and
         // repeat calls are free.
-        let db = open(&dir.path().join("index.sqlite")).map_err(index_error)?;
+        let db = open(&dir.path().join("index.sqlite"))?;
         let root_str = root
             .to_str()
             .ok_or_else(|| EvalError::Corpus("the temporary path is not UTF-8".to_string()))?;
-        let root_id = db.insert_watched_root(root_str).map_err(index_error)?;
+        let root_id = db.insert_watched_root(root_str)?;
 
         let pool = Pool::new(PoolConfig {
             workers: 1,
@@ -120,8 +116,7 @@ impl IndexedCorpus {
     pub fn document_id(&self, relative: &str) -> Result<Option<String>, EvalError> {
         Ok(self
             .db
-            .path_entry(self.root_id, relative)
-            .map_err(index_error)?
+            .path_entry(self.root_id, relative)?
             .map(|entry| entry.document_id))
     }
 }

@@ -1,20 +1,14 @@
 use crate::{Class, EvalError, Gold, IndexedCorpus, Question, QuestionSet, resolve_gold};
 
-fn index_error(e: mnema_index::Error) -> EvalError {
-    EvalError::Index(e.to_string())
-}
-
 /// How many chunks one question is allowed to see, and the ceiling every
 /// `recall@k` in the report is read under.
 ///
-/// The same twenty the application asks for (`src-tauri/src/bridge.rs:24`).
-/// Naming a larger number here would measure a search the product does not
-/// run, and a smaller one would report a miss the person would not have had.
-///
-/// Copied, not shared, and nothing fails when the two drift: this crate must
-/// not be depended on by shipping code, and depending on the binary from here
-/// would invert that. The bridge calls its own number a placeholder for the
-/// search/RAG spec to settle, so that spec moves both or neither.
+/// The same twenty the application asks for (`src-tauri/src/bridge.rs:24`),
+/// copied and not shared: that constant is private, and depending on the
+/// binary from here would invert the rule that nothing shipping depends on
+/// this crate. Nothing fails when the two drift — the bridge calls its own
+/// number a placeholder for the search/RAG spec to settle, so that spec moves
+/// both or neither.
 pub const SEARCH_LIMIT: i64 = 20;
 
 /// What one question got back, and where in it the right answer was.
@@ -22,31 +16,33 @@ pub const SEARCH_LIMIT: i64 = 20;
 pub struct Outcome {
     /// The question's id, as `Problem` also names it — not its text.
     pub question: String,
+    /// The question's own class, which spec §7 groups the report's table by.
+    /// Pinned by `an_outcome_carries_the_class_of_its_question`.
     pub class: Class,
-    /// 1-based position of the best-placed gold chunk, or `None`.
-    ///
-    /// A position rather than a boolean, because spec §7 reads `recall@1`,
-    /// `@5` and `@20` off one run. "Found it" would have forced a second run
-    /// per k.
+    /// 1-based position of the best-placed gold chunk, or `None`. A position
+    /// rather than a boolean, because spec §7 reads `recall@1`, `@5` and `@20`
+    /// off one run. Pinned by
+    /// `a_question_whose_words_are_all_in_the_gold_chunk_finds_it_first`,
+    /// which asserts `Some(1)` and would see a 0-based one.
     pub rank: Option<usize>,
-    /// What came back instead, in the order search returned it. This is what
-    /// lets the report list the failures with something to look at, rather
-    /// than only counting them.
+    /// What came back instead, in the order search returned it, written even
+    /// when no gold chunk is among it — that is what lets the report show a
+    /// failure rather than only count it. Pinned by
+    /// `a_chunk_that_is_returned_but_is_not_gold_does_not_count`.
     pub returned: Vec<i64>,
     pub gold: Vec<i64>,
 }
 
-/// Asks the lexical search every question, in order, one outcome each.
+/// Asks the lexical search every question, in order, one outcome each. Pinned
+/// by `every_question_produces_exactly_one_outcome_in_order`.
 ///
-/// Refuses — rather than scores — a question whose gold does not resolve: a
-/// document not in the index, an answer sentence in no chunk, an answer
-/// sentence in two. Each is an input defect that task 9's `preflight` reports
-/// before anything is scored (`preflight.rs:117-152`), so meeting one here
-/// means preflight was not run. Scoring it anyway would charge search for the
-/// defect — gold that is empty or ambiguous ranks nowhere, and the
-/// configuration would read worse than it is — while skipping it would shorten
-/// the outcome list without saying so, which is the same lie under a smaller
-/// denominator.
+/// A question whose gold does not resolve is refused, not scored: gold that
+/// ranks nowhere would charge search for a fixture defect, and skipping would
+/// shorten the list a `recall@k` divides by. `preflight` reports those three
+/// first (`preflight.rs:113-119`, `:134-142`); the fourth — a document that
+/// never reached `indexed` (`:121-128`) — stays there alone. Pinned by
+/// `a_question_whose_answer_is_in_no_chunk_is_refused_not_scored` and
+/// `a_question_naming_a_document_that_is_not_there_is_refused_not_scored`.
 pub fn run_lexical(
     indexed: &IndexedCorpus,
     questions: &QuestionSet,
@@ -56,16 +52,15 @@ pub fn run_lexical(
         let gold = gold_chunks(indexed, q)?;
         // The question goes in exactly as a person would have typed it: not
         // rewritten, not narrowed, not routed through `search_terms`. A
-        // sentence-shaped query that is unreachable under FTS5's implicit AND
-        // is the thing being measured (spec §2), not a defect for the
-        // instrument to route around.
-        let returned = indexed
-            .db()
-            .search_lexical(&q.text, SEARCH_LIMIT)
-            .map_err(index_error)?;
-        // The first gold chunk to appear is by construction the best-placed
-        // one, so scanning `returned` once answers "at least one of them, and
-        // how far down".
+        // sentence-shaped query unreachable under FTS5's implicit AND is the
+        // thing being measured (spec §2), not a defect to route around.
+        // Pinned by
+        // `a_question_no_chunk_answers_has_no_rank_and_says_what_came_back`.
+        let returned = indexed.db().search_lexical(&q.text, SEARCH_LIMIT)?;
+        // `position` stops at the first gold chunk to appear, which is the
+        // best-placed one — the rank is over ALL gold chunks, not just the
+        // first answer's. Pinned by
+        // `a_rank_is_the_best_placed_gold_chunk_not_the_first_answers`.
         let rank = returned
             .iter()
             .position(|id| gold.contains(id))
@@ -86,7 +81,7 @@ pub fn run_lexical(
 ///
 /// Chunks of the question's **own** document, and of no other. That an answer
 /// sentence does not also lie in some other document of the corpus is task 9's
-/// `Problem::SentenceInAnotherDocument` (`preflight.rs:182`); here it is
+/// `Problem::SentenceInAnotherDocument` (`preflight.rs:169`); here it is
 /// assumed, not paid for again on every question.
 fn gold_chunks(indexed: &IndexedCorpus, q: &Question) -> Result<Vec<i64>, EvalError> {
     let refuse = |why: String| EvalError::Questions(format!("{}: {why}; preflight names it", q.id));
@@ -94,10 +89,7 @@ fn gold_chunks(indexed: &IndexedCorpus, q: &Question) -> Result<Vec<i64>, EvalEr
     let Some(document_id) = indexed.document_id(&q.document)? else {
         return Err(refuse(format!("{} is not in the index", q.document)));
     };
-    let chunks = indexed
-        .db()
-        .chunks_of_document(&document_id)
-        .map_err(index_error)?;
+    let chunks = indexed.db().chunks_of_document(&document_id)?;
 
     let mut gold = Vec::with_capacity(q.answers.len());
     for sentence in &q.answers {

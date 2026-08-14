@@ -32,6 +32,81 @@ fn question(id: &str, text: &str, document: &str, answer: &str) -> Question {
     }
 }
 
+/// Long enough to become more than one chunk: the chunker aims at
+/// `TARGET_CHARS` = 900 (`crates/mnema-chunk/src/lib.rs:34`), and the filler
+/// alone is past twice that. The two marker sentences sit at the very start
+/// and the very end, where the 15% overlap cannot copy them into a second
+/// chunk — `resolve_gold` would answer `Several` and the run would refuse.
+fn two_chunk_document() -> String {
+    let filler =
+        "Сторони погодили загальні умови співпраці та порядок обміну документами. ".repeat(30);
+    format!(
+        "Перше речення називає ратифікацію угоди.\n\n{filler}\n\n\
+         Останнє речення називає депозитарій конвенції."
+    )
+}
+
+fn long_corpus() -> Corpus {
+    Corpus {
+        documents: vec![Document {
+            id: "uk/long.md".to_string(),
+            language: Language::Uk,
+            text: two_chunk_document(),
+        }],
+    }
+}
+
+#[test]
+fn an_outcome_carries_the_class_of_its_question() {
+    // Every other fixture here is `Literal`, so a field hardwired to `Literal`
+    // would look right in all of them. Spec §7 groups the report's table by
+    // this field: wrong class, right count on the wrong row.
+    let indexed = IndexedCorpus::build(&corpus(), support::worker()).unwrap();
+    let mut q = question(
+        "q-1",
+        "договір",
+        "uk/one.md",
+        "Договір складено у двох примірниках.",
+    );
+    q.class = Class::Paraphrase;
+    let outcomes = run_lexical(&indexed, &QuestionSet { questions: vec![q] }).unwrap();
+    assert_eq!(outcomes[0].class, Class::Paraphrase);
+}
+
+#[test]
+fn a_rank_is_the_best_placed_gold_chunk_not_the_first_answers() {
+    // Two answer sentences in two different chunks, and a query word that only
+    // the SECOND one's chunk holds. An implementation that ranked `gold[0]` —
+    // the first answer's chunk — would answer `None` here.
+    let indexed = IndexedCorpus::build(&long_corpus(), support::worker()).unwrap();
+    let questions = QuestionSet {
+        questions: vec![Question {
+            id: "q-1".to_string(),
+            language: Language::Uk,
+            class: Class::Topical,
+            text: "депозитарій".to_string(),
+            document: "uk/long.md".to_string(),
+            answers: vec![
+                "Перше речення називає ратифікацію угоди.".to_string(),
+                "Останнє речення називає депозитарій конвенції.".to_string(),
+            ],
+        }],
+    };
+    let outcome = run_lexical(&indexed, &questions).unwrap().remove(0);
+    // Without this the fixture could be one chunk, both answers could name it,
+    // and `gold[0]` would rank first by accident.
+    assert_ne!(
+        outcome.gold[0], outcome.gold[1],
+        "the document must have split: {outcome:?}"
+    );
+    assert_eq!(
+        outcome.returned,
+        vec![outcome.gold[1]],
+        "only the second answer's chunk may come back: {outcome:?}"
+    );
+    assert_eq!(outcome.rank, Some(1), "outcome: {outcome:?}");
+}
+
 #[test]
 fn a_question_whose_words_are_all_in_the_gold_chunk_finds_it_first() {
     let indexed = IndexedCorpus::build(&corpus(), support::worker()).unwrap();

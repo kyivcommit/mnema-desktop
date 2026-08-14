@@ -62,6 +62,15 @@ impl From<std::io::Error> for EvalError {
     }
 }
 
+/// The same trade as `Io` above, and the reason every index call in this crate
+/// is a bare `?`: the message survives, the type does not, and nothing here
+/// branches on which index error it was.
+impl From<mnema_index::Error> for EvalError {
+    fn from(err: mnema_index::Error) -> Self {
+        EvalError::Index(err.to_string())
+    }
+}
+
 /// The corpus shipped with this crate.
 pub fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus")
