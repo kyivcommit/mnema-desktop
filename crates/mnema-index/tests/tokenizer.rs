@@ -57,12 +57,18 @@ fn db_with(texts: &[(&str, SourceKind)]) -> (tempfile::TempDir, Db, Vec<i64>) {
 }
 
 /// D32's correction, and the test that would have caught the defect it names:
-/// `remove_diacritics 2` does not touch the Cyrillic breve, so a precomposed
-/// `й` (U+0439) and its decomposed spelling `и` (U+0438) + combining breve
-/// (U+0306) are two different tokens without NFC. macOS hands over the
-/// decomposed form; a query typed on another machine is precomposed — so
-/// without normalisation the document is unfindable by its own spelling, in
+/// a precomposed `й` (U+0439) and its decomposed spelling `и` (U+0438) +
+/// combining breve (U+0306) are two different tokens without NFC. macOS hands
+/// over the decomposed form; a query typed on another machine is precomposed —
+/// so without normalisation the document is unfindable by its own spelling, in
 /// either direction.
+///
+/// Not because `remove_diacritics 2` spares the breve. Measured in
+/// `search_terms_matches_what_fts5_stores_for_every_mark`, a standalone U+0306
+/// is deleted whatever precedes it; what the tokenizer's table does not carry
+/// is the *precomposed* U+0439. So the decomposed spelling tokenizes as plain
+/// `и` and the precomposed one as `й` — still two tokens, by the opposite
+/// mechanism to the one this comment used to give.
 #[test]
 fn both_forms_of_the_same_ukrainian_word_produce_one_token() {
     let precomposed = "йод"; // й = U+0439
@@ -492,4 +498,363 @@ fn fts5_operators_are_not_a_query_language_here() {
     let (_d, db, _) = db_with(&[("витрати і бюджет на 2024", SourceKind::Document)]);
     assert_eq!(db.search_lexical("витрати бюджет", 10).unwrap().len(), 1);
     assert_eq!(db.search_lexical("витрати OR бюджет", 10).unwrap().len(), 0);
+}
+
+/// The harness reasons about "the words the engine will demand". That is
+/// `prepare_for_search` plus the index's own splitting, and the second half is
+/// `pub(crate)` — so a caller outside this crate that split the prepared string
+/// itself would be inventing a second definition of "term".
+#[test]
+fn search_terms_are_the_words_the_index_demands() {
+    let t = mnema_index::search_terms("hello world");
+    assert_eq!(t, vec!["hello".to_string(), "world".to_string()]);
+
+    // Case is folded here rather than left to FTS5. The tokenizer lowercases at
+    // index time and at query time, so a caller comparing a question's terms
+    // with an answer's would otherwise miss `Договір` against `договір` — a
+    // difference the search itself does not have.
+    assert_eq!(
+        mnema_index::search_terms("Договір Оренди"),
+        vec!["договір".to_string(), "оренди".to_string()]
+    );
+
+    // The other direction, which a length assertion alone would not catch:
+    // separators alone are no terms at all. This is the same emptiness
+    // `search_lexical` turns into "no rows" instead of a syntax error
+    // (`search.rs:34-37`).
+    assert!(mnema_index::search_terms("(((").is_empty());
+
+    // The discriminating case for the hardcoded `SourceKind::Document`: every
+    // assertion above holds identically whether `search_terms` prepares as
+    // Document or as Code, because `expand_camel_case` leaves a word that
+    // does not split untouched. An identifier is what tells the two apart —
+    // as Code this prepares to `"getUserName get User Name"` and yields four
+    // terms, so only the Document reading collapses it to one.
+    assert_eq!(
+        mnema_index::search_terms("getUserName"),
+        vec!["getusername".to_string()]
+    );
+}
+
+/// The proof for `search_terms`'s diacritics fold. Not a check that
+/// `search_lexical` finds the chunk when queried with the reported term —
+/// that does not discriminate, because `search_lexical` re-runs
+/// `remove_diacritics 2`'s fold on whatever query string it is handed, so an
+/// *unstripped* term would be found too, by a second, independent pass
+/// through the same fold, and the check would pass whether or not
+/// `search_terms` stripped anything at all. Measured: it still passed with
+/// the stripping step removed.
+///
+/// This reads FTS5's own vocabulary instead. `fts5vocab('chunk_fts',
+/// 'instance')` names, per occurrence, the term actually stored and the
+/// rowid (chunk id) it occurs in — so this compares `search_terms`'s output
+/// against the term FTS5 truly recorded for the chunk, not against a second
+/// pass through the same tokenizer.
+///
+/// Covers a Latin word with a diaeresis, one with an acute accent, plain
+/// ASCII, two Ukrainian words — one carrying `й`, one carrying `ї` — a
+/// Ukrainian word carrying the stress accent, and a set of Latin letters
+/// straddling the boundary between those with a canonical decomposition and
+/// those without.
+///
+/// `сло́во` is the case this fixture was extended for. U+043E has no
+/// precomposed acute form, so the mark survives NFC and stands alone in the
+/// text the tokenizer receives — the tokenizer deletes it and stores `слово`,
+/// while a `search_terms` that required an ASCII base before stripping
+/// reported `сло́во`. Quoted from the run that found it: `search_terms
+/// reported {"сло\u{301}во"}, FTS5 actually stored {"слово"}`.
+///
+/// What is claimed here is agreement, and only agreement. Both sides fold
+/// `Zürich`, `łódź`, `ō`, `ď`, `ĥ` and `ĺ` the same way and leave `й`, `ї`,
+/// `ł`, `ø`, `æ`, `đ`, `ħ`, `ŋ`, `ð`, `þ`, `œ` and `ı` alone; the mechanisms
+/// behind that are **not** the same and this test does not say they are.
+/// `strip_latin_diacritics` asks NFD for a base and takes it when it is
+/// ASCII; SQLite's `fts5_remove_diacritic` binary-searches a hardcoded code
+/// point table and never decomposes anything. Two mechanisms landing on one
+/// result is exactly what a test can establish and a comment cannot, which is
+/// why the agreement is measured here per input rather than argued anywhere.
+#[test]
+fn search_terms_reports_the_terms_fts5_actually_stored() {
+    let texts = [
+        "Zürich",
+        "café",
+        "hello",
+        "йод",
+        "їжак",
+        "łódź",
+        "Ærø",
+        "сло\u{0301}во",
+        // The decomposition boundary, measured rather than reasoned about:
+        // each atomic letter is paired with a look-alike that decomposes, so
+        // this fixture is what backs `mnema_core::nfc`'s claim that the two
+        // columns fold differently.
+        "đď",
+        "ħĥ",
+        "łĺ",
+        "øō",
+        "ŋðþœı",
+        // Three stroke letters no other test names, so that `mnema_core::nfc`'s
+        // assertion about them stands on a measurement rather than on the same
+        // reasoning it is trying to check.
+        "ƀɏƶ",
+    ];
+    let (_d, db, ids) = db_with(&texts.map(|t| (t, SourceKind::Document)));
+
+    db.conn()
+        .execute_batch("CREATE VIRTUAL TABLE chunk_vocab USING fts5vocab('chunk_fts', 'instance')")
+        .unwrap();
+
+    for (i, text) in texts.iter().enumerate() {
+        let mut stmt = db
+            .conn()
+            .prepare("SELECT DISTINCT term FROM chunk_vocab WHERE doc = ?1")
+            .unwrap();
+        let stored: std::collections::BTreeSet<String> = stmt
+            .query_map([ids[i]], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        let reported: std::collections::BTreeSet<String> =
+            mnema_index::search_terms(text).into_iter().collect();
+
+        assert_eq!(
+            reported, stored,
+            "{text:?}: search_terms reported {reported:?}, FTS5 actually stored {stored:?}"
+        );
+    }
+}
+
+/// Where `mnema_core::nfc::is_stripped_mark`'s set comes from, and what stops
+/// it drifting from the tokenizer it claims to mirror.
+///
+/// The set is hand-written, so on its own it is an assertion about SQLite's
+/// internals — the kind this project has already paid for believing. This
+/// sweeps the whole combining-marks block through the real index and compares
+/// what `search_terms` reports against what FTS5 stored, mark by mark, so the
+/// set is measured on every run rather than decoded once from `sqlite3.c`.
+/// It goes red in both directions: a mark added to the set that the tokenizer
+/// keeps, and a mark dropped from it that the tokenizer deletes.
+///
+/// Two bases, because the fold has two independent halves. `ф` composes with
+/// none of these marks, so each one reaches the tokenizer standing alone —
+/// the case a base-conditional predicate got wrong, and the case Ukrainian
+/// stress accents fall into. `a` composes with many of them, so the same
+/// sweep also exercises the precomposed-letter half without a second test.
+///
+/// Hebrew, Arabic and Devanagari are swept too, and not for symmetry.
+/// `is_stripped_mark`'s doc comment claims their marks are outside the set
+/// and that this is the whole of their protection — a claim that named this
+/// sweep as its evidence while the sweep ran only U+0300–U+036F, so the
+/// evidence did not exist. U+0591–U+05C7, U+064B–U+0652 and U+0900–U+0954
+/// are now in the loop, and for them the check is stronger than agreement:
+/// every code point Unicode calls a combining mark must still be *present* in
+/// what the tokenizer stored. Agreement alone would be satisfied by both
+/// sides deleting a mark, which is precisely the outcome those ranges are
+/// claimed to be safe from.
+///
+/// The counts at the end are floors, no more: they catch a sweep that stored
+/// nothing, one in which every mark went the same way, or one that quietly
+/// stopped covering a script. The per-input equality is what does the real
+/// work, and a floor of one-and-one cannot stand in for it.
+///
+/// **One floor per script, and that is the point.** A single floor summed over
+/// the three non-Latin ranges was measured to let two of them vanish in
+/// silence: dropping Devanagari left 59 marks and dropping Arabic left 80,
+/// both clear of a combined floor of 50, so only Hebrew was ever really
+/// guarded. A floor an entire script can walk under is not a floor for that
+/// script — and Devanagari, the one the doc comment names most concretely, was
+/// the least protected of the three.
+///
+/// **What this instrument cannot see.** Both sides of the comparison run
+/// through `prepare_for_search`. If diacritic stripping ever moved *into*
+/// that function, the query side and the indexed side would fold identically,
+/// every input here would agree, and this test would stay green — while
+/// `chunk.text` and the index diverged, which is the exact failure this cycle
+/// exists to prevent. The harness matches answer sentences against
+/// `chunk.text`, so that divergence would be silent and this is the wrong
+/// instrument to notice it. Anything that moves folding earlier in the
+/// pipeline needs its own check against the unprepared column.
+#[test]
+fn search_terms_matches_what_fts5_stores_for_every_mark() {
+    use unicode_general_category::{GeneralCategory, get_general_category};
+
+    // The Latin marks behind both bases; the non-Latin ranges behind `ф`
+    // alone, since none of them composes with either base and a second base
+    // would only repeat the same measurement.
+    // Each non-Latin range carries its own name and its own floor, because one
+    // floor summed over all three is a guard a whole script can walk under.
+    // Measured: Hebrew contributes 51 combining marks, Devanagari 29, Arabic 8
+    // — so a combined floor of 50 fired only when Hebrew vanished, and dropping
+    // Devanagari (59 left) or Arabic (80 left) passed in silence. Devanagari is
+    // the script `is_stripped_mark`'s doc comment names most concretely, "the
+    // Devanagari virama and matra", so it was the one least protected.
+    //
+    // Each floor is about half its measured count: enough that a range going to
+    // zero or being truncated fails, loose enough that a Unicode update moving
+    // a few marks does not fail a test which is not about the count. The
+    // measured numbers are here rather than in the assertion for the reason
+    // `is_stripped_mark`'s own list carries no total — a number beside a
+    // definition is a second definition, and it drifts.
+    const NON_LATIN: &[(&str, u32, u32, usize)] = &[
+        ("Hebrew", 0x0591, 0x05C7, 25),
+        ("Arabic", 0x064B, 0x0652, 4),
+        ("Devanagari", 0x0900, 0x0954, 14),
+    ];
+
+    // `None` marks the Latin block, `Some(i)` indexes `NON_LATIN`.
+    let mut marks: Vec<(char, u32, Option<usize>)> = ['ф', 'a']
+        .into_iter()
+        .flat_map(|base| (0x0300u32..=0x036F).map(move |m| (base, m, None)))
+        .collect();
+    for (i, (_, first, last, _)) in NON_LATIN.iter().enumerate() {
+        marks.extend((*first..=*last).map(|m| ('ф', m, Some(i))));
+    }
+    let texts: Vec<String> = marks
+        .iter()
+        .map(|(base, m, _)| format!("{base}{}", char::from_u32(*m).unwrap()))
+        .collect();
+    let pairs: Vec<(&str, SourceKind)> = texts
+        .iter()
+        .map(|t| (t.as_str(), SourceKind::Document))
+        .collect();
+    let (_d, db, ids) = db_with(&pairs);
+
+    db.conn()
+        .execute_batch("CREATE VIRTUAL TABLE chunk_vocab USING fts5vocab('chunk_fts', 'instance')")
+        .unwrap();
+
+    // U+0345 is not a diacritics case and is excluded on purpose, with the
+    // measurement recorded rather than the input quietly dropped. FTS5 *case
+    // folds* it to ι (U+03B9) — `"ф\u{0345}"` stores as `"фι"` — while
+    // `to_lowercase` leaves it alone, which is the `to_lowercase`-is-not-
+    // case-folding gap `search_terms`'s own doc comment names. Closing it
+    // needs a case-folding dependency and a decision about which fold this
+    // product owes; both are outside a fix round about diacritics.
+    //
+    // Asserted as a *live* disagreement, not skipped: if a later change makes
+    // it agree, this goes red and says so, instead of leaving a stale
+    // exception nobody revisits. The measured values are pinned rather than
+    // merely required to differ — `assert_ne!` alone is satisfied by a
+    // `search_terms` broken on this input for any reason at all, including the
+    // one thing this branch is meant to rule out, a predicate that started
+    // stripping U+0345 as if it were a diacritic.
+    const KNOWN_FOLD_GAP: char = '\u{0345}';
+
+    let mut disagreements = Vec::new();
+    let (mut mark_deleted, mut mark_survived, mut gaps_seen) = (0, 0, 0);
+    let mut non_latin_marks_checked = vec![0usize; NON_LATIN.len()];
+    for (i, text) in texts.iter().enumerate() {
+        let mut stmt = db
+            .conn()
+            .prepare("SELECT DISTINCT term FROM chunk_vocab WHERE doc = ?1")
+            .unwrap();
+        let stored: std::collections::BTreeSet<String> = stmt
+            .query_map([ids[i]], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let reported: std::collections::BTreeSet<String> =
+            mnema_index::search_terms(text).into_iter().collect();
+
+        assert!(!stored.is_empty(), "{text:?} stored no term at all");
+        if stored.iter().any(|t| t.chars().count() > 1) {
+            mark_survived += 1;
+        } else {
+            mark_deleted += 1;
+        }
+
+        // For the non-Latin ranges the claim is survival, not just agreement:
+        // both sides deleting the mark would agree perfectly and would be
+        // exactly the outcome `is_stripped_mark`'s doc comment says cannot
+        // happen. Only real combining marks are held to it — these ranges also
+        // contain Hebrew punctuation and Devanagari consonants, which are not
+        // marks and have no business surviving as one.
+        let (base, mark, range) = marks[i];
+        let mark = char::from_u32(mark).unwrap();
+        if let Some(range) = range
+            && matches!(
+                get_general_category(mark),
+                GeneralCategory::NonspacingMark | GeneralCategory::SpacingMark
+            )
+        {
+            non_latin_marks_checked[range] += 1;
+            assert!(
+                stored.iter().all(|t| t.contains(mark)),
+                "U+{:04X} is a {} combining mark and the tokenizer dropped it: stored {stored:?}",
+                mark as u32,
+                NON_LATIN[range].0
+            );
+        }
+
+        if text.contains(KNOWN_FOLD_GAP) {
+            gaps_seen += 1;
+            // The measured values, not merely "these differ". FTS5 case folds
+            // U+0345 to ι; `to_lowercase` leaves it standing.
+            assert_eq!(
+                stored,
+                std::collections::BTreeSet::from([format!("{base}\u{03B9}")]),
+                "the stored side of the known gap changed"
+            );
+            assert_eq!(
+                reported,
+                std::collections::BTreeSet::from([format!("{base}{KNOWN_FOLD_GAP}")]),
+                "the reported side of the known gap changed"
+            );
+            // And the gap is the *report's*, not the search's: both sides of a
+            // real query fold identically, so the chunk is still findable by
+            // its own spelling. Without this the exception would be hiding an
+            // actual search defect behind a note about reporting.
+            assert_eq!(
+                db.search_lexical(text, 10).unwrap(),
+                vec![ids[i]],
+                "{text:?} must still be findable by its own spelling"
+            );
+            continue;
+        }
+
+        if reported != stored {
+            disagreements.push(format!(
+                "{text:?}: reported {reported:?}, stored {stored:?}"
+            ));
+        }
+    }
+
+    assert!(
+        disagreements.is_empty(),
+        "{} of {} inputs disagreed:\n{}",
+        disagreements.len(),
+        texts.len(),
+        disagreements.join("\n")
+    );
+    assert_eq!(gaps_seen, 2, "both bases must have exercised the known gap");
+    // Floors, not coverage. The per-input equality above is what proves the
+    // predicate; these only rule out a run that stored nothing, swept an empty
+    // range, or saw every mark go the same way — states in which the equality
+    // assertions would pass without having been asked anything.
+    assert!(
+        mark_deleted > 0 && mark_survived > 0,
+        "the sweep saw only one outcome ({mark_deleted} deleted, {mark_survived} survived), so \
+         agreement here says nothing about telling them apart"
+    );
+    // Collected rather than asserted in place, so one run names every script
+    // that fell under its floor. Asserting inside the loop would stop at the
+    // first, and "the other two were fine" would be an inference rather than
+    // something the output says.
+    let starved: Vec<String> = NON_LATIN
+        .iter()
+        .enumerate()
+        .filter(|(range, (_, _, _, floor))| non_latin_marks_checked[*range] <= *floor)
+        .map(|(range, &(script, _, _, floor))| {
+            format!(
+                "{script}: {} marks reached, floor {floor}",
+                non_latin_marks_checked[range]
+            )
+        })
+        .collect();
+    assert!(
+        starved.is_empty(),
+        "a script stopped being covered and the sweep still agreed on everything it did reach:\n{}",
+        starved.join("\n")
+    );
 }

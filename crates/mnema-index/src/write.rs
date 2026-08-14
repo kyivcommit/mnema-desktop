@@ -786,6 +786,42 @@ impl Db {
             relative_path: row.get(4)?,
         }))
     }
+
+    /// Every chunk of one document, in `ord` order, with the text as stored.
+    ///
+    /// `citation` answers about a chunk whose id the caller already has. This is
+    /// the other direction, and the evaluation harness is why it exists: a gold
+    /// chunk is named by a sentence, and `chunk.id` is reassigned on every
+    /// re-index, so the id has to be recovered from the text every run.
+    ///
+    /// Ordered by `ord` rather than by `id` — the two agree today and the schema
+    /// promises only the first (`schema.sql:152`, "explicit; the server has none").
+    ///
+    /// Unfiltered by `document.status`, on purpose, and that is a disagreement
+    /// with `search_lexical` rather than an oversight: `search_lexical` answers
+    /// only from a document whose status is `indexed` (`search.rs:42`), while
+    /// this returns a document's chunks whatever its status — including
+    /// `pending`. A method that filtered here would hide a corpus defect (a
+    /// document the harness expects to be searchable but is not) behind an
+    /// empty answer identical to "no such document", indistinguishable from
+    /// each other by anything this method returns. Whatever judges document
+    /// status owes itself that distinction, so it must read the status
+    /// directly rather than infer it from this method going quiet — a caller
+    /// comparing this method's answer with `search_lexical`'s is comparing two
+    /// different populations of chunk.
+    pub fn chunks_of_document(&self, document_id: &str) -> Result<Vec<(i64, String)>, Error> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT id, text FROM chunk WHERE document_id = ?1 ORDER BY ord")?;
+        let rows = stmt.query_map(params![document_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
 }
 
 /// Panics unless `tx` is a transaction on `db`'s own connection.

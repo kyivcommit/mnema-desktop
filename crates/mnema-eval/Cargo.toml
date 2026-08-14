@@ -1,0 +1,35 @@
+[package]
+name = "mnema-eval"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# The instrument that judges search. Not part of the bundle: nothing in
+# `src-tauri` depends on it, and nothing here may be depended on by shipping
+# code. It is allowed to know about the whole pipeline precisely because it
+# ships nowhere.
+#
+# No `rusqlite` here, deliberately, on the rule `mnema-embed` states: everything
+# from the database arrives through `Db`'s own methods.
+#
+# `mnema-ingest`, `mnema-pool` and `tempfile` are dependencies and not
+# dev-dependencies, which spec §8 had predicted the other way round. They
+# follow `IndexedCorpus`, and it lives in `src/`, not in `tests/`: it walks the
+# corpus into a fresh index (`mnema-ingest`) through the extraction pool
+# (`mnema-pool`), and it holds the `TempDir` whose lifetime *is* the "a
+# temporary directory per run" guarantee (`tempfile`). For a crate that ships
+# nowhere this is not a debt.
+[dependencies]
+mnema-core = { path = "../mnema-core" }
+mnema-index = { path = "../mnema-index" }
+mnema-ingest = { path = "../mnema-ingest" }
+mnema-pool = { path = "../mnema-pool" }
+mnema-walk = { path = "../mnema-walk" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "eval"
+path = "src/bin/eval.rs"

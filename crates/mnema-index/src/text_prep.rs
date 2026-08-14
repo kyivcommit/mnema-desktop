@@ -57,6 +57,60 @@ pub fn prepare_for_search(text: &str, kind: SourceKind) -> String {
     }
 }
 
+/// The terms the lexical index will demand for `text`.
+///
+/// `search_lexical` runs `prepare_for_search(query, SourceKind::Document)`
+/// (`search.rs:31`) and then `terms`, one call deeper inside `as_fts5_phrases`
+/// (`search.rs:91`); this is those two halves, joined and owned, because
+/// `terms` borrows from a string the caller does not hold and is `pub(crate)`
+/// besides.
+///
+/// No `kind` parameter, on purpose: `search_lexical` hardcodes
+/// `SourceKind::Document` for every query, not the kind of the thing being
+/// searched, because code chunks are indexed with camelCase expanded and
+/// preparing the query the same way would turn one identifier into four
+/// demanded terms instead of one (`search.rs:14-23`). A caller reasoning
+/// about "the words the engine demands" therefore has no legitimate second
+/// reading to ask for here — offering one would let it model a query the
+/// engine never actually runs. If a caller ever needs the corpus-side reading
+/// of a code chunk for something else, that is a different question and
+/// belongs behind a new, visible parameter rather than a silently wrong
+/// answer from this one.
+///
+/// Lowercased here on purpose. FTS5's `unicode61` folds case on both sides of a
+/// MATCH, so `Договір` and `договір` are one term to the *search* — a caller
+/// comparing two texts' terms has to see the same thing. `to_lowercase` is
+/// Unicode's default full lowercase *mapping*, a different operation from case
+/// *folding* — Unicode's fold maps `ß` to `ss` and `ﬁ` to `fi` while
+/// `to_lowercase` leaves both alone — and it is not byte-identical to FTS5's
+/// own fold for every script on earth. Where the two disagree, the
+/// disagreement belongs in a test rather than in a promise.
+///
+/// Exactly one is measured, and it is not `ß` or `ﬁ`: `unicode61` leaves those
+/// two alone as well, so this function and the index agree on them and there
+/// is nothing there to close. The one real divergence is U+0345, which FTS5
+/// case folds to ι and `to_lowercase` does not, so this over-reports for a
+/// Greek iota subscript. `search_terms_matches_what_fts5_stores_for_every_mark`
+/// pins both sides of it by value and proves the affected text is still
+/// findable by its own spelling, since a real query folds on both sides.
+///
+/// Diacritics stripped here too, for the same reason: `schema.sql` configures
+/// the tokenizer with `remove_diacritics 2`, which folds a Latin word's
+/// accented and unaccented spellings onto one token — `Zürich` and `Zurich`
+/// are one term to the index. It does **not** leave Cyrillic alone, which is
+/// the correction this line carries: the tokenizer strips by code point
+/// without consulting the base, so the Ukrainian stress accent goes and
+/// `сло́во` is stored as `слово`. What survives is the *precomposed* letter —
+/// `й` and `ї` keep their marks because U+0439 and U+0457 are not in the
+/// tokenizer's table, not because their script is spared (D32).
+/// `strip_latin_diacritics` mirrors both halves, so this reports the string
+/// the index actually stores rather than the merely lowercased one.
+pub fn search_terms(text: &str) -> Vec<String> {
+    let prepared = prepare_for_search(text, SourceKind::Document);
+    let prepared = mnema_core::nfc::strip_latin_diacritics(&prepared);
+    terms(&prepared).map(|t| t.to_lowercase()).collect()
+}
+
 /// Splits prepared text into the terms the tokenizer will see: letters, digits
 /// and word-internal apostrophes, with everything else a separator.
 ///
