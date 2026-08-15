@@ -884,3 +884,36 @@ fn the_unparameterised_search_is_the_all_terms_rule() {
         );
     }
 }
+
+/// The measured cause of `recall = 0.0%`: a question carries a word no document
+/// contains, and under `AllTerms` that one word empties the result. `AnyTerm`
+/// is the crudest answer to it — and the test asserts both directions, because
+/// a rule that returned everything would satisfy the first half alone.
+#[test]
+fn any_term_survives_a_word_no_document_has() {
+    let (_d, db, _) = db_with(&[
+        ("бюджет затверджено на ремонт даху", SourceKind::Document),
+        ("протокол засідання комісії", SourceKind::Document),
+    ]);
+    let all = db
+        .search_lexical_with("де бюджет", mnema_index::QueryRule::AllTerms, 10)
+        .unwrap();
+    assert!(all.is_empty(), "AllTerms must still be empty here: {all:?}");
+
+    let any = db
+        .search_lexical_with("де бюджет", mnema_index::QueryRule::AnyTerm, 10)
+        .unwrap();
+    assert_eq!(
+        any.len(),
+        1,
+        "only the budget chunk holds any of these words"
+    );
+
+    // The other direction: a word no chunk holds still returns nothing, so
+    // `AnyTerm` is not "return everything".
+    assert!(
+        db.search_lexical_with("деінде", mnema_index::QueryRule::AnyTerm, 10)
+            .unwrap()
+            .is_empty()
+    );
+}

@@ -75,7 +75,7 @@ impl Db {
         let prepared = crate::prepare_for_search(query, mnema_core::SourceKind::Document);
         let expr = match rule {
             QueryRule::AllTerms => as_fts5_phrases(&prepared),
-            QueryRule::AnyTerm => as_fts5_phrases(&prepared),
+            QueryRule::AnyTerm => as_fts5_any(&prepared),
             QueryRule::TermsInIndex => as_fts5_phrases(&prepared),
             QueryRule::TermsInIndexOrAnyTerm => as_fts5_phrases(&prepared),
         };
@@ -144,6 +144,27 @@ fn as_fts5_phrases(prepared: &str) -> String {
     for term in crate::text_prep::terms(prepared) {
         if !out.is_empty() {
             out.push(' ');
+        }
+        out.push('"');
+        out.push_str(term);
+        out.push('"');
+    }
+    out
+}
+
+/// Joins each quoted term with FTS5's `OR`, so any one term matches and `rank`
+/// (bm25) decides the order. The server's lexical arm works this way —
+/// `app/search/hybrid.py:36`, "BM25 match is `content ||| :q` (OR-tokenized)".
+///
+/// Quoting is unchanged and load-bearing for the same reason it is in
+/// `as_fts5_phrases`: it is what keeps a person's `OR` a word rather than an
+/// operator. Pinned by `any_term_survives_a_word_no_document_has` and by
+/// `fts5_operators_are_not_a_query_language_here`.
+fn as_fts5_any(prepared: &str) -> String {
+    let mut out = String::new();
+    for term in crate::text_prep::terms(prepared) {
+        if !out.is_empty() {
+            out.push_str(" OR ");
         }
         out.push('"');
         out.push_str(term);
