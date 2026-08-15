@@ -49,10 +49,34 @@ pub fn fuse(rule: FusionRule, text: &[i64], content: &[i64], limit: usize) -> Ve
         FusionRule::TextOnly => text.to_vec(),
         FusionRule::ContentOnly => content.to_vec(),
         FusionRule::Rrf => rrf(text, content),
-        FusionRule::Interleave => text.to_vec(),
+        FusionRule::Interleave => interleave(text, content),
         FusionRule::Cascade => text.to_vec(),
     };
     fused.into_iter().take(limit).collect()
+}
+
+/// Takes one from each arm in turn, text first, and skips a chunk already
+/// taken. An exhausted arm does not stop the other. Pinned by
+/// `interleave_alternates_and_keeps_each_chunk_once`.
+fn interleave(text: &[i64], content: &[i64]) -> Vec<i64> {
+    use std::collections::BTreeSet;
+
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::with_capacity(text.len() + content.len());
+    let push = |id: i64, out: &mut Vec<i64>, seen: &mut BTreeSet<i64>| {
+        if seen.insert(id) {
+            out.push(id);
+        }
+    };
+    for i in 0..text.len().max(content.len()) {
+        if let Some(&id) = text.get(i) {
+            push(id, &mut out, &mut seen);
+        }
+        if let Some(&id) = content.get(i) {
+            push(id, &mut out, &mut seen);
+        }
+    }
+    out
 }
 
 /// Sums `1/(RRF_K + position)` over both arms, positions counted from one, and

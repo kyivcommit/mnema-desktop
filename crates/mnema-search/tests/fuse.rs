@@ -99,6 +99,28 @@ fn rrf_lifts_the_chunk_that_stands_high_in_both_arms() {
     assert!(fuse(FusionRule::Rrf, &text, &content, 10).contains(&33));
 }
 
+/// Alternates the arms, dropping a chunk the other arm already contributed.
+#[test]
+fn interleave_alternates_and_keeps_each_chunk_once() {
+    let text = [7, 12, 3];
+    let content = [12, 5, 7];
+
+    assert_eq!(
+        fuse(FusionRule::Interleave, &text, &content, 10),
+        vec![7, 12, 5, 3]
+    );
+
+    // An exhausted arm does not stall the other: the longer list continues.
+    assert_eq!(
+        fuse(FusionRule::Interleave, &[1, 2, 3], &[9], 10),
+        vec![1, 9, 2, 3]
+    );
+    assert_eq!(
+        fuse(FusionRule::Interleave, &[9], &[1, 2, 3], 10),
+        vec![9, 1, 2, 3]
+    );
+}
+
 /// Ties are ordinary here, not an edge case: two chunks each appearing once at
 /// the same position score identically. The server calls the tie-break a
 /// correctness requirement (`app/search/hybrid.py:50`), and without it two runs
