@@ -18,6 +18,10 @@ const WIDTH: usize = 1024;
 /// A second model name, adopted and then never embedded into — the model
 /// [`indexed_space_with_a_decoy_model`] wants recorded in the database next
 /// to the real one, so a name genuinely present but not the active space's.
+///
+/// `#[allow(dead_code)]`: not every binary that declares `mod support;`
+/// calls this one.
+#[allow(dead_code)]
 pub const DECOY_MODEL: &str = "openai/decoy-embedding";
 
 pub struct TempDb {
@@ -35,7 +39,9 @@ impl std::ops::Deref for TempDb {
 pub struct Fixture {
     pub db: TempDb,
     pub chunk_ids: Vec<i64>,
+    #[allow(dead_code)]
     pub embedded_ids: Vec<i64>,
+    #[allow(dead_code)]
     pub space_model: String,
 }
 
@@ -43,6 +49,7 @@ impl Fixture {
     /// Renames the `chunk` table so `Db::chunk_count` returns `Err` for the
     /// rest of this fixture's life — a count that cannot be read, not a
     /// table that is honestly empty.
+    #[allow(dead_code)]
     pub fn break_chunk_count(&self) {
         self.db
             .conn()
@@ -53,6 +60,7 @@ impl Fixture {
     /// Renames `chunk_embedding_state` so `Db::embedded_chunk_count` returns
     /// `Err` for the rest of this fixture's life, on the one table
     /// `Db::chunk_count` and `Db::knn` never read.
+    #[allow(dead_code)]
     pub fn break_embedded_count(&self) {
         self.db
             .conn()
@@ -66,6 +74,8 @@ impl Fixture {
 /// given, is adopted first — while every space is still empty, the one
 /// moment [`Db::adopt_embedding_model`] permits a second one to exist —
 /// so it never gets a vector and the active space ends on the real model.
+/// Each chunk's text carries "ремонт даху", the query `search.rs` asks, so
+/// the real FTS5 index has something in it to find.
 fn built_space(total: usize, embedded: usize, decoy: Option<&str>) -> Fixture {
     let dir = tempfile::tempdir().expect("a temporary directory");
     register_vector_extension().expect("register the vector extension");
@@ -74,7 +84,7 @@ fn built_space(total: usize, embedded: usize, decoy: Option<&str>) -> Fixture {
         .insert_document(&"a".repeat(64), "text/plain", 64, SourceKind::Document)
         .expect("document");
     let chunk_ids: Vec<i64> = (0..total as i64)
-        .map(|ord| write_chunk(&db, &doc, ord, &format!("чанк {ord}")))
+        .map(|ord| write_chunk(&db, &doc, ord, &format!("ремонт даху, чанк {ord}")))
         .collect();
     db.set_document_status(&doc, DocumentStatus::Indexed)
         .expect("status");
@@ -108,6 +118,7 @@ pub fn indexed_space() -> Fixture {
 
 /// The same space, with the last chunk left unembedded — a coverage count
 /// that has a genuine gap to report instead of a full or empty index.
+#[allow(dead_code)]
 pub fn indexed_space_with_some_vectors_missing() -> Fixture {
     built_space(3, 2, None)
 }
@@ -116,6 +127,7 @@ pub fn indexed_space_with_some_vectors_missing() -> Fixture {
 /// left empty — a model genuinely on record that is not the active space's,
 /// so a test can tell "read the space's own model" apart from "read some
 /// model this database happens to know about."
+#[allow(dead_code)]
 pub fn indexed_space_with_a_decoy_model() -> Fixture {
     built_space(3, 3, Some(DECOY_MODEL))
 }
@@ -123,6 +135,7 @@ pub fn indexed_space_with_a_decoy_model() -> Fixture {
 /// A provider that answers with the exact vector already stored for
 /// `chunk_id` in `f` — cosine distance zero, so `knn` ranks it ahead of
 /// every other chunk `indexed_space` built.
+#[allow(dead_code)]
 pub fn mock_returning_vector_near(f: &Fixture, chunk_id: i64) -> MockServer {
     let axis = f
         .chunk_ids
@@ -139,6 +152,7 @@ pub fn mock_returning_vector_near(f: &Fixture, chunk_id: i64) -> MockServer {
 /// A provider that answers any single request with a valid vector, keeping
 /// that request's raw text for [`MockServer::request_if_any`] to hand back —
 /// for a test that cares which model was asked for, not which chunk won.
+#[allow(dead_code)]
 pub fn mock_recording_requests() -> MockServer {
     let row: Vec<String> = axis_vector(0).iter().map(|v| v.to_string()).collect();
     MockServer::new(vec![Reply::ok(&format!(
