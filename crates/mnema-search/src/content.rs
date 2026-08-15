@@ -58,7 +58,8 @@ pub enum ContentArm {
 ///
 /// The model comes from `Db::space_model`, never from the settings' current
 /// choice: a vector from another model is a coordinate on another map, and
-/// `knn` compares it silently.
+/// `knn` compares it silently. Will be pinned by task 14's
+/// `the_content_arm_refuses_a_model_that_is_not_the_spaces`, not yet written.
 pub fn content_arm(db: &Db, provider: Option<Provider>, query: &str, k: i64) -> ContentArm {
     let Some(provider) = provider else {
         return ContentArm::NotConfigured(Missing::NoKey);
