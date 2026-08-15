@@ -135,7 +135,10 @@ fn cascade_exhausts_the_text_arm_before_the_content_arm() {
     // The order within each arm is the arm's own, and the second arm never
     // reorders the first — the discriminating case against a rule that merely
     // concatenated and re-sorted.
-    assert_eq!(fuse(FusionRule::Cascade, &[3, 1], &[2], 10), vec![3, 1, 2]);
+    assert_eq!(
+        fuse(FusionRule::Cascade, &[3, 1], &[9, 2], 10),
+        vec![3, 1, 9, 2]
+    );
 }
 
 /// Ties are ordinary here, not an edge case: two chunks each appearing once at
