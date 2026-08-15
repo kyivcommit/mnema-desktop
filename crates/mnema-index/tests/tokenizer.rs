@@ -493,14 +493,30 @@ fn a_query_with_no_terms_returns_no_rows_rather_than_an_error() {
     assert_eq!(db.search_lexical("витрати", 10).unwrap().len(), 1);
 }
 
-/// Pinned, not endorsed. Every term is quoted, so `OR` reaches FTS5 as a third
-/// required word rather than as an operator — which makes the query strictly
-/// worse than the same words with no operator at all. Whether the product offers
-/// a query language is the search/RAG spec's decision and is open; this exists so
-/// the next person meets the boundary as a documented one.
+/// A person's `OR` is a word, under every rule. Pinned, not endorsed: the
+/// product offers no query language, and the ways FTS5 would read one —
+/// `OR`, `NEAR`, a prefix `*` — arrive quoted and therefore inert.
 #[test]
 fn fts5_operators_are_not_a_query_language_here() {
     let (_d, db, _) = db_with(&[("витрати і бюджет на 2024", SourceKind::Document)]);
+
+    // The word is data, not an operator: no rule may read it as one, and the
+    // discriminating case is a document that does not contain "or" at all.
+    for rule in mnema_index::QueryRule::ALL {
+        let with_operator = db
+            .search_lexical_with("витрати OR бюджет", rule, 10)
+            .unwrap();
+        let plain = db
+            .search_lexical_with("витрати бюджет or", rule, 10)
+            .unwrap();
+        assert_eq!(
+            with_operator, plain,
+            "{rule:?} read OR as syntax rather than as a word"
+        );
+    }
+
+    // And under the rule the unparameterised entry point uses, it is a third
+    // required word — strictly worse than the same two words alone.
     assert_eq!(db.search_lexical("витрати бюджет", 10).unwrap().len(), 1);
     assert_eq!(db.search_lexical("витрати OR бюджет", 10).unwrap().len(), 0);
 }
