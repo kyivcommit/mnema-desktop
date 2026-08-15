@@ -175,8 +175,8 @@ fn quoted_terms(prepared: &str, sep: &str) -> String {
 }
 
 /// One term, quoted for FTS5's MATCH grammar. The one place that owns the
-/// quoting rule — `quoted_terms` and `terms_present` both call this rather
-/// than each spelling `"` + term + `"` out again.
+/// quoting rule — `quoted_terms`, `terms_present` and `as_fts5_all_of` all
+/// call this rather than each spelling `"` + term + `"` out again.
 fn quote_term(term: &str) -> String {
     format!("\"{term}\"")
 }
