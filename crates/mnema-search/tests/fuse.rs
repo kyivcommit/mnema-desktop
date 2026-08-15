@@ -34,3 +34,30 @@ fn the_limit_cuts_the_fused_list_not_the_arms() {
     assert_eq!(fuse(FusionRule::TextOnly, &text, &[], 2), vec![1, 2]);
     assert_eq!(fuse(FusionRule::TextOnly, &text, &[], 0), Vec::<i64>::new());
 }
+
+/// `ALL` is a hand-written array a new variant will not join on its own; this
+/// guards its composition and order, not only its length.
+#[test]
+fn all_lists_every_variant_in_declaration_order() {
+    assert_eq!(
+        FusionRule::ALL,
+        [
+            FusionRule::TextOnly,
+            FusionRule::ContentOnly,
+            FusionRule::Rrf,
+            FusionRule::Interleave,
+            FusionRule::Cascade,
+        ]
+    );
+}
+
+/// `label` is the row name the sweep prints; each variant gets a distinct,
+/// stable string.
+#[test]
+fn label_names_every_variant() {
+    assert_eq!(FusionRule::TextOnly.label(), "text-only");
+    assert_eq!(FusionRule::ContentOnly.label(), "content-only");
+    assert_eq!(FusionRule::Rrf.label(), "rrf");
+    assert_eq!(FusionRule::Interleave.label(), "interleave");
+    assert_eq!(FusionRule::Cascade.label(), "cascade");
+}
