@@ -4,6 +4,8 @@
 //! `mnema-embed`: the index cannot reach a network, and the provider knows
 //! nothing about chunks.
 
+mod content;
 mod fuse;
 
+pub use content::{Arms, ContentArm, Missing, Provider, TextArm};
 pub use fuse::{CANDIDATES, FusionRule, RRF_K, fuse};
