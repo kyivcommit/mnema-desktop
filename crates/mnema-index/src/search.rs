@@ -87,6 +87,32 @@ impl Db {
         self.matching(&expr, limit)
     }
 
+    /// The query's terms that occur somewhere in the index, in the order they
+    /// were typed.
+    ///
+    /// One `MATCH` per term rather than a vocabulary table: `fts5vocab` would
+    /// need a line of DDL and a migration, and this runs on a query's worth of
+    /// words against a local file. If it ever measures as the narrow place, that
+    /// table is where to go. Pinned by
+    /// `a_terms_presence_is_asked_of_the_whole_index`.
+    pub fn terms_present(&self, prepared: &str) -> Result<Vec<String>, Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT 1 FROM chunk_fts
+               JOIN chunk ON chunk.id = chunk_fts.rowid
+               JOIN document ON document.id = chunk.document_id
+              WHERE chunk_fts MATCH ?1 AND document.status = 'indexed'
+              LIMIT 1",
+        )?;
+        let mut out = Vec::new();
+        for term in crate::text_prep::terms(prepared) {
+            let expr = format!("\"{term}\"");
+            if stmt.exists(params![expr])? {
+                out.push(term.to_string());
+            }
+        }
+        Ok(out)
+    }
+
     fn matching(&self, expr: &str, limit: i64) -> Result<Vec<i64>, Error> {
         let mut stmt = self.conn().prepare(
             "SELECT chunk_fts.rowid FROM chunk_fts

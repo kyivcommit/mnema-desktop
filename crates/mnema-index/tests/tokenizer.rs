@@ -942,3 +942,25 @@ fn any_term_survives_a_word_no_document_has() {
         "OR is data even under AnyTerm"
     );
 }
+
+/// The predicate `TermsInIndex` is built on, alone, so a later failure can be
+/// told apart from a failure of the rule that uses it.
+#[test]
+fn a_terms_presence_is_asked_of_the_whole_index() {
+    let (_d, db, _) = db_with(&[("бюджет затверджено", SourceKind::Document)]);
+    let prepared = mnema_index::prepare_for_search("де бюджет", mnema_core::SourceKind::Document);
+
+    assert_eq!(
+        db.terms_present(&prepared).unwrap(),
+        vec!["бюджет".to_string()]
+    );
+
+    // Both directions: a query of only-absent words yields nothing, and a query
+    // of only-present words yields all of them.
+    let absent = mnema_index::prepare_for_search("деінде колись", mnema_core::SourceKind::Document);
+    assert!(db.terms_present(&absent).unwrap().is_empty());
+
+    let present =
+        mnema_index::prepare_for_search("бюджет затверджено", mnema_core::SourceKind::Document);
+    assert_eq!(db.terms_present(&present).unwrap().len(), 2);
+}
