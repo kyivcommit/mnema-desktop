@@ -151,3 +151,26 @@ fn an_unreadable_embedded_count_also_makes_the_arm_failed_not_empty() {
         other => panic!("expected a failure, got {other:?}"),
     }
 }
+
+/// The discriminating case for "the model comes from the space": the settings
+/// name a different model, and the request must still carry the space's. A test
+/// that only checked the happy path would pass with either source.
+#[test]
+fn the_content_arm_refuses_a_model_that_is_not_the_spaces() {
+    let f = support::indexed_space();
+    f.db.meta_set(mnema_index::META_RERANK_MODEL, "some/other-model")
+        .unwrap();
+    let mock = support::mock_recording_requests();
+    let provider = mnema_search::Provider {
+        base: mock.base().to_string(),
+        key: "k".to_string(),
+    };
+
+    let _ = mnema_search::content_arm(&f.db, Some(provider), "ремонт даху", 10);
+
+    let body = mock.request_if_any().expect("the arm must have asked");
+    assert!(
+        body.contains(&f.space_model),
+        "asked for the wrong model: {body}"
+    );
+}

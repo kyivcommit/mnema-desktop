@@ -31,6 +31,7 @@ pub struct Fixture {
     pub db: TempDb,
     pub chunk_ids: Vec<i64>,
     pub embedded_ids: Vec<i64>,
+    pub space_model: String,
 }
 
 impl Fixture {
@@ -82,6 +83,7 @@ fn built_space(total: usize, embedded: usize) -> Fixture {
         db: TempDb { db, _dir: dir },
         chunk_ids,
         embedded_ids,
+        space_model: MODEL.to_string(),
     }
 }
 
@@ -108,6 +110,17 @@ pub fn mock_returning_vector_near(f: &Fixture, chunk_id: i64) -> MockServer {
         .position(|&id| id == chunk_id)
         .expect("chunk_id belongs to this fixture");
     let row: Vec<String> = axis_vector(axis).iter().map(|v| v.to_string()).collect();
+    MockServer::new(vec![Reply::ok(&format!(
+        r#"{{"data":[{{"embedding":[{}],"index":0}}]}}"#,
+        row.join(",")
+    ))])
+}
+
+/// A provider that answers any single request with a valid vector, keeping
+/// that request's raw text for [`MockServer::request_if_any`] to hand back —
+/// for a test that cares which model was asked for, not which chunk won.
+pub fn mock_recording_requests() -> MockServer {
+    let row: Vec<String> = axis_vector(0).iter().map(|v| v.to_string()).collect();
     MockServer::new(vec![Reply::ok(&format!(
         r#"{{"data":[{{"embedding":[{}],"index":0}}]}}"#,
         row.join(",")

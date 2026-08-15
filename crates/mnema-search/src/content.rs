@@ -61,8 +61,8 @@ pub enum ContentArm {
 ///
 /// The model comes from `Db::space_model`, never from the settings' current
 /// choice: a vector from another model is a coordinate on another map, and
-/// `knn` compares it silently. Will be pinned by task 14's
-/// `the_content_arm_refuses_a_model_that_is_not_the_spaces`, not yet written.
+/// `knn` compares it silently. Pinned by
+/// `the_content_arm_refuses_a_model_that_is_not_the_spaces`.
 ///
 /// A coverage count that cannot be read fails the whole arm rather than
 /// being read as zero. Pinned by
