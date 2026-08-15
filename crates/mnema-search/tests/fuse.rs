@@ -35,13 +35,25 @@ fn the_limit_cuts_the_fused_list_not_the_arms() {
     assert_eq!(fuse(FusionRule::TextOnly, &text, &[], 0), Vec::<i64>::new());
 }
 
-/// `ALL` is a hand-written array a new variant will not join on its own; this
-/// guards its composition and order, not only its length.
+/// `ALL` is a hand-written array; a new variant still compiles without it.
+/// Routing through this exhaustive match instead: a variant left off it
+/// fails the test's own compilation, not just its assertion.
 #[test]
 fn all_lists_every_variant_in_declaration_order() {
+    fn canonical(rule: &FusionRule) -> FusionRule {
+        match rule {
+            FusionRule::TextOnly => FusionRule::TextOnly,
+            FusionRule::ContentOnly => FusionRule::ContentOnly,
+            FusionRule::Rrf => FusionRule::Rrf,
+            FusionRule::Interleave => FusionRule::Interleave,
+            FusionRule::Cascade => FusionRule::Cascade,
+        }
+    }
+
+    let order: Vec<FusionRule> = FusionRule::ALL.iter().map(canonical).collect();
     assert_eq!(
-        FusionRule::ALL,
-        [
+        order,
+        vec![
             FusionRule::TextOnly,
             FusionRule::ContentOnly,
             FusionRule::Rrf,
