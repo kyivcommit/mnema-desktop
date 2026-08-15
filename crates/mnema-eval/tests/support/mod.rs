@@ -78,3 +78,43 @@ pub fn worker() -> &'static Path {
         path
     })
 }
+
+/// A two-document corpus and one question whose query names a term from one
+/// document and a term from neither — a rule that requires every term finds
+/// nothing, and a rule that requires only one finds that document.
+///
+/// `#[allow(dead_code)]`: not every binary that declares `mod support;`
+/// calls this one.
+#[allow(dead_code)]
+pub fn small_fixture() -> (
+    mnema_eval::Corpus,
+    mnema_eval::QuestionSet,
+    mnema_eval::IndexedCorpus,
+) {
+    let corpus = mnema_eval::Corpus {
+        documents: vec![
+            mnema_eval::Document {
+                id: "uk/one.md".to_string(),
+                language: mnema_eval::Language::Uk,
+                text: "Договір складено у двох примірниках. Кожен має однакову силу.".to_string(),
+            },
+            mnema_eval::Document {
+                id: "uk/two.md".to_string(),
+                language: mnema_eval::Language::Uk,
+                text: "Комісія відклала розгляд заяви до наступного засідання.".to_string(),
+            },
+        ],
+    };
+    let questions = mnema_eval::QuestionSet {
+        questions: vec![mnema_eval::Question {
+            id: "q-1".to_string(),
+            language: mnema_eval::Language::Uk,
+            class: mnema_eval::Class::Literal,
+            text: "договір неможливе".to_string(),
+            document: "uk/one.md".to_string(),
+            answers: vec!["Договір складено у двох примірниках.".to_string()],
+        }],
+    };
+    let indexed = mnema_eval::IndexedCorpus::build(&corpus, worker()).unwrap();
+    (corpus, questions, indexed)
+}

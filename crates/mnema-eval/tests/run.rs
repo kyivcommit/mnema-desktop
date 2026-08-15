@@ -269,3 +269,38 @@ fn every_question_produces_exactly_one_outcome_in_order() {
     let ids: Vec<&str> = outcomes.iter().map(|o| o.question.as_str()).collect();
     assert_eq!(ids, vec!["q-1", "q-2"]);
 }
+
+/// The rule the harness sweeps is a parameter of the run, and the old entry
+/// point is one of its values. The equality matters because every existing
+/// assertion in this file was written against `run_lexical`.
+#[test]
+fn the_unparameterised_run_is_the_all_terms_rule() {
+    let (corpus, questions, indexed) = support::small_fixture();
+    assert_eq!(
+        mnema_eval::run_lexical(&indexed, &questions).unwrap(),
+        mnema_eval::run_lexical_with(&indexed, &questions, mnema_index::QueryRule::AllTerms)
+            .unwrap()
+    );
+    let _ = corpus;
+}
+
+/// A rule that demands less finds more on this corpus, and the volume column is
+/// what shows the price. Both halves asserted: a rule that returned everything
+/// would satisfy the first alone.
+#[test]
+fn a_looser_rule_returns_more_and_the_outcome_records_how_much() {
+    let (_c, questions, indexed) = support::small_fixture();
+    let strict =
+        mnema_eval::run_lexical_with(&indexed, &questions, mnema_index::QueryRule::AllTerms)
+            .unwrap();
+    let loose = mnema_eval::run_lexical_with(&indexed, &questions, mnema_index::QueryRule::AnyTerm)
+        .unwrap();
+
+    let strict_total: usize = strict.iter().filter_map(|o| o.text_matched).sum();
+    let loose_total: usize = loose.iter().filter_map(|o| o.text_matched).sum();
+    assert!(
+        loose_total > strict_total,
+        "{loose_total} vs {strict_total}"
+    );
+    assert!(strict.iter().all(|o| o.content_matched.is_none()));
+}

@@ -18,5 +18,5 @@ pub use indexed::IndexedCorpus;
 pub use preflight::{Problem, preflight};
 pub use questions::{Class, Question, QuestionSet, questions_path};
 pub use report::Report;
-pub use run::{Location, Outcome, SEARCH_LIMIT, run_lexical};
+pub use run::{Location, Outcome, SEARCH_LIMIT, run_lexical, run_lexical_with};
 pub use terms::{ClassVerdict, check_class, universal_terms};

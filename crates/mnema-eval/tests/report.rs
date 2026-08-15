@@ -16,6 +16,8 @@ fn outcome(question: &str, class: Class, rank: Option<usize>) -> Outcome {
             None,
         ],
         gold: vec![42],
+        text_matched: None,
+        content_matched: None,
     }
 }
 

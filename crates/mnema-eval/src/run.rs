@@ -1,4 +1,5 @@
 use crate::{Class, EvalError, Gold, IndexedCorpus, Question, QuestionSet, resolve_gold};
+use mnema_index::QueryRule;
 
 /// How many chunks one question is allowed to see, and the ceiling every
 /// `recall@k` in the report is read under.
@@ -53,6 +54,14 @@ pub struct Outcome {
     /// `a_chunk_the_index_cannot_place_says_so_instead_of_a_bare_number`.
     pub returned_locations: Vec<Option<Location>>,
     pub gold: Vec<i64>,
+    /// How many chunks the lexical arm returned, or `None` when this run did
+    /// not ask it. Pinned by
+    /// `a_looser_rule_returns_more_and_the_outcome_records_how_much`.
+    pub text_matched: Option<usize>,
+    /// How many chunks the content arm returned, or `None` when this run did
+    /// not ask it. `run_lexical_with` never asks it. Pinned (for that value)
+    /// by `a_looser_rule_returns_more_and_the_outcome_records_how_much`.
+    pub content_matched: Option<usize>,
 }
 
 /// Asks the lexical search every question, in order, one outcome each. Pinned
@@ -69,16 +78,25 @@ pub fn run_lexical(
     indexed: &IndexedCorpus,
     questions: &QuestionSet,
 ) -> Result<Vec<Outcome>, EvalError> {
+    run_lexical_with(indexed, questions, QueryRule::AllTerms)
+}
+
+/// The same run as `run_lexical`, under a named rule. The question still goes
+/// in exactly as a person would have typed it — not rewritten, not narrowed,
+/// not routed through `search_terms` — and the rule is the only thing that
+/// varies. Pinned by `the_unparameterised_run_is_the_all_terms_rule` and
+/// `a_looser_rule_returns_more_and_the_outcome_records_how_much`.
+pub fn run_lexical_with(
+    indexed: &IndexedCorpus,
+    questions: &QuestionSet,
+    rule: QueryRule,
+) -> Result<Vec<Outcome>, EvalError> {
     let mut outcomes = Vec::with_capacity(questions.questions.len());
     for q in &questions.questions {
         let gold = gold_chunks(indexed, q)?;
-        // The question goes in exactly as a person would have typed it: not
-        // rewritten, not narrowed, not routed through `search_terms`. A
-        // sentence-shaped query unreachable under FTS5's implicit AND is the
-        // thing being measured (spec §2), not a defect to route around.
-        // Pinned by
-        // `a_question_no_chunk_answers_has_no_rank_and_says_what_came_back`.
-        let returned = indexed.db().search_lexical(&q.text, SEARCH_LIMIT)?;
+        let returned = indexed
+            .db()
+            .search_lexical_with(&q.text, rule, SEARCH_LIMIT)?;
         let returned_locations = locate(indexed, &returned)?;
         // `position` stops at the first gold chunk to appear, which is the
         // best-placed one — the rank is over ALL gold chunks, not just the
@@ -92,6 +110,8 @@ pub fn run_lexical(
             question: q.id.clone(),
             class: q.class,
             rank,
+            text_matched: Some(returned.len()),
+            content_matched: None,
             returned,
             returned_locations,
             gold,
