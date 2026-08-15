@@ -891,7 +891,7 @@ fn the_unparameterised_search_is_the_all_terms_rule() {
 /// a rule that returned everything would satisfy the first half alone.
 #[test]
 fn any_term_survives_a_word_no_document_has() {
-    let (_d, db, _) = db_with(&[
+    let (_d, db, ids) = db_with(&[
         ("бюджет затверджено на ремонт даху", SourceKind::Document),
         ("протокол засідання комісії", SourceKind::Document),
     ]);
@@ -904,9 +904,9 @@ fn any_term_survives_a_word_no_document_has() {
         .search_lexical_with("де бюджет", mnema_index::QueryRule::AnyTerm, 10)
         .unwrap();
     assert_eq!(
-        any.len(),
-        1,
-        "only the budget chunk holds any of these words"
+        any,
+        vec![ids[0]],
+        "only the budget chunk holds any of these words, and only it should come back"
     );
 
     // The other direction: a word no chunk holds still returns nothing, so
@@ -915,5 +915,30 @@ fn any_term_survives_a_word_no_document_has() {
         db.search_lexical_with("деінде", mnema_index::QueryRule::AnyTerm, 10)
             .unwrap()
             .is_empty()
+    );
+
+    // A rule that kept only the LAST term (a broken separator loop) would
+    // pass the assertion above too, because "бюджет" happens to be that
+    // last term. Terms living in different chunks close that gap: `OR`
+    // must reach both halves of this query, not just the one that is last.
+    let cross = db
+        .search_lexical_with("протокол даху", mnema_index::QueryRule::AnyTerm, 10)
+        .unwrap();
+    assert_eq!(
+        cross.len(),
+        2,
+        "AnyTerm must reach every chunk holding a term: {cross:?}"
+    );
+    assert!(cross.contains(&ids[0]));
+    assert!(cross.contains(&ids[1]));
+
+    // A literal `OR` is a third term to search for here, not FTS5's own
+    // operator — mirrors `fts5_operators_are_not_a_query_language_here`,
+    // but under `AnyTerm`, which already emits real `OR` as its separator.
+    assert_eq!(
+        db.search_lexical_with("бюджет OR немає", mnema_index::QueryRule::AnyTerm, 10)
+            .unwrap(),
+        vec![ids[0]],
+        "OR is data even under AnyTerm"
     );
 }

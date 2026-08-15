@@ -125,25 +125,21 @@ pub(crate) fn write_search_row(
     Ok(())
 }
 
-/// Quotes each term of a prepared query as an FTS5 phrase. Separate phrases
-/// rather than one: FTS5 joins them with an implicit AND, while a single phrase
-/// would demand the words be adjacent and quietly cost recall on every
-/// multi-word query.
+/// Quotes each term of a prepared query, joined by `sep`. Quoting is what
+/// keeps FTS5's own operators — OR, NEAR, prefix `*` — out of reach, so a
+/// person's literal `OR` arrives as one more quoted word instead of an
+/// operator: pinned for `as_fts5_phrases`'s separator by
+/// `fts5_operators_are_not_a_query_language_here`, and for `as_fts5_any`'s
+/// by `any_term_survives_a_word_no_document_has`.
 ///
-/// No escaping is needed inside the quotes, and that is a property of the term
-/// rule rather than an omission — `terms` yields letters, digits and internal
-/// apostrophes only, so a double quote cannot appear in one.
-///
-/// Quoting per term, not passing the expression through, means FTS5's own
-/// operators — OR, NEAR, prefix `*` — are not reachable from here, and a bare
-/// `OR` arrives as a third required word instead. That is pinned by a test
-/// rather than fixed: offering the user a query language is the search/RAG
-/// spec's decision, not a side effect of escaping.
-fn as_fts5_phrases(prepared: &str) -> String {
-    let mut out = String::with_capacity(prepared.len() + 8);
+/// No escaping is needed inside the quotes, and that is a property of the
+/// term rule rather than an omission — `terms` yields letters, digits and
+/// internal apostrophes only, so a double quote cannot appear in one.
+fn quoted_terms(prepared: &str, sep: &str) -> String {
+    let mut out = String::new();
     for term in crate::text_prep::terms(prepared) {
         if !out.is_empty() {
-            out.push(' ');
+            out.push_str(sep);
         }
         out.push('"');
         out.push_str(term);
@@ -152,23 +148,18 @@ fn as_fts5_phrases(prepared: &str) -> String {
     out
 }
 
-/// Joins each quoted term with FTS5's `OR`, so any one term matches and `rank`
-/// (bm25) decides the order. The server's lexical arm works this way —
-/// `app/search/hybrid.py:36`, "BM25 match is `content ||| :q` (OR-tokenized)".
+/// Separate phrases rather than one: FTS5 joins them with an implicit AND,
+/// while a single phrase would demand the words be adjacent and quietly cost
+/// recall on every multi-word query.
+fn as_fts5_phrases(prepared: &str) -> String {
+    quoted_terms(prepared, " ")
+}
+
+/// Joins each quoted term with FTS5's `OR`, so any one term is enough. The
+/// server's lexical arm works this way — `app/search/hybrid.py:36`, "BM25
+/// match is `content ||| :q` (OR-tokenized)".
 ///
-/// Quoting is unchanged and load-bearing for the same reason it is in
-/// `as_fts5_phrases`: it is what keeps a person's `OR` a word rather than an
-/// operator. Pinned by `any_term_survives_a_word_no_document_has` and by
-/// `fts5_operators_are_not_a_query_language_here`.
+/// Pinned by `any_term_survives_a_word_no_document_has`.
 fn as_fts5_any(prepared: &str) -> String {
-    let mut out = String::new();
-    for term in crate::text_prep::terms(prepared) {
-        if !out.is_empty() {
-            out.push_str(" OR ");
-        }
-        out.push('"');
-        out.push_str(term);
-        out.push('"');
-    }
-    out
+    quoted_terms(prepared, " OR ")
 }
