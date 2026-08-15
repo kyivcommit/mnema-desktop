@@ -56,4 +56,38 @@ impl Sweep {
             total: dense.total,
         })
     }
+
+    /// The header names the model and the service, because a recall figure
+    /// without them describes a configuration nobody can return to. Pinned by
+    /// `the_table_names_the_model_and_the_service_in_its_header`.
+    pub fn render(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = String::new();
+        let _ = writeln!(out, "модель: {}", self.model);
+        let _ = writeln!(out, "служба: {}\n", self.base);
+        for row in &self.rows {
+            let _ = writeln!(out, "=== {} / {} ===", row.rule.label(), row.fusion.label());
+            let _ = write!(out, "{}", row.report.render());
+            for class in crate::Class::ALL {
+                let (text, content) = row.report.volume(class);
+                let _ = writeln!(
+                    out,
+                    "{}обсяг за текстом {}  обсяг за вмістом {}",
+                    crate::report::pad(class.as_str(), crate::report::LABEL_WIDTH),
+                    volume_cell(text),
+                    volume_cell(content),
+                );
+            }
+            out.push('\n');
+        }
+        out
+    }
+}
+
+fn volume_cell(v: Option<f64>) -> String {
+    v.map_or_else(
+        || crate::report::UNMEASURED.to_string(),
+        |v| format!("{v:.1}"),
+    )
 }

@@ -202,6 +202,51 @@ pub fn canned_dense_answers(questions: &mnema_eval::QuestionSet) -> mnema_eval::
 
 const CANNED_CONTENT_BASE: i64 = 9000;
 
+/// A sweep with [`mnema_eval::Sweep::run`]'s shape: one row per query rule
+/// under `TextOnly` and each other fusion rule, one row under `ContentOnly`,
+/// since the query rule never reaches that arm. Built without indexing a
+/// corpus, so `Sweep::render` tests do not pay for a real run.
+#[allow(dead_code)]
+pub fn canned_sweep() -> mnema_eval::Sweep {
+    let outcome = || mnema_eval::Outcome {
+        question: "q-1".to_string(),
+        class: mnema_eval::Class::Literal,
+        rank: Some(1),
+        returned: vec![1],
+        returned_locations: vec![Some(mnema_eval::Location {
+            path: "uk/one.md".to_string(),
+            first_line: "Договір складено у двох примірниках.".to_string(),
+        })],
+        gold: vec![1],
+        text_matched: Some(3),
+        content_matched: Some(5),
+    };
+
+    let mut rows = Vec::new();
+    for fusion in mnema_search::FusionRule::ALL {
+        let rules: &[mnema_index::QueryRule] = if fusion == mnema_search::FusionRule::ContentOnly {
+            &[mnema_index::QueryRule::AllTerms]
+        } else {
+            &mnema_index::QueryRule::ALL
+        };
+        for &rule in rules {
+            rows.push(mnema_eval::Row {
+                rule,
+                fusion,
+                report: mnema_eval::Report::of(&[outcome()], 70),
+            });
+        }
+    }
+
+    mnema_eval::Sweep {
+        rows,
+        model: FIXTURE_MODEL.to_string(),
+        base: "http://localhost:9009".to_string(),
+        embedded: 2,
+        total: 2,
+    }
+}
+
 /// A provider that answers any of its first `n` requests with a valid
 /// vector, and counts how many it actually received.
 #[allow(dead_code)]
