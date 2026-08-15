@@ -114,20 +114,6 @@ fn a_long_first_line_is_cut_on_a_character_boundary() {
 }
 
 #[test]
-fn the_configurations_that_do_not_exist_are_named_not_zeroed() {
-    // Both directions in one render: the two unbuilt configurations are named,
-    // AND the word that says they are unbuilt is there. Naming them beside a
-    // number would be the failure this guards.
-    let text = Report::of(&[outcome("q-1", Class::Literal, Some(1))], 70).render();
-    for word in ["вмістом", "суміш", "не збудован"] {
-        assert!(
-            text.contains(word),
-            "{word} is not accounted for in:\n{text}"
-        );
-    }
-}
-
-#[test]
 fn a_class_that_was_never_asked_says_so_where_its_numbers_would_be() {
     // Only literal questions were put, so two of the three rows have nothing
     // to report. A zero there would read as "every one of them failed" — the

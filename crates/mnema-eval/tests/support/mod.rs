@@ -206,21 +206,28 @@ const CANNED_CONTENT_BASE: i64 = 9000;
 /// under `TextOnly` and each other fusion rule, one row under `ContentOnly`,
 /// since the query rule never reaches that arm. Built without indexing a
 /// corpus, so `Sweep::render` tests do not pay for a real run.
+///
+/// Two questions per row, not one: `text_matched` 2 and 4 mean 3.0,
+/// `content_matched` 4 and 6 mean 5.0 — with a single question the mean and
+/// the sum are the same number, and a `volume` that summed instead of
+/// averaging would print unchanged.
 #[allow(dead_code)]
 pub fn canned_sweep() -> mnema_eval::Sweep {
-    let outcome = || mnema_eval::Outcome {
-        question: "q-1".to_string(),
-        class: mnema_eval::Class::Literal,
-        rank: Some(1),
-        returned: vec![1],
-        returned_locations: vec![Some(mnema_eval::Location {
-            path: "uk/one.md".to_string(),
-            first_line: "Договір складено у двох примірниках.".to_string(),
-        })],
-        gold: vec![1],
-        text_matched: Some(3),
-        content_matched: Some(5),
-    };
+    let outcome =
+        |question: &str, text_matched: usize, content_matched: usize| mnema_eval::Outcome {
+            question: question.to_string(),
+            class: mnema_eval::Class::Literal,
+            rank: Some(1),
+            returned: vec![1],
+            returned_locations: vec![Some(mnema_eval::Location {
+                path: "uk/one.md".to_string(),
+                first_line: "Договір складено у двох примірниках.".to_string(),
+            })],
+            gold: vec![1],
+            text_matched: Some(text_matched),
+            content_matched: Some(content_matched),
+        };
+    let outcomes = || vec![outcome("q-1", 2, 4), outcome("q-2", 4, 6)];
 
     let mut rows = Vec::new();
     for fusion in mnema_search::FusionRule::ALL {
@@ -233,7 +240,7 @@ pub fn canned_sweep() -> mnema_eval::Sweep {
             rows.push(mnema_eval::Row {
                 rule,
                 fusion,
-                report: mnema_eval::Report::of(&[outcome()], 70),
+                report: mnema_eval::Report::of(&outcomes(), 70),
             });
         }
     }

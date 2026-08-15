@@ -91,15 +91,39 @@ fn the_table_names_the_model_and_the_service_in_its_header() {
     assert!(text.contains(&sweep.base), "no service in:\n{text}");
 }
 
-/// Every row is labelled by both rules, so a person reading the table can tell
-/// which pair a number belongs to.
+/// Every row but `ContentOnly` is labelled by both rules, so a person reading
+/// the table can tell which pair a number belongs to.
 #[test]
 fn every_row_is_labelled_by_both_rules() {
     let sweep = support::canned_sweep();
     let text = sweep.render();
     for row in &sweep.rows {
+        if row.fusion == mnema_search::FusionRule::ContentOnly {
+            continue;
+        }
         let label = format!("{} / {}", row.rule.label(), row.fusion.label());
         assert!(text.contains(&label), "missing row {label} in:\n{text}");
+    }
+}
+
+/// `ContentOnly`'s `rule` field is a placeholder `run_row` never reads under
+/// that fusion — the table must not print it as though it were a measured
+/// pair, which is what a table naming it "all-terms / content-only" would
+/// claim.
+#[test]
+fn content_only_is_labelled_by_its_fusion_rule_alone() {
+    let sweep = support::canned_sweep();
+    let text = sweep.render();
+    assert!(text.contains("=== content-only ==="), "in:\n{text}");
+    for row in &sweep.rows {
+        if row.fusion != mnema_search::FusionRule::ContentOnly {
+            continue;
+        }
+        let stub = format!("{} / {}", row.rule.label(), row.fusion.label());
+        assert!(
+            !text.contains(&stub),
+            "content-only row still names a query rule it did not ask: {stub} in:\n{text}"
+        );
     }
 }
 
@@ -111,13 +135,16 @@ fn the_chance_level_survives_into_the_sweep() {
     assert!(sweep.render().contains("випадково"));
 }
 
-/// Each arm's volume is printed apart from the other's.
+/// Each arm's volume is printed apart from the other's, and each is its own
+/// mean rather than the other's or their sum — `canned_sweep`'s two questions
+/// are chosen so a `volume` that summed instead of averaging, or swapped the
+/// two arms, would print a different number here.
 #[test]
 fn each_arms_volume_is_printed_in_its_own_column() {
     let sweep = support::canned_sweep();
     let text = sweep.render();
-    assert!(text.contains("обсяг за текстом"), "in:\n{text}");
-    assert!(text.contains("обсяг за вмістом"), "in:\n{text}");
+    assert!(text.contains("обсяг за текстом 3.0"), "in:\n{text}");
+    assert!(text.contains("обсяг за вмістом 5.0"), "in:\n{text}");
 }
 
 /// No row calls itself a configuration it did not measure. `Report::render`
@@ -135,4 +162,19 @@ fn no_row_names_a_configuration_it_did_not_measure() {
         .count();
     assert!(text_only_rows > 0, "the fixture must hold a text-only row");
     assert_eq!(claims, 0, "a row still claims a configuration in:\n{text}");
+}
+
+/// `Report::render` used to open every row's block with a sentence naming
+/// content-search and fusion as unbuilt — false for `ContentOnly` and every
+/// fused row here, which measured exactly those two arms. It carries no such
+/// claim now; only `bin/eval.rs`, whose one configuration is really lexical
+/// alone, adds it back.
+#[test]
+fn no_row_claims_the_configurations_it_measured_are_unbuilt() {
+    let sweep = support::canned_sweep();
+    let text = sweep.render();
+    assert!(
+        !text.contains("не збудован"),
+        "a row still carries the unbuilt-configurations sentence in:\n{text}"
+    );
 }

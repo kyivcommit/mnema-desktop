@@ -11,6 +11,7 @@ use std::path::Path;
 use mnema_eval::{
     Corpus, IndexedCorpus, QuestionSet, Report, corpus_dir, preflight, questions_path, run_lexical,
 };
+use mnema_index::QueryRule;
 
 /// Preflight found something, so no number was taken: one describing the
 /// corpus rather than the search is worse than none.
@@ -63,6 +64,15 @@ fn evaluate(worker: &Path) -> i32 {
         .chunk_count()
         .expect("the index counts its chunks");
     let report = Report::of(&outcomes, chunk_count);
+    // `Report::render` names no configuration — it is also what a sweep row
+    // prints, where "text-only" would be wrong. This is the one caller that
+    // only ever runs the lexical arm alone, so it is the one place that gets
+    // to say so.
+    println!(
+        "Пошук за текстом — правило {}\n",
+        QueryRule::AllTerms.label()
+    );
+    println!("Конфігурації «пошук за вмістом» і «суміш» не збудовані.\n");
     println!("{}", report.render());
     0
 }

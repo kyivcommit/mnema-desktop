@@ -67,7 +67,7 @@ impl Sweep {
         let _ = writeln!(out, "модель: {}", self.model);
         let _ = writeln!(out, "служба: {}\n", self.base);
         for row in &self.rows {
-            let _ = writeln!(out, "=== {} / {} ===", row.rule.label(), row.fusion.label());
+            let _ = writeln!(out, "=== {} ===", row_label(row));
             let _ = write!(out, "{}", row.report.render());
             for class in crate::Class::ALL {
                 let (text, content) = row.report.volume(class);
@@ -82,6 +82,18 @@ impl Sweep {
             out.push('\n');
         }
         out
+    }
+}
+
+/// `ContentOnly` never asks a query rule — `run_row` skips the text arm
+/// entirely under it — so its label carries only the fusion rule, not the
+/// `AllTerms` every `ContentOnly` row's `rule` field holds as a placeholder.
+/// Pinned by `content_only_is_labelled_by_its_fusion_rule_alone`.
+fn row_label(row: &Row) -> String {
+    if row.fusion == FusionRule::ContentOnly {
+        row.fusion.label().to_string()
+    } else {
+        format!("{} / {}", row.rule.label(), row.fusion.label())
     }
 }
 

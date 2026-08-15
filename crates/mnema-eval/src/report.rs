@@ -89,11 +89,13 @@ impl Report {
     }
 
     /// The whole report as one block of text: the table, what the numbers
-    /// would be worth by chance, the configurations that do not exist yet, and
-    /// the questions that failed.
+    /// would be worth by chance, and the questions that failed.
     ///
-    /// The failures are part of it rather than a second thing a caller has to
-    /// remember to print — pinned by
+    /// Names no configuration: a `Report` does not know which arm or which
+    /// fusion rule produced it, so any such claim here would be wrong for
+    /// some caller — `Sweep::render` and `bin/eval.rs` each say that
+    /// themselves. The failures are part of it rather than a second thing a
+    /// caller has to remember to print — pinned by
     /// `the_failures_are_in_the_report_not_appended_to_it`.
     pub fn render(&self) -> String {
         let mut out = String::new();
@@ -121,8 +123,7 @@ impl Report {
             let _ = writeln!(out, "{}", row.trim_end());
         }
 
-        out.push_str("\nУ дужках — рівень випадковості для того самого k.\n");
-        out.push_str("Конфігурації «пошук за вмістом» і «суміш» не збудовані.\n\n");
+        out.push_str("\nУ дужках — рівень випадковості для того самого k.\n\n");
 
         let failed: Vec<&Outcome> = self
             .by_class
