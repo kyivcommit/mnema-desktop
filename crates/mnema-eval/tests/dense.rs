@@ -46,7 +46,8 @@ fn the_answers_carry_the_model_and_the_service_that_made_them() {
 }
 
 /// How much of the index the content arm could see rides along too — it
-/// cannot be asked again later without paying for another live call.
+/// names the index's state at this snapshot, not at whenever it is later
+/// read, and the index could differ by then.
 #[test]
 fn the_answers_carry_how_much_of_the_index_was_embedded() {
     let (_c, questions, indexed) = support::small_fixture_with_vectors();

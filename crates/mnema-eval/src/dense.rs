@@ -7,7 +7,10 @@ use crate::{EvalError, IndexedCorpus, QuestionSet};
 /// What the content arm said about every question, taken once. The arm's
 /// answer depends on the question and on the index, not on any rule a later
 /// sweep varies — and `embedded`/`total` ride along with `model` and `base`
-/// because that coverage cannot be recovered without another live call.
+/// because they name the index's state at the moment of this one snapshot,
+/// not at whenever a caller later reads it: the index could keep being
+/// built in between, and a fresh read then would describe a different
+/// moment than the one this run measured against.
 /// Pinned by `every_question_reaches_the_provider_exactly_once` and
 /// `the_answers_carry_how_much_of_the_index_was_embedded`.
 #[derive(Debug)]
