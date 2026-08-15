@@ -66,6 +66,11 @@ impl Db {
         self.search_lexical_with(query, QueryRule::AllTerms, limit)
     }
 
+    /// `TermsInIndexOrAnyTerm` is `TermsInIndex` tried first, and only when
+    /// that comes back with nothing does `AnyTerm` run as a second attempt —
+    /// never as a second clause of the same expression, or it would widen
+    /// results the stricter rule already found. Pinned by
+    /// `the_fallback_fires_only_where_the_stricter_rule_came_back_empty`.
     pub fn search_lexical_with(
         &self,
         query: &str,
@@ -76,18 +81,27 @@ impl Db {
         let expr = match rule {
             QueryRule::AllTerms => as_fts5_phrases(&prepared),
             QueryRule::AnyTerm => as_fts5_any(&prepared),
-            QueryRule::TermsInIndex => {
-                let present = self.terms_present(&prepared)?;
-                as_fts5_all_of(&present)
+            QueryRule::TermsInIndex | QueryRule::TermsInIndexOrAnyTerm => {
+                as_fts5_all_of(&self.terms_present(&prepared)?)
             }
-            QueryRule::TermsInIndexOrAnyTerm => as_fts5_phrases(&prepared),
         };
-        if expr.is_empty() {
+        let first = if expr.is_empty() {
             // `MATCH ''` is a syntax error, and a query of nothing but
             // separators prepares down to exactly that. No terms, no rows.
+            // Pinned by
+            // `a_query_with_no_terms_returns_no_rows_rather_than_an_error`.
+            Vec::new()
+        } else {
+            self.matching(&expr, limit)?
+        };
+        if !first.is_empty() || rule != QueryRule::TermsInIndexOrAnyTerm {
+            return Ok(first);
+        }
+        let wide = as_fts5_any(&prepared);
+        if wide.is_empty() {
             return Ok(Vec::new());
         }
-        self.matching(&expr, limit)
+        self.matching(&wide, limit)
     }
 
     /// The query's terms that occur somewhere in the index, in the order they

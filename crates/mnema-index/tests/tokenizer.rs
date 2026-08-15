@@ -1005,3 +1005,38 @@ fn terms_in_index_drops_the_unseen_word_and_still_demands_the_rest() {
             .is_empty()
     );
 }
+
+/// The case `TermsInIndex` cannot reach: every surviving word exists somewhere,
+/// but no chunk holds them together. The fallback must fire there and must NOT
+/// fire where the stricter rule already answered — otherwise it is `AnyTerm`
+/// wearing another name.
+#[test]
+fn the_fallback_fires_only_where_the_stricter_rule_came_back_empty() {
+    let (_d, db, _) = db_with(&[
+        ("бюджет затверджено на ремонт даху", SourceKind::Document),
+        ("бюджет комісії", SourceKind::Document),
+    ]);
+    let strict = mnema_index::QueryRule::TermsInIndex;
+    let with_fallback = mnema_index::QueryRule::TermsInIndexOrAnyTerm;
+
+    // Where the strict rule answers, the fallback changes nothing.
+    assert_eq!(
+        db.search_lexical_with("де бюджет ремонт", with_fallback, 10)
+            .unwrap(),
+        db.search_lexical_with("де бюджет ремонт", strict, 10)
+            .unwrap()
+    );
+
+    // Where it does not, the fallback answers.
+    assert!(
+        db.search_lexical_with("комісії ремонт", strict, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        db.search_lexical_with("комісії ремонт", with_fallback, 10)
+            .unwrap()
+            .len(),
+        2
+    );
+}
