@@ -13,6 +13,12 @@ pub struct Sweep {
     pub rows: Vec<Row>,
     pub model: String,
     pub base: String,
+    /// Mirror `DenseAnswers::embedded`/`total`: the coverage the content arm
+    /// was measured under, carried alongside `model`/`base` rather than
+    /// dropped — the render this feeds is not this task's, but the number
+    /// disappears here if it is not kept.
+    pub embedded: i64,
+    pub total: i64,
 }
 
 impl Sweep {
@@ -46,6 +52,8 @@ impl Sweep {
             rows,
             model: dense.model.clone(),
             base: dense.base.clone(),
+            embedded: dense.embedded,
+            total: dense.total,
         })
     }
 }

@@ -45,4 +45,38 @@ fn the_sweep_walks_every_pair_that_can_differ() {
     pairs.sort_by_key(|(rule, fusion)| (format!("{rule:?}"), format!("{fusion:?}")));
     pairs.dedup();
     assert_eq!(pairs.len(), before, "a pair was swept twice");
+
+    // The two checks above pass even if every row's `report` came from the
+    // same call, as long as `rule`/`fusion` on the row still carry the loop's
+    // labels — a mutant that hardcodes the arguments to `run_row` while
+    // leaving `Row { rule, fusion, .. }` alone slips past them. These two
+    // assert the labels describe a run that actually differed.
+    let text_only_all_terms = sweep
+        .rows
+        .iter()
+        .find(|r| {
+            r.fusion == mnema_search::FusionRule::TextOnly
+                && r.rule == mnema_index::QueryRule::AllTerms
+        })
+        .unwrap();
+    let text_only_any_term = sweep
+        .rows
+        .iter()
+        .find(|r| {
+            r.fusion == mnema_search::FusionRule::TextOnly
+                && r.rule == mnema_index::QueryRule::AnyTerm
+        })
+        .unwrap();
+    assert_ne!(
+        text_only_all_terms.report, text_only_any_term.report,
+        "q-1's query has no chunk holding both terms, so AllTerms and AnyTerm \
+         must not read the same"
+    );
+    assert_ne!(
+        content_only[0].report, text_only_all_terms.report,
+        "ContentOnly must read the content arm, not the text arm"
+    );
+
+    assert_eq!(sweep.embedded, dense.embedded);
+    assert_eq!(sweep.total, dense.total);
 }
