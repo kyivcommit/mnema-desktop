@@ -75,7 +75,9 @@ impl Fixture {
 /// moment [`Db::adopt_embedding_model`] permits a second one to exist —
 /// so it never gets a vector and the active space ends on the real model.
 /// Each chunk's text carries "ремонт даху", the query `search.rs` asks, so
-/// the real FTS5 index has something in it to find.
+/// the real FTS5 index has something in it to find. Chunk 1 alone also
+/// carries "покрівля" — a word no other chunk's text has, so a lexical
+/// query for it names one chunk and excludes the rest.
 fn built_space(total: usize, embedded: usize, decoy: Option<&str>) -> Fixture {
     let dir = tempfile::tempdir().expect("a temporary directory");
     register_vector_extension().expect("register the vector extension");
@@ -84,7 +86,14 @@ fn built_space(total: usize, embedded: usize, decoy: Option<&str>) -> Fixture {
         .insert_document(&"a".repeat(64), "text/plain", 64, SourceKind::Document)
         .expect("document");
     let chunk_ids: Vec<i64> = (0..total as i64)
-        .map(|ord| write_chunk(&db, &doc, ord, &format!("ремонт даху, чанк {ord}")))
+        .map(|ord| {
+            let text = if ord == 1 {
+                format!("ремонт даху, чанк {ord}, покрівля")
+            } else {
+                format!("ремонт даху, чанк {ord}")
+            };
+            write_chunk(&db, &doc, ord, &text)
+        })
         .collect();
     db.set_document_status(&doc, DocumentStatus::Indexed)
         .expect("status");

@@ -14,9 +14,10 @@ use mnema_index::{Db, QueryRule};
 
 /// One search: the two arms and the list they became.
 ///
-/// Both arm states travel with the list rather than beside it — an empty list
-/// means five different things, and only these fields tell them apart. Pinned
-/// by `the_text_arm_still_answers_when_the_content_arm_cannot_be_asked`.
+/// Both arm states travel with the list rather than beside it. `Off`,
+/// `NotConfigured`, `Failed`, and an `Answered` that found nothing are
+/// each their own silence, and only these fields tell them apart. Pinned
+/// by `an_arm_that_is_off_contributes_nothing_and_says_so`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub chunks: Vec<i64>,
@@ -25,8 +26,9 @@ pub struct Found {
 }
 
 /// Asks each arm that is on, then fuses. An arm that is off contributes
-/// nothing to the fused list. Pinned by
-/// `an_arm_that_is_off_contributes_nothing_and_says_so`.
+/// nothing to the fused list, and a real answer from either arm survives
+/// into it. Pinned by `an_arm_that_is_off_contributes_nothing_and_says_so`
+/// and by `the_content_arms_chunks_survive_into_the_fused_list`.
 pub fn search(
     db: &Db,
     provider: Option<Provider>,

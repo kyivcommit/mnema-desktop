@@ -3,6 +3,7 @@
 pub const RRF_K: i64 = 60;
 
 /// How deep each arm is asked before fusing, ported from `app/config.py:244`.
+/// Pinned by `the_text_arm_is_asked_deeper_than_the_final_limit`.
 pub const CANDIDATES: i64 = 30;
 
 /// How two arms' answers become one list.
