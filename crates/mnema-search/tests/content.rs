@@ -1,9 +1,12 @@
 use mnema_search::{ContentArm, Missing};
 
-/// "Off", "cannot be asked" and "asked and failed" are three facts, and a
-/// person shown one list for all three learns something false about their
-/// documents. The type is what keeps them apart; this pins that it can hold
-/// all three.
+mod support;
+
+/// "Off", "cannot be asked", "asked and failed", and "asked and answered
+/// with nothing" are separate facts, and a person shown one list for all of
+/// them learns something false about their documents. The type is what
+/// keeps them apart; this pins that every variant below is told apart from
+/// every other.
 #[test]
 fn the_content_arms_silences_are_told_apart_by_type() {
     let states = [
@@ -19,8 +22,8 @@ fn the_content_arms_silences_are_told_apart_by_type() {
             total: 9,
         },
     ];
-    // Each is distinct from every other, including the two `NotConfigured`s and
-    // including an `Answered` that answered with nothing.
+    // Each is distinct from every other, including each `NotConfigured`
+    // payload and including an `Answered` that answered with nothing.
     for (i, a) in states.iter().enumerate() {
         for (j, b) in states.iter().enumerate() {
             assert_eq!(i == j, a == b, "{a:?} vs {b:?}");
@@ -48,4 +51,44 @@ fn an_empty_answer_still_carries_its_coverage() {
         }
         other => panic!("expected an answer, got {other:?}"),
     }
+}
+
+/// The whole arm, end to end against a rude little HTTP server: a query
+/// becomes a vector, the vector becomes a `knn` answer, and the answer
+/// carries how much of the index it could even see.
+#[test]
+fn the_content_arm_turns_a_query_into_nearest_chunks() {
+    let f = support::indexed_space();
+    let mock = support::mock_returning_vector_near(&f, f.chunk_ids[1]);
+    let provider = mnema_search::Provider {
+        base: mock.base().to_string(),
+        key: "k".to_string(),
+    };
+
+    let arm = mnema_search::content_arm(&f.db, Some(provider), "ремонт даху", 10);
+
+    match arm {
+        mnema_search::ContentArm::Answered {
+            chunks,
+            embedded,
+            total,
+        } => {
+            assert_eq!(chunks.first(), Some(&f.chunk_ids[1]));
+            assert_eq!(
+                (embedded, total),
+                (f.chunk_ids.len() as i64, f.chunk_ids.len() as i64)
+            );
+        }
+        other => panic!("expected an answer, got {other:?}"),
+    }
+}
+
+/// No key is not a failure and not an empty answer.
+#[test]
+fn no_key_is_not_configured_rather_than_failed() {
+    let f = support::indexed_space();
+    assert_eq!(
+        mnema_search::content_arm(&f.db, None, "ремонт даху", 10),
+        mnema_search::ContentArm::NotConfigured(mnema_search::Missing::NoKey)
+    );
 }

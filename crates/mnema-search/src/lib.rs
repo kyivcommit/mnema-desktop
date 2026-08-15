@@ -7,5 +7,5 @@
 mod content;
 mod fuse;
 
-pub use content::{Arms, ContentArm, Missing, Provider, TextArm};
+pub use content::{Arms, ContentArm, Missing, Provider, TextArm, content_arm};
 pub use fuse::{CANDIDATES, FusionRule, RRF_K, fuse};

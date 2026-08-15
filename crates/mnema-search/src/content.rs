@@ -1,6 +1,8 @@
+use mnema_index::Db;
+
 /// What a search was asked to use. Both false is not refused here — the
-/// invariant that at least one is on belongs to the window, not to this
-/// type, which is where a person can be told why.
+/// invariant that at least one is on belongs to the window, which is where
+/// a person can be told why, not to this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Arms {
     pub text: bool,
@@ -9,7 +11,7 @@ pub struct Arms {
 
 /// Where the content arm's embedding call goes.
 ///
-/// Owns its two strings rather than borrowing them. A search makes one network
+/// Owns its strings rather than borrowing them. A search makes one network
 /// call, so the copy costs nothing measurable — and a borrowed `base` turns
 /// every `Provider { base: &mock.base(), .. }` at a call site into a
 /// dropped-temporary error, which is a lifetime puzzle this type has no reason
@@ -50,4 +52,61 @@ pub enum ContentArm {
         embedded: i64,
         total: i64,
     },
+}
+
+/// Embeds the query with the model the space was built with, then asks `knn`.
+///
+/// The model comes from `Db::space_model`, never from the settings' current
+/// choice: a vector from another model is a coordinate on another map, and
+/// `knn` compares it silently.
+pub fn content_arm(db: &Db, provider: Option<Provider>, query: &str, k: i64) -> ContentArm {
+    let Some(provider) = provider else {
+        return ContentArm::NotConfigured(Missing::NoKey);
+    };
+    let space = match db.active_space() {
+        Ok(Some(space)) => space,
+        Ok(None) => return ContentArm::NotConfigured(Missing::NoModel),
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
+    };
+    let (model, _width) = match db.space_model(space) {
+        Ok(pair) => pair,
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
+    };
+    let vectors =
+        match mnema_provider::embed(&provider.base, &provider.key, &model, &[query.to_string()]) {
+            Ok(v) => v,
+            Err(e) => {
+                return ContentArm::Failed {
+                    reason: e.to_string(),
+                };
+            }
+        };
+    let Some(vector) = vectors.into_iter().next() else {
+        return ContentArm::Failed {
+            reason: "the provider answered with no vector".to_string(),
+        };
+    };
+    let chunks = match db.knn(space, &vector, k, None) {
+        Ok(chunks) => chunks,
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
+    };
+    let embedded = db.embedded_chunk_count(space).unwrap_or(0);
+    let total = db.chunk_count().unwrap_or(0);
+    ContentArm::Answered {
+        chunks,
+        embedded,
+        total,
+    }
 }
