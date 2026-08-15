@@ -2698,6 +2698,7 @@ dependencies = [
  "mnema-core",
  "mnema-index",
  "mnema-ingest",
+ "mnema-mock-provider",
  "mnema-pool",
  "mnema-search",
  "mnema-walk",

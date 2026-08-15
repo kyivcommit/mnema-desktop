@@ -4,6 +4,7 @@
 //! that the search cycle has something to be judged by before it starts.
 
 mod corpus;
+mod dense;
 mod gold;
 mod indexed;
 mod preflight;
@@ -13,6 +14,7 @@ mod run;
 mod terms;
 
 pub use corpus::{Corpus, Document, EvalError, Language, corpus_dir};
+pub use dense::DenseAnswers;
 pub use gold::{Gold, resolve_gold};
 pub use indexed::IndexedCorpus;
 pub use preflight::{Problem, preflight};

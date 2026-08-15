@@ -59,6 +59,10 @@ pub enum EvalError {
     Index(String),
     #[error("questions: {0}")]
     Questions(String),
+    #[error("no active embedding space")]
+    NoActiveSpace,
+    #[error("content arm was silent: {0}")]
+    ContentArmSilent(String),
 }
 
 impl From<std::io::Error> for EvalError {

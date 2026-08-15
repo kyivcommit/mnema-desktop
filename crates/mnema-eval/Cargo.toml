@@ -31,6 +31,9 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+mnema-mock-provider = { workspace = true }
+
 [[bin]]
 name = "eval"
 path = "src/bin/eval.rs"

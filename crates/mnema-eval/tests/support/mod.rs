@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use mnema_mock_provider::{MockServer, Reply};
+
 /// The extraction worker binary.
 ///
 /// **A deliberate copy of `crates/mnema-ingest/tests/support/mod.rs:61-118`.**
@@ -131,4 +133,88 @@ pub fn small_fixture() -> (
     };
     let indexed = mnema_eval::IndexedCorpus::build(&corpus, worker()).unwrap();
     (corpus, questions, indexed)
+}
+
+/// The model name [`small_fixture_with_vectors`] adopts. A label for the
+/// mock provider, not a real model — `content_arm` never reaches past it.
+#[allow(dead_code)]
+pub const FIXTURE_MODEL: &str = "baai/bge-m3";
+
+const FIXTURE_WIDTH: usize = 1024;
+
+/// [`small_fixture`], with every chunk already embedded into an active
+/// space under [`FIXTURE_MODEL`] — each chunk on its own axis, so a knn
+/// query against any axis has a nearest neighbour to return.
+#[allow(dead_code)]
+pub fn small_fixture_with_vectors() -> (
+    mnema_eval::Corpus,
+    mnema_eval::QuestionSet,
+    mnema_eval::IndexedCorpus,
+) {
+    let (corpus, questions, indexed) = small_fixture();
+    let db = indexed.db();
+    let space = db
+        .adopt_embedding_model(
+            FIXTURE_MODEL,
+            FIXTURE_WIDTH as i64,
+            "credential-ref",
+            CHUNKER,
+        )
+        .expect("adopt an embedding model")
+        .space_id;
+    let mut axis = 0usize;
+    for document in &corpus.documents {
+        let document_id = indexed
+            .document_id(&document.id)
+            .expect("look up the document")
+            .expect("the document was indexed");
+        for (chunk_id, _text) in db.chunks_of_document(&document_id).expect("chunks") {
+            db.upsert_vector(space, chunk_id, &axis_vector(axis))
+                .expect("vector");
+            axis += 1;
+        }
+    }
+    (corpus, questions, indexed)
+}
+
+const CHUNKER: &str = "chunker-v1";
+
+fn axis_vector(axis: usize) -> Vec<f32> {
+    let mut v = vec![0.0; FIXTURE_WIDTH];
+    v[axis] = 1.0;
+    v
+}
+
+/// A provider that answers any of its first `n` requests with a valid
+/// vector, and counts how many it actually received.
+#[allow(dead_code)]
+pub struct CountingMock {
+    server: MockServer,
+}
+
+impl CountingMock {
+    #[allow(dead_code)]
+    pub fn base(&self) -> String {
+        self.server.base().to_string()
+    }
+
+    /// Requests already answered. Sound only after the calls under test
+    /// have returned — see [`MockServer::request_if_any`].
+    #[allow(dead_code)]
+    pub fn request_count(&self) -> usize {
+        std::iter::from_fn(|| self.server.request_if_any()).count()
+    }
+}
+
+#[allow(dead_code)]
+pub fn mock_counting_requests(n: usize) -> CountingMock {
+    let row: Vec<String> = axis_vector(0).iter().map(|v| v.to_string()).collect();
+    let body = format!(
+        r#"{{"data":[{{"embedding":[{}],"index":0}}]}}"#,
+        row.join(",")
+    );
+    let replies = (0..n).map(|_| Reply::ok(&body)).collect();
+    CountingMock {
+        server: MockServer::new(replies),
+    }
 }
