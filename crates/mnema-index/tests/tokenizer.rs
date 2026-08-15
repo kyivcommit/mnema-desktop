@@ -968,3 +968,40 @@ fn a_terms_presence_is_asked_of_the_whole_index() {
         vec!["бюджет".to_string(), "затверджено".to_string()]
     );
 }
+
+/// Drops the words the index has never seen and demands the rest — all of them.
+/// The second half is what separates this from `AnyTerm`, and a test that only
+/// showed the question word being dropped would pass for either rule.
+#[test]
+fn terms_in_index_drops_the_unseen_word_and_still_demands_the_rest() {
+    let (_d, db, _) = db_with(&[
+        ("бюджет затверджено на ремонт даху", SourceKind::Document),
+        ("бюджет комісії", SourceKind::Document),
+    ]);
+    let rule = mnema_index::QueryRule::TermsInIndex;
+
+    // The question word is gone, so the remaining two are satisfiable.
+    assert_eq!(
+        db.search_lexical_with("де бюджет ремонт", rule, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Still a conjunction: both surviving words exist in the index, but not in
+    // one chunk. `AnyTerm` would return two here.
+    assert!(
+        db.search_lexical_with("комісії ремонт", rule, 10)
+            .unwrap()
+            .is_empty(),
+        "surviving terms are still all required"
+    );
+
+    // Every word unseen leaves nothing to demand, and that is no rows rather
+    // than every row.
+    assert!(
+        db.search_lexical_with("деінде колись", rule, 10)
+            .unwrap()
+            .is_empty()
+    );
+}

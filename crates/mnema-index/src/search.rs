@@ -76,7 +76,10 @@ impl Db {
         let expr = match rule {
             QueryRule::AllTerms => as_fts5_phrases(&prepared),
             QueryRule::AnyTerm => as_fts5_any(&prepared),
-            QueryRule::TermsInIndex => as_fts5_phrases(&prepared),
+            QueryRule::TermsInIndex => {
+                let present = self.terms_present(&prepared)?;
+                as_fts5_all_of(&present)
+            }
             QueryRule::TermsInIndexOrAnyTerm => as_fts5_phrases(&prepared),
         };
         if expr.is_empty() {
@@ -183,6 +186,21 @@ fn quote_term(term: &str) -> String {
 /// recall on every multi-word query.
 fn as_fts5_phrases(prepared: &str) -> String {
     quoted_terms(prepared, " ")
+}
+
+/// Quotes and ANDs an already-chosen list of terms. Separate from
+/// `as_fts5_phrases`, which starts from a prepared string and takes every term
+/// it holds — here the choosing has already happened. Pinned by
+/// `terms_in_index_drops_the_unseen_word_and_still_demands_the_rest`.
+fn as_fts5_all_of(terms: &[String]) -> String {
+    let mut out = String::new();
+    for term in terms {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&quote_term(term));
+    }
+    out
 }
 
 /// Joins each quoted term with FTS5's `OR`, so any one term is enough. The
