@@ -943,8 +943,9 @@ fn any_term_survives_a_word_no_document_has() {
     );
 }
 
-/// The predicate `TermsInIndex` is built on, alone, so a later failure can be
-/// told apart from a failure of the rule that uses it.
+/// The predicate that Task 4 will build `TermsInIndex` on, exercised alone
+/// here so a later failure can be told apart from a failure of the rule
+/// that uses it.
 #[test]
 fn a_terms_presence_is_asked_of_the_whole_index() {
     let (_d, db, _) = db_with(&[("бюджет затверджено", SourceKind::Document)]);
@@ -962,5 +963,8 @@ fn a_terms_presence_is_asked_of_the_whole_index() {
 
     let present =
         mnema_index::prepare_for_search("бюджет затверджено", mnema_core::SourceKind::Document);
-    assert_eq!(db.terms_present(&present).unwrap().len(), 2);
+    assert_eq!(
+        db.terms_present(&present).unwrap(),
+        vec!["бюджет".to_string(), "затверджено".to_string()]
+    );
 }

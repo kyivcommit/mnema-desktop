@@ -105,8 +105,7 @@ impl Db {
         )?;
         let mut out = Vec::new();
         for term in crate::text_prep::terms(prepared) {
-            let expr = format!("\"{term}\"");
-            if stmt.exists(params![expr])? {
+            if stmt.exists(params![quote_term(term)])? {
                 out.push(term.to_string());
             }
         }
@@ -167,11 +166,16 @@ fn quoted_terms(prepared: &str, sep: &str) -> String {
         if !out.is_empty() {
             out.push_str(sep);
         }
-        out.push('"');
-        out.push_str(term);
-        out.push('"');
+        out.push_str(&quote_term(term));
     }
     out
+}
+
+/// One term, quoted for FTS5's MATCH grammar. The one place that owns the
+/// quoting rule — `quoted_terms` and `terms_present` both call this rather
+/// than each spelling `"` + term + `"` out again.
+fn quote_term(term: &str) -> String {
+    format!("\"{term}\"")
 }
 
 /// Separate phrases rather than one: FTS5 joins them with an implicit AND,
