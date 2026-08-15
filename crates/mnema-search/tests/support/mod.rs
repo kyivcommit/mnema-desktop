@@ -43,6 +43,16 @@ impl Fixture {
             .execute_batch("ALTER TABLE chunk RENAME TO chunk_hidden_for_test;")
             .expect("rename the chunk table");
     }
+
+    /// Renames `chunk_embedding_state` so `Db::embedded_chunk_count` returns
+    /// `Err` for the rest of this fixture's life, on the one table
+    /// `Db::chunk_count` and `Db::knn` never read.
+    pub fn break_embedded_count(&self) {
+        self.db
+            .conn()
+            .execute_batch("ALTER TABLE chunk_embedding_state RENAME TO ces_hidden_for_test;")
+            .expect("rename the chunk_embedding_state table");
+    }
 }
 
 /// The shared build behind both fixtures below: `total` chunks, the first

@@ -133,3 +133,21 @@ fn a_coverage_count_that_fails_makes_the_arm_failed_not_empty() {
         other => panic!("expected a failure, got {other:?}"),
     }
 }
+
+/// The two counts fail on separate tables, and `chunk_count` failing is not
+/// the only path in: `embedded_chunk_count`'s own table must be caught too.
+#[test]
+fn an_unreadable_embedded_count_also_makes_the_arm_failed_not_empty() {
+    let f = support::indexed_space();
+    let mock = support::mock_returning_vector_near(&f, f.chunk_ids[0]);
+    let provider = mnema_search::Provider {
+        base: mock.base().to_string(),
+        key: "k".to_string(),
+    };
+    f.break_embedded_count();
+
+    match mnema_search::content_arm(&f.db, Some(provider), "ремонт даху", 10) {
+        mnema_search::ContentArm::Failed { .. } => {}
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}

@@ -47,6 +47,9 @@ pub enum ContentArm {
     Failed {
         reason: String,
     },
+    /// `embedded` of `total` tells a full index from a partly built one.
+    /// Pinned by
+    /// `a_partly_embedded_space_says_how_much_of_the_index_it_saw`.
     Answered {
         chunks: Vec<i64>,
         embedded: i64,
@@ -60,6 +63,10 @@ pub enum ContentArm {
 /// choice: a vector from another model is a coordinate on another map, and
 /// `knn` compares it silently. Will be pinned by task 14's
 /// `the_content_arm_refuses_a_model_that_is_not_the_spaces`, not yet written.
+///
+/// A coverage count that cannot be read fails the whole arm rather than
+/// being read as zero. Pinned by
+/// `a_coverage_count_that_fails_makes_the_arm_failed_not_empty`.
 pub fn content_arm(db: &Db, provider: Option<Provider>, query: &str, k: i64) -> ContentArm {
     let Some(provider) = provider else {
         return ContentArm::NotConfigured(Missing::NoKey);
