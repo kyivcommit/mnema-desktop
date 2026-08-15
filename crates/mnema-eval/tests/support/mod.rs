@@ -185,6 +185,23 @@ fn axis_vector(axis: usize) -> Vec<f32> {
     v
 }
 
+/// Fixed dense answers, no provider and no vectors behind them: question
+/// `i` of `questions` gets its own single chunk id, never one shared
+/// across all of them — the same distinctness `mock_counting_requests`
+/// gives the real content arm, without a live call to earn it.
+#[allow(dead_code)]
+pub fn canned_dense_answers(questions: &mnema_eval::QuestionSet) -> mnema_eval::DenseAnswers {
+    let by_question = questions
+        .questions
+        .iter()
+        .enumerate()
+        .map(|(i, q)| (q.id.clone(), vec![CANNED_CONTENT_BASE + i as i64]))
+        .collect();
+    mnema_eval::DenseAnswers::canned(by_question)
+}
+
+const CANNED_CONTENT_BASE: i64 = 9000;
+
 /// A provider that answers any of its first `n` requests with a valid
 /// vector, and counts how many it actually received.
 #[allow(dead_code)]

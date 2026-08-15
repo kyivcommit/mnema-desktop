@@ -315,3 +315,51 @@ fn a_looser_rule_returns_more_and_the_outcome_records_how_much() {
     );
     assert!(strict.iter().all(|o| o.content_matched.is_none()));
 }
+
+/// A row of the sweep: one query rule, one fusion rule, over dense answers
+/// taken once. `ContentOnly` is the discriminating case — its outcome must not
+/// depend on the query rule at all, which is also the sweep's own self-check.
+#[test]
+fn a_content_only_row_is_the_same_under_every_query_rule() {
+    let (_c, questions, indexed) = support::small_fixture_with_vectors();
+    let dense = support::canned_dense_answers(&questions);
+
+    let mut rows = Vec::new();
+    for rule in mnema_index::QueryRule::ALL {
+        rows.push(
+            mnema_eval::run_row(
+                &indexed,
+                &questions,
+                rule,
+                mnema_search::FusionRule::ContentOnly,
+                &dense,
+            )
+            .unwrap(),
+        );
+    }
+    for row in &rows[1..] {
+        assert_eq!(row, &rows[0], "content-only drifted with the query rule");
+    }
+    // And it is not vacuously equal: the rows carry answers.
+    assert!(rows[0].iter().any(|o| !o.returned.is_empty()));
+}
+
+/// Both arms' volumes are recorded separately. One shared number would hide the
+/// very difference the column exists to show.
+#[test]
+fn a_fused_row_records_each_arms_volume_apart() {
+    let (_c, questions, indexed) = support::small_fixture_with_vectors();
+    let dense = support::canned_dense_answers(&questions);
+
+    let row = mnema_eval::run_row(
+        &indexed,
+        &questions,
+        mnema_index::QueryRule::AnyTerm,
+        mnema_search::FusionRule::Rrf,
+        &dense,
+    )
+    .unwrap();
+
+    assert!(row.iter().all(|o| o.text_matched.is_some()));
+    assert!(row.iter().all(|o| o.content_matched.is_some()));
+}

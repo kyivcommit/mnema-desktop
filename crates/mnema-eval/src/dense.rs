@@ -84,4 +84,16 @@ impl DenseAnswers {
     pub fn of(&self, question_id: &str) -> &[i64] {
         self.by_question.get(question_id).map_or(&[], |v| v)
     }
+
+    /// Built straight from data, with no provider and no index behind it —
+    /// what a test hands `run_row` in place of a live `ask`.
+    pub fn canned(by_question: BTreeMap<String, Vec<i64>>) -> DenseAnswers {
+        DenseAnswers {
+            by_question,
+            model: "none".to_string(),
+            base: "none".to_string(),
+            embedded: 0,
+            total: 0,
+        }
+    }
 }

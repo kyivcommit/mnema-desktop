@@ -1,5 +1,8 @@
-use crate::{Class, EvalError, Gold, IndexedCorpus, Question, QuestionSet, resolve_gold};
+use crate::{
+    Class, DenseAnswers, EvalError, Gold, IndexedCorpus, Question, QuestionSet, resolve_gold,
+};
 use mnema_index::QueryRule;
+use mnema_search::{CANDIDATES, FusionRule, fuse};
 
 /// How many chunks one question is allowed to see, and the ceiling every
 /// `recall@k` in the report is read under.
@@ -112,6 +115,62 @@ pub fn run_lexical_with(
             rank,
             text_matched: Some(returned.len()),
             content_matched: None,
+            returned,
+            returned_locations,
+            gold,
+        });
+    }
+    Ok(outcomes)
+}
+
+/// One row of the sweep: a query rule, a fusion rule, and the dense answers
+/// taken once for the whole sweep. Each arm is asked to `CANDIDATES` depth
+/// and `fuse` cuts to `SEARCH_LIMIT` — the same shape as
+/// `mnema_search::search`. An arm the fusion rule does not read is never
+/// asked, so its `_matched` field is `None`, not a count of zero. Pinned by
+/// `a_content_only_row_is_the_same_under_every_query_rule` and by
+/// `a_fused_row_records_each_arms_volume_apart`.
+pub fn run_row(
+    indexed: &IndexedCorpus,
+    questions: &QuestionSet,
+    rule: QueryRule,
+    fusion: FusionRule,
+    dense: &DenseAnswers,
+) -> Result<Vec<Outcome>, EvalError> {
+    let mut outcomes = Vec::with_capacity(questions.questions.len());
+    for q in &questions.questions {
+        let gold = gold_chunks(indexed, q)?;
+        let text = if fusion == FusionRule::ContentOnly {
+            None
+        } else {
+            Some(
+                indexed
+                    .db()
+                    .search_lexical_with(&q.text, rule, CANDIDATES)?,
+            )
+        };
+        let content = if fusion == FusionRule::TextOnly {
+            None
+        } else {
+            Some(dense.of(&q.id))
+        };
+        let returned = fuse(
+            fusion,
+            text.as_deref().unwrap_or(&[]),
+            content.unwrap_or(&[]),
+            SEARCH_LIMIT as usize,
+        );
+        let returned_locations = locate(indexed, &returned)?;
+        let rank = returned
+            .iter()
+            .position(|id| gold.contains(id))
+            .map(|i| i + 1);
+        outcomes.push(Outcome {
+            question: q.id.clone(),
+            class: q.class,
+            rank,
+            text_matched: text.as_ref().map(Vec::len),
+            content_matched: content.map(<[i64]>::len),
             returned,
             returned_locations,
             gold,
