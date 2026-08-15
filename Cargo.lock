@@ -2788,6 +2788,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnema-search"
+version = "0.0.0"
+dependencies = [
+ "mnema-core",
+ "mnema-index",
+ "mnema-mock-provider",
+ "mnema-provider",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "mnema-secrets"
 version = "0.0.0"
 dependencies = [

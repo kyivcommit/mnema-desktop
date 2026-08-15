@@ -13,6 +13,7 @@ members = [
     "crates/mnema-mock-provider",
     "crates/mnema-pool",
     "crates/mnema-provider",
+    "crates/mnema-search",
     "crates/mnema-secrets",
     "crates/mnema-walk",
     "src-tauri",
