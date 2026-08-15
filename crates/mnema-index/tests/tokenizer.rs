@@ -870,8 +870,14 @@ fn the_unparameterised_search_is_the_all_terms_rule() {
         ("бюджет затверджено", SourceKind::Document),
     ]);
     for query in ["витрати бюджет", "бюджет", "витрати немає", ""] {
+        let lexical = db.search_lexical(query, 10).unwrap();
+        if query == "бюджет" {
+            // Otherwise two empty vectors would satisfy the equality below
+            // just as well as two agreeing, non-trivial ones.
+            assert!(!lexical.is_empty(), "{query:?} must match indexed rows");
+        }
         assert_eq!(
-            db.search_lexical(query, 10).unwrap(),
+            lexical,
             db.search_lexical_with(query, mnema_index::QueryRule::AllTerms, 10)
                 .unwrap(),
             "diverged on {query:?}"
