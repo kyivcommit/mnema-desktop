@@ -28,11 +28,19 @@ fn a_single_arm_rule_ignores_the_other_arm_entirely() {
 
 /// `limit` cuts the fused list, and it cuts it after fusing rather than before:
 /// a rule that truncated its inputs would score its own arms, not the fusion.
+/// The `Rrf` case below is the discriminating one: 1 and 3 each place within
+/// the limit in one arm only, yet together they outscore 2, which places
+/// within the limit in both. Cutting each arm to `limit` first would drop
+/// 3 before it could contribute, and put 2 on top instead.
 #[test]
 fn the_limit_cuts_the_fused_list_not_the_arms() {
     let text = [1, 2, 3, 4];
     assert_eq!(fuse(FusionRule::TextOnly, &text, &[], 2), vec![1, 2]);
     assert_eq!(fuse(FusionRule::TextOnly, &text, &[], 0), Vec::<i64>::new());
+
+    let text = [1, 2, 3];
+    let content = [3, 2, 1];
+    assert_eq!(fuse(FusionRule::Rrf, &text, &content, 2), vec![1, 3]);
 }
 
 /// `ALL` is a hand-written array; a new variant still compiles without it.
@@ -72,4 +80,34 @@ fn label_names_every_variant() {
     assert_eq!(FusionRule::Rrf.label(), "rrf");
     assert_eq!(FusionRule::Interleave.label(), "interleave");
     assert_eq!(FusionRule::Cascade.label(), "cascade");
+}
+
+/// Reciprocal rank fusion: a chunk high in BOTH lists outranks one high in a
+/// single list. The example is the spec's own — 12 is second in one arm and
+/// first in the other, and no single-arm rule puts it first.
+#[test]
+fn rrf_lifts_the_chunk_that_stands_high_in_both_arms() {
+    let text = [7, 12, 3, 41];
+    let content = [12, 5, 7, 33];
+
+    let fused = fuse(FusionRule::Rrf, &text, &content, 4);
+    assert_eq!(fused[0], 12, "12 places 2nd and 1st; 7 places 1st and 3rd");
+    assert_eq!(fused[1], 7);
+
+    // A chunk in one arm only still appears — fusion widens, it does not filter.
+    assert!(fuse(FusionRule::Rrf, &text, &content, 10).contains(&41));
+    assert!(fuse(FusionRule::Rrf, &text, &content, 10).contains(&33));
+}
+
+/// Ties are ordinary here, not an edge case: two chunks each appearing once at
+/// the same position score identically. The server calls the tie-break a
+/// correctness requirement (`app/search/hybrid.py:50`), and without it two runs
+/// over the same data print different tables.
+#[test]
+fn equal_scores_are_broken_by_chunk_id_so_two_runs_agree() {
+    let text = [50, 40];
+    let content = [40, 50];
+    // Each chunk scores 1/(60+1) + 1/(60+2). Only the id can separate them.
+    assert_eq!(fuse(FusionRule::Rrf, &text, &content, 2), vec![40, 50]);
+    assert_eq!(fuse(FusionRule::Rrf, &content, &text, 2), vec![40, 50]);
 }
