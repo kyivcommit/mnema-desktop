@@ -206,14 +206,20 @@ impl CountingMock {
     }
 }
 
+/// Reply `i` carries `axis_vector(i)`, not one vector repeated `n` times —
+/// so two different questions' answers can be told apart by which chunk
+/// their query vector landed nearest to.
 #[allow(dead_code)]
 pub fn mock_counting_requests(n: usize) -> CountingMock {
-    let row: Vec<String> = axis_vector(0).iter().map(|v| v.to_string()).collect();
-    let body = format!(
-        r#"{{"data":[{{"embedding":[{}],"index":0}}]}}"#,
-        row.join(",")
-    );
-    let replies = (0..n).map(|_| Reply::ok(&body)).collect();
+    let replies = (0..n)
+        .map(|i| {
+            let row: Vec<String> = axis_vector(i).iter().map(|v| v.to_string()).collect();
+            Reply::ok(&format!(
+                r#"{{"data":[{{"embedding":[{}],"index":0}}]}}"#,
+                row.join(",")
+            ))
+        })
+        .collect();
     CountingMock {
         server: MockServer::new(replies),
     }

@@ -6,11 +6,17 @@ use crate::{EvalError, IndexedCorpus, QuestionSet};
 
 /// What the content arm said about every question, taken once. The arm's
 /// answer depends on the question and on the index, not on any rule a later
-/// sweep varies. Pinned by `every_question_reaches_the_provider_exactly_once`.
+/// sweep varies — and `embedded`/`total` ride along with `model` and `base`
+/// because that coverage cannot be recovered without another live call.
+/// Pinned by `every_question_reaches_the_provider_exactly_once` and
+/// `the_answers_carry_how_much_of_the_index_was_embedded`.
+#[derive(Debug)]
 pub struct DenseAnswers {
     by_question: BTreeMap<String, Vec<i64>>,
     pub model: String,
     pub base: String,
+    pub embedded: i64,
+    pub total: i64,
 }
 
 impl DenseAnswers {
@@ -23,6 +29,8 @@ impl DenseAnswers {
         let space = db.active_space()?.ok_or(EvalError::NoActiveSpace)?;
         let (model, _width) = db.space_model(space)?;
         let mut by_question = BTreeMap::new();
+        let mut embedded = 0;
+        let mut total = 0;
         for q in &questions.questions {
             match mnema_search::content_arm(
                 db,
@@ -30,9 +38,20 @@ impl DenseAnswers {
                 &q.text,
                 mnema_search::CANDIDATES,
             ) {
-                ContentArm::Answered { chunks, .. } => {
+                ContentArm::Answered {
+                    chunks,
+                    embedded: e,
+                    total: t,
+                } => {
                     by_question.insert(q.id.clone(), chunks);
+                    embedded = e;
+                    total = t;
                 }
+                // Ends the whole run rather than skipping the question: a
+                // sweep table mixing questions the content arm answered
+                // with ones it stayed silent on would describe two
+                // different measurements as one row. Pinned by
+                // `a_failed_content_arm_ends_the_run`.
                 other => return Err(EvalError::ContentArmSilent(format!("{other:?}"))),
             }
         }
@@ -40,6 +59,8 @@ impl DenseAnswers {
             by_question,
             model,
             base: provider.base,
+            embedded,
+            total,
         })
     }
 
@@ -49,6 +70,8 @@ impl DenseAnswers {
             by_question: BTreeMap::new(),
             model: "none".to_string(),
             base: "none".to_string(),
+            embedded: 0,
+            total: 0,
         }
     }
 
