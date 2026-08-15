@@ -470,18 +470,23 @@ fn raw_text_that_skipped_preparation_is_still_findable() {
     assert_eq!(db.search_lexical("books", 10).unwrap(), vec![ids[0]]);
 }
 
-/// The guard in `search_lexical` is load-bearing: `MATCH ''` is a syntax error,
-/// so without it a user typing punctuation into a search box gets an engine
-/// error handed back — `fts5: syntax error near ""` — rather than no results.
+/// The guard in `search_lexical_with` is load-bearing: `MATCH ''` is a syntax
+/// error, so without it a user typing punctuation into a search box gets an
+/// engine error handed back — `fts5: syntax error near ""` — rather than no
+/// results. Run under every rule, not only `AllTerms`: `TermsInIndexOrAnyTerm`
+/// carries a second guard of its own, for the widened attempt's own
+/// `MATCH ''`, and a term-free query reaches both.
 #[test]
 fn a_query_with_no_terms_returns_no_rows_rather_than_an_error() {
     let (_d, db, _) = db_with(&[("витрати за 2024 рік", SourceKind::Document)]);
     for query in ["", "   ", "!!!", "…—", "'", "()"] {
-        assert_eq!(
-            db.search_lexical(query, 10).unwrap(),
-            Vec::<i64>::new(),
-            "query {query:?}"
-        );
+        for rule in mnema_index::QueryRule::ALL {
+            assert_eq!(
+                db.search_lexical_with(query, rule, 10).unwrap(),
+                Vec::<i64>::new(),
+                "query {query:?} rule {rule:?}"
+            );
+        }
     }
     // The fixture is reachable, so the emptiness above is the query's and not
     // the database's.
@@ -1038,5 +1043,22 @@ fn the_fallback_fires_only_where_the_stricter_rule_came_back_empty() {
             .unwrap()
             .len(),
         2
+    );
+
+    // Nothing to demand and nothing to widen to: the fallback's own second
+    // `MATCH ''` guard, exercised where the first guard alone would not
+    // reach it.
+    assert!(
+        db.search_lexical_with("()", with_fallback, 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Both words absent from the index, so the widened attempt still runs
+    // a real (non-empty) `MATCH`, and still finds nothing to return.
+    assert!(
+        db.search_lexical_with("деінде колись", with_fallback, 10)
+            .unwrap()
+            .is_empty()
     );
 }
