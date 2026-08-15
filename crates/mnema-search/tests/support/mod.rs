@@ -30,19 +30,31 @@ impl std::ops::Deref for TempDb {
 pub struct Fixture {
     pub db: TempDb,
     pub chunk_ids: Vec<i64>,
+    pub embedded_ids: Vec<i64>,
 }
 
-/// One active 1024-wide space, holding chunks that are each already
-/// embedded — every chunk on its own axis, so a query vector equal to one
-/// of them ranks that chunk first and no other.
-pub fn indexed_space() -> Fixture {
+impl Fixture {
+    /// Renames the `chunk` table so `Db::chunk_count` returns `Err` for the
+    /// rest of this fixture's life — a count that cannot be read, not a
+    /// table that is honestly empty.
+    pub fn break_chunk_count(&self) {
+        self.db
+            .conn()
+            .execute_batch("ALTER TABLE chunk RENAME TO chunk_hidden_for_test;")
+            .expect("rename the chunk table");
+    }
+}
+
+/// The shared build behind both fixtures below: `total` chunks, the first
+/// `embedded` of them given a vector, each on its own axis.
+fn built_space(total: usize, embedded: usize) -> Fixture {
     let dir = tempfile::tempdir().expect("a temporary directory");
     register_vector_extension().expect("register the vector extension");
     let db = open(&dir.path().join("index.sqlite")).expect("open the index");
     let doc = db
         .insert_document(&"a".repeat(64), "text/plain", 64, SourceKind::Document)
         .expect("document");
-    let chunk_ids: Vec<i64> = (0..3)
+    let chunk_ids: Vec<i64> = (0..total as i64)
         .map(|ord| write_chunk(&db, &doc, ord, &format!("чанк {ord}")))
         .collect();
     db.set_document_status(&doc, DocumentStatus::Indexed)
@@ -51,14 +63,29 @@ pub fn indexed_space() -> Fixture {
         .adopt_embedding_model(MODEL, WIDTH as i64, "credential-ref", CHUNKER)
         .expect("adopt")
         .space_id;
-    for (axis, &chunk_id) in chunk_ids.iter().enumerate() {
+    let embedded_ids: Vec<i64> = chunk_ids[..embedded].to_vec();
+    for (axis, &chunk_id) in embedded_ids.iter().enumerate() {
         db.upsert_vector(space, chunk_id, &axis_vector(axis))
             .expect("vector");
     }
     Fixture {
         db: TempDb { db, _dir: dir },
         chunk_ids,
+        embedded_ids,
     }
+}
+
+/// One active 1024-wide space, holding chunks that are each already
+/// embedded — every chunk on its own axis, so a query vector equal to one
+/// of them ranks that chunk first and no other.
+pub fn indexed_space() -> Fixture {
+    built_space(3, 3)
+}
+
+/// The same space, with the last chunk left unembedded — a coverage count
+/// that has a genuine gap to report instead of a full or empty index.
+pub fn indexed_space_with_some_vectors_missing() -> Fixture {
+    built_space(3, 2)
 }
 
 /// A provider that answers with the exact vector already stored for

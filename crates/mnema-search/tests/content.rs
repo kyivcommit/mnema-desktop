@@ -92,3 +92,44 @@ fn no_key_is_not_configured_rather_than_failed() {
         mnema_search::ContentArm::NotConfigured(mnema_search::Missing::NoKey)
     );
 }
+
+/// A half-filled space answers over its half and says so. Without the pair of
+/// numbers a person reads "nothing found" as a fact about their documents.
+#[test]
+fn a_partly_embedded_space_says_how_much_of_the_index_it_saw() {
+    let f = support::indexed_space_with_some_vectors_missing();
+    let mock = support::mock_returning_vector_near(&f, f.embedded_ids[0]);
+    let provider = mnema_search::Provider {
+        base: mock.base().to_string(),
+        key: "k".to_string(),
+    };
+
+    match mnema_search::content_arm(&f.db, Some(provider), "ремонт даху", 10) {
+        mnema_search::ContentArm::Answered {
+            embedded, total, ..
+        } => {
+            assert_eq!(embedded, f.embedded_ids.len() as i64);
+            assert_eq!(total, f.chunk_ids.len() as i64);
+            assert!(embedded < total, "the fixture must leave chunks unembedded");
+        }
+        other => panic!("expected an answer, got {other:?}"),
+    }
+}
+
+/// A count that cannot be read is not a zero. `0 of 0` is a claim about the
+/// index; a failed count is a claim about this build.
+#[test]
+fn a_coverage_count_that_fails_makes_the_arm_failed_not_empty() {
+    let f = support::indexed_space();
+    let mock = support::mock_returning_vector_near(&f, f.chunk_ids[0]);
+    let provider = mnema_search::Provider {
+        base: mock.base().to_string(),
+        key: "k".to_string(),
+    };
+    f.break_chunk_count();
+
+    match mnema_search::content_arm(&f.db, Some(provider), "ремонт даху", 10) {
+        mnema_search::ContentArm::Failed { .. } => {}
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}

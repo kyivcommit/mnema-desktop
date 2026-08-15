@@ -103,8 +103,22 @@ pub fn content_arm(db: &Db, provider: Option<Provider>, query: &str, k: i64) -> 
             };
         }
     };
-    let embedded = db.embedded_chunk_count(space).unwrap_or(0);
-    let total = db.chunk_count().unwrap_or(0);
+    let embedded = match db.embedded_chunk_count(space) {
+        Ok(n) => n,
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
+    };
+    let total = match db.chunk_count() {
+        Ok(n) => n,
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
+    };
     ContentArm::Answered {
         chunks,
         embedded,
