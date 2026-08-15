@@ -121,6 +121,23 @@ fn interleave_alternates_and_keeps_each_chunk_once() {
     );
 }
 
+/// The whole text arm first, then whatever the content arm adds.
+#[test]
+fn cascade_exhausts_the_text_arm_before_the_content_arm() {
+    let text = [7, 12, 3];
+    let content = [12, 5, 7];
+
+    assert_eq!(
+        fuse(FusionRule::Cascade, &text, &content, 10),
+        vec![7, 12, 3, 5]
+    );
+
+    // The order within each arm is the arm's own, and the second arm never
+    // reorders the first — the discriminating case against a rule that merely
+    // concatenated and re-sorted.
+    assert_eq!(fuse(FusionRule::Cascade, &[3, 1], &[2], 10), vec![3, 1, 2]);
+}
+
 /// Ties are ordinary here, not an edge case: two chunks each appearing once at
 /// the same position score identically. The server calls the tie-break a
 /// correctness requirement (`app/search/hybrid.py:50`), and without it two runs

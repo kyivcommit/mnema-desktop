@@ -50,7 +50,7 @@ pub fn fuse(rule: FusionRule, text: &[i64], content: &[i64], limit: usize) -> Ve
         FusionRule::ContentOnly => content.to_vec(),
         FusionRule::Rrf => rrf(text, content),
         FusionRule::Interleave => interleave(text, content),
-        FusionRule::Cascade => text.to_vec(),
+        FusionRule::Cascade => cascade(text, content),
     };
     fused.into_iter().take(limit).collect()
 }
@@ -100,4 +100,19 @@ fn rrf(text: &[i64], content: &[i64]) -> Vec<i64> {
     // function of the inputs alone.
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     ranked.into_iter().map(|(id, _)| id).collect()
+}
+
+/// The text arm entire, in its own order, then the content arm's contributions
+/// in theirs. Pinned by `cascade_exhausts_the_text_arm_before_the_content_arm`.
+fn cascade(text: &[i64], content: &[i64]) -> Vec<i64> {
+    use std::collections::BTreeSet;
+
+    let mut seen: BTreeSet<i64> = BTreeSet::new();
+    let mut out = Vec::with_capacity(text.len() + content.len());
+    for &id in text.iter().chain(content) {
+        if seen.insert(id) {
+            out.push(id);
+        }
+    }
+    out
 }
