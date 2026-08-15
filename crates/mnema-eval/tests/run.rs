@@ -286,7 +286,11 @@ fn the_unparameterised_run_is_the_all_terms_rule() {
 
 /// A rule that demands less finds more on this corpus, and the volume column is
 /// what shows the price. Both halves asserted: a rule that returned everything
-/// would satisfy the first alone.
+/// would satisfy the first alone. `text_matched` is `Some(0)`, not `None`, on
+/// the strict side: the arm WAS asked, it just found nothing — `None` means
+/// only "not asked", never "asked and empty". And the volume itself is checked
+/// against `returned.len()`, not merely against zero, so a count that tracked
+/// only "did anything come back" could not pass unnoticed.
 #[test]
 fn a_looser_rule_returns_more_and_the_outcome_records_how_much() {
     let (_c, questions, indexed) = support::small_fixture();
@@ -296,11 +300,18 @@ fn a_looser_rule_returns_more_and_the_outcome_records_how_much() {
     let loose = mnema_eval::run_lexical_with(&indexed, &questions, mnema_index::QueryRule::AnyTerm)
         .unwrap();
 
+    assert_eq!(strict[0].text_matched, Some(0), "outcome: {:?}", strict[0]);
     let strict_total: usize = strict.iter().filter_map(|o| o.text_matched).sum();
     let loose_total: usize = loose.iter().filter_map(|o| o.text_matched).sum();
     assert!(
         loose_total > strict_total,
         "{loose_total} vs {strict_total}"
+    );
+    assert!(
+        loose
+            .iter()
+            .all(|o| o.text_matched == Some(o.returned.len())),
+        "outcomes: {loose:?}"
     );
     assert!(strict.iter().all(|o| o.content_matched.is_none()));
 }

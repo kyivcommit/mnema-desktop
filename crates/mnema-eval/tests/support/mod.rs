@@ -79,9 +79,13 @@ pub fn worker() -> &'static Path {
     })
 }
 
-/// A two-document corpus and one question whose query names a term from one
-/// document and a term from neither — a rule that requires every term finds
-/// nothing, and a rule that requires only one finds that document.
+/// A two-document corpus and two questions. `q-1`'s query names one term
+/// from each document: no chunk holds both, so `AllTerms` finds nothing and
+/// `AnyTerm` finds both — two chunks, not one.
+///
+/// `q-2`'s query is the OTHER document's lone term: every rule returns that
+/// one chunk, never `q-2`'s own gold — `rank` is `None` while the count is
+/// `Some(1)`, telling a count apart from a rank.
 ///
 /// `#[allow(dead_code)]`: not every binary that declares `mod support;`
 /// calls this one.
@@ -106,14 +110,24 @@ pub fn small_fixture() -> (
         ],
     };
     let questions = mnema_eval::QuestionSet {
-        questions: vec![mnema_eval::Question {
-            id: "q-1".to_string(),
-            language: mnema_eval::Language::Uk,
-            class: mnema_eval::Class::Literal,
-            text: "договір неможливе".to_string(),
-            document: "uk/one.md".to_string(),
-            answers: vec!["Договір складено у двох примірниках.".to_string()],
-        }],
+        questions: vec![
+            mnema_eval::Question {
+                id: "q-1".to_string(),
+                language: mnema_eval::Language::Uk,
+                class: mnema_eval::Class::Literal,
+                text: "договір комісія".to_string(),
+                document: "uk/one.md".to_string(),
+                answers: vec!["Договір складено у двох примірниках.".to_string()],
+            },
+            mnema_eval::Question {
+                id: "q-2".to_string(),
+                language: mnema_eval::Language::Uk,
+                class: mnema_eval::Class::Literal,
+                text: "комісія".to_string(),
+                document: "uk/one.md".to_string(),
+                answers: vec!["Договір складено у двох примірниках.".to_string()],
+            },
+        ],
     };
     let indexed = mnema_eval::IndexedCorpus::build(&corpus, worker()).unwrap();
     (corpus, questions, indexed)
