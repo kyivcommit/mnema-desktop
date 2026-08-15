@@ -2,6 +2,38 @@ use rusqlite::params;
 
 use crate::{Db, Error};
 
+/// How the terms of a query are combined into one FTS5 expression.
+///
+/// A parameter rather than a branch inside the product: the application passes
+/// one value from one place, and only `mnema-eval` walks the whole list. Pinned
+/// by `the_unparameterised_search_is_the_all_terms_rule`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum QueryRule {
+    AllTerms,
+    AnyTerm,
+    TermsInIndex,
+    TermsInIndexOrAnyTerm,
+}
+
+impl QueryRule {
+    /// Every variant, in the order the sweep prints them.
+    pub const ALL: [QueryRule; 4] = [
+        QueryRule::AllTerms,
+        QueryRule::AnyTerm,
+        QueryRule::TermsInIndex,
+        QueryRule::TermsInIndexOrAnyTerm,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            QueryRule::AllTerms => "all-terms",
+            QueryRule::AnyTerm => "any-term",
+            QueryRule::TermsInIndex => "terms-in-index",
+            QueryRule::TermsInIndexOrAnyTerm => "terms-in-index-or-any",
+        }
+    }
+}
+
 impl Db {
     pub fn index_chunk_text(&self, chunk_id: i64, prepared: &str) -> Result<(), Error> {
         write_search_row(self.conn(), chunk_id, prepared)
@@ -28,13 +60,31 @@ impl Db {
     /// was, before the canonical apostrophe moved to U+02BC. Quoting is what
     /// makes the user's text data rather than syntax.
     pub fn search_lexical(&self, query: &str, limit: i64) -> Result<Vec<i64>, Error> {
+        self.search_lexical_with(query, QueryRule::AllTerms, limit)
+    }
+
+    pub fn search_lexical_with(
+        &self,
+        query: &str,
+        rule: QueryRule,
+        limit: i64,
+    ) -> Result<Vec<i64>, Error> {
         let prepared = crate::prepare_for_search(query, mnema_core::SourceKind::Document);
-        let expr = as_fts5_phrases(&prepared);
+        let expr = match rule {
+            QueryRule::AllTerms => as_fts5_phrases(&prepared),
+            QueryRule::AnyTerm => as_fts5_phrases(&prepared),
+            QueryRule::TermsInIndex => as_fts5_phrases(&prepared),
+            QueryRule::TermsInIndexOrAnyTerm => as_fts5_phrases(&prepared),
+        };
         if expr.is_empty() {
             // `MATCH ''` is a syntax error, and a query of nothing but
             // separators prepares down to exactly that. No terms, no rows.
             return Ok(Vec::new());
         }
+        self.matching(&expr, limit)
+    }
+
+    fn matching(&self, expr: &str, limit: i64) -> Result<Vec<i64>, Error> {
         let mut stmt = self.conn().prepare(
             "SELECT chunk_fts.rowid FROM chunk_fts
                JOIN chunk ON chunk.id = chunk_fts.rowid

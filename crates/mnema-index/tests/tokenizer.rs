@@ -858,3 +858,23 @@ fn search_terms_matches_what_fts5_stores_for_every_mark() {
         starved.join("\n")
     );
 }
+
+/// `search_lexical` is `AllTerms` and nothing else. The equality is the point:
+/// the product's entry point moves to `search_lexical_with` in this cycle, and
+/// a divergence between the two would make every existing assertion in this
+/// file measure a path the product no longer takes.
+#[test]
+fn the_unparameterised_search_is_the_all_terms_rule() {
+    let (_d, db, _) = db_with(&[
+        ("витрати і бюджет на 2024", SourceKind::Document),
+        ("бюджет затверджено", SourceKind::Document),
+    ]);
+    for query in ["витрати бюджет", "бюджет", "витрати немає", ""] {
+        assert_eq!(
+            db.search_lexical(query, 10).unwrap(),
+            db.search_lexical_with(query, mnema_index::QueryRule::AllTerms, 10)
+                .unwrap(),
+            "diverged on {query:?}"
+        );
+    }
+}
