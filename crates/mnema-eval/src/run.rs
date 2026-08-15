@@ -58,7 +58,10 @@ pub struct Outcome {
     pub returned_locations: Vec<Option<Location>>,
     pub gold: Vec<i64>,
     /// How many chunks the lexical arm returned, or `None` when this run did
-    /// not ask it. Pinned by
+    /// not ask it. The depth behind the count is not fixed by the field:
+    /// `run_lexical_with` asks to `SEARCH_LIMIT`, `run_row` asks to
+    /// `CANDIDATES` — the same field name from two entry points measuring
+    /// two different depths, not comparable across them. Pinned by
     /// `a_looser_rule_returns_more_and_the_outcome_records_how_much`.
     pub text_matched: Option<usize>,
     /// How many chunks the content arm returned, or `None` when this run did

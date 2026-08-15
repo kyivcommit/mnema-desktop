@@ -342,6 +342,76 @@ fn a_content_only_row_is_the_same_under_every_query_rule() {
     }
     // And it is not vacuously equal: the rows carry answers.
     assert!(rows[0].iter().any(|o| !o.returned.is_empty()));
+    // Not the same answer copied onto every question, either: `q-1` and
+    // `q-2` were handed different canned chunks, so the outcomes must
+    // differ too — a `run_row` that read one question's dense answer for
+    // all of them would still pass every assertion above.
+    assert_ne!(
+        rows[0][0].returned, rows[0][1].returned,
+        "outcomes: {:?}",
+        rows[0]
+    );
+    // The other half of the gate `a_fused_row_records_each_arms_volume_apart`
+    // pins for `Rrf`: content-only never asks the text arm, so it stays
+    // `None` rather than a count of zero.
+    assert!(rows[0].iter().all(|o| o.text_matched.is_none()));
+}
+
+/// The mirror of the content-only row: `TextOnly` never asks the content
+/// arm, so `content_matched` stays `None` rather than a count of zero,
+/// while `text_matched` — the arm that WAS asked — is `Some`.
+#[test]
+fn a_text_only_row_never_asks_the_content_arm() {
+    let (_c, questions, indexed) = support::small_fixture_with_vectors();
+    let dense = support::canned_dense_answers(&questions);
+
+    let row = mnema_eval::run_row(
+        &indexed,
+        &questions,
+        mnema_index::QueryRule::AnyTerm,
+        mnema_search::FusionRule::TextOnly,
+        &dense,
+    )
+    .unwrap();
+
+    assert!(row.iter().all(|o| o.content_matched.is_none()));
+    assert!(row.iter().all(|o| o.text_matched.is_some()));
+}
+
+/// `Rrf` and `Cascade` are not the same rule under a different name: on
+/// `q-1` under `AnyTerm` the text arm returns two chunks `[x, y]` and the
+/// content arm returns one `[z]`. `Cascade` exhausts the text arm first,
+/// so it answers `[x, y, z]`; `Rrf` scores `x` and `z` equal (both lead
+/// their own arm) and breaks the tie by the smaller id, always `x` here,
+/// so it answers `[x, z, y]` — the two disagree at the second position
+/// regardless of which real chunk `x` and `y` turn out to be.
+#[test]
+fn a_cascade_row_disagrees_with_rrf_on_where_the_content_answer_lands() {
+    let (_c, questions, indexed) = support::small_fixture_with_vectors();
+    let dense = support::canned_dense_answers(&questions);
+
+    let rrf = mnema_eval::run_row(
+        &indexed,
+        &questions,
+        mnema_index::QueryRule::AnyTerm,
+        mnema_search::FusionRule::Rrf,
+        &dense,
+    )
+    .unwrap();
+    let cascade = mnema_eval::run_row(
+        &indexed,
+        &questions,
+        mnema_index::QueryRule::AnyTerm,
+        mnema_search::FusionRule::Cascade,
+        &dense,
+    )
+    .unwrap();
+
+    assert_ne!(
+        rrf[0].returned, cascade[0].returned,
+        "rrf: {:?}, cascade: {:?}",
+        rrf[0].returned, cascade[0].returned
+    );
 }
 
 /// Both arms' volumes are recorded separately. One shared number would hide the
