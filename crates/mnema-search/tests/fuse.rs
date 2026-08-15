@@ -28,10 +28,10 @@ fn a_single_arm_rule_ignores_the_other_arm_entirely() {
 
 /// `limit` cuts the fused list, and it cuts it after fusing rather than before:
 /// a rule that truncated its inputs would score its own arms, not the fusion.
-/// The `Rrf` case below is the discriminating one: 1 and 3 each place within
-/// the limit in one arm only, yet together they outscore 2, which places
-/// within the limit in both. Cutting each arm to `limit` first would drop
-/// 3 before it could contribute, and put 2 on top instead.
+/// The `Rrf` case below is the discriminating one: cutting each arm to
+/// `limit` first costs 1 and 3 their second contribution — the one from
+/// the other arm, past the cut — dropping both to a single `1/61`; 2 loses
+/// neither contribution and would end up on top instead.
 #[test]
 fn the_limit_cuts_the_fused_list_not_the_arms() {
     let text = [1, 2, 3, 4];
@@ -84,7 +84,7 @@ fn label_names_every_variant() {
 
 /// Reciprocal rank fusion: a chunk high in BOTH lists outranks one high in a
 /// single list. The example is the spec's own — 12 is second in one arm and
-/// first in the other, and no single-arm rule puts it first.
+/// first in the other, and `TextOnly` alone would put 7 first, not 12.
 #[test]
 fn rrf_lifts_the_chunk_that_stands_high_in_both_arms() {
     let text = [7, 12, 3, 41];
