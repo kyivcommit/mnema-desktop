@@ -15,6 +15,11 @@ const CHUNKER: &str = "chunker-v1";
 const MODEL: &str = "baai/bge-m3";
 const WIDTH: usize = 1024;
 
+/// A second model name, adopted and then never embedded into — the model
+/// [`indexed_space_with_a_decoy_model`] wants recorded in the database next
+/// to the real one, so a name genuinely present but not the active space's.
+pub const DECOY_MODEL: &str = "openai/decoy-embedding";
+
 pub struct TempDb {
     db: Db,
     _dir: tempfile::TempDir,
@@ -56,9 +61,12 @@ impl Fixture {
     }
 }
 
-/// The shared build behind both fixtures below: `total` chunks, the first
-/// `embedded` of them given a vector, each on its own axis.
-fn built_space(total: usize, embedded: usize) -> Fixture {
+/// The shared build behind every fixture below: `total` chunks, the first
+/// `embedded` of them given a vector, each on its own axis. `decoy`, if
+/// given, is adopted first — while every space is still empty, the one
+/// moment [`Db::adopt_embedding_model`] permits a second one to exist —
+/// so it never gets a vector and the active space ends on the real model.
+fn built_space(total: usize, embedded: usize, decoy: Option<&str>) -> Fixture {
     let dir = tempfile::tempdir().expect("a temporary directory");
     register_vector_extension().expect("register the vector extension");
     let db = open(&dir.path().join("index.sqlite")).expect("open the index");
@@ -70,6 +78,10 @@ fn built_space(total: usize, embedded: usize) -> Fixture {
         .collect();
     db.set_document_status(&doc, DocumentStatus::Indexed)
         .expect("status");
+    if let Some(decoy) = decoy {
+        db.adopt_embedding_model(decoy, WIDTH as i64, "credential-ref", CHUNKER)
+            .expect("adopt the decoy while every space is still empty");
+    }
     let space = db
         .adopt_embedding_model(MODEL, WIDTH as i64, "credential-ref", CHUNKER)
         .expect("adopt")
@@ -91,13 +103,21 @@ fn built_space(total: usize, embedded: usize) -> Fixture {
 /// embedded — every chunk on its own axis, so a query vector equal to one
 /// of them ranks that chunk first and no other.
 pub fn indexed_space() -> Fixture {
-    built_space(3, 3)
+    built_space(3, 3, None)
 }
 
 /// The same space, with the last chunk left unembedded — a coverage count
 /// that has a genuine gap to report instead of a full or empty index.
 pub fn indexed_space_with_some_vectors_missing() -> Fixture {
-    built_space(3, 2)
+    built_space(3, 2, None)
+}
+
+/// The same space as [`indexed_space`], plus [`DECOY_MODEL`] adopted and
+/// left empty — a model genuinely on record that is not the active space's,
+/// so a test can tell "read the space's own model" apart from "read some
+/// model this database happens to know about."
+pub fn indexed_space_with_a_decoy_model() -> Fixture {
+    built_space(3, 3, Some(DECOY_MODEL))
 }
 
 /// A provider that answers with the exact vector already stored for

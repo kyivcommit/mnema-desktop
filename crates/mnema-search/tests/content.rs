@@ -152,14 +152,14 @@ fn an_unreadable_embedded_count_also_makes_the_arm_failed_not_empty() {
     }
 }
 
-/// The discriminating case for "the model comes from the space": the settings
-/// name a different model, and the request must still carry the space's. A test
-/// that only checked the happy path would pass with either source.
+/// The discriminating case for "the model comes from the space": the
+/// database also knows a decoy model, on record but never embedded into,
+/// and the request must still carry the real space's — not the decoy's. A
+/// test with only one model on record would pass no matter which one
+/// `content_arm` asked for.
 #[test]
 fn the_content_arm_refuses_a_model_that_is_not_the_spaces() {
-    let f = support::indexed_space();
-    f.db.meta_set(mnema_index::META_RERANK_MODEL, "some/other-model")
-        .unwrap();
+    let f = support::indexed_space_with_a_decoy_model();
     let mock = support::mock_recording_requests();
     let provider = mnema_search::Provider {
         base: mock.base().to_string(),
@@ -172,5 +172,9 @@ fn the_content_arm_refuses_a_model_that_is_not_the_spaces() {
     assert!(
         body.contains(&f.space_model),
         "asked for the wrong model: {body}"
+    );
+    assert!(
+        !body.contains(support::DECOY_MODEL),
+        "asked for the decoy model instead: {body}"
     );
 }
