@@ -1,6 +1,6 @@
-/// What a search was asked to use. Both false is a state this crate answers
-/// rather than refuses — the invariant that at least one is on belongs to the
-/// window, which is where a person can be told why.
+/// What a search was asked to use. Both false is not refused here — the
+/// invariant that at least one is on belongs to the window, not to this
+/// type, which is where a person can be told why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Arms {
     pub text: bool,
@@ -20,8 +20,9 @@ pub struct Provider {
     pub key: String,
 }
 
-/// What the content arm needs and does not have. Two variants rather than one
-/// message, because the two are fixed in different places.
+/// What the content arm needs and does not have — a missing key or a missing
+/// model, named apart because each is fixed in a different place rather than
+/// folded into one message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Missing {
     NoKey,
@@ -34,9 +35,9 @@ pub enum TextArm {
     Answered { chunks: Vec<i64> },
 }
 
-/// The content arm's outcome. `Off`, `NotConfigured` and `Failed` are three
-/// different silences, and `Answered` with an empty list is a fourth. Pinned by
-/// `the_content_arms_silences_are_told_apart_by_type`.
+/// The content arm's outcome. `Off`, `NotConfigured` and `Failed` are each
+/// their own silence, and `Answered` with an empty list is none of them —
+/// it answered. Pinned by `the_content_arms_silences_are_told_apart_by_type`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentArm {
     Off,

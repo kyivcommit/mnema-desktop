@@ -1,8 +1,9 @@
 use mnema_search::{ContentArm, Missing};
 
-/// "Off", "cannot be asked" and "asked and failed" are three facts, and a person
-/// shown one list for all three learns something false about their documents.
-/// The type is what keeps them apart; this pins that it can hold all three.
+/// "Off", "cannot be asked" and "asked and failed" are three facts, and a
+/// person shown one list for all three learns something false about their
+/// documents. The type is what keeps them apart; this pins that it can hold
+/// all three.
 #[test]
 fn the_content_arms_silences_are_told_apart_by_type() {
     let states = [
