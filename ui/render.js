@@ -220,13 +220,21 @@ export function toggleState({ savedText, savedContent, keyPresent, modelChosen }
   const missing = keyPresent
     ? "No embedding model is chosen. Choose one under Models."
     : "No key is saved. Save one under Models.";
+  // Reachable without either checkbox forcing the other: text unticked by
+  // choice, then the content arm's own availability drops away later (a key
+  // that stopped working). Neither runs, and unlike the "last effective arm"
+  // case above, the box that could fix it is not disabled — so it needs its
+  // own note, or a person sees an unticked, clickable box and no reason why
+  // search answers nothing.
+  const noneRuns = !textRuns && !contentRuns;
+  const noSearchRuns = "No search runs. Tick this to search by text.";
   return {
     text: {
       checked: textRuns,
       // D106's "at least one" is about what RUNS, not about what was chosen:
       // with the content arm unavailable, unticking this leaves no search.
       disabled: textRuns && !contentRuns,
-      note: textRuns && !contentRuns ? onlyArm : "",
+      note: textRuns && !contentRuns ? onlyArm : noneRuns ? noSearchRuns : "",
     },
     content: {
       checked: contentRuns,
@@ -1650,10 +1658,27 @@ export const CONTENT_ARM_TEXT = {
   noModel: () =>
     "Search by content needs an embedding model. Choose one under Models.",
   failed: (arm) => `Search by content could not be reached: ${arm.reason}`,
-  answered: (arm) =>
-    arm.embedded < arm.total
-      ? `Search by content looked at ${arm.embedded} of ${arm.total} pieces — the rest have no vectors yet.`
-      : `Search by content returned ${arm.matched}.`,
+  // Three cases, not two — the same shape `embeddingProgressText` already
+  // draws for the identical pair. `embedded === total` is the only one
+  // silent about coverage; the other two both have to say `matched` too,
+  // since neither "looked at" sentence on its own says whether anything
+  // was found.
+  answered: (arm) => {
+    if (arm.embedded < arm.total) {
+      return (
+        `Search by content looked at ${arm.embedded} of ${arm.total} pieces — the rest have ` +
+        `no vectors yet, and it returned ${arm.matched}.`
+      );
+    }
+    if (arm.embedded > arm.total) {
+      return (
+        `Search by content returned ${arm.matched} — it looked at ${arm.embedded} of ` +
+        `${arm.total} pieces, and a vector can outlive the piece it embeds, so the first ` +
+        "number is sometimes larger; this is not an error."
+      );
+    }
+    return `Search by content returned ${arm.matched}.`;
+  },
 };
 
 export const contentArmSentence = (arm) =>

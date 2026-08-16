@@ -336,6 +336,18 @@ test("with both arms available neither is forced on", () => {
   assert.equal(s.content.disabled, false);
 });
 
+// Reachable: text unticked while the content arm still ran, then the key
+// stops working. Neither arm runs and the text checkbox — unticked, so not
+// caught by "the last effective arm cannot be switched off" — must still
+// say why nothing is running and how to fix it, not stay blank.
+test("when neither arm runs the text checkbox says so and how to fix it", () => {
+  const s = toggleState({ savedText: false, savedContent: true, keyPresent: false, modelChosen: false });
+  assert.equal(s.text.checked, false);
+  assert.equal(s.text.disabled, false, "the box must stay clickable so the person can fix it");
+  assert.notEqual(s.text.note, "");
+  assert.match(s.text.note, /tick/i);
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Model configuration.
 //
@@ -2840,6 +2852,7 @@ test("a partly embedded space says how much of the index it searched", () => {
     kind: "answered", matched: 3, embedded: 30, total: 50,
   });
   assert.match(sentence, /30 of 50/);
+  assert.match(sentence, /\b3\b/, "the partial-coverage sentence dropped how many it found");
 });
 
 test("a full space does not talk about coverage at all", () => {
@@ -2848,6 +2861,19 @@ test("a full space does not talk about coverage at all", () => {
   });
   assert.doesNotMatch(sentence, /50 of 50/);
   assert.match(sentence, /returned 3\b/);
+});
+
+// The pair `embedded`/`total` is not a fraction (`IndexRead::embedded_chunks`'
+// own doc), and a vector can outlive the chunk it embeds — `Db::chunk_count`'s
+// doc names `delete_document` as a real path there, not a hypothetical one.
+// `embeddingProgressText` already has this third branch; this is the same
+// shape for the content arm's own sentence.
+test("content coverage above the total is explained rather than left looking broken", () => {
+  const sentence = contentArmSentence({
+    kind: "answered", matched: 5, embedded: 900, total: 812,
+  });
+  assert.match(sentence, /not an error/);
+  assert.match(sentence, /\b5\b/, "the over-coverage sentence dropped how many it found");
 });
 
 test("what is missing is named together with where to fix it", () => {
