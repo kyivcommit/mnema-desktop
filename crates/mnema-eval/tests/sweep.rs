@@ -190,6 +190,30 @@ fn each_arms_volume_is_printed_in_its_own_column() {
     assert!(text.contains("обсяг за вмістом 5.0"), "in:\n{text}");
 }
 
+/// The live run, by hand. `#[ignore]` for the same reason
+/// `crates/mnema-secrets/tests/roundtrip.rs:85` is: it reaches a real outside
+/// thing — here a paid service over the network.
+///
+/// Run with:
+///   MNEMA_EVAL_BASE=… MNEMA_EVAL_KEY=… \
+///     cargo test -p mnema-eval --test sweep -- --ignored --nocapture
+#[test]
+#[ignore = "reaches a live embedding provider; run explicitly"]
+fn the_live_sweep_prints_a_table_a_decision_can_be_read_from() {
+    let base = std::env::var("MNEMA_EVAL_BASE").expect("MNEMA_EVAL_BASE");
+    let key = std::env::var("MNEMA_EVAL_KEY").expect("MNEMA_EVAL_KEY");
+    let corpus = mnema_eval::Corpus::load(&mnema_eval::corpus_dir()).unwrap();
+    let questions = mnema_eval::QuestionSet::load(&mnema_eval::questions_path()).unwrap();
+    let indexed = mnema_eval::IndexedCorpus::build(&corpus, support::worker()).unwrap();
+    let provider = mnema_search::Provider { base, key };
+    let dense = mnema_eval::DenseAnswers::ask(&indexed, &questions, provider).unwrap();
+
+    let sweep = mnema_eval::Sweep::run(&indexed, &questions, &dense).unwrap();
+    println!("{}", sweep.render());
+
+    assert!(sweep.render().contains(&sweep.model));
+}
+
 /// No row calls itself a configuration it did not measure. `Report::render`
 /// used to open with "Пошук за текстом", which every fused and content-only row
 /// would have repeated.
