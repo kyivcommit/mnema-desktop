@@ -573,6 +573,52 @@ test("search draws the hits and both arm sentences from one SearchAnswer", async
   assert.equal(w.el("content-arm-state").textContent, "Search by content returned 7.");
 });
 
+// Codex round 2, Finding 4: the `catch` block replaced the result list with
+// an error but never touched `text-arm-state`/`content-arm-state`, which
+// `search()` only sets on success — so a failed search left the *previous*
+// successful search's arm report on screen, indistinguishable from a report
+// about the failed attempt.
+test("a failed search clears the previous arm-state text instead of leaving it stale", async () => {
+  let succeed = true;
+  const w = await boot({
+    search: () => {
+      if (succeed) {
+        succeed = false;
+        return {
+          hits: [{ relativePath: "a.txt", text: "fox" }],
+          text: { kind: "answered", matched: 5 },
+          content: { kind: "answered", matched: 7, embedded: 10, total: 10 },
+        };
+      }
+      return new Error("the index could not be reached");
+    },
+  });
+
+  w.el("query").value = "fox";
+  await w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+  assert.equal(
+    w.el("text-arm-state").textContent,
+    "Search by text returned 5.",
+    "premise: a successful search reported an arm state",
+  );
+
+  w.el("query").value = "fox again";
+  await w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.el("text-arm-state").textContent,
+    "",
+    "a failed search left the previous successful search's arm-state text on screen",
+  );
+  assert.equal(
+    w.el("content-arm-state").textContent,
+    "",
+    "a failed search left the previous successful search's arm-state text on screen",
+  );
+});
+
 // Review round 1, Important 1: a checkbox that always drew on, regardless of
 // what `set_search_arms` had saved, contradicted its own sentence the moment
 // somebody saved an arm off and reopened the window — the sentence beside it

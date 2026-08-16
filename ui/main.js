@@ -464,6 +464,11 @@ el("search-form").addEventListener("submit", async (event) => {
     const li = document.createElement("li");
     li.textContent = `search failed: ${error}`;
     results.replaceChildren(li);
+    // `search()` only sets these two on success. Left alone, a failed search
+    // keeps showing the previous successful search's arm report — a real
+    // number about a different attempt, indistinguishable from a current one.
+    el("text-arm-state").textContent = "";
+    el("content-arm-state").textContent = "";
   }
 });
 
