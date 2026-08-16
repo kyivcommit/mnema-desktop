@@ -135,10 +135,12 @@ pub fn small_fixture() -> (
     (corpus, questions, indexed)
 }
 
-/// The model name [`small_fixture_with_vectors`] adopts. A label for the
-/// mock provider, not a real model — `content_arm` never reaches past it.
+/// The model name [`small_fixture_with_vectors`] adopts —
+/// [`mnema_eval::EVAL_MODEL`] itself, a real model this crate has verified
+/// live (D30). Every caller here still goes through a mock; a literal
+/// copied by hand is what let this drift from that constant once already.
 #[allow(dead_code)]
-pub const FIXTURE_MODEL: &str = "baai/bge-m3";
+pub const FIXTURE_MODEL: &str = mnema_eval::EVAL_MODEL;
 
 #[allow(dead_code)]
 pub const FIXTURE_WIDTH: usize = 1024;
@@ -325,4 +327,48 @@ pub fn mock_counting_requests(n: usize) -> CountingMock {
 #[allow(dead_code)]
 pub fn mock_answering_every_question(questions: &mnema_eval::QuestionSet) -> CountingMock {
     mock_counting_requests(questions.questions.len())
+}
+
+/// One reply for one text, on its own axis — the shape a single-text
+/// request gets back, whether it is `content_arm` asking a question or
+/// `mnema_embed`'s `one_at_a_time` re-sending a single chunk after its
+/// batch was refused.
+#[allow(dead_code)]
+pub fn single_vector_reply(axis: usize) -> Reply {
+    let row: Vec<String> = axis_vector(axis).iter().map(|v| v.to_string()).collect();
+    Reply::ok(&format!(
+        r#"{{"data":[{{"embedding":[{}],"index":0}}]}}"#,
+        row.join(",")
+    ))
+}
+
+/// [`small_fixture`]'s own chunk count — measured
+/// (`cargo test -p mnema-eval --test embed -- --nocapture measure_chunk_count`),
+/// not assumed: two short documents need not chunk into exactly two pieces.
+#[allow(dead_code)]
+pub const SMALL_FIXTURE_CHUNKS: usize = 2;
+
+/// The mock sequence [`mnema_eval::embed_corpus`] followed by one `ask` per
+/// question needs against [`small_fixture`]: a probe, a batch answering
+/// every one of its chunks, then one vector per question.
+///
+/// The batch reply reuses [`mnema_mock_provider::two_vectors`] rather than a
+/// hand-built one, because [`SMALL_FIXTURE_CHUNKS`] is the same count that
+/// function already answers the probe with — a corpus that grows past that
+/// fails this fixture loudly (the mock's own `599` sentinel) instead of
+/// quietly answering the wrong request with the wrong reply.
+#[allow(dead_code)]
+pub fn mock_embedding_a_corpus_then_answering(questions: &mnema_eval::QuestionSet) -> CountingMock {
+    debug_assert_eq!(
+        SMALL_FIXTURE_CHUNKS, 2,
+        "the reused two_vectors reply no longer matches small_fixture's chunk count"
+    );
+    let mut replies = vec![
+        Reply::ok(&mnema_mock_provider::two_vectors(FIXTURE_WIDTH)), // probe
+        Reply::ok(&mnema_mock_provider::two_vectors(FIXTURE_WIDTH)), // batch embedding
+    ];
+    replies.extend((0..questions.questions.len()).map(single_vector_reply));
+    CountingMock {
+        server: MockServer::new(replies),
+    }
 }

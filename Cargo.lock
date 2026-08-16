@@ -2696,13 +2696,17 @@ dependencies = [
 name = "mnema-eval"
 version = "0.0.0"
 dependencies = [
+ "mnema-chunk",
  "mnema-core",
+ "mnema-embed",
  "mnema-index",
  "mnema-ingest",
  "mnema-mock-provider",
  "mnema-pool",
+ "mnema-provider",
  "mnema-search",
  "mnema-walk",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
