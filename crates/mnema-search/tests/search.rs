@@ -1,10 +1,13 @@
 mod support;
 
-/// The text arm shows its own answer even when the content arm could not be
-/// asked. A search that failed whole because one arm failed would turn a
-/// missing key into "your documents do not say this".
+/// The text arm shows its own answer even when the content arm has no
+/// input. A search that failed whole because one arm had nothing to run on
+/// would turn a missing key into "your documents do not say this". `search`
+/// no longer resolves *why* the content arm has nothing — that happens
+/// before any snapshot opens now, in whoever calls this — so it answers
+/// `Off`, not `NotConfigured`.
 #[test]
-fn the_text_arm_still_answers_when_the_content_arm_cannot_be_asked() {
+fn the_text_arm_still_answers_when_the_content_arm_has_no_input() {
     let f = support::indexed_space();
     let found = mnema_search::search(
         &f.db,
@@ -22,10 +25,7 @@ fn the_text_arm_still_answers_when_the_content_arm_cannot_be_asked() {
 
     assert!(!found.chunks.is_empty(), "the text arm had answers to give");
     assert!(matches!(found.text, mnema_search::TextArm::Answered { .. }));
-    assert_eq!(
-        found.content,
-        mnema_search::ContentArm::NotConfigured(mnema_search::Missing::NoKey)
-    );
+    assert_eq!(found.content, mnema_search::ContentArm::Off);
 }
 
 /// An arm that was not asked is `Off`, which is neither an empty answer nor a
@@ -84,18 +84,25 @@ fn both_arms_off_is_an_empty_answer_with_both_states_named() {
 /// lexically, so any other chunk in `found.chunks` must have come from the
 /// content arm — a mutant that fused against an empty content list instead
 /// of the real one would lose it.
+///
+/// The vector is given directly rather than through a mock provider:
+/// `search` no longer embeds anything itself, so there is no network call
+/// here to answer.
 #[test]
 fn the_content_arms_chunks_survive_into_the_fused_list() {
     let f = support::indexed_space();
-    let mock = support::mock_returning_vector_near(&f, f.chunk_ids[1]);
-    let provider = mnema_search::Provider {
-        base: mock.base().to_string(),
-        key: "k".to_string(),
+    let space =
+        f.db.active_space()
+            .expect("active space read")
+            .expect("a space is active");
+    let content = mnema_search::ContentQuery {
+        space_id: space,
+        vector: support::vector_matching(&f, f.chunk_ids[1]),
     };
 
     let found = mnema_search::search(
         &f.db,
-        Some(provider),
+        Some(content),
         "покрівля",
         mnema_search::Arms {
             text: true,

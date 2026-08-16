@@ -170,6 +170,20 @@ pub fn mock_recording_requests() -> MockServer {
     ))])
 }
 
+/// The exact vector already stored for `chunk_id` in `f` — cosine distance
+/// zero, so `knn` ranks it ahead of every other chunk `indexed_space` built.
+/// The non-network twin of [`mock_returning_vector_near`], for a caller that
+/// hands `search` a precomputed [`mnema_search::ContentQuery`] directly.
+#[allow(dead_code)]
+pub fn vector_matching(f: &Fixture, chunk_id: i64) -> Vec<f32> {
+    let axis = f
+        .chunk_ids
+        .iter()
+        .position(|&id| id == chunk_id)
+        .expect("chunk_id belongs to this fixture");
+    axis_vector(axis)
+}
+
 fn axis_vector(axis: usize) -> Vec<f32> {
     let mut v = vec![0.0; WIDTH];
     v[axis] = 1.0;
