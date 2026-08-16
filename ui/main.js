@@ -497,17 +497,17 @@ const drawArmState = () => {
   return state;
 };
 
-// The disclosure sentence's `contentArmRuns` is this same draw's
-// `content.checked`, not a second read of the toggle — `drawArmState`'s
-// return, not a fresh `toggleState` call, is what makes that one fact
-// instead of two that could disagree. Called everywhere `drawArmState` used
-// to be called alone: a checkbox `change` moves the toggle without a fresh
-// `model_settings` round trip, and the sentence promising what a search
-// sends must move with it, in the same paint.
+// The disclosure sentence's `contentArmRuns` and `textRuns` are this same
+// draw's `content.checked`/`text.checked`, not a second read of the toggle —
+// `drawArmState`'s return, not a fresh `toggleState` call, is what makes
+// that one fact instead of two that could disagree. Called everywhere
+// `drawArmState` used to be called alone: a checkbox `change` moves the
+// toggle without a fresh `model_settings` round trip, and the sentence
+// promising what a search sends must move with it, in the same paint.
 const drawArmStateAndDisclosure = () => {
-  const { content } = drawArmState();
+  const { text, content } = drawArmState();
   el("disclosure").textContent = asSentence(
-    disclosureSentence(keyState, { contentArmRuns: content.checked }),
+    disclosureSentence(keyState, { contentArmRuns: content.checked, textRuns: text.checked }),
   );
 };
 

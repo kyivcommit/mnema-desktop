@@ -432,6 +432,11 @@ export const recordedNoteSentence = ({ recorded, list, listed }) => {
 // "once, at indexing". That is false for cloud embeddings: the question has to
 // be embedded too, on every search (D29).
 export const LEAVES_NOTHING = "Nothing leaves this machine. Search works on words.";
+// `LEAVES_NOTHING` without its second sentence, for `toggleState`'s
+// `noneRuns` state — reachable with the key absent and the text arm
+// unticked, where the checkbox note already says "No search runs" and this
+// must not contradict it by also claiming search works.
+const LEAVES_NOTHING_NO_SEARCH = "Nothing leaves this machine.";
 // True only while the content arm runs. Split out of `LEAVES_EVERYTHING` when
 // that arm became switchable — before that, a stored key meant a question
 // always left, and the two facts were one. `render.test.js` asserts the
@@ -455,13 +460,16 @@ const LEAVES_UNSAID =
   "Whether anything leaves this machine is unknown: this build did not understand what the " +
   "key store answered.";
 
-// `absent` and `unreadable` ignore the toggle — the first is a promise it
-// cannot weaken, the second a not-knowing it cannot resolve. `render.test.js`
-// asserts both hold for either value of the toggle; only `present` reads it.
+// `unreadable` still ignores the toggle — a not-knowing it cannot resolve.
+// `absent` reads `search.textRuns`: "nothing leaves" stays true whether or
+// not text runs, but "search works on words" is false when text is also
+// off, and `render.test.js` pins the sentence that drops for that case.
+// Missing `textRuns` reads as running, matching every caller here that has
+// not measured it — only `main.js`'s real one always sends a real value.
 export const DISCLOSURE_TEXT = {
   present: (search) =>
     search.contentArmRuns ? LEAVES_EVERYTHING : LEAVES_INDEXING_ONLY,
-  absent: () => LEAVES_NOTHING,
+  absent: (search) => (search.textRuns === false ? LEAVES_NOTHING_NO_SEARCH : LEAVES_NOTHING),
   unreadable: () => LEAVES_UNKNOWN,
 };
 

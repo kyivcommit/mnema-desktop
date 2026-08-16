@@ -485,6 +485,17 @@ test("without a key nothing leaves, whatever the toggle says", () => {
   }
 });
 
+// Codex round 2, Finding 3: `noneRuns` (`toggleState`, render.js:229) is
+// reachable with the key absent — content unavailable and text unticked by
+// choice — and in that state the checkbox note already says "No search
+// runs," while this sentence went on claiming "Search works on words,"
+// contradicting it on screen at the same time.
+test("without a key and with the text arm off, the disclosure does not claim search works", () => {
+  const s = disclosureSentence({ kind: "absent" }, { contentArmRuns: false, textRuns: false });
+  assert.doesNotMatch(s, /search works on words/i);
+  assert.match(s, /nothing leaves this machine/i);
+});
+
 test("an unreadable key store is still unknown, whatever the toggle says", () => {
   for (const contentArmRuns of [true, false]) {
     assert.match(
