@@ -25,12 +25,12 @@ use crate::state::AppState;
 /// this is here so the walking skeleton has an end.
 const SEARCH_LIMIT: i64 = 20;
 
-/// The query rule `search` asks the text arm with, until a live sweep over a
-/// measured gold set replaces this placeholder with the winner.
-const SEARCH_QUERY_RULE: QueryRule = QueryRule::AllTerms;
+/// The query rule `search` asks the text arm with — the live sweep's winner,
+/// tied with `AllTerms` once fused but ahead of it text-only alone. See D108.
+const SEARCH_QUERY_RULE: QueryRule = QueryRule::TermsInIndex;
 
-/// The fusion rule `search` combines both arms with. Same placeholder status
-/// as [`SEARCH_QUERY_RULE`] above.
+/// The fusion rule `search` combines both arms with — tied with every other
+/// rule under the winning query rule, kept as the principled default. D109.
 const SEARCH_FUSION_RULE: FusionRule = FusionRule::Rrf;
 
 #[derive(Debug, Clone, Serialize)]
