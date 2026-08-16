@@ -427,8 +427,8 @@ mod tests {
 
     /// `matched`, `embedded` and `total` carry the arm's own numbers, not a
     /// placeholder: replacing `chunks.len()` with `0` in either `From` impl
-    /// above must fail this, not the other tests, which never see numbers
-    /// this specific.
+    /// above must fail this, without needing a live provider to reach the
+    /// content arm's `Answered` case at all.
     #[test]
     fn an_answered_arm_report_carries_the_real_numbers_not_a_placeholder() {
         assert!(matches!(

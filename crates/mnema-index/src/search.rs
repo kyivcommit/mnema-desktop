@@ -17,8 +17,7 @@ pub enum QueryRule {
 }
 
 impl QueryRule {
-    /// Every variant, in a fixed order — meant for a sweep that does not
-    /// exist yet.
+    /// Every variant, in a fixed order — what a sweep walks in full.
     pub const ALL: [QueryRule; 4] = [
         QueryRule::AllTerms,
         QueryRule::AnyTerm,

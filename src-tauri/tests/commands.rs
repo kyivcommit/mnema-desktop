@@ -784,8 +784,8 @@ fn a_fresh_index_with_no_arm_written_answers_with_both_arms_on() {
 
 /// `set_search_arms` reached through the real IPC path, the same shape
 /// `every_model_command_the_window_calls_is_registered`'s own doc warns a
-/// `pub` command can silently miss — and the one place `arm_is_on`'s
-/// `"off"` branch actually runs, for both keys at once.
+/// `pub` command can silently miss — and exercises `arm_is_on`'s `"off"`
+/// branch, for both keys at once.
 #[test]
 fn set_search_arms_is_reachable_through_the_ipc_and_off_means_off() {
     let dir = tempfile::tempdir().unwrap();
