@@ -140,7 +140,8 @@ pub fn small_fixture() -> (
 #[allow(dead_code)]
 pub const FIXTURE_MODEL: &str = "baai/bge-m3";
 
-const FIXTURE_WIDTH: usize = 1024;
+#[allow(dead_code)]
+pub const FIXTURE_WIDTH: usize = 1024;
 
 /// [`small_fixture`], with every chunk already embedded into an active
 /// space under [`FIXTURE_MODEL`] — each chunk on its own axis, so a knn
@@ -292,4 +293,12 @@ pub fn mock_counting_requests(n: usize) -> CountingMock {
     CountingMock {
         server: MockServer::new(replies),
     }
+}
+
+/// One reply per question, each `FIXTURE_WIDTH` wide — the caller's own
+/// `adopt_embedding_model` call must use that same width, or `knn` refuses
+/// the mismatch rather than answering.
+#[allow(dead_code)]
+pub fn mock_answering_every_question(questions: &mnema_eval::QuestionSet) -> CountingMock {
+    mock_counting_requests(questions.questions.len())
 }

@@ -1,5 +1,46 @@
 mod support;
 
+/// Assembly, not quality. Vectors from a mock are not measurements, and the
+/// only thing asserted here is that every pair of rules completes and prints.
+#[test]
+fn the_whole_sweep_runs_against_a_mock_without_falling_over() {
+    let corpus = mnema_eval::Corpus::load(&mnema_eval::corpus_dir()).unwrap();
+    let questions = mnema_eval::QuestionSet::load(&mnema_eval::questions_path()).unwrap();
+    let indexed = mnema_eval::IndexedCorpus::build(&corpus, support::worker()).unwrap();
+    indexed
+        .db()
+        .adopt_embedding_model(
+            support::FIXTURE_MODEL,
+            support::FIXTURE_WIDTH as i64,
+            "credential-ref",
+            "chunker-v1",
+        )
+        .unwrap();
+    let mock = support::mock_answering_every_question(&questions);
+    let provider = mnema_search::Provider {
+        base: mock.base(),
+        key: "k".to_string(),
+    };
+    let dense = mnema_eval::DenseAnswers::ask(&indexed, &questions, provider).unwrap();
+
+    let sweep = mnema_eval::Sweep::run(&indexed, &questions, &dense).unwrap();
+    let text = sweep.render();
+
+    // Every row reached the report. `ContentOnly` is labelled by its fusion
+    // rule alone (`src/sweep.rs`'s `row_label`, pinned by
+    // `content_only_is_labelled_by_its_fusion_rule_alone`), so it is checked
+    // apart from the paired rows rather than by the same format string.
+    for row in &sweep.rows {
+        if row.fusion == mnema_search::FusionRule::ContentOnly {
+            assert!(text.contains(row.fusion.label()));
+        } else {
+            assert!(text.contains(&format!("{} / {}", row.rule.label(), row.fusion.label())));
+        }
+    }
+    // No assertion about any recall figure. A mock's vectors measure nothing,
+    // and a threshold here would be a number nobody took.
+}
+
 /// The sweep's shape, enumerated rather than counted — the count follows the
 /// list, and a bare number would be a second definition of it.
 ///
