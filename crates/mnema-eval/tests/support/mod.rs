@@ -178,6 +178,30 @@ pub fn small_fixture_with_vectors() -> (
     (corpus, questions, indexed)
 }
 
+/// Every already-indexed document's chunks, each on its own axis in
+/// `space` — [`small_fixture_with_vectors`]'s loop, lifted out for a
+/// corpus this module did not build itself.
+#[allow(dead_code)]
+pub fn embed_every_chunk(
+    corpus: &mnema_eval::Corpus,
+    indexed: &mnema_eval::IndexedCorpus,
+    space: i64,
+) {
+    let db = indexed.db();
+    let mut axis = 0usize;
+    for document in &corpus.documents {
+        let document_id = indexed
+            .document_id(&document.id)
+            .expect("look up the document")
+            .expect("the document was indexed");
+        for (chunk_id, _text) in db.chunks_of_document(&document_id).expect("chunks") {
+            db.upsert_vector(space, chunk_id, &axis_vector(axis))
+                .expect("vector");
+            axis += 1;
+        }
+    }
+}
+
 const CHUNKER: &str = "chunker-v1";
 
 fn axis_vector(axis: usize) -> Vec<f32> {

@@ -7,7 +7,7 @@ fn the_whole_sweep_runs_against_a_mock_without_falling_over() {
     let corpus = mnema_eval::Corpus::load(&mnema_eval::corpus_dir()).unwrap();
     let questions = mnema_eval::QuestionSet::load(&mnema_eval::questions_path()).unwrap();
     let indexed = mnema_eval::IndexedCorpus::build(&corpus, support::worker()).unwrap();
-    indexed
+    let space = indexed
         .db()
         .adopt_embedding_model(
             support::FIXTURE_MODEL,
@@ -15,7 +15,9 @@ fn the_whole_sweep_runs_against_a_mock_without_falling_over() {
             "credential-ref",
             "chunker-v1",
         )
-        .unwrap();
+        .unwrap()
+        .space_id;
+    support::embed_every_chunk(&corpus, &indexed, space);
     let mock = support::mock_answering_every_question(&questions);
     let provider = mnema_search::Provider {
         base: mock.base(),
