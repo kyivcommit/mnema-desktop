@@ -195,13 +195,19 @@ fn each_arms_volume_is_printed_in_its_own_column() {
 /// thing — here a paid service over the network.
 ///
 /// Run with:
-///   MNEMA_EVAL_BASE=… MNEMA_EVAL_KEY=… \
+///   MNEMA_EVAL_KEY=… \
 ///     cargo test -p mnema-eval --test sweep -- --ignored --nocapture
+///
+/// `MNEMA_EVAL_BASE` and `MNEMA_EVAL_MODEL` override the product's own base
+/// and model; only the key has no default.
 #[test]
 #[ignore = "reaches a live embedding provider; run explicitly"]
 fn the_live_sweep_prints_a_table_a_decision_can_be_read_from() {
-    let base = std::env::var("MNEMA_EVAL_BASE").expect("MNEMA_EVAL_BASE");
     let key = std::env::var("MNEMA_EVAL_KEY").expect("MNEMA_EVAL_KEY");
+    let base = std::env::var("MNEMA_EVAL_BASE")
+        .unwrap_or_else(|_| mnema_provider::OPENROUTER_BASE.to_string());
+    let model =
+        std::env::var("MNEMA_EVAL_MODEL").unwrap_or_else(|_| mnema_eval::EVAL_MODEL.to_string());
     let corpus = mnema_eval::Corpus::load(&mnema_eval::corpus_dir()).unwrap();
     let questions = mnema_eval::QuestionSet::load(&mnema_eval::questions_path()).unwrap();
     let indexed = mnema_eval::IndexedCorpus::build(&corpus, support::worker()).unwrap();
@@ -211,6 +217,7 @@ fn the_live_sweep_prints_a_table_a_decision_can_be_read_from() {
     let problems = mnema_eval::preflight(&corpus, &questions, &indexed).unwrap();
     assert!(problems.is_empty(), "preflight found: {problems:?}");
     let provider = mnema_search::Provider { base, key };
+    mnema_eval::embed_corpus(&indexed, &provider, &model).unwrap();
     let dense = mnema_eval::DenseAnswers::ask(&indexed, &questions, provider).unwrap();
 
     let sweep = mnema_eval::Sweep::run(&indexed, &questions, &dense).unwrap();
