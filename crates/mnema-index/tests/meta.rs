@@ -1,7 +1,10 @@
 //! `meta` is a key-value table, and the point of these tests is that the keys
 //! are constants rather than literals spread over three crates.
 
-use mnema_index::{Error, META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL, META_VEC_VERSION};
+use mnema_index::{
+    Error, META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL, META_SEARCH_CONTENT_ARM,
+    META_SEARCH_TEXT_ARM, META_VEC_VERSION,
+};
 
 mod support;
 use support::temp_db;
@@ -81,4 +84,27 @@ fn the_active_space_is_refused_while_an_ordinary_key_still_writes() {
         Some("0.1.9"),
         "the guard is pinned to one key, not to 'not all of them'"
     );
+}
+
+/// Absent means on, because D106 makes both arms the default and a fresh index
+/// has written neither key. A default of off would make a new index answer
+/// nothing until somebody found the settings.
+#[test]
+fn an_index_that_never_saw_the_toggles_has_both_arms_on() {
+    let db = temp_db();
+    assert_eq!(db.meta_get(META_SEARCH_TEXT_ARM).expect("read"), None);
+    assert_eq!(db.meta_get(META_SEARCH_CONTENT_ARM).expect("read"), None);
+}
+
+/// The two keys are separate storage, which a single key holding a pair would
+/// not be: writing one must not disturb the other.
+#[test]
+fn writing_one_arms_state_leaves_the_other_alone() {
+    let db = temp_db();
+    db.meta_set(META_SEARCH_CONTENT_ARM, "off").expect("write");
+    assert_eq!(
+        db.meta_get(META_SEARCH_CONTENT_ARM).expect("read"),
+        Some("off".to_string())
+    );
+    assert_eq!(db.meta_get(META_SEARCH_TEXT_ARM).expect("read"), None);
 }

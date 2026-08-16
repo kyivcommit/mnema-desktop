@@ -23,6 +23,13 @@ pub const META_CHAT_MODEL: &str = "chat_model";
 /// would be theatre. What this buys is a diagnosis instead of a mystery on the
 /// day the pin moves.
 pub const META_VEC_VERSION: &str = "vec_version";
+/// Whether the text arm answers queries: `"on"` or `"off"`, absent meaning
+/// `"on"` (D106) so a fresh index answers with both arms before anyone opens
+/// the settings.
+pub const META_SEARCH_TEXT_ARM: &str = "search_text_arm";
+/// Whether the content arm answers queries. Same values, same default, and a
+/// key of its own: the two arms are switched independently.
+pub const META_SEARCH_CONTENT_ARM: &str = "search_content_arm";
 
 impl Db {
     pub fn meta_get(&self, key: &str) -> Result<Option<String>, Error> {
