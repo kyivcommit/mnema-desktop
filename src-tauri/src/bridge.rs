@@ -183,6 +183,50 @@ pub(crate) fn arm_is_on(value: Option<String>) -> bool {
     value.as_deref() != Some("off")
 }
 
+/// Resolves the content arm's input before any read snapshot opens: the
+/// model comes from one short `with_index` lock, then [`embed_query`] runs
+/// with no lock held at all — the network call [`search`]'s own doc says
+/// must never share a scope with `read_snapshot`, and why I5 (a network
+/// call inside the index mutex) closes as a side effect of this split.
+///
+/// `Ok((None, Some(_)))` is a terminal report `search` must not try to
+/// improve on — `content_failure` already covers a broken credential
+/// store; this also covers no model and a failed embed. `Ok((Some(_),
+/// None))` is ready for `search` to answer with.
+fn resolve_content_query(
+    state: &State<'_, AppState>,
+    provider: &Option<Provider>,
+    query: &str,
+    content_on: bool,
+    content_failure: Option<String>,
+) -> Result<(Option<mnema_search::ContentQuery>, Option<ContentArmReport>), Error> {
+    if let Some(reason) = content_failure {
+        return Ok((None, Some(ContentArmReport::Failed { reason })));
+    }
+    if !content_on {
+        return Ok((None, None));
+    }
+    let Some(provider) = provider else {
+        return Ok((None, Some(ContentArmReport::NoKey)));
+    };
+    let resolved = state.with_index(|db| {
+        Ok(match db.active_space()? {
+            Some(space_id) => {
+                let (model, _width) = db.space_model(space_id)?;
+                Some((space_id, model))
+            }
+            None => None,
+        })
+    })?;
+    let Some((space_id, model)) = resolved else {
+        return Ok((None, Some(ContentArmReport::NoModel)));
+    };
+    match mnema_search::embed_query(provider, &model, query) {
+        Ok(vector) => Ok((Some(mnema_search::ContentQuery { space_id, vector }), None)),
+        Err(reason) => Ok((None, Some(ContentArmReport::Failed { reason }))),
+    }
+}
+
 /// Off the main thread for the reason given on [`open_index`].
 ///
 /// Both arms, fused by `mnema_search::search`, in place of the lexical arm
@@ -194,12 +238,17 @@ pub(crate) fn arm_is_on(value: Option<String>) -> bool {
 /// `a_text_only_search_does_not_touch_a_credential_store_it_does_not_need`
 /// — and only [`Error::NoKey`] then turns into no provider.
 ///
-/// Any other failure to reach the store — a locked keychain, an absent
-/// Secret Service — must not fail the text arm along with it: it is saved
-/// as `content_failure` and turned into [`ContentArmReport::Failed`] after
-/// the search runs, in place of whatever `mnema_search::search` would have
-/// derived from a `None` provider (`NotConfigured(NoKey)`, the wrong reason
-/// for a store that never answered). Pinned by
+/// Everything from the lexical arm through fusion through citation
+/// resolution runs inside one [`mnema_index::Db::read_snapshot`], so a
+/// rebuild committing on the job's own connection mid-search cannot hand a
+/// reused chunk id's citation to the wrong text. [`resolve_content_query`]
+/// runs first and resolves what the content arm needs — including any
+/// reason it has nothing to run on — before that snapshot ever opens, so
+/// the snapshot holds no network call and [`ContentArmReport::NoKey`],
+/// [`ContentArmReport::NoModel`] and a broken credential store all reach
+/// the answer the same way `content_failure` always did: as an override
+/// applied after the snapshot closes, in place of whatever
+/// `mnema_search::search` answered on its own. Pinned by
 /// `a_broken_credential_store_does_not_take_the_text_arm_down_with_it`.
 #[tauri::command(async)]
 pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer, Error> {
@@ -226,45 +275,47 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
         (None, None)
     };
 
+    let (content_query, content_override) =
+        resolve_content_query(&state, &provider, &query, arms.content, content_failure)?;
+
     state.with_index(|db| {
-        let found = mnema_search::search(
-            db,
-            provider,
-            &query,
-            arms,
-            SEARCH_QUERY_RULE,
-            SEARCH_FUSION_RULE,
-            SEARCH_LIMIT,
-        )?;
+        db.read_snapshot(|db| {
+            let found = mnema_search::search(
+                db,
+                content_query,
+                &query,
+                arms,
+                SEARCH_QUERY_RULE,
+                SEARCH_FUSION_RULE,
+                SEARCH_LIMIT,
+            )?;
 
-        // A chunk that vanished between the fuse and this read is not an
-        // error: a walk running alongside a search is the ordinary case that
-        // motivated the job holding its own connection at all (see
-        // `AppState::open_job_index`). Only `citation`'s `None` is read this
-        // way — the `?` right before it still stops the whole search on any
-        // other failure.
-        let mut hits = Vec::new();
-        for chunk_id in found.chunks {
-            if let Some(c) = db.citation(chunk_id)? {
-                hits.push(Hit {
-                    chunk_id,
-                    text: c.text,
-                    relative_path: c.relative_path,
-                    section_title: c.section_title,
-                    coordinate: c.coordinate,
-                });
+            // A chunk that vanished between the fuse and this read is not an
+            // error: a walk running alongside a search is the ordinary case
+            // that motivated the job holding its own connection at all (see
+            // `AppState::open_job_index`). Only `citation`'s `None` is read
+            // this way — the `?` right before it still stops the whole
+            // search on any other failure.
+            let mut hits = Vec::new();
+            for chunk_id in found.chunks {
+                if let Some(c) = db.citation(chunk_id)? {
+                    hits.push(Hit {
+                        chunk_id,
+                        text: c.text,
+                        relative_path: c.relative_path,
+                        section_title: c.section_title,
+                        coordinate: c.coordinate,
+                    });
+                }
             }
-        }
 
-        let content = match content_failure {
-            Some(reason) => ContentArmReport::Failed { reason },
-            None => found.content.into(),
-        };
+            let content = content_override.unwrap_or_else(|| found.content.into());
 
-        Ok(SearchAnswer {
-            hits,
-            text: found.text.into(),
-            content,
+            Ok(SearchAnswer {
+                hits,
+                text: found.text.into(),
+                content,
+            })
         })
     })
 }
