@@ -5,10 +5,9 @@ use crate::{Db, Error};
 /// How the terms of a query are combined into one FTS5 expression.
 ///
 /// Meant to be a value the application passes in, rather than a branch
-/// inside the product, and eventually walked in full by `mnema-eval`'s
-/// sweep — neither caller exists yet. Pinned by
-/// `the_unparameterised_search_is_the_all_terms_rule`, which pins only that
-/// `search_lexical` equals `search_lexical_with` under `AllTerms`.
+/// inside the product, and walked in full by `mnema-eval`'s sweep. Pinned
+/// by `the_unparameterised_search_is_the_all_terms_rule`, which pins only
+/// that `search_lexical` equals `search_lexical_with` under `AllTerms`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum QueryRule {
     AllTerms,

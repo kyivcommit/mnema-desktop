@@ -186,25 +186,32 @@ fn arm_is_on(value: Option<String>) -> bool {
 /// parameter — the window already saved a choice through
 /// [`set_search_arms`].
 ///
-/// Only [`Error::NoKey`] turns into no provider; every other failure of
-/// [`crate::models::key`] stops the search, like every other command that
-/// needs the credential store.
+/// The key is asked for only when `arms.content` is on — pinned by
+/// `a_text_only_search_does_not_touch_a_credential_store_it_does_not_need`
+/// — and only [`Error::NoKey`] then turns into no provider.
 #[tauri::command(async)]
 pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer, Error> {
-    let provider = match crate::models::key(&state) {
-        Ok(key) => Some(Provider {
-            base: state.provider_base().to_string(),
-            key,
-        }),
-        Err(Error::NoKey) => None,
-        Err(e) => return Err(e),
+    let arms = state.with_index(|db| {
+        Ok(Arms {
+            text: arm_is_on(db.meta_get(mnema_index::META_SEARCH_TEXT_ARM)?),
+            content: arm_is_on(db.meta_get(mnema_index::META_SEARCH_CONTENT_ARM)?),
+        })
+    })?;
+
+    let provider = if arms.content {
+        match crate::models::key(&state) {
+            Ok(key) => Some(Provider {
+                base: state.provider_base().to_string(),
+                key,
+            }),
+            Err(Error::NoKey) => None,
+            Err(e) => return Err(e),
+        }
+    } else {
+        None
     };
 
     state.with_index(|db| {
-        let arms = Arms {
-            text: arm_is_on(db.meta_get(mnema_index::META_SEARCH_TEXT_ARM)?),
-            content: arm_is_on(db.meta_get(mnema_index::META_SEARCH_CONTENT_ARM)?),
-        };
         let found = mnema_search::search(
             db,
             provider,
@@ -416,5 +423,31 @@ mod tests {
         })
         .collect();
         assert_eq!(spellings, ["off", "noKey", "noModel", "failed", "answered"]);
+    }
+
+    /// `matched`, `embedded` and `total` carry the arm's own numbers, not a
+    /// placeholder: replacing `chunks.len()` with `0` in either `From` impl
+    /// above must fail this, not the other tests, which never see numbers
+    /// this specific.
+    #[test]
+    fn an_answered_arm_report_carries_the_real_numbers_not_a_placeholder() {
+        assert!(matches!(
+            TextArmReport::from(TextArm::Answered {
+                chunks: vec![10, 20, 30],
+            }),
+            TextArmReport::Answered { matched: 3 }
+        ));
+        assert!(matches!(
+            ContentArmReport::from(ContentArm::Answered {
+                chunks: vec![10, 20],
+                embedded: 7,
+                total: 12,
+            }),
+            ContentArmReport::Answered {
+                matched: 2,
+                embedded: 7,
+                total: 12,
+            }
+        ));
     }
 }

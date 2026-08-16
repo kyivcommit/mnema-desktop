@@ -744,6 +744,14 @@ fn search_returns_citations_not_ids() {
     assert!(!hits.is_empty());
     assert!(hits[0]["text"].as_str().unwrap().contains("fox"));
     assert!(hits[0]["relativePath"].is_string());
+    // A real count, not a placeholder: `matched: chunks.len()` in
+    // `bridge.rs`'s `From<TextArm>` mutated to `matched: 0` must fail this
+    // specific assertion, not merely the non-empty check above.
+    assert_eq!(
+        answer["text"]["matched"],
+        json!(1),
+        "the one-chunk fixture should be counted, not zeroed: {answer}"
+    );
 }
 
 /// D106: absent means on, for both arms. `mnema-index`'s own
@@ -772,6 +780,64 @@ fn a_fresh_index_with_no_arm_written_answers_with_both_arms_on() {
         "an absent content-arm row must run the arm — `noKey` proves it tried \
          and only then found no key, `off` would mean it never tried: {answer}"
     );
+}
+
+/// `set_search_arms` reached through the real IPC path, the same shape
+/// `every_model_command_the_window_calls_is_registered`'s own doc warns a
+/// `pub` command can silently miss — and the one place `arm_is_on`'s
+/// `"off"` branch actually runs, for both keys at once.
+#[test]
+fn set_search_arms_is_reachable_through_the_ipc_and_off_means_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": false, "content": false }),
+    )
+    .expect("set_search_arms was rejected");
+
+    let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+
+    assert_eq!(answer["text"]["kind"], json!("off"));
+    assert_eq!(answer["content"]["kind"], json!("off"));
+}
+
+/// `search` must not ask for a key it will not use. Built with
+/// `NO_CREDENTIAL` rather than `app_in`'s reachable store: a `search` that
+/// still called `crate::models::key` unconditionally would fail here before
+/// ever reading `arms.content`, which is exactly the shape this pins.
+#[test]
+fn a_text_only_search_does_not_touch_a_credential_store_it_does_not_need() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = mock_builder()
+        .manage(AppState::new(
+            dir.path().to_path_buf(),
+            support::worker().to_path_buf(),
+            NO_PROVIDER.to_string(),
+            NO_CREDENTIAL.to_string(),
+        ))
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application");
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .expect("set_search_arms was rejected");
+
+    let answer = call(&webview, "search", json!({ "query": "fox" }))
+        .expect("a text-only search reached a credential store it does not need");
+
+    assert_eq!(answer["text"]["kind"], json!("answered"));
+    assert_eq!(answer["content"]["kind"], json!("off"));
 }
 
 /// The channel a real webview passes is a string of this shape. Nothing
