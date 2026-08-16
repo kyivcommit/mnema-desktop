@@ -1042,9 +1042,7 @@ fn read_settings(db: &mnema_index::Db) -> Result<IndexSettings, mnema_index::Err
         embedded_chunks_everywhere: db.embedded_chunks_everywhere()?,
         rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
         chat_model: db.meta_get(mnema_index::META_CHAT_MODEL)?,
-        search_text_arm: crate::bridge::arm_is_on(
-            db.meta_get(mnema_index::META_SEARCH_TEXT_ARM)?,
-        ),
+        search_text_arm: crate::bridge::arm_is_on(db.meta_get(mnema_index::META_SEARCH_TEXT_ARM)?),
         search_content_arm: crate::bridge::arm_is_on(
             db.meta_get(mnema_index::META_SEARCH_CONTENT_ARM)?,
         ),

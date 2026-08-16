@@ -818,8 +818,7 @@ fn model_settings_reflects_the_saved_arm_choice() {
     let webview = main_webview(&app);
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
-    let before =
-        call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    let before = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
     assert_eq!(before["index"]["searchTextArm"], json!(true));
     assert_eq!(before["index"]["searchContentArm"], json!(true));
 
