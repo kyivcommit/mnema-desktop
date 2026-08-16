@@ -711,6 +711,8 @@ fn the_settings_reach_the_window_tagged_and_in_camel_case() {
         r#""embeddedChunks":0"#,
         r#""totalChunks":0"#,
         r#""activeSpace":null"#,
+        r#""searchTextArm":true"#,
+        r#""searchContentArm":true"#,
     ] {
         assert!(
             open.contains(expected),

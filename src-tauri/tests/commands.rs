@@ -806,6 +806,35 @@ fn set_search_arms_is_reachable_through_the_ipc_and_off_means_off() {
     assert_eq!(answer["content"]["kind"], json!("off"));
 }
 
+/// `model_settings` reads the saved choice back from the same two meta rows
+/// `search` runs against (`arm_is_on`), so a checkbox drawn from
+/// `model_settings` and the arm a search actually runs cannot disagree —
+/// task 26's review, Important 1: a window that always drew both arms on
+/// contradicted its own "is off" sentence the moment either was saved off.
+#[test]
+fn model_settings_reflects_the_saved_arm_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let before =
+        call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(before["index"]["searchTextArm"], json!(true));
+    assert_eq!(before["index"]["searchContentArm"], json!(true));
+
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": false, "content": true }),
+    )
+    .expect("set_search_arms was rejected");
+
+    let after = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(after["index"]["searchTextArm"], json!(false));
+    assert_eq!(after["index"]["searchContentArm"], json!(true));
+}
+
 /// `search` must not ask for a key it will not use. Built with
 /// `NO_CREDENTIAL` rather than `app_in`'s reachable store: a `search` that
 /// still called `crate::models::key` unconditionally would fail here before

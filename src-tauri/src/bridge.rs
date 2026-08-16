@@ -175,7 +175,11 @@ pub struct SearchAnswer {
 
 /// `meta`'s own rule (D106): absent, or anything but the literal `"off"`,
 /// leaves the arm on.
-fn arm_is_on(value: Option<String>) -> bool {
+///
+/// `pub(crate)`: `models::read_settings` reads the same two meta rows to
+/// answer the window's own question ("what did I save?"), and reusing this
+/// is what keeps that answer and `search`'s from ever disagreeing.
+pub(crate) fn arm_is_on(value: Option<String>) -> bool {
     value.as_deref() != Some("off")
 }
 

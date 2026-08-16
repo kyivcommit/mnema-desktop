@@ -118,6 +118,8 @@ const boot = async (answers = {}) => {
       embeddingModel: null,
       rerankModel: null,
       chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
     },
   });
 
@@ -540,12 +542,17 @@ test("the bar carries an ended state after a run, and a running one on the press
 // hit array — `searchResultItems` needs `hits` specifically, and reading the
 // whole answer as the array throws inside `.map`, which a source-text read
 // cannot see coming from the command's own shape changing underneath it.
+// The two arms carry different numbers on purpose: `TEXT_ARM_TEXT` was
+// written by copying `CONTENT_ARM_TEXT` (`render.js`), and a fixture that
+// gave both arms the same count could not tell a copy-paste that kept the
+// wrong word ("content") from one that did not — nor could it tell a swap
+// of which line gets which report. Full-sentence equality closes both.
 test("search draws the hits and both arm sentences from one SearchAnswer", async () => {
   const w = await boot({
     search: () => ({
       hits: [{ relativePath: "a.txt", text: "fox" }],
       text: { kind: "answered", matched: 5 },
-      content: { kind: "answered", matched: 5, embedded: 10, total: 10 },
+      content: { kind: "answered", matched: 7, embedded: 10, total: 10 },
     }),
   });
 
@@ -562,8 +569,133 @@ test("search draws the hits and both arm sentences from one SearchAnswer", async
   assert.equal(hitLi.options.length, 2, "a hit li does not carry its two lines");
   assert.equal(hitLi.options[0].textContent, "a.txt");
   assert.equal(hitLi.options[1].textContent, "fox");
-  assert.match(w.el("text-arm-state").textContent, /returned 5/);
-  assert.match(w.el("content-arm-state").textContent, /returned 5/);
+  assert.equal(w.el("text-arm-state").textContent, "Search by text returned 5.");
+  assert.equal(w.el("content-arm-state").textContent, "Search by content returned 7.");
+});
+
+// Review round 1, Important 1: a checkbox that always drew on, regardless of
+// what `set_search_arms` had saved, contradicted its own sentence the moment
+// somebody saved an arm off and reopened the window — the sentence beside it
+// (`contentArmSentence`, drawn from a real search) said "is off" while the
+// box drew checked. `drawSettings` must read `read.searchTextArm` /
+// `read.searchContentArm` back, not default both to on.
+test("a saved-off arm is drawn off, not defaulted to on, once model_settings answers", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: false,
+      },
+    }),
+  });
+
+  assert.equal(
+    w.el("arm-content").checked,
+    false,
+    "a saved-off content arm was drawn checked",
+  );
+});
+
+// The other half of the same fix: an index that stops being readable must not
+// reset a choice already read back to the true default, which would silently
+// turn a saved-off arm back on the moment a read failed for any reason.
+//
+// ⚠️ Text, not content: `content.checked` also depends on
+// `armModelChosen`, which itself goes false the moment `read` is null — so a
+// content-arm assertion here would pass even without the guard, satisfied by
+// that unrelated dependency rather than by the guard this test is for.
+// `text.checked` is `savedTextArm` alone, with no such neighbour to hide
+// behind.
+test("an index that stops being readable does not reset a saved-off arm to on", async () => {
+  let call = 0;
+  const w = await boot({
+    model_settings: () => {
+      call += 1;
+      if (call === 1) {
+        return {
+          key: { kind: "present" },
+          platform: "mac",
+          index: {
+            kind: "read",
+            activeSpace: 1,
+            embeddedChunks: 8,
+            totalChunks: 9,
+            failedChunks: 0,
+            embeddedChunksEverywhere: 8,
+            embeddingModel: "vendor/m",
+            rerankModel: null,
+            chatModel: null,
+            searchTextArm: false,
+            searchContentArm: true,
+          },
+        };
+      }
+      return {
+        key: { kind: "present" },
+        platform: "mac",
+        index: { kind: "unreadable", cause: "readFailed", reason: "boom" },
+      };
+    },
+  });
+
+  assert.equal(call, 2, "premise: model_settings was asked twice while booting");
+  assert.equal(
+    w.el("arm-text").checked,
+    false,
+    "an index that stopped being readable reset the saved choice back to on",
+  );
+});
+
+// Review round 1, Important 2: `savedTextArm`/`savedContentArm` used to be
+// written before `set_search_arms`'s own `await`, with nothing undoing that
+// write on a refusal — so a rejected save left the window believing meta
+// held a choice it never received. `#search-form`'s own listener already
+// catches and says; the two arm handlers must do the same.
+test("a rejected set_search_arms reverts the checkbox and says why", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+    set_search_arms: () => new Error("disk is full"),
+  });
+
+  assert.equal(w.el("arm-text").checked, true, "premise: the arm started checked");
+
+  w.el("arm-text").checked = false;
+  await w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-text").checked,
+    true,
+    "the checkbox did not revert after a rejected write",
+  );
+  assert.match(w.el("arm-text-note").textContent, /disk is full/);
 });
 
 // A press that is refused starts nothing, so it must not leave the bar claiming

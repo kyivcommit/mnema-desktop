@@ -471,8 +471,10 @@ el("search-form").addEventListener("submit", async (event) => {
 // so a checkbox's own `change` can redraw `toggleState` without asking again.
 let armKeyPresent = false;
 let armModelChosen = false;
-// The two toggles default to on, matching `arm_is_on`'s own default for a row
-// `set_search_arms` has never written.
+// True only until the first `model_settings` draw — `drawSettings` below
+// overwrites both from `read.searchTextArm`/`read.searchContentArm` the
+// moment an index read answers, so this default is never what a person
+// with a saved choice actually sees.
 let savedTextArm = true;
 let savedContentArm = true;
 
@@ -491,14 +493,34 @@ const drawArmState = () => {
   el("arm-content-note").textContent = state.content.note;
 };
 
+// Both handlers write optimistically and undo on refusal — the same
+// catch-and-say convention `#search-form`'s own listener uses above,
+// applied to a control this window must not leave believing a choice was
+// saved when `set_search_arms` never returned.
 el("arm-text").addEventListener("change", async () => {
+  const previous = savedTextArm;
   savedTextArm = el("arm-text").checked;
-  await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
+  try {
+    await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
+  } catch (error) {
+    savedTextArm = previous;
+    el("arm-text").checked = previous;
+    el("arm-text-note").textContent = `the choice was not saved: ${error}`;
+    return;
+  }
   drawArmState();
 });
 el("arm-content").addEventListener("change", async () => {
+  const previous = savedContentArm;
   savedContentArm = el("arm-content").checked;
-  await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
+  try {
+    await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
+  } catch (error) {
+    savedContentArm = previous;
+    el("arm-content").checked = previous;
+    el("arm-content-note").textContent = `the choice was not saved: ${error}`;
+    return;
+  }
   drawArmState();
 });
 
@@ -691,6 +713,14 @@ const drawSettings = (settings, askedAt) => {
   showRecorded("chat", read && read.chatModel);
   armKeyPresent = settings.key?.kind === "present";
   armModelChosen = Boolean(read && read.embeddingModel);
+  // Only while `read` actually answers: an index that stopped being
+  // readable carries no row to read the choice back from, and defaulting
+  // it to on here would overwrite whatever the person picked in this
+  // session with a fact this draw does not have.
+  if (read) {
+    savedTextArm = read.searchTextArm;
+    savedContentArm = read.searchContentArm;
+  }
   drawArmState();
 };
 
