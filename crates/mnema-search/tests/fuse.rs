@@ -94,7 +94,8 @@ fn rrf_lifts_the_chunk_that_stands_high_in_both_arms() {
     assert_eq!(fused[0], 12, "12 places 2nd and 1st; 7 places 1st and 3rd");
     assert_eq!(fused[1], 7);
 
-    // A chunk in one arm only still appears — fusion widens, it does not filter.
+    // A chunk in one arm only still appears — fusion widens, it does not
+    // filter.
     assert!(fuse(FusionRule::Rrf, &text, &content, 10).contains(&41));
     assert!(fuse(FusionRule::Rrf, &text, &content, 10).contains(&33));
 }

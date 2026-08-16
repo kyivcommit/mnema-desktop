@@ -18,11 +18,11 @@ use crate::error::Error;
 use crate::job::{self, JobEvent};
 use crate::state::AppState;
 
-/// How many lexical hits a search returns.
+/// How many hits `search` returns, after both arms are fused into one list.
 ///
-/// A placeholder with a number on it. What a search should return, and how the
-/// lexical and dense arms are fused into it, is the search/RAG spec's decision;
-/// this is here so the walking skeleton has an end.
+/// A placeholder with a number on it — what a search should return is still
+/// unsettled. How the two arms are fused is no longer this constant's story;
+/// see `SEARCH_QUERY_RULE` and `SEARCH_FUSION_RULE` below.
 const SEARCH_LIMIT: i64 = 20;
 
 /// The query rule `search` asks the text arm with — the live sweep's winner,
@@ -279,7 +279,10 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
 pub fn set_search_arms(state: State<'_, AppState>, text: bool, content: bool) -> Result<(), Error> {
     state.with_index(|db| {
         db.meta_set_many(&[
-            (mnema_index::META_SEARCH_TEXT_ARM, if text { "on" } else { "off" }),
+            (
+                mnema_index::META_SEARCH_TEXT_ARM,
+                if text { "on" } else { "off" },
+            ),
             (
                 mnema_index::META_SEARCH_CONTENT_ARM,
                 if content { "on" } else { "off" },

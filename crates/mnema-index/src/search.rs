@@ -106,9 +106,9 @@ impl Db {
     /// were typed.
     ///
     /// One `MATCH` per term rather than a vocabulary table: `fts5vocab` would
-    /// need a line of DDL and a migration, and this runs on a query's worth of
-    /// words against a local file. If it ever measures as the narrow place, that
-    /// table is where to go. Pinned by
+    /// need a line of DDL and a migration, and this runs on a query's worth
+    /// of words against a local file. If it ever measures as the narrow
+    /// place, that table is where to go. Pinned by
     /// `a_terms_presence_is_asked_of_the_whole_index`.
     pub fn terms_present(&self, prepared: &str) -> Result<Vec<String>, Error> {
         let mut stmt = self.conn().prepare(

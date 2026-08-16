@@ -131,8 +131,11 @@ fn meta_set_many_writes_every_pair_in_one_transaction() {
         }))
         .expect("registering the commit hook");
 
-    db.meta_set_many(&[(META_SEARCH_TEXT_ARM, "off"), (META_SEARCH_CONTENT_ARM, "off")])
-        .expect("write");
+    db.meta_set_many(&[
+        (META_SEARCH_TEXT_ARM, "off"),
+        (META_SEARCH_CONTENT_ARM, "off"),
+    ])
+    .expect("write");
 
     assert_eq!(
         commits.load(Ordering::SeqCst),
@@ -145,7 +148,9 @@ fn meta_set_many_writes_every_pair_in_one_transaction() {
         Some("off")
     );
     assert_eq!(
-        db.meta_get(META_SEARCH_CONTENT_ARM).expect("read").as_deref(),
+        db.meta_get(META_SEARCH_CONTENT_ARM)
+            .expect("read")
+            .as_deref(),
         Some("off")
     );
 }

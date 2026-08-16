@@ -1,6 +1,27 @@
-use mnema_search::{ContentArm, Missing};
+use mnema_search::{ContentArm, Missing, Provider};
 
 mod support;
+
+/// M6, final-round review: `Provider` derived `Debug`, which renders every
+/// field including `key` — nothing formats a `Provider` with `{:?}` today,
+/// but a struct with a bare credential field one derive away from a log line
+/// is the shape `mnema-secrets`' own module doc warns against.
+#[test]
+fn a_providers_debug_rendering_does_not_carry_the_key() {
+    let provider = Provider {
+        base: "https://api.example.test".to_string(),
+        key: "sk-do-not-print-me".to_string(),
+    };
+    let rendered = format!("{provider:?}");
+    assert!(
+        !rendered.contains("sk-do-not-print-me"),
+        "the key leaked into Debug: {rendered}"
+    );
+    assert!(
+        rendered.contains("[redacted]"),
+        "the field should say it withheld something, not simply vanish: {rendered}"
+    );
+}
 
 /// "Off", "cannot be asked", "asked and failed", and "asked and answered
 /// with nothing" are separate facts, and a person shown one list for all of

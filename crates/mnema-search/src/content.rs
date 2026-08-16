@@ -16,10 +16,23 @@ pub struct Arms {
 /// every `Provider { base: &mock.base(), .. }` at a call site into a
 /// dropped-temporary error, which is a lifetime puzzle this type has no reason
 /// to hand anyone.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Provider {
     pub base: String,
     pub key: String,
+}
+
+/// Redacts `key` — nothing formats a `Provider` with `{:?}` today, but a
+/// derived `Debug` is one `.unwrap()` away from printing it, and the same
+/// module-doc argument `mnema-secrets` makes for its own `Error` applies
+/// here. Pinned by `a_providers_debug_rendering_does_not_carry_the_key`.
+impl std::fmt::Debug for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Provider")
+            .field("base", &self.base)
+            .field("key", &"[redacted]")
+            .finish()
+    }
 }
 
 /// What the content arm needs and does not have — a missing key or a missing
