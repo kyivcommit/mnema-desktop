@@ -509,6 +509,9 @@ const drawArmState = () => {
 // `drawArmState` used to be called alone: a checkbox `change` moves the
 // toggle without a fresh `model_settings` round trip, and the sentence
 // promising what a search sends must move with it, in the same paint.
+// Pinned per arm by `switching the content arm off updates the disclosure
+// sentence too` and `switching the text arm off with an absent key updates
+// the disclosure sentence too`.
 const drawArmStateAndDisclosure = () => {
   const { text, content } = drawArmState();
   el("disclosure").textContent = asSentence(
@@ -529,7 +532,9 @@ let armWriteGeneration = 0;
 // applied to a control this window must not leave believing a choice was
 // saved when `set_search_arms` never returned. Both also claim the search
 // form's submit for the length of the write, the same way they already
-// claim each other's checkbox.
+// claim each other's checkbox. Pinned per handler by `the search form's
+// submit is disabled while an arm write is in flight, and re-enabled once
+// it settles` and its content-arm counterpart of the same name.
 el("arm-text").addEventListener("change", async () => {
   const previous = savedTextArm;
   savedTextArm = el("arm-text").checked;

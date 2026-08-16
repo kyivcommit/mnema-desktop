@@ -127,6 +127,13 @@ impl Db {
         Ok(out)
     }
 
+    // The `, chunk_fts.rowid` tie-break is additive in what it returns, not
+    // in query plan: on the bundled SQLite it drops FTS5's rank-ordered
+    // scan for `USE TEMP B-TREE FOR ORDER BY`, so every matching row is
+    // materialized before `LIMIT` applies rather than the scan
+    // short-circuiting. Relevance order still holds; this is a cost, not a
+    // correctness change. Codex round-2 review measured the plan on both
+    // sides.
     fn matching(&self, expr: &str, limit: i64) -> Result<Vec<i64>, Error> {
         let mut stmt = self.conn().prepare(
             "SELECT chunk_fts.rowid FROM chunk_fts

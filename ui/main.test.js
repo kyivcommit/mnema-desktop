@@ -921,6 +921,120 @@ test("the search form's submit is disabled while an arm write is in flight, and 
   );
 });
 
+// Codex round 2 review: the two tests above drive only `arm-text`, and the
+// `arm-content` handler's own `armWriteGeneration += 1`/`search-submit`
+// lines were unpinned — deleting them left the suite green. Same scenario,
+// driven through the content checkbox instead.
+test("a settings read issued before a content-arm write does not revert it once the write has landed", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.equal(w.el("arm-content").checked, true, "premise: the content arm starts checked");
+
+  // Issued from `forget`, not from the write below — this is the read that
+  // must not win.
+  const read = w.hold("model_settings");
+  await w.press("forget");
+
+  const write = w.hold("set_search_arms");
+  w.el("arm-content").checked = false;
+  const change = w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  // Resolves with the *old* saved value — exactly what a read issued before
+  // the write started would still carry.
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-content").checked,
+    false,
+    "a stale settings read reverted the optimistic write while it was still in flight",
+  );
+
+  write.resolve(null);
+  await change;
+  await settleEverything();
+});
+
+test("the search form's submit is disabled while a content-arm write is in flight, and re-enabled once it settles", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.equal(w.el("search-submit").disabled, false, "premise: submit starts enabled");
+
+  const write = w.hold("set_search_arms");
+  w.el("arm-content").checked = false;
+  const change = w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    true,
+    "the submit stayed clickable while a content-arm write was in flight",
+  );
+
+  write.resolve(null);
+  await change;
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    false,
+    "the submit was left disabled after its content-arm write settled",
+  );
+});
+
 // Review round 1, Important 1: `drawArmState()` alone never touched
 // `#disclosure`, so unticking "Search by content" left the sentence still
 // promising "every question you ask" — the very promise that checkbox had
@@ -962,6 +1076,49 @@ test("switching the content arm off updates the disclosure sentence too", async 
     w.el("disclosure").textContent,
     /every question you ask/,
     "the disclosure still promised questions leave after the arm that sends them was switched off",
+  );
+});
+
+// Codex round 2 review: the test above covers `contentArmRuns`, but the
+// `textRuns: text.checked` half of the same `disclosureSentence` call
+// (`ui/main.js`, `drawArmStateAndDisclosure`) had no `main.test.js` pin —
+// deleting that one line left the suite green. Same shape, text checkbox,
+// absent key.
+test("switching the text arm off with an absent key updates the disclosure sentence too", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "absent" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: null,
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.match(
+    w.el("disclosure").textContent,
+    /Search works on words/,
+    "premise: the text arm started on, so the disclosure claimed search works",
+  );
+
+  w.el("arm-text").checked = false;
+  await w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  assert.doesNotMatch(
+    w.el("disclosure").textContent,
+    /Search works on words/,
+    "the disclosure still claimed search works on words after the arm that runs it was switched off",
   );
 });
 
