@@ -2749,8 +2749,7 @@ test("a partly embedded space says how much of the index it searched", () => {
   const sentence = contentArmSentence({
     kind: "answered", matched: 3, embedded: 30, total: 50,
   });
-  assert.match(sentence, /30/);
-  assert.match(sentence, /50/);
+  assert.match(sentence, /30 of 50/);
 });
 
 test("a full space does not talk about coverage at all", () => {
@@ -2758,6 +2757,7 @@ test("a full space does not talk about coverage at all", () => {
     kind: "answered", matched: 3, embedded: 50, total: 50,
   });
   assert.doesNotMatch(sentence, /50 of 50/);
+  assert.match(sentence, /returned 3\b/);
 });
 
 test("what is missing is named together with where to fix it", () => {
