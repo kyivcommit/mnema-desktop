@@ -21,6 +21,9 @@ import {
   endingSentence,
   hitLocation,
   searchResultItems,
+  toggleState,
+  TEXT_ARM_TEXT,
+  textArmSentence,
   ROLES,
   ROLE_NAME,
   DISCLOSURE_TEXT,
@@ -298,6 +301,39 @@ test("search hits render their location and text", () => {
   assert.deepEqual(searchResultItems([{ relativePath: "a.txt", text: "fox" }]), [
     { kind: "hit", where: "a.txt", text: "fox" },
   ]);
+});
+
+test("an unconfigured content arm shows off and cannot be pressed", () => {
+  const s = toggleState({ savedText: true, savedContent: true, keyPresent: false, modelChosen: false });
+  assert.equal(s.content.checked, false);
+  assert.equal(s.content.disabled, true);
+  assert.match(s.content.note, /Models/);
+});
+
+test("the saved choice is not overwritten by the arm being unavailable", () => {
+  const unavailable = toggleState({ savedText: true, savedContent: true, keyPresent: false, modelChosen: false });
+  assert.equal(unavailable.content.checked, false);
+  const available = toggleState({ savedText: true, savedContent: true, keyPresent: true, modelChosen: true });
+  assert.equal(available.content.checked, true, "the choice must come back");
+});
+
+test("a saved off stays off once the arm becomes available", () => {
+  const s = toggleState({ savedText: true, savedContent: false, keyPresent: true, modelChosen: true });
+  assert.equal(s.content.checked, false);
+  assert.equal(s.content.disabled, false);
+});
+
+test("the last effective arm cannot be switched off", () => {
+  // Content unavailable, so text is the only arm that runs.
+  const s = toggleState({ savedText: true, savedContent: true, keyPresent: false, modelChosen: false });
+  assert.equal(s.text.disabled, true);
+  assert.match(s.text.note, /only/i);
+});
+
+test("with both arms available neither is forced on", () => {
+  const s = toggleState({ savedText: true, savedContent: true, keyPresent: true, modelChosen: true });
+  assert.equal(s.text.disabled, false);
+  assert.equal(s.content.disabled, false);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2736,6 +2772,27 @@ test("the note about a future request is drawn on the platform that will make it
     );
   }
   assert.equal(keyStoreNote("plan9", present), "", "a platform this build does not know said something");
+});
+
+test("every text-arm state has its own sentence, and no default swallows one", () => {
+  assert.deepEqual(Object.keys(TEXT_ARM_TEXT).sort(), ["answered", "off"]);
+});
+
+test("the text arm off state names the arm, not the content arm", () => {
+  assert.equal(textArmSentence({ kind: "off" }), "Search by text is off.");
+});
+
+test("a text-arm answer names how many matched", () => {
+  const sentence = textArmSentence({ kind: "answered", matched: 4 });
+  assert.match(sentence, /4/);
+  assert.doesNotMatch(sentence, /content/);
+});
+
+test("a text-arm kind this build does not know is not read as one of the states above", () => {
+  const unknown = textArmSentence({ kind: "somethingFutureAndUnknown" });
+  assert.notEqual(unknown, TEXT_ARM_TEXT.off());
+  assert.notEqual(unknown, TEXT_ARM_TEXT.answered({ matched: 4 }));
+  assert.match(unknown, /unknown/);
 });
 
 test("every content-arm state has its own sentence, and no default swallows one", () => {

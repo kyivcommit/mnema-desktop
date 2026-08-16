@@ -207,6 +207,35 @@ export function searchResultItems(hits) {
   return hits.map((h) => ({ kind: "hit", where: hitLocation(h), text: h.text }));
 }
 
+// The saved choice and whether an arm can run at all are two facts, and this is
+// the one place they meet. What comes back is what the window DRAWS — the saved
+// choice is never written from here, so an arm that becomes available again
+// returns to what the person chose. Pinned by
+// `the saved choice is not overwritten by the arm being unavailable`.
+export function toggleState({ savedText, savedContent, keyPresent, modelChosen }) {
+  const contentAvailable = keyPresent && modelChosen;
+  const contentRuns = contentAvailable && savedContent;
+  const textRuns = savedText;
+  const onlyArm = "This is the only arm that can run.";
+  const missing = keyPresent
+    ? "No embedding model is chosen. Choose one under Models."
+    : "No key is saved. Save one under Models.";
+  return {
+    text: {
+      checked: textRuns,
+      // D106's "at least one" is about what RUNS, not about what was chosen:
+      // with the content arm unavailable, unticking this leaves no search.
+      disabled: textRuns && !contentRuns,
+      note: textRuns && !contentRuns ? onlyArm : "",
+    },
+    content: {
+      checked: contentRuns,
+      disabled: !contentAvailable || (contentRuns && !textRuns),
+      note: contentAvailable ? (contentRuns && !textRuns ? onlyArm : "") : missing,
+    },
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Model configuration.
 //
@@ -1570,6 +1599,21 @@ export const catalogueSentence = (catalogue) => {
     ? `no model in the provider's list for this role could be read by this build — ${records}`
     : "the provider lists no models for this role";
 };
+
+// A different not-knowing from the states below: the window was handed a kind
+// this build has no name for, which is the same shape as `LEAVES_UNSAID`.
+const TEXT_ARM_UNSAID =
+  "Whether search by text ran is unknown: this build did not understand what it answered.";
+
+// One entry per `TextArmReport` variant in `src-tauri/src/bridge.rs`, a table
+// for the same reason `CONTENT_ARM_TEXT` below it is one.
+export const TEXT_ARM_TEXT = {
+  off: () => "Search by text is off.",
+  answered: (arm) => `Search by text returned ${arm.matched}.`,
+};
+
+export const textArmSentence = (arm) =>
+  (TEXT_ARM_TEXT[arm?.kind] ?? (() => TEXT_ARM_UNSAID))(arm);
 
 // A different not-knowing from the states below: the window was handed a kind
 // this build has no name for, which is the same shape as `LEAVES_UNSAID`.

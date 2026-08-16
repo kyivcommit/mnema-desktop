@@ -536,6 +536,36 @@ test("the bar carries an ended state after a run, and a running one on the press
   await settleEverything();
 });
 
+// `search` answers a `SearchAnswer` (`{ hits, text, content }`), not a bare
+// hit array — `searchResultItems` needs `hits` specifically, and reading the
+// whole answer as the array throws inside `.map`, which a source-text read
+// cannot see coming from the command's own shape changing underneath it.
+test("search draws the hits and both arm sentences from one SearchAnswer", async () => {
+  const w = await boot({
+    search: () => ({
+      hits: [{ relativePath: "a.txt", text: "fox" }],
+      text: { kind: "answered", matched: 5 },
+      content: { kind: "answered", matched: 5, embedded: 10, total: 10 },
+    }),
+  });
+
+  w.el("query").value = "fox";
+  await w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.el("results").options.length,
+    1,
+    "the hit from `hits` did not reach the list",
+  );
+  const [hitLi] = w.el("results").options;
+  assert.equal(hitLi.options.length, 2, "a hit li does not carry its two lines");
+  assert.equal(hitLi.options[0].textContent, "a.txt");
+  assert.equal(hitLi.options[1].textContent, "fox");
+  assert.match(w.el("text-arm-state").textContent, /returned 5/);
+  assert.match(w.el("content-arm-state").textContent, /returned 5/);
+});
+
 // A press that is refused starts nothing, so it must not leave the bar claiming
 // a run — and it must put the settings line back, because it bumped the
 // generation before awaiting and any read still in flight will therefore

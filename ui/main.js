@@ -7,6 +7,9 @@
 import {
   endingSentence,
   searchResultItems,
+  toggleState,
+  textArmSentence,
+  contentArmSentence,
   ROLES,
   indexNotAsked,
   indexOpened,
@@ -428,10 +431,12 @@ async function renderSkips(rootId) {
 
 // The window draws; it does not decide. Every number here came from a
 // command — `searchResultItems` and `hitLocation` (`render.js`) decide what
-// the list is made of, this only turns that into elements.
+// the list is made of, this only turns that into elements. `search` answers a
+// `SearchAnswer`, not a bare hit list — `hits` is what `searchResultItems`
+// takes, and `text`/`content` are each arm's own report.
 async function search(query) {
-  const hits = await invoke("search", { query });
-  results.replaceChildren(...searchResultItems(hits).map((item) => {
+  const answer = await invoke("search", { query });
+  results.replaceChildren(...searchResultItems(answer.hits).map((item) => {
     const li = document.createElement("li");
     if (item.kind === "empty") {
       li.className = "muted";
@@ -446,6 +451,8 @@ async function search(query) {
     li.append(where, text);
     return li;
   }));
+  el("text-arm-state").textContent = textArmSentence(answer.text);
+  el("content-arm-state").textContent = contentArmSentence(answer.content);
 }
 
 el("search-form").addEventListener("submit", async (event) => {
@@ -458,6 +465,41 @@ el("search-form").addEventListener("submit", async (event) => {
     li.textContent = `search failed: ${error}`;
     results.replaceChildren(li);
   }
+});
+
+// Whether each arm can run at all, cached from the last `model_settings` draw
+// so a checkbox's own `change` can redraw `toggleState` without asking again.
+let armKeyPresent = false;
+let armModelChosen = false;
+// The two toggles default to on, matching `arm_is_on`'s own default for a row
+// `set_search_arms` has never written.
+let savedTextArm = true;
+let savedContentArm = true;
+
+const drawArmState = () => {
+  const state = toggleState({
+    savedText: savedTextArm,
+    savedContent: savedContentArm,
+    keyPresent: armKeyPresent,
+    modelChosen: armModelChosen,
+  });
+  el("arm-text").checked = state.text.checked;
+  el("arm-text").disabled = state.text.disabled;
+  el("arm-text-note").textContent = state.text.note;
+  el("arm-content").checked = state.content.checked;
+  el("arm-content").disabled = state.content.disabled;
+  el("arm-content-note").textContent = state.content.note;
+};
+
+el("arm-text").addEventListener("change", async () => {
+  savedTextArm = el("arm-text").checked;
+  await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
+  drawArmState();
+});
+el("arm-content").addEventListener("change", async () => {
+  savedContentArm = el("arm-content").checked;
+  await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
+  drawArmState();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -647,6 +689,9 @@ const drawSettings = (settings, askedAt) => {
   showRecorded("embedding", read && read.embeddingModel);
   showRecorded("rerank", read && read.rerankModel);
   showRecorded("chat", read && read.chatModel);
+  armKeyPresent = settings.key?.kind === "present";
+  armModelChosen = Boolean(read && read.embeddingModel);
+  drawArmState();
 };
 
 // No `.catch()`, and that is deliberate. `model_settings` returns no `Result`
