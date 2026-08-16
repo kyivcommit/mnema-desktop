@@ -205,6 +205,11 @@ fn the_live_sweep_prints_a_table_a_decision_can_be_read_from() {
     let corpus = mnema_eval::Corpus::load(&mnema_eval::corpus_dir()).unwrap();
     let questions = mnema_eval::QuestionSet::load(&mnema_eval::questions_path()).unwrap();
     let indexed = mnema_eval::IndexedCorpus::build(&corpus, support::worker()).unwrap();
+    // Same point in the sequence `bin/eval.rs` checks it: before any call
+    // that costs money, not after — an `assert!` here, not a silent `.ok()`,
+    // so a bad corpus fails loud before the provider is ever asked.
+    let problems = mnema_eval::preflight(&corpus, &questions, &indexed).unwrap();
+    assert!(problems.is_empty(), "preflight found: {problems:?}");
     let provider = mnema_search::Provider { base, key };
     let dense = mnema_eval::DenseAnswers::ask(&indexed, &questions, provider).unwrap();
 
