@@ -70,6 +70,37 @@ pub enum ContentArm {
     },
 }
 
+/// `knn`, filtered down to ids `Db::citation` still recognises. `Db::knn`
+/// answers straight from the vector table, which cannot hold a foreign key
+/// back to `chunk` (`crates/mnema-index/src/space.rs:539`), so a neighbour
+/// can rank ahead of a live chunk with no `chunk` row left for it any more.
+///
+/// Margin `k * 2` (capped at `knn`'s own 4096) leaves room to drop those and
+/// still return `k` live ids. A citation lookup that errors fails the whole
+/// call rather than being read as "no such chunk". Pinned by
+/// `an_orphaned_neighbour_is_skipped_without_shortening_the_answer` and
+/// `a_citation_lookup_that_fails_makes_the_arm_failed_not_merely_short`.
+fn knn_live_chunks(
+    db: &Db,
+    space_id: i64,
+    query: &[f32],
+    k: i64,
+) -> Result<Vec<i64>, mnema_index::Error> {
+    let margin = (k * 2).min(4096);
+    let candidates = db.knn(space_id, query, margin, None)?;
+    let mut live = Vec::new();
+    for id in candidates {
+        if live.len() as i64 >= k {
+            break;
+        }
+        match db.citation(id)? {
+            Some(_) => live.push(id),
+            None => continue,
+        }
+    }
+    Ok(live)
+}
+
 /// Embeds the query with the model the space was built with, then asks `knn`.
 ///
 /// The model comes from `Db::space_model`, never from the settings' current
@@ -115,7 +146,7 @@ pub fn content_arm(db: &Db, provider: Option<Provider>, query: &str, k: i64) -> 
             reason: "the provider answered with no vector".to_string(),
         };
     };
-    let chunks = match db.knn(space, &vector, k, None) {
+    let chunks = match knn_live_chunks(db, space, &vector, k) {
         Ok(chunks) => chunks,
         Err(e) => {
             return ContentArm::Failed {
