@@ -518,11 +518,13 @@ const drawArmStateAndDisclosure = () => {
 el("arm-text").addEventListener("change", async () => {
   const previous = savedTextArm;
   savedTextArm = el("arm-text").checked;
+  el("arm-text").disabled = true;
+  el("arm-content").disabled = true;
   try {
     await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
   } catch (error) {
     savedTextArm = previous;
-    el("arm-text").checked = previous;
+    drawArmStateAndDisclosure();
     el("arm-text-note").textContent = `the choice was not saved: ${error}`;
     return;
   }
@@ -531,11 +533,13 @@ el("arm-text").addEventListener("change", async () => {
 el("arm-content").addEventListener("change", async () => {
   const previous = savedContentArm;
   savedContentArm = el("arm-content").checked;
+  el("arm-text").disabled = true;
+  el("arm-content").disabled = true;
   try {
     await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
   } catch (error) {
     savedContentArm = previous;
-    el("arm-content").checked = previous;
+    drawArmStateAndDisclosure();
     el("arm-content-note").textContent = `the choice was not saved: ${error}`;
     return;
   }

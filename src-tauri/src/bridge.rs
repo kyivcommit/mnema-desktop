@@ -277,6 +277,9 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
 /// choice disagreeing with the other's.
 #[tauri::command(async)]
 pub fn set_search_arms(state: State<'_, AppState>, text: bool, content: bool) -> Result<(), Error> {
+    if !text && !content {
+        return Err(Error::NoSearchArm);
+    }
     state.with_index(|db| {
         db.meta_set_many(&[
             (

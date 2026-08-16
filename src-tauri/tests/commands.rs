@@ -785,7 +785,9 @@ fn a_fresh_index_with_no_arm_written_answers_with_both_arms_on() {
 /// `set_search_arms` reached through the real IPC path, the same shape
 /// `every_model_command_the_window_calls_is_registered`'s own doc warns a
 /// `pub` command can silently miss — and exercises `arm_is_on`'s `"off"`
-/// branch, for both keys at once.
+/// branch, for each key in turn. Never both at once:
+/// `set_search_arms_refuses_to_turn_off_both_arms`, right below, is what
+/// that combination means now.
 #[test]
 fn set_search_arms_is_reachable_through_the_ipc_and_off_means_off() {
     let dir = tempfile::tempdir().unwrap();
@@ -796,14 +798,41 @@ fn set_search_arms_is_reachable_through_the_ipc_and_off_means_off() {
     call(
         &webview,
         "set_search_arms",
-        json!({ "text": false, "content": false }),
+        json!({ "text": false, "content": true }),
     )
     .expect("set_search_arms was rejected");
-
     let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
-
     assert_eq!(answer["text"]["kind"], json!("off"));
+
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .expect("set_search_arms was rejected");
+    let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
     assert_eq!(answer["content"]["kind"], json!("off"));
+}
+
+/// D106: two independent toggles, and at least one is always on. Nothing
+/// stopped a caller from writing both meta rows `"off"` before this —
+/// `arm_is_on` would then read a row that contradicts the sentence nothing
+/// here rechecks.
+#[test]
+fn set_search_arms_refuses_to_turn_off_both_arms() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let error = call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": false, "content": false }),
+    )
+    .expect_err("turning off both search arms was accepted");
+
+    assert_eq!(error, json!("at least one search arm must stay on"));
 }
 
 /// `model_settings` reads the saved choice back from the same two meta rows

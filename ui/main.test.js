@@ -698,6 +698,100 @@ test("a rejected set_search_arms reverts the checkbox and says why", async () =>
   assert.match(w.el("arm-text-note").textContent, /disk is full/);
 });
 
+// Codex review on PR #10: `savedTextArm`/`savedContentArm` are written
+// synchronously, before either handler's own `await`. A second click on the
+// *other* checkbox while the first save is still in flight reads the first
+// handler's already-written variable and sends its own `set_search_arms`
+// call with a state nothing has confirmed yet — reachable because nothing
+// before this fix stopped the second checkbox from being clicked at all
+// while the first was mid-flight.
+test("clicking one arm disables both checkboxes until the save resolves", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.equal(w.el("arm-text").disabled, false, "premise: the text arm starts clickable");
+  assert.equal(w.el("arm-content").disabled, false, "premise: the content arm starts clickable");
+
+  const held = w.hold("set_search_arms");
+  w.el("arm-text").checked = false;
+  const change = w.el("arm-text").listeners.get("change")({});
+
+  assert.equal(
+    w.el("arm-text").disabled,
+    true,
+    "the clicked checkbox itself stayed clickable while its own save was in flight",
+  );
+  assert.equal(
+    w.el("arm-content").disabled,
+    true,
+    "the other checkbox could still be clicked while the first save was in flight",
+  );
+
+  held.resolve(null);
+  await change;
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-text").disabled,
+    false,
+    "the text arm was left disabled after its own save finished",
+  );
+});
+
+// The freeze above must lift on a refusal too. The catch block already
+// reverted its own checkbox before this fix existed; the *other* checkbox
+// was frozen by the same click, and nothing in the catch branch ever
+// unfroze it, so a rejected save used to leave it stuck disabled.
+test("a rejected save re-enables the other checkbox too, not only the one that was clicked", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+    set_search_arms: () => new Error("disk is full"),
+  });
+
+  w.el("arm-text").checked = false;
+  await w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-content").disabled,
+    false,
+    "the content arm was left disabled after a rejected save on the text arm",
+  );
+});
+
 // Review round 1, Important 1: `drawArmState()` alone never touched
 // `#disclosure`, so unticking "Search by content" left the sentence still
 // promising "every question you ask" — the very promise that checkbox had
