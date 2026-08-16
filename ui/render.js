@@ -416,13 +416,22 @@ export const recordedNoteSentence = ({ recorded, list, listed }) => {
   )({ recorded, listed, list });
 };
 
-// What leaves the machine, per state of the credential store. Two of these
-// sentences are promises and the third is the refusal to make one.
+// What leaves the machine, per state of the credential store — and, while a
+// key is present, per state of the content arm switch that decides whether a
+// question is ever sent.
 //
 // `LEAVES_EVERYTHING` is longer than §3.2 of the requirements, which says
 // "once, at indexing". That is false for cloud embeddings: the question has to
 // be embedded too, on every search (D29).
 export const LEAVES_NOTHING = "Nothing leaves this machine. Search works on words.";
+// True only while the content arm runs. Split out of `LEAVES_EVERYTHING` when
+// that arm became switchable — before that, a stored key meant a question
+// always left, and the two facts were one. `render.test.js` asserts the
+// content half of the sentence disappears with the arm off and appears with
+// it on.
+export const LEAVES_INDEXING_ONLY =
+  "Every piece of every document leaves this machine while indexing. Your " +
+  "questions stay here: search by content is off.";
 export const LEAVES_EVERYTHING =
   "Every piece of every document leaves this machine while indexing — and every question you " +
   "ask while searching.";
@@ -438,18 +447,25 @@ const LEAVES_UNSAID =
   "Whether anything leaves this machine is unknown: this build did not understand what the " +
   "key store answered.";
 
+// `absent` and `unreadable` ignore the toggle — the first is a promise it
+// cannot weaken, the second a not-knowing it cannot resolve. `render.test.js`
+// asserts both hold for either value of the toggle; only `present` reads it.
 export const DISCLOSURE_TEXT = {
-  present: LEAVES_EVERYTHING,
-  absent: LEAVES_NOTHING,
-  unreadable: LEAVES_UNKNOWN,
+  present: (search) =>
+    search.contentArmRuns ? LEAVES_EVERYTHING : LEAVES_INDEXING_ONLY,
+  absent: () => LEAVES_NOTHING,
+  unreadable: () => LEAVES_UNKNOWN,
 };
 
-// Takes the `KeyState` field, not the whole `ModelSettings`. Every function in
-// this block takes the field it renders — `indexStateSentence` has to, since
-// `AdoptedModel` carries an `IndexSettings` of its own — and two conventions
-// for the same kind of argument is the shape that let the brief's `keyPresent`
-// go stale unnoticed.
-export const disclosureSentence = (key) => DISCLOSURE_TEXT[key?.kind] ?? LEAVES_UNSAID;
+// Takes the `KeyState` field and the content arm's run state, not the whole
+// `ModelSettings` or a caller-built boolean — `main.js` reads
+// `contentArmRuns` off the same `toggleState` call that draws the arm
+// checkboxes, so this sentence and those checkboxes read one fact rather
+// than two that could disagree.
+export const disclosureSentence = (key, search) =>
+  (DISCLOSURE_TEXT[key?.kind] ?? (() => LEAVES_UNSAID))(
+    search ?? { contentArmRuns: false },
+  );
 
 // `KeyStoreFailure` is four values over six error variants, and the grouping is
 // the whole content: what the person does next. Four sentences that read alike

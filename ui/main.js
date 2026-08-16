@@ -478,6 +478,10 @@ let armModelChosen = false;
 let savedTextArm = true;
 let savedContentArm = true;
 
+// Returns the `toggleState` it drew from, so a caller that needs the same
+// facts — `drawSettings`, for the disclosure sentence's `contentArmRuns` —
+// reads them off this one call instead of asking `toggleState` again with
+// its own copy of these four fields.
 const drawArmState = () => {
   const state = toggleState({
     savedText: savedTextArm,
@@ -491,6 +495,7 @@ const drawArmState = () => {
   el("arm-content").checked = state.content.checked;
   el("arm-content").disabled = state.content.disabled;
   el("arm-content-note").textContent = state.content.note;
+  return state;
 };
 
 // Both handlers write optimistically and undo on refusal — the same
@@ -659,7 +664,6 @@ const drawSettings = (settings, askedAt) => {
   // that reason.
   const aJobHasTheSlot = jobRunning || askedAt !== jobGeneration;
   keyState = settings.key;
-  el("disclosure").textContent = asSentence(disclosureSentence(settings.key));
   el("key-state").textContent = asSentence(keyStateSentence(settings.key));
   // The field and its button are drawn from the store's answer too. With a key
   // stored this window has just cleared the field, so an empty one is the
@@ -721,7 +725,13 @@ const drawSettings = (settings, askedAt) => {
     savedTextArm = read.searchTextArm;
     savedContentArm = read.searchContentArm;
   }
-  drawArmState();
+  // `contentArmRuns` reads `drawArmState`'s own return rather than a second,
+  // independently built boolean — see the comment above `drawArmState` for
+  // why that would be the very defect this line exists to close.
+  const { content } = drawArmState();
+  el("disclosure").textContent = asSentence(
+    disclosureSentence(settings.key, { contentArmRuns: content.checked }),
+  );
 };
 
 // No `.catch()`, and that is deliberate. `model_settings` returns no `Result`

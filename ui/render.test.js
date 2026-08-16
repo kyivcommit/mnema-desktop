@@ -444,13 +444,42 @@ test("the states main.js writes are exactly the states these tables render", () 
 });
 
 test("the disclosure names the search query, not only indexing", () => {
-  const withKey = disclosureSentence({ kind: "present" });
+  const withKey = disclosureSentence({ kind: "present" }, { contentArmRuns: true });
   assert.match(withKey, /every question/,
     "§3.2 of the requirements says 'once, at indexing', and that is false for cloud embeddings");
   // `/i`, because the phrase opens the sentence. The brief's own `/нічого/`
   // against `Нічого` was this same mistake and nothing caught it; here the
   // assertion went red on the first run.
   assert.match(withKey, /every piece/i);
+});
+
+test("with the content arm off, a stored key does not make questions leave", () => {
+  const s = disclosureSentence({ kind: "present" }, { contentArmRuns: false });
+  assert.doesNotMatch(s, /every question you ask/);
+  assert.match(s, /indexing/);
+});
+
+test("with the content arm running, the question half is stated", () => {
+  const s = disclosureSentence({ kind: "present" }, { contentArmRuns: true });
+  assert.match(s, /every question you ask/);
+});
+
+test("without a key nothing leaves, whatever the toggle says", () => {
+  for (const contentArmRuns of [true, false]) {
+    assert.match(
+      disclosureSentence({ kind: "absent" }, { contentArmRuns }),
+      /Nothing leaves this machine/,
+    );
+  }
+});
+
+test("an unreadable key store is still unknown, whatever the toggle says", () => {
+  for (const contentArmRuns of [true, false]) {
+    assert.match(
+      disclosureSentence({ kind: "unreadable" }, { contentArmRuns }),
+      /unknown/,
+    );
+  }
 });
 
 test("with no key the disclosure promises nothing leaves", () => {
