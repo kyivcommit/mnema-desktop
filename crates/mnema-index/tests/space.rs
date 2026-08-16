@@ -1135,3 +1135,126 @@ fn recording_a_failure_says_whether_it_wrote_one() {
     );
     assert_eq!(db.failed_chunk_count(space).unwrap(), 0);
 }
+
+/// A document, page, block and one chunk under `id`, holding `text`.
+/// Returns the chunk id.
+fn write_one_chunk(db: &Db, id: &str, text: &str) -> i64 {
+    db.insert_document(id, "text/plain", text.len() as i64, SourceKind::Document)
+        .unwrap();
+    rebuild_one_chunk(db, id, text)
+}
+
+/// What a rebuild does after `clear_document_content`: writes a fresh page,
+/// block and chunk onto a document id that already exists. Returns the
+/// chunk id.
+fn rebuild_one_chunk(db: &Db, doc: &str, text: &str) -> i64 {
+    let page = db.insert_page(doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: Some("uk".into()),
+                text: text.to_string(),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap();
+    db.insert_chunk(
+        doc,
+        0,
+        text,
+        &Locator {
+            spans: vec![Segment {
+                block_id: block,
+                start: 0,
+                end: text.chars().count() as u32,
+                block_start: 0,
+            }],
+            coordinate: Coordinate::None,
+        },
+        SourceKind::Document,
+    )
+    .unwrap()
+}
+
+/// T4 (design §7, invariant I from design §2): in any committed state,
+/// every vector names a chunk that still holds text — never a chunk that
+/// is gone. This is what makes `read_snapshot` alone (no content-hash
+/// join, no `AUTOINCREMENT`) a checked argument rather than an assumption,
+/// and what would catch a future `insert_vector`/`upsert_vector` call
+/// bypassing the hash check (`space.rs:341-351`).
+/// Exercises real ways a vector's chunk can go: a document deleted the
+/// ordered way `forget_if_unnamed` relies on (vectors, then the document),
+/// and a rebuild that reuses a chunk's id under new text, where
+/// `upsert_vector_for_text`'s hash check must refuse the stale write.
+#[test]
+fn every_vector_names_a_chunk_that_still_holds_its_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+
+    let chunk = write_one_chunk(&db, &"5".repeat(64), "first");
+    let hash: String = db
+        .conn()
+        .query_row(
+            "SELECT content_hash FROM chunk WHERE id = ?1",
+            [chunk],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        db.upsert_vector_for_text(space, chunk, &hash, &support::unit_vector_1024())
+            .unwrap()
+    );
+
+    let victim = write_one_chunk(&db, &"6".repeat(64), "victim");
+    let victim_doc = "6".repeat(64);
+    let victim_hash: String = db
+        .conn()
+        .query_row(
+            "SELECT content_hash FROM chunk WHERE id = ?1",
+            [victim],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        db.upsert_vector_for_text(
+            space,
+            victim,
+            &victim_hash,
+            &support::other_unit_vector_1024()
+        )
+        .unwrap()
+    );
+    db.delete_vectors_for_document(&victim_doc).unwrap();
+    db.delete_document(&victim_doc).unwrap();
+
+    let doc = "5".repeat(64);
+    db.clear_document_content(&doc).unwrap();
+    let reused = rebuild_one_chunk(&db, &doc, "second");
+    assert_eq!(reused, chunk, "pointless unless the id was reused");
+    assert!(
+        !db.upsert_vector_for_text(space, reused, &hash, &support::unit_vector_1024())
+            .unwrap(),
+        "a write under the old text's hash must be refused for the reused id"
+    );
+
+    for table in vector_tables(&db) {
+        let orphans: i64 = db
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM {table} v
+                       LEFT JOIN chunk c ON c.id = v.chunk_id
+                      WHERE c.id IS NULL"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "{table} has a vector with no chunk row");
+    }
+}
