@@ -133,7 +133,7 @@ impl Db {
                JOIN chunk ON chunk.id = chunk_fts.rowid
                JOIN document ON document.id = chunk.document_id
               WHERE chunk_fts MATCH ?1 AND document.status = 'indexed'
-              ORDER BY rank LIMIT ?2",
+              ORDER BY rank, chunk_fts.rowid LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![expr, limit], |r| r.get::<_, i64>(0))?;
         let mut out = Vec::new();
@@ -222,4 +222,27 @@ fn as_fts5_all_of(terms: &[String]) -> String {
 /// Pinned by `any_term_survives_a_word_no_document_has`.
 fn as_fts5_any(prepared: &str) -> String {
     quoted_terms(prepared, " OR ")
+}
+
+#[cfg(test)]
+mod tests {
+    /// Codex round 2, Finding 2. `citation.rs`'s
+    /// `a_bm25_tie_breaks_by_chunk_id_and_is_stable_across_calls` builds a
+    /// real tie and asserts the order it resolves to, but this SQLite build
+    /// already happens to return ties in chunk-id order on its own, so that
+    /// test cannot go red if the key below is ever lost. This can: it reads
+    /// the query text directly.
+    #[test]
+    fn matching_breaks_bm25_ties_by_chunk_id() {
+        // Split before this very module: `include_str!` reads the whole file,
+        // and the pattern below is also this test's own source text.
+        let (src, _this_module) = include_str!("search.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap();
+        assert!(
+            src.contains("ORDER BY rank, chunk_fts.rowid"),
+            "the BM25 query has no secondary sort key, so two chunks that tie in `rank` can \
+             swap positions between calls"
+        );
+    }
 }

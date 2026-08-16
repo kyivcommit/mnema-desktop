@@ -514,7 +514,7 @@ impl Db {
             let mut stmt = self.conn().prepare(&format!(
                 "SELECT chunk_id FROM {table}
                   WHERE embedding MATCH ?1 AND k = ?2
-                  ORDER BY distance NULLS LAST"
+                  ORDER BY distance NULLS LAST, chunk_id"
             ))?;
             let rows = stmt.query_map(params![blob, k], first_id)?;
             return rows.collect::<Result<Vec<i64>, _>>().map_err(Error::from);
@@ -525,7 +525,7 @@ impl Db {
             "SELECT chunk_id FROM {table}
               WHERE embedding MATCH ?1 AND k = ?2
                 AND chunk_id IN (SELECT value FROM json_each(?3))
-              ORDER BY distance NULLS LAST"
+              ORDER BY distance NULLS LAST, chunk_id"
         ))?;
         let rows = stmt.query_map(params![blob, k, list], first_id)?;
         rows.collect::<Result<Vec<i64>, _>>().map_err(Error::from)
@@ -1588,4 +1588,27 @@ fn vec_table_name(space_id: i64) -> String {
 /// invalidate every vector table copied from a little-endian one.
 fn as_blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_ne_bytes()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    /// Codex round 2, Finding 2. `tests/space.rs`'s
+    /// `a_distance_tie_breaks_by_chunk_id_and_is_stable_across_calls` builds
+    /// a real tie and asserts the order, but vec0 in this build already
+    /// happens to return ties in chunk-id order on its own, so that test
+    /// cannot go red if the key below is ever lost from either statement.
+    /// This can: it reads the query text directly.
+    #[test]
+    fn knn_breaks_distance_ties_by_chunk_id_in_both_statements() {
+        // Split before this very module: `include_str!` reads the whole file,
+        // and the pattern below is also this test's own source text.
+        let (src, _this_module) = include_str!("space.rs").split_once("#[cfg(test)]").unwrap();
+        assert_eq!(
+            src.matches("ORDER BY distance NULLS LAST, chunk_id")
+                .count(),
+            2,
+            "`Db::knn` builds two statements (filtered and unfiltered) and both need the \
+             secondary sort key, or a tie can silently swap positions in whichever one lost it"
+        );
+    }
 }

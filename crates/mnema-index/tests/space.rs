@@ -509,6 +509,58 @@ fn an_undefined_distance_sorts_last_not_first() {
     );
 }
 
+/// Codex round 2, Finding 2: `ORDER BY distance NULLS LAST` alone leaves a
+/// tie to whatever order vec0 returns, which the same finding says can
+/// differ between runs. Two chunks holding the *same* vector tie on cosine
+/// distance exactly, not approximately. Pinned on order, repeated across
+/// several calls, in both the filtered and unfiltered statements — the same
+/// two-statement split `an_undefined_distance_sorts_last_not_first` above
+/// already has to cover twice.
+#[test]
+fn a_distance_tie_breaks_by_chunk_id_and_is_stable_across_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let cfg = db
+        .create_model_config("d", "openrouter", None, "baai/bge-m3", 4)
+        .unwrap();
+    let space = db.create_space(cfg, 4, "chunker-v1").unwrap();
+
+    db.insert_vector(space, 1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    // Chunks 3 and 2, inserted in that order, so an ordering that happened to
+    // follow insertion or ascending-id order by coincidence cannot pass.
+    db.insert_vector(space, 3, &[1.0, 0.1, 0.0, 0.0]).unwrap();
+    db.insert_vector(space, 2, &[1.0, 0.1, 0.0, 0.0]).unwrap();
+
+    let query = [1.0f32, 0.0, 0.0, 0.0];
+    let first = db.knn(space, &query, 3, None).unwrap();
+    for _ in 0..5 {
+        assert_eq!(
+            db.knn(space, &query, 3, None).unwrap(),
+            first,
+            "a distance tie must resolve the same way on every call"
+        );
+    }
+    assert_eq!(
+        first,
+        vec![1, 2, 3],
+        "tied rows must resolve by chunk_id ascending in the unfiltered statement"
+    );
+
+    let first_filtered = db.knn(space, &query, 3, Some(&[1, 2, 3])).unwrap();
+    for _ in 0..5 {
+        assert_eq!(
+            db.knn(space, &query, 3, Some(&[1, 2, 3])).unwrap(),
+            first_filtered,
+            "a distance tie must resolve the same way on every call in the filtered branch too"
+        );
+    }
+    assert_eq!(
+        first_filtered,
+        vec![1, 2, 3],
+        "tied rows must resolve by chunk_id ascending in the filtered statement too"
+    );
+}
+
 /// `create_space` reads twice — the duplicate check, then the id counter — and
 /// only then writes. A DEFERRED transaction takes no lock at BEGIN, so those
 /// reads see a snapshot another writer may already have moved past.

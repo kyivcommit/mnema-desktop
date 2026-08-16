@@ -515,6 +515,49 @@ fn a_written_chunk_is_always_findable() {
     );
 }
 
+/// Codex round 2, Finding 2: `ORDER BY rank` alone leaves ties to whatever
+/// order SQLite returns, which is free to differ from one call to the next
+/// — three chunks with identical text tie on BM25 exactly, not
+/// approximately, since term frequency, length and the corpus-wide idf are
+/// all equal. Pinned here rather than argued: the assertion is on order,
+/// repeated across several calls, not merely that all three came back.
+#[test]
+fn a_bm25_tie_breaks_by_chunk_id_and_is_stable_across_calls() {
+    let db = fixture_one_page();
+    let text = "tied ranking term";
+    let n_chars = text.chars().count() as u32;
+    let locator = Locator {
+        spans: vec![Segment {
+            block_id: db.block(),
+            start: 0,
+            end: n_chars,
+            block_start: 0,
+        }],
+        coordinate: Coordinate::None,
+    };
+    let mut ids: Vec<i64> = (0..3)
+        .map(|ord| {
+            db.insert_chunk("doc-1", ord, text, &locator, SourceKind::Document)
+                .unwrap()
+        })
+        .collect();
+    ids.sort();
+
+    let first = db.search_lexical("tied", 10).unwrap();
+    for _ in 0..5 {
+        assert_eq!(
+            db.search_lexical("tied", 10).unwrap(),
+            first,
+            "a BM25 tie must resolve the same way on every call"
+        );
+    }
+    assert_eq!(
+        first, ids,
+        "tied rows must resolve by chunk_id ascending, not by whatever order SQLite happens \
+         to return"
+    );
+}
+
 /// `validate_locator` is what stands between a wrong offset computed upstream
 /// and a citation that quotes past the end of its own text forever — nothing
 /// downstream re-derives it from the original.
