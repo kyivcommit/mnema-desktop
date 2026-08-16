@@ -868,6 +868,59 @@ fn a_text_only_search_does_not_touch_a_credential_store_it_does_not_need() {
     assert_eq!(answer["content"]["kind"], json!("off"));
 }
 
+/// I1, final-round review: a credential store that will not answer at all —
+/// not merely "no key" — must not take the whole search down with it. Built
+/// with `NO_CREDENTIAL`, the same unreachable store as the test above, but
+/// with the content arm on, so `crate::models::key` fails with
+/// [`mnema_desktop::error::Error::Secrets`] rather than [`Error::NoKey`].
+/// Before this test the `Err(e) => return Err(e)` arm in `search` answered
+/// the whole command with that error, so the text arm — which needs no
+/// credential store at all — never got to answer either.
+#[test]
+fn a_broken_credential_store_does_not_take_the_text_arm_down_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = mock_builder()
+        .manage(AppState::new(
+            dir.path().to_path_buf(),
+            support::worker().to_path_buf(),
+            NO_PROVIDER.to_string(),
+            NO_CREDENTIAL.to_string(),
+        ))
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application");
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    run_walk_to_completion(&app, root);
+
+    // Both arms on (the default) — the content arm is what hits the broken
+    // store; the text arm is the one that must survive it.
+    let answer = call(&webview, "search", json!({ "query": "fox" }))
+        .expect("a broken credential store must not fail the whole search");
+
+    assert!(
+        !answer["hits"].as_array().unwrap().is_empty(),
+        "the text arm did not answer even though it needs no credential store: {answer}"
+    );
+    assert_eq!(answer["text"]["kind"], json!("answered"));
+    assert_eq!(
+        answer["content"]["kind"],
+        json!("failed"),
+        "a real store failure must be reported as failed, not silently read as \
+         no key: {answer}"
+    );
+}
+
 /// The channel a real webview passes is a string of this shape. Nothing
 /// receives the messages here — `run_walk_to_completion` above is what
 /// proves the walk itself works, by calling the command function directly so

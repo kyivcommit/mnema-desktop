@@ -193,6 +193,14 @@ pub(crate) fn arm_is_on(value: Option<String>) -> bool {
 /// The key is asked for only when `arms.content` is on — pinned by
 /// `a_text_only_search_does_not_touch_a_credential_store_it_does_not_need`
 /// — and only [`Error::NoKey`] then turns into no provider.
+///
+/// Any other failure to reach the store — a locked keychain, an absent
+/// Secret Service — must not fail the text arm along with it: it is saved
+/// as `content_failure` and turned into [`ContentArmReport::Failed`] after
+/// the search runs, in place of whatever `mnema_search::search` would have
+/// derived from a `None` provider (`NotConfigured(NoKey)`, the wrong reason
+/// for a store that never answered). Pinned by
+/// `a_broken_credential_store_does_not_take_the_text_arm_down_with_it`.
 #[tauri::command(async)]
 pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer, Error> {
     let arms = state.with_index(|db| {
@@ -202,17 +210,20 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
         })
     })?;
 
-    let provider = if arms.content {
+    let (provider, content_failure) = if arms.content {
         match crate::models::key(&state) {
-            Ok(key) => Some(Provider {
-                base: state.provider_base().to_string(),
-                key,
-            }),
-            Err(Error::NoKey) => None,
-            Err(e) => return Err(e),
+            Ok(key) => (
+                Some(Provider {
+                    base: state.provider_base().to_string(),
+                    key,
+                }),
+                None,
+            ),
+            Err(Error::NoKey) => (None, None),
+            Err(e) => (None, Some(e.to_string())),
         }
     } else {
-        None
+        (None, None)
     };
 
     state.with_index(|db| {
@@ -245,10 +256,15 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
             }
         }
 
+        let content = match content_failure {
+            Some(reason) => ContentArmReport::Failed { reason },
+            None => found.content.into(),
+        };
+
         Ok(SearchAnswer {
             hits,
             text: found.text.into(),
-            content: found.content.into(),
+            content,
         })
     })
 }
