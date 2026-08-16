@@ -271,17 +271,20 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
 
 /// The one way the window changes a toggle. `search` reads the same two rows,
 /// so the arm a person ticked and the arm that ran cannot disagree.
+///
+/// The two rows are written by [`mnema_index::Db::meta_set_many`], in one
+/// transaction, so a failure between them cannot leave one arm's saved
+/// choice disagreeing with the other's.
 #[tauri::command(async)]
 pub fn set_search_arms(state: State<'_, AppState>, text: bool, content: bool) -> Result<(), Error> {
     state.with_index(|db| {
-        db.meta_set(
-            mnema_index::META_SEARCH_TEXT_ARM,
-            if text { "on" } else { "off" },
-        )?;
-        db.meta_set(
-            mnema_index::META_SEARCH_CONTENT_ARM,
-            if content { "on" } else { "off" },
-        )
+        db.meta_set_many(&[
+            (mnema_index::META_SEARCH_TEXT_ARM, if text { "on" } else { "off" }),
+            (
+                mnema_index::META_SEARCH_CONTENT_ARM,
+                if content { "on" } else { "off" },
+            ),
+        ])
     })
 }
 
