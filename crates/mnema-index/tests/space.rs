@@ -1180,16 +1180,15 @@ fn rebuild_one_chunk(db: &Db, doc: &str, text: &str) -> i64 {
     .unwrap()
 }
 
-/// T4 (design §7, invariant I from design §2): in any committed state,
-/// every vector names a chunk that still holds text — never a chunk that
-/// is gone. This is what makes `read_snapshot` alone (no content-hash
-/// join, no `AUTOINCREMENT`) a checked argument rather than an assumption,
-/// and what would catch a future `insert_vector`/`upsert_vector` call
-/// bypassing the hash check (`space.rs:341-351`).
-/// Exercises real ways a vector's chunk can go: a document deleted the
-/// ordered way `forget_if_unnamed` relies on (vectors, then the document),
-/// and a rebuild that reuses a chunk's id under new text, where
-/// `upsert_vector_for_text`'s hash check must refuse the stale write.
+/// T4 (design §7): its two load-bearing checks are
+/// `assert_eq!(second, first, ...)`, pinning that the id really was
+/// reused, and the final `!upsert_vector_for_text(...)`, pinning that a
+/// write under the pre-rebuild hash is refused for the reused id. The
+/// LEFT JOIN loop below only catches a vector on a chunk id gone
+/// entirely — `clearing_a_document_takes_its_vector_with_the_chunk`
+/// already pins that directly, and by the time this loop runs the
+/// vector table is empty either way, so `orphans == 0` here holds
+/// vacuously and proves nothing about the reused-id case on its own.
 #[test]
 fn every_vector_names_a_chunk_that_still_holds_its_text() {
     let dir = tempfile::tempdir().unwrap();
