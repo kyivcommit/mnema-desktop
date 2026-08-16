@@ -115,6 +115,9 @@ case_ "harness: the corpus really moves a format between readers" \
 # present it reddens on 3f by name.
 case_ "index: a search does not answer from a document that is not indexed" \
   crates/mnema-index/src/search.rs \
-  "s~WHERE chunk_fts MATCH \\?1 AND document.status = 'indexed'~WHERE chunk_fts MATCH ?1~" \
+  "s~SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document ON document\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND document.status = 'indexed'~SELECT chunk_fts.rowid FROM chunk_fts
+               JOIN chunk ON chunk.id = chunk_fts.rowid
+               JOIN document ON document.id = chunk.document_id
+              WHERE chunk_fts MATCH ?1 ~" \
   "WHERE chunk_fts MATCH ?1" \
   mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
