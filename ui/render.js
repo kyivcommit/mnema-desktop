@@ -1570,3 +1570,26 @@ export const catalogueSentence = (catalogue) => {
     ? `no model in the provider's list for this role could be read by this build — ${records}`
     : "the provider lists no models for this role";
 };
+
+// A different not-knowing from the states below: the window was handed a kind
+// this build has no name for, which is the same shape as `LEAVES_UNSAID`.
+const CONTENT_ARM_UNSAID =
+  "Whether search by content ran is unknown: this build did not understand what it answered.";
+
+// One entry per `ContentArmReport` variant in `src-tauri/src/bridge.rs`, and a
+// table rather than a switch for the reason the block above this one gives: a
+// `default` arm is where two states quietly become one pixel.
+export const CONTENT_ARM_TEXT = {
+  off: () => "Search by content is off.",
+  noKey: () => "Search by content needs a key. Save one under Models.",
+  noModel: () =>
+    "Search by content needs an embedding model. Choose one under Models.",
+  failed: (arm) => `Search by content could not be reached: ${arm.reason}`,
+  answered: (arm) =>
+    arm.embedded < arm.total
+      ? `Search by content looked at ${arm.embedded} of ${arm.total} pieces — the rest have no vectors yet.`
+      : `Search by content returned ${arm.matched}.`,
+};
+
+export const contentArmSentence = (arm) =>
+  (CONTENT_ARM_TEXT[arm?.kind] ?? (() => CONTENT_ARM_UNSAID))(arm);

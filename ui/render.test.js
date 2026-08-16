@@ -63,6 +63,8 @@ import {
   keyAcceptedSentence,
   unreadableSentence,
   catalogueSentence,
+  CONTENT_ARM_TEXT,
+  contentArmSentence,
   roleRecordedSentence,
   recordedNoteSentence,
   keyRemovedSentence,
@@ -2734,4 +2736,39 @@ test("the note about a future request is drawn on the platform that will make it
     );
   }
   assert.equal(keyStoreNote("plan9", present), "", "a platform this build does not know said something");
+});
+
+test("every content-arm state has its own sentence, and no default swallows one", () => {
+  assert.deepEqual(
+    Object.keys(CONTENT_ARM_TEXT).sort(),
+    ["answered", "failed", "noKey", "noModel", "off"],
+  );
+});
+
+test("a partly embedded space says how much of the index it searched", () => {
+  const sentence = contentArmSentence({
+    kind: "answered", matched: 3, embedded: 30, total: 50,
+  });
+  assert.match(sentence, /30/);
+  assert.match(sentence, /50/);
+});
+
+test("a full space does not talk about coverage at all", () => {
+  const sentence = contentArmSentence({
+    kind: "answered", matched: 3, embedded: 50, total: 50,
+  });
+  assert.doesNotMatch(sentence, /50 of 50/);
+});
+
+test("what is missing is named together with where to fix it", () => {
+  assert.match(contentArmSentence({ kind: "noKey" }), /Models/);
+  assert.match(contentArmSentence({ kind: "noModel" }), /Models/);
+});
+
+test("a content-arm kind this build does not know is not read as one of the states above", () => {
+  const unknown = contentArmSentence({ kind: "somethingFutureAndUnknown" });
+  assert.notEqual(unknown, CONTENT_ARM_TEXT.off());
+  assert.notEqual(unknown, CONTENT_ARM_TEXT.noKey());
+  assert.notEqual(unknown, CONTENT_ARM_TEXT.noModel());
+  assert.match(unknown, /unknown/);
 });
