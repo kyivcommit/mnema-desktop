@@ -70,12 +70,11 @@ pub enum ContentArm {
     },
 }
 
-/// `knn`, filtered to ids `Db::citation` still recognises. `Db::knn` reads
-/// the vector table directly, with no foreign key back to `chunk`
-/// (`crates/mnema-index/src/space.rs:539`) — but the one write path keeps
-/// them in step in any committed state (invariant I, pinned by
-/// `every_vector_names_a_chunk_that_still_holds_its_text`): defence in
-/// depth here, not a reachable state.
+/// `knn`, filtered to ids `Db::citation` still recognises — not reachable
+/// through any write path `search` depends on, except `Db::delete_document`
+/// (`space.rs:647-656`), a documented exception that leaves vectors behind.
+/// This filter stays load-bearing against that one path, pinned by
+/// `every_vector_names_a_chunk_that_still_holds_its_text`.
 /// Margin `k * 2` (capped at `knn`'s own 4096) drops any orphan and still
 /// returns `k` live ids. A failed lookup fails the call outright, not "no
 /// such chunk". Pinned by
