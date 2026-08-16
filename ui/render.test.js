@@ -486,6 +486,10 @@ test("with no key the disclosure promises nothing leaves", () => {
   assert.match(disclosureSentence({ kind: "absent" }), /nothing/i);
 });
 
+test("a present key with no toggle reading gets the pessimistic sentence", () => {
+  assert.match(disclosureSentence({ kind: "present" }), /every question you ask/);
+});
+
 // `KeyState` has three values, and a store that would not answer is not a store
 // that answered "no key". Promising that nothing leaves the machine, on the
 // evidence of a keychain that is merely locked, is a promise this window is in

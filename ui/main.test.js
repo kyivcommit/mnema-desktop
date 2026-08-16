@@ -698,6 +698,50 @@ test("a rejected set_search_arms reverts the checkbox and says why", async () =>
   assert.match(w.el("arm-text-note").textContent, /disk is full/);
 });
 
+// Review round 1, Important 1: `drawArmState()` alone never touched
+// `#disclosure`, so unticking "Search by content" left the sentence still
+// promising "every question you ask" — the very promise that checkbox had
+// just switched off, until the next `model_settings` round trip caught up.
+// `drawArmStateAndDisclosure` closes that; this drives the checkbox the way
+// a person would, not `drawArmState` directly.
+test("switching the content arm off updates the disclosure sentence too", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.match(
+    w.el("disclosure").textContent,
+    /every question you ask/,
+    "premise: the content arm started on, so the disclosure named the question",
+  );
+
+  w.el("arm-content").checked = false;
+  await w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  assert.doesNotMatch(
+    w.el("disclosure").textContent,
+    /every question you ask/,
+    "the disclosure still promised questions leave after the arm that sends them was switched off",
+  );
+});
+
 // A press that is refused starts nothing, so it must not leave the bar claiming
 // a run — and it must put the settings line back, because it bumped the
 // generation before awaiting and any read still in flight will therefore

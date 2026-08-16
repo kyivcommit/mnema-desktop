@@ -479,9 +479,8 @@ let savedTextArm = true;
 let savedContentArm = true;
 
 // Returns the `toggleState` it drew from, so a caller that needs the same
-// facts — `drawSettings`, for the disclosure sentence's `contentArmRuns` —
-// reads them off this one call instead of asking `toggleState` again with
-// its own copy of these four fields.
+// facts reads them off this one call instead of asking `toggleState` again
+// with its own copy of these four fields.
 const drawArmState = () => {
   const state = toggleState({
     savedText: savedTextArm,
@@ -496,6 +495,20 @@ const drawArmState = () => {
   el("arm-content").disabled = state.content.disabled;
   el("arm-content-note").textContent = state.content.note;
   return state;
+};
+
+// The disclosure sentence's `contentArmRuns` is this same draw's
+// `content.checked`, not a second read of the toggle — `drawArmState`'s
+// return, not a fresh `toggleState` call, is what makes that one fact
+// instead of two that could disagree. Called everywhere `drawArmState` used
+// to be called alone: a checkbox `change` moves the toggle without a fresh
+// `model_settings` round trip, and the sentence promising what a search
+// sends must move with it, in the same paint.
+const drawArmStateAndDisclosure = () => {
+  const { content } = drawArmState();
+  el("disclosure").textContent = asSentence(
+    disclosureSentence(keyState, { contentArmRuns: content.checked }),
+  );
 };
 
 // Both handlers write optimistically and undo on refusal — the same
@@ -513,7 +526,7 @@ el("arm-text").addEventListener("change", async () => {
     el("arm-text-note").textContent = `the choice was not saved: ${error}`;
     return;
   }
-  drawArmState();
+  drawArmStateAndDisclosure();
 });
 el("arm-content").addEventListener("change", async () => {
   const previous = savedContentArm;
@@ -526,7 +539,7 @@ el("arm-content").addEventListener("change", async () => {
     el("arm-content-note").textContent = `the choice was not saved: ${error}`;
     return;
   }
-  drawArmState();
+  drawArmStateAndDisclosure();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -725,13 +738,7 @@ const drawSettings = (settings, askedAt) => {
     savedTextArm = read.searchTextArm;
     savedContentArm = read.searchContentArm;
   }
-  // `contentArmRuns` reads `drawArmState`'s own return rather than a second,
-  // independently built boolean — see the comment above `drawArmState` for
-  // why that would be the very defect this line exists to close.
-  const { content } = drawArmState();
-  el("disclosure").textContent = asSentence(
-    disclosureSentence(settings.key, { contentArmRuns: content.checked }),
-  );
+  drawArmStateAndDisclosure();
 };
 
 // No `.catch()`, and that is deliberate. `model_settings` returns no `Result`

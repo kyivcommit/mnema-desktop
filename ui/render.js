@@ -462,9 +462,14 @@ export const DISCLOSURE_TEXT = {
 // `contentArmRuns` off the same `toggleState` call that draws the arm
 // checkboxes, so this sentence and those checkboxes read one fact rather
 // than two that could disagree.
+//
+// A caller that forgets `search` gets the pessimistic reading, not the
+// reassuring one: `LEAVES_UNKNOWN`'s own doc forbids a promise made without
+// evidence, and "the content arm is off" is exactly such a promise if
+// nobody actually checked the arm.
 export const disclosureSentence = (key, search) =>
   (DISCLOSURE_TEXT[key?.kind] ?? (() => LEAVES_UNSAID))(
-    search ?? { contentArmRuns: false },
+    search ?? { contentArmRuns: true },
   );
 
 // `KeyStoreFailure` is four values over six error variants, and the grouping is
