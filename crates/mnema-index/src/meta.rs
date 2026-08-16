@@ -51,8 +51,8 @@ impl Db {
     /// costs data, and is the one key refused here; see
     /// [`Error::ActiveSpaceNotWritable`] for what the loss looks like.
     ///
-    /// Whoever adds a fifth key owes it the same question rather than this
-    /// answer: what does replacing this value make unreachable?
+    /// Whoever adds a key owes it the same question rather than this answer:
+    /// what does replacing this value make unreachable?
     ///
     /// A refusal rather than a silent no-op, because a caller that has just
     /// been stopped from changing which space search reads is a caller whose
