@@ -792,6 +792,89 @@ test("a rejected save re-enables the other checkbox too, not only the one that w
   );
 });
 
+// Codex round 2, Finding 1: `refreshSettings` can be issued from several
+// places (`forget`, `key-form`, embedding-model handlers, polling) and any
+// of them can land *after* an arm write has started but *before* it settles.
+// `drawSettings` used to overwrite `savedTextArm` from whatever that read
+// carried unconditionally — reverting the optimistic write to what the
+// checkbox looked like before the click, with no error shown.
+test("a settings read issued before an arm write does not revert it once the write has landed", async () => {
+  const w = await boot();
+
+  assert.equal(w.el("arm-text").checked, true, "premise: the text arm starts checked");
+
+  // Issued from `forget`, not from the write below — this is the read that
+  // must not win.
+  const read = w.hold("model_settings");
+  await w.press("forget");
+
+  const write = w.hold("set_search_arms");
+  w.el("arm-text").checked = false;
+  const change = w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  // Resolves with the *old* saved value — exactly what a read issued before
+  // the write started would still carry.
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: null,
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-text").checked,
+    false,
+    "a stale settings read reverted the optimistic write while it was still in flight",
+  );
+
+  write.resolve(null);
+  await change;
+  await settleEverything();
+});
+
+// The other half of the same finding: nothing stopped a search while an arm
+// write was in flight, so a search could run against the arm state from
+// before the change the user just made, with nothing telling them so.
+test("the search form's submit is disabled while an arm write is in flight, and re-enabled once it settles", async () => {
+  const w = await boot();
+
+  assert.equal(w.el("search-submit").disabled, false, "premise: submit starts enabled");
+
+  const write = w.hold("set_search_arms");
+  w.el("arm-text").checked = false;
+  const change = w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    true,
+    "the submit stayed clickable while an arm write was in flight",
+  );
+
+  write.resolve(null);
+  await change;
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    false,
+    "the submit was left disabled after its arm write settled",
+  );
+});
+
 // Review round 1, Important 1: `drawArmState()` alone never touched
 // `#disclosure`, so unticking "Search by content" left the sentence still
 // promising "every question you ask" — the very promise that checkbox had

@@ -511,23 +511,37 @@ const drawArmStateAndDisclosure = () => {
   );
 };
 
+// Whether an arm write (`set_search_arms`) has started, as a generation that
+// only grows — the same idiom as `jobGeneration`/`askedAt` below. A read
+// issued before a write started must not restore the checkbox once that
+// write lands, even after the write itself has already settled, which a
+// simple in-flight flag could not tell. Pinned by `a settings read issued
+// before an arm write does not revert it once the write has landed`.
+let armWriteGeneration = 0;
+
 // Both handlers write optimistically and undo on refusal — the same
 // catch-and-say convention `#search-form`'s own listener uses above,
 // applied to a control this window must not leave believing a choice was
-// saved when `set_search_arms` never returned.
+// saved when `set_search_arms` never returned. Both also claim the search
+// form's submit for the length of the write, the same way they already
+// claim each other's checkbox.
 el("arm-text").addEventListener("change", async () => {
   const previous = savedTextArm;
   savedTextArm = el("arm-text").checked;
   el("arm-text").disabled = true;
   el("arm-content").disabled = true;
+  armWriteGeneration += 1;
+  el("search-submit").disabled = true;
   try {
     await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
   } catch (error) {
     savedTextArm = previous;
+    el("search-submit").disabled = false;
     drawArmStateAndDisclosure();
     el("arm-text-note").textContent = `the choice was not saved: ${error}`;
     return;
   }
+  el("search-submit").disabled = false;
   drawArmStateAndDisclosure();
 });
 el("arm-content").addEventListener("change", async () => {
@@ -535,14 +549,18 @@ el("arm-content").addEventListener("change", async () => {
   savedContentArm = el("arm-content").checked;
   el("arm-text").disabled = true;
   el("arm-content").disabled = true;
+  armWriteGeneration += 1;
+  el("search-submit").disabled = true;
   try {
     await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
   } catch (error) {
     savedContentArm = previous;
+    el("search-submit").disabled = false;
     drawArmStateAndDisclosure();
     el("arm-content-note").textContent = `the choice was not saved: ${error}`;
     return;
   }
+  el("search-submit").disabled = false;
   drawArmStateAndDisclosure();
 });
 
@@ -661,9 +679,10 @@ const showRecorded = (role, recorded) => {
   });
 };
 
-// `askedAt` is `jobGeneration` as it stood when this draw's `model_settings`
-// was **issued**, not when it came back.
-const drawSettings = (settings, askedAt) => {
+// `askedAt` is `jobGeneration` and `armAskedAt` is `armWriteGeneration`, both
+// as they stood when this draw's `model_settings` was **issued**, not when
+// it came back.
+const drawSettings = (settings, askedAt, armAskedAt) => {
   // ⚠️ **Whether a job has these counts, and why `jobRunning` alone is the
   // wrong question.** Review of `3b18859`, Important 2, measured rather than
   // argued: this function reads the flag when it runs, which is after its own
@@ -734,11 +753,13 @@ const drawSettings = (settings, askedAt) => {
   showRecorded("chat", read && read.chatModel);
   armKeyPresent = settings.key?.kind === "present";
   armModelChosen = Boolean(read && read.embeddingModel);
-  // Only while `read` actually answers: an index that stopped being
-  // readable carries no row to read the choice back from, and defaulting
-  // it to on here would overwrite whatever the person picked in this
-  // session with a fact this draw does not have.
-  if (read) {
+  // Only while `read` actually answers, and only while no arm write has
+  // started since this read was issued: `armAskedAt !== armWriteGeneration`
+  // means a write landed first, and overwriting here would revert the
+  // checkbox this read knows nothing about. Pinned by `a settings read
+  // issued before an arm write does not revert it once the write has
+  // landed`.
+  if (read && armAskedAt === armWriteGeneration) {
     savedTextArm = read.searchTextArm;
     savedContentArm = read.searchContentArm;
   }
@@ -775,6 +796,10 @@ let settingsDrawn = 0;
 const refreshSettings = async () => {
   settingsAsked += 1;
   const issue = settingsAsked;
+  // Same idea as `askedAt` just below, for an arm write instead of a job:
+  // captured here so `drawSettings` can tell a write that started after this
+  // point from one already running when this read was issued.
+  const armAskedAt = armWriteGeneration;
   // Captured before the await, never after. This is the whole of what lets
   // `drawSettings` tell "no job has touched these counts" from "one started
   // while I was asking" — the distinction `jobRunning` cannot draw, because
@@ -787,7 +812,7 @@ const refreshSettings = async () => {
   // restatement does.
   if (issue > settingsDrawn) {
     settingsDrawn = issue;
-    drawSettings(settings, askedAt);
+    drawSettings(settings, askedAt, armAskedAt);
   }
   return settings;
 };
