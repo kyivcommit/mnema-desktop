@@ -70,15 +70,15 @@ pub enum ContentArm {
     },
 }
 
-/// `knn`, filtered down to ids `Db::citation` still recognises. `Db::knn`
-/// answers straight from the vector table, which cannot hold a foreign key
-/// back to `chunk` (`crates/mnema-index/src/space.rs:539`), so a neighbour
-/// can rank ahead of a live chunk with no `chunk` row left for it any more.
-///
-/// Margin `k * 2` (capped at `knn`'s own 4096) leaves room to drop those and
-/// still return `k` live ids. A citation lookup that errors fails the whole
-/// call rather than being read as "no such chunk". Pinned by
-/// `an_orphaned_neighbour_is_skipped_without_shortening_the_answer` and
+/// `knn`, filtered to ids `Db::citation` still recognises. `Db::knn` reads
+/// the vector table directly, with no foreign key back to `chunk`
+/// (`crates/mnema-index/src/space.rs:539`) — but the one write path keeps
+/// them in step in any committed state (invariant I, pinned by
+/// `every_vector_names_a_chunk_that_still_holds_its_text`): defence in
+/// depth here, not a reachable state.
+/// Margin `k * 2` (capped at `knn`'s own 4096) drops any orphan and still
+/// returns `k` live ids. A failed lookup fails the call outright, not "no
+/// such chunk". Pinned by
 /// `a_citation_lookup_that_fails_makes_the_arm_failed_not_merely_short`.
 fn knn_live_chunks(
     db: &Db,
@@ -101,16 +101,81 @@ fn knn_live_chunks(
     Ok(live)
 }
 
+/// A query already embedded, and the space it was embedded against — what
+/// `search` needs to run the content arm without making a network call of
+/// its own. `space_id` travels with `vector` rather than beside it: the two
+/// are meaningless apart, and a caller cannot pass one without the other.
+pub struct ContentQuery {
+    pub space_id: i64,
+    pub vector: Vec<f32>,
+}
+
+/// This crate's one network call — everything `content_arm` used to do
+/// after resolving `model`, pulled out so a caller can run it before
+/// opening any read snapshot. `search`'s own doc explains why: a snapshot
+/// held through a network round trip blocks a writer's checkpoint for as
+/// long as the provider takes to answer.
+///
+/// Rejects an empty vector answer as a failure, not an empty result — the
+/// same refusal `content_arm` always made.
+pub fn embed_query(provider: &Provider, model: &str, query: &str) -> Result<Vec<f32>, String> {
+    let vectors = mnema_provider::embed(&provider.base, &provider.key, model, &[query.to_string()])
+        .map_err(|e| e.to_string())?;
+    vectors
+        .into_iter()
+        .next()
+        .ok_or_else(|| "the provider answered with no vector".to_string())
+}
+
+/// `knn_live_chunks` plus how much of the index it could even see — the
+/// half of `content_arm` that touches no network, so `search` can run it
+/// on a vector a caller already resolved, inside its read snapshot.
+///
+/// A coverage count that cannot be read fails the whole arm rather than
+/// being read as zero. Pinned by
+/// `a_coverage_count_that_fails_makes_the_arm_failed_not_empty`.
+pub(crate) fn content_arm_answered(db: &Db, space_id: i64, vector: &[f32], k: i64) -> ContentArm {
+    let chunks = match knn_live_chunks(db, space_id, vector, k) {
+        Ok(chunks) => chunks,
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
+    };
+    let embedded = match db.embedded_chunk_count(space_id) {
+        Ok(n) => n,
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
+    };
+    let total = match db.chunk_count() {
+        Ok(n) => n,
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
+    };
+    ContentArm::Answered {
+        chunks,
+        embedded,
+        total,
+    }
+}
+
 /// Embeds the query with the model the space was built with, then asks `knn`.
 ///
 /// The model comes from `Db::space_model`, never from the settings' current
 /// choice: a vector from another model is a coordinate on another map, and
 /// `knn` compares it silently. Pinned by
 /// `the_content_arm_refuses_a_model_that_is_not_the_spaces`.
-///
-/// A coverage count that cannot be read fails the whole arm rather than
-/// being read as zero. Pinned by
-/// `a_coverage_count_that_fails_makes_the_arm_failed_not_empty`.
+/// Single-connection callers only — `mnema-eval`'s dense sweep, today's
+/// one. `search` shares a connection with a job on another one, and uses
+/// [`embed_query`] and [`content_arm_answered`] instead, split across its
+/// own read snapshot.
 pub fn content_arm(db: &Db, provider: Option<Provider>, query: &str, k: i64) -> ContentArm {
     let Some(provider) = provider else {
         return ContentArm::NotConfigured(Missing::NoKey);
@@ -132,47 +197,9 @@ pub fn content_arm(db: &Db, provider: Option<Provider>, query: &str, k: i64) -> 
             };
         }
     };
-    let vectors =
-        match mnema_provider::embed(&provider.base, &provider.key, &model, &[query.to_string()]) {
-            Ok(v) => v,
-            Err(e) => {
-                return ContentArm::Failed {
-                    reason: e.to_string(),
-                };
-            }
-        };
-    let Some(vector) = vectors.into_iter().next() else {
-        return ContentArm::Failed {
-            reason: "the provider answered with no vector".to_string(),
-        };
+    let vector = match embed_query(&provider, &model, query) {
+        Ok(v) => v,
+        Err(reason) => return ContentArm::Failed { reason },
     };
-    let chunks = match knn_live_chunks(db, space, &vector, k) {
-        Ok(chunks) => chunks,
-        Err(e) => {
-            return ContentArm::Failed {
-                reason: e.to_string(),
-            };
-        }
-    };
-    let embedded = match db.embedded_chunk_count(space) {
-        Ok(n) => n,
-        Err(e) => {
-            return ContentArm::Failed {
-                reason: e.to_string(),
-            };
-        }
-    };
-    let total = match db.chunk_count() {
-        Ok(n) => n,
-        Err(e) => {
-            return ContentArm::Failed {
-                reason: e.to_string(),
-            };
-        }
-    };
-    ContentArm::Answered {
-        chunks,
-        embedded,
-        total,
-    }
+    content_arm_answered(db, space, &vector, k)
 }
