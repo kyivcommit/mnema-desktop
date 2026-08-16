@@ -8,6 +8,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mnema_core::Coordinate;
+use mnema_index::QueryRule;
+use mnema_search::{Arms, ContentArm, FusionRule, Missing, Provider, TextArm};
 use serde::Serialize;
 use tauri::State;
 use tauri::ipc::Channel;
@@ -22,6 +24,14 @@ use crate::state::AppState;
 /// lexical and dense arms are fused into it, is the search/RAG spec's decision;
 /// this is here so the walking skeleton has an end.
 const SEARCH_LIMIT: i64 = 20;
+
+/// The query rule `search` asks the text arm with, until a live sweep over a
+/// measured gold set replaces this placeholder with the winner.
+const SEARCH_QUERY_RULE: QueryRule = QueryRule::AllTerms;
+
+/// The fusion rule `search` combines both arms with. Same placeholder status
+/// as [`SEARCH_QUERY_RULE`] above.
+const SEARCH_FUSION_RULE: FusionRule = FusionRule::Rrf;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,29 +100,129 @@ pub struct Hit {
     pub coordinate: Coordinate,
 }
 
+/// The text arm's outcome, without the chunk ids `hits` already carries.
+///
+/// Not [`mnema_search::TextArm`] reused: this needs `Serialize` and a
+/// camelCase `kind`, and a count keeps this and `hits` from being two lists
+/// that could disagree about what the arm found.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum TextArmReport {
+    Off,
+    Answered { matched: usize },
+}
+
+impl From<TextArm> for TextArmReport {
+    fn from(arm: TextArm) -> Self {
+        match arm {
+            TextArm::Off => Self::Off,
+            TextArm::Answered { chunks } => Self::Answered {
+                matched: chunks.len(),
+            },
+        }
+    }
+}
+
+/// The content arm's outcome, in the same shape as [`TextArmReport`].
+///
+/// [`Missing`]'s two values become their own variants rather than staying
+/// nested under one `NotConfigured`: each is fixed in a different place, and
+/// `render.js` names a sentence per `kind`, not per nested field.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ContentArmReport {
+    Off,
+    NoKey,
+    NoModel,
+    Failed {
+        reason: String,
+    },
+    Answered {
+        matched: usize,
+        embedded: i64,
+        total: i64,
+    },
+}
+
+impl From<ContentArm> for ContentArmReport {
+    fn from(arm: ContentArm) -> Self {
+        match arm {
+            ContentArm::Off => Self::Off,
+            ContentArm::NotConfigured(Missing::NoKey) => Self::NoKey,
+            ContentArm::NotConfigured(Missing::NoModel) => Self::NoModel,
+            ContentArm::Failed { reason } => Self::Failed { reason },
+            ContentArm::Answered {
+                chunks,
+                embedded,
+                total,
+            } => Self::Answered {
+                matched: chunks.len(),
+                embedded,
+                total,
+            },
+        }
+    }
+}
+
+/// What a search answers with: the citations to draw, and what each arm did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchAnswer {
+    pub hits: Vec<Hit>,
+    pub text: TextArmReport,
+    pub content: ContentArmReport,
+}
+
+/// `meta`'s own rule (D106): absent, or anything but the literal `"off"`,
+/// leaves the arm on.
+fn arm_is_on(value: Option<String>) -> bool {
+    value.as_deref() != Some("off")
+}
+
 /// Off the main thread for the reason given on [`open_index`].
 ///
-/// What a search should return, and how a dense arm is fused into it, is the
-/// search/RAG spec's decision. This is the lexical arm alone, which under D29
-/// is the only arm a private index has at all.
+/// Both arms, fused by `mnema_search::search`, in place of the lexical arm
+/// alone D29 left this command with. The arms come from `meta`, never a
+/// parameter — the window already saved a choice through
+/// [`set_search_arms`].
+///
+/// Only [`Error::NoKey`] turns into no provider; every other failure of
+/// [`crate::models::key`] stops the search, like every other command that
+/// needs the credential store.
 #[tauri::command(async)]
-pub fn search(state: State<'_, AppState>, query: String) -> Result<Vec<Hit>, Error> {
+pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer, Error> {
+    let provider = match crate::models::key(&state) {
+        Ok(key) => Some(Provider {
+            base: state.provider_base().to_string(),
+            key,
+        }),
+        Err(Error::NoKey) => None,
+        Err(e) => return Err(e),
+    };
+
     state.with_index(|db| {
+        let arms = Arms {
+            text: arm_is_on(db.meta_get(mnema_index::META_SEARCH_TEXT_ARM)?),
+            content: arm_is_on(db.meta_get(mnema_index::META_SEARCH_CONTENT_ARM)?),
+        };
+        let found = mnema_search::search(
+            db,
+            provider,
+            &query,
+            arms,
+            SEARCH_QUERY_RULE,
+            SEARCH_FUSION_RULE,
+            SEARCH_LIMIT,
+        )?;
+
+        // A chunk that vanished between the fuse and this read is not an
+        // error: a walk running alongside a search is the ordinary case that
+        // motivated the job holding its own connection at all (see
+        // `AppState::open_job_index`). Only `citation`'s `None` is read this
+        // way — the `?` right before it still stops the whole search on any
+        // other failure.
         let mut hits = Vec::new();
-        for chunk_id in db.search_lexical(&query, SEARCH_LIMIT)? {
-            // A chunk that vanished between the MATCH and this read is not an
-            // error: a walk running alongside a search is the ordinary case
-            // that motivated the job holding its own connection at all (see
-            // `AppState::open_job_index`). Only `citation`'s `None` is read
-            // this way — the `?` right before it still stops the whole
-            // search on any other failure — and the price is that the window
-            // is shown fewer hits than `search_lexical` matched, with
-            // nothing saying so: a count of 20 that quietly became 18 reads
-            // as a smaller, equally true search rather than as a race it
-            // lost. Making that difference visible — a partial-result
-            // notice, a re-query, something else — is the search/RAG
-            // interface's decision to make, not a UI default for this
-            // command to invent on its own.
+        for chunk_id in found.chunks {
             if let Some(c) = db.citation(chunk_id)? {
                 hits.push(Hit {
                     chunk_id,
@@ -123,7 +233,28 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<Vec<Hit>, Err
                 });
             }
         }
-        Ok(hits)
+
+        Ok(SearchAnswer {
+            hits,
+            text: found.text.into(),
+            content: found.content.into(),
+        })
+    })
+}
+
+/// The one way the window changes a toggle. `search` reads the same two rows,
+/// so the arm a person ticked and the arm that ran cannot disagree.
+#[tauri::command(async)]
+pub fn set_search_arms(state: State<'_, AppState>, text: bool, content: bool) -> Result<(), Error> {
+    state.with_index(|db| {
+        db.meta_set(
+            mnema_index::META_SEARCH_TEXT_ARM,
+            if text { "on" } else { "off" },
+        )?;
+        db.meta_set(
+            mnema_index::META_SEARCH_CONTENT_ARM,
+            if content { "on" } else { "off" },
+        )
     })
 }
 
@@ -251,4 +382,39 @@ pub fn job_status(state: State<'_, AppState>) -> JobStatus {
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>) {
     state.cancel_job();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every discriminant the window sees has its camel-case spelling pinned
+    /// — the same guard `models.rs` carries, for the same reason:
+    /// `render.js` matches on these strings and a rename here becomes a
+    /// missing table key there.
+    #[test]
+    fn every_search_discriminant_the_window_sees_has_its_camel_case_spelling_pinned() {
+        let spellings: Vec<String> = [
+            ContentArmReport::Off,
+            ContentArmReport::NoKey,
+            ContentArmReport::NoModel,
+            ContentArmReport::Failed {
+                reason: String::new(),
+            },
+            ContentArmReport::Answered {
+                matched: 0,
+                embedded: 0,
+                total: 0,
+            },
+        ]
+        .iter()
+        .map(|v| {
+            serde_json::to_value(v).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+        assert_eq!(spellings, ["off", "noKey", "noModel", "failed", "answered"]);
+    }
 }

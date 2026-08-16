@@ -30,21 +30,13 @@ const NO_PROVIDER: &str = "http://127.0.0.1:1";
 /// A credential reference that cannot reach a store at all — the same trick
 /// `NO_PROVIDER` uses, one line up.
 ///
-/// Empty is not carelessness: `mnema_secrets::entry` refuses an empty reference
-/// *before* it calls `ensure_default_store`, so no store is installed and none
-/// is consulted — `Error::EmptyReference`, and the ordering inside `entry` is
-/// what makes that true rather than a hope. The reason it refuses at all is the
-/// macOS keychain, where an empty attribute is a wildcard that would match
-/// another configuration's credential. So any store operation in this file fails
-/// loudly instead of quietly succeeding under a fixed name — which is what a
-/// plausible-looking name would do, leaving an entry behind with no `Drop` to
-/// remove it and two parallel runs colliding on it.
+/// Empty is not carelessness: `mnema_secrets::entry` refuses an empty
+/// reference before it installs or consults any store —
+/// `Error::EmptyReference`. It refuses because of the macOS keychain, where
+/// an empty attribute is a wildcard matching another configuration's key.
 ///
-/// `every_model_command_the_window_calls_is_registered` does reach
-/// `mnema_secrets` — four of the eight commands ask it something — and this is
-/// exactly why that test can do so without registering a store or touching the
-/// developer's keychain. `tests/model_commands.rs` is where a credential is
-/// really written, behind an in-memory store and a reference unique per fixture.
+/// Kept only for the two fixtures that build `AppState` directly and never
+/// call `search` or a model command; `app_in` below wants a real store.
 const NO_CREDENTIAL: &str = "";
 
 /// An application whose data directory is a temporary one.
@@ -53,13 +45,18 @@ const NO_CREDENTIAL: &str = "";
 /// resolve inside the developer's own Application Support folder. A test must
 /// not write there, which is the reason the directory is resolved once at
 /// start-up and held in state rather than derived inside each command.
+///
+/// **A real, in-memory, empty store**, not `NO_CREDENTIAL`'s unreachable
+/// one: `search` now reads it even with no key entered, so this fixture
+/// needs "no key" (`Error::NoKey`), not "no store" (`Error::Secrets`).
 fn app_in(dir: &std::path::Path) -> tauri::App<MockRuntime> {
+    mnema_secrets::test_store::register();
     mock_builder()
         .manage(AppState::new(
             dir.to_path_buf(),
             support::worker().to_path_buf(),
             NO_PROVIDER.to_string(),
-            NO_CREDENTIAL.to_string(),
+            format!("mnema-desktop-commands-test-{}", dir.display()),
         ))
         .invoke_handler(mnema_desktop::invoke_handler())
         .build(mock_context(noop_assets()))
@@ -351,8 +348,11 @@ fn a_search_through_the_ipc_finds_what_another_connection_wrote() {
         chunk
     };
 
-    let hits = call(&webview, "search", json!({ "query": "звірки" })).expect("search was rejected");
-    let hits = hits.as_array().expect("search did not return an array");
+    let answer =
+        call(&webview, "search", json!({ "query": "звірки" })).expect("search was rejected");
+    let hits = answer["hits"]
+        .as_array()
+        .expect("search did not return a hits array");
 
     assert_eq!(
         hits.len(),
@@ -736,12 +736,42 @@ fn search_returns_citations_not_ids() {
 
     run_walk_to_completion(&app, root);
 
-    let hits = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
-    let hits = hits.as_array().expect("search did not return an array");
+    let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    let hits = answer["hits"]
+        .as_array()
+        .expect("search did not return a hits array");
 
     assert!(!hits.is_empty());
     assert!(hits[0]["text"].as_str().unwrap().contains("fox"));
     assert!(hits[0]["relativePath"].is_string());
+}
+
+/// D106: absent means on, for both arms. `mnema-index`'s own
+/// `an_index_that_never_saw_the_toggles_has_both_arms_on` pins that the raw
+/// row is absent; this pins what `search` does with that absence, the seam a
+/// person actually sees. `content`'s only route past `Off` without a key is
+/// `NoKey`, so seeing that discriminant is what tells "the arm ran and found
+/// nothing to work with" apart from "the arm was skipped".
+#[test]
+fn a_fresh_index_with_no_arm_written_answers_with_both_arms_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+
+    assert_eq!(
+        answer["text"]["kind"],
+        json!("answered"),
+        "an absent text-arm row must run the arm, not skip it: {answer}"
+    );
+    assert_eq!(
+        answer["content"]["kind"],
+        json!("noKey"),
+        "an absent content-arm row must run the arm — `noKey` proves it tried \
+         and only then found no key, `off` would mean it never tried: {answer}"
+    );
 }
 
 /// The channel a real webview passes is a string of this shape. Nothing
@@ -813,10 +843,10 @@ fn the_walk_job_is_reachable_through_the_ipc() {
 /// warns nowhere and fails only on a screen no gate runs.
 ///
 /// **The call is expected to fail**, and that is what proves it was reached:
-/// this application's credential reference cannot reach a store at all
-/// (`NO_CREDENTIAL`), so the command refuses for a reason of its own rather
-/// than being refused by name before it runs. Nothing is started and no slot is
-/// taken, which is why this test needs no teardown of its own.
+/// `app_in`'s store has no key in it, so the command refuses for a reason of
+/// its own — `Error::NoKey` — rather than being refused by name before it
+/// runs. Nothing is started and no slot is taken, which is why this test
+/// needs no teardown of its own.
 #[test]
 fn the_embed_job_is_reachable_through_the_ipc() {
     let dir = tempfile::tempdir().unwrap();
@@ -828,7 +858,7 @@ fn the_embed_job_is_reachable_through_the_ipc() {
         "start_embed_job",
         json!({ "onProgress": "__CHANNEL__:11" }),
     )
-    .expect_err("this application has no reachable credential store, so the job cannot start");
+    .expect_err("this application has no key entered, so the job cannot start");
     assert_ne!(
         error_text(&refusal),
         not_registered("start_embed_job"),
@@ -880,7 +910,7 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
     run_walk_to_completion(&app, root);
     let before = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
     assert!(
-        !before.as_array().unwrap().is_empty(),
+        !before["hits"].as_array().unwrap().is_empty(),
         "the fixture was never indexed, so removing it proves nothing"
     );
 
@@ -894,7 +924,7 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
 
     let after = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
     assert_eq!(
-        after,
+        after["hits"],
         json!([]),
         "a document survived the folder that owned it being removed"
     );
@@ -1313,17 +1343,17 @@ fn error_text(rejected: &Value) -> String {
 ///
 /// **Most of these calls fail, and that is the point rather than a problem.**
 /// This application has no provider behind it (`NO_PROVIDER`), no index open,
-/// and a credential reference that cannot reach a store (`NO_CREDENTIAL`); the
-/// question here is only whether the command was reached, and being reached is
-/// exactly what lets it fail for a reason of its own.
+/// and no key entered in `app_in`'s store; the question here is only whether
+/// the command was reached, and being reached is exactly what lets it fail
+/// for a reason of its own.
 ///
-/// `model_settings` is the exception and answers `Ok` even here, because every
-/// state of the store and of the index is a state it draws — a store that will
-/// not answer arrives as `KeyState::Unreadable` rather than as a rejection.
-/// `Ok` proves registration at least as well as a specific failure does: an
-/// unregistered command cannot return one, it is refused by name before it runs.
-/// This paragraph said "every call is expected to fail" for one commit after
-/// that stopped being true.
+/// `model_settings` is the exception and answers `Ok` even here, because
+/// every state of the store and of the index is a state it draws — no key
+/// entered arrives as `KeyState::Absent` rather than as a rejection. `Ok`
+/// proves registration at least as well as a specific failure does: an
+/// unregistered command cannot return one, it is refused by name before it
+/// runs. This paragraph said "every call is expected to fail" for one commit
+/// after that stopped being true.
 #[test]
 fn every_model_command_the_window_calls_is_registered() {
     let dir = tempfile::tempdir().unwrap();

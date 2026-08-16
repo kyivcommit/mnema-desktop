@@ -29,6 +29,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::add_watched_folder,
         bridge::remove_watched_folder,
         bridge::search,
+        bridge::set_search_arms,
         bridge::skips,
         bridge::start_probe_job,
         bridge::cancel_job,
