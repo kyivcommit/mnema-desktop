@@ -9,7 +9,7 @@ mod support;
 #[test]
 fn a_corpus_that_was_only_walked_can_be_asked_after_it_is_embedded() {
     let (_c, questions, indexed) = support::small_fixture();
-    let mock = support::mock_embedding_a_corpus_then_answering(&questions);
+    let mock = support::mock_embedding_a_corpus_then_answering(&indexed, &questions);
     let provider = mnema_search::Provider {
         base: mock.base(),
         key: "k".into(),
@@ -50,7 +50,7 @@ fn the_space_is_built_at_the_width_the_provider_measured() {
 #[test]
 fn the_key_never_reaches_the_database() {
     let (_c, questions, indexed) = support::small_fixture();
-    let mock = support::mock_embedding_a_corpus_then_answering(&questions);
+    let mock = support::mock_embedding_a_corpus_then_answering(&indexed, &questions);
     let provider = mnema_search::Provider {
         base: mock.base(),
         key: "a-real-looking-secret".into(),

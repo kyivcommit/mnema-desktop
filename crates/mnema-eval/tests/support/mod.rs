@@ -342,26 +342,36 @@ pub fn single_vector_reply(axis: usize) -> Reply {
     ))
 }
 
-/// [`small_fixture`]'s own chunk count — measured
-/// (`cargo test -p mnema-eval --test embed -- --nocapture measure_chunk_count`),
-/// not assumed: two short documents need not chunk into exactly two pieces.
+/// [`small_fixture`]'s chunk count, the number of rows
+/// [`mock_embedding_a_corpus_then_answering`]'s reused batch reply is built
+/// for. That function checks this against the real database on every call,
+/// rather than trusting the number to stay true on its own.
 #[allow(dead_code)]
 pub const SMALL_FIXTURE_CHUNKS: usize = 2;
 
 /// The mock sequence [`mnema_eval::embed_corpus`] followed by one `ask` per
-/// question needs against [`small_fixture`]: a probe, a batch answering
-/// every one of its chunks, then one vector per question.
+/// question needs against `indexed`: a probe, a batch answering every one
+/// of its chunks, then one vector per question.
 ///
-/// The batch reply reuses [`mnema_mock_provider::two_vectors`] rather than a
-/// hand-built one, because [`SMALL_FIXTURE_CHUNKS`] is the same count that
-/// function already answers the probe with — a corpus that grows past that
-/// fails this fixture loudly (the mock's own `599` sentinel) instead of
-/// quietly answering the wrong request with the wrong reply.
+/// The batch reply reuses [`mnema_mock_provider::two_vectors`], which always
+/// answers exactly [`SMALL_FIXTURE_CHUNKS`] rows. Sound only while `indexed`
+/// actually holds that many chunks — checked here against
+/// `indexed.db().chunk_count()` itself, so a corpus edit that moved the real
+/// count fails this `assert_eq!` with the number it actually got, not a
+/// number that could only ever agree with itself.
 #[allow(dead_code)]
-pub fn mock_embedding_a_corpus_then_answering(questions: &mnema_eval::QuestionSet) -> CountingMock {
-    debug_assert_eq!(
-        SMALL_FIXTURE_CHUNKS, 2,
-        "the reused two_vectors reply no longer matches small_fixture's chunk count"
+pub fn mock_embedding_a_corpus_then_answering(
+    indexed: &mnema_eval::IndexedCorpus,
+    questions: &mnema_eval::QuestionSet,
+) -> CountingMock {
+    let chunks = indexed
+        .db()
+        .chunk_count()
+        .expect("count the corpus's chunks");
+    assert_eq!(
+        chunks, SMALL_FIXTURE_CHUNKS as i64,
+        "small_fixture now chunks into {chunks}, not {SMALL_FIXTURE_CHUNKS} — this fixture's \
+         batch reply needs rebuilding for the real count"
     );
     let mut replies = vec![
         Reply::ok(&mnema_mock_provider::two_vectors(FIXTURE_WIDTH)), // probe
