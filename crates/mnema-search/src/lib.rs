@@ -30,22 +30,23 @@ pub struct Found {
 /// Asks each arm that is on, then fuses. Makes no network call: `content`
 /// is already embedded by the caller, before any read snapshot opens
 /// (`content::embed_query`'s own doc explains why) — a caller that must
-/// tell `Off` apart from `NotConfigured`/`Failed` reports those itself, since
-/// this only sees whether a vector was ever resolved. An arm that is off
-/// contributes nothing to the fused list, and a real answer from either arm
-/// survives into it. Pinned by
+/// tell `Off` apart from `NotConfigured`/`Failed` reports those itself.
+/// `text_on` stands alone rather than folded into an `Arms`, so nothing
+/// here can be asked to run the content arm while also being told it is
+/// off. An arm that is off contributes nothing to the fused list, and a
+/// real answer from either arm survives into it. Pinned by
 /// `an_arm_that_is_off_contributes_nothing_and_says_so` and by
 /// `the_content_arms_chunks_survive_into_the_fused_list`.
 pub fn search(
     db: &Db,
     content: Option<ContentQuery>,
     query: &str,
-    arms: Arms,
+    text_on: bool,
     rule: QueryRule,
     fusion: FusionRule,
     limit: i64,
 ) -> Result<Found, mnema_index::Error> {
-    let text = if arms.text {
+    let text = if text_on {
         TextArm::Answered {
             chunks: db.search_lexical_with(query, rule, CANDIDATES)?,
         }

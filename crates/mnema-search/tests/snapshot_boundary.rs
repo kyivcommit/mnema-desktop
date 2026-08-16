@@ -9,7 +9,7 @@
 
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_index::{Db, DocumentStatus, QueryRule, open, register_vector_extension};
-use mnema_search::{Arms, ContentQuery, FusionRule};
+use mnema_search::{ContentQuery, FusionRule};
 
 fn fresh(dir: &std::path::Path) -> Db {
     register_vector_extension().expect("register the vector extension");
@@ -115,10 +115,7 @@ fn a_rebuild_inside_the_snapshot_does_not_reach_the_content_arms_citation() {
                 db,
                 Some(content),
                 "irrelevant",
-                Arms {
-                    text: false,
-                    content: true,
-                },
+                false,
                 QueryRule::AnyTerm,
                 FusionRule::ContentOnly,
                 20,
@@ -169,10 +166,7 @@ fn a_rebuild_inside_the_snapshot_does_not_reach_the_text_arms_citation() {
                 db,
                 None,
                 "маркер",
-                Arms {
-                    text: true,
-                    content: false,
-                },
+                true,
                 QueryRule::AnyTerm,
                 FusionRule::TextOnly,
                 20,
