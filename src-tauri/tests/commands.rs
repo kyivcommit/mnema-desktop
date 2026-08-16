@@ -368,6 +368,138 @@ fn a_search_through_the_ipc_finds_what_another_connection_wrote() {
     assert_eq!(hits[0]["relativePath"], json!(null));
 }
 
+/// Writes a fresh page, block and chunk onto a document id that already
+/// exists — what a rebuild does after `clear_document_content`. Returns the
+/// chunk id `insert_chunk` produced.
+fn rebuild_one_chunk(db: &mnema_index::Db, doc: &str, text: &str) -> i64 {
+    let page = db.insert_page(doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: None,
+                text: text.to_string(),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap();
+    let chunk = db
+        .insert_chunk(
+            doc,
+            0,
+            text,
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block,
+                    start: 0,
+                    end: text.chars().count() as u32,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        )
+        .unwrap();
+    db.set_document_status(doc, mnema_index::DocumentStatus::Indexed)
+        .unwrap();
+    chunk
+}
+
+/// Round-2 review, F1: the mechanism was pinned by
+/// `crates/mnema-search/tests/snapshot_boundary.rs`, but nothing pinned that
+/// `bridge::search` itself wraps its own work in `Db::read_snapshot` —
+/// removing that call left the whole workspace suite green. A real second
+/// connection rebuilds the matched document — reused chunk id, a different
+/// marker word — while the real `search` IPC command runs. Measured red
+/// without the fix: the rebuild sometimes lands between the delete and the
+/// reinsert (missing from the answer), sometimes after (the new marker
+/// reaches the answer) — both impossible with the snapshot in place. See
+/// the comments below for how the race and the ranking are built.
+#[test]
+fn a_rebuild_racing_the_ipc_search_does_not_reach_its_citation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .expect("set_search_arms was rejected");
+
+    // Fillers first, target last: `chunk.id` is `INTEGER PRIMARY KEY` without
+    // `AUTOINCREMENT` (the defect this whole branch closes), and SQLite only
+    // reuses the *highest* freed id — `citation.rs:1301-1325`'s own fixture
+    // relies on the identical ordering. Inserted any other way, deleting the
+    // target would free an id below the corpus max and the rebuild below
+    // would never reuse it at all.
+    let writer = mnema_index::open(&path).unwrap();
+    for i in 0..1500 {
+        let filler_doc = format!("{i:064x}");
+        writer
+            .insert_document(&filler_doc, "text/plain", 1, SourceKind::Document)
+            .unwrap();
+        rebuild_one_chunk(&writer, &filler_doc, "спільний термін заповнювач");
+    }
+    let target_doc = "9".repeat(64);
+    writer
+        .insert_document(&target_doc, "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    let unique_word = "маркер";
+    // Doubled term frequency for both query terms: inserted last, the
+    // target would tie-break to the *bottom* of `ORDER BY rank,
+    // chunk_fts.rowid` against 1500 once-each fillers, and never reach
+    // `SEARCH_LIMIT`. bm25 rewards term frequency enough to overcome that on
+    // its own — measured, not assumed, by the fixture below actually
+    // finding it.
+    let original_text = format!("спільний спільний термін термін {unique_word}");
+    let target_chunk = rebuild_one_chunk(&writer, &target_doc, &original_text);
+
+    let writer_handle = std::thread::spawn(move || {
+        // A short, deliberately generous head start: `matching`'s sort over
+        // 1500+ tied rows (see the doc comment above) takes low
+        // milliseconds, comfortably longer than this — see the branch's own
+        // measured snapshot hold time in the private report for the
+        // comparable timing this rests on.
+        std::thread::sleep(Duration::from_millis(2));
+        writer
+            .clear_document_content(&target_doc)
+            .expect("clear the target document");
+        // The same doubled term frequency as `original_text` above, so the
+        // rebuild lands inside the race whether it beats the lexical match
+        // query or not: either way the chunk still ranks and is found, and
+        // only `unique_word` tells the two texts apart at the citation the
+        // search answer carries.
+        rebuild_one_chunk(
+            &writer,
+            &target_doc,
+            "спільний спільний термін термін замінник",
+        );
+    });
+
+    let answer = call(&webview, "search", json!({ "query": "спільний термін" }))
+        .expect("search was rejected");
+    writer_handle.join().expect("the writer thread panicked");
+
+    let hits = answer["hits"].as_array().expect("hits array");
+    let hit = hits
+        .iter()
+        .find(|h| h["chunkId"] == json!(target_chunk))
+        .unwrap_or_else(|| panic!("the target chunk did not rank into the answer: {hits:?}"));
+    let text = hit["text"].as_str().unwrap();
+    assert!(
+        text.contains(unique_word),
+        "the chunk was matched because its text held {unique_word:?}, but the citation \
+         read back {text:?} — the rebuild that landed inside the search reached a citation \
+         it should never have been visible to: {hits:?}"
+    );
+}
+
 #[test]
 fn an_unknown_command_is_rejected() {
     // The control for every test above. They ask whether a command answered
