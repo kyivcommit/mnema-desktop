@@ -7,7 +7,9 @@
 mod content;
 mod fuse;
 
-pub use content::{Arms, ContentArm, Missing, Provider, TextArm, content_arm};
+pub use content::{
+    Arms, ContentArm, ContentQuery, Missing, Provider, TextArm, content_arm, embed_query,
+};
 pub use fuse::{CANDIDATES, FusionRule, RRF_K, fuse};
 
 use mnema_index::{Db, QueryRule};
@@ -25,13 +27,18 @@ pub struct Found {
     pub content: ContentArm,
 }
 
-/// Asks each arm that is on, then fuses. An arm that is off contributes
-/// nothing to the fused list, and a real answer from either arm survives
-/// into it. Pinned by `an_arm_that_is_off_contributes_nothing_and_says_so`
-/// and by `the_content_arms_chunks_survive_into_the_fused_list`.
+/// Asks each arm that is on, then fuses. Makes no network call: `content`
+/// is already embedded by the caller, before any read snapshot opens
+/// (`content::embed_query`'s own doc explains why) — a caller that must
+/// tell `Off` apart from `NotConfigured`/`Failed` reports those itself, since
+/// this only sees whether a vector was ever resolved. An arm that is off
+/// contributes nothing to the fused list, and a real answer from either arm
+/// survives into it. Pinned by
+/// `an_arm_that_is_off_contributes_nothing_and_says_so` and by
+/// `the_content_arms_chunks_survive_into_the_fused_list`.
 pub fn search(
     db: &Db,
-    provider: Option<Provider>,
+    content: Option<ContentQuery>,
     query: &str,
     arms: Arms,
     rule: QueryRule,
@@ -45,10 +52,11 @@ pub fn search(
     } else {
         TextArm::Off
     };
-    let content = if arms.content {
-        content_arm(db, provider, query, CANDIDATES)
-    } else {
-        ContentArm::Off
+    let content = match content {
+        Some(ContentQuery { space_id, vector }) => {
+            content::content_arm_answered(db, space_id, &vector, CANDIDATES)
+        }
+        None => ContentArm::Off,
     };
 
     let text_chunks: &[i64] = match &text {
