@@ -631,15 +631,12 @@ impl Db {
     /// nothing about `document`'s `ON DELETE CASCADE` reaches these tables
     /// when a document goes: without this, a vector would outlive the chunk
     /// it embeds, silently, and nothing downstream would ever notice a
-    /// `vec_emb_<n>` row naming a `chunk_id` no chunk owns any more. Called
-    /// from `mnema-ingest`'s `forget_if_unnamed`, the one place that decides
-    /// an ordinary edit or reconciliation has left a document with no path
-    /// naming it, and — via this module's private `delete_vectors_for_document_in`,
-    /// directly against an already-open transaction — from
-    /// [`Db::delete_watched_root`], which decides the same question for a
-    /// whole root at once and needs the sweep and the document's own
-    /// deletion in one transaction rather than two calls that could be
-    /// interrupted between them.
+    /// `vec_emb_<n>` row naming a `chunk_id` no chunk owns any more. This
+    /// public form has no product caller today — [`Db::delete_document`]
+    /// and [`Db::delete_watched_root`] each call this module's private
+    /// `delete_vectors_for_document_in` directly, against a transaction
+    /// they already hold, so the sweep and their own deletion cannot be
+    /// interrupted between two separate calls.
     ///
     /// Must run BEFORE the document (and, by cascade, its chunks) is
     /// deleted: once they are gone there is no `chunk.document_id` left to
@@ -732,21 +729,17 @@ impl Db {
     /// How many chunks the index holds at all — the denominator the settings
     /// screen shows [`Db::embedded_chunk_count`] against.
     ///
-    /// ⚠️ **The two are not counted over the same population, and the
-    /// difference has a direction.** A `vec_emb_<id>` row is referenced by no
-    /// foreign key, so nothing forces it to go when the chunk it embeds does.
-    /// [`Db::clear_document_content`] closed this for a rebuild (D88): it now
-    /// sweeps a document's vectors, in every space, before the `chunk` rows
-    /// and their `chunk_embedding_state` rows go with it. [`Db::delete_document`]
-    /// has not — deleting a document outright still leaves its vectors behind.
-    /// So the numerator can still exceed this denominator through that path,
-    /// and whatever renders the pair has to be able to show that rather than a
-    /// percentage above one hundred. Neither is zero today — D29 described a
-    /// build with nothing embedded, and this branch built the thing that
-    /// embeds — so the trap is no longer hypothetical: a document's vectors
-    /// can genuinely outlive it through [`Db::delete_document`], and whatever
-    /// renders the pair has to show a numerator above the denominator rather
-    /// than clamp it away.
+    /// ⚠️ **The two are not counted over the same population, and a caller
+    /// rendering the pair has to allow the numerator above the
+    /// denominator rather than clamp it away.** A `vec_emb_<id>` row takes
+    /// no foreign key, so nothing forces it to go when its chunk does.
+    /// [`Db::clear_document_content`] (D88) and [`Db::delete_document`]
+    /// both sweep a document's vectors before its rows go, closing every
+    /// *product* path to that split — pinned by
+    /// `delete_document_sweeps_its_own_vectors`. What is left is
+    /// [`Db::insert_vector`]/[`Db::upsert_vector`] writing a `chunk_id` no
+    /// `chunk` row backs: still public, still unchecked, held by a test
+    /// (`every_vector_names_an_eligible_chunk`) and not by a type.
     pub fn chunk_count(&self) -> Result<i64, Error> {
         Ok(self
             .conn()

@@ -1606,3 +1606,143 @@ fn knn_searchable_intersects_a_tag_filter_with_eligibility_in_one_subquery() {
         .unwrap();
     assert_eq!(single.chunks, vec![ids[2]]);
 }
+
+// -------------------------------------------------------------- Finding 6
+
+/// T4 (design §6, §9): `delete_document` sweeps a document's vectors by
+/// itself now, so a caller does not have to remember
+/// `delete_vectors_for_document` beside it — unlike
+/// `every_vector_names_a_chunk_that_still_holds_its_text` above, which
+/// still calls both, this calls `delete_document` alone.
+#[test]
+fn delete_document_sweeps_its_own_vectors() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+    let doc = "7".repeat(64);
+    let chunk = write_one_chunk(&db, &doc, "will be forgotten");
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .unwrap();
+    assert_eq!(db.embedded_chunk_count(space).unwrap(), 1);
+
+    db.delete_document(&doc).unwrap();
+
+    for table in vector_tables(&db) {
+        let rows: i64 = db
+            .conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            rows, 0,
+            "{table} still holds a vector after delete_document alone"
+        );
+    }
+}
+
+/// The other half of T4: the sweep and the deletion are one unit wherever
+/// a caller already holds a transaction — every product call site does,
+/// through `mnema-ingest`'s `forget_if_unnamed` — because `delete_document`
+/// opens no transaction of its own and simply joins the caller's.
+#[test]
+fn delete_document_is_atomic_inside_a_callers_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+    let doc = "8".repeat(64);
+    let chunk = write_one_chunk(&db, &doc, "will survive a rollback");
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .unwrap();
+
+    let result = db.transaction(|_| {
+        db.delete_document(&doc)?;
+        // Any error after the delete forces the rollback this test needs.
+        db.mark_space_ready(-1)
+    });
+    assert!(result.is_err(), "the forced failure must propagate");
+
+    assert_eq!(
+        db.embedded_chunk_count(space).unwrap(),
+        1,
+        "the vector must survive a rolled-back delete"
+    );
+    let survived: Option<i64> = db
+        .conn()
+        .query_row("SELECT 1 FROM document WHERE id = ?1", [&doc], |r| r.get(0))
+        .optional()
+        .unwrap();
+    assert!(
+        survived.is_some(),
+        "the document must survive a rolled-back delete"
+    );
+}
+
+/// T7 (design §9, §2): what the design's `file:line` reachability argument
+/// would fail to prove if it were wrong. Exercises the two vector-bearing
+/// destructive paths through their public methods only —
+/// `delete_document` and `clear_document_content` — and then scans every
+/// `vec_emb_<n>` table for a row that fails either half of eligibility: no
+/// `chunk` row, or a `chunk` whose document is not `indexed`.
+#[test]
+fn every_vector_names_an_eligible_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+
+    let kept = support::one_chunk(&db);
+    let deleted_doc = "d".repeat(64);
+    let deleted_chunk = write_one_chunk(&db, &deleted_doc, "will be deleted");
+    let rebuilt_doc = "e".repeat(64);
+    let rebuilt_chunk = write_one_chunk(&db, &rebuilt_doc, "will be rebuilt");
+    db.set_document_status(&rebuilt_doc, DocumentStatus::Indexed)
+        .unwrap();
+
+    db.upsert_vector(space, kept, &support::unit_vector_1024())
+        .unwrap();
+    db.upsert_vector(space, deleted_chunk, &support::unit_vector_1024())
+        .unwrap();
+    db.upsert_vector(space, rebuilt_chunk, &support::other_unit_vector_1024())
+        .unwrap();
+
+    db.delete_document(&deleted_doc).unwrap();
+    db.clear_document_content(&rebuilt_doc).unwrap();
+
+    assert_no_ineligible_vectors(&db);
+}
+
+/// Every `vec_emb_<n>` row must name a `chunk` whose document is `indexed`
+/// — the invariant `Db::knn_searchable`'s eligibility subquery assumes is
+/// worth pre-filtering for at all. Shared by `every_vector_names_an_
+/// eligible_chunk` above and the `#[ignore]`d check below that can be
+/// pointed at a real archive.
+fn assert_no_ineligible_vectors(db: &Db) {
+    for table in vector_tables(db) {
+        let bad: i64 = db
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM {table} v
+                       LEFT JOIN chunk c ON c.id = v.chunk_id
+                       LEFT JOIN document d ON d.id = c.document_id
+                      WHERE c.id IS NULL OR d.status IS NOT 'indexed'"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad, 0, "{table} holds a vector for an ineligible chunk");
+    }
+}
+
+/// Open question 3 (design §11): whether a real archive holds an orphan or
+/// an ineligible vector through some path the `file:line` argument in §2
+/// missed. `#[ignore]`d because it needs a real index rather than a
+/// fixture — point `MNEMA_REAL_INDEX_PATH` at one and run with `--ignored`.
+#[test]
+#[ignore = "needs a real index; set MNEMA_REAL_INDEX_PATH and run with --ignored"]
+fn a_real_index_has_no_ineligible_vectors() {
+    let path = std::env::var("MNEMA_REAL_INDEX_PATH")
+        .expect("set MNEMA_REAL_INDEX_PATH to a real index.sqlite");
+    register_vector_extension().unwrap();
+    let db = open(std::path::Path::new(&path)).unwrap();
+    assert_no_ineligible_vectors(&db);
+}
