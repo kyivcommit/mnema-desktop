@@ -61,6 +61,65 @@ const { open } = window.__TAURI__.dialog;
 const el = (id) => document.getElementById(id);
 const results = el("results");
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Round 3: one readiness barrier for `#search-submit`
+// (`docs/private/sdd/2026-08-14-search-query-and-fusion/
+// ui-readiness-barrier-spec.md`, closes Codex round-3 findings 2, 3 and 9).
+//
+// Round 2 disabled `#search-submit` from inside the two arm handlers only,
+// each handler writing the property itself. Round 3 found the key form, both
+// model pickers and the initial load still pressable — and the arm
+// handlers' own `disabled = true` quietly undone by an unrelated redraw
+// (`drawArmState`, below). Both are the same mistake: a control this window
+// has narrowed is not any redraw's to widen back except the one that
+// narrowed it.
+//
+// `pendingConfigWrites` is a count, not a flag (§3.2): two overlapping
+// writes must not have the first to settle re-open anything while the
+// second is still out. `authoritativeStateRead` is a second, independent
+// reason to stay closed (§3.3): at load there has been no write and no read
+// either, and `index.html` now starts `#search-submit` `disabled` for
+// exactly that window — this flag is what lets the barrier open, once, the
+// first time `drawSettings` actually draws.
+let pendingConfigWrites = 0;
+let authoritativeStateRead = false;
+
+// The one place that answers "may a search be submitted now" (§3.1) — every
+// other line in this file that used to write `#search-submit`'s `disabled`
+// itself now reports a fact to one of the two variables above and calls this
+// instead.
+const syncSearchGate = () => {
+  el("search-submit").disabled = !authoritativeStateRead || pendingConfigWrites > 0;
+};
+// Forces the closed reading immediately, rather than waiting for the first
+// caller that happens to touch the barrier. The markup (`index.html`)
+// already starts `#search-submit` `disabled` for a real browser; this line
+// is what gives the same window to anything — this file's own test harness
+// included — that models the element without parsing the markup's own
+// attributes.
+syncSearchGate();
+
+// Wraps a config-mutating handler's **whole** body — its `invoke` and
+// whatever redraw follows it, not the `invoke` alone. The disclosure this
+// barrier protects (`#disclosure`, drawn by `drawSettings`) is only as
+// current as the last redraw, so the gate must stay shut through that
+// redraw too: reopening the instant the write's own `invoke` resolves would
+// let a search leave on the strength of a promise the screen has not caught
+// up to yet — F9's exact defect, one step later. Every config-mutating
+// `invoke` in this file goes through this (or, for the two arm handlers,
+// through the same two variables directly — see the note above their
+// listeners); `main.test.js`'s site test checks that nothing new does not.
+const withSearchGated = async (body) => {
+  pendingConfigWrites += 1;
+  syncSearchGate();
+  try {
+    return await body();
+  } finally {
+    pendingConfigWrites -= 1;
+    syncSearchGate();
+  }
+};
+
 // Every write to `#job-status`, and the count of them.
 //
 // ⚠️ **The question a late write has to ask is "is my line still the newest
@@ -435,38 +494,65 @@ async function renderSkips(rootId) {
 // `SearchAnswer`, not a bare hit list — `hits` is what `searchResultItems`
 // takes, and `text`/`content` are each arm's own report.
 async function search(query) {
-  const answer = await invoke("search", { query });
-  results.replaceChildren(...searchResultItems(answer.hits).map((item) => {
-    const li = document.createElement("li");
-    if (item.kind === "empty") {
-      li.className = "muted";
-      li.textContent = item.text;
-      return li;
-    }
-    const where = document.createElement("p");
-    where.className = "muted";
-    where.textContent = item.where;
-    const text = document.createElement("p");
-    text.textContent = item.text;
-    li.append(where, text);
-    return li;
-  }));
-  el("text-arm-state").textContent = textArmSentence(answer.text);
-  el("content-arm-state").textContent = contentArmSentence(answer.content);
+  return invoke("search", { query });
 }
+
+// Round 3, F3: two searches can now be genuinely concurrent — D111 hoisted
+// the embedding call out of the index mutex, so two paid provider requests
+// can be in flight at once. Without a generation of its own, an older
+// completion settling after a newer one used to overwrite it silently on
+// success, and clear the *newer* search's arm-state lines on the older
+// one's failure. `searchAsked`/`searchDrawn` are the same idiom as
+// `settingsAsked`/`settingsDrawn` below: issue numbers, not a flag, because
+// two searches can be in flight and can come back in either order, and both
+// the success and the failure render paths have to ask the same question.
+let searchAsked = 0;
+let searchDrawn = 0;
 
 el("search-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const query = el("query").value;
+  searchAsked += 1;
+  const issue = searchAsked;
   try {
-    await search(query);
+    const answer = await search(query);
+    // An answer older than one already on screen has nothing to add and
+    // could only take something away.
+    if (issue <= searchDrawn) {
+      return;
+    }
+    searchDrawn = issue;
+    results.replaceChildren(...searchResultItems(answer.hits).map((item) => {
+      const li = document.createElement("li");
+      if (item.kind === "empty") {
+        li.className = "muted";
+        li.textContent = item.text;
+        return li;
+      }
+      const where = document.createElement("p");
+      where.className = "muted";
+      where.textContent = item.where;
+      const text = document.createElement("p");
+      text.textContent = item.text;
+      li.append(where, text);
+      return li;
+    }));
+    el("text-arm-state").textContent = textArmSentence(answer.text);
+    el("content-arm-state").textContent = contentArmSentence(answer.content);
   } catch (error) {
+    // The same guard on the failure path: an older rejection is exactly the
+    // path that used to erase a newer answer, clearing both arm-state lines
+    // it had never touched.
+    if (issue <= searchDrawn) {
+      return;
+    }
+    searchDrawn = issue;
     const li = document.createElement("li");
     li.textContent = `search failed: ${error}`;
     results.replaceChildren(li);
-    // `search()` only sets these two on success. Left alone, a failed search
-    // keeps showing the previous successful search's arm report — a real
-    // number about a different attempt, indistinguishable from a current one.
+    // Left alone, a failed search keeps showing the previous successful
+    // search's arm report — a real number about a different attempt,
+    // indistinguishable from a current one.
     el("text-arm-state").textContent = "";
     el("content-arm-state").textContent = "";
   }
@@ -483,9 +569,28 @@ let armModelChosen = false;
 let savedTextArm = true;
 let savedContentArm = true;
 
+// Whether a `set_search_arms` write is currently outstanding — round 2's
+// `armWriteGeneration` counts *presses*, which is right for "does a read
+// issued before this write predate it" (below) but wrong for "is a write
+// still out right now": a press that has already settled still holds a
+// generation. This is incremented before the `invoke` and decremented once
+// it settles, success or refusal, so it is exactly zero when nothing this
+// window started is still waiting to hear back.
+let armWritesInFlight = 0;
+
 // Returns the `toggleState` it drew from, so a caller that needs the same
 // facts reads them off this one call instead of asking `toggleState` again
 // with its own copy of these four fields.
+//
+// Round 3, F2: this used to write `toggleState`'s `disabled` unconditionally,
+// so a `model_settings` redraw landing while a `set_search_arms` write was
+// still in flight re-enabled both checkboxes out from under it — the pending
+// write's own `disabled = true` (in the handlers below) quietly undone, and
+// a second click then sent a *second*, overlapping write. §3.4's fix: the
+// value actually written is `toggleState`'s disabled **or** the barrier's —
+// a redraw may only ever add a disable here, never remove one a pending
+// write still owns. This is the one function that writes these two
+// properties, and it is the only place that fix belongs.
 const drawArmState = () => {
   const state = toggleState({
     savedText: savedTextArm,
@@ -494,10 +599,10 @@ const drawArmState = () => {
     modelChosen: armModelChosen,
   });
   el("arm-text").checked = state.text.checked;
-  el("arm-text").disabled = state.text.disabled;
+  el("arm-text").disabled = state.text.disabled || armWritesInFlight > 0;
   el("arm-text-note").textContent = state.text.note;
   el("arm-content").checked = state.content.checked;
-  el("arm-content").disabled = state.content.disabled;
+  el("arm-content").disabled = state.content.disabled || armWritesInFlight > 0;
   el("arm-content-note").textContent = state.content.note;
   return state;
 };
@@ -532,27 +637,37 @@ let armWriteGeneration = 0;
 // applied to a control this window must not leave believing a choice was
 // saved when `set_search_arms` never returned. Both also claim the search
 // form's submit for the length of the write, the same way they already
-// claim each other's checkbox. Pinned per handler by `the search form's
-// submit is disabled while an arm write is in flight, and re-enabled once
-// it settles` and its content-arm counterpart of the same name.
+// claim each other's checkbox — through `withSearchGated`, the same barrier
+// every other Class A handler in this file uses, not by writing
+// `#search-submit`'s `disabled` themselves (§3.1). `armWritesInFlight` is
+// separate from `pendingConfigWrites`, and is decremented *inside* the
+// wrapped body, before `drawArmStateAndDisclosure()` — a moment earlier than
+// `withSearchGated`'s own bookkeeping settles — because that draw is what
+// `armWritesInFlight` gates (§3.4), and it has to see this write's own
+// count already back down before it decides whether either checkbox may
+// re-enable. Pinned per handler by `the search form's submit is disabled
+// while an arm write is in flight, and re-enabled once it settles` and its
+// content-arm counterpart of the same name.
 el("arm-text").addEventListener("change", async () => {
   const previous = savedTextArm;
   savedTextArm = el("arm-text").checked;
   el("arm-text").disabled = true;
   el("arm-content").disabled = true;
   armWriteGeneration += 1;
-  el("search-submit").disabled = true;
-  try {
-    await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
-  } catch (error) {
-    savedTextArm = previous;
-    el("search-submit").disabled = false;
+  armWritesInFlight += 1;
+  await withSearchGated(async () => {
+    try {
+      await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
+    } catch (error) {
+      savedTextArm = previous;
+      armWritesInFlight -= 1;
+      drawArmStateAndDisclosure();
+      el("arm-text-note").textContent = `the choice was not saved: ${error}`;
+      return;
+    }
+    armWritesInFlight -= 1;
     drawArmStateAndDisclosure();
-    el("arm-text-note").textContent = `the choice was not saved: ${error}`;
-    return;
-  }
-  el("search-submit").disabled = false;
-  drawArmStateAndDisclosure();
+  });
 });
 el("arm-content").addEventListener("change", async () => {
   const previous = savedContentArm;
@@ -560,18 +675,20 @@ el("arm-content").addEventListener("change", async () => {
   el("arm-text").disabled = true;
   el("arm-content").disabled = true;
   armWriteGeneration += 1;
-  el("search-submit").disabled = true;
-  try {
-    await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
-  } catch (error) {
-    savedContentArm = previous;
-    el("search-submit").disabled = false;
+  armWritesInFlight += 1;
+  await withSearchGated(async () => {
+    try {
+      await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
+    } catch (error) {
+      savedContentArm = previous;
+      armWritesInFlight -= 1;
+      drawArmStateAndDisclosure();
+      el("arm-content-note").textContent = `the choice was not saved: ${error}`;
+      return;
+    }
+    armWritesInFlight -= 1;
     drawArmStateAndDisclosure();
-    el("arm-content-note").textContent = `the choice was not saved: ${error}`;
-    return;
-  }
-  el("search-submit").disabled = false;
-  drawArmStateAndDisclosure();
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -774,6 +891,13 @@ const drawSettings = (settings, askedAt, armAskedAt) => {
     savedContentArm = read.searchContentArm;
   }
   drawArmStateAndDisclosure();
+  // §3.3: this is the first authoritative read landing, or the tenth — either
+  // way, `syncSearchGate` is what turns that into `#search-submit` opening
+  // (or staying shut, if a config write is still out). Set every time this
+  // function actually draws, which per `refreshSettings`'s own guard is only
+  // for the newest read issued.
+  authoritativeStateRead = true;
+  syncSearchGate();
 };
 
 // No `.catch()`, and that is deliberate. `model_settings` returns no `Result`
@@ -843,31 +967,42 @@ el("key-form").addEventListener("submit", async (event) => {
       return;
     }
   }
-  try {
-    const status = await invoke("set_key", { key: el("key").value });
-    el("key").value = "";
-    el("key-status").textContent = asSentence(keyAcceptedSentence(status));
-  } catch (error) {
-    // Not "the key was not accepted": every reachable failure of `set_key`
-    // except `Provider` decided nothing about the key. Said without a total,
-    // because the total was wrong for one commit — this comment counted three
-    // while its two neighbours, the table on `keyNotSavedSentence` and the test
-    // above it, were updated. `keyNotSavedSentence` has the enumeration.
-    el("key-status").textContent = asSentence(keyNotSavedSentence(error));
-  }
-  await refreshSettings();
+  // Class A (§2): a saved key changes what leaves the machine, and the
+  // barrier stays shut through the trailing `refreshSettings()` too, not
+  // only the `invoke` — F9's sequence is a key saved and a search sent
+  // while `#disclosure` still reads the old promise, and that promise is
+  // only put right by the redraw this call awaits.
+  await withSearchGated(async () => {
+    try {
+      const status = await invoke("set_key", { key: el("key").value });
+      el("key").value = "";
+      el("key-status").textContent = asSentence(keyAcceptedSentence(status));
+    } catch (error) {
+      // Not "the key was not accepted": every reachable failure of `set_key`
+      // except `Provider` decided nothing about the key. Said without a total,
+      // because the total was wrong for one commit — this comment counted three
+      // while its two neighbours, the table on `keyNotSavedSentence` and the test
+      // above it, were updated. `keyNotSavedSentence` has the enumeration.
+      el("key-status").textContent = asSentence(keyNotSavedSentence(error));
+    }
+    await refreshSettings();
+  });
 });
 
 el("forget").addEventListener("click", async () => {
-  try {
-    el("key-status").textContent = asSentence(keyRemovedSentence(await invoke("forget_key")));
-  } catch (error) {
-    // The key is still there. Saying "removed" because the button was pressed
-    // would state as fact something the store refused to do — and the next
-    // line of the window, redrawn from the store itself, would contradict it.
-    el("key-status").textContent = asSentence(keyNotRemovedSentence(error));
-  }
-  await refreshSettings();
+  // Class A (§2): removing the key changes what leaves the machine just as
+  // saving one does — see the note on `key-form`'s own listener above.
+  await withSearchGated(async () => {
+    try {
+      el("key-status").textContent = asSentence(keyRemovedSentence(await invoke("forget_key")));
+    } catch (error) {
+      // The key is still there. Saying "removed" because the button was pressed
+      // would state as fact something the store refused to do — and the next
+      // line of the window, redrawn from the store itself, would contradict it.
+      el("key-status").textContent = asSentence(keyNotRemovedSentence(error));
+    }
+    await refreshSettings();
+  });
 });
 
 // The embedding role is not the other two and does not share their handler.
@@ -879,34 +1014,41 @@ el("forget").addEventListener("click", async () => {
 // Both presses that can record an embedding model go through this one function,
 // differing only in `existingVectors`. Two copies would be two places for the
 // destructive spelling to end up on the harmless press.
+// Class A (§2): the embedding model decides whether questions leave the
+// machine at all, and the discard-vectors confirmation reaches this too —
+// `recordEmbeddingModel` is one function with two call sites, gated once
+// here rather than at each press, or the second press would keep the hole
+// F9 exists to close.
 const recordEmbeddingModel = async (model, existingVectors) => {
-  try {
-    const adopted = await invoke("set_embedding_model", { model, existingVectors });
-    // Cleared on success, so the button below cannot survive the change it was
-    // offered for and act a second time on a model nobody is looking at.
-    refusedChange = null;
-    el("model-status").textContent = asSentence(adoptedModelSentence(adopted, indexOpening));
-  } catch (error) {
-    // The refusal already says how many vectors stand in the way; showing it
-    // whole is better than a sentence of our own that says less.
-    //
-    // Set on every failure this window cannot attribute, and narrowed by
-    // `discardOffer` rather than here. Not for tidiness: the refusal arrives as
-    // a string, so this `catch` cannot tell "a space blocks the change" from
-    // "you have entered no key" without matching on message text — the failure
-    // mode `crate::error::Error`'s own header says that type exists to avoid.
-    // What can be decided is decided from state, one line down, where the guards
-    // and their gaps are written out.
-    //
-    // The one exception is the one this window *does* know from state: with a
-    // job running, the refusal is the slot, and a slot refusal must leave
-    // nothing to confirm — otherwise the run's own ending redraws the button
-    // against a count that run has just made larger, and pressing it destroys
-    // what it paid for. `changeToConfirm` is where that is written.
-    refusedChange = changeToConfirm(model, jobRunning);
-    el("model-status").textContent = asSentence(embeddingModelNotRecordedSentence(error));
-  }
-  await refreshSettings();
+  await withSearchGated(async () => {
+    try {
+      const adopted = await invoke("set_embedding_model", { model, existingVectors });
+      // Cleared on success, so the button below cannot survive the change it was
+      // offered for and act a second time on a model nobody is looking at.
+      refusedChange = null;
+      el("model-status").textContent = asSentence(adoptedModelSentence(adopted, indexOpening));
+    } catch (error) {
+      // The refusal already says how many vectors stand in the way; showing it
+      // whole is better than a sentence of our own that says less.
+      //
+      // Set on every failure this window cannot attribute, and narrowed by
+      // `discardOffer` rather than here. Not for tidiness: the refusal arrives as
+      // a string, so this `catch` cannot tell "a space blocks the change" from
+      // "you have entered no key" without matching on message text — the failure
+      // mode `crate::error::Error`'s own header says that type exists to avoid.
+      // What can be decided is decided from state, one line down, where the guards
+      // and their gaps are written out.
+      //
+      // The one exception is the one this window *does* know from state: with a
+      // job running, the refusal is the slot, and a slot refusal must leave
+      // nothing to confirm — otherwise the run's own ending redraws the button
+      // against a count that run has just made larger, and pressing it destroys
+      // what it paid for. `changeToConfirm` is where that is written.
+      refusedChange = changeToConfirm(model, jobRunning);
+      el("model-status").textContent = asSentence(embeddingModelNotRecordedSentence(error));
+    }
+    await refreshSettings();
+  });
 };
 
 el(selectId("embedding")).addEventListener("change", async (event) => {
@@ -1022,41 +1164,67 @@ el("embed").addEventListener("click", async () => {
   const barWas = el("bar").dataset.state ?? "";
   el("bar").dataset.state = BAR_RUNNING;
 
-  try {
-    endingDescribed = false;
-    await invoke("start_embed_job", { onProgress });
-    jobRunning = true;
-    // After the await, for the reason the walk's own press gives: an ending
-    // that arrived first has already been overwritten by the line above, and
-    // only the core can put it right.
-    syncButtons();
-    follow();
-  } catch (error) {
-    // Refused before anything started — no key, no index, or a job already
-    // running. Nothing began, so the buttons must not move, and neither must
-    // the bar.
-    el("bar").dataset.state = barWas;
-    sayJobStatus(embedNotStartedSentence(error));
-    // For the reason the walk's own refusal gives: this press bumped the
-    // generation before awaiting, so a settings draw that resolved inside the
-    // refusal suppressed its refusal clause for a job that never started.
-    refreshSettings();
-  }
+  // Class A, the weakest member (§2): `start_embed_job` does not change
+  // whether a question leaves this machine, only the coverage numbers the
+  // arm report states — but it moves them the moment the core accepts the
+  // press, before this window has read anything back, so a search submitted
+  // in that gap would report content-arm coverage that is already wrong.
+  // Gated for the length of *this* round trip only — accepted-or-refused,
+  // not the whole run: the run's own ending is asynchronous, arrives on
+  // `onProgress` above and settles `refreshSettings()` of its own accord
+  // (`:1012`-ish, in the handler above), which is a Class B concern
+  // `drawArmState`'s barrier-aware redraw already covers, not something
+  // `#search-submit` needs held shut for minutes at a time.
+  await withSearchGated(async () => {
+    try {
+      endingDescribed = false;
+      await invoke("start_embed_job", { onProgress });
+      jobRunning = true;
+      // After the await, for the reason the walk's own press gives: an ending
+      // that arrived first has already been overwritten by the line above, and
+      // only the core can put it right.
+      syncButtons();
+      follow();
+    } catch (error) {
+      // Refused before anything started — no key, no index, or a job already
+      // running. Nothing began, so the buttons must not move, and neither must
+      // the bar.
+      el("bar").dataset.state = barWas;
+      sayJobStatus(embedNotStartedSentence(error));
+      // For the reason the walk's own refusal gives: this press bumped the
+      // generation before awaiting, so a settings draw that resolved inside the
+      // refusal suppressed its refusal clause for a job that never started.
+      await refreshSettings();
+    }
+  });
 });
 
+// The spec (§2) classifies these two as Class B, not Class A — neither
+// touches what leaves the machine — but they reach the core through a
+// **computed** command name, `command` below rather than a string literal,
+// which is exactly the shape `main.test.js`'s site test has to be able to
+// see so a future Class A mutation cannot hide behind the same pattern.
+// Gated here anyway, deliberately wider than §2 strictly asks:
+// telling "this identifier happens to be Class B" from "this identifier is
+// a new Class A write" needs more than a source-text pin can prove, and
+// gating every config mutation through the one barrier — matching model or
+// not — costs a search no more than the round trip these two already pay
+// for. See the report for the argument in full.
 for (const [role, command] of [
   ["rerank", "set_rerank_model"],
   ["chat", "set_chat_model"],
 ]) {
   el(selectId(role)).addEventListener("change", async (event) => {
     const model = event.target.value;
-    try {
-      await invoke(command, { model });
-      el("model-status").textContent = asSentence(roleRecordedSentence(role, model));
-    } catch (error) {
-      el("model-status").textContent = asSentence(roleNotRecordedSentence(role, error));
-    }
-    await refreshSettings();
+    await withSearchGated(async () => {
+      try {
+        await invoke(command, { model });
+        el("model-status").textContent = asSentence(roleRecordedSentence(role, model));
+      } catch (error) {
+        el("model-status").textContent = asSentence(roleNotRecordedSentence(role, error));
+      }
+      await refreshSettings();
+    });
   });
 }
 

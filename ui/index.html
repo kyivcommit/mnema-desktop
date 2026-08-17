@@ -121,7 +121,16 @@
         <p id="arm-content-note" class="muted"></p>
         <form id="search-form">
           <input id="query" type="search" placeholder="query" autocomplete="off" />
-          <button id="search-submit" type="submit">Search</button>
+          <!--
+            §3.3 of the round-3 readiness-barrier spec: this starts disabled
+            rather than relying on `main.js` to disable it before anything
+            can be pressed. There is a window, at every load, between the
+            markup parsing and the first `model_settings` read landing, that
+            no handler-side guard can close — `main.js`'s own barrier
+            (`syncSearchGate`) only ever narrows this further, and opens it
+            once the first authoritative read has drawn.
+          -->
+          <button id="search-submit" type="submit" disabled>Search</button>
         </form>
         <p id="text-arm-state" class="muted"></p>
         <p id="content-arm-state" class="muted"></p>

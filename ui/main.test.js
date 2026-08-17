@@ -24,6 +24,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // A deferred promise, which is the whole technique: an IPC call the test can
 // leave hanging until the thing that must happen first has happened.
@@ -191,6 +193,93 @@ const boot = async (answers = {}) => {
 
 const progress = (data) => ({ event: "progress", data });
 const ending = (data) => ({ event: "ended", data });
+
+// Boots a window without waiting for it to settle — the one thing `boot()`
+// cannot produce, because it always awaits the import to completion, and by
+// the time it returns every one of `main.js`'s own initial
+// `refreshSettings()` calls has already resolved (`hold()` only exists on
+// the object `boot()` hands back, by which point it is too late to hold
+// anything the module asks for on its way up). This holds `model_settings`
+// *before* the module is imported, so its own first top-level
+// `await refreshSettings()` genuinely suspends there, and the caller can
+// read the DOM while that suspension is real — round 3, §3.3.
+const bootPending = (answers = {}) => {
+  const elements = new Map();
+  const el = (id) => {
+    if (!elements.has(id)) {
+      elements.set(id, makeElement());
+    }
+    return elements.get(id);
+  };
+
+  const channels = [];
+  const pending = {};
+
+  const settings = () => ({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: null,
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+
+  const defaults = {
+    open_index: () => ({ path: "/tmp/index", schemaVersion: 1 }),
+    job_status: () => ({ running: false }),
+    model_settings: () => settings(),
+    provider_models: () => ({ entries: [], unreadable: 0, unreadableRecords: [] }),
+    start_embed_job: () => null,
+    start_walk_job: () => null,
+    skips: () => [],
+    cancel_job: () => null,
+  };
+
+  const invoke = (command, args) => {
+    if (args && args.onProgress) {
+      channels.push(args.onProgress);
+    }
+    if (pending[command] && pending[command].length) {
+      return pending[command].shift().promise;
+    }
+    const answer = (answers[command] ?? defaults[command] ?? (() => null))(args);
+    return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
+  };
+
+  class Channel {
+    constructor() {
+      this.onmessage = null;
+    }
+  }
+
+  globalThis.window = {
+    __TAURI__: { core: { invoke, Channel }, dialog: { open: async () => null } },
+  };
+  globalThis.document = {
+    getElementById: el,
+    createElement: () => makeElement(),
+  };
+
+  // Queued *before* `import()` runs, so the module's own first
+  // `invoke("model_settings")` call — issued from its first top-level
+  // `await refreshSettings()` — is the one that finds it and suspends.
+  const modelSettings = deferred();
+  pending.model_settings = [modelSettings];
+
+  bootCount += 1;
+  const importPromise = import(`./main.js?window=${bootCount}`);
+
+  return { el, channels, modelSettings, importPromise };
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1187,4 +1276,450 @@ test("a refused press leaves the bar as it was and puts the settings line back",
   );
   poll.resolve({ running: false });
   await settleEverything();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round 3: one readiness barrier for `#search-submit`
+// (`docs/private/sdd/2026-08-14-search-query-and-fusion/
+// ui-readiness-barrier-spec.md`). Closes Codex round-3 findings 2, 3 and 9.
+
+// Round 3, the floor test (spec §5): a source-text pin, because JS gives no
+// type to lean on — the same technique this branch already uses for the
+// `ORDER BY` secondary key in `search.rs`/`space.rs` (`crates/mnema-index/
+// src/{search,space}.rs`), with the same trap avoided: that pin first read
+// its own `#[cfg(test)]` block back into its own search and could never go
+// red, fixed by `split_once` before matching. This one reads a *different*
+// file (`main.js`), so there is no self-inclusion to guard against — but it
+// is still a pin over source text, not a real parser, and the two gaps
+// below are the price of that, stated rather than left to be discovered.
+//
+// This does **not** enumerate Class A commands by name and check each one is
+// present — that is the exact shape of mistake this floor test exists to
+// end: a check that passes forever while an eighth site arrives untested.
+// Instead it finds **every** `invoke(...)` call in the file and requires
+// each one to be either explicitly out of scope (§6, plus the two read-only
+// commands the barrier is itself built around — `search`, which it gates
+// from the outside, and `model_settings`, the read that opens it) or
+// lexically inside a `withSearchGated(...)` call. A command this list has
+// never heard of defaults to "must be gated", which is what lets it catch
+// the computed name at the `set_rerank_model`/`set_chat_model` call site
+// (`invoke(command, ...)`, `command` a loop variable, not a string literal)
+// without special-casing it, and what makes it turn red the moment a new
+// config mutation is added anywhere in the file without the barrier —
+// proved below by mutation, not assumed.
+//
+// What it cannot see: a comment containing the exact text `invoke("...")`
+// or `withSearchGated(` would be read as a real call site. `main.js` has
+// none today — checked directly, every `invoke(` in it is real code — and
+// this round's own first draft tripped exactly that trap in a comment about
+// the computed-name call, rewritten rather than the check weakened.
+// `matchParen` below only skips parens inside quotes and `//` line
+// comments; a block comment or a template literal's `${...}` containing an
+// unbalanced paren could still desync it, and `main.js` has neither near a
+// `withSearchGated(` call today.
+const mainJsPath = fileURLToPath(new URL("./main.js", import.meta.url));
+
+// Returns the source index one past the `)` that closes the `(` at
+// `openIndex`, skipping anything inside a string or template literal
+// (honouring `\` escapes) and `//` line comments, so a sentence or a
+// comment containing a stray paren cannot desync the depth count.
+const matchParen = (src, openIndex) => {
+  let depth = 0;
+  for (let i = openIndex; i < src.length; i += 1) {
+    const c = src[i];
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      i += 1;
+      while (i < src.length && src[i] !== quote) {
+        if (src[i] === "\\") {
+          i += 1;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") {
+        i += 1;
+      }
+      continue;
+    }
+    if (c === "(") {
+      depth += 1;
+    } else if (c === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return i + 1;
+      }
+    }
+  }
+  throw new Error(`unbalanced parens from source offset ${openIndex}`);
+};
+
+// Every `[start, end)` span textually inside a `withSearchGated(...)` call —
+// the one decision point §3.1 asks for, and the only thing that counts as
+// "gated" for this test.
+const gatedRanges = (src) => {
+  const ranges = [];
+  const re = /withSearchGated\(/g;
+  let m;
+  while ((m = re.exec(src))) {
+    const openParen = m.index + "withSearchGated".length;
+    ranges.push([m.index, matchParen(src, openParen)]);
+  }
+  return ranges;
+};
+
+// Every `invoke(...)` call site: the command name if it is a string
+// literal, or the identifier if it is computed — the `set_rerank_model`/
+// `set_chat_model` shape.
+const invokeCalls = (src) => {
+  const re = /\binvoke\(\s*(?:"([a-zA-Z0-9_]+)"|([a-zA-Z_$][\w$]*))/g;
+  const calls = [];
+  let m;
+  while ((m = re.exec(src))) {
+    calls.push({ index: m.index, literal: m[1] ?? null, identifier: m[2] ?? null });
+  }
+  return calls;
+};
+
+// §6, out of scope: these mutate the index or read status, not the search
+// configuration or the privacy promise — plus the two commands the barrier
+// is itself built around, neither a config mutation of its own.
+const OUT_OF_SCOPE_COMMANDS = new Set([
+  "open_index",
+  "add_watched_folder",
+  "start_walk_job",
+  "cancel_job",
+  "job_status",
+  "skips",
+  "provider_models",
+  "model_settings",
+  "search",
+]);
+
+test("every config-mutating invoke() in main.js is inside withSearchGated(...)", () => {
+  const src = readFileSync(mainJsPath, "utf8");
+  const ranges = gatedRanges(src);
+  assert.ok(ranges.length > 0, "premise: withSearchGated(...) exists in main.js at all");
+
+  const ungated = invokeCalls(src).filter((call) => {
+    if (call.literal !== null && OUT_OF_SCOPE_COMMANDS.has(call.literal)) {
+      return false;
+    }
+    return !ranges.some(([start, end]) => call.index > start && call.index < end);
+  });
+
+  assert.deepEqual(
+    ungated.map((c) => c.literal ?? `<computed: ${c.identifier}>`),
+    [],
+    "a config-mutating invoke() is reachable outside the search barrier — every one of these " +
+      "can change what leaves the machine or clobber pending state, and none of them is in " +
+      "§6's out-of-scope list",
+  );
+});
+
+// F9: `#search-submit` is enabled in the markup before this round, and the
+// first draw that would say otherwise is a network round trip away. Between
+// load and that draw, a search is pressable with no disclosure on screen —
+// `bootPending` is what lets a test hold that window open long enough to
+// look at it. §3.3.
+test("search stays closed until the first settings read lands, at load (F9, §3.3)", async () => {
+  const w = bootPending();
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    true,
+    "search was pressable before any settings read had landed",
+  );
+
+  w.modelSettings.resolve({
+    key: { kind: "absent" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 0,
+      totalChunks: 0,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 0,
+      embeddingModel: null,
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  await w.importPromise;
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    false,
+    "the first settings read landed but the gate stayed shut",
+  );
+});
+
+// F9, the sequence Codex named: no key, then a key saved. The backend
+// commits the key the instant `set_key` resolves — a search submitted right
+// then would genuinely leave the machine — but `#disclosure` does not catch
+// up until the trailing `refreshSettings()` inside the same handler draws.
+// The gate has to stay shut across that whole span, not just across the
+// `invoke` itself, or it reopens on the strength of a promise the screen is
+// still making the old way.
+test("a saved key does not reopen search until the disclosure has caught up with it (F9)", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "absent" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 0,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 0,
+        embeddingModel: null,
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+    set_key: () => ({ balance: { kind: "notStated" } }),
+  });
+
+  assert.equal(w.el("search-submit").disabled, false, "premise: submit starts enabled, key absent");
+  assert.match(
+    w.el("disclosure").textContent,
+    /Nothing leaves this machine/,
+    "premise: the disclosure promises nothing leaves, with no key saved",
+  );
+
+  const read = w.hold("model_settings");
+  w.el("key").value = "sk-example-live-key";
+  const submit = w.el("key-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    true,
+    "search stayed pressable between the key being saved on the core side and the disclosure " +
+      "catching up with it — the exact window F9 names",
+  );
+  assert.match(
+    w.el("disclosure").textContent,
+    /Nothing leaves this machine/,
+    "premise: the disclosure is still stale — this is why the gate, not the sentence, has to " +
+      "be what stands between a press and the provider here",
+  );
+
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 0,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 0,
+      embeddingModel: null,
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  await submit;
+  await settleEverything();
+
+  assert.equal(w.el("search-submit").disabled, false, "the gate never reopened once the redraw landed");
+});
+
+// F2, with the shape the brief asked for specifically: a stale
+// `model_settings` response drawn *in between* two overlapping arm writes.
+// Without this, a test that only holds one write open passes against the
+// round-2 code that already fails in production — round 2's guard protected
+// the saved booleans, not the `disabled` attribute a redraw could still
+// clear.
+test("a stale settings redraw landing between two overlapping arm writes does not re-enable them (F2)", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.equal(w.el("arm-text").disabled, false, "premise: clickable at boot");
+  assert.equal(w.el("arm-content").disabled, false, "premise: clickable at boot");
+
+  // Issued from `forget`, held open — the "stale" read, exactly the source
+  // the existing arm-write tests already use for the same reason.
+  const staleRead = w.hold("model_settings");
+  await w.press("forget");
+
+  // Write A: uncheck the text arm.
+  const writeA = w.hold("set_search_arms");
+  w.el("arm-text").checked = false;
+  const changeA = w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  assert.equal(w.el("arm-text").disabled, true, "premise: write A disabled the text arm");
+  assert.equal(w.el("arm-content").disabled, true, "premise: write A disabled the content arm too");
+
+  // The stale redraw lands mid-flight — round 2's bug: `drawArmState` wrote
+  // `toggleState`'s `disabled` unconditionally, clearing both.
+  staleRead.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-text").disabled,
+    true,
+    "a stale settings redraw re-enabled a control write A's own pending save still owns",
+  );
+  assert.equal(w.el("arm-content").disabled, true, "same bug, the other checkbox");
+
+  // Write B starts while A is still pending — the round-2 bug is exactly
+  // what let this happen for real: the stale redraw's `disabled = false`
+  // let a person click a checkbox a pending write should still have held
+  // shut.
+  const writeB = w.hold("set_search_arms");
+  w.el("arm-content").checked = false;
+  const changeB = w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  // A settles first — must not re-open anything while B is still out (§3.2).
+  writeA.resolve(null);
+  await changeA;
+  await settleEverything();
+  assert.equal(
+    w.el("arm-text").disabled,
+    true,
+    "the first write to settle re-opened the gate while a second write was still out",
+  );
+  assert.equal(w.el("arm-content").disabled, true, "same, the other checkbox");
+
+  // B settles — now everything may re-open.
+  writeB.resolve(null);
+  await changeB;
+  await settleEverything();
+  assert.equal(w.el("arm-text").disabled, false);
+  assert.equal(w.el("arm-content").disabled, false);
+});
+
+// F3: two searches settling out of order. Success-then-success first — an
+// older answer must not overwrite a newer one that already landed.
+test("an older search's success does not overwrite a newer one that already landed (F3)", async () => {
+  const w = await boot();
+
+  const first = w.hold("search");
+  w.el("query").value = "first query";
+  const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+
+  const second = w.hold("search");
+  w.el("query").value = "second query";
+  const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+
+  // B, the newer submission, answers first.
+  second.resolve({
+    hits: [{ relativePath: "b.txt", text: "b" }],
+    text: { kind: "answered", matched: 2 },
+    content: { kind: "answered", matched: 3, embedded: 1, total: 1 },
+  });
+  await submitB;
+  await settleEverything();
+  assert.equal(w.el("text-arm-state").textContent, "Search by text returned 2.", "premise: B is on screen");
+
+  // A, the older submission, answers after — must not win.
+  first.resolve({
+    hits: [{ relativePath: "a.txt", text: "a" }],
+    text: { kind: "answered", matched: 5 },
+    content: { kind: "answered", matched: 7, embedded: 10, total: 10 },
+  });
+  await submitA;
+  await settleEverything();
+
+  assert.equal(
+    w.el("text-arm-state").textContent,
+    "Search by text returned 2.",
+    "an older search overwrote a newer one that had already landed",
+  );
+  assert.equal(w.el("results").options.length, 1);
+  assert.equal(w.el("results").options[0].options[1].textContent, "b");
+});
+
+// F3, the direction that matters more than it looks: a reject-after-success.
+// Round 2's own fix cleared both arm-state lines on a failed search — which
+// is exactly the path an older rejection can use to erase a newer answer if
+// nothing tells the two attempts apart.
+test("an older search's rejection does not erase a newer search's results (F3)", async () => {
+  const w = await boot();
+
+  const first = w.hold("search");
+  w.el("query").value = "first query";
+  const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+
+  const second = w.hold("search");
+  w.el("query").value = "second query";
+  const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+
+  second.resolve({
+    hits: [{ relativePath: "b.txt", text: "b" }],
+    text: { kind: "answered", matched: 2 },
+    content: { kind: "answered", matched: 3, embedded: 1, total: 1 },
+  });
+  await submitB;
+  await settleEverything();
+  assert.equal(w.el("text-arm-state").textContent, "Search by text returned 2.", "premise: B is on screen");
+
+  first.reject(new Error("the index could not be reached"));
+  await submitA;
+  await settleEverything();
+
+  assert.equal(
+    w.el("text-arm-state").textContent,
+    "Search by text returned 2.",
+    "an older search's rejection erased a newer search's arm-state text",
+  );
+  assert.equal(
+    w.el("content-arm-state").textContent,
+    "Search by content returned 3.",
+    "an older search's rejection erased a newer search's arm-state text",
+  );
+  assert.equal(
+    w.el("results").options.length,
+    1,
+    "an older search's rejection replaced a newer search's result list",
+  );
 });
