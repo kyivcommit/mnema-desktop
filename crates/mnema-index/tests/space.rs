@@ -1724,6 +1724,28 @@ fn knn_searchable_matches_knn_exactly_on_an_ordinary_corpus() {
     );
 }
 
+/// Round-3 adversarial review, F-A1: [`Db::eligible_chunk_count`] shares
+/// `ELIGIBLE_CHUNK` with `Db::knn_searchable`'s own pre-filter, so this
+/// count and what a search can actually reach cannot drift apart —
+/// [`Db::chunk_count`] does not know about `document.status`, and this
+/// does.
+#[test]
+fn eligible_chunk_count_excludes_a_pending_documents_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    // `support::one_chunk` sets its document to `Indexed`.
+    let _live = support::one_chunk(&db);
+    // `write_one_chunk` leaves `insert_document`'s own default — `Pending`.
+    let _rebuilding = write_one_chunk(&db, &"c".repeat(64), "still building");
+
+    assert_eq!(db.chunk_count().unwrap(), 2, "both chunk rows exist");
+    assert_eq!(
+        db.eligible_chunk_count().unwrap(),
+        1,
+        "only the chunk behind the indexed document is eligible"
+    );
+}
+
 // -------------------------------------------------------------- Finding 6
 
 /// T4 (design §6, §9): `delete_document` sweeps a document's vectors by

@@ -141,6 +141,7 @@ pub enum ContentArmReport {
         matched: usize,
         embedded: i64,
         total: i64,
+        reachable: i64,
     },
 }
 
@@ -155,10 +156,12 @@ impl From<ContentArm> for ContentArmReport {
                 chunks,
                 embedded,
                 total,
+                reachable,
             } => Self::Answered {
                 matched: chunks.len(),
                 embedded,
                 total,
+                reachable,
             },
         }
     }
@@ -195,13 +198,15 @@ pub(crate) fn arm_is_on(value: Option<String>) -> bool {
 /// None))` is ready for `search` to answer with.
 ///
 /// **Two kinds of failure, told apart.** `active_space`/`space_model`
-/// failing inside the closure — e.g. `NoSuchSpace` from a dangling
-/// `meta.active_space` (`models.rs:243-258`) — become
-/// `ContentArmReport::Failed` rather than escaping through `with_index`'s
-/// own `?`. That outer `?` is for `IndexNotOpen`/`StatePoisoned`, and is
-/// unreachable from `search`: its own earlier `with_index` call (the arm
-/// toggles, `bridge.rs:273`) rejects on either first. Pinned by
-/// `an_index_failure_inside_the_content_arm_stays_local_to_it`.
+/// failing inside the closure become `ContentArmReport::Failed` instead
+/// of escaping `with_index`'s own `?` — e.g. `NoSuchSpace` from a
+/// dangling `meta.active_space` (`models.rs:243-258`). That outer `?`
+/// covers `IndexNotOpen` (unreachable once `open_index` has succeeded —
+/// `state.rs:108` is the only write to `db`) and `StatePoisoned`
+/// (reachable: a poison between `search`'s own arm-toggle read and the
+/// credential read at `bridge.rs:284` still lands here — measured inert
+/// either way, since every command answers a poisoned state alike).
+/// Pinned by `an_index_failure_inside_the_content_arm_stays_local_to_it`.
 fn resolve_content_query(
     state: &State<'_, AppState>,
     provider: &Option<Provider>,
@@ -510,6 +515,7 @@ mod tests {
                 matched: 0,
                 embedded: 0,
                 total: 0,
+                reachable: 0,
             },
         ]
         .iter()
@@ -523,10 +529,11 @@ mod tests {
         assert_eq!(spellings, ["off", "noKey", "noModel", "failed", "answered"]);
     }
 
-    /// `matched`, `embedded` and `total` carry the arm's own numbers, not a
-    /// placeholder: replacing `chunks.len()` with `0` in either `From` impl
-    /// above must fail this, without needing a live provider to reach the
-    /// content arm's `Answered` case at all.
+    /// `matched`, `embedded`, `total` and `reachable` carry the arm's own
+    /// numbers, not a placeholder: replacing `chunks.len()` with `0`, or
+    /// dropping the new field, in the `From` impl above must fail this,
+    /// without needing a live provider to reach the content arm's
+    /// `Answered` case at all.
     #[test]
     fn an_answered_arm_report_carries_the_real_numbers_not_a_placeholder() {
         assert!(matches!(
@@ -540,11 +547,13 @@ mod tests {
                 chunks: vec![10, 20],
                 embedded: 7,
                 total: 12,
+                reachable: 9,
             }),
             ContentArmReport::Answered {
                 matched: 2,
                 embedded: 7,
                 total: 12,
+                reachable: 9,
             }
         ));
     }

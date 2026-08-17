@@ -63,10 +63,20 @@ pub enum ContentArm {
     /// `embedded` of `total` tells a full index from a partly built one.
     /// Pinned by
     /// `a_partly_embedded_space_says_how_much_of_the_index_it_saw`.
+    ///
+    /// `reachable` is `total` narrowed to what a search could actually
+    /// return — [`mnema_index::Db::eligible_chunk_count`], the same
+    /// predicate the arm's own pre-filter runs. `embedded == total` says
+    /// nothing about coverage on its own: a document mid-rebuild holds
+    /// embedded chunks `total` still counts but the arm cannot reach, so
+    /// `reachable < total` is what actually signals incomplete coverage.
+    /// Pinned by
+    /// `a_pending_documents_embedded_chunks_are_not_claimed_as_coverage`.
     Answered {
         chunks: Vec<i64>,
         embedded: i64,
         total: i64,
+        reachable: i64,
     },
 }
 
@@ -145,10 +155,19 @@ pub(crate) fn content_arm_answered(db: &Db, space_id: i64, vector: &[f32], k: i6
             };
         }
     };
+    let reachable = match db.eligible_chunk_count() {
+        Ok(n) => n,
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
+    };
     ContentArm::Answered {
         chunks,
         embedded,
         total,
+        reachable,
     }
 }
 

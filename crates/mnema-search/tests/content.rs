@@ -1,3 +1,4 @@
+use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_search::{ContentArm, Missing, Provider};
 
 mod support;
@@ -199,6 +200,7 @@ fn the_content_arms_silences_are_told_apart_by_type() {
             chunks: vec![],
             embedded: 0,
             total: 9,
+            reachable: 9,
         },
     ];
     // Each is distinct from every other, including each `NotConfigured`
@@ -218,15 +220,17 @@ fn an_empty_answer_still_carries_its_coverage() {
         chunks: vec![],
         embedded: 3,
         total: 9,
+        reachable: 6,
     };
     match arm {
         ContentArm::Answered {
             chunks,
             embedded,
             total,
+            reachable,
         } => {
             assert!(chunks.is_empty());
-            assert_eq!((embedded, total), (3, 9));
+            assert_eq!((embedded, total, reachable), (3, 9, 6));
         }
         other => panic!("expected an answer, got {other:?}"),
     }
@@ -251,12 +255,11 @@ fn the_content_arm_turns_a_query_into_nearest_chunks() {
             chunks,
             embedded,
             total,
+            reachable,
         } => {
             assert_eq!(chunks.first(), Some(&f.chunk_ids[1]));
-            assert_eq!(
-                (embedded, total),
-                (f.chunk_ids.len() as i64, f.chunk_ids.len() as i64)
-            );
+            let all = f.chunk_ids.len() as i64;
+            assert_eq!((embedded, total, reachable), (all, all, all));
         }
         other => panic!("expected an answer, got {other:?}"),
     }
@@ -290,6 +293,174 @@ fn a_partly_embedded_space_says_how_much_of_the_index_it_saw() {
             assert_eq!(embedded, f.embedded_ids.len() as i64);
             assert_eq!(total, f.chunk_ids.len() as i64);
             assert!(embedded < total, "the fixture must leave chunks unembedded");
+        }
+        other => panic!("expected an answer, got {other:?}"),
+    }
+}
+
+/// Round-3 adversarial review, F-A1. Round 3's own fix widened the excluded
+/// population from an orphan filter to a status filter, but `embedded`/
+/// `total` still counted the whole `chunk` table — so a document mid-rebuild
+/// (`Db::clear_document_content` leaves it `Pending`, D61) could hold
+/// embedded chunks the arm can no longer reach while `embedded == total`
+/// went on claiming full coverage. The exact shape measured: two embedded
+/// chunks, one `Indexed`, one `Pending`, `embedded=2, total=2`.
+///
+/// `reachable` is the fix: [`mnema_index::Db::eligible_chunk_count`], the
+/// same predicate the pre-filter itself runs, so `reachable < total` is now
+/// what actually signals incomplete coverage — the `embedded == total`
+/// branch alone cannot be trusted for that any more.
+#[test]
+fn a_pending_documents_embedded_chunks_are_not_claimed_as_coverage() {
+    let f = support::indexed_space();
+    let space =
+        f.db.active_space()
+            .expect("active space read")
+            .expect("a space is active");
+
+    let rebuilding_doc =
+        f.db.insert_document(&"c".repeat(64), "text/plain", 64, SourceKind::Document)
+            .expect("rebuilding document");
+    let page =
+        f.db.insert_page(&rebuilding_doc, 1, "native:txt", None)
+            .expect("rebuilding page");
+    let block =
+        f.db.insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: Some("uk".into()),
+                text: "ремонт даху, чанк-перебудова".to_string(),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .expect("rebuilding block");
+    let rebuilding_chunk =
+        f.db.insert_chunk(
+            &rebuilding_doc,
+            0,
+            "ремонт даху, чанк-перебудова",
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block,
+                    start: 0,
+                    end: 28,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        )
+        .expect("rebuilding chunk");
+    // Left at `insert_document`'s own default — `Pending`, exactly what
+    // `Db::clear_document_content` leaves at the start of an ordinary
+    // rebuild. No `set_document_status` call here is the point.
+    let mut rebuilding_vector = vec![0.0f32; 1024];
+    rebuilding_vector[5] = 1.0;
+    f.db.upsert_vector(space, rebuilding_chunk, &rebuilding_vector)
+        .expect("rebuilding vector");
+
+    let row: Vec<String> = rebuilding_vector.iter().map(|v| v.to_string()).collect();
+    let mock =
+        mnema_mock_provider::MockServer::new(vec![mnema_mock_provider::Reply::ok(&format!(
+            r#"{{"data":[{{"embedding":[{}],"index":0}}]}}"#,
+            row.join(",")
+        ))]);
+    let provider = mnema_search::Provider {
+        base: mock.base().to_string(),
+        key: "k".to_string(),
+    };
+
+    match mnema_search::content_arm(&f.db, Some(provider), "ремонт даху", 10) {
+        mnema_search::ContentArm::Answered {
+            chunks,
+            embedded,
+            total,
+            reachable,
+        } => {
+            assert!(
+                !chunks.contains(&rebuilding_chunk),
+                "a chunk behind a pending document must not reach the answer: {chunks:?}"
+            );
+            assert_eq!(
+                (embedded, total),
+                (4, 4),
+                "the pending chunk's vector is genuinely embedded and its row genuinely exists"
+            );
+            assert_eq!(
+                reachable, 3,
+                "only the three chunks behind the indexed document are reachable"
+            );
+            assert!(
+                reachable < total,
+                "coverage must not read as complete while a document is mid-rebuild"
+            );
+        }
+        other => panic!("expected an answer, got {other:?}"),
+    }
+}
+
+/// The mirror case F-A1 asked for: an embedded vector with no `chunk` row
+/// at all — `Db::insert_vector`'s own doc names this as the residual gap
+/// [`Db::chunk_count`]'s doc still points to — must still report
+/// `embedded > total`, the anomaly `render.js` already has a branch for.
+/// `reachable`'s addition is a second, independent fact beside that one,
+/// not a replacement for it.
+#[test]
+fn an_orphaned_vector_still_reports_embedded_above_total() {
+    let f = support::indexed_space();
+    let space =
+        f.db.active_space()
+            .expect("active space read")
+            .expect("a space is active");
+
+    // No document, no page, no chunk row — a bare write against the vector
+    // table, the same shape `Db::insert_vector`'s own doc calls out.
+    let mut orphan_vector = vec![0.0f32; 1024];
+    orphan_vector[9] = 1.0;
+    f.db.insert_vector(space, 999_999, &orphan_vector)
+        .expect("orphan vector");
+
+    let row: Vec<String> = orphan_vector.iter().map(|v| v.to_string()).collect();
+    let mock =
+        mnema_mock_provider::MockServer::new(vec![mnema_mock_provider::Reply::ok(&format!(
+            r#"{{"data":[{{"embedding":[{}],"index":0}}]}}"#,
+            row.join(",")
+        ))]);
+    let provider = mnema_search::Provider {
+        base: mock.base().to_string(),
+        key: "k".to_string(),
+    };
+
+    match mnema_search::content_arm(&f.db, Some(provider), "ремонт даху", 10) {
+        mnema_search::ContentArm::Answered {
+            chunks,
+            embedded,
+            total,
+            reachable,
+        } => {
+            assert!(
+                !chunks.contains(&999_999),
+                "the orphaned id must not reach the answer: {chunks:?}"
+            );
+            assert_eq!(
+                embedded, 4,
+                "the orphan vector is still counted as embedded"
+            );
+            assert_eq!(
+                total, 3,
+                "no chunk row backs the orphan, so it is not in chunk_count"
+            );
+            assert_eq!(
+                reachable, 3,
+                "the three real chunks are still all reachable"
+            );
+            assert!(
+                embedded > total,
+                "the pre-existing anomaly must stay visible after this fix"
+            );
         }
         other => panic!("expected an answer, got {other:?}"),
     }

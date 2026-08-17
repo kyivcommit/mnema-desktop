@@ -746,6 +746,22 @@ impl Db {
             .query_row("SELECT count(*) FROM chunk", [], |r| r.get(0))?)
     }
 
+    /// How many chunks a search could actually reach — [`ELIGIBLE_CHUNK`],
+    /// the same predicate [`Db::knn_searchable`]'s pre-filter runs, so this
+    /// count and what the arm searches cannot drift apart. Round-3
+    /// adversarial review (F-A1): the content arm's `total` used to be
+    /// [`Db::chunk_count`], which does not know about `document.status`, so
+    /// a document mid-rebuild made `embedded == total` claim coverage the
+    /// arm never had. Pinned by
+    /// `a_pending_documents_embedded_chunks_are_not_claimed_as_coverage`.
+    pub fn eligible_chunk_count(&self) -> Result<i64, Error> {
+        Ok(self
+            .conn()
+            .query_row(&format!("SELECT count(*) {ELIGIBLE_CHUNK}"), [], |r| {
+                r.get(0)
+            })?)
+    }
+
     /// How many vector spaces the index holds at all.
     ///
     /// **Not a diagnostic.** It exists so a caller holding

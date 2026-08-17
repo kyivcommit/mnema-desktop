@@ -45,6 +45,7 @@ impl DenseAnswers {
                     chunks,
                     embedded: e,
                     total: t,
+                    ..
                 } => {
                     by_question.insert(q.id.clone(), chunks);
                     embedded = e;
