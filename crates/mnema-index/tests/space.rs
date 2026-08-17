@@ -630,6 +630,11 @@ fn a_tie_wider_than_k_lets_insertion_order_choose_who_is_cut() {
         "descending insertion (31..=1) must keep a different 30"
     );
 
+    // A measurement of today's vec0, not a guarantee this code owes: a
+    // future sqlite-vec that makes selection insertion-independent would
+    // turn this red for a *good* change. What the code does guarantee,
+    // and what would still hold then, is that each result is sorted by
+    // `chunk_id` on its own — asserted separately above.
     assert_ne!(
         ascending, descending,
         "membership at a tie wider than k is vec0's own choice, not this \
@@ -1451,6 +1456,8 @@ fn knn_searchable_tie_cut_tells_a_window_wide_tie_from_a_narrow_one() {
         "140 ties into a 120-deep window must say so"
     );
     assert!(wide_b.tie_cut);
+    // A measurement of today's vec0, not a guarantee this code owes: see
+    // the identical note on the `Db::knn` version of this assertion above.
     assert_ne!(
         wide_a.chunks, wide_b.chunks,
         "a tie wider than the window is free to disagree between insertion orders"
@@ -1614,6 +1621,13 @@ fn knn_searchable_intersects_a_tag_filter_with_eligibility_in_one_subquery() {
 /// stay unchanged while individual rows moved under it, and this catches
 /// exactly the trap `space.rs:480-500` documents — a `JOIN` in place of the
 /// subquery returns nothing where this returns everything.
+///
+/// **500 chunks at `k = 30`, not fewer.** The tie window is `k * 4` = 120;
+/// a population at or under that never reaches the cut this method exists
+/// to sort, and the round-3 review measured exactly that at the original
+/// 25/`k = 10` size — a passing test that could not see its own claim.
+/// 200 of the 500 for the tag filter, same reason: a smaller restricted
+/// population would leave that branch's cut untested too.
 #[test]
 fn knn_searchable_matches_knn_exactly_on_an_ordinary_corpus() {
     let dir = tempfile::tempdir().unwrap();
@@ -1624,8 +1638,9 @@ fn knn_searchable_matches_knn_exactly_on_an_ordinary_corpus() {
     let space = db.create_space(cfg, 4, "chunker-v1").unwrap();
     let query = tilted(4, 0.0);
 
+    const N: i64 = 500;
     let doc = db
-        .insert_document(&"f".repeat(64), "text/plain", 25, SourceKind::Document)
+        .insert_document(&"f".repeat(64), "text/plain", N, SourceKind::Document)
         .unwrap();
     let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
     let block = db
@@ -1635,13 +1650,13 @@ fn knn_searchable_matches_knn_exactly_on_an_ordinary_corpus() {
                 block_type: BlockType::Paragraph,
                 reading_order: 0,
                 language: Some("uk".into()),
-                text: "т".repeat(25),
+                text: "т".repeat(N as usize),
                 line_start: None,
                 line_end: None,
             },
         )
         .unwrap();
-    let ids: Vec<i64> = (0..25i64)
+    let ids: Vec<i64> = (0..N)
         .map(|i| {
             let chunk = db
                 .insert_chunk(
@@ -1662,7 +1677,7 @@ fn knn_searchable_matches_knn_exactly_on_an_ordinary_corpus() {
                 .unwrap();
             // Distinct distances: no ties to make the two methods agree by
             // accident on which of a tied group they each kept.
-            db.insert_vector(space, chunk, &tilted(4, 1.0 + i as f32 * 0.05))
+            db.insert_vector(space, chunk, &tilted(4, 1.0 + i as f32 * 0.001))
                 .unwrap();
             chunk
         })
@@ -1670,7 +1685,7 @@ fn knn_searchable_matches_knn_exactly_on_an_ordinary_corpus() {
     db.set_document_status(&doc, DocumentStatus::Indexed)
         .unwrap();
 
-    let k = 10;
+    let k = 30;
     let via_knn = db.knn(space, &query, k, None).unwrap();
     let via_searchable = db.knn_searchable(space, &query, k, None).unwrap();
     assert_eq!(
@@ -1680,7 +1695,7 @@ fn knn_searchable_matches_knn_exactly_on_an_ordinary_corpus() {
     assert!(!via_searchable.tie_cut, "no ties in this fixture");
 
     // The same question through the tag-filtered branch on both sides.
-    let tag = &ids[3..13];
+    let tag = &ids[50..250];
     let via_knn_tagged = db.knn(space, &query, k, Some(tag)).unwrap();
     let via_searchable_tagged = db.knn_searchable(space, &query, k, Some(tag)).unwrap();
     assert_eq!(
@@ -1756,14 +1771,33 @@ fn delete_document_is_atomic_inside_a_callers_transaction() {
         survived.is_some(),
         "the document must survive a rolled-back delete"
     );
+
+    // Round-3 review, R1: the rollback row above is satisfied by a
+    // `delete_document` that sweeps nothing at all — a vector nobody
+    // deleted "survives" a rollback too. This is the row that tells that
+    // apart from a real sweep: a second chunk, deleted inside a
+    // transaction that actually commits, must not be there afterward.
+    let doc2 = "9".repeat(64);
+    let chunk2 = write_one_chunk(&db, &doc2, "will not survive a commit");
+    db.upsert_vector(space, chunk2, &support::other_unit_vector_1024())
+        .unwrap();
+    db.transaction(|_| db.delete_document(&doc2)).unwrap();
+    assert_eq!(
+        db.embedded_chunk_count(space).unwrap(),
+        1,
+        "a committed delete must sweep its own vector, leaving only the \
+         rolled-back one behind"
+    );
 }
 
 /// T7 (design §9, §2): what the design's `file:line` reachability argument
-/// would fail to prove if it were wrong. Exercises the two vector-bearing
-/// destructive paths through their public methods only —
-/// `delete_document` and `clear_document_content` — and then scans every
-/// `vec_emb_<n>` table for a row that fails either half of eligibility: no
-/// `chunk` row, or a `chunk` whose document is not `indexed`.
+/// would fail to prove if it were wrong. Exercises `delete_document` and
+/// `clear_document_content` through their public methods; the third
+/// vector-bearing destructive path, `delete_watched_root`, is pinned
+/// separately by `removing_a_root_takes_its_documents_vectors_too`
+/// (`root_removal.rs`). Then scans every `vec_emb_<n>` table for a row
+/// that fails either half of eligibility: no `chunk` row, or a `chunk`
+/// whose document is not `indexed`.
 #[test]
 fn every_vector_names_an_eligible_chunk() {
     let dir = tempfile::tempdir().unwrap();
