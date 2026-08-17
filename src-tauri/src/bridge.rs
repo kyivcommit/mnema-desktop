@@ -193,6 +193,18 @@ pub(crate) fn arm_is_on(value: Option<String>) -> bool {
 /// improve on — `content_failure` already covers a broken credential
 /// store; this also covers no model and a failed embed. `Ok((Some(_),
 /// None))` is ready for `search` to answer with.
+///
+/// **Two kinds of failure, told apart.** `IndexNotOpen` and `StatePoisoned`
+/// come from `with_index` itself and reject the whole command — the index
+/// cannot be read at all, by either arm. `active_space` and `space_model`
+/// failing inside the closure — `NoSuchSpace` from a `meta.active_space`
+/// left dangling by a confirmed-but-unfinished model change
+/// (`models.rs:243-258`), among others — describe only the content arm and
+/// become `ContentArmReport::Failed`, the same as `content_failure`
+/// already is. Before D111 split `content_arm` in two, its
+/// single-connection form made exactly this choice (`content.rs:183-199`);
+/// the split let these two escape through `?` instead. Pinned by
+/// `an_index_failure_inside_the_content_arm_stays_local_to_it`.
 fn resolve_content_query(
     state: &State<'_, AppState>,
     provider: &Option<Provider>,
@@ -209,17 +221,26 @@ fn resolve_content_query(
     let Some(provider) = provider else {
         return Ok((None, Some(ContentArmReport::NoKey)));
     };
-    let resolved = state.with_index(|db| {
-        Ok(match db.active_space()? {
-            Some(space_id) => {
-                let (model, _width) = db.space_model(space_id)?;
-                Some((space_id, model))
-            }
-            None => None,
+    let resolved: Result<Option<(i64, String)>, mnema_index::Error> = state.with_index(|db| {
+        Ok(match db.active_space() {
+            Ok(Some(space_id)) => db
+                .space_model(space_id)
+                .map(|(model, _width)| Some((space_id, model))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
         })
     })?;
-    let Some((space_id, model)) = resolved else {
-        return Ok((None, Some(ContentArmReport::NoModel)));
+    let (space_id, model) = match resolved {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return Ok((None, Some(ContentArmReport::NoModel))),
+        Err(e) => {
+            return Ok((
+                None,
+                Some(ContentArmReport::Failed {
+                    reason: e.to_string(),
+                }),
+            ));
+        }
     };
     match mnema_search::embed_query(provider, &model, query) {
         Ok(vector) => Ok((Some(mnema_search::ContentQuery { space_id, vector }), None)),

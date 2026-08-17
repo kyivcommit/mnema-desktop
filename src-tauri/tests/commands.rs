@@ -14,8 +14,10 @@ use std::time::Duration;
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_desktop::bridge;
 use mnema_desktop::job::JobEvent;
+use mnema_desktop::models::{ExistingVectors, set_embedding_model, set_key};
 use mnema_desktop::state::AppState;
 use mnema_desktop::walk_job;
+use mnema_mock_provider::{MockServer, Reply};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, Channel, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, mock_builder, mock_context, noop_assets};
@@ -57,6 +59,27 @@ fn app_in(dir: &std::path::Path) -> tauri::App<MockRuntime> {
             support::worker().to_path_buf(),
             NO_PROVIDER.to_string(),
             format!("mnema-desktop-commands-test-{}", dir.display()),
+        ))
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application")
+}
+
+/// An application whose provider is a real, local mock server rather than
+/// [`NO_PROVIDER`] — for the one test in this file that needs a model
+/// actually adopted. A fresh in-memory credential store per app, the same
+/// guard `support/fixture.rs`'s own doc explains at length: `mnema-secrets`
+/// only skips the platform store under its own `cfg(test)`, so an
+/// integration test of another crate would otherwise reach a developer's
+/// real keychain.
+fn app_with_provider(dir: &std::path::Path, base: &str) -> tauri::App<MockRuntime> {
+    mnema_secrets::test_store::register();
+    mock_builder()
+        .manage(AppState::new(
+            dir.to_path_buf(),
+            support::worker().to_path_buf(),
+            base.to_string(),
+            format!("mnema-desktop-commands-provider-test-{}", dir.display()),
         ))
         .invoke_handler(mnema_desktop::invoke_handler())
         .build(mock_context(noop_assets()))
@@ -901,6 +924,80 @@ fn search_returns_citations_not_ids() {
         answer["text"]["matched"],
         json!(1),
         "the one-chunk fixture should be counted, not zeroed: {answer}"
+    );
+}
+
+/// Codex round 3, Finding 1 — a regression from the `content_arm` split for
+/// D111. Before the split, `content_arm` turned `active_space` and
+/// `space_model` errors into `ContentArm::Failed` (`content.rs:183-199`
+/// still does, on the single-connection path). After the split,
+/// `resolve_content_query` let those errors escape through `?` and reject
+/// the whole IPC command, throwing away an already-computable lexical
+/// answer. `models.rs:243-258` names how a dangling `meta.active_space` is
+/// reachable without a corrupt file: a confirmed model change that commits
+/// `drop_space` and then fails adoption. Reproduced here the same way,
+/// through `Db::drop_space` directly, and asked through the real `search`
+/// command rather than `resolve_content_query` alone — the defect was that
+/// the error escaped to the command boundary, so the pin has to sit there
+/// too.
+#[test]
+fn an_index_failure_inside_the_content_arm_stays_local_to_it() {
+    const KEY: &str = "test-key-not-a-real-one-round3-f1";
+    const MODEL: &str = "baai/bge-m3";
+    const DIM: usize = 1024;
+    const CREDITS: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#;
+
+    let server = MockServer::new(vec![
+        Reply::ok(CREDITS),
+        Reply::ok(&mnema_mock_provider::two_vectors(DIM)),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+
+    state.open_index().expect("the index opens");
+    set_key(state.clone(), KEY.into()).expect("the key is accepted");
+    let adopted = set_embedding_model(state.clone(), MODEL.into(), ExistingVectors::Keep)
+        .expect("the default model is adopted");
+
+    // The shape `models.rs:243-258` names: `drop_space` alone, leaving
+    // `meta.active_space` pointing at a space that no longer exists — the
+    // debris a confirmed model change leaves if `drop_space` commits and
+    // the adoption that follows it does not.
+    state
+        .with_index(|db| db.drop_space(adopted.space_id))
+        .expect("drop the space directly, the way a failed re-adoption would");
+
+    let text_dir = fixture_dir();
+    let webview = main_webview(&app);
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": text_dir.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    run_walk_to_completion(&app, root);
+
+    let answer = call(&webview, "search", json!({ "query": "fox" }))
+        .expect("a dangling active_space must not reject the whole command");
+
+    assert_eq!(
+        answer["text"]["kind"],
+        json!("answered"),
+        "the lexical arm must survive an index failure in the content arm: {answer}"
+    );
+    assert!(
+        answer["hits"]
+            .as_array()
+            .is_some_and(|hits| !hits.is_empty()),
+        "the lexical hit must still reach the window: {answer}"
+    );
+    assert_eq!(
+        answer["content"]["kind"],
+        json!("failed"),
+        "the content arm alone must report the failure: {answer}"
     );
 }
 
