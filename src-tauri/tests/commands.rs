@@ -14,7 +14,7 @@ use std::time::Duration;
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_desktop::bridge;
 use mnema_desktop::job::JobEvent;
-use mnema_desktop::models::{ExistingVectors, set_embedding_model, set_key};
+use mnema_desktop::models::set_key;
 use mnema_desktop::state::AppState;
 use mnema_desktop::walk_job;
 use mnema_mock_provider::{MockServer, Reply};
@@ -976,20 +976,27 @@ fn search_returns_citations_not_ids() {
 fn an_index_failure_inside_the_content_arm_stays_local_to_it() {
     const KEY: &str = "test-key-not-a-real-one-round3-f1";
     const MODEL: &str = "baai/bge-m3";
-    const DIM: usize = 1024;
+    const DIM: i64 = 1024;
     const CREDITS: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#;
 
-    let server = MockServer::new(vec![
-        Reply::ok(CREDITS),
-        Reply::ok(&mnema_mock_provider::two_vectors(DIM)),
-    ]);
+    // Round-3 adversarial review, R-3's own broken-case investigation: this
+    // test used to go through `models::set_embedding_model` (the checked,
+    // network-backed command), the only call to it in this file. Mutating
+    // that command's own `existing_vectors` parameter — an unrelated,
+    // pre-round-3 mutation case in `scripts/mutations/embedding.sh` — broke
+    // this test binary's compilation instead of the case's own target,
+    // because `commands.rs` is compiled whole. `Db::adopt_embedding_model`
+    // directly needs no network call at all and cannot collide with a
+    // mutation of a command this test was never testing.
+    let server = MockServer::new(vec![Reply::ok(CREDITS)]);
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
 
     state.open_index().expect("the index opens");
     set_key(state.clone(), KEY.into()).expect("the key is accepted");
-    let adopted = set_embedding_model(state.clone(), MODEL.into(), ExistingVectors::Keep)
+    let adopted = state
+        .with_index(|db| db.adopt_embedding_model(MODEL, DIM, "credential-ref", "chunker-v1"))
         .expect("the default model is adopted");
 
     // The shape `models.rs:243-258` names: `drop_space` alone, leaving
