@@ -408,16 +408,33 @@ fn rebuild_one_chunk(db: &mnema_index::Db, doc: &str, text: &str) -> i64 {
     chunk
 }
 
-/// Round-2 review, F1: the mechanism was pinned by
-/// `crates/mnema-search/tests/snapshot_boundary.rs`, but nothing pinned that
-/// `bridge::search` itself wraps its own work in `Db::read_snapshot` —
-/// removing that call left the whole workspace suite green. A real second
-/// connection rebuilds the matched document — reused chunk id, a different
-/// marker word — while the real `search` IPC command runs. Measured red
-/// without the fix: the rebuild sometimes lands between the delete and the
-/// reinsert (missing from the answer), sometimes after (the new marker
-/// reaches the answer) — both impossible with the snapshot in place. See
-/// the comments below for how the race and the ranking are built.
+/// Finds `chunk_id` among `answer`'s hits and asserts its citation still
+/// carries `word` — shared by the control search below and the raced one,
+/// so both check the identical property and a panic from either names the
+/// same failure shape.
+fn assert_citation_carries(answer: &Value, chunk_id: i64, word: &str) {
+    let hits = answer["hits"].as_array().expect("hits array");
+    let hit = hits
+        .iter()
+        .find(|h| h["chunkId"] == json!(chunk_id))
+        .unwrap_or_else(|| panic!("the target chunk did not rank into the answer: {hits:?}"));
+    let text = hit["text"].as_str().unwrap();
+    assert!(
+        text.contains(word),
+        "the chunk was matched because its text held {word:?}, but the citation read back \
+         {text:?}: {hits:?}"
+    );
+}
+
+/// Round-2 review, F1: nothing pinned that `bridge::search` itself wraps
+/// its own work in `Db::read_snapshot`, only that the mechanism works
+/// (`crates/mnema-search/tests/snapshot_boundary.rs`) — removing that call
+/// left the whole suite green. A real second connection rebuilds the
+/// matched document — reused chunk id, a different marker word — while
+/// the real `search` IPC command runs. Round-3 re-review measured this
+/// test's own catch rate under both build profiles and found it profile-
+/// dependent at first; the fixture-size and control comments below cover
+/// what changed and why. Full repeat-count numbers in the private report.
 #[test]
 fn a_rebuild_racing_the_ipc_search_does_not_reach_its_citation() {
     let dir = tempfile::tempdir().unwrap();
@@ -436,10 +453,13 @@ fn a_rebuild_racing_the_ipc_search_does_not_reach_its_citation() {
     // `AUTOINCREMENT` (the defect this whole branch closes), and SQLite only
     // reuses the *highest* freed id — `citation.rs:1301-1325`'s own fixture
     // relies on the identical ordering. Inserted any other way, deleting the
-    // target would free an id below the corpus max and the rebuild below
-    // would never reuse it at all.
+    // target frees an id below the corpus max and the rebuild never reuses
+    // it. 6000, not 1500: at 1500 this was 25/25 red under debug but 25/25
+    // green under `--release` (the command finished inside the writer's
+    // head start once optimised) — widened, now 25/25 both ways, both
+    // profiles.
     let writer = mnema_index::open(&path).unwrap();
-    for i in 0..1500 {
+    for i in 0..6000 {
         let filler_doc = format!("{i:064x}");
         writer
             .insert_document(&filler_doc, "text/plain", 1, SourceKind::Document)
@@ -453,19 +473,28 @@ fn a_rebuild_racing_the_ipc_search_does_not_reach_its_citation() {
     let unique_word = "маркер";
     // Doubled term frequency for both query terms: inserted last, the
     // target would tie-break to the *bottom* of `ORDER BY rank,
-    // chunk_fts.rowid` against 1500 once-each fillers, and never reach
+    // chunk_fts.rowid` against 6000 once-each fillers, and never reach
     // `SEARCH_LIMIT`. bm25 rewards term frequency enough to overcome that on
     // its own — measured, not assumed, by the fixture below actually
     // finding it.
     let original_text = format!("спільний спільний термін термін {unique_word}");
     let target_chunk = rebuild_one_chunk(&writer, &target_doc, &original_text);
 
+    // Control, before the writer thread exists to race against: round-2's
+    // only observed failure in debug was "the target chunk did not rank
+    // into the answer", which an unrelated ranking regression would also
+    // produce. This proves the fixture and ranking work on their own, so a
+    // failure below can only mean the race reached the citation.
+    let control = call(&webview, "search", json!({ "query": "спільний термін" }))
+        .expect("control search was rejected");
+    assert_citation_carries(&control, target_chunk, unique_word);
+
     let writer_handle = std::thread::spawn(move || {
         // A short, deliberately generous head start: `matching`'s sort over
-        // 1500+ tied rows (see the doc comment above) takes low
-        // milliseconds, comfortably longer than this — see the branch's own
-        // measured snapshot hold time in the private report for the
-        // comparable timing this rests on.
+        // 6000+ tied rows (see the doc comment above) takes low
+        // milliseconds under a debug build and low hundreds of microseconds
+        // optimised — both comfortably longer than this, measured by the
+        // repeat counts the doc comment above states.
         std::thread::sleep(Duration::from_millis(2));
         writer
             .clear_document_content(&target_doc)
@@ -486,18 +515,7 @@ fn a_rebuild_racing_the_ipc_search_does_not_reach_its_citation() {
         .expect("search was rejected");
     writer_handle.join().expect("the writer thread panicked");
 
-    let hits = answer["hits"].as_array().expect("hits array");
-    let hit = hits
-        .iter()
-        .find(|h| h["chunkId"] == json!(target_chunk))
-        .unwrap_or_else(|| panic!("the target chunk did not rank into the answer: {hits:?}"));
-    let text = hit["text"].as_str().unwrap();
-    assert!(
-        text.contains(unique_word),
-        "the chunk was matched because its text held {unique_word:?}, but the citation \
-         read back {text:?} — the rebuild that landed inside the search reached a citation \
-         it should never have been visible to: {hits:?}"
-    );
+    assert_citation_carries(&answer, target_chunk, unique_word);
 }
 
 #[test]
