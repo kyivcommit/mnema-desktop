@@ -4,10 +4,10 @@ mod support;
 
 /// Codex review on PR #10: `Db::knn` answers straight from the vector
 /// table, with no join back to `chunk` — a vector can outlive the chunk it
-/// embeds (`crates/mnema-index/src/space.rs:539`'s own doc says so, for
-/// `delete_document`). A neighbour ranked ahead of a live chunk but with no
-/// row left in `chunk` must not appear in the answer, and must not push a
-/// live chunk out of it either.
+/// embeds, through `insert_vector`/`upsert_vector` writing an id no `chunk`
+/// row backs (`Db::chunk_count`'s own doc). A neighbour ranked ahead of a
+/// live chunk but with no row left in `chunk` must not appear in the
+/// answer, and must not push a live chunk out of it either.
 #[test]
 fn an_orphaned_neighbour_is_skipped_without_shortening_the_answer() {
     let f = support::indexed_space();
@@ -63,10 +63,18 @@ fn an_orphaned_neighbour_is_skipped_without_shortening_the_answer() {
     f.db.upsert_vector(space, victim_chunk, &victim_vector)
         .expect("victim vector");
 
-    // The chunk row goes; `vec0` cannot hold a foreign key to it (G7.0
-    // §5.7), so the vector survives it — an orphan ranked first, since the
-    // query below asks for exactly this vector.
-    f.db.delete_document(&victim_doc)
+    // Raw SQL, not `Db::delete_document`: round-3's fix made that method
+    // sweep a document's vectors itself (`delete_document_sweeps_its_own_
+    // vectors`, `mnema-index/tests/space.rs`), so it no longer leaves this
+    // orphan behind. What is reconstructed here directly is the residual
+    // gap `Db::chunk_count`'s own doc still names: `insert_vector`/
+    // `upsert_vector` writing a `chunk_id` no `chunk` row backs, held by a
+    // test rather than a type. `vec0` cannot hold a foreign key to `chunk`
+    // (G7.0 §5.7), so the vector survives the document's deletion — an
+    // orphan ranked first, since the query below asks for exactly this
+    // vector.
+    f.db.conn()
+        .execute("DELETE FROM document WHERE id = ?1", [victim_doc.as_str()])
         .expect("delete the victim document");
 
     let row: Vec<String> = victim_vector.iter().map(|v| v.to_string()).collect();
