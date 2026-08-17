@@ -806,12 +806,14 @@ impl Db {
     /// is, by [`Db::record_embedding_failure`]; [`Db::insert_vector`] writes
     /// only the `vec0` table — so a check reading that table alone would call
     /// a space full of vectors empty: an assertion satisfied by zero from one
-    /// side. And a `vec0` table takes no foreign key, so a
-    /// vector can still outlive the chunk it embeds and the
-    /// `chunk_embedding_state` row that cascaded away with it —
-    /// [`Db::clear_document_content`] closed that for a rebuild (D88), but
-    /// [`Db::delete_document`] has not — so a check reading only `vec_emb_<id>`
-    /// would be satisfied by zero from the other side instead.
+    /// side. And a `vec0` table takes no foreign key, so a vector can still
+    /// outlive the chunk it embeds and the `chunk_embedding_state` row that
+    /// cascaded away with it — [`Db::clear_document_content`] (D88) and
+    /// [`Db::delete_document`] (round-3, Finding 6) close that for every
+    /// product path, but [`Db::insert_vector`]/[`Db::upsert_vector`] writing
+    /// a `chunk_id` no `chunk` row backs is still reachable directly, so a
+    /// check reading only `vec_emb_<id>` would be satisfied by zero from the
+    /// other side instead.
     ///
     /// A space that does not exist is **not** empty — it is absent, and that
     /// arrives as [`Error::NoSuchSpace`] rather than as `Ok(true)`. Two facts
