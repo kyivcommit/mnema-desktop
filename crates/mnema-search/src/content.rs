@@ -70,11 +70,12 @@ pub enum ContentArm {
     },
 }
 
-/// `knn`, filtered to ids `Db::citation` still recognises — not reachable
-/// through any write path `search` depends on, except `Db::delete_document`
-/// (`space.rs:647-656`), a documented exception that leaves vectors behind.
-/// This filter stays load-bearing against that one path, pinned by
-/// `every_vector_names_a_chunk_that_still_holds_its_text`.
+/// `knn`, filtered to ids `Db::citation` still recognises. An orphaned
+/// neighbour is not reachable through any write path `search` depends on,
+/// except `Db::delete_document` (`space.rs:647-656`), a documented
+/// exception that leaves vectors behind — this filter stays load-bearing
+/// against that one path, pinned by
+/// `an_orphaned_neighbour_is_skipped_without_shortening_the_answer`.
 /// Margin `k * 2` (capped at `knn`'s own 4096) drops any orphan and still
 /// returns `k` live ids. A failed lookup fails the call outright, not "no
 /// such chunk". Pinned by
