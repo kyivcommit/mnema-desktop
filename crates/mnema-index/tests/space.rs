@@ -604,8 +604,14 @@ fn a_tie_wider_than_k_lets_insertion_order_choose_who_is_cut() {
             "the cut must land the same way on every call against one database"
         );
     }
+    // Membership only, order deliberately washed out: sortedness is asserted
+    // on its own below, and an `assert_eq!` against an ordered `Vec` bundles
+    // the two so tightly that neither can be driven red without the other.
+    // Sorted-set equality plus that assertion is the same claim, told apart.
+    let mut ascending_members = ascending.clone();
+    ascending_members.sort();
     assert_eq!(
-        ascending,
+        ascending_members,
         (2..=31).collect::<Vec<i64>>(),
         "ascending insertion (1..=31) must keep the 30 most recently inserted ids"
     );
@@ -624,17 +630,31 @@ fn a_tie_wider_than_k_lets_insertion_order_choose_who_is_cut() {
     let descending = descending_db
         .knn(descending_space, &query, 30, None)
         .unwrap();
+    let mut descending_members = descending.clone();
+    descending_members.sort();
     assert_eq!(
-        descending,
+        descending_members,
         (1..=30).collect::<Vec<i64>>(),
         "descending insertion (31..=1) must keep a different 30"
+    );
+
+    // Order on its own, apart from membership: driven red by turning `knn`'s
+    // secondary key round (`chunk_id DESC`), which leaves both memberships
+    // above untouched. This is the half the code owes whatever vec0 selects.
+    assert!(
+        ascending.is_sorted(),
+        "each result must be sorted by chunk_id, whatever vec0 selected"
+    );
+    assert!(
+        descending.is_sorted(),
+        "each result must be sorted by chunk_id, whatever vec0 selected"
     );
 
     // A measurement of today's vec0, not a guarantee this code owes: a
     // future sqlite-vec that makes selection insertion-independent would
     // turn this red for a *good* change. What the code does guarantee,
     // and what would still hold then, is that each result is sorted by
-    // `chunk_id` on its own — asserted separately above.
+    // `chunk_id` on its own — asserted just above, without membership.
     assert_ne!(
         ascending, descending,
         "membership at a tie wider than k is vec0's own choice, not this \

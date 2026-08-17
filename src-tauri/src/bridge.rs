@@ -200,7 +200,7 @@ pub(crate) fn arm_is_on(value: Option<String>) -> bool {
 /// `ContentArmReport::Failed` rather than escaping through `with_index`'s
 /// own `?`. That outer `?` is for `IndexNotOpen`/`StatePoisoned`, and is
 /// unreachable from `search`: its own earlier `with_index` call (the arm
-/// toggles, `bridge.rs:272`) rejects on either first. Pinned by
+/// toggles, `bridge.rs:273`) rejects on either first. Pinned by
 /// `an_index_failure_inside_the_content_arm_stays_local_to_it`.
 fn resolve_content_query(
     state: &State<'_, AppState>,
