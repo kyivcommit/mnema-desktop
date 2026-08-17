@@ -1317,6 +1317,30 @@ test("a refused press leaves the bar as it was and puts the settings line back",
 // comments; a block comment or a template literal's `${...}` containing an
 // unbalanced paren could still desync it, and `main.js` has neither near a
 // `withSearchGated(` call today.
+//
+// Two routes review found and this file now closes, kept here rather than
+// only at their own definitions because this is where a reader checking
+// "what can still get past this" starts:
+//
+// - **A deferred `invoke()` inside a gate.** Lexical containment inside
+//   `withSearchGated(...)` is not runtime containment — an `invoke()`
+//   written inside a `setTimeout`/`.then`/`queueMicrotask`/
+//   `requestAnimationFrame` callback runs after that callback's turn, by
+//   which point the gate it is textually nested inside has already
+//   reopened. `deferralRanges` below finds these the same way `gatedRanges`
+//   finds the barrier itself, and the test folds a call found inside one
+//   into "ungated" even when it is also, lexically, inside a gate.
+// - **The allowlist itself.** `OUT_OF_SCOPE_COMMANDS` cannot be made
+//   un-editable — an allowlist has to stay editable, or nothing new could
+//   ever legitimately be added to it — but the most likely way to silence
+//   this floor test is a one-line addition there instead of gating a real
+//   mutation. `no out-of-scope command name looks like a config mutation`,
+//   below, narrows that: every command this file actually mutates config
+//   through is named `set_*` or `forget_*`, so a name shaped like one of
+//   those appearing in the allowlist is the shape of the mistake to catch.
+//   This does not close the route, only narrows it — a mutation named
+//   something that does not start with `set_`/`forget_` could still be
+//   allowlisted quietly, and that is a real, remaining soft spot.
 const mainJsPath = fileURLToPath(new URL("./main.js", import.meta.url));
 
 // Returns the source index one past the `)` that closes the `(` at
@@ -1370,6 +1394,36 @@ const gatedRanges = (src) => {
   return ranges;
 };
 
+// A1 (post-review addition): every `[start, end)` span textually inside a
+// deferral construct's own call — `setTimeout(...)`, `.then(...)`,
+// `queueMicrotask(...)`, `requestAnimationFrame(...)`. Lexical containment
+// inside `withSearchGated(...)` is not runtime containment: an `invoke(...)`
+// written inside one of these callbacks runs after that callback's turn on
+// the event loop, by which point the gate it is textually nested inside has
+// already reopened. A planted `setTimeout(async () => { await
+// invoke("set_evil_deferred", ...) }, 0)` inside a `withSearchGated(...)`
+// body passed the site test before this existed — the base check only asks
+// "is this text between two parens", and it was.
+//
+// This does **not** forbid a deferral construct from appearing inside a
+// gate — `main.js` already has a legitimate one (`refreshSettings().then(
+// (settings) => { ... })` inside the embed handler's `onProgress` callback,
+// restating an ending once the settings redraw lands) and forbidding the
+// *construct* rather than an `invoke()` inside it would turn that red for
+// no reason. Only `invoke(...)` calls found inside one of these spans count.
+const deferralRanges = (src) => {
+  const ranges = [];
+  const re = /\b(?:setTimeout|queueMicrotask|requestAnimationFrame)\(|\.then\(/g;
+  let m;
+  while ((m = re.exec(src))) {
+    // Each alternative above ends in a literal "(" — its index is the last
+    // character of the match.
+    const openParen = m.index + m[0].length - 1;
+    ranges.push([m.index, matchParen(src, openParen)]);
+  }
+  return ranges;
+};
+
 // Every `invoke(...)` call site: the command name if it is a string
 // literal, or the identifier if it is computed — the `set_rerank_model`/
 // `set_chat_model` shape.
@@ -1398,25 +1452,60 @@ const OUT_OF_SCOPE_COMMANDS = new Set([
   "search",
 ]);
 
-test("every config-mutating invoke() in main.js is inside withSearchGated(...)", () => {
+test("every config-mutating invoke() in main.js is inside withSearchGated(...), and not deferred out of it", () => {
   const src = readFileSync(mainJsPath, "utf8");
   const ranges = gatedRanges(src);
   assert.ok(ranges.length > 0, "premise: withSearchGated(...) exists in main.js at all");
+  const deferrals = deferralRanges(src);
 
   const ungated = invokeCalls(src).filter((call) => {
     if (call.literal !== null && OUT_OF_SCOPE_COMMANDS.has(call.literal)) {
       return false;
     }
-    return !ranges.some(([start, end]) => call.index > start && call.index < end);
+    const insideGate = ranges.some(([start, end]) => call.index > start && call.index < end);
+    if (!insideGate) {
+      // Never reached the barrier lexically at all — the base violation.
+      return true;
+    }
+    // A1: inside the gate textually, but also inside a deferral construct
+    // that is itself inside the gate — the gate has already reopened by the
+    // time this call actually runs, so this counts as ungated too.
+    return deferrals.some(([ds, de]) => call.index > ds && call.index < de);
   });
 
   assert.deepEqual(
     ungated.map((c) => c.literal ?? `<computed: ${c.identifier}>`),
     [],
-    "a config-mutating invoke() is reachable outside the search barrier — every one of these " +
-      "can change what leaves the machine or clobber pending state, and none of them is in " +
-      "§6's out-of-scope list",
+    "a config-mutating invoke() is reachable outside the search barrier — either never inside " +
+      "withSearchGated(...) at all, or inside it only lexically because it runs from a deferred " +
+      "callback (setTimeout/.then/queueMicrotask/requestAnimationFrame) after the gate has " +
+      "already reopened — every one of these can change what leaves the machine or clobber " +
+      "pending state, and none of them is in §6's out-of-scope list",
   );
+});
+
+// A2 (post-review addition): the allowlist above is the one part of this
+// floor test that can be silenced quietly — an unbalanced paren in a
+// comment throws, and a balanced mention of `withSearchGated(` in a comment
+// merely yields an empty (harmless) range, but adding a name to
+// `OUT_OF_SCOPE_COMMANDS` is a legitimate-looking one-line diff that turns
+// a real config mutation invisible to every check above. This does not
+// close that route — it cannot, an allowlist has to stay editable — but it
+// narrows the most likely form of it: every command this file actually
+// mutates config through is named `set_*` or `forget_*` (`set_key`,
+// `set_search_arms`, `set_embedding_model`, `set_rerank_model`,
+// `set_chat_model`, `forget_key`), so a name shaped like one of those
+// showing up in the allowlist is the shape of the mistake to catch, not a
+// coincidence.
+test("no out-of-scope command name looks like a config mutation", () => {
+  for (const name of OUT_OF_SCOPE_COMMANDS) {
+    assert.ok(
+      !name.startsWith("set_") && !name.startsWith("forget_"),
+      `"${name}" is in the out-of-scope allowlist but is shaped like a config mutation — the ` +
+        `most likely way to silence the floor test above is adding a new set_*/forget_* command ` +
+        `here instead of gating it`,
+    );
+  }
 });
 
 // F9: `#search-submit` is enabled in the markup before this round, and the
