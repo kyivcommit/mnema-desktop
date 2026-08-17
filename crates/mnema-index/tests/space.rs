@@ -1607,6 +1607,88 @@ fn knn_searchable_intersects_a_tag_filter_with_eligibility_in_one_subquery() {
     assert_eq!(single.chunks, vec![ids[2]]);
 }
 
+/// Design open question 4 (recall@k before/after): on an ordinary corpus —
+/// every chunk eligible, no ties — `Db::knn` and `Db::knn_searchable` must
+/// answer with the identical id sequence, unfiltered and tag-filtered
+/// alike. Sharper than a `recall@k` comparison and free: an aggregate could
+/// stay unchanged while individual rows moved under it, and this catches
+/// exactly the trap `space.rs:480-500` documents — a `JOIN` in place of the
+/// subquery returns nothing where this returns everything.
+#[test]
+fn knn_searchable_matches_knn_exactly_on_an_ordinary_corpus() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let cfg = db
+        .create_model_config("d", "openrouter", None, "baai/bge-m3", 4)
+        .unwrap();
+    let space = db.create_space(cfg, 4, "chunker-v1").unwrap();
+    let query = tilted(4, 0.0);
+
+    let doc = db
+        .insert_document(&"f".repeat(64), "text/plain", 25, SourceKind::Document)
+        .unwrap();
+    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: Some("uk".into()),
+                text: "т".repeat(25),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap();
+    let ids: Vec<i64> = (0..25i64)
+        .map(|i| {
+            let chunk = db
+                .insert_chunk(
+                    &doc,
+                    i,
+                    "т",
+                    &Locator {
+                        spans: vec![Segment {
+                            block_id: block,
+                            start: 0,
+                            end: 1,
+                            block_start: 0,
+                        }],
+                        coordinate: Coordinate::None,
+                    },
+                    SourceKind::Document,
+                )
+                .unwrap();
+            // Distinct distances: no ties to make the two methods agree by
+            // accident on which of a tied group they each kept.
+            db.insert_vector(space, chunk, &tilted(4, 1.0 + i as f32 * 0.05))
+                .unwrap();
+            chunk
+        })
+        .collect();
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
+
+    let k = 10;
+    let via_knn = db.knn(space, &query, k, None).unwrap();
+    let via_searchable = db.knn_searchable(space, &query, k, None).unwrap();
+    assert_eq!(
+        via_knn, via_searchable.chunks,
+        "an ordinary corpus must rank identically through both methods"
+    );
+    assert!(!via_searchable.tie_cut, "no ties in this fixture");
+
+    // The same question through the tag-filtered branch on both sides.
+    let tag = &ids[3..13];
+    let via_knn_tagged = db.knn(space, &query, k, Some(tag)).unwrap();
+    let via_searchable_tagged = db.knn_searchable(space, &query, k, Some(tag)).unwrap();
+    assert_eq!(
+        via_knn_tagged, via_searchable_tagged.chunks,
+        "the tag-filtered branch must agree too"
+    );
+}
+
 // -------------------------------------------------------------- Finding 6
 
 /// T4 (design §6, §9): `delete_document` sweeps a document's vectors by
