@@ -194,16 +194,11 @@ pub(crate) fn arm_is_on(value: Option<String>) -> bool {
 /// store; this also covers no model and a failed embed. `Ok((Some(_),
 /// None))` is ready for `search` to answer with.
 ///
-/// **Two kinds of failure, told apart.** `IndexNotOpen` and `StatePoisoned`
-/// come from `with_index` itself and reject the whole command — the index
-/// cannot be read at all, by either arm. `active_space` and `space_model`
-/// failing inside the closure — `NoSuchSpace` from a `meta.active_space`
-/// left dangling by a confirmed-but-unfinished model change
-/// (`models.rs:243-258`), among others — describe only the content arm and
-/// become `ContentArmReport::Failed`, the same as `content_failure`
-/// already is. Before D111 split `content_arm` in two, its
-/// single-connection form made exactly this choice (`content.rs:183-199`);
-/// the split let these two escape through `?` instead. Pinned by
+/// **Two kinds of failure, told apart.** `IndexNotOpen`/`StatePoisoned`
+/// come from `with_index` itself and reject the command. `active_space`/
+/// `space_model` failing inside the closure — e.g. `NoSuchSpace` from a
+/// dangling `meta.active_space` (`models.rs:243-258`) — become
+/// `ContentArmReport::Failed` instead. Pinned by
 /// `an_index_failure_inside_the_content_arm_stays_local_to_it`.
 fn resolve_content_query(
     state: &State<'_, AppState>,

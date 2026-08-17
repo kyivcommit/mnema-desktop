@@ -434,9 +434,8 @@ impl Db {
 
     /// Removes a document and everything below it — pages, blocks, chunks,
     /// search rows — **and every `path` row that names it**. Sweeps every
-    /// space's vectors for it first, since a `vec0` table takes no foreign
-    /// key and nothing else would notice one outliving the chunk it embeds.
-    /// Pinned by `delete_document_sweeps_its_own_vectors`.
+    /// space's vectors first — pinned by
+    /// `delete_document_sweeps_its_own_vectors`.
     ///
     /// That last clause is why this is not the method to reach for when
     /// re-indexing. `path.document_id` is `REFERENCES document(id) ON DELETE
@@ -447,12 +446,8 @@ impl Db {
     /// rebuild a document; this is for a document that should genuinely stop
     /// existing, which today means one no path names any more.
     ///
-    /// **No transaction of its own, deliberately.** Every product caller —
-    /// `mnema-ingest`'s `forget_if_unnamed`, reached from `repoint`,
-    /// `record_skip` and reconciliation's phase 3 — already holds one, and
-    /// SQLite has no nested `BEGIN`; a self-transacting form fails exactly
-    /// there, the way `clear_document_content` does. The pair lands or
-    /// rolls back with whatever the caller does, pinned by
+    /// **No transaction of its own** — every product caller already holds
+    /// one, and SQLite forbids nesting. Atomic inside it: pinned by
     /// `delete_document_is_atomic_inside_a_callers_transaction`.
     pub fn delete_document(&self, id: &str) -> Result<(), Error> {
         crate::space::delete_vectors_for_document_in(self.conn(), id)?;
