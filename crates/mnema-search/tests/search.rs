@@ -1,4 +1,113 @@
+use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
+use mnema_index::DocumentStatus;
+
 mod support;
+
+/// Codex round 3, Finding 7 (design §1.2, T2). The lexical arm already
+/// filters `document.status = 'indexed'` (`search.rs:118,142`); before this
+/// fix the content arm filtered only "does `citation` still find it" —
+/// existence, not status — so a chunk from a `Pending`, `Failed` or
+/// `Skipped` document could reach the content arm's answer while the
+/// lexical arm refused it. Both arms are asked the same query over the
+/// same corpus here, and their answers about that corpus must name the
+/// same chunks.
+#[test]
+fn the_content_arm_and_the_lexical_arm_answer_about_the_same_documents() {
+    for hidden in [
+        DocumentStatus::Pending,
+        DocumentStatus::Failed,
+        DocumentStatus::Skipped,
+    ] {
+        let f = support::indexed_space();
+        let space =
+            f.db.active_space()
+                .expect("active space read")
+                .expect("a space is active");
+
+        // A second document, embedded near the query vector and carrying
+        // matching text, then hidden behind `hidden`.
+        let doc =
+            f.db.insert_document(&"d".repeat(64), "text/plain", 64, SourceKind::Document)
+                .expect("hidden document");
+        let page =
+            f.db.insert_page(&doc, 1, "native:txt", None)
+                .expect("hidden page");
+        let block =
+            f.db.insert_block(
+                page,
+                &Block {
+                    block_type: BlockType::Paragraph,
+                    reading_order: 0,
+                    language: Some("uk".into()),
+                    text: "ремонт даху, схований чанк".to_string(),
+                    line_start: None,
+                    line_end: None,
+                },
+            )
+            .expect("hidden block");
+        let hidden_chunk =
+            f.db.insert_chunk(
+                &doc,
+                0,
+                "ремонт даху, схований чанк",
+                &Locator {
+                    spans: vec![Segment {
+                        block_id: block,
+                        start: 0,
+                        end: 26,
+                        block_start: 0,
+                    }],
+                    coordinate: Coordinate::None,
+                },
+                SourceKind::Document,
+            )
+            .expect("hidden chunk");
+        // The exact vector `indexed_space`'s chunk 0 was embedded on, so
+        // the content arm ranks it first alongside chunk 0 — a real tie,
+        // not merely "somewhere in range".
+        let query_vector = support::vector_matching(&f, f.chunk_ids[0]);
+        f.db.upsert_vector(space, hidden_chunk, &query_vector)
+            .expect("hidden vector");
+        f.db.set_document_status(&doc, hidden).expect("hide it");
+
+        let content = mnema_search::ContentQuery {
+            space_id: space,
+            vector: query_vector,
+        };
+        let found = mnema_search::search(
+            &f.db,
+            Some(content),
+            "ремонт даху",
+            true,
+            mnema_index::QueryRule::AnyTerm,
+            mnema_search::FusionRule::TextOnly,
+            20,
+        )
+        .unwrap();
+
+        let content_chunks: Vec<i64> = match found.content {
+            mnema_search::ContentArm::Answered { chunks, .. } => chunks,
+            other => panic!("expected an answer for {hidden:?}, got {other:?}"),
+        };
+        let lexical_chunks: Vec<i64> = match found.text {
+            mnema_search::TextArm::Answered { chunks } => chunks,
+            other => panic!("expected an answer for {hidden:?}, got {other:?}"),
+        };
+        let mut content_sorted = content_chunks.clone();
+        content_sorted.sort();
+        let mut lexical_sorted = lexical_chunks.clone();
+        lexical_sorted.sort();
+        assert_eq!(
+            content_sorted, lexical_sorted,
+            "content and lexical disagreed about the {hidden:?} document: \
+             content {content_chunks:?}, lexical {lexical_chunks:?}"
+        );
+        assert!(
+            !content_chunks.contains(&hidden_chunk),
+            "the content arm returned a chunk from a {hidden:?} document: {content_chunks:?}"
+        );
+    }
+}
 
 /// The text arm shows its own answer even when the content arm has no
 /// input. A search that failed whole because one arm had nothing to run on

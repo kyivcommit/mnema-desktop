@@ -104,13 +104,38 @@ fn an_orphaned_neighbour_is_skipped_without_shortening_the_answer() {
     }
 }
 
-/// The other half of the same fix: telling a gone chunk apart from a
-/// citation lookup that could not answer at all. A database error there is a
-/// defect in this build, not a chunk that no longer exists, and swallowing
-/// it into "skip this id" would silently shrink the answer for a reason
-/// nobody could see.
+/// The other half of the same fix: telling a database error apart from a
+/// chunk `knn_searchable`'s eligibility subquery is entitled to skip in
+/// silence. `chunk`, not `page` — the eligibility subquery reads `chunk`
+/// and `document` directly and never touches `page`, so this is the table
+/// whose absence must reach here as `Failed` after the round-3 fix that
+/// replaced the citation-lookup loop with that subquery.
 #[test]
 fn a_citation_lookup_that_fails_makes_the_arm_failed_not_merely_short() {
+    let f = support::indexed_space();
+    let mock = support::mock_returning_vector_near(&f, f.chunk_ids[0]);
+    let provider = mnema_search::Provider {
+        base: mock.base().to_string(),
+        key: "k".to_string(),
+    };
+    f.db.conn()
+        .execute_batch("ALTER TABLE chunk RENAME TO chunk_hidden_for_test;")
+        .expect("rename the chunk table");
+
+    match mnema_search::content_arm(&f.db, Some(provider), "ремонт даху", 3) {
+        mnema_search::ContentArm::Failed { .. } => {}
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+/// The property this pin protects moved with the fix: renaming `page` no
+/// longer breaks the content arm at all, since neither `knn_searchable`'s
+/// eligibility subquery nor the coverage counts touch it — the failure
+/// that used to come from `citation` now belongs to `bridge.rs`'s own
+/// citation loop, outside this crate. `Answered` here, not `Failed`, is
+/// what proves the property moved rather than merely stopped firing.
+#[test]
+fn renaming_page_no_longer_breaks_the_content_arm() {
     let f = support::indexed_space();
     let mock = support::mock_returning_vector_near(&f, f.chunk_ids[0]);
     let provider = mnema_search::Provider {
@@ -122,8 +147,8 @@ fn a_citation_lookup_that_fails_makes_the_arm_failed_not_merely_short() {
         .expect("rename the page table");
 
     match mnema_search::content_arm(&f.db, Some(provider), "ремонт даху", 3) {
-        mnema_search::ContentArm::Failed { .. } => {}
-        other => panic!("expected a failure, got {other:?}"),
+        mnema_search::ContentArm::Answered { .. } => {}
+        other => panic!("expected an answer, got {other:?}"),
     }
 }
 

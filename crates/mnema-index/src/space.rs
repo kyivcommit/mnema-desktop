@@ -28,6 +28,16 @@ const GIVEN_UP_ON_CURRENT_TEXT: &str = "SELECT 1 FROM chunk_embedding_state s
                   WHERE s.space_id = ?1 AND s.chunk_id = c.id
                     AND s.state = 2 AND s.content_hash = c.content_hash";
 
+/// A chunk a search, or the embedding queue, is allowed to act on: one whose
+/// document is `indexed`. Written once so a chunk the queue refuses to embed
+/// and a chunk search refuses to surface cannot drift into disagreeing about
+/// which one that is. [`the_embedding_queue`] builds its own `FROM`/`WHERE`
+/// on top of this exact clause; [`Db::knn_searchable`] uses it as a genuine
+/// vec0 pre-filter, nested inside the one `IN` vec0 accepts per query.
+/// Expects the outer query to expose the candidate as `c`.
+const ELIGIBLE_CHUNK: &str =
+    "FROM chunk c JOIN document d ON d.id = c.document_id WHERE d.status = 'indexed'";
+
 /// The queue itself: the `FROM` and `WHERE` of "which chunks does this space
 /// still owe a vector", shared by the query that hands them over and the count
 /// that measures how many are left.
@@ -51,9 +61,7 @@ const GIVEN_UP_ON_CURRENT_TEXT: &str = "SELECT 1 FROM chunk_embedding_state s
 /// — binds it a real `i64`, never a NULL.
 fn the_embedding_queue(table: &str) -> String {
     format!(
-        "FROM chunk c
-           JOIN document d ON d.id = c.document_id
-          WHERE d.status = 'indexed'
+        "{ELIGIBLE_CHUNK}
             AND c.id NOT IN (SELECT chunk_id FROM {table})
             AND NOT EXISTS ({GIVEN_UP_ON_CURRENT_TEXT})"
     )
@@ -95,6 +103,21 @@ pub struct AdoptedSpace {
     /// and answering both with one field is how a caller ends up told a space
     /// was created when the call found one.
     pub created: bool,
+}
+
+/// What [`Db::knn_searchable`] found — a struct and not the `(Vec<i64>,
+/// bool)` it would otherwise be, for the reason [`PendingChunk`] above is
+/// not a tuple: two fields nothing about a tuple would notice swapped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Neighbours {
+    /// At most `k` ids, nearest first, a tie broken by ascending id.
+    pub chunks: Vec<i64>,
+    /// Whether the `k`-cut fell inside a tie wider than the window asked
+    /// for — vec0's own choice then, not this method's sort. Read by a
+    /// test, not by `mnema_search::ContentArm`: D106 already draws four
+    /// states apart, and a fifth meaning "two tied chunks read alike" is
+    /// not one a person reading a search result has any use for.
+    pub tie_cut: bool,
 }
 
 impl Db {
@@ -498,6 +521,14 @@ impl Db {
     /// `k` is capped by vec0 at 4096; above that it errors with
     /// `k value in knn query too large`. A tag-filtered "everything under this
     /// tag" is the query that will meet it.
+    ///
+    /// Two more traps of the same class, measured and not yet handled here:
+    /// vec0 takes at most one `rowid in (..)` per query — a second `IN`
+    /// (eligibility beside a tag filter, say) is refused outright, not
+    /// merged. And a `JOIN` inside this query *looks* like a pre-filter and
+    /// is not: vec0 cuts to `k` first, so it filters what `k` already
+    /// discarded. [`Db::knn_searchable`] handles both, as one subquery
+    /// nested inside the single `IN` — deliberately not here.
     pub fn knn(
         &self,
         space_id: i64,
@@ -529,6 +560,68 @@ impl Db {
         ))?;
         let rows = stmt.query_map(params![blob, k, list], first_id)?;
         rows.collect::<Result<Vec<i64>, _>>().map_err(Error::from)
+    }
+
+    /// [`Db::knn`], narrowed to chunks a search is allowed to show —
+    /// [`ELIGIBLE_CHUNK`] as a genuine vec0 pre-filter, intersected with
+    /// `restrict_to` inside the one `IN` vec0 accepts rather than a second
+    /// one. A sibling of `knn`, not a change to it: every `knn` pin in
+    /// `tests/space.rs` inserts vectors for ids with no `chunk` row at all,
+    /// and this filter would answer `[]` there for the wrong reason.
+    ///
+    /// Fetches `k` capped four times over — the tie window, not `k` itself
+    /// — so a tie straddling the cut can be seen and sorted rather than
+    /// resolved by whichever `k` rows vec0 happened to return first.
+    /// `tie_cut` is conservative: `true` whenever the window could not
+    /// prove it saw the whole tie, including the one case where it did.
+    pub fn knn_searchable(
+        &self,
+        space_id: i64,
+        query: &[f32],
+        k: i64,
+        restrict_to: Option<&[i64]>,
+    ) -> Result<Neighbours, Error> {
+        let space = self.space(space_id)?;
+        check_rankable(query, &space.metric, VectorRole::Query)?;
+        let table = space.table;
+        let blob = as_blob(query);
+        let window = (k.saturating_mul(4)).min(4096).max(k);
+
+        let rows: Vec<(i64, f64)> = match restrict_to {
+            None => {
+                let mut stmt = self.conn().prepare(&format!(
+                    "SELECT chunk_id, distance FROM {table}
+                      WHERE embedding MATCH ?1 AND k = ?2
+                        AND chunk_id IN (SELECT c.id {ELIGIBLE_CHUNK})
+                      ORDER BY distance NULLS LAST, chunk_id"
+                ))?;
+                stmt.query_map(params![blob, window], distance_row)?
+                    .collect::<rusqlite::Result<_>>()?
+            }
+            Some(ids) => {
+                let list = serde_json::to_string(ids)?;
+                let mut stmt = self.conn().prepare(&format!(
+                    "SELECT chunk_id, distance FROM {table}
+                      WHERE embedding MATCH ?1 AND k = ?2
+                        AND chunk_id IN (SELECT c.id {ELIGIBLE_CHUNK}
+                                           AND c.id IN (SELECT value FROM json_each(?3)))
+                      ORDER BY distance NULLS LAST, chunk_id"
+                ))?;
+                stmt.query_map(params![blob, window, list], distance_row)?
+                    .collect::<rusqlite::Result<_>>()?
+            }
+        };
+
+        let take = (k as usize).min(rows.len());
+        // Conservative on purpose (own doc comment): `true` whenever the
+        // window returned exactly `window` rows *and* the cut at `take`
+        // sits inside a run of equal distances — including the one case,
+        // population exactly `window` wide, where the whole tie was in
+        // fact captured and a narrower flag could have said `false`.
+        let tie_cut =
+            rows.len() as i64 == window && take > 0 && rows[take - 1].1 == rows[rows.len() - 1].1;
+        let chunks = rows.into_iter().take(take).map(|(id, _)| id).collect();
+        Ok(Neighbours { chunks, tie_cut })
     }
 
     /// Removes every vector — across every embedding space, not only the
@@ -1565,6 +1658,18 @@ fn first_id(row: &rusqlite::Row<'_>) -> rusqlite::Result<i64> {
     row.get(0)
 }
 
+/// A `(chunk_id, distance)` row for [`Db::knn_searchable`]'s tie window.
+/// vec0's NULL distance — an undefined one — maps to `f64::INFINITY`,
+/// already last under `NULLS LAST`; two such rows would then read as a
+/// tie, but `check_rankable` refuses that vector on the write side, so the
+/// case is left rather than special-cased here.
+fn distance_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, f64)> {
+    Ok((
+        row.get(0)?,
+        row.get::<_, Option<f64>>(1)?.unwrap_or(f64::INFINITY),
+    ))
+}
+
 /// The vector table's name: `vec_emb_` and the id as SQLite renders it.
 ///
 /// Unpadded, because `embedding_space.vec_table` CHECKs the name against
@@ -1596,19 +1701,21 @@ mod tests {
     /// `a_distance_tie_breaks_by_chunk_id_and_is_stable_across_calls` builds
     /// a real tie and asserts the order, but vec0 in this build already
     /// happens to return ties in chunk-id order on its own, so that test
-    /// cannot go red if the key below is ever lost from either statement.
-    /// This can: it reads the query text directly.
+    /// cannot go red if the key below is ever lost from any statement.
+    /// This can: it reads the query text directly. Four now, not two:
+    /// `Db::knn_searchable` repeats the same filtered/unfiltered split.
     #[test]
-    fn knn_breaks_distance_ties_by_chunk_id_in_both_statements() {
+    fn knn_breaks_distance_ties_by_chunk_id_in_every_statement() {
         // Split before this very module: `include_str!` reads the whole file,
         // and the pattern below is also this test's own source text.
         let (src, _this_module) = include_str!("space.rs").split_once("#[cfg(test)]").unwrap();
         assert_eq!(
             src.matches("ORDER BY distance NULLS LAST, chunk_id")
                 .count(),
-            2,
-            "`Db::knn` builds two statements (filtered and unfiltered) and both need the \
-             secondary sort key, or a tie can silently swap positions in whichever one lost it"
+            4,
+            "`Db::knn` and `Db::knn_searchable` each build a filtered and an \
+             unfiltered statement, and all four need the secondary sort key, \
+             or a tie can silently swap positions in whichever one lost it"
         );
     }
 }

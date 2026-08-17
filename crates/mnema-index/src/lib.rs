@@ -15,7 +15,7 @@ pub use meta::{
 pub use migrations::SCHEMA_VERSION;
 pub use open::{Db, open, register_vector_extension};
 pub use search::QueryRule;
-pub use space::{AdoptedSpace, PendingChunk, VectorRole};
+pub use space::{AdoptedSpace, Neighbours, PendingChunk, VectorRole};
 pub use text_prep::{prepare_for_search, search_terms};
 pub use write::{Citation, INDEX_FORMAT_VERSION, PathEntry};
 

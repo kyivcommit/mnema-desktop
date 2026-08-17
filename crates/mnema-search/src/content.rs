@@ -70,15 +70,13 @@ pub enum ContentArm {
     },
 }
 
-/// `knn`, filtered to ids `Db::citation` still recognises. An orphaned
-/// neighbour is not reachable through any write path `search` depends on,
-/// except `Db::delete_document` (`space.rs:647-656`), a documented
-/// exception that leaves vectors behind — this filter stays load-bearing
-/// against that one path, pinned by
-/// `an_orphaned_neighbour_is_skipped_without_shortening_the_answer`.
-/// Margin `k * 2` (capped at `knn`'s own 4096) drops any orphan and still
-/// returns `k` live ids. A failed lookup fails the call outright, not "no
-/// such chunk". Pinned by
+/// `Db::knn_searchable`, which already narrows to chunks a search may show
+/// — a real chunk row behind an `indexed` document, the same rule the
+/// lexical arm applies — so an orphan or a hidden-status chunk cannot
+/// reach here. Pinned by
+/// `an_orphaned_neighbour_is_skipped_without_shortening_the_answer` and
+/// `the_content_arm_and_the_lexical_arm_answer_about_the_same_documents`.
+/// A failed lookup fails the call outright. Pinned by
 /// `a_citation_lookup_that_fails_makes_the_arm_failed_not_merely_short`.
 fn knn_live_chunks(
     db: &Db,
@@ -86,19 +84,7 @@ fn knn_live_chunks(
     query: &[f32],
     k: i64,
 ) -> Result<Vec<i64>, mnema_index::Error> {
-    let margin = (k * 2).min(4096);
-    let candidates = db.knn(space_id, query, margin, None)?;
-    let mut live = Vec::new();
-    for id in candidates {
-        if live.len() as i64 >= k {
-            break;
-        }
-        match db.citation(id)? {
-            Some(_) => live.push(id),
-            None => continue,
-        }
-    }
-    Ok(live)
+    Ok(db.knn_searchable(space_id, query, k, None)?.chunks)
 }
 
 /// A query already embedded, and the space it was embedded against — what
