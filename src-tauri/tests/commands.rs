@@ -431,33 +431,62 @@ fn rebuild_one_chunk(db: &mnema_index::Db, doc: &str, text: &str) -> i64 {
     chunk
 }
 
-/// Finds `chunk_id` among `answer`'s hits and asserts its citation still
-/// carries `word` — shared by the control search below and the raced one,
-/// so both check the identical property and a panic from either names the
-/// same failure shape.
-fn assert_citation_carries(answer: &Value, chunk_id: i64, word: &str) {
+/// Round-3 review, Finding 4. The old oracle asserted an *order*: the
+/// citation for the reused chunk id must always read the pre-rebuild text.
+/// That is wrong on both sides of the race — a search that loses the race
+/// outright sees one coherent *new* state and this oracle failed it anyway,
+/// and a writer delayed past the search passed without the race ever being
+/// reached at all. The invariant `Db::read_snapshot` actually buys is
+/// coherence, not order: whichever state a search's answer reflects, it must
+/// be *one* state, never the old chunk's id carrying the new chunk's text
+/// because two different statements inside the same command read two
+/// different moments.
+///
+/// Made checkable by conditioning *inclusion* on the same word the citation
+/// is checked for, rather than treating them as two independent facts. The
+/// query requires `MARKER`, which only the pre-rebuild text holds — so a hit
+/// for `target_chunk` can only exist because some statement inside this
+/// command's snapshot read the chunk while it still held `MARKER`. If the
+/// citation for that same hit does not hold `MARKER`, two different
+/// statements read two different moments: the match came from before the
+/// rebuild and the citation from after it. Absence of the hit is the other
+/// coherent outcome — by the time the snapshot was taken the document no
+/// longer matched, whether because the rebuild had already landed or because
+/// the read fell inside the gap between `clear_document_content`'s commit
+/// and the rebuild's — and `bridge.rs`'s own citation loop already treats a
+/// chunk that is simply gone as no error, not a defect.
+fn assert_coherent_or_absent(answer: &Value, chunk_id: i64) {
+    const MARKER: &str = "маркер";
     let hits = answer["hits"].as_array().expect("hits array");
-    let hit = hits
-        .iter()
-        .find(|h| h["chunkId"] == json!(chunk_id))
-        .unwrap_or_else(|| panic!("the target chunk did not rank into the answer: {hits:?}"));
+    let Some(hit) = hits.iter().find(|h| h["chunkId"] == json!(chunk_id)) else {
+        return;
+    };
     let text = hit["text"].as_str().unwrap();
     assert!(
-        text.contains(word),
-        "the chunk was matched because its text held {word:?}, but the citation read back \
-         {text:?}: {hits:?}"
+        text.contains(MARKER),
+        "the hit exists only because a statement inside this command matched \
+         {MARKER:?}, but its citation does not hold that word — the old \
+         chunk's id carrying the new chunk's text: {text:?}"
     );
+}
+
+/// A document with one chunk holding `text`, for
+/// [`a_rebuild_racing_the_ipc_search_does_not_reach_its_citation`]'s decoys.
+fn write_one_document(db: &mnema_index::Db, id: &str, text: &str) -> i64 {
+    db.insert_document(id, "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    rebuild_one_chunk(db, id, text)
 }
 
 /// Round-2 review, F1: nothing pinned that `bridge::search` itself wraps
 /// its own work in `Db::read_snapshot`, only that the mechanism works
 /// (`crates/mnema-search/tests/snapshot_boundary.rs`) — removing that call
 /// left the whole suite green. A real second connection rebuilds the
-/// matched document — reused chunk id, a different marker word — while
-/// the real `search` IPC command runs. Round-3 re-review measured this
-/// test's own catch rate under both build profiles and found it profile-
-/// dependent at first; the fixture-size and control comments below cover
-/// what changed and why. Full repeat-count numbers in the private report.
+/// matched document — reused chunk id, the query's own required word
+/// replaced — while the real `search` IPC command runs. See
+/// `assert_coherent_or_absent`'s own doc for why the oracle asks about
+/// coherence rather than which text won the race, and the private report
+/// for this fixture's measured catch rate.
 #[test]
 fn a_rebuild_racing_the_ipc_search_does_not_reach_its_citation() {
     let dir = tempfile::tempdir().unwrap();
@@ -472,73 +501,76 @@ fn a_rebuild_racing_the_ipc_search_does_not_reach_its_citation() {
     )
     .expect("set_search_arms was rejected");
 
-    // Fillers first, target last: `chunk.id` is `INTEGER PRIMARY KEY` without
-    // `AUTOINCREMENT` (the defect this whole branch closes), and SQLite only
-    // reuses the *highest* freed id — `citation.rs:1301-1325`'s own fixture
-    // relies on the identical ordering. Inserted any other way, deleting the
-    // target frees an id below the corpus max and the rebuild never reuses
-    // it. 6000, not 1500: at 1500 this was 25/25 red under debug but 25/25
-    // green under `--release` (the command finished inside the writer's
-    // head start once optimised) — widened, now 25/25 both ways, both
-    // profiles.
+    // `bridge.rs`'s `SEARCH_QUERY_RULE` (`TermsInIndex`) demands every term
+    // present anywhere in the index, same as `AllTerms` once all three are:
+    // only a decoy or the target ever holds all three, so only they match,
+    // and `matching`'s own `ORDER BY rank, chunk_fts.rowid` needs a real
+    // sort over all of them — `USE TEMP B-TREE FOR ORDER BY` materialises
+    // every matching row before `LIMIT` applies (`search.rs:130-136`), and
+    // that is the race's width: 6000 decoys costs low milliseconds, the
+    // same order of magnitude as the writer's own head start below,
+    // matched against the fillers `citation.rs:1301-1325`'s own fixture
+    // already relies on for the identical id-reuse ordering. Doubled term
+    // frequency ranks the target ahead of every once-tied decoy, so it is
+    // always the sort's own cost that supplies the width, not where in a
+    // citation loop the target happens to fall.
     let writer = mnema_index::open(&path).unwrap();
-    for i in 0..6000 {
-        let filler_doc = format!("{i:064x}");
-        writer
-            .insert_document(&filler_doc, "text/plain", 1, SourceKind::Document)
-            .unwrap();
-        rebuild_one_chunk(&writer, &filler_doc, "спільний термін заповнювач");
+    const MARKER: &str = "маркер";
+    const DECOYS: usize = 6000;
+    for i in 0..DECOYS {
+        write_one_document(
+            &writer,
+            &format!("{i:064x}"),
+            &format!("спільний термін {MARKER}"),
+        );
     }
     let target_doc = "9".repeat(64);
-    writer
-        .insert_document(&target_doc, "text/plain", 1, SourceKind::Document)
-        .unwrap();
-    let unique_word = "маркер";
-    // Doubled term frequency for both query terms: inserted last, the
-    // target would tie-break to the *bottom* of `ORDER BY rank,
-    // chunk_fts.rowid` against 6000 once-each fillers, and never reach
-    // `SEARCH_LIMIT`. bm25 rewards term frequency enough to overcome that on
-    // its own — measured, not assumed, by the fixture below actually
-    // finding it.
-    let original_text = format!("спільний спільний термін термін {unique_word}");
-    let target_chunk = rebuild_one_chunk(&writer, &target_doc, &original_text);
+    let original_text = format!("спільний спільний термін термін {MARKER} {MARKER}");
+    let target_chunk = write_one_document(&writer, &target_doc, &original_text);
 
-    // Control, before the writer thread exists to race against: round-2's
-    // only observed failure in debug was "the target chunk did not rank
-    // into the answer", which an unrelated ranking regression would also
-    // produce. This proves the fixture and ranking work on their own, so a
-    // failure below can only mean the race reached the citation.
-    let control = call(&webview, "search", json!({ "query": "спільний термін" }))
-        .expect("control search was rejected");
-    assert_citation_carries(&control, target_chunk, unique_word);
+    // Control, before the writer thread exists to race against: this proves
+    // the fixture and ranking work on their own, so a failure below can
+    // only mean the race reached the citation.
+    let control = call(
+        &webview,
+        "search",
+        json!({ "query": "спільний термін маркер" }),
+    )
+    .expect("control search was rejected");
+    assert!(
+        control["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["chunkId"] == json!(target_chunk)),
+        "the fixture on its own must find the target chunk: {control}"
+    );
+    assert_coherent_or_absent(&control, target_chunk);
 
     let writer_handle = std::thread::spawn(move || {
-        // A short, deliberately generous head start: `matching`'s sort over
-        // 6000+ tied rows (see the doc comment above) takes low
-        // milliseconds under a debug build and low hundreds of microseconds
-        // optimised — both comfortably longer than this, measured by the
-        // repeat counts the doc comment above states.
+        // A short, deliberately generous head start over the search this
+        // thread races: the match query's own sort over `DECOYS` tied rows,
+        // comment above, gives it room to land inside that sort.
         std::thread::sleep(Duration::from_millis(2));
         writer
             .clear_document_content(&target_doc)
             .expect("clear the target document");
-        // The same doubled term frequency as `original_text` above, so the
-        // rebuild lands inside the race whether it beats the lexical match
-        // query or not: either way the chunk still ranks and is found, and
-        // only `unique_word` tells the two texts apart at the citation the
-        // search answer carries.
-        rebuild_one_chunk(
-            &writer,
-            &target_doc,
-            "спільний спільний термін термін замінник",
-        );
+        // No `MARKER` in the rebuilt text: the query the search below asks
+        // can no longer match this chunk once this statement has committed,
+        // which is what makes a hit whose citation lacks `MARKER` provable
+        // incoherence rather than an ordinary, harmless miss.
+        rebuild_one_chunk(&writer, &target_doc, "спільний термін замінник");
     });
 
-    let answer = call(&webview, "search", json!({ "query": "спільний термін" }))
-        .expect("search was rejected");
+    let answer = call(
+        &webview,
+        "search",
+        json!({ "query": "спільний термін маркер" }),
+    )
+    .expect("search was rejected");
     writer_handle.join().expect("the writer thread panicked");
 
-    assert_citation_carries(&answer, target_chunk, unique_word);
+    assert_coherent_or_absent(&answer, target_chunk);
 }
 
 #[test]
