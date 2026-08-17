@@ -2471,6 +2471,38 @@ test("every element main.js reaches for exists in index.html", () => {
   }
 });
 
+// Round 3, §3.3: the markup itself has to start `#search-submit` `disabled`
+// — `main.js`'s own barrier (`syncSearchGate`) only closes it from the
+// moment the script actually runs, and there is a real window before that
+// (a deferred or module script, a slow load, a restored session) where a
+// button rendered without this attribute is pressable with nothing on
+// screen yet to say a search should wait. Found by mutation, not by
+// inspection: reverting the whole fix (`main.js` and `index.html` together)
+// against the round-3 test suite kills tests for every other mechanism this
+// round added, but reverting the markup attribute *alone* — with the rest
+// of the fix left standing — killed nothing, because `main.js`'s own
+// `syncSearchGate()` call papers over a missing attribute in every mocked
+// DOM this suite drives. This test reads the raw markup, which nothing else
+// here does.
+//
+// Scoped to `#search-submit`'s own opening tag rather than searching the
+// whole file for the word "disabled": `#walk` and `#cancel` both carry that
+// attribute too, for reasons of their own, and a search for the bare word
+// would be satisfied by either of them even with this button's own
+// attribute removed.
+test("#search-submit starts disabled in the markup itself, not only from main.js's own barrier", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const html = readFileSync(join(here, "index.html"), "utf8");
+  const tag = html.match(/<button\s+id="search-submit"[^>]*>/);
+  assert.ok(tag, "no <button id=\"search-submit\"...> found in index.html at all");
+  assert.match(
+    tag[0],
+    /\bdisabled\b/,
+    "#search-submit's own opening tag does not carry `disabled` — the window between markup " +
+      "parse and the first settings read landing is open again",
+  );
+});
+
 test("each role is named in the sentence that says its model was recorded", () => {
   const said = ROLES.map((role) => roleRecordedSentence(role, "vendor/m"));
   assert.equal(new Set(said).size, ROLES.length, `two roles read alike: ${said}`);
