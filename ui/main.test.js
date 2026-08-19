@@ -1290,84 +1290,118 @@ test("a refused press leaves the bar as it was and puts the settings line back",
 // its own `#[cfg(test)]` block back into its own search and could never go
 // red, fixed by `split_once` before matching. This one reads a *different*
 // file (`main.js`), so there is no self-inclusion to guard against — but it
-// is still a pin over source text, not a real parser, and the two gaps
-// below are the price of that, stated rather than left to be discovered.
+// is still a pin over source text, not a real parser, and the gaps below
+// are the price of that, stated rather than left to be discovered.
 //
 // This does **not** enumerate Class A commands by name and check each one is
 // present — that is the exact shape of mistake this floor test exists to
 // end: a check that passes forever while an eighth site arrives untested.
-// Instead it finds **every** `invoke(...)` call in the file and requires
-// each one to be either explicitly out of scope (§6, plus the two read-only
-// commands the barrier is itself built around — `search`, which it gates
-// from the outside, and `model_settings`, the read that opens it) or
-// lexically inside a `withSearchGated(...)` call. A command this list has
-// never heard of defaults to "must be gated", which is what lets it catch
-// the computed name at the `set_rerank_model`/`set_chat_model` call site
-// (`invoke(command, ...)`, `command` a loop variable, not a string literal)
-// without special-casing it, and what makes it turn red the moment a new
-// config mutation is added anywhere in the file without the barrier —
-// proved below by mutation, not assumed.
+// It finds **every** `invoke(...)` call in the file and requires each one
+// to be either explicitly out of scope (§6, plus the two read-only commands
+// the barrier is itself built around — `search`, which it gates from the
+// outside, and `model_settings`, the read that opens it) or lexically
+// inside a `withSearchGated(...)` call and not deferred out of it.
 //
-// What it cannot see: a comment containing the exact text `invoke("...")`
-// or `withSearchGated(` would be read as a real call site. `main.js` has
-// none today — checked directly, every `invoke(` in it is real code — and
-// this round's own first draft tripped exactly that trap in a comment about
-// the computed-name call, rewritten rather than the check weakened.
-// `matchParen` below only skips parens inside quotes and `//` line
-// comments; a block comment or a template literal's `${...}` containing an
-// unbalanced paren could still desync it, and `main.js` has neither near a
-// `withSearchGated(` call today.
+// U-1 (adversarial pass, F-A2) found the same mistake one level down, in
+// this file's own scan rather than in `main.js`: the original regex found
+// an `invoke(...)` call's argument and classified it in the same step, so
+// an argument shape it could not parse — a template literal, an aliased
+// binding through another name — produced no match *at all*, and the call
+// was invisible rather than reported. And the deferral check named four
+// constructs by hand (`setTimeout`, `.then(`, `queueMicrotask`,
+// `requestAnimationFrame`) and missed three that do the identical thing
+// (`.catch`, `.finally`, `setInterval`) — the third round in a row an
+// enumeration here covered half its sites.
 //
-// Two routes review found and this file now closes, kept here rather than
-// only at their own definitions because this is where a reader checking
-// "what can still get past this" starts:
+// Both are fixed the same way: **find first, classify second.**
+// `invokeSites` finds every textual `invoke(` occurrence with no filter on
+// what follows it. `classifyInvokeArg` then reads the first argument and
+// returns `literal` (a command name), `computed` (a bare identifier — the
+// `set_rerank_model`/`set_chat_model` loop's `command` variable) or
+// `unclassified` — and an unclassified shape is itself reported, by name,
+// whether or not the call also turns out to be gated, because a shape this
+// scan cannot read is a shape it cannot vouch for. `aliasSites` catches the
+// one shape that never appears as `invoke(` at all — `invoke` assigned to
+// another binding — by failing loud at the assignment, since the test
+// cannot follow the binding to wherever it is later called.
 //
-// - **A deferred `invoke()` inside a gate.** Lexical containment inside
-//   `withSearchGated(...)` is not runtime containment — an `invoke()`
-//   written inside a `setTimeout`/`.then`/`queueMicrotask`/
-//   `requestAnimationFrame` callback runs after that callback's turn, by
-//   which point the gate it is textually nested inside has already
-//   reopened. `deferralRanges` below finds these the same way `gatedRanges`
-//   finds the barrier itself, and the test folds a call found inside one
-//   into "ungated" even when it is also, lexically, inside a gate.
-// - **The allowlist itself.** `OUT_OF_SCOPE_COMMANDS` cannot be made
-//   un-editable — an allowlist has to stay editable, or nothing new could
-//   ever legitimately be added to it — but the most likely way to silence
-//   this floor test is a one-line addition there instead of gating a real
-//   mutation. `no out-of-scope command name looks like a config mutation`,
-//   below, narrows that: every command this file actually mutates config
-//   through is named `set_*` or `forget_*`, so a name shaped like one of
-//   those appearing in the allowlist is the shape of the mistake to catch.
-//   This does not close the route, only narrows it — a mutation named
-//   something that does not start with `set_`/`forget_` could still be
-//   allowlisted quietly, and that is a real, remaining soft spot.
+// The deferral check no longer names a construct either.
+// `nestedDeferralSpans` finds every function/arrow boundary *inside* a
+// gate's own body — not the gate's own immediate function argument, which
+// `gateBodyRange` excludes, but anything nested one level deeper — and any
+// `invoke(` inside one of those spans counts as ungated, because the
+// callback holding it runs after its own turn on the event loop, by which
+// point the gate has already reopened. One rule instead of a list is what
+// makes `setInterval`/`.catch`/`.finally` fall out of it for free, along
+// with whatever the next round reaches for.
+//
+// The trap this has to keep clearing: `main.js` has one legitimate
+// deferral inside a gated *handler* — `refreshSettings().then((settings)
+// => { ... })`, inside `#embed`'s `onProgress` "ended" callback — but that
+// callback is assigned *before* the handler's own `withSearchGated(...)`
+// call, not textually inside it, so `nestedDeferralSpans` never looks at
+// it at all. Checked as a standalone run against the real, unmodified
+// `main.js` before this was wired into the test below (see the report).
+//
+// What it still cannot see: a block comment (`main.js` has none — every
+// comment in it is `//`) would not be skipped the way a line comment is,
+// and a template literal's `${...}` containing an unbalanced brace or
+// paren could desync `matchBrace`/`matchParen` — both skip a string or
+// template's contents whole, by matching quote to quote, so this only
+// bites if the imbalance is inside the interpolation's own code, which
+// nothing in `main.js` today does.
+//
+// The allowlist itself is the other route review found: `OUT_OF_SCOPE_
+// COMMANDS` cannot be made un-editable — an allowlist has to stay
+// editable — but the most likely way to silence this floor test is a
+// one-line addition there instead of gating a real mutation. `no
+// out-of-scope command name looks like a config mutation`, below, narrows
+// that: every command this file actually mutates config through is named
+// `set_*` or `forget_*`, so a name shaped like one of those appearing in
+// the allowlist is the shape of the mistake to catch. This does not close
+// the route, only narrows it.
 const mainJsPath = fileURLToPath(new URL("./main.js", import.meta.url));
 
+// Skips a string, a template literal (honouring `\` escapes; a template's
+// `${...}` is skipped along with the rest of it, quote to quote, not
+// parsed), or a `//` line comment starting at `src[i]`. Returns the index
+// to resume from, or `null` if `i` does not start one of those — the one
+// piece of "is this really code" every scanner below shares, so a stray
+// paren, brace or comma inside a string or a comment cannot desync any of
+// them the same way it could when each had its own copy of this check.
+const skipNonCode = (src, i) => {
+  const c = src[i];
+  if (c === '"' || c === "'" || c === "`") {
+    let j = i + 1;
+    while (j < src.length && src[j] !== c) {
+      if (src[j] === "\\") {
+        j += 1;
+      }
+      j += 1;
+    }
+    return j + 1;
+  }
+  if (c === "/" && src[i + 1] === "/") {
+    let j = i;
+    while (j < src.length && src[j] !== "\n") {
+      j += 1;
+    }
+    return j;
+  }
+  return null;
+};
+
 // Returns the source index one past the `)` that closes the `(` at
-// `openIndex`, skipping anything inside a string or template literal
-// (honouring `\` escapes) and `//` line comments, so a sentence or a
-// comment containing a stray paren cannot desync the depth count.
+// `openIndex`, skip-aware throughout.
 const matchParen = (src, openIndex) => {
   let depth = 0;
   for (let i = openIndex; i < src.length; i += 1) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip - 1;
+      continue;
+    }
     const c = src[i];
-    if (c === '"' || c === "'" || c === "`") {
-      const quote = c;
-      i += 1;
-      while (i < src.length && src[i] !== quote) {
-        if (src[i] === "\\") {
-          i += 1;
-        }
-        i += 1;
-      }
-      continue;
-    }
-    if (c === "/" && src[i + 1] === "/") {
-      while (i < src.length && src[i] !== "\n") {
-        i += 1;
-      }
-      continue;
-    }
     if (c === "(") {
       depth += 1;
     } else if (c === ")") {
@@ -1378,6 +1412,29 @@ const matchParen = (src, openIndex) => {
     }
   }
   throw new Error(`unbalanced parens from source offset ${openIndex}`);
+};
+
+// `matchParen`'s sibling for `{`/`}`, used to find where a function or
+// arrow body — the gate's own, or one nested inside it — actually ends.
+const matchBrace = (src, openIndex) => {
+  let depth = 0;
+  for (let i = openIndex; i < src.length; i += 1) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip - 1;
+      continue;
+    }
+    const c = src[i];
+    if (c === "{") {
+      depth += 1;
+    } else if (c === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return i + 1;
+      }
+    }
+  }
+  throw new Error(`unbalanced braces from source offset ${openIndex}`);
 };
 
 // Every `[start, end)` span textually inside a `withSearchGated(...)` call —
@@ -1394,47 +1451,188 @@ const gatedRanges = (src) => {
   return ranges;
 };
 
-// A1 (post-review addition): every `[start, end)` span textually inside a
-// deferral construct's own call — `setTimeout(...)`, `.then(...)`,
-// `queueMicrotask(...)`, `requestAnimationFrame(...)`. Lexical containment
-// inside `withSearchGated(...)` is not runtime containment: an `invoke(...)`
-// written inside one of these callbacks runs after that callback's turn on
-// the event loop, by which point the gate it is textually nested inside has
-// already reopened. A planted `setTimeout(async () => { await
-// invoke("set_evil_deferred", ...) }, 0)` inside a `withSearchGated(...)`
-// body passed the site test before this existed — the base check only asks
-// "is this text between two parens", and it was.
-//
-// This does **not** forbid a deferral construct from appearing inside a
-// gate — `main.js` already has a legitimate one (`refreshSettings().then(
-// (settings) => { ... })` inside the embed handler's `onProgress` callback,
-// restating an ending once the settings redraw lands) and forbidding the
-// *construct* rather than an `invoke()` inside it would turn that red for
-// no reason. Only `invoke(...)` calls found inside one of these spans count.
-const deferralRanges = (src) => {
-  const ranges = [];
-  const re = /\b(?:setTimeout|queueMicrotask|requestAnimationFrame)\(|\.then\(/g;
-  let m;
-  while ((m = re.exec(src))) {
-    // Each alternative above ends in a literal "(" — its index is the last
-    // character of the match.
-    const openParen = m.index + m[0].length - 1;
-    ranges.push([m.index, matchParen(src, openParen)]);
+// The gate's own body: every call site in this file is
+// `withSearchGated(async (…) => { … })`, and this finds that function
+// argument's own `{ … }` — the first real `=>` after `gateStart`, then the
+// first real `{` after that. `null` if the argument is not this shape, in
+// which case the caller falls back to treating the whole gated range as
+// depth 0, same as before this file could tell nested boundaries apart.
+const gateBodyRange = (src, gateStart, gateEnd) => {
+  let i = gateStart;
+  let arrow = -1;
+  while (i < gateEnd - 1) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip;
+      continue;
+    }
+    if (src[i] === "=" && src[i + 1] === ">") {
+      arrow = i;
+      break;
+    }
+    i += 1;
   }
-  return ranges;
+  if (arrow === -1) {
+    return null;
+  }
+  i = arrow + 2;
+  while (i < gateEnd) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip;
+      continue;
+    }
+    if (src[i] === "{") {
+      return [i + 1, matchBrace(src, i) - 1];
+    }
+    if (!/\s/.test(src[i])) {
+      return null;
+    }
+    i += 1;
+  }
+  return null;
 };
 
-// Every `invoke(...)` call site: the command name if it is a string
-// literal, or the identifier if it is computed — the `set_rerank_model`/
-// `set_chat_model` shape.
-const invokeCalls = (src) => {
-  const re = /\binvoke\(\s*(?:"([a-zA-Z0-9_]+)"|([a-zA-Z_$][\w$]*))/g;
-  const calls = [];
+// Where a concise-body arrow's own expression ends — `() => invoke(...)`,
+// with no braces, is exactly shapes 3-5 of U-1's five. The body ends at the
+// first `,`/`;` reached while this arrow's own paren/bracket/brace nesting
+// is back to zero, or at a closing bracket that would take it negative —
+// which belongs to whatever encloses the arrow, not to the arrow itself.
+const conciseArrowBodyEnd = (src, start, hardLimit) => {
+  let depth = 0;
+  let i = start;
+  while (i < hardLimit) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip;
+      continue;
+    }
+    const c = src[i];
+    if (c === "(" || c === "[" || c === "{") {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (c === ")" || c === "]" || c === "}") {
+      if (depth === 0) {
+        return i;
+      }
+      depth -= 1;
+      i += 1;
+      continue;
+    }
+    if ((c === "," || c === ";") && depth === 0) {
+      return i;
+    }
+    i += 1;
+  }
+  return hardLimit;
+};
+
+// U-1 (adversarial pass, F-A2): every `[start, end)` span, inside a gate's
+// own body, that is itself inside a *further* function or arrow boundary —
+// construct-agnostic on purpose, so `setTimeout`, `setInterval`, `.then`,
+// `.catch`, `.finally`, `queueMicrotask`, `requestAnimationFrame` and
+// whatever the next round reaches for all fall out of one rule: is there a
+// function boundary between here and the gate's own body, not "does this
+// text match one of these names". `start`/`end` bound the gate's own
+// immediate body (`gateBodyRange`'s job to find), so the gate's own
+// function argument is never itself counted as nested.
+const nestedDeferralSpans = (src, start, end) => {
+  const spans = [];
+  let i = start;
+  while (i < end) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip;
+      continue;
+    }
+    if (
+      src.startsWith("function", i) &&
+      !/[\w$]/.test(src[i - 1] ?? "") &&
+      !/[\w$]/.test(src[i + 8] ?? "")
+    ) {
+      const brace = src.indexOf("{", i);
+      if (brace === -1 || brace >= end) {
+        i += 8;
+        continue;
+      }
+      const close = matchBrace(src, brace);
+      spans.push([i, close]);
+      i = close;
+      continue;
+    }
+    if (src[i] === "=" && src[i + 1] === ">") {
+      let j = i + 2;
+      while (/\s/.test(src[j])) {
+        j += 1;
+      }
+      if (src[j] === "{") {
+        const close = matchBrace(src, j);
+        spans.push([i, close]);
+        i = close;
+      } else {
+        const close = conciseArrowBodyEnd(src, j, end);
+        spans.push([i, close]);
+        i = close;
+      }
+      continue;
+    }
+    i += 1;
+  }
+  return spans;
+};
+
+// Every textual `invoke(` occurrence, found with no filter at all on what
+// follows it — classification is a separate step below, deliberately, so a
+// shape that step cannot read still shows up here instead of vanishing.
+const invokeSites = (src) => {
+  const re = /\binvoke\(/g;
+  const sites = [];
   let m;
   while ((m = re.exec(src))) {
-    calls.push({ index: m.index, literal: m[1] ?? null, identifier: m[2] ?? null });
+    const openParen = m.index + m[0].length - 1;
+    const closeParen = matchParen(src, openParen);
+    sites.push({ index: m.index, argsText: src.slice(openParen + 1, closeParen - 1) });
   }
-  return calls;
+  return sites;
+};
+
+// Reads one call's leading argument. `literal` is a command name this test
+// can look up in `OUT_OF_SCOPE_COMMANDS`; `computed` is a bare identifier —
+// the `set_rerank_model`/`set_chat_model` loop's `command` — that this test
+// cannot name but can still confirm is gated. Anything else (a template
+// literal, a member expression, a nested call) is `unclassified`, and U-1's
+// shape 1, `` invoke(`set_${role}_model`, …) ``, is exactly this: it is
+// neither of the first two, and used to produce no match at all rather
+// than reaching this branch.
+const classifyInvokeArg = (argsText) => {
+  const literal = /^\s*"([a-zA-Z0-9_]+)"\s*(?:,|$)/.exec(argsText);
+  if (literal) {
+    return { kind: "literal", name: literal[1] };
+  }
+  const identifier = /^\s*([a-zA-Z_$][\w$]*)\s*(?:,|$)/.exec(argsText);
+  if (identifier) {
+    return { kind: "computed", name: identifier[1] };
+  }
+  return { kind: "unclassified", name: argsText.trim().slice(0, 60) };
+};
+
+// U-1's shape 2: `invoke` itself assigned to another binding, then called
+// through that binding — a call this file's own scan never sees as
+// `invoke(`, so the only place it can be caught is the assignment. `[=:]`
+// immediately before the bare word is what this looks for; the one
+// legitimate reference in `main.js`, `const { invoke, Channel } =
+// window.__TAURI__.core;`, is a destructuring pattern with `{` before
+// `invoke`, not `=`/`:`, so it does not match.
+const aliasSites = (src) => {
+  const re = /[=:]\s*invoke\b(?!\()/g;
+  const sites = [];
+  let m;
+  while ((m = re.exec(src))) {
+    sites.push(m.index);
+  }
+  return sites;
 };
 
 // §6, out of scope: these mutate the index or read status, not the search
@@ -1454,33 +1652,65 @@ const OUT_OF_SCOPE_COMMANDS = new Set([
 
 test("every config-mutating invoke() in main.js is inside withSearchGated(...), and not deferred out of it", () => {
   const src = readFileSync(mainJsPath, "utf8");
-  const ranges = gatedRanges(src);
-  assert.ok(ranges.length > 0, "premise: withSearchGated(...) exists in main.js at all");
-  const deferrals = deferralRanges(src);
+  const gates = gatedRanges(src);
+  assert.ok(gates.length > 0, "premise: withSearchGated(...) exists in main.js at all");
 
-  const ungated = invokeCalls(src).filter((call) => {
-    if (call.literal !== null && OUT_OF_SCOPE_COMMANDS.has(call.literal)) {
-      return false;
+  const ungated = [];
+  const unclassified = [];
+
+  for (const site of invokeSites(src)) {
+    const cls = classifyInvokeArg(site.argsText);
+    const label =
+      cls.kind === "literal"
+        ? cls.name
+        : cls.kind === "computed"
+          ? `<computed: ${cls.name}>`
+          : `<unclassified: ${cls.name}>`;
+
+    if (cls.kind === "literal" && OUT_OF_SCOPE_COMMANDS.has(cls.name)) {
+      continue;
     }
-    const insideGate = ranges.some(([start, end]) => call.index > start && call.index < end);
-    if (!insideGate) {
+
+    const gate = gates.find(([start, end]) => site.index > start && site.index < end);
+    if (!gate) {
       // Never reached the barrier lexically at all — the base violation.
-      return true;
+      ungated.push(label);
+    } else {
+      const body = gateBodyRange(src, gate[0], gate[1]);
+      const deferred = body ? nestedDeferralSpans(src, body[0], body[1]) : [];
+      // Inside the gate textually, but also inside a further function/arrow
+      // boundary — the gate has already reopened by the time this call
+      // actually runs, so this counts as ungated too.
+      if (deferred.some(([ds, de]) => site.index > ds && site.index < de)) {
+        ungated.push(label);
+      }
     }
-    // A1: inside the gate textually, but also inside a deferral construct
-    // that is itself inside the gate — the gate has already reopened by the
-    // time this call actually runs, so this counts as ungated too.
-    return deferrals.some(([ds, de]) => call.index > ds && call.index < de);
-  });
+    if (cls.kind === "unclassified") {
+      unclassified.push(label);
+    }
+  }
 
   assert.deepEqual(
-    ungated.map((c) => c.literal ?? `<computed: ${c.identifier}>`),
+    ungated,
     [],
     "a config-mutating invoke() is reachable outside the search barrier — either never inside " +
-      "withSearchGated(...) at all, or inside it only lexically because it runs from a deferred " +
-      "callback (setTimeout/.then/queueMicrotask/requestAnimationFrame) after the gate has " +
-      "already reopened — every one of these can change what leaves the machine or clobber " +
-      "pending state, and none of them is in §6's out-of-scope list",
+      "withSearchGated(...) at all, or inside it only lexically because it runs from a function " +
+      "or arrow nested inside the gate's own body after the gate has already reopened — every " +
+      "one of these can change what leaves the machine or clobber pending state, and none of " +
+      "them is in §6's out-of-scope list",
+  );
+  assert.deepEqual(
+    unclassified,
+    [],
+    "an invoke() call's argument could not be classified as a command name or a computed " +
+      "identifier — this scan cannot vouch for what it targets, gated or not, and a shape it " +
+      "cannot read must fail loud rather than pass in silence",
+  );
+  assert.deepEqual(
+    aliasSites(src),
+    [],
+    "invoke was assigned to another binding — this scan cannot follow a call made through that " +
+      "binding, so it fails at the assignment instead of missing the call entirely",
   );
 });
 
