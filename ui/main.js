@@ -110,9 +110,15 @@ syncSearchGate();
 // through the same two variables directly — see the note above their
 // listeners); `main.test.js`'s site test checks that nothing new does not.
 const withSearchGated = async (body) => {
-  pendingConfigWrites += 1;
-  syncSearchGate();
+  // U-2 (adversarial pass, F-A3): both statements are inside `try` now, not
+  // only `body()`. `syncSearchGate()` dereferences `el("search-submit")`; if
+  // that throws, the increment must still be visible to `finally`, or the
+  // counter never comes back down and search is shut for the rest of the
+  // session. Pinned by "a throw inside syncSearchGate's own call does not
+  // leak the gate shut for later writes".
   try {
+    pendingConfigWrites += 1;
+    syncSearchGate();
     return await body();
   } finally {
     pendingConfigWrites -= 1;

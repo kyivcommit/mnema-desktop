@@ -1727,6 +1727,99 @@ test("a stale settings redraw landing between two overlapping arm writes does no
   assert.equal(w.el("arm-content").disabled, false);
 });
 
+// Adversarial pass, F-A3/U-2: `withSearchGated` used to increment
+// `pendingConfigWrites` and call `syncSearchGate()` *before* its own `try`.
+// `syncSearchGate` dereferences `el("search-submit")`; a throw there left the
+// increment applied and skipped the `finally`, so the counter never came back
+// down — search stayed shut for the rest of the session, even for a later
+// write that had nothing wrong with it. Not reachable through `boot()`'s own
+// `el`, which never throws, so this window builds its own `getElementById`
+// that throws for `search-submit` only while a flag is up, mirroring the
+// adversarial harness's shape (report, finding F-A3, probe P9).
+test("a throw inside syncSearchGate's own call does not leak the gate shut for later writes", async () => {
+  const elements = new Map();
+  const realEl = (id) => {
+    if (!elements.has(id)) {
+      elements.set(id, makeElement());
+    }
+    return elements.get(id);
+  };
+  let throwing = false;
+  const el = (id) => {
+    if (id === "search-submit" && throwing) {
+      throw new Error("element vanished");
+    }
+    return realEl(id);
+  };
+
+  const settings = () => ({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: null,
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  const invoke = (command) => {
+    if (command === "open_index") return Promise.resolve({ path: "/tmp/index", schemaVersion: 1 });
+    if (command === "job_status") return Promise.resolve({ running: false });
+    if (command === "model_settings") return Promise.resolve(settings());
+    if (command === "provider_models") {
+      return Promise.resolve({ entries: [], unreadable: 0, unreadableRecords: [] });
+    }
+    if (command === "forget_key") return Promise.resolve({ kind: "removed" });
+    return Promise.resolve(null);
+  };
+  class Channel {
+    constructor() {
+      this.onmessage = null;
+    }
+  }
+
+  globalThis.window = {
+    __TAURI__: { core: { invoke, Channel }, dialog: { open: async () => null } },
+  };
+  globalThis.document = { getElementById: el, createElement: () => makeElement() };
+
+  bootCount += 1;
+  await import(`./main.js?window=${bootCount}`);
+  await settleEverything();
+
+  assert.equal(realEl("search-submit").disabled, false, "premise: submit starts enabled");
+
+  // One write whose own `syncSearchGate()` throws at the increment.
+  throwing = true;
+  const clickPromise = realEl("forget").listeners.get("click")({});
+  const caught = await clickPromise.then(
+    () => null,
+    (error) => error,
+  );
+  assert.match(String(caught), /element vanished/, "premise: the handler threw, same as the harness");
+  throwing = false;
+  await settleEverything();
+
+  // A later, entirely healthy write must still be able to shut the gate and
+  // reopen it — if the earlier throw leaked the counter, this one settling
+  // will find it already shut and unable to ever come back.
+  realEl("forget").listeners.get("click")({});
+  await settleEverything();
+  assert.equal(
+    realEl("search-submit").disabled,
+    false,
+    "a throw inside an earlier syncSearchGate() call leaked the counter and shut the gate for " +
+      "the rest of the session",
+  );
+});
+
 // F3: two searches settling out of order. Success-then-success first — an
 // older answer must not overwrite a newer one that already landed.
 test("an older search's success does not overwrite a newer one that already landed (F3)", async () => {
