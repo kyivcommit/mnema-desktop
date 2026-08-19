@@ -1079,6 +1079,147 @@ test("a settings read issued before a content-arm write does not revert it once 
   await settleEverything();
 });
 
+// The half of the arm-write race the generation guard alone does not cover:
+// Codex round 4 (inline on `ui/main.js:931`, 2026-08-19). A read issued *during*
+// a write — after `armWriteGeneration += 1`, before `set_search_arms` commits —
+// shares the write's generation, so the generation check takes it as
+// authoritative and reverts the optimistic arm to the stale persisted value. The
+// worst case is the database ending content-on while the checkbox/disclosure say
+// content-off, so the next search sends the query under the local-only promise.
+// First ordering: the read draws while the write is still in flight.
+test("a settings read issued during a content-arm write does not revert it once the write has landed", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: false,
+      },
+    }),
+  });
+
+  assert.equal(w.el("arm-content").checked, false, "premise: the content arm starts off (persisted off)");
+
+  // The write starts first, so the read below is issued *during* it and shares
+  // its generation.
+  const write = w.hold("set_search_arms");
+  w.el("arm-content").checked = true;
+  const change = w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  // Issued from `forget` while the write is still outstanding — the read that
+  // must not win, carrying the *old* persisted value.
+  const read = w.hold("model_settings");
+  await w.press("forget");
+
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: false,
+    },
+  });
+  await settleEverything();
+
+  write.resolve(null);
+  await change;
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-content").checked,
+    true,
+    "a settings read issued during the write reverted the optimistic content-arm write",
+  );
+});
+
+// Second ordering, the one a guard keyed on `armWritesInFlight` at *draw* time
+// would still get wrong: the in-flight write settles first, then the stale read
+// (issued during that write) draws with nothing in flight. Only a guard that
+// remembers a write was outstanding *at the read's issue* keeps the arm on.
+test("a settings read issued during a content-arm write does not revert it even after the write has settled", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: false,
+      },
+    }),
+  });
+
+  assert.equal(w.el("arm-content").checked, false, "premise: the content arm starts off (persisted off)");
+
+  const write = w.hold("set_search_arms");
+  w.el("arm-content").checked = true;
+  const change = w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  const read = w.hold("model_settings");
+  await w.press("forget");
+
+  // The write settles first: the optimistic value is correct on screen here.
+  write.resolve(null);
+  await change;
+  await settleEverything();
+
+  // Then the stale read — issued while the write was in flight — lands with
+  // nothing in flight.
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: false,
+    },
+  });
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-content").checked,
+    true,
+    "a settings read that landed after the write settled still reverted the content-arm write",
+  );
+});
+
 test("the search form's submit is disabled while a content-arm write is in flight, and re-enabled once it settles", async () => {
   const w = await boot({
     model_settings: () => ({

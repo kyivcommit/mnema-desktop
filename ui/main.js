@@ -616,6 +616,11 @@ let savedContentArm = true;
 // generation. This is incremented before the `invoke` and decremented once
 // it settles, success or refusal, so it is exactly zero when nothing this
 // window started is still waiting to hear back.
+//
+// Besides the live `drawArmState` disable, a snapshot of this taken at read-issue
+// (`armWriteInFlightAtIssue`) is the second half of the arm-write guard in
+// `drawSettings`: a read whose issue moment fell inside a write's interval must
+// not overwrite the saved arms, even though it shares that write's generation.
 let armWritesInFlight = 0;
 
 // Returns the `toggleState` it drew from, so a caller that needs the same
@@ -849,7 +854,7 @@ const showRecorded = (role, recorded) => {
 // `askedAt` is `jobGeneration` and `armAskedAt` is `armWriteGeneration`, both
 // as they stood when this draw's `model_settings` was **issued**, not when
 // it came back.
-const drawSettings = (settings, askedAt, armAskedAt) => {
+const drawSettings = (settings, askedAt, armAskedAt, armWriteInFlightAtIssue) => {
   // ⚠️ **Whether a job has these counts, and why `jobRunning` alone is the
   // wrong question.** Review of `3b18859`, Important 2, measured rather than
   // argued: this function reads the flag when it runs, which is after its own
@@ -920,13 +925,19 @@ const drawSettings = (settings, askedAt, armAskedAt) => {
   showRecorded("chat", read && read.chatModel);
   armKeyPresent = settings.key?.kind === "present";
   armModelChosen = Boolean(read && read.embeddingModel);
-  // Only while `read` actually answers, and only while no arm write has
-  // started since this read was issued: `armAskedAt !== armWriteGeneration`
-  // means a write landed first, and overwriting here would revert the
-  // checkbox this read knows nothing about. Pinned by `a settings read
-  // issued before an arm write does not revert it once the write has
-  // landed`.
-  if (read && armAskedAt === armWriteGeneration) {
+  // Only while `read` actually answers, and only while this read's whole
+  // interval was free of an arm write — two conditions, because a write can
+  // overlap a read from either side. `armAskedAt !== armWriteGeneration` means a
+  // write *started* after this read was issued, and overwriting here would revert
+  // a checkbox this read knows nothing about. `armWriteInFlightAtIssue` means a
+  // write was *already outstanding* when the read was issued: it can carry a DB
+  // snapshot older than that write's commit while sharing its generation, so the
+  // generation check alone would wrongly take it as authoritative — the half of
+  // the race a press-counting generation cannot see. Pinned by `a settings read
+  // issued before an arm write does not revert it once the write has landed`, its
+  // content-arm counterpart, and the two `... issued during a content-arm write
+  // ...` tests below (both orderings of read-draw versus write-settle).
+  if (read && armAskedAt === armWriteGeneration && !armWriteInFlightAtIssue) {
     savedTextArm = read.searchTextArm;
     savedContentArm = read.searchContentArm;
   }
@@ -974,6 +985,14 @@ const refreshSettings = async () => {
   // captured here so `drawSettings` can tell a write that started after this
   // point from one already running when this read was issued.
   const armAskedAt = armWriteGeneration;
+  // The other half of the same idea. `armAskedAt` catches a write that *starts*
+  // after this read is issued; it cannot catch a write already outstanding at
+  // this moment, because that write has already bumped `armWriteGeneration`, so
+  // the read shares its generation while its `model_settings` snapshot may still
+  // predate the write's commit. Sampled here, at issue, so `drawSettings` can
+  // refuse the read for the whole write interval, not only for writes that begin
+  // after it.
+  const armWriteInFlightAtIssue = armWritesInFlight > 0;
   // Captured before the await, never after. This is the whole of what lets
   // `drawSettings` tell "no job has touched these counts" from "one started
   // while I was asking" — the distinction `jobRunning` cannot draw, because
@@ -986,7 +1005,7 @@ const refreshSettings = async () => {
   // restatement does.
   if (issue > settingsDrawn) {
     settingsDrawn = issue;
-    drawSettings(settings, askedAt, armAskedAt);
+    drawSettings(settings, askedAt, armAskedAt, armWriteInFlightAtIssue);
   }
   return settings;
 };
