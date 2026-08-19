@@ -85,10 +85,15 @@ let pendingConfigWrites = 0;
 let authoritativeStateRead = false;
 
 // U-3 (adversarial pass, F-A6): a third, independent reason to stay shut —
-// a search already in flight. Its own counter, not `pendingConfigWrites`: a
-// config write and a search are different reasons to hold this button, and
-// folding them into one would make either wait on the other's redraw for no
-// reason. Declared here so `syncSearchGate` has one formula over all three.
+// a search already in flight. A flag, not a counter like
+// `pendingConfigWrites`: the submit handler below refuses a second submit
+// synchronously, before anything is awaited, so this can never be more than
+// one search deep — a boolean is correct here precisely because U-3 makes
+// overlap impossible, not an oversight of §3.2's counter rule for the
+// other one. Declared here so `syncSearchGate` has one formula over all
+// three, and its own variable, not `pendingConfigWrites`: a config write
+// and a search are different reasons to hold this button, and folding them
+// together would make either wait on the other's redraw for no reason.
 let searchInFlight = false;
 
 // The one place that answers "may a search be submitted now" (§3.1) — every
@@ -546,7 +551,11 @@ el("search-form").addEventListener("submit", async (event) => {
     if (issue <= searchDrawn) {
       return;
     }
-    searchDrawn = issue;
+    // Review, V-1: assigned *after* the render, not before it. Assigning it
+    // here used to make a render that itself throws land in `catch` below
+    // with `issue <= searchDrawn` already true, swallowing the failure
+    // instead of reporting it. Pinned by "a render that throws after a
+    // successful answer still reports the failure".
     results.replaceChildren(...searchResultItems(answer.hits).map((item) => {
       const li = document.createElement("li");
       if (item.kind === "empty") {
@@ -564,6 +573,7 @@ el("search-form").addEventListener("submit", async (event) => {
     }));
     el("text-arm-state").textContent = textArmSentence(answer.text);
     el("content-arm-state").textContent = contentArmSentence(answer.content);
+    searchDrawn = issue;
   } catch (error) {
     // The same guard on the failure path: an older rejection is exactly the
     // path that used to erase a newer answer, clearing both arm-state lines

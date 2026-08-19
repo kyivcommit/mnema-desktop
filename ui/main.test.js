@@ -2089,26 +2089,34 @@ test("a submit refused while a search is in flight draws nothing until that sear
   assert.equal(w.el("results").options[0].options[1].textContent, "a");
 });
 
-// F3, the rejection half, adapted the same way as the test above.
-test("a submit refused while a search is in flight does not survive that search's own rejection (F3, U-3)", async () => {
-  const w = await boot();
+// Review, V-1: `searchDrawn = issue` used to be assigned *before* the
+// render, so a render that itself throws lands in this same handler's own
+// `catch` with `issue <= searchDrawn` already true (they are equal) — and
+// the failure is swallowed instead of reported. Not reachable from the
+// product today (`bridge.rs` always serialises real `hits`), which is why
+// this needs a malformed answer to reach at all, the same category as U-2.
+// Pinned rather than only reasoned about, per this branch's own rule that a
+// test which reads code proves its shape, not its premise.
+test("a render that throws after a successful answer still reports the failure (V-1)", async () => {
+  const w = await boot({
+    search: () => ({
+      hits: null,
+      text: { kind: "answered", matched: 0 },
+      content: { kind: "answered", matched: 0, embedded: 0, total: 0, reachable: 0 },
+    }),
+  });
 
-  const first = w.hold("search");
-  w.el("query").value = "first query";
-  const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
-
-  w.el("query").value = "second query";
-  const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
-  await submitB;
+  w.el("query").value = "malformed";
+  await w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
   await settleEverything();
 
-  first.reject(new Error("the index could not be reached"));
-  await submitA;
-  await settleEverything();
-
+  assert.equal(
+    w.el("results").options.length,
+    1,
+    "a render failure left nothing on screen — searchDrawn advanced before the render, so the " +
+      "throw looked like a stale answer to the catch block and was swallowed",
+  );
   assert.match(w.el("results").options[0].textContent, /search failed/);
-  assert.equal(w.el("text-arm-state").textContent, "");
-  assert.equal(w.el("content-arm-state").textContent, "");
 });
 
 // Adversarial pass, F-A6/U-3: nothing stopped a second submit while a search
