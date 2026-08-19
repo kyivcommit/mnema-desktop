@@ -1529,6 +1529,14 @@ const conciseArrowBodyEnd = (src, start, hardLimit) => {
   return hardLimit;
 };
 
+// Review, V-3: the fixed control-flow keywords `IDENT(...) {` also matches
+// but is never a function boundary — `if`/`for`/`while`/`switch` guard a
+// block that runs now, and `catch` (this very file's own gated handlers'
+// `try { … } catch (error) { … }`) would otherwise turn every one of them
+// into a false deferral. `do`/`with` are here for the same reason even
+// though neither takes a parenthesised head the way this check looks for.
+const DEFERRAL_CONTROL_KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "do", "with"]);
+
 // U-1 (adversarial pass, F-A2): every `[start, end)` span, inside a gate's
 // own body, that is itself inside a *further* function or arrow boundary —
 // construct-agnostic on purpose, so `setTimeout`, `setInterval`, `.then`,
@@ -1538,6 +1546,18 @@ const conciseArrowBodyEnd = (src, start, hardLimit) => {
 // text match one of these names". `start`/`end` bound the gate's own
 // immediate body (`gateBodyRange`'s job to find), so the gate's own
 // function argument is never itself counted as nested.
+//
+// Review, V-3: object method shorthand (`{ async later() { … } }`) and
+// class methods (`class K { async go() { … } }`) are a third way to write
+// a function, and neither the `function` keyword nor `=>` matches them —
+// the deferral axis had the same "unrecognised shape vanishes" defect the
+// argument axis's `unclassified` branch was built to end, just not yet
+// applied here. Unlike deferral *constructs*, which are an open library
+// set, the ways to write a function in JS are a closed grammar: any
+// `IDENT(params) {` not one of `DEFERRAL_CONTROL_KEYWORDS` is a boundary,
+// covering method shorthand, class methods, getters/setters, generators,
+// `static`/`async` methods and constructors alike without naming any of
+// them individually.
 const nestedDeferralSpans = (src, start, end) => {
   const spans = [];
   let i = start;
@@ -1577,6 +1597,27 @@ const nestedDeferralSpans = (src, start, end) => {
         i = close;
       }
       continue;
+    }
+    if (/[a-zA-Z_$]/.test(src[i]) && !/[\w$]/.test(src[i - 1] ?? "")) {
+      const idMatch = /^[a-zA-Z_$][\w$]*/.exec(src.slice(i, i + 200));
+      const name = idMatch[0];
+      let j = i + name.length;
+      while (/\s/.test(src[j])) {
+        j += 1;
+      }
+      if (src[j] === "(" && !DEFERRAL_CONTROL_KEYWORDS.has(name)) {
+        const afterParen = matchParen(src, j);
+        let k = afterParen;
+        while (/\s/.test(src[k])) {
+          k += 1;
+        }
+        if (src[k] === "{") {
+          const close = matchBrace(src, k);
+          spans.push([i, close]);
+          i = close;
+          continue;
+        }
+      }
     }
     i += 1;
   }
