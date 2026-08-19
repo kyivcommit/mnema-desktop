@@ -1820,30 +1820,32 @@ test("a throw inside syncSearchGate's own call does not leak the gate shut for l
   );
 });
 
-// F3: two searches settling out of order. Success-then-success first — an
-// older answer must not overwrite a newer one that already landed.
-test("an older search's success does not overwrite a newer one that already landed (F3)", async () => {
+// F3, adapted for U-3 (adversarial pass, F-A6). This test used to hold two
+// searches open at once to pin their render order — exactly the capability
+// U-3 removes: a submit while one is in flight is now refused before it
+// ever reaches `search()` (see the U-3 tests below). What F3's guard still
+// protects, on the one search that is now ever in flight: the refused
+// submit must draw nothing, and the search that actually ran must draw its
+// own real answer once it settles — not left blank, not overwritten.
+test("a submit refused while a search is in flight draws nothing until that search settles (F3, U-3)", async () => {
   const w = await boot();
 
   const first = w.hold("search");
   w.el("query").value = "first query";
   const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
 
-  const second = w.hold("search");
+  // Refused: `first` is still out. No second `invoke("search")`, so nothing
+  // here has an answer to draw from.
   w.el("query").value = "second query";
   const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
-
-  // B, the newer submission, answers first.
-  second.resolve({
-    hits: [{ relativePath: "b.txt", text: "b" }],
-    text: { kind: "answered", matched: 2 },
-    content: { kind: "answered", matched: 3, embedded: 1, total: 1, reachable: 1 },
-  });
   await submitB;
   await settleEverything();
-  assert.equal(w.el("text-arm-state").textContent, "Search by text returned 2.", "premise: B is on screen");
+  assert.equal(
+    w.el("text-arm-state").textContent,
+    "",
+    "a refused submit drew something before the one search in flight had answered",
+  );
 
-  // A, the older submission, answers after — must not win.
   first.resolve({
     hits: [{ relativePath: "a.txt", text: "a" }],
     text: { kind: "answered", matched: 5 },
@@ -1852,56 +1854,128 @@ test("an older search's success does not overwrite a newer one that already land
   await submitA;
   await settleEverything();
 
-  assert.equal(
-    w.el("text-arm-state").textContent,
-    "Search by text returned 2.",
-    "an older search overwrote a newer one that had already landed",
-  );
+  assert.equal(w.el("text-arm-state").textContent, "Search by text returned 5.");
   assert.equal(w.el("results").options.length, 1);
-  assert.equal(w.el("results").options[0].options[1].textContent, "b");
+  assert.equal(w.el("results").options[0].options[1].textContent, "a");
 });
 
-// F3, the direction that matters more than it looks: a reject-after-success.
-// Round 2's own fix cleared both arm-state lines on a failed search — which
-// is exactly the path an older rejection can use to erase a newer answer if
-// nothing tells the two attempts apart.
-test("an older search's rejection does not erase a newer search's results (F3)", async () => {
+// F3, the rejection half, adapted the same way as the test above.
+test("a submit refused while a search is in flight does not survive that search's own rejection (F3, U-3)", async () => {
   const w = await boot();
 
   const first = w.hold("search");
   w.el("query").value = "first query";
   const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
 
-  const second = w.hold("search");
   w.el("query").value = "second query";
   const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
-
-  second.resolve({
-    hits: [{ relativePath: "b.txt", text: "b" }],
-    text: { kind: "answered", matched: 2 },
-    content: { kind: "answered", matched: 3, embedded: 1, total: 1, reachable: 1 },
-  });
   await submitB;
   await settleEverything();
-  assert.equal(w.el("text-arm-state").textContent, "Search by text returned 2.", "premise: B is on screen");
 
   first.reject(new Error("the index could not be reached"));
   await submitA;
   await settleEverything();
 
+  assert.match(w.el("results").options[0].textContent, /search failed/);
+  assert.equal(w.el("text-arm-state").textContent, "");
+  assert.equal(w.el("content-arm-state").textContent, "");
+});
+
+// Adversarial pass, F-A6/U-3: nothing stopped a second submit while a search
+// was already in flight, so two concurrent searches sent two paid
+// `POST /embeddings` requests (report, finding F-A6) — money spent on an
+// answer the window discards by design, since only the newest may render.
+// The controller's ruling: coalesce. One query field, one button; a second
+// submit must not reach the provider while the first is still out.
+const emptyAnswer = () => ({
+  hits: [],
+  text: { kind: "answered", matched: 0 },
+  content: { kind: "answered", matched: 0, embedded: 0, total: 0, reachable: 0 },
+});
+
+test('a submit while a search is in flight does not send a second invoke("search") (U-3)', async () => {
+  const w = await boot();
+
+  const first = w.hold("search");
+  w.el("query").value = "first query";
+  const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
   assert.equal(
-    w.el("text-arm-state").textContent,
-    "Search by text returned 2.",
-    "an older search's rejection erased a newer search's arm-state text",
-  );
-  assert.equal(
-    w.el("content-arm-state").textContent,
-    "Search by content returned 3.",
-    "an older search's rejection erased a newer search's arm-state text",
-  );
-  assert.equal(
-    w.el("results").options.length,
+    w.calls.filter((c) => c === "search").length,
     1,
-    "an older search's rejection replaced a newer search's result list",
+    "premise: the first submit reached the provider",
   );
+
+  w.el("query").value = "second query";
+  const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.calls.filter((c) => c === "search").length,
+    1,
+    "a second submit sent a second paid provider request while the first was still in flight",
+  );
+
+  first.resolve(emptyAnswer());
+  await Promise.all([submitA, submitB]);
+  await settleEverything();
+});
+
+// The success path must reopen the gate — otherwise the first search's own
+// coalescing would refuse every later submit for the rest of the session.
+test("a settled, successful search reopens the gate for the next submit (U-3)", async () => {
+  const w = await boot();
+
+  const first = w.hold("search");
+  w.el("query").value = "first query";
+  const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  first.resolve(emptyAnswer());
+  await submitA;
+  await settleEverything();
+
+  const second = w.hold("search");
+  w.el("query").value = "second query";
+  const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.calls.filter((c) => c === "search").length,
+    2,
+    "a successful search left the gate shut, refusing the very next submit",
+  );
+  second.resolve(emptyAnswer());
+  await submitB;
+  await settleEverything();
+});
+
+// The failure path — round 3's own bug (F3) lived exactly here, in a
+// handler that reopened correctly on success and not on rejection.
+test("a settled, failed search reopens the gate for the next submit (U-3)", async () => {
+  const w = await boot();
+
+  const first = w.hold("search");
+  w.el("query").value = "first query";
+  const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  first.reject(new Error("the index could not be reached"));
+  await submitA;
+  await settleEverything();
+
+  const second = w.hold("search");
+  w.el("query").value = "second query";
+  const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.calls.filter((c) => c === "search").length,
+    2,
+    "a failed search left the gate shut, refusing the very next submit",
+  );
+  second.resolve(emptyAnswer());
+  await submitB;
+  await settleEverything();
 });

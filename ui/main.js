@@ -84,12 +84,20 @@ const results = el("results");
 let pendingConfigWrites = 0;
 let authoritativeStateRead = false;
 
+// U-3 (adversarial pass, F-A6): a third, independent reason to stay shut —
+// a search already in flight. Its own counter, not `pendingConfigWrites`: a
+// config write and a search are different reasons to hold this button, and
+// folding them into one would make either wait on the other's redraw for no
+// reason. Declared here so `syncSearchGate` has one formula over all three.
+let searchInFlight = false;
+
 // The one place that answers "may a search be submitted now" (§3.1) — every
 // other line in this file that used to write `#search-submit`'s `disabled`
-// itself now reports a fact to one of the two variables above and calls this
-// instead.
+// itself now reports a fact to one of the three variables above and calls
+// this instead.
 const syncSearchGate = () => {
-  el("search-submit").disabled = !authoritativeStateRead || pendingConfigWrites > 0;
+  el("search-submit").disabled =
+    !authoritativeStateRead || pendingConfigWrites > 0 || searchInFlight;
 };
 // Forces the closed reading immediately, rather than waiting for the first
 // caller that happens to touch the barrier. The markup (`index.html`)
@@ -517,9 +525,20 @@ let searchDrawn = 0;
 
 el("search-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  // U-3 (adversarial pass, F-A6): one query field, one button — a second
+  // submit replaces the question rather than asking a second one. Refused
+  // here, synchronously and before anything is awaited, so no ordering can
+  // let two submits both reach `search()`; `syncSearchGate` folds this into
+  // `#search-submit` itself, the same one decision point every other config
+  // gate in this file already uses.
+  if (searchInFlight) {
+    return;
+  }
   const query = el("query").value;
   searchAsked += 1;
   const issue = searchAsked;
+  searchInFlight = true;
+  syncSearchGate();
   try {
     const answer = await search(query);
     // An answer older than one already on screen has nothing to add and
@@ -561,6 +580,11 @@ el("search-form").addEventListener("submit", async (event) => {
     // indistinguishable from a current one.
     el("text-arm-state").textContent = "";
     el("content-arm-state").textContent = "";
+  } finally {
+    // Reopens on both the success and the failure path above — round 3's
+    // own bug (F3) was a handler that only reopened on one of them.
+    searchInFlight = false;
+    syncSearchGate();
   }
 });
 
