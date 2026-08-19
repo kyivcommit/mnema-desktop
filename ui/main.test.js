@@ -641,7 +641,7 @@ test("search draws the hits and both arm sentences from one SearchAnswer", async
     search: () => ({
       hits: [{ relativePath: "a.txt", text: "fox" }],
       text: { kind: "answered", matched: 5 },
-      content: { kind: "answered", matched: 7, embedded: 10, total: 10 },
+      content: { kind: "answered", matched: 7, embedded: 10, total: 10, reachable: 10 },
     }),
   });
 
@@ -676,7 +676,7 @@ test("a failed search clears the previous arm-state text instead of leaving it s
         return {
           hits: [{ relativePath: "a.txt", text: "fox" }],
           text: { kind: "answered", matched: 5 },
-          content: { kind: "answered", matched: 7, embedded: 10, total: 10 },
+          content: { kind: "answered", matched: 7, embedded: 10, total: 10, reachable: 10 },
         };
       }
       return new Error("the index could not be reached");
@@ -1744,7 +1744,7 @@ test("an older search's success does not overwrite a newer one that already land
   second.resolve({
     hits: [{ relativePath: "b.txt", text: "b" }],
     text: { kind: "answered", matched: 2 },
-    content: { kind: "answered", matched: 3, embedded: 1, total: 1 },
+    content: { kind: "answered", matched: 3, embedded: 1, total: 1, reachable: 1 },
   });
   await submitB;
   await settleEverything();
@@ -1754,7 +1754,7 @@ test("an older search's success does not overwrite a newer one that already land
   first.resolve({
     hits: [{ relativePath: "a.txt", text: "a" }],
     text: { kind: "answered", matched: 5 },
-    content: { kind: "answered", matched: 7, embedded: 10, total: 10 },
+    content: { kind: "answered", matched: 7, embedded: 10, total: 10, reachable: 10 },
   });
   await submitA;
   await settleEverything();
@@ -1786,7 +1786,7 @@ test("an older search's rejection does not erase a newer search's results (F3)",
   second.resolve({
     hits: [{ relativePath: "b.txt", text: "b" }],
     text: { kind: "answered", matched: 2 },
-    content: { kind: "answered", matched: 3, embedded: 1, total: 1 },
+    content: { kind: "answered", matched: 3, embedded: 1, total: 1, reachable: 1 },
   });
   await submitB;
   await settleEverything();
