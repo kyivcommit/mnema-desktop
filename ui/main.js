@@ -851,9 +851,10 @@ const showRecorded = (role, recorded) => {
   });
 };
 
-// `askedAt` is `jobGeneration` and `armAskedAt` is `armWriteGeneration`, both
-// as they stood when this draw's `model_settings` was **issued**, not when
-// it came back.
+// `askedAt` is `jobGeneration`, `armAskedAt` is `armWriteGeneration`, and
+// `armWriteInFlightAtIssue` is whether an arm write was already outstanding —
+// all three as they stood when this draw's `model_settings` was **issued**, not
+// when it came back.
 const drawSettings = (settings, askedAt, armAskedAt, armWriteInFlightAtIssue) => {
   // ⚠️ **Whether a job has these counts, and why `jobRunning` alone is the
   // wrong question.** Review of `3b18859`, Important 2, measured rather than
@@ -982,8 +983,11 @@ const refreshSettings = async () => {
   settingsAsked += 1;
   const issue = settingsAsked;
   // Same idea as `askedAt` just below, for an arm write instead of a job:
-  // captured here so `drawSettings` can tell a write that started after this
-  // point from one already running when this read was issued.
+  // captured here so `drawSettings` can tell a write that *started after* this
+  // read was issued — the generation will have grown by the time it draws —
+  // from one that did not. On its own it cannot tell a write that was *already
+  // outstanding* at this point, which shares this same generation; that is the
+  // next capture's job.
   const armAskedAt = armWriteGeneration;
   // The other half of the same idea. `armAskedAt` catches a write that *starts*
   // after this read is issued; it cannot catch a write already outstanding at
