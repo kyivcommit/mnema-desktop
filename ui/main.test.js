@@ -1666,12 +1666,20 @@ const classifyInvokeArg = (argsText) => {
 // legitimate reference in `main.js`, `const { invoke, Channel } =
 // window.__TAURI__.core;`, is a destructuring pattern with `{` before
 // `invoke`, not `=`/`:`, so it does not match.
+//
+// Review, V-1 (not required, taken since it was free): a bare offset is
+// stale the moment the file changes, so each site carries its own line
+// number and a snippet of the surrounding source — the same idiom
+// `classifyInvokeArg` already uses for an unclassified argument — rather
+// than a number a reader has to go compute an offset to place.
 const aliasSites = (src) => {
   const re = /[=:]\s*invoke\b(?!\()/g;
   const sites = [];
   let m;
   while ((m = re.exec(src))) {
-    sites.push(m.index);
+    const line = src.slice(0, m.index).split("\n").length;
+    const snippet = src.slice(Math.max(0, m.index - 20), m.index + 20).trim();
+    sites.push(`line ${line}: …${snippet}…`);
   }
   return sites;
 };
