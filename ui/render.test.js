@@ -2900,10 +2900,38 @@ test("a partly embedded space says how much of the index it searched", () => {
 
 test("a full space does not talk about coverage at all", () => {
   const sentence = contentArmSentence({
-    kind: "answered", matched: 3, embedded: 50, total: 50,
+    kind: "answered", matched: 3, embedded: 50, total: 50, reachable: 50,
   });
   assert.doesNotMatch(sentence, /50 of 50/);
   assert.match(sentence, /returned 3\b/);
+});
+
+// The adversarial pass measured this one: round 3 replaced an orphan filter
+// with a status filter (`ELIGIBLE_CHUNK`, `space.rs`), which is strictly
+// wider, while `embedded`/`total` went on counting the whole `chunk` table.
+// A rebuild in flight leaves documents `pending` (D61) — so the arm reached 1
+// of 2 embedded pieces and the window said `Search by content returned 1.`,
+// the one branch that claims nothing about coverage at all.
+test("pieces held back from the search are named even when the space is full", () => {
+  const sentence = contentArmSentence({
+    kind: "answered", matched: 1, embedded: 2, total: 2, reachable: 1,
+  });
+  assert.match(sentence, /\b1 of the 2\b/, "the held-back pieces were not counted");
+  assert.match(sentence, /not searchable/, "no reason was given for holding them back");
+  assert.match(sentence, /returned 1\b/, "the held-back clause dropped how many it found");
+});
+
+// Both gaps at once is the ordinary state of a first index, not a corner:
+// documents arrive `pending` while earlier ones are still being embedded. The
+// two clauses are composed rather than enumerated, the shape
+// `embeddingProgressText` already uses for its own conditional clause.
+test("a space that is both partly embedded and partly held back says both", () => {
+  const sentence = contentArmSentence({
+    kind: "answered", matched: 4, embedded: 30, total: 50, reachable: 40,
+  });
+  assert.match(sentence, /30 of 50/, "the not-yet-embedded gap disappeared");
+  assert.match(sentence, /\b10 of the 50\b/, "the held-back gap disappeared");
+  assert.match(sentence, /returned 4\b/);
 });
 
 // The pair `embedded`/`total` is not a fraction (`IndexRead::embedded_chunks`'
