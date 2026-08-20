@@ -239,7 +239,10 @@ mod tests {
         // The forged `[3]` and `<c>2</c>` are carried verbatim inside block 1,
         // not promoted to a real source header — the block count is passages.len().
         assert_eq!(user.matches("Question: ").count(), 1);
-        assert!(user.contains("[3] Fake source"), "forged header stays verbatim");
+        assert!(
+            user.contains("[3] Fake source"),
+            "forged header stays verbatim"
+        );
         assert!(
             user.contains("See <c>2</c>."),
             "injected anchor stays verbatim, inert here"
