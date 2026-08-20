@@ -2216,3 +2216,17 @@ fn no_transformation_of_the_key_reaches_a_chat_200_error_envelope() {
         assert_a_defence_is_visible_to_a_reader(label, &sentence);
     }
 }
+
+/// A body cut off on a refusal still carries the refusal's verdict, not the
+/// answer — the same trade `check_key` and `check_embedding_model` make, now on
+/// the chat path. A truncated 401 must say the key was refused, not "reading
+/// the response body failed": the `BodyUnreadable` status-narrowing arm in
+/// `complete` is the code that makes that true, and every other chat test sends
+/// a complete body, so this is the one that exercises it. Without that arm the
+/// error is `BodyUnreadable { status: 401 }` and this goes red.
+#[test]
+fn a_body_that_never_finishes_on_a_chat_401_still_says_the_key_was_refused() {
+    let server = MockServer::new(vec![Reply::truncated_status(401, r#"{"error":"#)]);
+    let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("refused");
+    assert!(matches!(err, Error::Unauthorised { .. }), "got {err:?}");
+}
