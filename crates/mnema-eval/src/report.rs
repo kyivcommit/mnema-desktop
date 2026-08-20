@@ -13,10 +13,10 @@ const KS: [usize; 3] = [1, 5, SEARCH_LIMIT as usize];
 /// What a class with no questions prints where the numbers would go — the
 /// spelling of "nothing was measured", which a zero would misreport as "every
 /// question of this class failed".
-const UNMEASURED: &str = "недоступно";
+pub(crate) const UNMEASURED: &str = "недоступно";
 
-const LABEL_WIDTH: usize = 15;
-const CELL_WIDTH: usize = 16;
+pub(crate) const LABEL_WIDTH: usize = 15;
+pub(crate) const CELL_WIDTH: usize = 16;
 
 /// How much of a chunk's first line the failure list shows: wide enough to
 /// tell two documents of the corpus apart, narrow enough that a question whose
@@ -65,20 +65,41 @@ impl Report {
         Some(found as f64 / outcomes.len() as f64)
     }
 
-    /// The whole report as one block of text: the table, what the numbers
-    /// would be worth by chance, the configurations that do not exist yet, and
-    /// the questions that failed.
+    /// The mean number of chunks each arm returned over this class's questions,
+    /// and `None` where an arm was not asked at all.
     ///
-    /// The failures are part of it rather than a second thing a caller has to
-    /// remember to print — pinned by
+    /// Two numbers rather than one: the query rule moves the text arm's volume
+    /// and leaves the content arm's where it was, and a single figure averages
+    /// exactly that difference away. Pinned by
+    /// `each_arms_volume_is_printed_in_its_own_column`.
+    pub fn volume(&self, class: Class) -> (Option<f64>, Option<f64>) {
+        let outcomes = match self.by_class.get(&class) {
+            Some(o) if !o.is_empty() => o,
+            _ => return (None, None),
+        };
+        let mean = |pick: fn(&Outcome) -> Option<usize>| {
+            let taken: Vec<usize> = outcomes.iter().filter_map(pick).collect();
+            if taken.is_empty() {
+                None
+            } else {
+                Some(taken.iter().sum::<usize>() as f64 / taken.len() as f64)
+            }
+        };
+        (mean(|o| o.text_matched), mean(|o| o.content_matched))
+    }
+
+    /// The whole report as one block of text: the table, what the numbers
+    /// would be worth by chance, and the questions that failed.
+    ///
+    /// Names no configuration: a `Report` does not know which arm or which
+    /// fusion rule produced it, so any such claim here would be wrong for
+    /// some caller — `Sweep::render` and `bin/eval.rs` each say that
+    /// themselves. The failures are part of it rather than a second thing a
+    /// caller has to remember to print — pinned by
     /// `the_failures_are_in_the_report_not_appended_to_it`.
     pub fn render(&self) -> String {
         let mut out = String::new();
-        let _ = writeln!(
-            out,
-            "Пошук за текстом — {} чанків у покажчику\n",
-            self.chunk_count
-        );
+        let _ = writeln!(out, "{} чанків у покажчику\n", self.chunk_count);
 
         let mut header = pad("клас", LABEL_WIDTH);
         for k in KS {
@@ -102,8 +123,7 @@ impl Report {
             let _ = writeln!(out, "{}", row.trim_end());
         }
 
-        out.push_str("\nУ дужках — рівень випадковості для того самого k.\n");
-        out.push_str("Конфігурації «пошук за вмістом» і «суміш» не збудовані.\n\n");
+        out.push_str("\nУ дужках — рівень випадковості для того самого k.\n\n");
 
         let failed: Vec<&Outcome> = self
             .by_class
@@ -158,7 +178,7 @@ fn label(class: Class) -> &'static str {
     }
 }
 
-fn pad(text: &str, width: usize) -> String {
+pub(crate) fn pad(text: &str, width: usize) -> String {
     format!("{text:<width$}")
 }
 

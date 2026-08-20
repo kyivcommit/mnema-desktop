@@ -134,6 +134,13 @@ fn a_document_still_being_written_answers_no_search() {
         "a document that has not been declared finished must not answer with \
          the part of itself that happens to be written, chunk {chunk}"
     );
+    assert!(
+        db.terms_present(&prepare_for_search("Вільхівка", SourceKind::Document))
+            .unwrap()
+            .is_empty(),
+        "a term that exists only in a document still being written must not \
+         be reported present either, chunk {chunk}"
+    );
 }
 
 #[test]
@@ -474,6 +481,12 @@ fn a_failed_or_skipped_document_is_not_searchable_either() {
         assert!(
             db.search_lexical("Вільхівка", 10).unwrap().is_empty(),
             "{status:?} is not a document a search may answer with"
+        );
+        assert!(
+            db.terms_present(&prepare_for_search("Вільхівка", SourceKind::Document))
+                .unwrap()
+                .is_empty(),
+            "{status:?}: its words must not be reported present either"
         );
     }
 }

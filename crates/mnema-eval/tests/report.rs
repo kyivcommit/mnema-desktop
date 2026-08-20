@@ -16,6 +16,8 @@ fn outcome(question: &str, class: Class, rank: Option<usize>) -> Outcome {
             None,
         ],
         gold: vec![42],
+        text_matched: None,
+        content_matched: None,
     }
 }
 
@@ -109,20 +111,6 @@ fn a_long_first_line_is_cut_on_a_character_boundary() {
         text.contains("Ділянка") && text.contains('…'),
         "the long line was neither shown nor marked as cut:\n{text}"
     );
-}
-
-#[test]
-fn the_configurations_that_do_not_exist_are_named_not_zeroed() {
-    // Both directions in one render: the two unbuilt configurations are named,
-    // AND the word that says they are unbuilt is there. Naming them beside a
-    // number would be the failure this guards.
-    let text = Report::of(&[outcome("q-1", Class::Literal, Some(1))], 70).render();
-    for word in ["вмістом", "суміш", "не збудован"] {
-        assert!(
-            text.contains(word),
-            "{word} is not accounted for in:\n{text}"
-        );
-    }
 }
 
 #[test]

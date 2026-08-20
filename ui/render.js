@@ -207,6 +207,43 @@ export function searchResultItems(hits) {
   return hits.map((h) => ({ kind: "hit", where: hitLocation(h), text: h.text }));
 }
 
+// The saved choice and whether an arm can run at all are two facts, and this is
+// the one place they meet. What comes back is what the window DRAWS — the saved
+// choice is never written from here, so an arm that becomes available again
+// returns to what the person chose. Pinned by
+// `the saved choice is not overwritten by the arm being unavailable`.
+export function toggleState({ savedText, savedContent, keyPresent, modelChosen }) {
+  const contentAvailable = keyPresent && modelChosen;
+  const contentRuns = contentAvailable && savedContent;
+  const textRuns = savedText;
+  const onlyArm = "This is the only arm that can run.";
+  const missing = keyPresent
+    ? "No embedding model is chosen. Choose one under Models."
+    : "No key is saved. Save one under Models.";
+  // Reachable without either checkbox forcing the other: text unticked by
+  // choice, then the content arm's own availability drops away later (a key
+  // that stopped working). Neither runs, and unlike the "last effective arm"
+  // case above, the box that could fix it is not disabled — so it needs its
+  // own note, or a person sees an unticked, clickable box and no reason why
+  // search answers nothing.
+  const noneRuns = !textRuns && !contentRuns;
+  const noSearchRuns = "No search runs. Tick this to search by text.";
+  return {
+    text: {
+      checked: textRuns,
+      // D106's "at least one" is about what RUNS, not about what was chosen:
+      // with the content arm unavailable, unticking this leaves no search.
+      disabled: textRuns && !contentRuns,
+      note: textRuns && !contentRuns ? onlyArm : noneRuns ? noSearchRuns : "",
+    },
+    content: {
+      checked: contentRuns,
+      disabled: !contentAvailable || (contentRuns && !textRuns),
+      note: contentAvailable ? (contentRuns && !textRuns ? onlyArm : "") : missing,
+    },
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Model configuration.
 //
@@ -387,13 +424,27 @@ export const recordedNoteSentence = ({ recorded, list, listed }) => {
   )({ recorded, listed, list });
 };
 
-// What leaves the machine, per state of the credential store. Two of these
-// sentences are promises and the third is the refusal to make one.
+// What leaves the machine, per state of the credential store — and, while a
+// key is present, per state of the content arm switch that decides whether a
+// question is ever sent.
 //
 // `LEAVES_EVERYTHING` is longer than §3.2 of the requirements, which says
 // "once, at indexing". That is false for cloud embeddings: the question has to
 // be embedded too, on every search (D29).
 export const LEAVES_NOTHING = "Nothing leaves this machine. Search works on words.";
+// `LEAVES_NOTHING` without its second sentence, for `toggleState`'s
+// `noneRuns` state — reachable with the key absent and the text arm
+// unticked, where the checkbox note already says "No search runs" and this
+// must not contradict it by also claiming search works.
+const LEAVES_NOTHING_NO_SEARCH = "Nothing leaves this machine.";
+// True only while the content arm runs. Split out of `LEAVES_EVERYTHING` when
+// that arm became switchable — before that, a stored key meant a question
+// always left, and the two facts were one. `render.test.js` asserts the
+// content half of the sentence disappears with the arm off and appears with
+// it on.
+export const LEAVES_INDEXING_ONLY =
+  "Every piece of every document leaves this machine while indexing. Your " +
+  "questions stay here: search by content is off.";
 export const LEAVES_EVERYTHING =
   "Every piece of every document leaves this machine while indexing — and every question you " +
   "ask while searching.";
@@ -402,6 +453,13 @@ export const LEAVES_EVERYTHING =
 // same promise a key that is sitting right there would make false.
 export const LEAVES_UNKNOWN =
   "Whether anything leaves this machine is unknown: the key store could not be read.";
+// The index's own not-knowing, distinct from the key store's (`LEAVES_UNKNOWN`)
+// and the credential envelope's (`LEAVES_UNSAID`): the settings read failed, so
+// whether the content arm is on — and therefore whether a question leaves — is
+// unknown. A definite "content is off" here is exactly the evidence-free promise
+// `disclosureSentence`'s own doc forbids.
+export const LEAVES_UNKNOWN_INDEX =
+  "Whether anything leaves this machine is unknown: the index could not be read.";
 // A different not-knowing from the one above, and worth its own words: there,
 // the store was asked and would not answer; here, it answered something this
 // build has no name for.
@@ -409,18 +467,33 @@ const LEAVES_UNSAID =
   "Whether anything leaves this machine is unknown: this build did not understand what the " +
   "key store answered.";
 
+// `unreadable` still ignores the toggle — a not-knowing it cannot resolve.
+// `absent` reads `search.textRuns`: "nothing leaves" stays true whether or
+// not text runs, but "search works on words" is false when text is also
+// off, and `render.test.js` pins the sentence that drops for that case.
+// Missing `textRuns` reads as running, matching every caller here that has
+// not measured it — only `main.js`'s real one always sends a real value.
 export const DISCLOSURE_TEXT = {
-  present: LEAVES_EVERYTHING,
-  absent: LEAVES_NOTHING,
-  unreadable: LEAVES_UNKNOWN,
+  present: (search) =>
+    search.contentArmRuns ? LEAVES_EVERYTHING : LEAVES_INDEXING_ONLY,
+  absent: (search) => (search.textRuns === false ? LEAVES_NOTHING_NO_SEARCH : LEAVES_NOTHING),
+  unreadable: () => LEAVES_UNKNOWN,
 };
 
-// Takes the `KeyState` field, not the whole `ModelSettings`. Every function in
-// this block takes the field it renders — `indexStateSentence` has to, since
-// `AdoptedModel` carries an `IndexSettings` of its own — and two conventions
-// for the same kind of argument is the shape that let the brief's `keyPresent`
-// go stale unnoticed.
-export const disclosureSentence = (key) => DISCLOSURE_TEXT[key?.kind] ?? LEAVES_UNSAID;
+// Takes the `KeyState` field and the content arm's run state, not the whole
+// `ModelSettings` or a caller-built boolean — `main.js` reads
+// `contentArmRuns` off the same `toggleState` call that draws the arm
+// checkboxes, so this sentence and those checkboxes read one fact rather
+// than two that could disagree.
+//
+// A caller that forgets `search` gets the pessimistic reading, not the
+// reassuring one: `LEAVES_UNKNOWN`'s own doc forbids a promise made without
+// evidence, and "the content arm is off" is exactly such a promise if
+// nobody actually checked the arm.
+export const disclosureSentence = (key, search) =>
+  (DISCLOSURE_TEXT[key?.kind] ?? (() => LEAVES_UNSAID))(
+    search ?? { contentArmRuns: true },
+  );
 
 // `KeyStoreFailure` is four values over six error variants, and the grouping is
 // the whole content: what the person does next. Four sentences that read alike
@@ -1570,3 +1643,71 @@ export const catalogueSentence = (catalogue) => {
     ? `no model in the provider's list for this role could be read by this build — ${records}`
     : "the provider lists no models for this role";
 };
+
+// A different not-knowing from the states below: the window was handed a kind
+// this build has no name for, which is the same shape as `LEAVES_UNSAID`.
+const TEXT_ARM_UNSAID =
+  "Whether search by text ran is unknown: this build did not understand what it answered.";
+
+// One entry per `TextArmReport` variant in `src-tauri/src/bridge.rs`, a table
+// for the same reason `CONTENT_ARM_TEXT` below it is one.
+export const TEXT_ARM_TEXT = {
+  off: () => "Search by text is off.",
+  answered: (arm) => `Search by text returned ${arm.matched}.`,
+};
+
+export const textArmSentence = (arm) =>
+  (TEXT_ARM_TEXT[arm?.kind] ?? (() => TEXT_ARM_UNSAID))(arm);
+
+// A different not-knowing from the states below: the window was handed a kind
+// this build has no name for, which is the same shape as `LEAVES_UNSAID`.
+const CONTENT_ARM_UNSAID =
+  "Whether search by content ran is unknown: this build did not understand what it answered.";
+
+// One entry per `ContentArmReport` variant in `src-tauri/src/bridge.rs`, and a
+// table rather than a switch for the reason the block above this one gives: a
+// `default` arm is where two states quietly become one pixel.
+export const CONTENT_ARM_TEXT = {
+  off: () => "Search by content is off.",
+  noKey: () => "Search by content needs a key. Save one under Models.",
+  noModel: () =>
+    "Search by content needs an embedding model. Choose one under Models.",
+  failed: (arm) => `Search by content could not be reached: ${arm.reason}`,
+  // Three cases over `embedded`/`total`, and a clause over `reachable` that
+  // composes with each — the shape `embeddingProgressText` already uses, and
+  // the reason this is not a fourth and fifth case: the two gaps are
+  // independent and a first index has both at once. Only the `embedded ===
+  // total` case is silent about coverage, and only while nothing is held
+  // back; the others all have to say `matched` too, since no "looked at"
+  // clause on its own says whether anything was found.
+  answered: (arm) => {
+    // `total` counts chunks that exist, `reachable` the ones a search could
+    // return: `ELIGIBLE_CHUNK` (`space.rs`) drops every chunk whose document
+    // is not `indexed`, which an ordinary rebuild causes (D61). No reason is
+    // claimed, because `pending`, `failed` and `skipped` all land here and
+    // this window cannot tell them apart. Pinned by `pieces held back from
+    // the search are named even when the space is full`.
+    const heldBack =
+      arm.reachable < arm.total
+        ? ` ${arm.total - arm.reachable} of the ${arm.total} are under documents that are ` +
+          "not searchable right now, so this search could not reach them."
+        : "";
+    if (arm.embedded < arm.total) {
+      return (
+        `Search by content looked at ${arm.embedded} of ${arm.total} pieces — the rest have ` +
+        `no vectors yet, and it returned ${arm.matched}.` + heldBack
+      );
+    }
+    if (arm.embedded > arm.total) {
+      return (
+        `Search by content returned ${arm.matched} — it looked at ${arm.embedded} of ` +
+        `${arm.total} pieces, and a vector can outlive the piece it embeds, so the first ` +
+        "number is sometimes larger; this is not an error." + heldBack
+      );
+    }
+    return `Search by content returned ${arm.matched}.` + heldBack;
+  },
+};
+
+export const contentArmSentence = (arm) =>
+  (CONTENT_ARM_TEXT[arm?.kind] ?? (() => CONTENT_ARM_UNSAID))(arm);

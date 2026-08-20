@@ -110,10 +110,30 @@
 
       <section>
         <h2>Search</h2>
+        <!--
+          An exception to this file's own header, which asks not to be grown
+          further: these two toggles are temporary and leave with this file
+          once the ported interface arrives.
+        -->
+        <label><input id="arm-text" type="checkbox" checked /> Search by text</label>
+        <p id="arm-text-note" class="muted"></p>
+        <label><input id="arm-content" type="checkbox" checked /> Search by content</label>
+        <p id="arm-content-note" class="muted"></p>
         <form id="search-form">
           <input id="query" type="search" placeholder="query" autocomplete="off" />
-          <button type="submit">Search</button>
+          <!--
+            §3.3 of the round-3 readiness-barrier spec: this starts disabled
+            rather than relying on `main.js` to disable it before anything
+            can be pressed. There is a window, at every load, between the
+            markup parsing and the first `model_settings` read landing, that
+            no handler-side guard can close — `main.js`'s own barrier
+            (`syncSearchGate`) only ever narrows this further, and opens it
+            once the first authoritative read has drawn.
+          -->
+          <button id="search-submit" type="submit" disabled>Search</button>
         </form>
+        <p id="text-arm-state" class="muted"></p>
+        <p id="content-arm-state" class="muted"></p>
         <ol id="results"></ol>
       </section>
     </main>

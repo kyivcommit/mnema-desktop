@@ -9,26 +9,38 @@ publish.workspace = true
 # code. It is allowed to know about the whole pipeline precisely because it
 # ships nowhere.
 #
-# No `rusqlite` here, deliberately, on the rule `mnema-embed` states: everything
-# from the database arrives through `Db`'s own methods.
-#
-# `mnema-ingest`, `mnema-pool` and `tempfile` are dependencies and not
-# dev-dependencies, which spec §8 had predicted the other way round. They
-# follow `IndexedCorpus`, and it lives in `src/`, not in `tests/`: it walks the
-# corpus into a fresh index (`mnema-ingest`) through the extraction pool
-# (`mnema-pool`), and it holds the `TempDir` whose lifetime *is* the "a
-# temporary directory per run" guarantee (`tempfile`). For a crate that ships
-# nowhere this is not a debt.
+# `mnema-ingest`, `mnema-pool`, `mnema-chunk`, `mnema-embed`, `mnema-provider`
+# and `tempfile` are dependencies and not dev-dependencies, which spec §8 had
+# predicted the other way round. They follow `IndexedCorpus` and `embed_corpus`,
+# and both live in `src/`, not in `tests/`: `IndexedCorpus` walks the corpus
+# into a fresh index (`mnema-ingest`) through the extraction pool
+# (`mnema-pool`) and holds the `TempDir` whose lifetime *is* the "a temporary
+# directory per run" guarantee (`tempfile`); `embed_corpus` measures a
+# provider's width (`mnema-provider`), adopts it and runs the embedding pass
+# (`mnema-embed`), which needs the chunker's own hash (`mnema-chunk`). For a
+# crate that ships nowhere this is not a debt.
 [dependencies]
+mnema-chunk = { path = "../mnema-chunk" }
 mnema-core = { path = "../mnema-core" }
+mnema-embed = { path = "../mnema-embed" }
 mnema-index = { path = "../mnema-index" }
 mnema-ingest = { path = "../mnema-ingest" }
 mnema-pool = { path = "../mnema-pool" }
+mnema-provider = { path = "../mnema-provider" }
+mnema-search = { path = "../mnema-search" }
 mnema-walk = { path = "../mnema-walk" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+mnema-mock-provider = { workspace = true }
+# The fixtures read the database directly — that the key never lands in
+# `model_config.credential_ref` — the same rule and the same scope
+# `mnema-embed/Cargo.toml` states: everything `src/` needs from the database
+# arrives through `Db`'s own methods, and `Db::conn()` is public for `tests/`.
+rusqlite = { workspace = true }
 
 [[bin]]
 name = "eval"

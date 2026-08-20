@@ -1,4 +1,8 @@
-use crate::{Class, EvalError, Gold, IndexedCorpus, Question, QuestionSet, resolve_gold};
+use crate::{
+    Class, DenseAnswers, EvalError, Gold, IndexedCorpus, Question, QuestionSet, resolve_gold,
+};
+use mnema_index::QueryRule;
+use mnema_search::{CANDIDATES, FusionRule, fuse};
 
 /// How many chunks one question is allowed to see, and the ceiling every
 /// `recall@k` in the report is read under.
@@ -53,6 +57,17 @@ pub struct Outcome {
     /// `a_chunk_the_index_cannot_place_says_so_instead_of_a_bare_number`.
     pub returned_locations: Vec<Option<Location>>,
     pub gold: Vec<i64>,
+    /// How many chunks the lexical arm returned, or `None` when this run did
+    /// not ask it. The depth behind the count is not fixed by the field:
+    /// `run_lexical_with` asks to `SEARCH_LIMIT`, `run_row` asks to
+    /// `CANDIDATES` — the same field name from two entry points measuring
+    /// two different depths, not comparable across them. Pinned by
+    /// `a_looser_rule_returns_more_and_the_outcome_records_how_much`.
+    pub text_matched: Option<usize>,
+    /// How many chunks the content arm returned, or `None` when this run did
+    /// not ask it. `run_lexical_with` never asks it. Pinned (for that value)
+    /// by `a_looser_rule_returns_more_and_the_outcome_records_how_much`.
+    pub content_matched: Option<usize>,
 }
 
 /// Asks the lexical search every question, in order, one outcome each. Pinned
@@ -69,16 +84,25 @@ pub fn run_lexical(
     indexed: &IndexedCorpus,
     questions: &QuestionSet,
 ) -> Result<Vec<Outcome>, EvalError> {
+    run_lexical_with(indexed, questions, QueryRule::AllTerms)
+}
+
+/// The same run as `run_lexical`, under a named rule. The question still goes
+/// in exactly as a person would have typed it — not rewritten, not narrowed,
+/// not routed through `search_terms` — and the rule is the only thing that
+/// varies. Pinned by `the_unparameterised_run_is_the_all_terms_rule` and
+/// `a_looser_rule_returns_more_and_the_outcome_records_how_much`.
+pub fn run_lexical_with(
+    indexed: &IndexedCorpus,
+    questions: &QuestionSet,
+    rule: QueryRule,
+) -> Result<Vec<Outcome>, EvalError> {
     let mut outcomes = Vec::with_capacity(questions.questions.len());
     for q in &questions.questions {
         let gold = gold_chunks(indexed, q)?;
-        // The question goes in exactly as a person would have typed it: not
-        // rewritten, not narrowed, not routed through `search_terms`. A
-        // sentence-shaped query unreachable under FTS5's implicit AND is the
-        // thing being measured (spec §2), not a defect to route around.
-        // Pinned by
-        // `a_question_no_chunk_answers_has_no_rank_and_says_what_came_back`.
-        let returned = indexed.db().search_lexical(&q.text, SEARCH_LIMIT)?;
+        let returned = indexed
+            .db()
+            .search_lexical_with(&q.text, rule, SEARCH_LIMIT)?;
         let returned_locations = locate(indexed, &returned)?;
         // `position` stops at the first gold chunk to appear, which is the
         // best-placed one — the rank is over ALL gold chunks, not just the
@@ -92,6 +116,64 @@ pub fn run_lexical(
             question: q.id.clone(),
             class: q.class,
             rank,
+            text_matched: Some(returned.len()),
+            content_matched: None,
+            returned,
+            returned_locations,
+            gold,
+        });
+    }
+    Ok(outcomes)
+}
+
+/// One row of the sweep: a query rule, a fusion rule, and the dense answers
+/// taken once for the whole sweep. Each arm is asked to `CANDIDATES` depth
+/// and `fuse` cuts to `SEARCH_LIMIT` — the same shape as
+/// `mnema_search::search`. An arm the fusion rule does not read is never
+/// asked, so its `_matched` field is `None`, not a count of zero. Pinned by
+/// `a_content_only_row_is_the_same_under_every_query_rule` and by
+/// `a_fused_row_records_each_arms_volume_apart`.
+pub fn run_row(
+    indexed: &IndexedCorpus,
+    questions: &QuestionSet,
+    rule: QueryRule,
+    fusion: FusionRule,
+    dense: &DenseAnswers,
+) -> Result<Vec<Outcome>, EvalError> {
+    let mut outcomes = Vec::with_capacity(questions.questions.len());
+    for q in &questions.questions {
+        let gold = gold_chunks(indexed, q)?;
+        let text = if fusion == FusionRule::ContentOnly {
+            None
+        } else {
+            Some(
+                indexed
+                    .db()
+                    .search_lexical_with(&q.text, rule, CANDIDATES)?,
+            )
+        };
+        let content = if fusion == FusionRule::TextOnly {
+            None
+        } else {
+            Some(dense.of(&q.id))
+        };
+        let returned = fuse(
+            fusion,
+            text.as_deref().unwrap_or(&[]),
+            content.unwrap_or(&[]),
+            SEARCH_LIMIT as usize,
+        );
+        let returned_locations = locate(indexed, &returned)?;
+        let rank = returned
+            .iter()
+            .position(|id| gold.contains(id))
+            .map(|i| i + 1);
+        outcomes.push(Outcome {
+            question: q.id.clone(),
+            class: q.class,
+            rank,
+            text_matched: text.as_ref().map(Vec::len),
+            content_matched: content.map(<[i64]>::len),
             returned,
             returned_locations,
             gold,

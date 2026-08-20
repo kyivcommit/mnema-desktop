@@ -391,16 +391,26 @@ case_ "embed: a refused batch must be split, not blamed on the chunk that happen
 # cases, one per test, since `case_` names one test at a time — and the second
 # is not the same claim: `failed` and `skipped` are outside `'indexed'` too,
 # and a filter written as "not pending" would pass the first test and fail it.
+#
+# Round-3 adversarial review (R-3): both used to target the literal
+# `WHERE d.status = 'indexed'\n            AND c.id NOT IN` two-line text
+# that sat directly in `the_embedding_queue`. Round 3 moved that predicate
+# into the one-line `ELIGIBLE_CHUNK` const (`space.rs:38-39`), so the old
+# pattern matched nothing and both cases silently passed without mutating
+# anything. Retargeted at `ELIGIBLE_CHUNK` itself — and because that const
+# is now shared with `Db::knn_searchable`'s own pre-filter, this mutation
+# also removes eligibility from search, not only from the queue: these two
+# cases no longer isolate the queue the way they did before round 3.
 case_ "index: the queue must skip documents that are not indexed (D95 d)" \
   crates/mnema-index/src/space.rs \
-  's{          WHERE d\.status = \x27indexed\x27\n            AND c\.id NOT IN}{          WHERE c.id NOT IN}' \
-  'WHERE c.id NOT IN (SELECT chunk_id FROM {table})' \
+  's{WHERE d\.status = \x27indexed\x27}{WHERE 1=1}' \
+  'WHERE 1=1' \
   mnema-embed 'chunks_of_a_document_being_rebuilt_are_not_embedded' --test queue
 
 case_ "index: the queue must skip failed and skipped documents too, not only pending" \
   crates/mnema-index/src/space.rs \
-  's{          WHERE d\.status = \x27indexed\x27\n            AND c\.id NOT IN}{          WHERE c.id NOT IN}' \
-  'WHERE c.id NOT IN (SELECT chunk_id FROM {table})' \
+  's{WHERE d\.status = \x27indexed\x27}{WHERE 1=1}' \
+  'WHERE 1=1' \
   mnema-embed 'only_indexed_documents_are_embedded' --test queue
 
 # Without this the pass spins on the chunk the provider will not take: it is
@@ -660,11 +670,19 @@ case_ "embed: a corroborated split must still write the rows it held" \
 # M2: the filter that makes the queue *the* queue had no case of its own. This
 # is the whole of "not done yet" — remove it and every chunk is offered again on
 # every pass, for ever, against a paid provider.
+#
+# Round-3 adversarial review (R-3): the expression above still applies —
+# `the_embedding_queue` still has this exact line — but the old marker
+# expected `JOIN document d ON d.id = c.document_id\n          WHERE
+# d.status` as adjacent lines, and round 3 folded that text onto one line
+# inside `ELIGIBLE_CHUNK` (`space.rs:38-39`). Marker only, retargeted at
+# what the mutation actually leaves behind: `{ELIGIBLE_CHUNK}` running
+# straight into `AND NOT EXISTS` with the `AND c.id NOT IN` line gone.
 case_ "index: the queue must exclude chunks that already have a vector" \
   crates/mnema-index/src/space.rs \
   's{\n            AND c\.id NOT IN \(SELECT chunk_id FROM \{table\}\)}{}' \
-  'JOIN document d ON d.id = c.document_id
-          WHERE d.status' \
+  '{ELIGIBLE_CHUNK}
+            AND NOT EXISTS' \
   mnema-embed 'the_queue_is_the_chunks_with_no_vector' --test queue
 
 # I1: chunk ids are reused, so a vector written by id alone can land on a chunk

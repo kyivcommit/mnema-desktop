@@ -959,6 +959,11 @@ pub struct IndexRead {
     pub embedded_chunks_everywhere: i64,
     pub rerank_model: Option<String>,
     pub chat_model: Option<String>,
+    /// Whether each search arm is on, read the same way `search` itself
+    /// reads them (`bridge::arm_is_on`) — so a checkbox drawn from this and
+    /// the arm that actually ran on the next search cannot disagree.
+    pub search_text_arm: bool,
+    pub search_content_arm: bool,
 }
 
 /// The index half, read or refused — and never an `Err`, which is the whole
@@ -1037,6 +1042,10 @@ fn read_settings(db: &mnema_index::Db) -> Result<IndexSettings, mnema_index::Err
         embedded_chunks_everywhere: db.embedded_chunks_everywhere()?,
         rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
         chat_model: db.meta_get(mnema_index::META_CHAT_MODEL)?,
+        search_text_arm: crate::bridge::arm_is_on(db.meta_get(mnema_index::META_SEARCH_TEXT_ARM)?),
+        search_content_arm: crate::bridge::arm_is_on(
+            db.meta_get(mnema_index::META_SEARCH_CONTENT_ARM)?,
+        ),
     }))
 }
 
@@ -1143,6 +1152,8 @@ mod tests {
             embedded_chunks_everywhere: 0,
             rerank_model: None,
             chat_model: None,
+            search_text_arm: true,
+            search_content_arm: true,
         }
     }
 

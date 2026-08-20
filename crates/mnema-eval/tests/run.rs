@@ -269,3 +269,167 @@ fn every_question_produces_exactly_one_outcome_in_order() {
     let ids: Vec<&str> = outcomes.iter().map(|o| o.question.as_str()).collect();
     assert_eq!(ids, vec!["q-1", "q-2"]);
 }
+
+/// The rule the harness sweeps is a parameter of the run, and the old entry
+/// point is one of its values. The equality matters because every existing
+/// assertion in this file was written against `run_lexical`.
+#[test]
+fn the_unparameterised_run_is_the_all_terms_rule() {
+    let (corpus, questions, indexed) = support::small_fixture();
+    assert_eq!(
+        mnema_eval::run_lexical(&indexed, &questions).unwrap(),
+        mnema_eval::run_lexical_with(&indexed, &questions, mnema_index::QueryRule::AllTerms)
+            .unwrap()
+    );
+    let _ = corpus;
+}
+
+/// A rule that demands less finds more on this corpus, and the volume column is
+/// what shows the price. Both halves asserted: a rule that returned everything
+/// would satisfy the first alone. `text_matched` is `Some(0)`, not `None`, on
+/// the strict side: the arm WAS asked, it just found nothing — `None` means
+/// only "not asked", never "asked and empty". And the volume itself is checked
+/// against `returned.len()`, not merely against zero, so a count that tracked
+/// only "did anything come back" could not pass unnoticed.
+#[test]
+fn a_looser_rule_returns_more_and_the_outcome_records_how_much() {
+    let (_c, questions, indexed) = support::small_fixture();
+    let strict =
+        mnema_eval::run_lexical_with(&indexed, &questions, mnema_index::QueryRule::AllTerms)
+            .unwrap();
+    let loose = mnema_eval::run_lexical_with(&indexed, &questions, mnema_index::QueryRule::AnyTerm)
+        .unwrap();
+
+    assert_eq!(strict[0].text_matched, Some(0), "outcome: {:?}", strict[0]);
+    let strict_total: usize = strict.iter().filter_map(|o| o.text_matched).sum();
+    let loose_total: usize = loose.iter().filter_map(|o| o.text_matched).sum();
+    assert!(
+        loose_total > strict_total,
+        "{loose_total} vs {strict_total}"
+    );
+    assert!(
+        loose
+            .iter()
+            .all(|o| o.text_matched == Some(o.returned.len())),
+        "outcomes: {loose:?}"
+    );
+    assert!(strict.iter().all(|o| o.content_matched.is_none()));
+}
+
+/// A row of the sweep: one query rule, one fusion rule, over dense answers
+/// taken once. `ContentOnly` is the discriminating case — its outcome must not
+/// depend on the query rule at all, which is also the sweep's own self-check.
+#[test]
+fn a_content_only_row_is_the_same_under_every_query_rule() {
+    let (_c, questions, indexed) = support::small_fixture_with_vectors();
+    let dense = support::canned_dense_answers(&questions);
+
+    let mut rows = Vec::new();
+    for rule in mnema_index::QueryRule::ALL {
+        rows.push(
+            mnema_eval::run_row(
+                &indexed,
+                &questions,
+                rule,
+                mnema_search::FusionRule::ContentOnly,
+                &dense,
+            )
+            .unwrap(),
+        );
+    }
+    for row in &rows[1..] {
+        assert_eq!(row, &rows[0], "content-only drifted with the query rule");
+    }
+    // And it is not vacuously equal: the rows carry answers.
+    assert!(rows[0].iter().any(|o| !o.returned.is_empty()));
+    // Not the same answer copied onto every question, either: `q-1` and
+    // `q-2` were handed different canned chunks, so the outcomes must
+    // differ too — a `run_row` that read one question's dense answer for
+    // all of them would still pass every assertion above.
+    assert_ne!(
+        rows[0][0].returned, rows[0][1].returned,
+        "outcomes: {:?}",
+        rows[0]
+    );
+    // The other half of the gate `a_fused_row_records_each_arms_volume_apart`
+    // pins for `Rrf`: content-only never asks the text arm, so it stays
+    // `None` rather than a count of zero.
+    assert!(rows[0].iter().all(|o| o.text_matched.is_none()));
+}
+
+/// The mirror of the content-only row: `TextOnly` never asks the content
+/// arm, so `content_matched` stays `None` rather than a count of zero,
+/// while `text_matched` — the arm that WAS asked — is `Some`.
+#[test]
+fn a_text_only_row_never_asks_the_content_arm() {
+    let (_c, questions, indexed) = support::small_fixture_with_vectors();
+    let dense = support::canned_dense_answers(&questions);
+
+    let row = mnema_eval::run_row(
+        &indexed,
+        &questions,
+        mnema_index::QueryRule::AnyTerm,
+        mnema_search::FusionRule::TextOnly,
+        &dense,
+    )
+    .unwrap();
+
+    assert!(row.iter().all(|o| o.content_matched.is_none()));
+    assert!(row.iter().all(|o| o.text_matched.is_some()));
+}
+
+/// `Rrf` and `Cascade` are not the same rule under a different name: on
+/// `q-1` under `AnyTerm` the text arm returns two chunks `[x, y]` and the
+/// content arm returns one `[z]`. `Cascade` exhausts the text arm first,
+/// so it answers `[x, y, z]`; `Rrf` scores `x` and `z` equal (both lead
+/// their own arm) and breaks the tie by the smaller id, always `x` here,
+/// so it answers `[x, z, y]` — the two disagree at the second position
+/// regardless of which real chunk `x` and `y` turn out to be.
+#[test]
+fn a_cascade_row_disagrees_with_rrf_on_where_the_content_answer_lands() {
+    let (_c, questions, indexed) = support::small_fixture_with_vectors();
+    let dense = support::canned_dense_answers(&questions);
+
+    let rrf = mnema_eval::run_row(
+        &indexed,
+        &questions,
+        mnema_index::QueryRule::AnyTerm,
+        mnema_search::FusionRule::Rrf,
+        &dense,
+    )
+    .unwrap();
+    let cascade = mnema_eval::run_row(
+        &indexed,
+        &questions,
+        mnema_index::QueryRule::AnyTerm,
+        mnema_search::FusionRule::Cascade,
+        &dense,
+    )
+    .unwrap();
+
+    assert_ne!(
+        rrf[0].returned, cascade[0].returned,
+        "rrf: {:?}, cascade: {:?}",
+        rrf[0].returned, cascade[0].returned
+    );
+}
+
+/// Both arms' volumes are recorded separately. One shared number would hide the
+/// very difference the column exists to show.
+#[test]
+fn a_fused_row_records_each_arms_volume_apart() {
+    let (_c, questions, indexed) = support::small_fixture_with_vectors();
+    let dense = support::canned_dense_answers(&questions);
+
+    let row = mnema_eval::run_row(
+        &indexed,
+        &questions,
+        mnema_index::QueryRule::AnyTerm,
+        mnema_search::FusionRule::Rrf,
+        &dense,
+    )
+    .unwrap();
+
+    assert!(row.iter().all(|o| o.text_matched.is_some()));
+    assert!(row.iter().all(|o| o.content_matched.is_some()));
+}

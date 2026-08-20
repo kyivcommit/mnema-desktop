@@ -14,8 +14,10 @@ use std::time::Duration;
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_desktop::bridge;
 use mnema_desktop::job::JobEvent;
+use mnema_desktop::models::set_key;
 use mnema_desktop::state::AppState;
 use mnema_desktop::walk_job;
+use mnema_mock_provider::{MockServer, Reply};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, Channel, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, mock_builder, mock_context, noop_assets};
@@ -30,21 +32,13 @@ const NO_PROVIDER: &str = "http://127.0.0.1:1";
 /// A credential reference that cannot reach a store at all — the same trick
 /// `NO_PROVIDER` uses, one line up.
 ///
-/// Empty is not carelessness: `mnema_secrets::entry` refuses an empty reference
-/// *before* it calls `ensure_default_store`, so no store is installed and none
-/// is consulted — `Error::EmptyReference`, and the ordering inside `entry` is
-/// what makes that true rather than a hope. The reason it refuses at all is the
-/// macOS keychain, where an empty attribute is a wildcard that would match
-/// another configuration's credential. So any store operation in this file fails
-/// loudly instead of quietly succeeding under a fixed name — which is what a
-/// plausible-looking name would do, leaving an entry behind with no `Drop` to
-/// remove it and two parallel runs colliding on it.
+/// Empty is not carelessness: `mnema_secrets::entry` refuses an empty
+/// reference before it installs or consults any store —
+/// `Error::EmptyReference`. It refuses because of the macOS keychain, where
+/// an empty attribute is a wildcard matching another configuration's key.
 ///
-/// `every_model_command_the_window_calls_is_registered` does reach
-/// `mnema_secrets` — four of the eight commands ask it something — and this is
-/// exactly why that test can do so without registering a store or touching the
-/// developer's keychain. `tests/model_commands.rs` is where a credential is
-/// really written, behind an in-memory store and a reference unique per fixture.
+/// Kept only for the two fixtures that build `AppState` directly and never
+/// call `search` or a model command; `app_in` below wants a real store.
 const NO_CREDENTIAL: &str = "";
 
 /// An application whose data directory is a temporary one.
@@ -53,13 +47,39 @@ const NO_CREDENTIAL: &str = "";
 /// resolve inside the developer's own Application Support folder. A test must
 /// not write there, which is the reason the directory is resolved once at
 /// start-up and held in state rather than derived inside each command.
+///
+/// **A real, in-memory, empty store**, not `NO_CREDENTIAL`'s unreachable
+/// one: `search` now reads it even with no key entered, so this fixture
+/// needs "no key" (`Error::NoKey`), not "no store" (`Error::Secrets`).
 fn app_in(dir: &std::path::Path) -> tauri::App<MockRuntime> {
+    mnema_secrets::test_store::register();
     mock_builder()
         .manage(AppState::new(
             dir.to_path_buf(),
             support::worker().to_path_buf(),
             NO_PROVIDER.to_string(),
-            NO_CREDENTIAL.to_string(),
+            format!("mnema-desktop-commands-test-{}", dir.display()),
+        ))
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application")
+}
+
+/// An application whose provider is a real, local mock server rather than
+/// [`NO_PROVIDER`] — for the one test in this file that needs a model
+/// actually adopted. A fresh in-memory credential store per app, the same
+/// guard `support/fixture.rs`'s own doc explains at length: `mnema-secrets`
+/// only skips the platform store under its own `cfg(test)`, so an
+/// integration test of another crate would otherwise reach a developer's
+/// real keychain.
+fn app_with_provider(dir: &std::path::Path, base: &str) -> tauri::App<MockRuntime> {
+    mnema_secrets::test_store::register();
+    mock_builder()
+        .manage(AppState::new(
+            dir.to_path_buf(),
+            support::worker().to_path_buf(),
+            base.to_string(),
+            format!("mnema-desktop-commands-provider-test-{}", dir.display()),
         ))
         .invoke_handler(mnema_desktop::invoke_handler())
         .build(mock_context(noop_assets()))
@@ -351,8 +371,11 @@ fn a_search_through_the_ipc_finds_what_another_connection_wrote() {
         chunk
     };
 
-    let hits = call(&webview, "search", json!({ "query": "звірки" })).expect("search was rejected");
-    let hits = hits.as_array().expect("search did not return an array");
+    let answer =
+        call(&webview, "search", json!({ "query": "звірки" })).expect("search was rejected");
+    let hits = answer["hits"]
+        .as_array()
+        .expect("search did not return a hits array");
 
     assert_eq!(
         hits.len(),
@@ -366,6 +389,188 @@ fn a_search_through_the_ipc_finds_what_another_connection_wrote() {
     // join a relative path from, and `None` must cross as `null`, not `""`
     // or an absent key.
     assert_eq!(hits[0]["relativePath"], json!(null));
+}
+
+/// Writes a fresh page, block and chunk onto a document id that already
+/// exists — what a rebuild does after `clear_document_content`. Returns the
+/// chunk id `insert_chunk` produced.
+fn rebuild_one_chunk(db: &mnema_index::Db, doc: &str, text: &str) -> i64 {
+    let page = db.insert_page(doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: None,
+                text: text.to_string(),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap();
+    let chunk = db
+        .insert_chunk(
+            doc,
+            0,
+            text,
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block,
+                    start: 0,
+                    end: text.chars().count() as u32,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        )
+        .unwrap();
+    db.set_document_status(doc, mnema_index::DocumentStatus::Indexed)
+        .unwrap();
+    chunk
+}
+
+/// Round-3 review, Finding 4. The old oracle asserted an *order*: the
+/// citation for the reused chunk id must always read the pre-rebuild text.
+/// That is wrong on both sides of the race — a search that loses the race
+/// outright sees one coherent *new* state and this oracle failed it anyway,
+/// and a writer delayed past the search passed without the race ever being
+/// reached at all. The invariant `Db::read_snapshot` actually buys is
+/// coherence, not order: whichever state a search's answer reflects, it must
+/// be *one* state, never the old chunk's id carrying the new chunk's text
+/// because two different statements inside the same command read two
+/// different moments.
+///
+/// Made checkable by conditioning *inclusion* on the same word the citation
+/// is checked for, rather than treating them as two independent facts. The
+/// query requires `MARKER`, which only the pre-rebuild text holds — so a hit
+/// for `target_chunk` can only exist because some statement inside this
+/// command's snapshot read the chunk while it still held `MARKER`. If the
+/// citation for that same hit does not hold `MARKER`, two different
+/// statements read two different moments: the match came from before the
+/// rebuild and the citation from after it. Absence of the hit is the other
+/// coherent outcome — by the time the snapshot was taken the document no
+/// longer matched, whether because the rebuild had already landed or because
+/// the read fell inside the gap between `clear_document_content`'s commit
+/// and the rebuild's — and `bridge.rs`'s own citation loop already treats a
+/// chunk that is simply gone as no error, not a defect.
+fn assert_coherent_or_absent(answer: &Value, chunk_id: i64) {
+    const MARKER: &str = "маркер";
+    let hits = answer["hits"].as_array().expect("hits array");
+    let Some(hit) = hits.iter().find(|h| h["chunkId"] == json!(chunk_id)) else {
+        return;
+    };
+    let text = hit["text"].as_str().unwrap();
+    assert!(
+        text.contains(MARKER),
+        "the hit exists only because a statement inside this command matched \
+         {MARKER:?}, but its citation does not hold that word — the old \
+         chunk's id carrying the new chunk's text: {text:?}"
+    );
+}
+
+/// A document with one chunk holding `text`, for
+/// [`a_rebuild_racing_the_ipc_search_does_not_reach_its_citation`]'s decoys.
+fn write_one_document(db: &mnema_index::Db, id: &str, text: &str) -> i64 {
+    db.insert_document(id, "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    rebuild_one_chunk(db, id, text)
+}
+
+/// Round-2 review, F1: nothing pinned that `bridge::search` itself wraps
+/// its own work in `Db::read_snapshot`, only that the mechanism works
+/// (`crates/mnema-search/tests/snapshot_boundary.rs`) — removing that call
+/// left the whole suite green. A real second connection rebuilds the
+/// matched document — reused chunk id, the query's own required word
+/// replaced — while the real `search` IPC command runs. See
+/// `assert_coherent_or_absent`'s own doc for why the oracle asks about
+/// coherence rather than which text won the race, and the private report
+/// for this fixture's measured catch rate.
+#[test]
+fn a_rebuild_racing_the_ipc_search_does_not_reach_its_citation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .expect("set_search_arms was rejected");
+
+    // `bridge.rs`'s `SEARCH_QUERY_RULE` (`TermsInIndex`) demands every term
+    // present anywhere in the index, same as `AllTerms` once all three are:
+    // only a decoy or the target ever holds all three, so only they match,
+    // and `matching`'s own `ORDER BY rank, chunk_fts.rowid` needs a real
+    // sort over all of them — `USE TEMP B-TREE FOR ORDER BY` materialises
+    // every matching row before `LIMIT` applies (`search.rs:130-136`), and
+    // that is the race's width: 6000 decoys costs low milliseconds, the
+    // same order of magnitude as the writer's own head start below,
+    // matched against the fillers `citation.rs:1301-1325`'s own fixture
+    // already relies on for the identical id-reuse ordering. Doubled term
+    // frequency ranks the target ahead of every once-tied decoy, so it is
+    // always the sort's own cost that supplies the width, not where in a
+    // citation loop the target happens to fall.
+    let writer = mnema_index::open(&path).unwrap();
+    const MARKER: &str = "маркер";
+    const DECOYS: usize = 6000;
+    for i in 0..DECOYS {
+        write_one_document(
+            &writer,
+            &format!("{i:064x}"),
+            &format!("спільний термін {MARKER}"),
+        );
+    }
+    let target_doc = "9".repeat(64);
+    let original_text = format!("спільний спільний термін термін {MARKER} {MARKER}");
+    let target_chunk = write_one_document(&writer, &target_doc, &original_text);
+
+    // Control, before the writer thread exists to race against: this proves
+    // the fixture and ranking work on their own, so a failure below can
+    // only mean the race reached the citation.
+    let control = call(
+        &webview,
+        "search",
+        json!({ "query": "спільний термін маркер" }),
+    )
+    .expect("control search was rejected");
+    assert!(
+        control["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["chunkId"] == json!(target_chunk)),
+        "the fixture on its own must find the target chunk: {control}"
+    );
+    assert_coherent_or_absent(&control, target_chunk);
+
+    let writer_handle = std::thread::spawn(move || {
+        // A short, deliberately generous head start over the search this
+        // thread races: the match query's own sort over `DECOYS` tied rows,
+        // comment above, gives it room to land inside that sort.
+        std::thread::sleep(Duration::from_millis(2));
+        writer
+            .clear_document_content(&target_doc)
+            .expect("clear the target document");
+        // No `MARKER` in the rebuilt text: the query the search below asks
+        // can no longer match this chunk once this statement has committed,
+        // which is what makes a hit whose citation lacks `MARKER` provable
+        // incoherence rather than an ordinary, harmless miss.
+        rebuild_one_chunk(&writer, &target_doc, "спільний термін замінник");
+    });
+
+    let answer = call(
+        &webview,
+        "search",
+        json!({ "query": "спільний термін маркер" }),
+    )
+    .expect("search was rejected");
+    writer_handle.join().expect("the writer thread panicked");
+
+    assert_coherent_or_absent(&answer, target_chunk);
 }
 
 #[test]
@@ -736,12 +941,299 @@ fn search_returns_citations_not_ids() {
 
     run_walk_to_completion(&app, root);
 
-    let hits = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
-    let hits = hits.as_array().expect("search did not return an array");
+    let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    let hits = answer["hits"]
+        .as_array()
+        .expect("search did not return a hits array");
 
     assert!(!hits.is_empty());
     assert!(hits[0]["text"].as_str().unwrap().contains("fox"));
     assert!(hits[0]["relativePath"].is_string());
+    // A real count, not a placeholder: `matched: chunks.len()` in
+    // `bridge.rs`'s `From<TextArm>` mutated to `matched: 0` must fail this
+    // specific assertion, not merely the non-empty check above.
+    assert_eq!(
+        answer["text"]["matched"],
+        json!(1),
+        "the one-chunk fixture should be counted, not zeroed: {answer}"
+    );
+}
+
+/// Codex round 3, Finding 1 — a regression from the `content_arm` split for
+/// D111. Before the split, `content_arm` turned `active_space` and
+/// `space_model` errors into `ContentArm::Failed` (`content.rs:183-199`
+/// still does, on the single-connection path). After the split,
+/// `resolve_content_query` let those errors escape through `?` and reject
+/// the whole IPC command, throwing away an already-computable lexical
+/// answer. `models.rs:243-258` names how a dangling `meta.active_space` is
+/// reachable without a corrupt file: a confirmed model change that commits
+/// `drop_space` and then fails adoption. Reproduced here the same way,
+/// through `Db::drop_space` directly, and asked through the real `search`
+/// command rather than `resolve_content_query` alone — the defect was that
+/// the error escaped to the command boundary, so the pin has to sit there
+/// too.
+#[test]
+fn an_index_failure_inside_the_content_arm_stays_local_to_it() {
+    const KEY: &str = "test-key-not-a-real-one-round3-f1";
+    const MODEL: &str = "baai/bge-m3";
+    const DIM: i64 = 1024;
+    const CREDITS: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#;
+
+    // Round-3 adversarial review, R-3's own broken-case investigation: this
+    // test used to go through `models::set_embedding_model` (the checked,
+    // network-backed command), the only call to it in this file. Mutating
+    // that command's own `existing_vectors` parameter — an unrelated,
+    // pre-round-3 mutation case in `scripts/mutations/embedding.sh` — broke
+    // this test binary's compilation instead of the case's own target,
+    // because `commands.rs` is compiled whole. `Db::adopt_embedding_model`
+    // directly needs no network call at all and cannot collide with a
+    // mutation of a command this test was never testing.
+    let server = MockServer::new(vec![Reply::ok(CREDITS)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+
+    state.open_index().expect("the index opens");
+    set_key(state.clone(), KEY.into()).expect("the key is accepted");
+    let adopted = state
+        .with_index(|db| db.adopt_embedding_model(MODEL, DIM, "credential-ref", "chunker-v1"))
+        .expect("the default model is adopted");
+
+    // The shape `models.rs:243-258` names: `drop_space` alone, leaving
+    // `meta.active_space` pointing at a space that no longer exists — the
+    // debris a confirmed model change leaves if `drop_space` commits and
+    // the adoption that follows it does not.
+    state
+        .with_index(|db| db.drop_space(adopted.space_id))
+        .expect("drop the space directly, the way a failed re-adoption would");
+
+    let text_dir = fixture_dir();
+    let webview = main_webview(&app);
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": text_dir.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    run_walk_to_completion(&app, root);
+
+    let answer = call(&webview, "search", json!({ "query": "fox" }))
+        .expect("a dangling active_space must not reject the whole command");
+
+    assert_eq!(
+        answer["text"]["kind"],
+        json!("answered"),
+        "the lexical arm must survive an index failure in the content arm: {answer}"
+    );
+    assert!(
+        answer["hits"]
+            .as_array()
+            .is_some_and(|hits| !hits.is_empty()),
+        "the lexical hit must still reach the window: {answer}"
+    );
+    assert_eq!(
+        answer["content"]["kind"],
+        json!("failed"),
+        "the content arm alone must report the failure: {answer}"
+    );
+}
+
+/// D106: absent means on, for both arms. `mnema-index`'s own
+/// `an_index_that_never_saw_the_toggles_has_both_arms_on` pins that the raw
+/// row is absent; this pins what `search` does with that absence, the seam a
+/// person actually sees. `content`'s only route past `Off` without a key is
+/// `NoKey`, so seeing that discriminant is what tells "the arm ran and found
+/// nothing to work with" apart from "the arm was skipped".
+#[test]
+fn a_fresh_index_with_no_arm_written_answers_with_both_arms_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+
+    assert_eq!(
+        answer["text"]["kind"],
+        json!("answered"),
+        "an absent text-arm row must run the arm, not skip it: {answer}"
+    );
+    assert_eq!(
+        answer["content"]["kind"],
+        json!("noKey"),
+        "an absent content-arm row must run the arm — `noKey` proves it tried \
+         and only then found no key, `off` would mean it never tried: {answer}"
+    );
+}
+
+/// `set_search_arms` reached through the real IPC path, the same shape
+/// `every_model_command_the_window_calls_is_registered`'s own doc warns a
+/// `pub` command can silently miss — and exercises `arm_is_on`'s `"off"`
+/// branch, for each key in turn. Never both at once:
+/// `set_search_arms_refuses_to_turn_off_both_arms`, right below, is what
+/// that combination means now.
+#[test]
+fn set_search_arms_is_reachable_through_the_ipc_and_off_means_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": false, "content": true }),
+    )
+    .expect("set_search_arms was rejected");
+    let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    assert_eq!(answer["text"]["kind"], json!("off"));
+
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .expect("set_search_arms was rejected");
+    let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    assert_eq!(answer["content"]["kind"], json!("off"));
+}
+
+/// D106: two independent toggles, and at least one is always on. Nothing
+/// stopped a caller from writing both meta rows `"off"` before this —
+/// `arm_is_on` would then read a row that contradicts the sentence nothing
+/// here rechecks.
+#[test]
+fn set_search_arms_refuses_to_turn_off_both_arms() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let error = call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": false, "content": false }),
+    )
+    .expect_err("turning off both search arms was accepted");
+
+    assert_eq!(error, json!("at least one search arm must stay on"));
+}
+
+/// `model_settings` reads the saved choice back from the same two meta rows
+/// `search` runs against (`arm_is_on`), so a checkbox drawn from
+/// `model_settings` and the arm a search actually runs cannot disagree —
+/// task 26's review, Important 1: a window that always drew both arms on
+/// contradicted its own "is off" sentence the moment either was saved off.
+#[test]
+fn model_settings_reflects_the_saved_arm_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let before = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(before["index"]["searchTextArm"], json!(true));
+    assert_eq!(before["index"]["searchContentArm"], json!(true));
+
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": false, "content": true }),
+    )
+    .expect("set_search_arms was rejected");
+
+    let after = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(after["index"]["searchTextArm"], json!(false));
+    assert_eq!(after["index"]["searchContentArm"], json!(true));
+}
+
+/// `search` must not ask for a key it will not use. Built with
+/// `NO_CREDENTIAL` rather than `app_in`'s reachable store: a `search` that
+/// still called `crate::models::key` unconditionally would fail here before
+/// ever reading `arms.content`, which is exactly the shape this pins.
+#[test]
+fn a_text_only_search_does_not_touch_a_credential_store_it_does_not_need() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = mock_builder()
+        .manage(AppState::new(
+            dir.path().to_path_buf(),
+            support::worker().to_path_buf(),
+            NO_PROVIDER.to_string(),
+            NO_CREDENTIAL.to_string(),
+        ))
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application");
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .expect("set_search_arms was rejected");
+
+    let answer = call(&webview, "search", json!({ "query": "fox" }))
+        .expect("a text-only search reached a credential store it does not need");
+
+    assert_eq!(answer["text"]["kind"], json!("answered"));
+    assert_eq!(answer["content"]["kind"], json!("off"));
+}
+
+/// I1, final-round review: a credential store that will not answer at all —
+/// not merely "no key" — must not take the whole search down with it. Built
+/// with `NO_CREDENTIAL`, the same unreachable store as the test above, but
+/// with the content arm on, so `crate::models::key` fails with
+/// [`mnema_desktop::error::Error::Secrets`] rather than [`Error::NoKey`].
+/// Before this test the `Err(e) => return Err(e)` arm in `search` answered
+/// the whole command with that error, so the text arm — which needs no
+/// credential store at all — never got to answer either.
+#[test]
+fn a_broken_credential_store_does_not_take_the_text_arm_down_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = mock_builder()
+        .manage(AppState::new(
+            dir.path().to_path_buf(),
+            support::worker().to_path_buf(),
+            NO_PROVIDER.to_string(),
+            NO_CREDENTIAL.to_string(),
+        ))
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application");
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    run_walk_to_completion(&app, root);
+
+    // Both arms on (the default) — the content arm is what hits the broken
+    // store; the text arm is the one that must survive it.
+    let answer = call(&webview, "search", json!({ "query": "fox" }))
+        .expect("a broken credential store must not fail the whole search");
+
+    assert!(
+        !answer["hits"].as_array().unwrap().is_empty(),
+        "the text arm did not answer even though it needs no credential store: {answer}"
+    );
+    assert_eq!(answer["text"]["kind"], json!("answered"));
+    assert_eq!(
+        answer["content"]["kind"],
+        json!("failed"),
+        "a real store failure must be reported as failed, not silently read as \
+         no key: {answer}"
+    );
 }
 
 /// The channel a real webview passes is a string of this shape. Nothing
@@ -813,10 +1305,10 @@ fn the_walk_job_is_reachable_through_the_ipc() {
 /// warns nowhere and fails only on a screen no gate runs.
 ///
 /// **The call is expected to fail**, and that is what proves it was reached:
-/// this application's credential reference cannot reach a store at all
-/// (`NO_CREDENTIAL`), so the command refuses for a reason of its own rather
-/// than being refused by name before it runs. Nothing is started and no slot is
-/// taken, which is why this test needs no teardown of its own.
+/// `app_in`'s store has no key in it, so the command refuses for a reason of
+/// its own — `Error::NoKey` — rather than being refused by name before it
+/// runs. Nothing is started and no slot is taken, which is why this test
+/// needs no teardown of its own.
 #[test]
 fn the_embed_job_is_reachable_through_the_ipc() {
     let dir = tempfile::tempdir().unwrap();
@@ -828,7 +1320,7 @@ fn the_embed_job_is_reachable_through_the_ipc() {
         "start_embed_job",
         json!({ "onProgress": "__CHANNEL__:11" }),
     )
-    .expect_err("this application has no reachable credential store, so the job cannot start");
+    .expect_err("this application has no key entered, so the job cannot start");
     assert_ne!(
         error_text(&refusal),
         not_registered("start_embed_job"),
@@ -880,7 +1372,7 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
     run_walk_to_completion(&app, root);
     let before = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
     assert!(
-        !before.as_array().unwrap().is_empty(),
+        !before["hits"].as_array().unwrap().is_empty(),
         "the fixture was never indexed, so removing it proves nothing"
     );
 
@@ -894,7 +1386,7 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
 
     let after = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
     assert_eq!(
-        after,
+        after["hits"],
         json!([]),
         "a document survived the folder that owned it being removed"
     );
@@ -1313,17 +1805,17 @@ fn error_text(rejected: &Value) -> String {
 ///
 /// **Most of these calls fail, and that is the point rather than a problem.**
 /// This application has no provider behind it (`NO_PROVIDER`), no index open,
-/// and a credential reference that cannot reach a store (`NO_CREDENTIAL`); the
-/// question here is only whether the command was reached, and being reached is
-/// exactly what lets it fail for a reason of its own.
+/// and no key entered in `app_in`'s store; the question here is only whether
+/// the command was reached, and being reached is exactly what lets it fail
+/// for a reason of its own.
 ///
-/// `model_settings` is the exception and answers `Ok` even here, because every
-/// state of the store and of the index is a state it draws — a store that will
-/// not answer arrives as `KeyState::Unreadable` rather than as a rejection.
-/// `Ok` proves registration at least as well as a specific failure does: an
-/// unregistered command cannot return one, it is refused by name before it runs.
-/// This paragraph said "every call is expected to fail" for one commit after
-/// that stopped being true.
+/// `model_settings` is the exception and answers `Ok` even here, because
+/// every state of the store and of the index is a state it draws — no key
+/// entered arrives as `KeyState::Absent` rather than as a rejection. `Ok`
+/// proves registration at least as well as a specific failure does: an
+/// unregistered command cannot return one, it is refused by name before it
+/// runs. This paragraph said "every call is expected to fail" for one commit
+/// after that stopped being true.
 #[test]
 fn every_model_command_the_window_calls_is_registered() {
     let dir = tempfile::tempdir().unwrap();

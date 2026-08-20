@@ -11,6 +11,7 @@
 
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_index::{Db, DocumentStatus, open, register_vector_extension};
+use rusqlite::OptionalExtension;
 
 mod support;
 
@@ -506,6 +507,158 @@ fn an_undefined_distance_sorts_last_not_first() {
         db.knn(space, &query, 3, Some(&[1, 2, 3])).unwrap(),
         vec![1, 2, 3],
         "the filtered branch orders by the same rule as the unfiltered one"
+    );
+}
+
+/// Codex round 2, Finding 2: `ORDER BY distance NULLS LAST` alone leaves a
+/// tie to whatever order vec0 returns, which the same finding says can
+/// differ between runs. Two chunks holding the *same* vector tie on cosine
+/// distance exactly, not approximately. Pinned on order, repeated across
+/// several calls, in both the filtered and unfiltered statements — the same
+/// two-statement split `an_undefined_distance_sorts_last_not_first` above
+/// already has to cover twice.
+///
+/// **What this proves, and what it cannot.** `k` here equals the number of
+/// tied rows, so vec0 returns every one of them and `ORDER BY` merely sorts
+/// what it already has — this pins that the secondary key does that sort
+/// correctly. It proves nothing about *which* rows survive a cut that lands
+/// inside a tie wider than `k`; Codex round 3, Finding 8 named that gap, and
+/// `a_tie_wider_than_k_lets_insertion_order_choose_who_is_cut` below is the
+/// pin for it — renamed here from `_and_is_stable_across_calls` because that
+/// name claimed the wider property this test cannot see.
+#[test]
+fn tied_rows_within_k_sort_by_chunk_id_and_stay_stable() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let cfg = db
+        .create_model_config("d", "openrouter", None, "baai/bge-m3", 4)
+        .unwrap();
+    let space = db.create_space(cfg, 4, "chunker-v1").unwrap();
+
+    db.insert_vector(space, 1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    // Chunks 3 and 2, inserted in that order, so an ordering that happened to
+    // follow insertion or ascending-id order by coincidence cannot pass.
+    db.insert_vector(space, 3, &[1.0, 0.1, 0.0, 0.0]).unwrap();
+    db.insert_vector(space, 2, &[1.0, 0.1, 0.0, 0.0]).unwrap();
+
+    let query = [1.0f32, 0.0, 0.0, 0.0];
+    let first = db.knn(space, &query, 3, None).unwrap();
+    for _ in 0..5 {
+        assert_eq!(
+            db.knn(space, &query, 3, None).unwrap(),
+            first,
+            "a distance tie must resolve the same way on every call"
+        );
+    }
+    assert_eq!(
+        first,
+        vec![1, 2, 3],
+        "tied rows must resolve by chunk_id ascending in the unfiltered statement"
+    );
+
+    let first_filtered = db.knn(space, &query, 3, Some(&[1, 2, 3])).unwrap();
+    for _ in 0..5 {
+        assert_eq!(
+            db.knn(space, &query, 3, Some(&[1, 2, 3])).unwrap(),
+            first_filtered,
+            "a distance tie must resolve the same way on every call in the filtered branch too"
+        );
+    }
+    assert_eq!(
+        first_filtered,
+        vec![1, 2, 3],
+        "tied rows must resolve by chunk_id ascending in the filtered statement too"
+    );
+}
+
+/// Codex round 3, Finding 8. 31 identical vectors, `k = 30`: the tie is one
+/// row wider than `k`, so the cut lands inside it. `ORDER BY` still sorts
+/// whatever `k` rows vec0 handed back — each result below is ascending by
+/// `chunk_id` on its own — but *which* 30 of the 31 those are is vec0's own
+/// pre-`ORDER BY` choice, and it tracks insertion order: H3 in the design
+/// harness measured ascending insertion keeping the 30 highest ids and
+/// descending insertion keeping the 30 lowest. Stable within one database
+/// (five repeats), and still free to disagree between two databases that
+/// inserted the same tie in opposite orders.
+#[test]
+fn a_tie_wider_than_k_lets_insertion_order_choose_who_is_cut() {
+    let query = [1.0f32, 0.0, 0.0, 0.0];
+    let tied = [1.0f32, 0.1, 0.0, 0.0];
+
+    let ascending_dir = tempfile::tempdir().unwrap();
+    let ascending_db = fresh(&ascending_dir);
+    let cfg = ascending_db
+        .create_model_config("d", "openrouter", None, "baai/bge-m3", 4)
+        .unwrap();
+    let ascending_space = ascending_db.create_space(cfg, 4, "chunker-v1").unwrap();
+    for id in 1..=31i64 {
+        ascending_db
+            .insert_vector(ascending_space, id, &tied)
+            .unwrap();
+    }
+    let ascending = ascending_db.knn(ascending_space, &query, 30, None).unwrap();
+    for _ in 0..5 {
+        assert_eq!(
+            ascending_db.knn(ascending_space, &query, 30, None).unwrap(),
+            ascending,
+            "the cut must land the same way on every call against one database"
+        );
+    }
+    // Membership only, order deliberately washed out: sortedness is asserted
+    // on its own below, and an `assert_eq!` against an ordered `Vec` bundles
+    // the two so tightly that neither can be driven red without the other.
+    // Sorted-set equality plus that assertion is the same claim, told apart.
+    let mut ascending_members = ascending.clone();
+    ascending_members.sort();
+    assert_eq!(
+        ascending_members,
+        (2..=31).collect::<Vec<i64>>(),
+        "ascending insertion (1..=31) must keep the 30 most recently inserted ids"
+    );
+
+    let descending_dir = tempfile::tempdir().unwrap();
+    let descending_db = fresh(&descending_dir);
+    let cfg2 = descending_db
+        .create_model_config("d", "openrouter", None, "baai/bge-m3", 4)
+        .unwrap();
+    let descending_space = descending_db.create_space(cfg2, 4, "chunker-v1").unwrap();
+    for id in (1..=31i64).rev() {
+        descending_db
+            .insert_vector(descending_space, id, &tied)
+            .unwrap();
+    }
+    let descending = descending_db
+        .knn(descending_space, &query, 30, None)
+        .unwrap();
+    let mut descending_members = descending.clone();
+    descending_members.sort();
+    assert_eq!(
+        descending_members,
+        (1..=30).collect::<Vec<i64>>(),
+        "descending insertion (31..=1) must keep a different 30"
+    );
+
+    // Order on its own, apart from membership: driven red by turning `knn`'s
+    // secondary key round (`chunk_id DESC`), which leaves both memberships
+    // above untouched. This is the half the code owes whatever vec0 selects.
+    assert!(
+        ascending.is_sorted(),
+        "each result must be sorted by chunk_id, whatever vec0 selected"
+    );
+    assert!(
+        descending.is_sorted(),
+        "each result must be sorted by chunk_id, whatever vec0 selected"
+    );
+
+    // A measurement of today's vec0, not a guarantee this code owes: a
+    // future sqlite-vec that makes selection insertion-independent would
+    // turn this red for a *good* change. What the code does guarantee,
+    // and what would still hold then, is that each result is sorted by
+    // `chunk_id` on its own — asserted just above, without membership.
+    assert_ne!(
+        ascending, descending,
+        "membership at a tie wider than k is vec0's own choice, not this \
+         code's, so the two insertion orders must be free to disagree"
     );
 }
 
@@ -1082,4 +1235,672 @@ fn recording_a_failure_says_whether_it_wrote_one() {
         "a chunk that has gone leaves no row, and the caller must not count one"
     );
     assert_eq!(db.failed_chunk_count(space).unwrap(), 0);
+}
+
+/// A document, page, block and one chunk under `id`, holding `text`.
+/// Returns the chunk id.
+fn write_one_chunk(db: &Db, id: &str, text: &str) -> i64 {
+    db.insert_document(id, "text/plain", text.len() as i64, SourceKind::Document)
+        .unwrap();
+    rebuild_one_chunk(db, id, text)
+}
+
+/// What a rebuild does after `clear_document_content`: writes a fresh page,
+/// block and chunk onto a document id that already exists. Returns the
+/// chunk id.
+fn rebuild_one_chunk(db: &Db, doc: &str, text: &str) -> i64 {
+    let page = db.insert_page(doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: Some("uk".into()),
+                text: text.to_string(),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap();
+    db.insert_chunk(
+        doc,
+        0,
+        text,
+        &Locator {
+            spans: vec![Segment {
+                block_id: block,
+                start: 0,
+                end: text.chars().count() as u32,
+                block_start: 0,
+            }],
+            coordinate: Coordinate::None,
+        },
+        SourceKind::Document,
+    )
+    .unwrap()
+}
+
+/// T4 (design §7): its two load-bearing checks are
+/// `assert_eq!(second, first, ...)`, pinning that the id really was
+/// reused, and the final `!upsert_vector_for_text(...)`, pinning that a
+/// write under the pre-rebuild hash is refused for the reused id. The
+/// LEFT JOIN loop below only catches a vector on a chunk id gone
+/// entirely — `clearing_a_document_takes_its_vector_with_the_chunk`
+/// already pins that directly, and by the time this loop runs the
+/// vector table is empty either way, so `orphans == 0` here holds
+/// vacuously and proves nothing about the reused-id case on its own.
+#[test]
+fn every_vector_names_a_chunk_that_still_holds_its_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+
+    let chunk = write_one_chunk(&db, &"5".repeat(64), "first");
+    let hash: String = db
+        .conn()
+        .query_row(
+            "SELECT content_hash FROM chunk WHERE id = ?1",
+            [chunk],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        db.upsert_vector_for_text(space, chunk, &hash, &support::unit_vector_1024())
+            .unwrap()
+    );
+
+    let victim = write_one_chunk(&db, &"6".repeat(64), "victim");
+    let victim_doc = "6".repeat(64);
+    let victim_hash: String = db
+        .conn()
+        .query_row(
+            "SELECT content_hash FROM chunk WHERE id = ?1",
+            [victim],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        db.upsert_vector_for_text(
+            space,
+            victim,
+            &victim_hash,
+            &support::other_unit_vector_1024()
+        )
+        .unwrap()
+    );
+    db.delete_vectors_for_document(&victim_doc).unwrap();
+    db.delete_document(&victim_doc).unwrap();
+
+    let doc = "5".repeat(64);
+    db.clear_document_content(&doc).unwrap();
+    let reused = rebuild_one_chunk(&db, &doc, "second");
+    assert_eq!(reused, chunk, "pointless unless the id was reused");
+    assert!(
+        !db.upsert_vector_for_text(space, reused, &hash, &support::unit_vector_1024())
+            .unwrap(),
+        "a write under the old text's hash must be refused for the reused id"
+    );
+
+    for table in vector_tables(&db) {
+        let orphans: i64 = db
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM {table} v
+                       LEFT JOIN chunk c ON c.id = v.chunk_id
+                      WHERE c.id IS NULL"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "{table} has a vector with no chunk row");
+    }
+}
+
+// ------------------------------------------------------- Db::knn_searchable
+
+/// Codex round 3, Finding 5 (design §1.1, §4.4). A post-filter's margin is
+/// bounded by vec0's own 4096 cap and cannot reach a live neighbour behind
+/// more ineligible ones than that; this fixture puts 4200 in the way, well
+/// past any margin a doubling loop could reach before hitting the cap.
+/// `knn_searchable`'s eligibility subquery is a genuine vec0 pre-filter —
+/// it narrows the population before `k` is ever cut — so none of the 4200
+/// face the cap at all, and the true 20 come back in one call.
+#[test]
+fn knn_searchable_reaches_the_live_chunks_behind_a_flood_of_ineligible_neighbours() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let cfg = db
+        .create_model_config("d", "openrouter", None, "baai/bge-m3", 4)
+        .unwrap();
+    let space = db.create_space(cfg, 4, "chunker-v1").unwrap();
+    let query = tilted(4, 0.0);
+
+    // 20 real, eligible chunks, ranked farthest from the query.
+    let doc = db
+        .insert_document(&"9".repeat(64), "text/plain", 20, SourceKind::Document)
+        .unwrap();
+    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: Some("uk".into()),
+                text: "т".repeat(20),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap();
+    let mut live_ids = Vec::new();
+    for i in 0..20i64 {
+        let chunk = db
+            .insert_chunk(
+                &doc,
+                i,
+                "т",
+                &Locator {
+                    spans: vec![Segment {
+                        block_id: block,
+                        start: 0,
+                        end: 1,
+                        block_start: 0,
+                    }],
+                    coordinate: Coordinate::None,
+                },
+                SourceKind::Document,
+            )
+            .unwrap();
+        db.insert_vector(space, chunk, &tilted(4, 10.0 + i as f32 * 0.01))
+            .unwrap();
+        live_ids.push(chunk);
+    }
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
+
+    // 4200 ineligible neighbours, nearer than every live one, with no
+    // `chunk` row backing their vector id at all.
+    for i in 0..4200i64 {
+        db.insert_vector(space, 100_000 + i, &tilted(4, 0.0001 * i as f32))
+            .unwrap();
+    }
+
+    let found = db.knn_searchable(space, &query, 30, None).unwrap();
+    live_ids.sort();
+    let mut got = found.chunks.clone();
+    got.sort();
+    assert_eq!(
+        got, live_ids,
+        "all 20 live chunks must be reachable behind the flood of hidden ones"
+    );
+    assert!(!found.tie_cut, "there is no tie in this fixture");
+}
+
+/// Codex round 3, Finding 8, closed for `Neighbours::tie_cut`. A tie that
+/// fits inside the tie window (`k * 4` = 120 at `k = 30`) is `tie_cut =
+/// false` and resolves the same way regardless of insertion order — the
+/// window saw the whole tie, so `ORDER BY`'s tie-break decided it, not
+/// vec0's own pre-cut choice. A tie wider than the window is `tie_cut =
+/// true` and free to disagree between insertion orders, the same as raw
+/// `Db::knn` in `a_tie_wider_than_k_lets_insertion_order_choose_who_is_cut`
+/// above.
+#[test]
+fn knn_searchable_tie_cut_tells_a_window_wide_tie_from_a_narrow_one() {
+    let query = tilted(4, 0.0);
+
+    let (_d1, db1, s1) = tied_eligible_space(31, false);
+    let (_d2, db2, s2) = tied_eligible_space(31, true);
+    let narrow_a = db1.knn_searchable(s1, &query, 30, None).unwrap();
+    let narrow_b = db2.knn_searchable(s2, &query, 30, None).unwrap();
+    assert!(
+        !narrow_a.tie_cut,
+        "a 31-wide tie fits entirely inside k * 4"
+    );
+    assert!(!narrow_b.tie_cut);
+    assert_eq!(
+        narrow_a.chunks, narrow_b.chunks,
+        "a tie the window fully saw must resolve the same way regardless \
+         of insertion order"
+    );
+
+    let (_d3, db3, s3) = tied_eligible_space(140, false);
+    let (_d4, db4, s4) = tied_eligible_space(140, true);
+    let wide_a = db3.knn_searchable(s3, &query, 30, None).unwrap();
+    let wide_b = db4.knn_searchable(s4, &query, 30, None).unwrap();
+    assert!(
+        wide_a.tie_cut,
+        "140 ties into a 120-deep window must say so"
+    );
+    assert!(wide_b.tie_cut);
+    // A measurement of today's vec0, not a guarantee this code owes: see
+    // the identical note on the `Db::knn` version of this assertion above.
+    assert_ne!(
+        wide_a.chunks, wide_b.chunks,
+        "a tie wider than the window is free to disagree between insertion orders"
+    );
+}
+
+/// `n` chunks in one freshly `indexed` document, an identical vector for
+/// each — inserted in ascending chunk-id order if `reverse` is false,
+/// descending if true — and the space + database holding them. Returns the
+/// tempdir too, so it is not dropped (and the file deleted) before the
+/// caller is done with `db`.
+fn tied_eligible_space(n: i64, reverse: bool) -> (tempfile::TempDir, Db, i64) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let cfg = db
+        .create_model_config("d", "openrouter", None, "baai/bge-m3", 4)
+        .unwrap();
+    let space = db.create_space(cfg, 4, "chunker-v1").unwrap();
+    let doc = db
+        .insert_document(&"c".repeat(64), "text/plain", n, SourceKind::Document)
+        .unwrap();
+    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: Some("uk".into()),
+                text: "т".repeat(n as usize),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap();
+    let ids: Vec<i64> = (0..n)
+        .map(|i| {
+            db.insert_chunk(
+                &doc,
+                i,
+                "т",
+                &Locator {
+                    spans: vec![Segment {
+                        block_id: block,
+                        start: 0,
+                        end: 1,
+                        block_start: 0,
+                    }],
+                    coordinate: Coordinate::None,
+                },
+                SourceKind::Document,
+            )
+            .unwrap()
+        })
+        .collect();
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
+    let tied = [1.0f32, 0.1, 0.0, 0.0];
+    let order: Vec<i64> = if reverse {
+        ids.iter().rev().copied().collect()
+    } else {
+        ids.clone()
+    };
+    for id in order {
+        db.insert_vector(space, id, &tied).unwrap();
+    }
+    (dir, db, space)
+}
+
+/// The corner no product pin reaches today: `content.rs:90` always passes
+/// `None` for `restrict_to`, so nothing exercises the eligibility subquery
+/// and a tag filter intersected — exactly where vec0's "one `rowid in` per
+/// query" limit lives. And the single-id form, which `Db::knn`'s own doc
+/// already warns rewrites a bare `IN (n)` into `=` and defeats a pre-filter
+/// — sound here because the id sits inside a nested `json_each`, never a
+/// bare `IN` vec0 itself would see.
+#[test]
+fn knn_searchable_intersects_a_tag_filter_with_eligibility_in_one_subquery() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let cfg = db
+        .create_model_config("d", "openrouter", None, "baai/bge-m3", 4)
+        .unwrap();
+    let space = db.create_space(cfg, 4, "chunker-v1").unwrap();
+    let query = tilted(4, 0.0);
+
+    let doc = db
+        .insert_document(&"e".repeat(64), "text/plain", 5, SourceKind::Document)
+        .unwrap();
+    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: Some("uk".into()),
+                text: "ттттт".to_string(),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap();
+    let ids: Vec<i64> = (0..5i64)
+        .map(|i| {
+            db.insert_chunk(
+                &doc,
+                i,
+                "т",
+                &Locator {
+                    spans: vec![Segment {
+                        block_id: block,
+                        start: 0,
+                        end: 1,
+                        block_start: 0,
+                    }],
+                    coordinate: Coordinate::None,
+                },
+                SourceKind::Document,
+            )
+            .unwrap()
+        })
+        .collect();
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
+    for (i, &id) in ids.iter().enumerate() {
+        db.insert_vector(space, id, &tilted(4, i as f32 * 0.01))
+            .unwrap();
+    }
+
+    // The tag filter names two of the five eligible chunks.
+    let tag = [ids[1], ids[3]];
+    let found = db.knn_searchable(space, &query, 30, Some(&tag)).unwrap();
+    let mut got = found.chunks.clone();
+    got.sort();
+    let mut want = tag.to_vec();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "the tag filter and eligibility must intersect, not each apply alone"
+    );
+
+    // A tag naming one eligible id and one that names no chunk at all —
+    // the filter must not smuggle the second one through.
+    let mixed = [ids[1], 999_999];
+    let found_mixed = db.knn_searchable(space, &query, 30, Some(&mixed)).unwrap();
+    assert_eq!(found_mixed.chunks, vec![ids[1]]);
+
+    // The single-id form: the bare `IN (n)` rewrite trap does not apply,
+    // because the id reaches vec0 through `json_each`, not a literal `IN`.
+    let single = db
+        .knn_searchable(space, &query, 30, Some(&[ids[2]]))
+        .unwrap();
+    assert_eq!(single.chunks, vec![ids[2]]);
+}
+
+/// Design open question 4 (recall@k before/after): on an ordinary corpus —
+/// every chunk eligible, no ties — `Db::knn` and `Db::knn_searchable` must
+/// answer with the identical id sequence, unfiltered and tag-filtered
+/// alike. Sharper than a `recall@k` comparison and free: an aggregate could
+/// stay unchanged while individual rows moved under it, and this catches
+/// exactly the trap `space.rs:480-500` documents — a `JOIN` in place of the
+/// subquery returns nothing where this returns everything.
+///
+/// **500 chunks at `k = 30`, not fewer.** The tie window is `k * 4` = 120;
+/// a population at or under that never reaches the cut this method exists
+/// to sort, and the round-3 review measured exactly that at the original
+/// 25/`k = 10` size — a passing test that could not see its own claim.
+/// 200 of the 500 for the tag filter, same reason: a smaller restricted
+/// population would leave that branch's cut untested too.
+#[test]
+fn knn_searchable_matches_knn_exactly_on_an_ordinary_corpus() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let cfg = db
+        .create_model_config("d", "openrouter", None, "baai/bge-m3", 4)
+        .unwrap();
+    let space = db.create_space(cfg, 4, "chunker-v1").unwrap();
+    let query = tilted(4, 0.0);
+
+    const N: i64 = 500;
+    let doc = db
+        .insert_document(&"f".repeat(64), "text/plain", N, SourceKind::Document)
+        .unwrap();
+    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: Some("uk".into()),
+                text: "т".repeat(N as usize),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap();
+    let ids: Vec<i64> = (0..N)
+        .map(|i| {
+            let chunk = db
+                .insert_chunk(
+                    &doc,
+                    i,
+                    "т",
+                    &Locator {
+                        spans: vec![Segment {
+                            block_id: block,
+                            start: 0,
+                            end: 1,
+                            block_start: 0,
+                        }],
+                        coordinate: Coordinate::None,
+                    },
+                    SourceKind::Document,
+                )
+                .unwrap();
+            // Distinct distances: no ties to make the two methods agree by
+            // accident on which of a tied group they each kept.
+            db.insert_vector(space, chunk, &tilted(4, 1.0 + i as f32 * 0.001))
+                .unwrap();
+            chunk
+        })
+        .collect();
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
+
+    let k = 30;
+    let via_knn = db.knn(space, &query, k, None).unwrap();
+    let via_searchable = db.knn_searchable(space, &query, k, None).unwrap();
+    assert_eq!(
+        via_knn, via_searchable.chunks,
+        "an ordinary corpus must rank identically through both methods"
+    );
+    assert!(!via_searchable.tie_cut, "no ties in this fixture");
+
+    // The same question through the tag-filtered branch on both sides.
+    let tag = &ids[50..250];
+    let via_knn_tagged = db.knn(space, &query, k, Some(tag)).unwrap();
+    let via_searchable_tagged = db.knn_searchable(space, &query, k, Some(tag)).unwrap();
+    assert_eq!(
+        via_knn_tagged, via_searchable_tagged.chunks,
+        "the tag-filtered branch must agree too"
+    );
+}
+
+/// Round-3 adversarial review, F-A1: [`Db::eligible_chunk_count`] shares
+/// `ELIGIBLE_CHUNK` with `Db::knn_searchable`'s own pre-filter, so this
+/// count and what a search can actually reach cannot drift apart —
+/// [`Db::chunk_count`] does not know about `document.status`, and this
+/// does.
+#[test]
+fn eligible_chunk_count_excludes_a_pending_documents_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    // `support::one_chunk` sets its document to `Indexed`.
+    let _live = support::one_chunk(&db);
+    // `write_one_chunk` leaves `insert_document`'s own default — `Pending`.
+    let _rebuilding = write_one_chunk(&db, &"c".repeat(64), "still building");
+
+    assert_eq!(db.chunk_count().unwrap(), 2, "both chunk rows exist");
+    assert_eq!(
+        db.eligible_chunk_count().unwrap(),
+        1,
+        "only the chunk behind the indexed document is eligible"
+    );
+}
+
+// -------------------------------------------------------------- Finding 6
+
+/// T4 (design §6, §9): `delete_document` sweeps a document's vectors by
+/// itself now, so a caller does not have to remember
+/// `delete_vectors_for_document` beside it — unlike
+/// `every_vector_names_a_chunk_that_still_holds_its_text` above, which
+/// still calls both, this calls `delete_document` alone.
+#[test]
+fn delete_document_sweeps_its_own_vectors() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+    let doc = "7".repeat(64);
+    let chunk = write_one_chunk(&db, &doc, "will be forgotten");
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .unwrap();
+    assert_eq!(db.embedded_chunk_count(space).unwrap(), 1);
+
+    db.delete_document(&doc).unwrap();
+
+    for table in vector_tables(&db) {
+        let rows: i64 = db
+            .conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            rows, 0,
+            "{table} still holds a vector after delete_document alone"
+        );
+    }
+}
+
+/// The other half of T4: the sweep and the deletion are one unit wherever
+/// a caller already holds a transaction — every product call site does,
+/// through `mnema-ingest`'s `forget_if_unnamed` — because `delete_document`
+/// opens no transaction of its own and simply joins the caller's.
+#[test]
+fn delete_document_is_atomic_inside_a_callers_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+    let doc = "8".repeat(64);
+    let chunk = write_one_chunk(&db, &doc, "will survive a rollback");
+    db.upsert_vector(space, chunk, &support::unit_vector_1024())
+        .unwrap();
+
+    let result = db.transaction(|_| {
+        db.delete_document(&doc)?;
+        // Any error after the delete forces the rollback this test needs.
+        db.mark_space_ready(-1)
+    });
+    assert!(result.is_err(), "the forced failure must propagate");
+
+    assert_eq!(
+        db.embedded_chunk_count(space).unwrap(),
+        1,
+        "the vector must survive a rolled-back delete"
+    );
+    let survived: Option<i64> = db
+        .conn()
+        .query_row("SELECT 1 FROM document WHERE id = ?1", [&doc], |r| r.get(0))
+        .optional()
+        .unwrap();
+    assert!(
+        survived.is_some(),
+        "the document must survive a rolled-back delete"
+    );
+
+    // Round-3 review, R1: the rollback row above is satisfied by a
+    // `delete_document` that sweeps nothing at all — a vector nobody
+    // deleted "survives" a rollback too. This is the row that tells that
+    // apart from a real sweep: a second chunk, deleted inside a
+    // transaction that actually commits, must not be there afterward.
+    let doc2 = "9".repeat(64);
+    let chunk2 = write_one_chunk(&db, &doc2, "will not survive a commit");
+    db.upsert_vector(space, chunk2, &support::other_unit_vector_1024())
+        .unwrap();
+    db.transaction(|_| db.delete_document(&doc2)).unwrap();
+    assert_eq!(
+        db.embedded_chunk_count(space).unwrap(),
+        1,
+        "a committed delete must sweep its own vector, leaving only the \
+         rolled-back one behind"
+    );
+}
+
+/// T7 (design §9, §2): what the design's `file:line` reachability argument
+/// would fail to prove if it were wrong. Exercises `delete_document` and
+/// `clear_document_content` through their public methods; the third
+/// vector-bearing destructive path, `delete_watched_root`, is pinned
+/// separately by `removing_a_root_takes_its_documents_vectors_too`
+/// (`root_removal.rs`). Then scans every `vec_emb_<n>` table for a row
+/// that fails either half of eligibility: no `chunk` row, or a `chunk`
+/// whose document is not `indexed`.
+#[test]
+fn every_vector_names_an_eligible_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+
+    let kept = support::one_chunk(&db);
+    let deleted_doc = "d".repeat(64);
+    let deleted_chunk = write_one_chunk(&db, &deleted_doc, "will be deleted");
+    let rebuilt_doc = "e".repeat(64);
+    let rebuilt_chunk = write_one_chunk(&db, &rebuilt_doc, "will be rebuilt");
+    db.set_document_status(&rebuilt_doc, DocumentStatus::Indexed)
+        .unwrap();
+
+    db.upsert_vector(space, kept, &support::unit_vector_1024())
+        .unwrap();
+    db.upsert_vector(space, deleted_chunk, &support::unit_vector_1024())
+        .unwrap();
+    db.upsert_vector(space, rebuilt_chunk, &support::other_unit_vector_1024())
+        .unwrap();
+
+    db.delete_document(&deleted_doc).unwrap();
+    db.clear_document_content(&rebuilt_doc).unwrap();
+
+    assert_no_ineligible_vectors(&db);
+}
+
+/// Every `vec_emb_<n>` row must name a `chunk` whose document is `indexed`
+/// — the invariant `Db::knn_searchable`'s eligibility subquery assumes is
+/// worth pre-filtering for at all. Shared by `every_vector_names_an_
+/// eligible_chunk` above and the `#[ignore]`d check below that can be
+/// pointed at a real archive.
+fn assert_no_ineligible_vectors(db: &Db) {
+    for table in vector_tables(db) {
+        let bad: i64 = db
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM {table} v
+                       LEFT JOIN chunk c ON c.id = v.chunk_id
+                       LEFT JOIN document d ON d.id = c.document_id
+                      WHERE c.id IS NULL OR d.status IS NOT 'indexed'"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad, 0, "{table} holds a vector for an ineligible chunk");
+    }
+}
+
+/// Open question 3 (design §11): whether a real archive holds an orphan or
+/// an ineligible vector through some path the `file:line` argument in §2
+/// missed. `#[ignore]`d because it needs a real index rather than a
+/// fixture — point `MNEMA_REAL_INDEX_PATH` at one and run with `--ignored`.
+#[test]
+#[ignore = "needs a real index; set MNEMA_REAL_INDEX_PATH and run with --ignored"]
+fn a_real_index_has_no_ineligible_vectors() {
+    let path = std::env::var("MNEMA_REAL_INDEX_PATH")
+        .expect("set MNEMA_REAL_INDEX_PATH to a real index.sqlite");
+    register_vector_extension().unwrap();
+    let db = open(std::path::Path::new(&path)).unwrap();
+    assert_no_ineligible_vectors(&db);
 }

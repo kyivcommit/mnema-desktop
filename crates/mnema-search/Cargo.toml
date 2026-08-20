@@ -1,0 +1,16 @@
+[package]
+name = "mnema-search"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mnema-index = { path = "../mnema-index" }
+mnema-provider = { path = "../mnema-provider" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+mnema-core = { path = "../mnema-core" }
+mnema-mock-provider = { workspace = true }
+tempfile = { workspace = true }

@@ -180,14 +180,17 @@ fn a_document_reachable_from_another_root_survives() {
 /// now, because nothing deleted at scale. A walk deletes at scale. With chunk
 /// ids reused on rebuild, the stale vector then points at different content.
 ///
-/// This calls `delete_vectors_for_document` and `delete_document` directly,
-/// the exact pair `mnema-ingest`'s `forget_if_unnamed` calls — it is Task 9's
-/// own regression test, kept here because it belongs in this crate's suite
-/// rather than only in `mnema-ingest`'s. It does **not** exercise
-/// `delete_watched_root`'s call into the same sweep:
-/// `removing_a_root_takes_its_documents_vectors_too`, below, is the one that
-/// pins that path — this one alone left `delete_watched_root`'s own
-/// `delete_vectors_for_document_in(&tx, id)` call
+/// Calls `delete_vectors_for_document` and then `delete_document` directly
+/// — Task 9's own regression test, kept here because it belongs in this
+/// crate's suite rather than only in `mnema-ingest`'s. The explicit sweep
+/// is redundant now that `delete_document` sweeps a document's vectors
+/// itself (round-3, Finding 6) — `mnema-ingest`'s `forget_if_unnamed` calls
+/// `delete_document` alone — but it costs nothing to keep here, and the
+/// assertion below is the outcome either call would already guarantee on
+/// its own. It does **not** exercise `delete_watched_root`'s call into the
+/// same sweep: `removing_a_root_takes_its_documents_vectors_too`, below, is
+/// the one that pins that path — this one alone left `delete_watched_root`'s
+/// own `delete_vectors_for_document_in(&tx, id)` call
 /// (`crates/mnema-index/src/write.rs`) free to be deleted with the whole
 /// workspace suite staying green, since nothing here ever calls
 /// `delete_watched_root`.

@@ -24,6 +24,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { asSentence, LEAVES_EVERYTHING, LEAVES_UNKNOWN_INDEX } from "./render.js";
 
 // A deferred promise, which is the whole technique: an IPC call the test can
 // leave hanging until the thing that must happen first has happened.
@@ -118,6 +121,8 @@ const boot = async (answers = {}) => {
       embeddingModel: null,
       rerankModel: null,
       chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
     },
   });
 
@@ -189,6 +194,93 @@ const boot = async (answers = {}) => {
 
 const progress = (data) => ({ event: "progress", data });
 const ending = (data) => ({ event: "ended", data });
+
+// Boots a window without waiting for it to settle — the one thing `boot()`
+// cannot produce, because it always awaits the import to completion, and by
+// the time it returns every one of `main.js`'s own initial
+// `refreshSettings()` calls has already resolved (`hold()` only exists on
+// the object `boot()` hands back, by which point it is too late to hold
+// anything the module asks for on its way up). This holds `model_settings`
+// *before* the module is imported, so its own first top-level
+// `await refreshSettings()` genuinely suspends there, and the caller can
+// read the DOM while that suspension is real — round 3, §3.3.
+const bootPending = (answers = {}) => {
+  const elements = new Map();
+  const el = (id) => {
+    if (!elements.has(id)) {
+      elements.set(id, makeElement());
+    }
+    return elements.get(id);
+  };
+
+  const channels = [];
+  const pending = {};
+
+  const settings = () => ({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: null,
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+
+  const defaults = {
+    open_index: () => ({ path: "/tmp/index", schemaVersion: 1 }),
+    job_status: () => ({ running: false }),
+    model_settings: () => settings(),
+    provider_models: () => ({ entries: [], unreadable: 0, unreadableRecords: [] }),
+    start_embed_job: () => null,
+    start_walk_job: () => null,
+    skips: () => [],
+    cancel_job: () => null,
+  };
+
+  const invoke = (command, args) => {
+    if (args && args.onProgress) {
+      channels.push(args.onProgress);
+    }
+    if (pending[command] && pending[command].length) {
+      return pending[command].shift().promise;
+    }
+    const answer = (answers[command] ?? defaults[command] ?? (() => null))(args);
+    return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
+  };
+
+  class Channel {
+    constructor() {
+      this.onmessage = null;
+    }
+  }
+
+  globalThis.window = {
+    __TAURI__: { core: { invoke, Channel }, dialog: { open: async () => null } },
+  };
+  globalThis.document = {
+    getElementById: el,
+    createElement: () => makeElement(),
+  };
+
+  // Queued *before* `import()` runs, so the module's own first
+  // `invoke("model_settings")` call — issued from its first top-level
+  // `await refreshSettings()` — is the one that finds it and suspends.
+  const modelSettings = deferred();
+  pending.model_settings = [modelSettings];
+
+  bootCount += 1;
+  const importPromise = import(`./main.js?window=${bootCount}`);
+
+  return { el, channels, modelSettings, importPromise };
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -536,6 +628,837 @@ test("the bar carries an ended state after a run, and a running one on the press
   await settleEverything();
 });
 
+// `search` answers a `SearchAnswer` (`{ hits, text, content }`), not a bare
+// hit array — `searchResultItems` needs `hits` specifically, and reading the
+// whole answer as the array throws inside `.map`, which a source-text read
+// cannot see coming from the command's own shape changing underneath it.
+// The two arms carry different numbers on purpose: `TEXT_ARM_TEXT` was
+// written by copying `CONTENT_ARM_TEXT` (`render.js`), and a fixture that
+// gave both arms the same count could not tell a copy-paste that kept the
+// wrong word ("content") from one that did not — nor could it tell a swap
+// of which line gets which report. Full-sentence equality closes both.
+test("search draws the hits and both arm sentences from one SearchAnswer", async () => {
+  const w = await boot({
+    search: () => ({
+      hits: [{ relativePath: "a.txt", text: "fox" }],
+      text: { kind: "answered", matched: 5 },
+      content: { kind: "answered", matched: 7, embedded: 10, total: 10, reachable: 10 },
+    }),
+  });
+
+  w.el("query").value = "fox";
+  await w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.el("results").options.length,
+    1,
+    "the hit from `hits` did not reach the list",
+  );
+  const [hitLi] = w.el("results").options;
+  assert.equal(hitLi.options.length, 2, "a hit li does not carry its two lines");
+  assert.equal(hitLi.options[0].textContent, "a.txt");
+  assert.equal(hitLi.options[1].textContent, "fox");
+  assert.equal(w.el("text-arm-state").textContent, "Search by text returned 5.");
+  assert.equal(w.el("content-arm-state").textContent, "Search by content returned 7.");
+});
+
+// Codex round 2, Finding 4: the `catch` block replaced the result list with
+// an error but never touched `text-arm-state`/`content-arm-state`, which
+// `search()` only sets on success — so a failed search left the *previous*
+// successful search's arm report on screen, indistinguishable from a report
+// about the failed attempt.
+test("a failed search clears the previous arm-state text instead of leaving it stale", async () => {
+  let succeed = true;
+  const w = await boot({
+    search: () => {
+      if (succeed) {
+        succeed = false;
+        return {
+          hits: [{ relativePath: "a.txt", text: "fox" }],
+          text: { kind: "answered", matched: 5 },
+          content: { kind: "answered", matched: 7, embedded: 10, total: 10, reachable: 10 },
+        };
+      }
+      return new Error("the index could not be reached");
+    },
+  });
+
+  w.el("query").value = "fox";
+  await w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+  assert.equal(
+    w.el("text-arm-state").textContent,
+    "Search by text returned 5.",
+    "premise: a successful search reported an arm state",
+  );
+
+  w.el("query").value = "fox again";
+  await w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.el("text-arm-state").textContent,
+    "",
+    "a failed search left the previous successful search's arm-state text on screen",
+  );
+  assert.equal(
+    w.el("content-arm-state").textContent,
+    "",
+    "a failed search left the previous successful search's arm-state text on screen",
+  );
+});
+
+// Review round 1, Important 1: a checkbox that always drew on, regardless of
+// what `set_search_arms` had saved, contradicted its own sentence the moment
+// somebody saved an arm off and reopened the window — the sentence beside it
+// (`contentArmSentence`, drawn from a real search) said "is off" while the
+// box drew checked. `drawSettings` must read `read.searchTextArm` /
+// `read.searchContentArm` back, not default both to on.
+test("a saved-off arm is drawn off, not defaulted to on, once model_settings answers", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: false,
+      },
+    }),
+  });
+
+  assert.equal(
+    w.el("arm-content").checked,
+    false,
+    "a saved-off content arm was drawn checked",
+  );
+});
+
+// The other half of the same fix: an index that stops being readable must not
+// reset a choice already read back to the true default, which would silently
+// turn a saved-off arm back on the moment a read failed for any reason.
+//
+// ⚠️ Text, not content: `content.checked` also depends on
+// `armModelChosen`, which itself goes false the moment `read` is null — so a
+// content-arm assertion here would pass even without the guard, satisfied by
+// that unrelated dependency rather than by the guard this test is for.
+// `text.checked` is `savedTextArm` alone, with no such neighbour to hide
+// behind.
+test("an index that stops being readable does not reset a saved-off arm to on", async () => {
+  let call = 0;
+  const w = await boot({
+    model_settings: () => {
+      call += 1;
+      if (call === 1) {
+        return {
+          key: { kind: "present" },
+          platform: "mac",
+          index: {
+            kind: "read",
+            activeSpace: 1,
+            embeddedChunks: 8,
+            totalChunks: 9,
+            failedChunks: 0,
+            embeddedChunksEverywhere: 8,
+            embeddingModel: "vendor/m",
+            rerankModel: null,
+            chatModel: null,
+            searchTextArm: false,
+            searchContentArm: true,
+          },
+        };
+      }
+      return {
+        key: { kind: "present" },
+        platform: "mac",
+        index: { kind: "unreadable", cause: "readFailed", reason: "boom" },
+      };
+    },
+  });
+
+  assert.equal(call, 2, "premise: model_settings was asked twice while booting");
+  assert.equal(
+    w.el("arm-text").checked,
+    false,
+    "an index that stopped being readable reset the saved choice back to on",
+  );
+});
+
+// Review round 1, Important 2: `savedTextArm`/`savedContentArm` used to be
+// written before `set_search_arms`'s own `await`, with nothing undoing that
+// write on a refusal — so a rejected save left the window believing meta
+// held a choice it never received. `#search-form`'s own listener already
+// catches and says; the two arm handlers must do the same.
+test("a rejected set_search_arms reverts the checkbox and says why", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+    set_search_arms: () => new Error("disk is full"),
+  });
+
+  assert.equal(w.el("arm-text").checked, true, "premise: the arm started checked");
+
+  w.el("arm-text").checked = false;
+  await w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-text").checked,
+    true,
+    "the checkbox did not revert after a rejected write",
+  );
+  assert.match(w.el("arm-text-note").textContent, /disk is full/);
+});
+
+// Codex review on PR #10: `savedTextArm`/`savedContentArm` are written
+// synchronously, before either handler's own `await`. A second click on the
+// *other* checkbox while the first save is still in flight reads the first
+// handler's already-written variable and sends its own `set_search_arms`
+// call with a state nothing has confirmed yet — reachable because nothing
+// before this fix stopped the second checkbox from being clicked at all
+// while the first was mid-flight.
+test("clicking one arm disables both checkboxes until the save resolves", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.equal(w.el("arm-text").disabled, false, "premise: the text arm starts clickable");
+  assert.equal(w.el("arm-content").disabled, false, "premise: the content arm starts clickable");
+
+  const held = w.hold("set_search_arms");
+  w.el("arm-text").checked = false;
+  const change = w.el("arm-text").listeners.get("change")({});
+
+  assert.equal(
+    w.el("arm-text").disabled,
+    true,
+    "the clicked checkbox itself stayed clickable while its own save was in flight",
+  );
+  assert.equal(
+    w.el("arm-content").disabled,
+    true,
+    "the other checkbox could still be clicked while the first save was in flight",
+  );
+
+  held.resolve(null);
+  await change;
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-text").disabled,
+    false,
+    "the text arm was left disabled after its own save finished",
+  );
+});
+
+// The freeze above must lift on a refusal too. The catch block already
+// reverted its own checkbox before this fix existed; the *other* checkbox
+// was frozen by the same click, and nothing in the catch branch ever
+// unfroze it, so a rejected save used to leave it stuck disabled.
+test("a rejected save re-enables the other checkbox too, not only the one that was clicked", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+    set_search_arms: () => new Error("disk is full"),
+  });
+
+  w.el("arm-text").checked = false;
+  await w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-content").disabled,
+    false,
+    "the content arm was left disabled after a rejected save on the text arm",
+  );
+});
+
+// Codex round 2, Finding 1: `refreshSettings` can be issued from several
+// places (`forget`, `key-form`, embedding-model handlers, polling) and any
+// of them can land *after* an arm write has started but *before* it settles.
+// `drawSettings` used to overwrite `savedTextArm` from whatever that read
+// carried unconditionally — reverting the optimistic write to what the
+// checkbox looked like before the click, with no error shown.
+test("a settings read issued before an arm write does not revert it once the write has landed", async () => {
+  const w = await boot();
+
+  assert.equal(w.el("arm-text").checked, true, "premise: the text arm starts checked");
+
+  // Issued from `forget`, not from the write below — this is the read that
+  // must not win.
+  const read = w.hold("model_settings");
+  await w.press("forget");
+
+  const write = w.hold("set_search_arms");
+  w.el("arm-text").checked = false;
+  const change = w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  // Resolves with the *old* saved value — exactly what a read issued before
+  // the write started would still carry.
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: null,
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-text").checked,
+    false,
+    "a stale settings read reverted the optimistic write while it was still in flight",
+  );
+
+  write.resolve(null);
+  await change;
+  await settleEverything();
+});
+
+// The other half of the same finding: nothing stopped a search while an arm
+// write was in flight, so a search could run against the arm state from
+// before the change the user just made, with nothing telling them so.
+test("the search form's submit is disabled while an arm write is in flight, and re-enabled once it settles", async () => {
+  const w = await boot();
+
+  assert.equal(w.el("search-submit").disabled, false, "premise: submit starts enabled");
+
+  const write = w.hold("set_search_arms");
+  w.el("arm-text").checked = false;
+  const change = w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    true,
+    "the submit stayed clickable while an arm write was in flight",
+  );
+
+  write.resolve(null);
+  await change;
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    false,
+    "the submit was left disabled after its arm write settled",
+  );
+});
+
+// Codex round 2 review: the two tests above drive only `arm-text`, and the
+// `arm-content` handler's own `armWriteGeneration += 1`/`search-submit`
+// lines were unpinned — deleting them left the suite green. Same scenario,
+// driven through the content checkbox instead.
+test("a settings read issued before a content-arm write does not revert it once the write has landed", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.equal(w.el("arm-content").checked, true, "premise: the content arm starts checked");
+
+  // Issued from `forget`, not from the write below — this is the read that
+  // must not win.
+  const read = w.hold("model_settings");
+  await w.press("forget");
+
+  const write = w.hold("set_search_arms");
+  w.el("arm-content").checked = false;
+  const change = w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  // Resolves with the *old* saved value — exactly what a read issued before
+  // the write started would still carry.
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-content").checked,
+    false,
+    "a stale settings read reverted the optimistic write while it was still in flight",
+  );
+
+  write.resolve(null);
+  await change;
+  await settleEverything();
+});
+
+// The half of the arm-write race the generation guard alone does not cover:
+// Codex round 4 (inline on `ui/main.js:931`, 2026-08-19). A read issued *during*
+// a write — after `armWriteGeneration += 1`, before `set_search_arms` commits —
+// shares the write's generation, so the generation check takes it as
+// authoritative and reverts the optimistic arm to the stale persisted value. The
+// worst case is the database ending content-on while the checkbox/disclosure say
+// content-off, so the next search sends the query under the local-only promise.
+// First ordering: the read draws while the write is still in flight.
+test("a settings read issued during a content-arm write does not revert it once the write has landed", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: false,
+      },
+    }),
+  });
+
+  assert.equal(w.el("arm-content").checked, false, "premise: the content arm starts off (persisted off)");
+
+  // The write starts first, so the read below is issued *during* it and shares
+  // its generation.
+  const write = w.hold("set_search_arms");
+  w.el("arm-content").checked = true;
+  const change = w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  // Issued from `forget` while the write is still outstanding — the read that
+  // must not win, carrying the *old* persisted value.
+  const read = w.hold("model_settings");
+  await w.press("forget");
+
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: false,
+    },
+  });
+  await settleEverything();
+
+  write.resolve(null);
+  await change;
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-content").checked,
+    true,
+    "a settings read issued during the write reverted the optimistic content-arm write",
+  );
+});
+
+// Second ordering, the one a guard keyed on `armWritesInFlight` at *draw* time
+// would still get wrong: the in-flight write settles first, then the stale read
+// (issued during that write) draws with nothing in flight. Only a guard that
+// remembers a write was outstanding *at the read's issue* keeps the arm on.
+test("a settings read issued during a content-arm write does not revert it even after the write has settled", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: false,
+      },
+    }),
+  });
+
+  assert.equal(w.el("arm-content").checked, false, "premise: the content arm starts off (persisted off)");
+
+  const write = w.hold("set_search_arms");
+  w.el("arm-content").checked = true;
+  const change = w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  const read = w.hold("model_settings");
+  await w.press("forget");
+
+  // The write settles first: the optimistic value is correct on screen here.
+  write.resolve(null);
+  await change;
+  await settleEverything();
+
+  // Then the stale read — issued while the write was in flight — lands with
+  // nothing in flight.
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: false,
+    },
+  });
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-content").checked,
+    true,
+    "a settings read that landed after the write settled still reverted the content-arm write",
+  );
+});
+
+test("the search form's submit is disabled while a content-arm write is in flight, and re-enabled once it settles", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.equal(w.el("search-submit").disabled, false, "premise: submit starts enabled");
+
+  const write = w.hold("set_search_arms");
+  w.el("arm-content").checked = false;
+  const change = w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    true,
+    "the submit stayed clickable while a content-arm write was in flight",
+  );
+
+  write.resolve(null);
+  await change;
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    false,
+    "the submit was left disabled after its content-arm write settled",
+  );
+});
+
+// Codex round 5 (inline on `ui/main.js:928`): an unreadable index left Search
+// pressable under a local-only disclosure while the backend `search` reads the
+// arms from the DB and would still send. The window cannot know the arm state
+// when the index read fails, so it must fail closed — gate Search and say the
+// promise is unknown, not "content is off".
+test("an unreadable index closes search and stops promising local-only", async () => {
+  let call = 0;
+  const w = await boot({
+    model_settings: () => {
+      call += 1;
+      // `boot()` issues two settings reads of its own (main.js's two top-level
+      // `await refreshSettings()`), so calls 1 and 2 are consumed before the
+      // test body runs — both readable here, so the premise below holds.
+      if (call <= 2) {
+        return {
+          key: { kind: "present" },
+          platform: "mac",
+          index: {
+            kind: "read",
+            activeSpace: 1,
+            embeddedChunks: 8,
+            totalChunks: 9,
+            failedChunks: 0,
+            embeddedChunksEverywhere: 8,
+            embeddingModel: "vendor/m",
+            rerankModel: null,
+            chatModel: null,
+            searchTextArm: true,
+            searchContentArm: true,
+          },
+        };
+      }
+      return {
+        key: { kind: "present" },
+        platform: "mac",
+        index: { kind: "unreadable", cause: "readFailed", reason: "boom" },
+      };
+    },
+  });
+
+  assert.equal(w.el("search-submit").disabled, false, "premise: a readable index opened search");
+
+  // A further settings read (boot already issued two), now unreadable, from a
+  // reachable settings action — call 3.
+  await w.press("forget");
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    true,
+    "search stayed pressable while the index was unreadable and the arm state unknown",
+  );
+  assert.equal(
+    w.el("disclosure").textContent,
+    asSentence(LEAVES_UNKNOWN_INDEX),
+    "the disclosure kept making a local-only promise the failed read cannot back",
+  );
+});
+
+// The fail-closed state must recover: a later readable read reopens Search and
+// restores a real disclosure, so a transient failure does not wedge the window.
+test("a readable index after an unreadable one reopens search", async () => {
+  let call = 0;
+  const readable = {
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  };
+  const w = await boot({
+    model_settings: () => {
+      call += 1;
+      // Calls 1–2 are boot()'s own two reads (readable); the first press below
+      // is call 3 (unreadable), the second is call 4 (readable again).
+      if (call === 3) {
+        return {
+          key: { kind: "present" },
+          platform: "mac",
+          index: { kind: "unreadable", cause: "readFailed", reason: "boom" },
+        };
+      }
+      return readable;
+    },
+  });
+
+  await w.press("forget"); // call 3 → unreadable → shut
+  assert.equal(w.el("search-submit").disabled, true, "premise: the unreadable read closed search");
+
+  await w.press("forget"); // call 4 → readable → reopens
+  assert.equal(
+    w.el("search-submit").disabled,
+    false,
+    "search stayed shut after a readable read reconciled the index",
+  );
+});
+
+// Review round 1, Important 1: `drawArmState()` alone never touched
+// `#disclosure`, so unticking "Search by content" left the sentence still
+// promising "every question you ask" — the very promise that checkbox had
+// just switched off, until the next `model_settings` round trip caught up.
+// `drawArmStateAndDisclosure` closes that; this drives the checkbox the way
+// a person would, not `drawArmState` directly.
+test("switching the content arm off updates the disclosure sentence too", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.match(
+    w.el("disclosure").textContent,
+    /every question you ask/,
+    "premise: the content arm started on, so the disclosure named the question",
+  );
+
+  w.el("arm-content").checked = false;
+  await w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  assert.doesNotMatch(
+    w.el("disclosure").textContent,
+    /every question you ask/,
+    "the disclosure still promised questions leave after the arm that sends them was switched off",
+  );
+});
+
+// Codex round 2 review: the test above covers `contentArmRuns`, but the
+// `textRuns: text.checked` half of the same `disclosureSentence` call
+// (`ui/main.js`, `drawArmStateAndDisclosure`) had no `main.test.js` pin —
+// deleting that one line left the suite green. Same shape, text checkbox,
+// absent key.
+test("switching the text arm off with an absent key updates the disclosure sentence too", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "absent" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: null,
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.match(
+    w.el("disclosure").textContent,
+    /Search works on words/,
+    "premise: the text arm started on, so the disclosure claimed search works",
+  );
+
+  w.el("arm-text").checked = false;
+  await w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  assert.doesNotMatch(
+    w.el("disclosure").textContent,
+    /Search works on words/,
+    "the disclosure still claimed search works on words after the arm that runs it was switched off",
+  );
+});
+
 // A press that is refused starts nothing, so it must not leave the bar claiming
 // a run — and it must put the settings line back, because it bumped the
 // generation before awaiting and any read still in flight will therefore
@@ -600,5 +1523,1231 @@ test("a refused press leaves the bar as it was and puts the settings line back",
      started nothing: "${w.el("embedding-progress").textContent}"`,
   );
   poll.resolve({ running: false });
+  await settleEverything();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round 3: one readiness barrier for `#search-submit`
+// (`docs/private/sdd/2026-08-14-search-query-and-fusion/
+// ui-readiness-barrier-spec.md`). Closes Codex round-3 findings 2, 3 and 9.
+
+// Round 3, the floor test (spec §5): a source-text pin, because JS gives no
+// type to lean on — the same technique this branch already uses for the
+// `ORDER BY` secondary key in `search.rs`/`space.rs` (`crates/mnema-index/
+// src/{search,space}.rs`), with the same trap avoided: that pin first read
+// its own `#[cfg(test)]` block back into its own search and could never go
+// red, fixed by `split_once` before matching. This one reads a *different*
+// file (`main.js`), so there is no self-inclusion to guard against — but it
+// is still a pin over source text, not a real parser, and the gaps below
+// are the price of that, stated rather than left to be discovered.
+//
+// This does **not** enumerate Class A commands by name and check each one is
+// present — that is the exact shape of mistake this floor test exists to
+// end: a check that passes forever while an eighth site arrives untested.
+// It finds **every** `invoke(...)` call in the file and requires each one
+// to be either explicitly out of scope (§6, plus the two read-only commands
+// the barrier is itself built around — `search`, which it gates from the
+// outside, and `model_settings`, the read that opens it) or lexically
+// inside a `withSearchGated(...)` call and not deferred out of it.
+//
+// U-1 (adversarial pass, F-A2) found the same mistake one level down, in
+// this file's own scan rather than in `main.js`: the original regex found
+// an `invoke(...)` call's argument and classified it in the same step, so
+// an argument shape it could not parse — a template literal, an aliased
+// binding through another name — produced no match *at all*, and the call
+// was invisible rather than reported. And the deferral check named four
+// constructs by hand (`setTimeout`, `.then(`, `queueMicrotask`,
+// `requestAnimationFrame`) and missed three that do the identical thing
+// (`.catch`, `.finally`, `setInterval`) — the third round in a row an
+// enumeration here covered half its sites.
+//
+// Both are fixed the same way: **find first, classify second.**
+// `invokeSites` finds every textual `invoke(` occurrence with no filter on
+// what follows it. `classifyInvokeArg` then reads the first argument and
+// returns `literal` (a command name), `computed` (a bare identifier — the
+// `set_rerank_model`/`set_chat_model` loop's `command` variable) or
+// `unclassified` — and an unclassified shape is itself reported, by name,
+// whether or not the call also turns out to be gated, because a shape this
+// scan cannot read is a shape it cannot vouch for. `aliasSites` catches the
+// one shape that never appears as `invoke(` at all — `invoke` assigned to
+// another binding — by failing loud at the assignment, since the test
+// cannot follow the binding to wherever it is later called.
+//
+// The deferral check no longer names a construct either.
+// `nestedDeferralSpans` finds every function/arrow boundary *inside* a
+// gate's own body — not the gate's own immediate function argument, which
+// `gateBodyRange` excludes, but anything nested one level deeper — and any
+// `invoke(` inside one of those spans counts as ungated, because the
+// callback holding it runs after its own turn on the event loop, by which
+// point the gate has already reopened. One rule instead of a list is what
+// makes `setInterval`/`.catch`/`.finally` fall out of it for free, along
+// with whatever the next round reaches for.
+//
+// The trap this has to keep clearing: `main.js` has one legitimate
+// deferral inside a gated *handler* — `refreshSettings().then((settings)
+// => { ... })`, inside `#embed`'s `onProgress` "ended" callback — but that
+// callback is assigned *before* the handler's own `withSearchGated(...)`
+// call, not textually inside it, so `nestedDeferralSpans` never looks at
+// it at all. Checked as a standalone run against the real, unmodified
+// `main.js` before this was wired into the test below (see the report).
+//
+// What it still cannot see: a block comment (`main.js` has none — every
+// comment in it is `//`) would not be skipped the way a line comment is,
+// and a template literal's `${...}` containing an unbalanced brace or
+// paren could desync `matchBrace`/`matchParen` — both skip a string or
+// template's contents whole, by matching quote to quote, so this only
+// bites if the imbalance is inside the interpolation's own code, which
+// nothing in `main.js` today does.
+//
+// The allowlist itself is the other route review found: `OUT_OF_SCOPE_
+// COMMANDS` cannot be made un-editable — an allowlist has to stay
+// editable — but the most likely way to silence this floor test is a
+// one-line addition there instead of gating a real mutation. `no
+// out-of-scope command name looks like a config mutation`, below, narrows
+// that: every command this file actually mutates config through is named
+// `set_*` or `forget_*`, so a name shaped like one of those appearing in
+// the allowlist is the shape of the mistake to catch. This does not close
+// the route, only narrows it.
+const mainJsPath = fileURLToPath(new URL("./main.js", import.meta.url));
+
+// Skips a string, a template literal (honouring `\` escapes; a template's
+// `${...}` is skipped along with the rest of it, quote to quote, not
+// parsed), or a `//` line comment starting at `src[i]`. Returns the index
+// to resume from, or `null` if `i` does not start one of those — the one
+// piece of "is this really code" every scanner below shares, so a stray
+// paren, brace or comma inside a string or a comment cannot desync any of
+// them the same way it could when each had its own copy of this check.
+const skipNonCode = (src, i) => {
+  const c = src[i];
+  if (c === '"' || c === "'" || c === "`") {
+    let j = i + 1;
+    while (j < src.length && src[j] !== c) {
+      if (src[j] === "\\") {
+        j += 1;
+      }
+      j += 1;
+    }
+    return j + 1;
+  }
+  if (c === "/" && src[i + 1] === "/") {
+    let j = i;
+    while (j < src.length && src[j] !== "\n") {
+      j += 1;
+    }
+    return j;
+  }
+  return null;
+};
+
+// Returns the source index one past the `)` that closes the `(` at
+// `openIndex`, skip-aware throughout.
+const matchParen = (src, openIndex) => {
+  let depth = 0;
+  for (let i = openIndex; i < src.length; i += 1) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip - 1;
+      continue;
+    }
+    const c = src[i];
+    if (c === "(") {
+      depth += 1;
+    } else if (c === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return i + 1;
+      }
+    }
+  }
+  throw new Error(`unbalanced parens from source offset ${openIndex}`);
+};
+
+// `matchParen`'s sibling for `{`/`}`, used to find where a function or
+// arrow body — the gate's own, or one nested inside it — actually ends.
+const matchBrace = (src, openIndex) => {
+  let depth = 0;
+  for (let i = openIndex; i < src.length; i += 1) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip - 1;
+      continue;
+    }
+    const c = src[i];
+    if (c === "{") {
+      depth += 1;
+    } else if (c === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return i + 1;
+      }
+    }
+  }
+  throw new Error(`unbalanced braces from source offset ${openIndex}`);
+};
+
+// Every `[start, end)` span textually inside a `withSearchGated(...)` call —
+// the one decision point §3.1 asks for, and the only thing that counts as
+// "gated" for this test.
+const gatedRanges = (src) => {
+  const ranges = [];
+  const re = /withSearchGated\(/g;
+  let m;
+  while ((m = re.exec(src))) {
+    const openParen = m.index + "withSearchGated".length;
+    ranges.push([m.index, matchParen(src, openParen)]);
+  }
+  return ranges;
+};
+
+// The gate's own body: every call site in this file is
+// `withSearchGated(async (…) => { … })`, and this finds that function
+// argument's own `{ … }` — the first real `=>` after `gateStart`, then the
+// first real `{` after that. `null` if the argument is not this shape, in
+// which case the caller falls back to treating the whole gated range as
+// depth 0, same as before this file could tell nested boundaries apart.
+const gateBodyRange = (src, gateStart, gateEnd) => {
+  let i = gateStart;
+  let arrow = -1;
+  while (i < gateEnd - 1) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip;
+      continue;
+    }
+    if (src[i] === "=" && src[i + 1] === ">") {
+      arrow = i;
+      break;
+    }
+    i += 1;
+  }
+  if (arrow === -1) {
+    return null;
+  }
+  i = arrow + 2;
+  while (i < gateEnd) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip;
+      continue;
+    }
+    if (src[i] === "{") {
+      return [i + 1, matchBrace(src, i) - 1];
+    }
+    if (!/\s/.test(src[i])) {
+      return null;
+    }
+    i += 1;
+  }
+  return null;
+};
+
+// Where a concise-body arrow's own expression ends — `() => invoke(...)`,
+// with no braces, is exactly shapes 3-5 of U-1's five. The body ends at the
+// first `,`/`;` reached while this arrow's own paren/bracket/brace nesting
+// is back to zero, or at a closing bracket that would take it negative —
+// which belongs to whatever encloses the arrow, not to the arrow itself.
+const conciseArrowBodyEnd = (src, start, hardLimit) => {
+  let depth = 0;
+  let i = start;
+  while (i < hardLimit) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip;
+      continue;
+    }
+    const c = src[i];
+    if (c === "(" || c === "[" || c === "{") {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (c === ")" || c === "]" || c === "}") {
+      if (depth === 0) {
+        return i;
+      }
+      depth -= 1;
+      i += 1;
+      continue;
+    }
+    if ((c === "," || c === ";") && depth === 0) {
+      return i;
+    }
+    i += 1;
+  }
+  return hardLimit;
+};
+
+// Review, V-3: the fixed control-flow keywords `IDENT(...) {` also matches
+// but is never a function boundary — `if`/`for`/`while`/`switch` guard a
+// block that runs now, and `catch` (this very file's own gated handlers'
+// `try { … } catch (error) { … }`) would otherwise turn every one of them
+// into a false deferral. `do`/`with` are here for the same reason even
+// though neither takes a parenthesised head the way this check looks for.
+const DEFERRAL_CONTROL_KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "do", "with"]);
+
+// U-1 (adversarial pass, F-A2): every `[start, end)` span, inside a gate's
+// own body, that is itself inside a *further* function or arrow boundary —
+// construct-agnostic on purpose, so `setTimeout`, `setInterval`, `.then`,
+// `.catch`, `.finally`, `queueMicrotask`, `requestAnimationFrame` and
+// whatever the next round reaches for all fall out of one rule: is there a
+// function boundary between here and the gate's own body, not "does this
+// text match one of these names". `start`/`end` bound the gate's own
+// immediate body (`gateBodyRange`'s job to find), so the gate's own
+// function argument is never itself counted as nested.
+//
+// Review, V-3: object method shorthand (`{ async later() { … } }`) and
+// class methods (`class K { async go() { … } }`) are a third way to write
+// a function, and neither the `function` keyword nor `=>` matches them —
+// the deferral axis had the same "unrecognised shape vanishes" defect the
+// argument axis's `unclassified` branch was built to end, just not yet
+// applied here. Unlike deferral *constructs*, which are an open library
+// set, the ways to write a function in JS are a closed grammar: any
+// `IDENT(params) {` not one of `DEFERRAL_CONTROL_KEYWORDS` is a boundary,
+// covering method shorthand, class methods, getters/setters, generators,
+// `static`/`async` methods and constructors alike without naming any of
+// them individually.
+const nestedDeferralSpans = (src, start, end) => {
+  const spans = [];
+  let i = start;
+  while (i < end) {
+    const skip = skipNonCode(src, i);
+    if (skip !== null) {
+      i = skip;
+      continue;
+    }
+    if (
+      src.startsWith("function", i) &&
+      !/[\w$]/.test(src[i - 1] ?? "") &&
+      !/[\w$]/.test(src[i + 8] ?? "")
+    ) {
+      const brace = src.indexOf("{", i);
+      if (brace === -1 || brace >= end) {
+        i += 8;
+        continue;
+      }
+      const close = matchBrace(src, brace);
+      spans.push([i, close]);
+      i = close;
+      continue;
+    }
+    if (src[i] === "=" && src[i + 1] === ">") {
+      let j = i + 2;
+      while (/\s/.test(src[j])) {
+        j += 1;
+      }
+      if (src[j] === "{") {
+        const close = matchBrace(src, j);
+        spans.push([i, close]);
+        i = close;
+      } else {
+        const close = conciseArrowBodyEnd(src, j, end);
+        spans.push([i, close]);
+        i = close;
+      }
+      continue;
+    }
+    if (/[a-zA-Z_$]/.test(src[i]) && !/[\w$]/.test(src[i - 1] ?? "")) {
+      const idMatch = /^[a-zA-Z_$][\w$]*/.exec(src.slice(i, i + 200));
+      const name = idMatch[0];
+      let j = i + name.length;
+      while (/\s/.test(src[j])) {
+        j += 1;
+      }
+      if (src[j] === "(" && !DEFERRAL_CONTROL_KEYWORDS.has(name)) {
+        const afterParen = matchParen(src, j);
+        let k = afterParen;
+        while (/\s/.test(src[k])) {
+          k += 1;
+        }
+        if (src[k] === "{") {
+          const close = matchBrace(src, k);
+          spans.push([i, close]);
+          i = close;
+          continue;
+        }
+      }
+    }
+    i += 1;
+  }
+  return spans;
+};
+
+// Every textual `invoke(` occurrence, found with no filter at all on what
+// follows it — classification is a separate step below, deliberately, so a
+// shape that step cannot read still shows up here instead of vanishing.
+const invokeSites = (src) => {
+  const re = /\binvoke\(/g;
+  const sites = [];
+  let m;
+  while ((m = re.exec(src))) {
+    const openParen = m.index + m[0].length - 1;
+    const closeParen = matchParen(src, openParen);
+    sites.push({ index: m.index, argsText: src.slice(openParen + 1, closeParen - 1) });
+  }
+  return sites;
+};
+
+// Reads one call's leading argument. `literal` is a command name this test
+// can look up in `OUT_OF_SCOPE_COMMANDS`; `computed` is a bare identifier —
+// the `set_rerank_model`/`set_chat_model` loop's `command` — that this test
+// cannot name but can still confirm is gated. Anything else (a template
+// literal, a member expression, a nested call) is `unclassified`, and U-1's
+// shape 1, `` invoke(`set_${role}_model`, …) ``, is exactly this: it is
+// neither of the first two, and used to produce no match at all rather
+// than reaching this branch.
+const classifyInvokeArg = (argsText) => {
+  const literal = /^\s*"([a-zA-Z0-9_]+)"\s*(?:,|$)/.exec(argsText);
+  if (literal) {
+    return { kind: "literal", name: literal[1] };
+  }
+  const identifier = /^\s*([a-zA-Z_$][\w$]*)\s*(?:,|$)/.exec(argsText);
+  if (identifier) {
+    return { kind: "computed", name: identifier[1] };
+  }
+  return { kind: "unclassified", name: argsText.trim().slice(0, 60) };
+};
+
+// U-1's shape 2: `invoke` itself assigned to another binding, then called
+// through that binding — a call this file's own scan never sees as
+// `invoke(`, so the only place it can be caught is the assignment. `[=:]`
+// immediately before the bare word is what this looks for; the one
+// legitimate reference in `main.js`, `const { invoke, Channel } =
+// window.__TAURI__.core;`, is a destructuring pattern with `{` before
+// `invoke`, not `=`/`:`, so it does not match.
+//
+// Review, V-1 (not required, taken since it was free): a bare offset is
+// stale the moment the file changes, so each site carries its own line
+// number and a snippet of the surrounding source — the same idiom
+// `classifyInvokeArg` already uses for an unclassified argument — rather
+// than a number a reader has to go compute an offset to place.
+const aliasSites = (src) => {
+  const re = /[=:]\s*invoke\b(?!\()/g;
+  const sites = [];
+  let m;
+  while ((m = re.exec(src))) {
+    const line = src.slice(0, m.index).split("\n").length;
+    const snippet = src.slice(Math.max(0, m.index - 20), m.index + 20).trim();
+    sites.push(`line ${line}: …${snippet}…`);
+  }
+  return sites;
+};
+
+// §6, out of scope: these mutate the index or read status, not the search
+// configuration or the privacy promise — plus the two commands the barrier
+// is itself built around, neither a config mutation of its own.
+const OUT_OF_SCOPE_COMMANDS = new Set([
+  "open_index",
+  "add_watched_folder",
+  "start_walk_job",
+  "cancel_job",
+  "job_status",
+  "skips",
+  "provider_models",
+  "model_settings",
+  "search",
+]);
+
+test("every config-mutating invoke() in main.js is inside withSearchGated(...), and not deferred out of it", () => {
+  const src = readFileSync(mainJsPath, "utf8");
+  const gates = gatedRanges(src);
+  assert.ok(gates.length > 0, "premise: withSearchGated(...) exists in main.js at all");
+
+  const ungated = [];
+  const unclassified = [];
+
+  for (const site of invokeSites(src)) {
+    const cls = classifyInvokeArg(site.argsText);
+    const label =
+      cls.kind === "literal"
+        ? cls.name
+        : cls.kind === "computed"
+          ? `<computed: ${cls.name}>`
+          : `<unclassified: ${cls.name}>`;
+
+    if (cls.kind === "literal" && OUT_OF_SCOPE_COMMANDS.has(cls.name)) {
+      continue;
+    }
+
+    const gate = gates.find(([start, end]) => site.index > start && site.index < end);
+    if (!gate) {
+      // Never reached the barrier lexically at all — the base violation.
+      ungated.push(label);
+    } else {
+      const body = gateBodyRange(src, gate[0], gate[1]);
+      const deferred = body ? nestedDeferralSpans(src, body[0], body[1]) : [];
+      // Inside the gate textually, but also inside a further function/arrow
+      // boundary — the gate has already reopened by the time this call
+      // actually runs, so this counts as ungated too.
+      if (deferred.some(([ds, de]) => site.index > ds && site.index < de)) {
+        ungated.push(label);
+      }
+    }
+    if (cls.kind === "unclassified") {
+      unclassified.push(label);
+    }
+  }
+
+  assert.deepEqual(
+    ungated,
+    [],
+    "a config-mutating invoke() is reachable outside the search barrier — either never inside " +
+      "withSearchGated(...) at all, or inside it only lexically because it runs from a function " +
+      "or arrow nested inside the gate's own body after the gate has already reopened — every " +
+      "one of these can change what leaves the machine or clobber pending state, and none of " +
+      "them is in §6's out-of-scope list",
+  );
+  assert.deepEqual(
+    unclassified,
+    [],
+    "an invoke() call's argument could not be classified as a command name or a computed " +
+      "identifier — this scan cannot vouch for what it targets, gated or not, and a shape it " +
+      "cannot read must fail loud rather than pass in silence",
+  );
+  assert.deepEqual(
+    aliasSites(src),
+    [],
+    "invoke was assigned to another binding — this scan cannot follow a call made through that " +
+      "binding, so it fails at the assignment instead of missing the call entirely",
+  );
+});
+
+// A2 (post-review addition): the allowlist above is the one part of this
+// floor test that can be silenced quietly — an unbalanced paren in a
+// comment throws, and a balanced mention of `withSearchGated(` in a comment
+// merely yields an empty (harmless) range, but adding a name to
+// `OUT_OF_SCOPE_COMMANDS` is a legitimate-looking one-line diff that turns
+// a real config mutation invisible to every check above. This does not
+// close that route — it cannot, an allowlist has to stay editable — but it
+// narrows the most likely form of it: every command this file actually
+// mutates config through is named `set_*` or `forget_*` (`set_key`,
+// `set_search_arms`, `set_embedding_model`, `set_rerank_model`,
+// `set_chat_model`, `forget_key`), so a name shaped like one of those
+// showing up in the allowlist is the shape of the mistake to catch, not a
+// coincidence.
+test("no out-of-scope command name looks like a config mutation", () => {
+  for (const name of OUT_OF_SCOPE_COMMANDS) {
+    assert.ok(
+      !name.startsWith("set_") && !name.startsWith("forget_"),
+      `"${name}" is in the out-of-scope allowlist but is shaped like a config mutation — the ` +
+        `most likely way to silence the floor test above is adding a new set_*/forget_* command ` +
+        `here instead of gating it`,
+    );
+  }
+});
+
+// F9: `#search-submit` is enabled in the markup before this round, and the
+// first draw that would say otherwise is a network round trip away. Between
+// load and that draw, a search is pressable with no disclosure on screen —
+// `bootPending` is what lets a test hold that window open long enough to
+// look at it. §3.3.
+test("search stays closed until the first settings read lands, at load (F9, §3.3)", async () => {
+  const w = bootPending();
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    true,
+    "search was pressable before any settings read had landed",
+  );
+
+  w.modelSettings.resolve({
+    key: { kind: "absent" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 0,
+      totalChunks: 0,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 0,
+      embeddingModel: null,
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  await w.importPromise;
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    false,
+    "the first settings read landed but the gate stayed shut",
+  );
+});
+
+// F9, the sequence Codex named: no key, then a key saved. The backend
+// commits the key the instant `set_key` resolves — a search submitted right
+// then would genuinely leave the machine — but `#disclosure` does not catch
+// up until the trailing `refreshSettings()` inside the same handler draws.
+// The gate has to stay shut across that whole span, not just across the
+// `invoke` itself, or it reopens on the strength of a promise the screen is
+// still making the old way.
+test("a saved key does not reopen search until the disclosure has caught up with it (F9)", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "absent" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 0,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 0,
+        embeddingModel: null,
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+    set_key: () => ({ balance: { kind: "notStated" } }),
+  });
+
+  assert.equal(w.el("search-submit").disabled, false, "premise: submit starts enabled, key absent");
+  assert.match(
+    w.el("disclosure").textContent,
+    /Nothing leaves this machine/,
+    "premise: the disclosure promises nothing leaves, with no key saved",
+  );
+
+  const read = w.hold("model_settings");
+  w.el("key").value = "sk-example-live-key";
+  const submit = w.el("key-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    true,
+    "search stayed pressable between the key being saved on the core side and the disclosure " +
+      "catching up with it — the exact window F9 names",
+  );
+  assert.match(
+    w.el("disclosure").textContent,
+    /Nothing leaves this machine/,
+    "premise: the disclosure is still stale — this is why the gate, not the sentence, has to " +
+      "be what stands between a press and the provider here",
+  );
+
+  read.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 0,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 0,
+      embeddingModel: null,
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  await submit;
+  await settleEverything();
+
+  assert.equal(w.el("search-submit").disabled, false, "the gate never reopened once the redraw landed");
+});
+
+// F2, with the shape the brief asked for specifically: a stale
+// `model_settings` response drawn *in between* two overlapping arm writes.
+// Without this, a test that only holds one write open passes against the
+// round-2 code that already fails in production — round 2's guard protected
+// the saved booleans, not the `disabled` attribute a redraw could still
+// clear.
+test("a stale settings redraw landing between two overlapping arm writes does not re-enable them (F2)", async () => {
+  const w = await boot({
+    model_settings: () => ({
+      key: { kind: "present" },
+      platform: "mac",
+      index: {
+        kind: "read",
+        activeSpace: 1,
+        embeddedChunks: 8,
+        totalChunks: 9,
+        failedChunks: 0,
+        embeddedChunksEverywhere: 8,
+        embeddingModel: "vendor/m",
+        rerankModel: null,
+        chatModel: null,
+        searchTextArm: true,
+        searchContentArm: true,
+      },
+    }),
+  });
+
+  assert.equal(w.el("arm-text").disabled, false, "premise: clickable at boot");
+  assert.equal(w.el("arm-content").disabled, false, "premise: clickable at boot");
+
+  // Issued from `forget`, held open — the "stale" read, exactly the source
+  // the existing arm-write tests already use for the same reason.
+  const staleRead = w.hold("model_settings");
+  await w.press("forget");
+
+  // Write A: uncheck the text arm.
+  const writeA = w.hold("set_search_arms");
+  w.el("arm-text").checked = false;
+  const changeA = w.el("arm-text").listeners.get("change")({});
+  await settleEverything();
+
+  assert.equal(w.el("arm-text").disabled, true, "premise: write A disabled the text arm");
+  assert.equal(w.el("arm-content").disabled, true, "premise: write A disabled the content arm too");
+
+  // The stale redraw lands mid-flight — round 2's bug: `drawArmState` wrote
+  // `toggleState`'s `disabled` unconditionally, clearing both.
+  staleRead.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-text").disabled,
+    true,
+    "a stale settings redraw re-enabled a control write A's own pending save still owns",
+  );
+  assert.equal(w.el("arm-content").disabled, true, "same bug, the other checkbox");
+
+  // Write B starts while A is still pending — the round-2 bug is exactly
+  // what let this happen for real: the stale redraw's `disabled = false`
+  // let a person click a checkbox a pending write should still have held
+  // shut.
+  const writeB = w.hold("set_search_arms");
+  w.el("arm-content").checked = false;
+  const changeB = w.el("arm-content").listeners.get("change")({});
+  await settleEverything();
+
+  // A settles first — must not re-open anything while B is still out (§3.2).
+  writeA.resolve(null);
+  await changeA;
+  await settleEverything();
+  assert.equal(
+    w.el("arm-text").disabled,
+    true,
+    "the first write to settle re-opened the gate while a second write was still out",
+  );
+  assert.equal(w.el("arm-content").disabled, true, "same, the other checkbox");
+
+  // B settles — now everything may re-open.
+  writeB.resolve(null);
+  await changeB;
+  await settleEverything();
+  assert.equal(w.el("arm-text").disabled, false);
+  assert.equal(w.el("arm-content").disabled, false);
+});
+
+// Adversarial pass, F-A3/U-2: `withSearchGated` used to increment
+// `pendingConfigWrites` and call `syncSearchGate()` *before* its own `try`.
+// `syncSearchGate` dereferences `el("search-submit")`; a throw there left the
+// increment applied and skipped the `finally`, so the counter never came back
+// down — search stayed shut for the rest of the session, even for a later
+// write that had nothing wrong with it. Not reachable through `boot()`'s own
+// `el`, which never throws, so this window builds its own `getElementById`
+// that throws for `search-submit` only while a flag is up, mirroring the
+// adversarial harness's shape (report, finding F-A3, probe P9).
+test("a throw inside syncSearchGate's own call does not leak the gate shut for later writes", async () => {
+  const elements = new Map();
+  const realEl = (id) => {
+    if (!elements.has(id)) {
+      elements.set(id, makeElement());
+    }
+    return elements.get(id);
+  };
+  let throwing = false;
+  const el = (id) => {
+    if (id === "search-submit" && throwing) {
+      throw new Error("element vanished");
+    }
+    return realEl(id);
+  };
+
+  const settings = () => ({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: null,
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  const invoke = (command) => {
+    if (command === "open_index") return Promise.resolve({ path: "/tmp/index", schemaVersion: 1 });
+    if (command === "job_status") return Promise.resolve({ running: false });
+    if (command === "model_settings") return Promise.resolve(settings());
+    if (command === "provider_models") {
+      return Promise.resolve({ entries: [], unreadable: 0, unreadableRecords: [] });
+    }
+    if (command === "forget_key") return Promise.resolve({ kind: "removed" });
+    return Promise.resolve(null);
+  };
+  class Channel {
+    constructor() {
+      this.onmessage = null;
+    }
+  }
+
+  globalThis.window = {
+    __TAURI__: { core: { invoke, Channel }, dialog: { open: async () => null } },
+  };
+  globalThis.document = { getElementById: el, createElement: () => makeElement() };
+
+  bootCount += 1;
+  await import(`./main.js?window=${bootCount}`);
+  await settleEverything();
+
+  assert.equal(realEl("search-submit").disabled, false, "premise: submit starts enabled");
+
+  // One write whose own `syncSearchGate()` throws at the increment.
+  throwing = true;
+  const clickPromise = realEl("forget").listeners.get("click")({});
+  const caught = await clickPromise.then(
+    () => null,
+    (error) => error,
+  );
+  assert.match(String(caught), /element vanished/, "premise: the handler threw, same as the harness");
+  throwing = false;
+  await settleEverything();
+
+  // A later, entirely healthy write must still be able to shut the gate and
+  // reopen it — if the earlier throw leaked the counter, this one settling
+  // will find it already shut and unable to ever come back.
+  realEl("forget").listeners.get("click")({});
+  await settleEverything();
+  assert.equal(
+    realEl("search-submit").disabled,
+    false,
+    "a throw inside an earlier syncSearchGate() call leaked the counter and shut the gate for " +
+      "the rest of the session",
+  );
+});
+
+// F3, adapted for U-3 (adversarial pass, F-A6). This test used to hold two
+// searches open at once to pin their render order — exactly the capability
+// U-3 removes: a submit while one is in flight is now refused before it
+// ever reaches `search()` (see the U-3 tests below). What F3's guard still
+// protects, on the one search that is now ever in flight: the refused
+// submit must draw nothing, and the search that actually ran must draw its
+// own real answer once it settles — not left blank, not overwritten.
+test("a submit refused while a search is in flight draws nothing until that search settles (F3, U-3)", async () => {
+  const w = await boot();
+
+  const first = w.hold("search");
+  w.el("query").value = "first query";
+  const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+
+  // Refused: `first` is still out. No second `invoke("search")`, so nothing
+  // here has an answer to draw from.
+  w.el("query").value = "second query";
+  const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await submitB;
+  await settleEverything();
+  assert.equal(
+    w.el("text-arm-state").textContent,
+    "",
+    "a refused submit drew something before the one search in flight had answered",
+  );
+
+  first.resolve({
+    hits: [{ relativePath: "a.txt", text: "a" }],
+    text: { kind: "answered", matched: 5 },
+    content: { kind: "answered", matched: 7, embedded: 10, total: 10, reachable: 10 },
+  });
+  await submitA;
+  await settleEverything();
+
+  assert.equal(w.el("text-arm-state").textContent, "Search by text returned 5.");
+  assert.equal(w.el("results").options.length, 1);
+  assert.equal(w.el("results").options[0].options[1].textContent, "a");
+});
+
+// Review, V-1: `searchDrawn = issue` used to be assigned *before* the
+// render, so a render that itself throws lands in this same handler's own
+// `catch` with `issue <= searchDrawn` already true (they are equal) — and
+// the failure is swallowed instead of reported. Not reachable from the
+// product today (`bridge.rs` always serialises real `hits`), which is why
+// this needs a malformed answer to reach at all, the same category as U-2.
+// Pinned rather than only reasoned about, per this branch's own rule that a
+// test which reads code proves its shape, not its premise.
+test("a render that throws after a successful answer still reports the failure (V-1)", async () => {
+  const w = await boot({
+    search: () => ({
+      hits: null,
+      text: { kind: "answered", matched: 0 },
+      content: { kind: "answered", matched: 0, embedded: 0, total: 0, reachable: 0 },
+    }),
+  });
+
+  w.el("query").value = "malformed";
+  await w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.el("results").options.length,
+    1,
+    "a render failure left nothing on screen — searchDrawn advanced before the render, so the " +
+      "throw looked like a stale answer to the catch block and was swallowed",
+  );
+  assert.match(w.el("results").options[0].textContent, /search failed/);
+});
+
+// Adversarial pass, F-A6/U-3: nothing stopped a second submit while a search
+// was already in flight, so two concurrent searches sent two paid
+// `POST /embeddings` requests (report, finding F-A6) — money spent on an
+// answer the window discards by design, since only the newest may render.
+// The controller's ruling: coalesce. One query field, one button; a second
+// submit must not reach the provider while the first is still out.
+const emptyAnswer = () => ({
+  hits: [],
+  text: { kind: "answered", matched: 0 },
+  content: { kind: "answered", matched: 0, embedded: 0, total: 0, reachable: 0 },
+});
+
+test('a submit while a search is in flight does not send a second invoke("search") (U-3)', async () => {
+  const w = await boot();
+
+  const first = w.hold("search");
+  w.el("query").value = "first query";
+  const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.calls.filter((c) => c === "search").length,
+    1,
+    "premise: the first submit reached the provider",
+  );
+
+  w.el("query").value = "second query";
+  const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.calls.filter((c) => c === "search").length,
+    1,
+    "a second submit sent a second paid provider request while the first was still in flight",
+  );
+
+  first.resolve(emptyAnswer());
+  await Promise.all([submitA, submitB]);
+  await settleEverything();
+});
+
+// The success path must reopen the gate — otherwise the first search's own
+// coalescing would refuse every later submit for the rest of the session.
+test("a settled, successful search reopens the gate for the next submit (U-3)", async () => {
+  const w = await boot();
+
+  const first = w.hold("search");
+  w.el("query").value = "first query";
+  const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  first.resolve(emptyAnswer());
+  await submitA;
+  await settleEverything();
+
+  const second = w.hold("search");
+  w.el("query").value = "second query";
+  const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.calls.filter((c) => c === "search").length,
+    2,
+    "a successful search left the gate shut, refusing the very next submit",
+  );
+  second.resolve(emptyAnswer());
+  await submitB;
+  await settleEverything();
+});
+
+// The failure path — round 3's own bug (F3) lived exactly here, in a
+// handler that reopened correctly on success and not on rejection.
+test("a settled, failed search reopens the gate for the next submit (U-3)", async () => {
+  const w = await boot();
+
+  const first = w.hold("search");
+  w.el("query").value = "first query";
+  const submitA = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  first.reject(new Error("the index could not be reached"));
+  await submitA;
+  await settleEverything();
+
+  const second = w.hold("search");
+  w.el("query").value = "second query";
+  const submitB = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.calls.filter((c) => c === "search").length,
+    2,
+    "a failed search left the gate shut, refusing the very next submit",
+  );
+  second.resolve(emptyAnswer());
+  await submitB;
+  await settleEverything();
+});
+
+// Codex round 6 (P1, `main.js:660`): the barrier `searchInFlight` builds was
+// one-directional — it disabled only `#search-submit`, and every
+// privacy-affecting control (the two arm checkboxes, the key form, both
+// model pickers, discard-vectors) stayed live while `search` was still
+// embedding/sending the query it captured at submit (`bridge.rs:278-302`).
+// So a toggle mid-search could flip `#disclosure` to a false local-only
+// promise over a question that was, in fact, still leaving the machine.
+// This is the 4th P1 of this class in this file's history (`main.js:70-76`
+// records the 3rd), so the fix is one predicate every privacy control reads,
+// not a per-control patch — and this test enumerates that control set by
+// name rather than asserting a summary, because the set is open (memory
+// "Definition by enumeration") and a one-directional assertion is satisfied
+// by zero (memory "Assert both directions"). Mirrors the enumerating shape
+// of "the search form's submit is disabled while an arm write is in flight
+// ..." above (`main.test.js:987`), one level up: every control, not one.
+test("every privacy control is frozen while a search is in flight, and re-enabled once it settles", async () => {
+  const contentArmed = () => ({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  const w = await boot({ model_settings: () => contentArmed() });
+
+  const frozenIds = [
+    "arm-text",
+    "arm-content",
+    "key",
+    "key-submit",
+    "forget",
+    "embedding-model",
+    "discard-vectors",
+    "rerank-model",
+    "chat-model",
+  ];
+
+  for (const id of frozenIds) {
+    assert.equal(w.el(id).disabled, false, `premise: ${id} starts enabled`);
+  }
+  assert.equal(
+    w.el("disclosure").textContent,
+    asSentence(LEAVES_EVERYTHING),
+    "premise: the content-armed boot promised everything leaves",
+  );
+
+  const s = w.hold("search");
+  w.el("query").value = "q";
+  const submit = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  for (const id of frozenIds) {
+    assert.equal(w.el(id).disabled, true, `${id} stayed clickable while a search was in flight`);
+  }
+  assert.equal(
+    w.el("disclosure").textContent,
+    asSentence(LEAVES_EVERYTHING),
+    "the disclosure sentence itself changed while nothing in the DB did",
+  );
+
+  s.resolve({
+    hits: [],
+    text: { kind: "answered", matched: 0 },
+    content: { kind: "answered", matched: 0, embedded: 0, total: 0, reachable: 0 },
+  });
+  await submit;
+  await settleEverything();
+
+  for (const id of frozenIds) {
+    assert.equal(
+      w.el(id).disabled,
+      false,
+      `${id} was left disabled after a successful search settled`,
+    );
+  }
+});
+
+// The mirror of the test above, on the failure path — round 3's own bug
+// (F3) lived exactly here, in a handler that reopened correctly on success
+// and not on rejection. The `finally` block that clears `searchInFlight`
+// already covers both paths (`main.js:603-608`), so this pins that the
+// redraw calls added there (Edit 3) inherited that coverage rather than
+// being wired only to the success branch.
+test("every privacy control is re-enabled once an in-flight search fails, not only when it succeeds", async () => {
+  const contentArmed = () => ({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  const w = await boot({ model_settings: () => contentArmed() });
+
+  const frozenIds = [
+    "arm-text",
+    "arm-content",
+    "key",
+    "key-submit",
+    "forget",
+    "embedding-model",
+    "discard-vectors",
+    "rerank-model",
+    "chat-model",
+  ];
+
+  const s = w.hold("search");
+  w.el("query").value = "q";
+  const submit = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  for (const id of frozenIds) {
+    assert.equal(w.el(id).disabled, true, `premise: ${id} froze while the search was in flight`);
+  }
+
+  s.reject(new Error("net"));
+  await submit;
+  await settleEverything();
+
+  for (const id of frozenIds) {
+    assert.equal(
+      w.el(id).disabled,
+      false,
+      `${id} was left disabled after a failed search settled (finally)`,
+    );
+  }
+});
+
+// The adversarial half (design §3.2/§3.3): freezing the controls stops a
+// *click* from reaching the store, but it does not stop a background
+// `model_settings` read from landing mid-search and re-running
+// `drawArmStateAndDisclosure`. If `searchInFlight` were a one-shot write at
+// the submit site instead of a term inside `drawArmState`'s own formula
+// (Edit 2), that redraw would silently re-open the checkboxes — the exact
+// "widened back by an unrelated redraw" bug `main.js:70-76` already
+// records, one level up. The read here carries the *same* disposition the
+// search itself captured, which by §3.2 is what every such read must carry
+// while nothing frozen can write — so the checkboxes must stay shut and the
+// sentence must not move. A second variant lands a transient `unreadable`
+// read instead: the sentence must fail closed to `LEAVES_UNKNOWN_INDEX`,
+// never back to a local-only promise (§3.3).
+test("a background settings read landing mid-search does not thaw the freeze or flip the disclosure", async () => {
+  const contentArmed = () => ({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  const w = await boot({ model_settings: () => contentArmed() });
+
+  const s = w.hold("search");
+  w.el("query").value = "q";
+  const submit = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(w.el("arm-text").disabled, true, "premise: the search froze the text arm");
+  assert.equal(w.el("arm-content").disabled, true, "premise: the search froze the content arm");
+
+  // Issued from `forget`, not from the submit above — the same idiom as "a
+  // settings read issued before an arm write does not revert it ..."
+  // (`main.test.js:937`): hold the read, trigger a reachable settings
+  // action, then resolve it once the assertions below are ready for it.
+  const read = w.hold("model_settings");
+  await w.press("forget");
+  read.resolve(contentArmed());
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-text").disabled,
+    true,
+    "a background settings redraw mid-search re-opened the text arm",
+  );
+  assert.equal(
+    w.el("arm-content").disabled,
+    true,
+    "a background settings redraw mid-search re-opened the content arm",
+  );
+  assert.equal(
+    w.el("disclosure").textContent,
+    asSentence(LEAVES_EVERYTHING),
+    "a background settings redraw carrying the same disposition still moved the disclosure",
+  );
+
+  const unreadableRead = w.hold("model_settings");
+  await w.press("forget");
+  unreadableRead.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: { kind: "unreadable", cause: "readFailed", reason: "boom" },
+  });
+  await settleEverything();
+
+  assert.equal(
+    w.el("disclosure").textContent,
+    asSentence(LEAVES_UNKNOWN_INDEX),
+    "a transient unreadable read mid-search did not fail closed to unknown",
+  );
+
+  s.resolve({
+    hits: [],
+    text: { kind: "answered", matched: 0 },
+    content: { kind: "answered", matched: 0, embedded: 0, total: 0, reachable: 0 },
+  });
+  await submit;
   await settleEverything();
 });

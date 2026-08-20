@@ -4,7 +4,7 @@
 //! another, with no compiler between them — the same reason the reader names
 //! are constants in `mnema-core` rather than literals in three files.
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{Db, Error};
 
@@ -23,6 +23,13 @@ pub const META_CHAT_MODEL: &str = "chat_model";
 /// would be theatre. What this buys is a diagnosis instead of a mystery on the
 /// day the pin moves.
 pub const META_VEC_VERSION: &str = "vec_version";
+/// Whether the text arm answers queries: `"on"` or `"off"`, absent meaning
+/// `"on"` (D106) so a fresh index answers with both arms before anyone opens
+/// the settings.
+pub const META_SEARCH_TEXT_ARM: &str = "search_text_arm";
+/// Whether the content arm answers queries. Same values, same default, and a
+/// key of its own: the two arms are switched independently.
+pub const META_SEARCH_CONTENT_ARM: &str = "search_content_arm";
 
 impl Db {
     pub fn meta_get(&self, key: &str) -> Result<Option<String>, Error> {
@@ -44,8 +51,8 @@ impl Db {
     /// costs data, and is the one key refused here; see
     /// [`Error::ActiveSpaceNotWritable`] for what the loss looks like.
     ///
-    /// Whoever adds a fifth key owes it the same question rather than this
-    /// answer: what does replacing this value make unreachable?
+    /// Whoever adds a key owes it the same question rather than this answer:
+    /// what does replacing this value make unreachable?
     ///
     /// A refusal rather than a silent no-op, because a caller that has just
     /// been stopped from changing which space search reads is a caller whose
@@ -74,6 +81,37 @@ impl Db {
     /// transaction rather than two.
     pub(crate) fn meta_put(&self, key: &str, value: &str) -> Result<(), Error> {
         self.conn().execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Writes several keys in one transaction: all land, or none do. The same
+    /// refusal `meta_set` gives for [`META_ACTIVE_SPACE`], checked for every
+    /// pair rather than only the first. Pinned by
+    /// `meta_set_many_writes_every_pair_in_one_transaction`.
+    pub fn meta_set_many(&self, pairs: &[(&str, &str)]) -> Result<(), Error> {
+        self.transaction(|tx| {
+            for (key, value) in pairs {
+                if *key == META_ACTIVE_SPACE {
+                    return Err(Error::ActiveSpaceNotWritable);
+                }
+                self.meta_put_in(tx, key, value)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// [`Db::meta_put`] under a transaction the caller already opened.
+    ///
+    /// Private, and called only from inside [`Db::meta_set_many`]'s own
+    /// `self.transaction(..)` — `tx` is therefore always on this `Db`'s
+    /// connection already, unlike `insert_chunk_in`'s, which takes one an
+    /// external caller opened and needs `same_connection` to check it.
+    fn meta_put_in(&self, tx: &Transaction<'_>, key: &str, value: &str) -> Result<(), Error> {
+        tx.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],

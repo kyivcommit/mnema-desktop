@@ -59,6 +59,18 @@ pub enum EvalError {
     Index(String),
     #[error("questions: {0}")]
     Questions(String),
+    #[error("no active embedding space")]
+    NoActiveSpace,
+    #[error("content arm was silent: {0}")]
+    ContentArmSilent(String),
+    /// The same trade as `Io`/`Index` above: `mnema_provider::Error` and
+    /// `mnema_embed::Error` neither derive `PartialEq`/`Eq`, and one variant
+    /// covers both — nothing here branches on which of the two calls
+    /// `embed_corpus` makes actually failed.
+    #[error("embedding: {0}")]
+    Embedding(String),
+    #[error("the corpus is not fully embedded: {embedded} of {total} chunks have a vector")]
+    CorpusNotEmbedded { embedded: i64, total: i64 },
 }
 
 impl From<std::io::Error> for EvalError {
@@ -73,6 +85,18 @@ impl From<std::io::Error> for EvalError {
 impl From<mnema_index::Error> for EvalError {
     fn from(err: mnema_index::Error) -> Self {
         EvalError::Index(err.to_string())
+    }
+}
+
+impl From<mnema_provider::Error> for EvalError {
+    fn from(err: mnema_provider::Error) -> Self {
+        EvalError::Embedding(err.to_string())
+    }
+}
+
+impl From<mnema_embed::Error> for EvalError {
+    fn from(err: mnema_embed::Error) -> Self {
+        EvalError::Embedding(err.to_string())
     }
 }
 

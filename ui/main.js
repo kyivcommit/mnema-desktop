@@ -7,6 +7,9 @@
 import {
   endingSentence,
   searchResultItems,
+  toggleState,
+  textArmSentence,
+  contentArmSentence,
   ROLES,
   indexNotAsked,
   indexOpened,
@@ -16,6 +19,7 @@ import {
   listFailed,
   selectId,
   disclosureSentence,
+  LEAVES_UNKNOWN_INDEX,
   asSentence,
   keyStoreNote,
   keyStateSentence,
@@ -57,6 +61,128 @@ const { open } = window.__TAURI__.dialog;
 
 const el = (id) => document.getElementById(id);
 const results = el("results");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round 3: one readiness barrier for `#search-submit`
+// (`docs/private/sdd/2026-08-14-search-query-and-fusion/
+// ui-readiness-barrier-spec.md`, closes Codex round-3 findings 2, 3 and 9).
+//
+// Round 2 disabled `#search-submit` from inside the two arm handlers only,
+// each handler writing the property itself. Round 3 found the key form, both
+// model pickers and the initial load still pressable — and the arm
+// handlers' own `disabled = true` quietly undone by an unrelated redraw
+// (`drawArmState`, below). Both are the same mistake: a control this window
+// has narrowed is not any redraw's to widen back except the one that
+// narrowed it.
+//
+// `pendingConfigWrites` is a count, not a flag (§3.2): two overlapping
+// writes must not have the first to settle re-open anything while the
+// second is still out. `authoritativeStateRead` is a second, independent
+// reason to stay closed (§3.3): at load there has been no write and no read
+// either, and `index.html` now starts `#search-submit` `disabled` for
+// exactly that window — this flag is what lets the barrier open, once, the
+// first time `drawSettings` actually draws.
+let pendingConfigWrites = 0;
+let authoritativeStateRead = false;
+// A fourth, privacy reason for `syncSearchGate` to stay shut (§3.3, Codex round
+// 5): the most recently drawn settings read was **not** an authoritative index
+// read. When `IndexSettings` is `unreadable` the window cannot know whether the
+// content arm is on, so it must not open Search or promise anything about what
+// leaves — the backend `search` reads the arms straight from the DB and would
+// send regardless. Distinct from `authoritativeStateRead` (which only records
+// that *some* read has landed): this one goes false again on a transient
+// unreadable read, so Search fails closed until a readable read reconciles it.
+let indexReadable = false;
+
+// U-3 (adversarial pass, F-A6): a third, independent reason to stay shut —
+// a search already in flight. A flag, not a counter like
+// `pendingConfigWrites`: the submit handler below refuses a second submit
+// synchronously, before anything is awaited, so this can never be more than
+// one search deep — a boolean is correct here precisely because U-3 makes
+// overlap impossible, not an oversight of §3.2's counter rule for the
+// other one. Declared here so `syncSearchGate` has one formula over all
+// three, and its own variable, not `pendingConfigWrites`: a config write
+// and a search are different reasons to hold this button, and folding them
+// together would make either wait on the other's redraw for no reason.
+let searchInFlight = false;
+
+// The mirror of `syncSearchGate`, for the other direction of the barrier (Codex
+// round 6): a config write already holds the search submit shut; symmetrically,
+// an in-flight search must hold every privacy-affecting control shut, or the
+// live disclosure can flip to a false local-only promise while `search` is still
+// sending the question it captured at submit (`bridge.rs:278-302`). One predicate
+// so "a search is out" — and any future reason — lives in one formula, not in a
+// per-control `disabled` a later control silently skips (the exact failure
+// `main.js:70-76` records, and the reason this is round 6 of the same class).
+const configFrozenBySearch = () => searchInFlight;
+// The single writer of these controls' `disabled`. None of them writes `disabled`
+// anywhere else today; if `drawSettings`/a role fill ever does, OR this in
+// (`... || configFrozenBySearch()`) or call this last in that redraw. The arm
+// checkboxes are NOT here — they have their own sole writer, `drawArmState`
+// (below). `discard-vectors` is frozen independently of its `hidden` (a
+// background read can un-hide it mid-search): visible but untouchable.
+const syncConfigControls = () => {
+  const frozen = configFrozenBySearch();
+  for (const id of [
+    "key",
+    "key-submit",
+    "forget",
+    "embedding-model",
+    "discard-vectors",
+    "rerank-model",
+    "chat-model",
+  ]) {
+    el(id).disabled = frozen;
+  }
+};
+
+// The one place that answers "may a search be submitted now" (§3.1) — every
+// other line in this file that used to write `#search-submit`'s `disabled`
+// itself now reports a fact to one of the four variables above and calls
+// this instead.
+const syncSearchGate = () => {
+  el("search-submit").disabled =
+    !authoritativeStateRead || !indexReadable || pendingConfigWrites > 0 || searchInFlight;
+};
+// Forces the closed reading immediately, rather than waiting for the first
+// caller that happens to touch the barrier. The markup (`index.html`)
+// already starts `#search-submit` `disabled` for a real browser; this line
+// is what gives the same window to anything — this file's own test harness
+// included — that models the element without parsing the markup's own
+// attributes.
+syncSearchGate();
+// Same reasoning, other direction: a freshly-mounted window (and this file's
+// own test harness) must start with the config controls in a defined
+// `disabled=false` state, not whatever `undefined` the DOM would otherwise
+// leave them at before the first `searchInFlight` transition ever runs.
+syncConfigControls();
+
+// Wraps a config-mutating handler's **whole** body — its `invoke` and
+// whatever redraw follows it, not the `invoke` alone. The disclosure this
+// barrier protects (`#disclosure`, drawn by `drawSettings`) is only as
+// current as the last redraw, so the gate must stay shut through that
+// redraw too: reopening the instant the write's own `invoke` resolves would
+// let a search leave on the strength of a promise the screen has not caught
+// up to yet — F9's exact defect, one step later. Every config-mutating
+// `invoke` in this file goes through this (or, for the two arm handlers,
+// through the same two variables directly — see the note above their
+// listeners); `main.test.js`'s site test checks that nothing new does not.
+const withSearchGated = async (body) => {
+  // U-2 (adversarial pass, F-A3): both statements are inside `try` now, not
+  // only `body()`. `syncSearchGate()` dereferences `el("search-submit")`; if
+  // that throws, the increment must still be visible to `finally`, or the
+  // counter never comes back down and search is shut for the rest of the
+  // session. Pinned by "a throw inside syncSearchGate's own call does not
+  // leak the gate shut for later writes".
+  try {
+    pendingConfigWrites += 1;
+    syncSearchGate();
+    return await body();
+  } finally {
+    pendingConfigWrites -= 1;
+    syncSearchGate();
+  }
+};
 
 // Every write to `#job-status`, and the count of them.
 //
@@ -428,36 +554,244 @@ async function renderSkips(rootId) {
 
 // The window draws; it does not decide. Every number here came from a
 // command — `searchResultItems` and `hitLocation` (`render.js`) decide what
-// the list is made of, this only turns that into elements.
+// the list is made of, this only turns that into elements. `search` answers a
+// `SearchAnswer`, not a bare hit list — `hits` is what `searchResultItems`
+// takes, and `text`/`content` are each arm's own report.
 async function search(query) {
-  const hits = await invoke("search", { query });
-  results.replaceChildren(...searchResultItems(hits).map((item) => {
-    const li = document.createElement("li");
-    if (item.kind === "empty") {
-      li.className = "muted";
-      li.textContent = item.text;
-      return li;
-    }
-    const where = document.createElement("p");
-    where.className = "muted";
-    where.textContent = item.where;
-    const text = document.createElement("p");
-    text.textContent = item.text;
-    li.append(where, text);
-    return li;
-  }));
+  return invoke("search", { query });
 }
+
+// Round 3, F3: two searches can now be genuinely concurrent — D111 hoisted
+// the embedding call out of the index mutex, so two paid provider requests
+// can be in flight at once. Without a generation of its own, an older
+// completion settling after a newer one used to overwrite it silently on
+// success, and clear the *newer* search's arm-state lines on the older
+// one's failure. `searchAsked`/`searchDrawn` are the same idiom as
+// `settingsAsked`/`settingsDrawn` below: issue numbers, not a flag, because
+// two searches can be in flight and can come back in either order, and both
+// the success and the failure render paths have to ask the same question.
+let searchAsked = 0;
+let searchDrawn = 0;
 
 el("search-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  // U-3 (adversarial pass, F-A6): one query field, one button — a second
+  // submit replaces the question rather than asking a second one. Refused
+  // here, synchronously and before anything is awaited, so no ordering can
+  // let two submits both reach `search()`; `syncSearchGate` folds this into
+  // `#search-submit` itself, the same one decision point every other config
+  // gate in this file already uses.
+  if (searchInFlight) {
+    return;
+  }
   const query = el("query").value;
+  searchAsked += 1;
+  const issue = searchAsked;
+  searchInFlight = true;
+  syncSearchGate();
+  drawArmState();
+  syncConfigControls();
   try {
-    await search(query);
+    const answer = await search(query);
+    // An answer older than one already on screen has nothing to add and
+    // could only take something away.
+    if (issue <= searchDrawn) {
+      return;
+    }
+    // Review, V-1: assigned *after* the render, not before it. Assigning it
+    // here used to make a render that itself throws land in `catch` below
+    // with `issue <= searchDrawn` already true, swallowing the failure
+    // instead of reporting it. Pinned by "a render that throws after a
+    // successful answer still reports the failure".
+    results.replaceChildren(...searchResultItems(answer.hits).map((item) => {
+      const li = document.createElement("li");
+      if (item.kind === "empty") {
+        li.className = "muted";
+        li.textContent = item.text;
+        return li;
+      }
+      const where = document.createElement("p");
+      where.className = "muted";
+      where.textContent = item.where;
+      const text = document.createElement("p");
+      text.textContent = item.text;
+      li.append(where, text);
+      return li;
+    }));
+    el("text-arm-state").textContent = textArmSentence(answer.text);
+    el("content-arm-state").textContent = contentArmSentence(answer.content);
+    searchDrawn = issue;
   } catch (error) {
+    // The same guard on the failure path: an older rejection is exactly the
+    // path that used to erase a newer answer, clearing both arm-state lines
+    // it had never touched.
+    if (issue <= searchDrawn) {
+      return;
+    }
+    searchDrawn = issue;
     const li = document.createElement("li");
     li.textContent = `search failed: ${error}`;
     results.replaceChildren(li);
+    // Left alone, a failed search keeps showing the previous successful
+    // search's arm report — a real number about a different attempt,
+    // indistinguishable from a current one.
+    el("text-arm-state").textContent = "";
+    el("content-arm-state").textContent = "";
+  } finally {
+    // Reopens on both the success and the failure path above — round 3's
+    // own bug (F3) was a handler that only reopened on one of them. Round 6
+    // (Edit 3): the same `finally` is what re-enables the arm checkboxes
+    // and the rest of the frozen config controls on both paths too — a
+    // one-directional reopen here would repeat F3's own mistake one level
+    // up, this time for the barrier's other direction.
+    searchInFlight = false;
+    syncSearchGate();
+    drawArmState();
+    syncConfigControls();
   }
+});
+
+// Whether each arm can run at all, cached from the last `model_settings` draw
+// so a checkbox's own `change` can redraw `toggleState` without asking again.
+let armKeyPresent = false;
+let armModelChosen = false;
+// True only until the first `model_settings` draw — `drawSettings` below
+// overwrites both from `read.searchTextArm`/`read.searchContentArm` the
+// moment an index read answers, so this default is never what a person
+// with a saved choice actually sees.
+let savedTextArm = true;
+let savedContentArm = true;
+
+// Whether a `set_search_arms` write is currently outstanding — round 2's
+// `armWriteGeneration` counts *presses*, which is right for "does a read
+// issued before this write predate it" (below) but wrong for "is a write
+// still out right now": a press that has already settled still holds a
+// generation. This is incremented before the `invoke` and decremented once
+// it settles, success or refusal, so it is exactly zero when nothing this
+// window started is still waiting to hear back.
+//
+// Besides the live `drawArmState` disable, a snapshot of this taken at read-issue
+// (`armWriteInFlightAtIssue`) is the second half of the arm-write guard in
+// `drawSettings`: a read whose issue moment fell inside a write's interval must
+// not overwrite the saved arms, even though it shares that write's generation.
+let armWritesInFlight = 0;
+
+// Returns the `toggleState` it drew from, so a caller that needs the same
+// facts reads them off this one call instead of asking `toggleState` again
+// with its own copy of these four fields.
+//
+// Round 3, F2: this used to write `toggleState`'s `disabled` unconditionally,
+// so a `model_settings` redraw landing while a `set_search_arms` write was
+// still in flight re-enabled both checkboxes out from under it — the pending
+// write's own `disabled = true` (in the handlers below) quietly undone, and
+// a second click then sent a *second*, overlapping write. §3.4's fix: the
+// value actually written is `toggleState`'s disabled **or** the barrier's —
+// a redraw may only ever add a disable here, never remove one a pending
+// write still owns. This is the one function that writes these two
+// properties, and it is the only place that fix belongs.
+const drawArmState = () => {
+  const state = toggleState({
+    savedText: savedTextArm,
+    savedContent: savedContentArm,
+    keyPresent: armKeyPresent,
+    modelChosen: armModelChosen,
+  });
+  el("arm-text").checked = state.text.checked;
+  el("arm-text").disabled = state.text.disabled || armWritesInFlight > 0 || searchInFlight;
+  el("arm-text-note").textContent = state.text.note;
+  el("arm-content").checked = state.content.checked;
+  el("arm-content").disabled = state.content.disabled || armWritesInFlight > 0 || searchInFlight;
+  el("arm-content-note").textContent = state.content.note;
+  return state;
+};
+
+// The disclosure sentence's `contentArmRuns` and `textRuns` are this same
+// draw's `content.checked`/`text.checked`, not a second read of the toggle —
+// `drawArmState`'s return, not a fresh `toggleState` call, is what makes
+// that one fact instead of two that could disagree. Called everywhere
+// `drawArmState` used to be called alone: a checkbox `change` moves the
+// toggle without a fresh `model_settings` round trip, and the sentence
+// promising what a search sends must move with it, in the same paint.
+// Pinned per arm by `switching the content arm off updates the disclosure
+// sentence too` and `switching the text arm off with an absent key updates
+// the disclosure sentence too`.
+const drawArmStateAndDisclosure = () => {
+  const { text, content } = drawArmState();
+  // When the index could not be read, the arm state is unknown, so the
+  // disclosure must say so rather than make the evidence-free "content is off"
+  // promise `disclosureSentence`'s own doc (render.js) forbids.
+  el("disclosure").textContent = asSentence(
+    indexReadable
+      ? disclosureSentence(keyState, { contentArmRuns: content.checked, textRuns: text.checked })
+      : LEAVES_UNKNOWN_INDEX,
+  );
+};
+
+// Whether an arm write (`set_search_arms`) has started, as a generation that
+// only grows — the same idiom as `jobGeneration`/`askedAt` below. A read
+// issued before a write started must not restore the checkbox once that
+// write lands, even after the write itself has already settled, which a
+// simple in-flight flag could not tell. Pinned by `a settings read issued
+// before an arm write does not revert it once the write has landed`.
+let armWriteGeneration = 0;
+
+// Both handlers write optimistically and undo on refusal — the same
+// catch-and-say convention `#search-form`'s own listener uses above,
+// applied to a control this window must not leave believing a choice was
+// saved when `set_search_arms` never returned. Both also claim the search
+// form's submit for the length of the write, the same way they already
+// claim each other's checkbox — through `withSearchGated`, the same barrier
+// every other Class A handler in this file uses, not by writing
+// `#search-submit`'s `disabled` themselves (§3.1). `armWritesInFlight` is
+// separate from `pendingConfigWrites`, and is decremented *inside* the
+// wrapped body, before `drawArmStateAndDisclosure()` — a moment earlier than
+// `withSearchGated`'s own bookkeeping settles — because that draw is what
+// `armWritesInFlight` gates (§3.4), and it has to see this write's own
+// count already back down before it decides whether either checkbox may
+// re-enable. Pinned per handler by `the search form's submit is disabled
+// while an arm write is in flight, and re-enabled once it settles` and its
+// content-arm counterpart of the same name.
+el("arm-text").addEventListener("change", async () => {
+  const previous = savedTextArm;
+  savedTextArm = el("arm-text").checked;
+  el("arm-text").disabled = true;
+  el("arm-content").disabled = true;
+  armWriteGeneration += 1;
+  armWritesInFlight += 1;
+  await withSearchGated(async () => {
+    try {
+      await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
+    } catch (error) {
+      savedTextArm = previous;
+      armWritesInFlight -= 1;
+      drawArmStateAndDisclosure();
+      el("arm-text-note").textContent = `the choice was not saved: ${error}`;
+      return;
+    }
+    armWritesInFlight -= 1;
+    drawArmStateAndDisclosure();
+  });
+});
+el("arm-content").addEventListener("change", async () => {
+  const previous = savedContentArm;
+  savedContentArm = el("arm-content").checked;
+  el("arm-text").disabled = true;
+  el("arm-content").disabled = true;
+  armWriteGeneration += 1;
+  armWritesInFlight += 1;
+  await withSearchGated(async () => {
+    try {
+      await invoke("set_search_arms", { text: savedTextArm, content: savedContentArm });
+    } catch (error) {
+      savedContentArm = previous;
+      armWritesInFlight -= 1;
+      drawArmStateAndDisclosure();
+      el("arm-content-note").textContent = `the choice was not saved: ${error}`;
+      return;
+    }
+    armWritesInFlight -= 1;
+    drawArmStateAndDisclosure();
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -575,9 +909,11 @@ const showRecorded = (role, recorded) => {
   });
 };
 
-// `askedAt` is `jobGeneration` as it stood when this draw's `model_settings`
-// was **issued**, not when it came back.
-const drawSettings = (settings, askedAt) => {
+// `askedAt` is `jobGeneration`, `armAskedAt` is `armWriteGeneration`, and
+// `armWriteInFlightAtIssue` is whether an arm write was already outstanding —
+// all three as they stood when this draw's `model_settings` was **issued**, not
+// when it came back.
+const drawSettings = (settings, askedAt, armAskedAt, armWriteInFlightAtIssue) => {
   // ⚠️ **Whether a job has these counts, and why `jobRunning` alone is the
   // wrong question.** Review of `3b18859`, Important 2, measured rather than
   // argued: this function reads the flag when it runs, which is after its own
@@ -595,7 +931,6 @@ const drawSettings = (settings, askedAt) => {
   // that reason.
   const aJobHasTheSlot = jobRunning || askedAt !== jobGeneration;
   keyState = settings.key;
-  el("disclosure").textContent = asSentence(disclosureSentence(settings.key));
   el("key-state").textContent = asSentence(keyStateSentence(settings.key));
   // The field and its button are drawn from the store's answer too. With a key
   // stored this window has just cleared the field, so an empty one is the
@@ -644,9 +979,39 @@ const drawSettings = (settings, askedAt) => {
   el("discard-vectors").textContent = discardVectorsLabel(offer);
   el("discard-vectors-note").textContent = discardVectorsNote(offer);
   const read = settings.index?.kind === "read" ? settings.index : null;
+  // Reconciled on every draw: an unreadable index leaves this false, which both
+  // holds Search shut (`syncSearchGate`) and switches the disclosure below to
+  // the unknown-index sentence instead of a promise no read backs.
+  indexReadable = read !== null;
   showRecorded("embedding", read && read.embeddingModel);
   showRecorded("rerank", read && read.rerankModel);
   showRecorded("chat", read && read.chatModel);
+  armKeyPresent = settings.key?.kind === "present";
+  armModelChosen = Boolean(read && read.embeddingModel);
+  // Only while `read` actually answers, and only while this read's whole
+  // interval was free of an arm write — two conditions, because a write can
+  // overlap a read from either side. `armAskedAt !== armWriteGeneration` means a
+  // write *started* after this read was issued, and overwriting here would revert
+  // a checkbox this read knows nothing about. `armWriteInFlightAtIssue` means a
+  // write was *already outstanding* when the read was issued: it can carry a DB
+  // snapshot older than that write's commit while sharing its generation, so the
+  // generation check alone would wrongly take it as authoritative — the half of
+  // the race a press-counting generation cannot see. Pinned by `a settings read
+  // issued before an arm write does not revert it once the write has landed`, its
+  // content-arm counterpart, and the two `... issued during a content-arm write
+  // ...` tests below (both orderings of read-draw versus write-settle).
+  if (read && armAskedAt === armWriteGeneration && !armWriteInFlightAtIssue) {
+    savedTextArm = read.searchTextArm;
+    savedContentArm = read.searchContentArm;
+  }
+  drawArmStateAndDisclosure();
+  // §3.3: this is the first authoritative read landing, or the tenth — either
+  // way, `syncSearchGate` is what turns that into `#search-submit` opening
+  // (or staying shut, if a config write is still out). Set every time this
+  // function actually draws, which per `refreshSettings`'s own guard is only
+  // for the newest read issued.
+  authoritativeStateRead = true;
+  syncSearchGate();
 };
 
 // No `.catch()`, and that is deliberate. `model_settings` returns no `Result`
@@ -679,6 +1044,21 @@ let settingsDrawn = 0;
 const refreshSettings = async () => {
   settingsAsked += 1;
   const issue = settingsAsked;
+  // Same idea as `askedAt` just below, for an arm write instead of a job:
+  // captured here so `drawSettings` can tell a write that *started after* this
+  // read was issued — the generation will have grown by the time it draws —
+  // from one that did not. On its own it cannot tell a write that was *already
+  // outstanding* at this point, which shares this same generation; that is the
+  // next capture's job.
+  const armAskedAt = armWriteGeneration;
+  // The other half of the same idea. `armAskedAt` catches a write that *starts*
+  // after this read is issued; it cannot catch a write already outstanding at
+  // this moment, because that write has already bumped `armWriteGeneration`, so
+  // the read shares its generation while its `model_settings` snapshot may still
+  // predate the write's commit. Sampled here, at issue, so `drawSettings` can
+  // refuse the read for the whole write interval, not only for writes that begin
+  // after it.
+  const armWriteInFlightAtIssue = armWritesInFlight > 0;
   // Captured before the await, never after. This is the whole of what lets
   // `drawSettings` tell "no job has touched these counts" from "one started
   // while I was asking" — the distinction `jobRunning` cannot draw, because
@@ -691,7 +1071,7 @@ const refreshSettings = async () => {
   // restatement does.
   if (issue > settingsDrawn) {
     settingsDrawn = issue;
-    drawSettings(settings, askedAt);
+    drawSettings(settings, askedAt, armAskedAt, armWriteInFlightAtIssue);
   }
   return settings;
 };
@@ -712,31 +1092,42 @@ el("key-form").addEventListener("submit", async (event) => {
       return;
     }
   }
-  try {
-    const status = await invoke("set_key", { key: el("key").value });
-    el("key").value = "";
-    el("key-status").textContent = asSentence(keyAcceptedSentence(status));
-  } catch (error) {
-    // Not "the key was not accepted": every reachable failure of `set_key`
-    // except `Provider` decided nothing about the key. Said without a total,
-    // because the total was wrong for one commit — this comment counted three
-    // while its two neighbours, the table on `keyNotSavedSentence` and the test
-    // above it, were updated. `keyNotSavedSentence` has the enumeration.
-    el("key-status").textContent = asSentence(keyNotSavedSentence(error));
-  }
-  await refreshSettings();
+  // Class A (§2): a saved key changes what leaves the machine, and the
+  // barrier stays shut through the trailing `refreshSettings()` too, not
+  // only the `invoke` — F9's sequence is a key saved and a search sent
+  // while `#disclosure` still reads the old promise, and that promise is
+  // only put right by the redraw this call awaits.
+  await withSearchGated(async () => {
+    try {
+      const status = await invoke("set_key", { key: el("key").value });
+      el("key").value = "";
+      el("key-status").textContent = asSentence(keyAcceptedSentence(status));
+    } catch (error) {
+      // Not "the key was not accepted": every reachable failure of `set_key`
+      // except `Provider` decided nothing about the key. Said without a total,
+      // because the total was wrong for one commit — this comment counted three
+      // while its two neighbours, the table on `keyNotSavedSentence` and the test
+      // above it, were updated. `keyNotSavedSentence` has the enumeration.
+      el("key-status").textContent = asSentence(keyNotSavedSentence(error));
+    }
+    await refreshSettings();
+  });
 });
 
 el("forget").addEventListener("click", async () => {
-  try {
-    el("key-status").textContent = asSentence(keyRemovedSentence(await invoke("forget_key")));
-  } catch (error) {
-    // The key is still there. Saying "removed" because the button was pressed
-    // would state as fact something the store refused to do — and the next
-    // line of the window, redrawn from the store itself, would contradict it.
-    el("key-status").textContent = asSentence(keyNotRemovedSentence(error));
-  }
-  await refreshSettings();
+  // Class A (§2): removing the key changes what leaves the machine just as
+  // saving one does — see the note on `key-form`'s own listener above.
+  await withSearchGated(async () => {
+    try {
+      el("key-status").textContent = asSentence(keyRemovedSentence(await invoke("forget_key")));
+    } catch (error) {
+      // The key is still there. Saying "removed" because the button was pressed
+      // would state as fact something the store refused to do — and the next
+      // line of the window, redrawn from the store itself, would contradict it.
+      el("key-status").textContent = asSentence(keyNotRemovedSentence(error));
+    }
+    await refreshSettings();
+  });
 });
 
 // The embedding role is not the other two and does not share their handler.
@@ -748,34 +1139,41 @@ el("forget").addEventListener("click", async () => {
 // Both presses that can record an embedding model go through this one function,
 // differing only in `existingVectors`. Two copies would be two places for the
 // destructive spelling to end up on the harmless press.
+// Class A (§2): the embedding model decides whether questions leave the
+// machine at all, and the discard-vectors confirmation reaches this too —
+// `recordEmbeddingModel` is one function with two call sites, gated once
+// here rather than at each press, or the second press would keep the hole
+// F9 exists to close.
 const recordEmbeddingModel = async (model, existingVectors) => {
-  try {
-    const adopted = await invoke("set_embedding_model", { model, existingVectors });
-    // Cleared on success, so the button below cannot survive the change it was
-    // offered for and act a second time on a model nobody is looking at.
-    refusedChange = null;
-    el("model-status").textContent = asSentence(adoptedModelSentence(adopted, indexOpening));
-  } catch (error) {
-    // The refusal already says how many vectors stand in the way; showing it
-    // whole is better than a sentence of our own that says less.
-    //
-    // Set on every failure this window cannot attribute, and narrowed by
-    // `discardOffer` rather than here. Not for tidiness: the refusal arrives as
-    // a string, so this `catch` cannot tell "a space blocks the change" from
-    // "you have entered no key" without matching on message text — the failure
-    // mode `crate::error::Error`'s own header says that type exists to avoid.
-    // What can be decided is decided from state, one line down, where the guards
-    // and their gaps are written out.
-    //
-    // The one exception is the one this window *does* know from state: with a
-    // job running, the refusal is the slot, and a slot refusal must leave
-    // nothing to confirm — otherwise the run's own ending redraws the button
-    // against a count that run has just made larger, and pressing it destroys
-    // what it paid for. `changeToConfirm` is where that is written.
-    refusedChange = changeToConfirm(model, jobRunning);
-    el("model-status").textContent = asSentence(embeddingModelNotRecordedSentence(error));
-  }
-  await refreshSettings();
+  await withSearchGated(async () => {
+    try {
+      const adopted = await invoke("set_embedding_model", { model, existingVectors });
+      // Cleared on success, so the button below cannot survive the change it was
+      // offered for and act a second time on a model nobody is looking at.
+      refusedChange = null;
+      el("model-status").textContent = asSentence(adoptedModelSentence(adopted, indexOpening));
+    } catch (error) {
+      // The refusal already says how many vectors stand in the way; showing it
+      // whole is better than a sentence of our own that says less.
+      //
+      // Set on every failure this window cannot attribute, and narrowed by
+      // `discardOffer` rather than here. Not for tidiness: the refusal arrives as
+      // a string, so this `catch` cannot tell "a space blocks the change" from
+      // "you have entered no key" without matching on message text — the failure
+      // mode `crate::error::Error`'s own header says that type exists to avoid.
+      // What can be decided is decided from state, one line down, where the guards
+      // and their gaps are written out.
+      //
+      // The one exception is the one this window *does* know from state: with a
+      // job running, the refusal is the slot, and a slot refusal must leave
+      // nothing to confirm — otherwise the run's own ending redraws the button
+      // against a count that run has just made larger, and pressing it destroys
+      // what it paid for. `changeToConfirm` is where that is written.
+      refusedChange = changeToConfirm(model, jobRunning);
+      el("model-status").textContent = asSentence(embeddingModelNotRecordedSentence(error));
+    }
+    await refreshSettings();
+  });
 };
 
 el(selectId("embedding")).addEventListener("change", async (event) => {
@@ -891,41 +1289,67 @@ el("embed").addEventListener("click", async () => {
   const barWas = el("bar").dataset.state ?? "";
   el("bar").dataset.state = BAR_RUNNING;
 
-  try {
-    endingDescribed = false;
-    await invoke("start_embed_job", { onProgress });
-    jobRunning = true;
-    // After the await, for the reason the walk's own press gives: an ending
-    // that arrived first has already been overwritten by the line above, and
-    // only the core can put it right.
-    syncButtons();
-    follow();
-  } catch (error) {
-    // Refused before anything started — no key, no index, or a job already
-    // running. Nothing began, so the buttons must not move, and neither must
-    // the bar.
-    el("bar").dataset.state = barWas;
-    sayJobStatus(embedNotStartedSentence(error));
-    // For the reason the walk's own refusal gives: this press bumped the
-    // generation before awaiting, so a settings draw that resolved inside the
-    // refusal suppressed its refusal clause for a job that never started.
-    refreshSettings();
-  }
+  // Class A, the weakest member (§2): `start_embed_job` does not change
+  // whether a question leaves this machine, only the coverage numbers the
+  // arm report states — but it moves them the moment the core accepts the
+  // press, before this window has read anything back, so a search submitted
+  // in that gap would report content-arm coverage that is already wrong.
+  // Gated for the length of *this* round trip only — accepted-or-refused,
+  // not the whole run: the run's own ending is asynchronous, arrives on
+  // `onProgress` above and settles `refreshSettings()` of its own accord
+  // (`:1012`-ish, in the handler above), which is a Class B concern
+  // `drawArmState`'s barrier-aware redraw already covers, not something
+  // `#search-submit` needs held shut for minutes at a time.
+  await withSearchGated(async () => {
+    try {
+      endingDescribed = false;
+      await invoke("start_embed_job", { onProgress });
+      jobRunning = true;
+      // After the await, for the reason the walk's own press gives: an ending
+      // that arrived first has already been overwritten by the line above, and
+      // only the core can put it right.
+      syncButtons();
+      follow();
+    } catch (error) {
+      // Refused before anything started — no key, no index, or a job already
+      // running. Nothing began, so the buttons must not move, and neither must
+      // the bar.
+      el("bar").dataset.state = barWas;
+      sayJobStatus(embedNotStartedSentence(error));
+      // For the reason the walk's own refusal gives: this press bumped the
+      // generation before awaiting, so a settings draw that resolved inside the
+      // refusal suppressed its refusal clause for a job that never started.
+      await refreshSettings();
+    }
+  });
 });
 
+// The spec (§2) classifies these two as Class B, not Class A — neither
+// touches what leaves the machine — but they reach the core through a
+// **computed** command name, `command` below rather than a string literal,
+// which is exactly the shape `main.test.js`'s site test has to be able to
+// see so a future Class A mutation cannot hide behind the same pattern.
+// Gated here anyway, deliberately wider than §2 strictly asks:
+// telling "this identifier happens to be Class B" from "this identifier is
+// a new Class A write" needs more than a source-text pin can prove, and
+// gating every config mutation through the one barrier — matching model or
+// not — costs a search no more than the round trip these two already pay
+// for. See the report for the argument in full.
 for (const [role, command] of [
   ["rerank", "set_rerank_model"],
   ["chat", "set_chat_model"],
 ]) {
   el(selectId(role)).addEventListener("change", async (event) => {
     const model = event.target.value;
-    try {
-      await invoke(command, { model });
-      el("model-status").textContent = asSentence(roleRecordedSentence(role, model));
-    } catch (error) {
-      el("model-status").textContent = asSentence(roleNotRecordedSentence(role, error));
-    }
-    await refreshSettings();
+    await withSearchGated(async () => {
+      try {
+        await invoke(command, { model });
+        el("model-status").textContent = asSentence(roleRecordedSentence(role, model));
+      } catch (error) {
+        el("model-status").textContent = asSentence(roleNotRecordedSentence(role, error));
+      }
+      await refreshSettings();
+    });
   });
 }
 

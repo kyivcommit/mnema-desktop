@@ -1,7 +1,13 @@
 //! `meta` is a key-value table, and the point of these tests is that the keys
 //! are constants rather than literals spread over three crates.
 
-use mnema_index::{Error, META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL, META_VEC_VERSION};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use mnema_index::{
+    Error, META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL, META_SEARCH_CONTENT_ARM,
+    META_SEARCH_TEXT_ARM, META_VEC_VERSION,
+};
 
 mod support;
 use support::temp_db;
@@ -80,5 +86,71 @@ fn the_active_space_is_refused_while_an_ordinary_key_still_writes() {
         db.meta_get(META_VEC_VERSION).expect("read").as_deref(),
         Some("0.1.9"),
         "the guard is pinned to one key, not to 'not all of them'"
+    );
+}
+
+/// Absent means on, because D106 makes both arms the default and a fresh index
+/// has written neither key. A default of off would make a new index answer
+/// nothing until somebody found the settings.
+#[test]
+fn an_index_that_never_saw_the_toggles_has_both_arms_on() {
+    let db = temp_db();
+    assert_eq!(db.meta_get(META_SEARCH_TEXT_ARM).expect("read"), None);
+    assert_eq!(db.meta_get(META_SEARCH_CONTENT_ARM).expect("read"), None);
+}
+
+/// The two keys are separate storage, which a single key holding a pair would
+/// not be: writing one must not disturb the other.
+#[test]
+fn writing_one_arms_state_leaves_the_other_alone() {
+    let db = temp_db();
+    db.meta_set(META_SEARCH_CONTENT_ARM, "off").expect("write");
+    assert_eq!(
+        db.meta_get(META_SEARCH_CONTENT_ARM).expect("read"),
+        Some("off".to_string())
+    );
+    assert_eq!(db.meta_get(META_SEARCH_TEXT_ARM).expect("read"), None);
+}
+
+/// `set_search_arms`'s own doc claims the pair it writes cannot disagree.
+/// Two separate `meta_set` calls are each their own autocommit transaction,
+/// so a failure between them — `SQLITE_BUSY`, a full disk — could land one
+/// key and not the other. A commit hook fires once per committed
+/// transaction, never per statement, so counting its calls tells "one
+/// transaction, two writes" apart from "two transactions" without having to
+/// force the mid-write failure itself.
+#[test]
+fn meta_set_many_writes_every_pair_in_one_transaction() {
+    let db = temp_db();
+    let commits = Arc::new(AtomicUsize::new(0));
+    let counted = commits.clone();
+    db.conn()
+        .commit_hook(Some(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            false
+        }))
+        .expect("registering the commit hook");
+
+    db.meta_set_many(&[
+        (META_SEARCH_TEXT_ARM, "off"),
+        (META_SEARCH_CONTENT_ARM, "off"),
+    ])
+    .expect("write");
+
+    assert_eq!(
+        commits.load(Ordering::SeqCst),
+        1,
+        "the pair committed as more than one transaction, so a failure between the two \
+         writes could still land one key and not the other"
+    );
+    assert_eq!(
+        db.meta_get(META_SEARCH_TEXT_ARM).expect("read").as_deref(),
+        Some("off")
+    );
+    assert_eq!(
+        db.meta_get(META_SEARCH_CONTENT_ARM)
+            .expect("read")
+            .as_deref(),
+        Some("off")
     );
 }

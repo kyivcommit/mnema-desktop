@@ -470,32 +470,53 @@ fn raw_text_that_skipped_preparation_is_still_findable() {
     assert_eq!(db.search_lexical("books", 10).unwrap(), vec![ids[0]]);
 }
 
-/// The guard in `search_lexical` is load-bearing: `MATCH ''` is a syntax error,
-/// so without it a user typing punctuation into a search box gets an engine
-/// error handed back — `fts5: syntax error near ""` — rather than no results.
+/// The guard in `search_lexical_with` is load-bearing: `MATCH ''` is a syntax
+/// error, so without it a user typing punctuation into a search box gets an
+/// engine error handed back — `fts5: syntax error near ""` — rather than no
+/// results. Run under every rule, not only `AllTerms`: `TermsInIndexOrAnyTerm`
+/// carries a second guard of its own, for the widened attempt's own
+/// `MATCH ''`, and a term-free query reaches both.
 #[test]
 fn a_query_with_no_terms_returns_no_rows_rather_than_an_error() {
     let (_d, db, _) = db_with(&[("витрати за 2024 рік", SourceKind::Document)]);
     for query in ["", "   ", "!!!", "…—", "'", "()"] {
-        assert_eq!(
-            db.search_lexical(query, 10).unwrap(),
-            Vec::<i64>::new(),
-            "query {query:?}"
-        );
+        for rule in mnema_index::QueryRule::ALL {
+            assert_eq!(
+                db.search_lexical_with(query, rule, 10).unwrap(),
+                Vec::<i64>::new(),
+                "query {query:?} rule {rule:?}"
+            );
+        }
     }
     // The fixture is reachable, so the emptiness above is the query's and not
     // the database's.
     assert_eq!(db.search_lexical("витрати", 10).unwrap().len(), 1);
 }
 
-/// Pinned, not endorsed. Every term is quoted, so `OR` reaches FTS5 as a third
-/// required word rather than as an operator — which makes the query strictly
-/// worse than the same words with no operator at all. Whether the product offers
-/// a query language is the search/RAG spec's decision and is open; this exists so
-/// the next person meets the boundary as a documented one.
+/// A person's `OR` is a word, under every rule. Pinned, not endorsed: the
+/// product offers no query language, and the ways FTS5 would read one —
+/// `OR`, `NEAR`, a prefix `*` — arrive quoted and therefore inert.
 #[test]
 fn fts5_operators_are_not_a_query_language_here() {
     let (_d, db, _) = db_with(&[("витрати і бюджет на 2024", SourceKind::Document)]);
+
+    // The word is data, not an operator: no rule may read it as one, and the
+    // discriminating case is a document that does not contain "or" at all.
+    for rule in mnema_index::QueryRule::ALL {
+        let with_operator = db
+            .search_lexical_with("витрати OR бюджет", rule, 10)
+            .unwrap();
+        let plain = db
+            .search_lexical_with("витрати бюджет or", rule, 10)
+            .unwrap();
+        assert_eq!(
+            with_operator, plain,
+            "{rule:?} read OR as syntax rather than as a word"
+        );
+    }
+
+    // And under the rule the unparameterised entry point uses, it is a third
+    // required word — strictly worse than the same two words alone.
     assert_eq!(db.search_lexical("витрати бюджет", 10).unwrap().len(), 1);
     assert_eq!(db.search_lexical("витрати OR бюджет", 10).unwrap().len(), 0);
 }
@@ -856,5 +877,204 @@ fn search_terms_matches_what_fts5_stores_for_every_mark() {
         starved.is_empty(),
         "a script stopped being covered and the sweep still agreed on everything it did reach:\n{}",
         starved.join("\n")
+    );
+}
+
+/// `search_lexical` is `AllTerms` and nothing else. The equality is the point:
+/// the product's entry point moves to `search_lexical_with` in this cycle, and
+/// a divergence between the two would make every existing assertion in this
+/// file measure a path the product no longer takes.
+#[test]
+fn the_unparameterised_search_is_the_all_terms_rule() {
+    let (_d, db, _) = db_with(&[
+        ("витрати і бюджет на 2024", SourceKind::Document),
+        ("бюджет затверджено", SourceKind::Document),
+    ]);
+    for query in ["витрати бюджет", "бюджет", "витрати немає", ""] {
+        let lexical = db.search_lexical(query, 10).unwrap();
+        if query == "бюджет" {
+            // Otherwise two empty vectors would satisfy the equality below
+            // just as well as two agreeing, non-trivial ones.
+            assert!(!lexical.is_empty(), "{query:?} must match indexed rows");
+        }
+        assert_eq!(
+            lexical,
+            db.search_lexical_with(query, mnema_index::QueryRule::AllTerms, 10)
+                .unwrap(),
+            "diverged on {query:?}"
+        );
+    }
+}
+
+/// The measured cause of `recall = 0.0%`: a question carries a word no document
+/// contains, and under `AllTerms` that one word empties the result. `AnyTerm`
+/// is the crudest answer to it — and the test asserts both directions, because
+/// a rule that returned everything would satisfy the first half alone.
+#[test]
+fn any_term_survives_a_word_no_document_has() {
+    let (_d, db, ids) = db_with(&[
+        ("бюджет затверджено на ремонт даху", SourceKind::Document),
+        ("протокол засідання комісії", SourceKind::Document),
+    ]);
+    let all = db
+        .search_lexical_with("де бюджет", mnema_index::QueryRule::AllTerms, 10)
+        .unwrap();
+    assert!(all.is_empty(), "AllTerms must still be empty here: {all:?}");
+
+    let any = db
+        .search_lexical_with("де бюджет", mnema_index::QueryRule::AnyTerm, 10)
+        .unwrap();
+    assert_eq!(
+        any,
+        vec![ids[0]],
+        "only the budget chunk holds any of these words, and only it should come back"
+    );
+
+    // The other direction: a word no chunk holds still returns nothing, so
+    // `AnyTerm` is not "return everything".
+    assert!(
+        db.search_lexical_with("деінде", mnema_index::QueryRule::AnyTerm, 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    // A rule that kept only the LAST term (a broken separator loop) would
+    // pass the assertion above too, because "бюджет" happens to be that
+    // last term. Terms living in different chunks close that gap: `OR`
+    // must reach both halves of this query, not just the one that is last.
+    let cross = db
+        .search_lexical_with("протокол даху", mnema_index::QueryRule::AnyTerm, 10)
+        .unwrap();
+    assert_eq!(
+        cross.len(),
+        2,
+        "AnyTerm must reach every chunk holding a term: {cross:?}"
+    );
+    assert!(cross.contains(&ids[0]));
+    assert!(cross.contains(&ids[1]));
+
+    // A literal `OR` is a third term to search for here, not FTS5's own
+    // operator — mirrors `fts5_operators_are_not_a_query_language_here`,
+    // but under `AnyTerm`, which already emits real `OR` as its separator.
+    assert_eq!(
+        db.search_lexical_with("бюджет OR немає", mnema_index::QueryRule::AnyTerm, 10)
+            .unwrap(),
+        vec![ids[0]],
+        "OR is data even under AnyTerm"
+    );
+}
+
+/// The predicate that Task 4 will build `TermsInIndex` on, exercised alone
+/// here so a later failure can be told apart from a failure of the rule
+/// that uses it.
+#[test]
+fn a_terms_presence_is_asked_of_the_whole_index() {
+    let (_d, db, _) = db_with(&[("бюджет затверджено", SourceKind::Document)]);
+    let prepared = mnema_index::prepare_for_search("де бюджет", mnema_core::SourceKind::Document);
+
+    assert_eq!(
+        db.terms_present(&prepared).unwrap(),
+        vec!["бюджет".to_string()]
+    );
+
+    // Both directions: a query of only-absent words yields nothing, and a query
+    // of only-present words yields all of them.
+    let absent = mnema_index::prepare_for_search("деінде колись", mnema_core::SourceKind::Document);
+    assert!(db.terms_present(&absent).unwrap().is_empty());
+
+    let present =
+        mnema_index::prepare_for_search("бюджет затверджено", mnema_core::SourceKind::Document);
+    assert_eq!(
+        db.terms_present(&present).unwrap(),
+        vec!["бюджет".to_string(), "затверджено".to_string()]
+    );
+}
+
+/// Drops the words the index has never seen and demands the rest — all of them.
+/// The second half is what separates this from `AnyTerm`, and a test that only
+/// showed the question word being dropped would pass for either rule.
+#[test]
+fn terms_in_index_drops_the_unseen_word_and_still_demands_the_rest() {
+    let (_d, db, _) = db_with(&[
+        ("бюджет затверджено на ремонт даху", SourceKind::Document),
+        ("бюджет комісії", SourceKind::Document),
+    ]);
+    let rule = mnema_index::QueryRule::TermsInIndex;
+
+    // The question word is gone, so the remaining two are satisfiable.
+    assert_eq!(
+        db.search_lexical_with("де бюджет ремонт", rule, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Still a conjunction: both surviving words exist in the index, but not in
+    // one chunk. `AnyTerm` would return two here.
+    assert!(
+        db.search_lexical_with("комісії ремонт", rule, 10)
+            .unwrap()
+            .is_empty(),
+        "surviving terms are still all required"
+    );
+
+    // Every word unseen leaves nothing to demand, and that is no rows rather
+    // than every row.
+    assert!(
+        db.search_lexical_with("деінде колись", rule, 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// The case `TermsInIndex` cannot reach: every surviving word exists somewhere,
+/// but no chunk holds them together. The fallback must fire there and must NOT
+/// fire where the stricter rule already answered — otherwise it is `AnyTerm`
+/// wearing another name.
+#[test]
+fn the_fallback_fires_only_where_the_stricter_rule_came_back_empty() {
+    let (_d, db, _) = db_with(&[
+        ("бюджет затверджено на ремонт даху", SourceKind::Document),
+        ("бюджет комісії", SourceKind::Document),
+    ]);
+    let strict = mnema_index::QueryRule::TermsInIndex;
+    let with_fallback = mnema_index::QueryRule::TermsInIndexOrAnyTerm;
+
+    // Where the strict rule answers, the fallback changes nothing.
+    assert_eq!(
+        db.search_lexical_with("де бюджет ремонт", with_fallback, 10)
+            .unwrap(),
+        db.search_lexical_with("де бюджет ремонт", strict, 10)
+            .unwrap()
+    );
+
+    // Where it does not, the fallback answers.
+    assert!(
+        db.search_lexical_with("комісії ремонт", strict, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        db.search_lexical_with("комісії ремонт", with_fallback, 10)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Nothing to demand and nothing to widen to: the fallback's own second
+    // `MATCH ''` guard, exercised where the first guard alone would not
+    // reach it.
+    assert!(
+        db.search_lexical_with("()", with_fallback, 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Both words absent from the index, so the widened attempt still runs
+    // a real (non-empty) `MATCH`, and still finds nothing to return.
+    assert!(
+        db.search_lexical_with("деінде колись", with_fallback, 10)
+            .unwrap()
+            .is_empty()
     );
 }

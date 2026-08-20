@@ -8,6 +8,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mnema_core::Coordinate;
+use mnema_index::QueryRule;
+use mnema_search::{Arms, ContentArm, FusionRule, Missing, Provider, TextArm};
 use serde::Serialize;
 use tauri::State;
 use tauri::ipc::Channel;
@@ -16,12 +18,20 @@ use crate::error::Error;
 use crate::job::{self, JobEvent};
 use crate::state::AppState;
 
-/// How many lexical hits a search returns.
+/// How many hits `search` returns, after both arms are fused into one list.
 ///
-/// A placeholder with a number on it. What a search should return, and how the
-/// lexical and dense arms are fused into it, is the search/RAG spec's decision;
-/// this is here so the walking skeleton has an end.
+/// A placeholder with a number on it — what a search should return is still
+/// unsettled. How the two arms are fused is no longer this constant's story;
+/// see `SEARCH_QUERY_RULE` and `SEARCH_FUSION_RULE` below.
 const SEARCH_LIMIT: i64 = 20;
+
+/// The query rule `search` asks the text arm with — the live sweep's winner,
+/// tied with `AllTerms` once fused but ahead of it text-only alone. See D108.
+const SEARCH_QUERY_RULE: QueryRule = QueryRule::TermsInIndex;
+
+/// The fusion rule `search` combines both arms with — tied with every other
+/// rule under the winning query rule, kept as the principled default. D109.
+const SEARCH_FUSION_RULE: FusionRule = FusionRule::Rrf;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,40 +100,271 @@ pub struct Hit {
     pub coordinate: Coordinate,
 }
 
+/// The text arm's outcome, without the chunk ids `hits` already carries.
+///
+/// Not [`mnema_search::TextArm`] reused: this needs `Serialize` and a
+/// camelCase `kind`, and a count keeps this and `hits` from being two lists
+/// that could disagree about what the arm found.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum TextArmReport {
+    Off,
+    Answered { matched: usize },
+}
+
+impl From<TextArm> for TextArmReport {
+    fn from(arm: TextArm) -> Self {
+        match arm {
+            TextArm::Off => Self::Off,
+            TextArm::Answered { chunks } => Self::Answered {
+                matched: chunks.len(),
+            },
+        }
+    }
+}
+
+/// The content arm's outcome, in the same shape as [`TextArmReport`].
+///
+/// [`Missing`]'s two values become their own variants rather than staying
+/// nested under one `NotConfigured`: each is fixed in a different place, and
+/// `render.js` names a sentence per `kind`, not per nested field.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ContentArmReport {
+    Off,
+    NoKey,
+    NoModel,
+    Failed {
+        reason: String,
+    },
+    Answered {
+        matched: usize,
+        embedded: i64,
+        total: i64,
+        reachable: i64,
+    },
+}
+
+impl From<ContentArm> for ContentArmReport {
+    fn from(arm: ContentArm) -> Self {
+        match arm {
+            ContentArm::Off => Self::Off,
+            ContentArm::NotConfigured(Missing::NoKey) => Self::NoKey,
+            ContentArm::NotConfigured(Missing::NoModel) => Self::NoModel,
+            ContentArm::Failed { reason } => Self::Failed { reason },
+            ContentArm::Answered {
+                chunks,
+                embedded,
+                total,
+                reachable,
+            } => Self::Answered {
+                matched: chunks.len(),
+                embedded,
+                total,
+                reachable,
+            },
+        }
+    }
+}
+
+/// What a search answers with: the citations to draw, and what each arm did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchAnswer {
+    pub hits: Vec<Hit>,
+    pub text: TextArmReport,
+    pub content: ContentArmReport,
+}
+
+/// `meta`'s own rule (D106): absent, or anything but the literal `"off"`,
+/// leaves the arm on.
+///
+/// `pub(crate)`: `models::read_settings` reads the same two meta rows to
+/// answer the window's own question ("what did I save?"), and reusing this
+/// is what keeps that answer and `search`'s from ever disagreeing.
+pub(crate) fn arm_is_on(value: Option<String>) -> bool {
+    value.as_deref() != Some("off")
+}
+
+/// Resolves the content arm's input before any read snapshot opens: the
+/// model comes from one short `with_index` lock, then [`embed_query`] runs
+/// with no lock held at all — the network call [`search`]'s own doc says
+/// must never share a scope with `read_snapshot`, and why I5 (a network
+/// call inside the index mutex) closes as a side effect of this split.
+///
+/// `Ok((None, Some(_)))` is a terminal report `search` must not try to
+/// improve on — `content_failure` already covers a broken credential
+/// store; this also covers no model and a failed embed. `Ok((Some(_),
+/// None))` is ready for `search` to answer with.
+///
+/// **Two kinds of failure, told apart.** `active_space`/`space_model`
+/// failing inside the closure become `ContentArmReport::Failed` instead
+/// of escaping `with_index`'s own `?` — e.g. `NoSuchSpace` from a
+/// dangling `meta.active_space` (`models.rs:243-258`). That outer `?`
+/// covers `IndexNotOpen` (unreachable once `open_index` has succeeded —
+/// `state.rs:108` is the only write to `db`) and `StatePoisoned`
+/// (reachable: a poison between `search`'s own arm-toggle read and the
+/// credential read at `bridge.rs:284` still lands here — measured inert
+/// either way, since every command answers a poisoned state alike).
+/// Pinned by `an_index_failure_inside_the_content_arm_stays_local_to_it`.
+fn resolve_content_query(
+    state: &State<'_, AppState>,
+    provider: &Option<Provider>,
+    query: &str,
+    content_on: bool,
+    content_failure: Option<String>,
+) -> Result<(Option<mnema_search::ContentQuery>, Option<ContentArmReport>), Error> {
+    if let Some(reason) = content_failure {
+        return Ok((None, Some(ContentArmReport::Failed { reason })));
+    }
+    if !content_on {
+        return Ok((None, None));
+    }
+    let Some(provider) = provider else {
+        return Ok((None, Some(ContentArmReport::NoKey)));
+    };
+    let resolved: Result<Option<(i64, String)>, mnema_index::Error> = state.with_index(|db| {
+        Ok(match db.active_space() {
+            Ok(Some(space_id)) => db
+                .space_model(space_id)
+                .map(|(model, _width)| Some((space_id, model))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        })
+    })?;
+    let (space_id, model) = match resolved {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return Ok((None, Some(ContentArmReport::NoModel))),
+        Err(e) => {
+            return Ok((
+                None,
+                Some(ContentArmReport::Failed {
+                    reason: e.to_string(),
+                }),
+            ));
+        }
+    };
+    match mnema_search::embed_query(provider, &model, query) {
+        Ok(vector) => Ok((Some(mnema_search::ContentQuery { space_id, vector }), None)),
+        Err(reason) => Ok((None, Some(ContentArmReport::Failed { reason }))),
+    }
+}
+
 /// Off the main thread for the reason given on [`open_index`].
 ///
-/// What a search should return, and how a dense arm is fused into it, is the
-/// search/RAG spec's decision. This is the lexical arm alone, which under D29
-/// is the only arm a private index has at all.
+/// Both arms, fused by `mnema_search::search`, in place of the lexical arm
+/// alone D29 left this command with. The arms come from `meta`, never a
+/// parameter — the window already saved a choice through
+/// [`set_search_arms`].
+///
+/// The key is asked for only when `arms.content` is on — pinned by
+/// `a_text_only_search_does_not_touch_a_credential_store_it_does_not_need`
+/// — and only [`Error::NoKey`] then turns into no provider.
+///
+/// Everything from the lexical arm through fusion through citation
+/// resolution runs inside one [`mnema_index::Db::read_snapshot`], so a
+/// rebuild committing on the job's own connection mid-search cannot hand a
+/// reused chunk id's citation to the wrong text. [`resolve_content_query`]
+/// runs first and resolves what the content arm needs — including any
+/// reason it has nothing to run on — before that snapshot ever opens, so
+/// the snapshot holds no network call and [`ContentArmReport::NoKey`],
+/// [`ContentArmReport::NoModel`] and a broken credential store all reach
+/// the answer the same way `content_failure` always did: as an override
+/// applied after the snapshot closes, in place of whatever
+/// `mnema_search::search` answered on its own. Pinned by
+/// `a_broken_credential_store_does_not_take_the_text_arm_down_with_it`.
 #[tauri::command(async)]
-pub fn search(state: State<'_, AppState>, query: String) -> Result<Vec<Hit>, Error> {
+pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer, Error> {
+    let arms = state.with_index(|db| {
+        Ok(Arms {
+            text: arm_is_on(db.meta_get(mnema_index::META_SEARCH_TEXT_ARM)?),
+            content: arm_is_on(db.meta_get(mnema_index::META_SEARCH_CONTENT_ARM)?),
+        })
+    })?;
+
+    let (provider, content_failure) = if arms.content {
+        match crate::models::key(&state) {
+            Ok(key) => (
+                Some(Provider {
+                    base: state.provider_base().to_string(),
+                    key,
+                }),
+                None,
+            ),
+            Err(Error::NoKey) => (None, None),
+            Err(e) => (None, Some(e.to_string())),
+        }
+    } else {
+        (None, None)
+    };
+
+    let (content_query, content_override) =
+        resolve_content_query(&state, &provider, &query, arms.content, content_failure)?;
+
     state.with_index(|db| {
-        let mut hits = Vec::new();
-        for chunk_id in db.search_lexical(&query, SEARCH_LIMIT)? {
-            // A chunk that vanished between the MATCH and this read is not an
+        db.read_snapshot(|db| {
+            let found = mnema_search::search(
+                db,
+                content_query,
+                &query,
+                arms.text,
+                SEARCH_QUERY_RULE,
+                SEARCH_FUSION_RULE,
+                SEARCH_LIMIT,
+            )?;
+
+            // A chunk that vanished between the fuse and this read is not an
             // error: a walk running alongside a search is the ordinary case
             // that motivated the job holding its own connection at all (see
             // `AppState::open_job_index`). Only `citation`'s `None` is read
             // this way — the `?` right before it still stops the whole
-            // search on any other failure — and the price is that the window
-            // is shown fewer hits than `search_lexical` matched, with
-            // nothing saying so: a count of 20 that quietly became 18 reads
-            // as a smaller, equally true search rather than as a race it
-            // lost. Making that difference visible — a partial-result
-            // notice, a re-query, something else — is the search/RAG
-            // interface's decision to make, not a UI default for this
-            // command to invent on its own.
-            if let Some(c) = db.citation(chunk_id)? {
-                hits.push(Hit {
-                    chunk_id,
-                    text: c.text,
-                    relative_path: c.relative_path,
-                    section_title: c.section_title,
-                    coordinate: c.coordinate,
-                });
+            // search on any other failure.
+            let mut hits = Vec::new();
+            for chunk_id in found.chunks {
+                if let Some(c) = db.citation(chunk_id)? {
+                    hits.push(Hit {
+                        chunk_id,
+                        text: c.text,
+                        relative_path: c.relative_path,
+                        section_title: c.section_title,
+                        coordinate: c.coordinate,
+                    });
+                }
             }
-        }
-        Ok(hits)
+
+            let content = content_override.unwrap_or_else(|| found.content.into());
+
+            Ok(SearchAnswer {
+                hits,
+                text: found.text.into(),
+                content,
+            })
+        })
+    })
+}
+
+/// The one way the window changes a toggle. `search` reads the same two rows,
+/// so the arm a person ticked and the arm that ran cannot disagree.
+///
+/// The two rows are written by [`mnema_index::Db::meta_set_many`], in one
+/// transaction, so a failure between them cannot leave one arm's saved
+/// choice disagreeing with the other's.
+#[tauri::command(async)]
+pub fn set_search_arms(state: State<'_, AppState>, text: bool, content: bool) -> Result<(), Error> {
+    if !text && !content {
+        return Err(Error::NoSearchArm);
+    }
+    state.with_index(|db| {
+        db.meta_set_many(&[
+            (
+                mnema_index::META_SEARCH_TEXT_ARM,
+                if text { "on" } else { "off" },
+            ),
+            (
+                mnema_index::META_SEARCH_CONTENT_ARM,
+                if content { "on" } else { "off" },
+            ),
+        ])
     })
 }
 
@@ -251,4 +492,69 @@ pub fn job_status(state: State<'_, AppState>) -> JobStatus {
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>) {
     state.cancel_job();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every discriminant the window sees has its camel-case spelling pinned
+    /// — the same guard `models.rs` carries, for the same reason:
+    /// `render.js` matches on these strings and a rename here becomes a
+    /// missing table key there.
+    #[test]
+    fn every_search_discriminant_the_window_sees_has_its_camel_case_spelling_pinned() {
+        let spellings: Vec<String> = [
+            ContentArmReport::Off,
+            ContentArmReport::NoKey,
+            ContentArmReport::NoModel,
+            ContentArmReport::Failed {
+                reason: String::new(),
+            },
+            ContentArmReport::Answered {
+                matched: 0,
+                embedded: 0,
+                total: 0,
+                reachable: 0,
+            },
+        ]
+        .iter()
+        .map(|v| {
+            serde_json::to_value(v).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+        assert_eq!(spellings, ["off", "noKey", "noModel", "failed", "answered"]);
+    }
+
+    /// `matched`, `embedded`, `total` and `reachable` carry the arm's own
+    /// numbers, not a placeholder: replacing `chunks.len()` with `0`, or
+    /// dropping the new field, in the `From` impl above must fail this,
+    /// without needing a live provider to reach the content arm's
+    /// `Answered` case at all.
+    #[test]
+    fn an_answered_arm_report_carries_the_real_numbers_not_a_placeholder() {
+        assert!(matches!(
+            TextArmReport::from(TextArm::Answered {
+                chunks: vec![10, 20, 30],
+            }),
+            TextArmReport::Answered { matched: 3 }
+        ));
+        assert!(matches!(
+            ContentArmReport::from(ContentArm::Answered {
+                chunks: vec![10, 20],
+                embedded: 7,
+                total: 12,
+                reachable: 9,
+            }),
+            ContentArmReport::Answered {
+                matched: 2,
+                embedded: 7,
+                total: 12,
+                reachable: 9,
+            }
+        ));
+    }
 }

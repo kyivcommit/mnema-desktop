@@ -433,7 +433,9 @@ impl Db {
     }
 
     /// Removes a document and everything below it — pages, blocks, chunks,
-    /// search rows — **and every `path` row that names it**.
+    /// search rows — **and every `path` row that names it**. Sweeps every
+    /// space's vectors first — pinned by
+    /// `delete_document_sweeps_its_own_vectors`.
     ///
     /// That last clause is why this is not the method to reach for when
     /// re-indexing. `path.document_id` is `REFERENCES document(id) ON DELETE
@@ -443,7 +445,12 @@ impl Db {
     /// the walk had already gone by. Use [`Db::clear_document_content`] to
     /// rebuild a document; this is for a document that should genuinely stop
     /// existing, which today means one no path names any more.
+    ///
+    /// **No transaction of its own** — every product caller already holds
+    /// one, and SQLite forbids nesting. Atomic inside it: pinned by
+    /// `delete_document_is_atomic_inside_a_callers_transaction`.
     pub fn delete_document(&self, id: &str) -> Result<(), Error> {
+        crate::space::delete_vectors_for_document_in(self.conn(), id)?;
         self.conn()
             .execute("DELETE FROM document WHERE id = ?1", params![id])?;
         Ok(())

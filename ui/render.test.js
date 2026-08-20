@@ -21,11 +21,16 @@ import {
   endingSentence,
   hitLocation,
   searchResultItems,
+  toggleState,
+  TEXT_ARM_TEXT,
+  textArmSentence,
   ROLES,
   ROLE_NAME,
   DISCLOSURE_TEXT,
   LEAVES_NOTHING,
   LEAVES_EVERYTHING,
+  LEAVES_INDEXING_ONLY,
+  LEAVES_UNKNOWN_INDEX,
   KEY_STATE_TEXT,
   asSentence,
   keyStoreNote,
@@ -63,6 +68,8 @@ import {
   keyAcceptedSentence,
   unreadableSentence,
   catalogueSentence,
+  CONTENT_ARM_TEXT,
+  contentArmSentence,
   roleRecordedSentence,
   recordedNoteSentence,
   keyRemovedSentence,
@@ -298,6 +305,51 @@ test("search hits render their location and text", () => {
   ]);
 });
 
+test("an unconfigured content arm shows off and cannot be pressed", () => {
+  const s = toggleState({ savedText: true, savedContent: true, keyPresent: false, modelChosen: false });
+  assert.equal(s.content.checked, false);
+  assert.equal(s.content.disabled, true);
+  assert.match(s.content.note, /Models/);
+});
+
+test("the saved choice is not overwritten by the arm being unavailable", () => {
+  const unavailable = toggleState({ savedText: true, savedContent: true, keyPresent: false, modelChosen: false });
+  assert.equal(unavailable.content.checked, false);
+  const available = toggleState({ savedText: true, savedContent: true, keyPresent: true, modelChosen: true });
+  assert.equal(available.content.checked, true, "the choice must come back");
+});
+
+test("a saved off stays off once the arm becomes available", () => {
+  const s = toggleState({ savedText: true, savedContent: false, keyPresent: true, modelChosen: true });
+  assert.equal(s.content.checked, false);
+  assert.equal(s.content.disabled, false);
+});
+
+test("the last effective arm cannot be switched off", () => {
+  // Content unavailable, so text is the only arm that runs.
+  const s = toggleState({ savedText: true, savedContent: true, keyPresent: false, modelChosen: false });
+  assert.equal(s.text.disabled, true);
+  assert.match(s.text.note, /only/i);
+});
+
+test("with both arms available neither is forced on", () => {
+  const s = toggleState({ savedText: true, savedContent: true, keyPresent: true, modelChosen: true });
+  assert.equal(s.text.disabled, false);
+  assert.equal(s.content.disabled, false);
+});
+
+// Reachable: text unticked while the content arm still ran, then the key
+// stops working. Neither arm runs and the text checkbox — unticked, so not
+// caught by "the last effective arm cannot be switched off" — must still
+// say why nothing is running and how to fix it, not stay blank.
+test("when neither arm runs the text checkbox says so and how to fix it", () => {
+  const s = toggleState({ savedText: false, savedContent: true, keyPresent: false, modelChosen: false });
+  assert.equal(s.text.checked, false);
+  assert.equal(s.text.disabled, false, "the box must stay clickable so the person can fix it");
+  assert.notEqual(s.text.note, "");
+  assert.match(s.text.note, /tick/i);
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Model configuration.
 //
@@ -406,7 +458,7 @@ test("the states main.js writes are exactly the states these tables render", () 
 });
 
 test("the disclosure names the search query, not only indexing", () => {
-  const withKey = disclosureSentence({ kind: "present" });
+  const withKey = disclosureSentence({ kind: "present" }, { contentArmRuns: true });
   assert.match(withKey, /every question/,
     "§3.2 of the requirements says 'once, at indexing', and that is false for cloud embeddings");
   // `/i`, because the phrase opens the sentence. The brief's own `/нічого/`
@@ -415,8 +467,52 @@ test("the disclosure names the search query, not only indexing", () => {
   assert.match(withKey, /every piece/i);
 });
 
+test("with the content arm off, a stored key does not make questions leave", () => {
+  const s = disclosureSentence({ kind: "present" }, { contentArmRuns: false });
+  assert.doesNotMatch(s, /every question you ask/);
+  assert.match(s, /indexing/);
+});
+
+test("with the content arm running, the question half is stated", () => {
+  const s = disclosureSentence({ kind: "present" }, { contentArmRuns: true });
+  assert.match(s, /every question you ask/);
+});
+
+test("without a key nothing leaves, whatever the toggle says", () => {
+  for (const contentArmRuns of [true, false]) {
+    assert.match(
+      disclosureSentence({ kind: "absent" }, { contentArmRuns }),
+      /Nothing leaves this machine/,
+    );
+  }
+});
+
+// Codex round 2, Finding 3: `noneRuns` (`toggleState`, render.js:229) is
+// reachable with the key absent — content unavailable and text unticked by
+// choice — and in that state the checkbox note already says "No search
+// runs," while this sentence went on claiming "Search works on words,"
+// contradicting it on screen at the same time.
+test("without a key and with the text arm off, the disclosure does not claim search works", () => {
+  const s = disclosureSentence({ kind: "absent" }, { contentArmRuns: false, textRuns: false });
+  assert.doesNotMatch(s, /search works on words/i);
+  assert.match(s, /nothing leaves this machine/i);
+});
+
+test("an unreadable key store is still unknown, whatever the toggle says", () => {
+  for (const contentArmRuns of [true, false]) {
+    assert.match(
+      disclosureSentence({ kind: "unreadable" }, { contentArmRuns }),
+      /unknown/,
+    );
+  }
+});
+
 test("with no key the disclosure promises nothing leaves", () => {
   assert.match(disclosureSentence({ kind: "absent" }), /nothing/i);
+});
+
+test("a present key with no toggle reading gets the pessimistic sentence", () => {
+  assert.match(disclosureSentence({ kind: "present" }), /every question you ask/);
 });
 
 // `KeyState` has three values, and a store that would not answer is not a store
@@ -439,6 +535,11 @@ test("a key state this build does not know promises neither everything nor nothi
   const unknown = disclosureSentence({ kind: "somethingFutureAndUnknown" });
   assert.notEqual(unknown, LEAVES_NOTHING);
   assert.notEqual(unknown, LEAVES_EVERYTHING);
+});
+
+test("the unreadable-index disclosure states unknown rather than a local-only promise", () => {
+  assert.match(LEAVES_UNKNOWN_INDEX, /unknown/);
+  assert.notEqual(LEAVES_UNKNOWN_INDEX, LEAVES_INDEXING_ONLY);
 });
 
 // The sentence `Error::NoKey`'s own doc calls forbidden: telling someone whose
@@ -2377,6 +2478,38 @@ test("every element main.js reaches for exists in index.html", () => {
   }
 });
 
+// Round 3, §3.3: the markup itself has to start `#search-submit` `disabled`
+// — `main.js`'s own barrier (`syncSearchGate`) only closes it from the
+// moment the script actually runs, and there is a real window before that
+// (a deferred or module script, a slow load, a restored session) where a
+// button rendered without this attribute is pressable with nothing on
+// screen yet to say a search should wait. Found by mutation, not by
+// inspection: reverting the whole fix (`main.js` and `index.html` together)
+// against the round-3 test suite kills tests for every other mechanism this
+// round added, but reverting the markup attribute *alone* — with the rest
+// of the fix left standing — killed nothing, because `main.js`'s own
+// `syncSearchGate()` call papers over a missing attribute in every mocked
+// DOM this suite drives. This test reads the raw markup, which nothing else
+// here does.
+//
+// Scoped to `#search-submit`'s own opening tag rather than searching the
+// whole file for the word "disabled": `#walk` and `#cancel` both carry that
+// attribute too, for reasons of their own, and a search for the bare word
+// would be satisfied by either of them even with this button's own
+// attribute removed.
+test("#search-submit starts disabled in the markup itself, not only from main.js's own barrier", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const html = readFileSync(join(here, "index.html"), "utf8");
+  const tag = html.match(/<button\s+id="search-submit"[^>]*>/);
+  assert.ok(tag, "no <button id=\"search-submit\"...> found in index.html at all");
+  assert.match(
+    tag[0],
+    /\bdisabled\b/,
+    "#search-submit's own opening tag does not carry `disabled` — the window between markup " +
+      "parse and the first settings read landing is open again",
+  );
+});
+
 test("each role is named in the sentence that says its model was recorded", () => {
   const said = ROLES.map((role) => roleRecordedSentence(role, "vendor/m"));
   assert.equal(new Set(said).size, ROLES.length, `two roles read alike: ${said}`);
@@ -2734,4 +2867,102 @@ test("the note about a future request is drawn on the platform that will make it
     );
   }
   assert.equal(keyStoreNote("plan9", present), "", "a platform this build does not know said something");
+});
+
+test("every text-arm state has its own sentence, and no default swallows one", () => {
+  assert.deepEqual(Object.keys(TEXT_ARM_TEXT).sort(), ["answered", "off"]);
+});
+
+test("the text arm off state names the arm, not the content arm", () => {
+  assert.equal(textArmSentence({ kind: "off" }), "Search by text is off.");
+});
+
+test("a text-arm answer names how many matched", () => {
+  const sentence = textArmSentence({ kind: "answered", matched: 4 });
+  assert.match(sentence, /4/);
+  assert.doesNotMatch(sentence, /content/);
+});
+
+test("a text-arm kind this build does not know is not read as one of the states above", () => {
+  const unknown = textArmSentence({ kind: "somethingFutureAndUnknown" });
+  assert.notEqual(unknown, TEXT_ARM_TEXT.off());
+  assert.notEqual(unknown, TEXT_ARM_TEXT.answered({ matched: 4 }));
+  assert.match(unknown, /unknown/);
+});
+
+test("every content-arm state has its own sentence, and no default swallows one", () => {
+  assert.deepEqual(
+    Object.keys(CONTENT_ARM_TEXT).sort(),
+    ["answered", "failed", "noKey", "noModel", "off"],
+  );
+});
+
+test("a partly embedded space says how much of the index it searched", () => {
+  const sentence = contentArmSentence({
+    kind: "answered", matched: 3, embedded: 30, total: 50,
+  });
+  assert.match(sentence, /30 of 50/);
+  assert.match(sentence, /\b3\b/, "the partial-coverage sentence dropped how many it found");
+});
+
+test("a full space does not talk about coverage at all", () => {
+  const sentence = contentArmSentence({
+    kind: "answered", matched: 3, embedded: 50, total: 50, reachable: 50,
+  });
+  assert.doesNotMatch(sentence, /50 of 50/);
+  assert.match(sentence, /returned 3\b/);
+});
+
+// The adversarial pass measured this one: round 3 replaced an orphan filter
+// with a status filter (`ELIGIBLE_CHUNK`, `space.rs`), which is strictly
+// wider, while `embedded`/`total` went on counting the whole `chunk` table.
+// A rebuild in flight leaves documents `pending` (D61) — so the arm reached 1
+// of 2 embedded pieces and the window said `Search by content returned 1.`,
+// the one branch that claims nothing about coverage at all.
+test("pieces held back from the search are named even when the space is full", () => {
+  const sentence = contentArmSentence({
+    kind: "answered", matched: 1, embedded: 2, total: 2, reachable: 1,
+  });
+  assert.match(sentence, /\b1 of the 2\b/, "the held-back pieces were not counted");
+  assert.match(sentence, /not searchable/, "no reason was given for holding them back");
+  assert.match(sentence, /returned 1\b/, "the held-back clause dropped how many it found");
+});
+
+// Both gaps at once is the ordinary state of a first index, not a corner:
+// documents arrive `pending` while earlier ones are still being embedded. The
+// two clauses are composed rather than enumerated, the shape
+// `embeddingProgressText` already uses for its own conditional clause.
+test("a space that is both partly embedded and partly held back says both", () => {
+  const sentence = contentArmSentence({
+    kind: "answered", matched: 4, embedded: 30, total: 50, reachable: 40,
+  });
+  assert.match(sentence, /30 of 50/, "the not-yet-embedded gap disappeared");
+  assert.match(sentence, /\b10 of the 50\b/, "the held-back gap disappeared");
+  assert.match(sentence, /returned 4\b/);
+});
+
+// The pair `embedded`/`total` is not a fraction (`IndexRead::embedded_chunks`'
+// own doc), and a vector can outlive the chunk it embeds — `Db::chunk_count`'s
+// doc names `delete_document` as a real path there, not a hypothetical one.
+// `embeddingProgressText` already has this third branch; this is the same
+// shape for the content arm's own sentence.
+test("content coverage above the total is explained rather than left looking broken", () => {
+  const sentence = contentArmSentence({
+    kind: "answered", matched: 5, embedded: 900, total: 812,
+  });
+  assert.match(sentence, /not an error/);
+  assert.match(sentence, /\b5\b/, "the over-coverage sentence dropped how many it found");
+});
+
+test("what is missing is named together with where to fix it", () => {
+  assert.match(contentArmSentence({ kind: "noKey" }), /Models/);
+  assert.match(contentArmSentence({ kind: "noModel" }), /Models/);
+});
+
+test("a content-arm kind this build does not know is not read as one of the states above", () => {
+  const unknown = contentArmSentence({ kind: "somethingFutureAndUnknown" });
+  assert.notEqual(unknown, CONTENT_ARM_TEXT.off());
+  assert.notEqual(unknown, CONTENT_ARM_TEXT.noKey());
+  assert.notEqual(unknown, CONTENT_ARM_TEXT.noModel());
+  assert.match(unknown, /unknown/);
 });

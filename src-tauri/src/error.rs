@@ -44,6 +44,12 @@ pub enum Error {
     /// single writer, so a second concurrent job would contend for both.
     #[error("a job is already running")]
     JobAlreadyRunning,
+    /// D106: two independent toggles, and at least one is always on.
+    /// `set_search_arms` refuses here so a meta row nothing rereads to check
+    /// cannot make that sentence false. Proven by
+    /// `set_search_arms_refuses_to_turn_off_both_arms`.
+    #[error("at least one search arm must stay on")]
+    NoSearchArm,
     /// The provider answered, and the answer was not the one asked for — a key
     /// it refused, a model it does not have, a body this build could not read.
     ///
