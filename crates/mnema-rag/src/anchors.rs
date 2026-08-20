@@ -25,13 +25,14 @@ static SHORTHAND_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<c>?\s*(\d+
 /// (`app/rag/anchors.py:63`).
 static MULTISPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" {2,}").unwrap());
 
-/// The `Nd` decimal-digit "zero" of every Unicode block, generated from Unicode
-/// 15.1 (`unicodedata`). Each `Nd` run is a contiguous ten codepoints, so a
-/// digit's value is `c - zero`. ASCII `0-9` is handled by `to_digit` and omitted.
+/// The `Nd` decimal-digit "zero" of every Unicode block. Each `Nd` run is a
+/// contiguous ten codepoints, so a digit's value is `c - zero`. ASCII `0-9` is
+/// handled by `to_digit` and omitted. Sourced to match the `\d` that `ANCHOR_RE`
+/// uses — the shipped `regex-syntax` (Unicode 16.0), not a separate data set.
 ///
-/// AGES: an `Nd` block added in a later Unicode version is absent here, and a
-/// citation ordinal a model writes in it would be dropped — the frozen-table
-/// trap D32 records for SQLite's `unicode61`. Revisit on a Unicode bump.
+/// A later `regex` bump that adds `Nd` blocks would make `\d` match digits this
+/// list misses; that does NOT silently drop a citation — the regression test
+/// below fails loudly until the new block zeros are added here.
 const ND_ZEROS: &[char] = &[
     '\u{0660}',  // Arabic-Indic
     '\u{06F0}',  // Extended Arabic-Indic
@@ -100,6 +101,16 @@ const ND_ZEROS: &[char] = &[
     '\u{1E4F0}', // Nag Mundari
     '\u{1E950}', // Adlam
     '\u{1FBF0}', // Segmented
+    // Unicode 16.0 blocks (beyond the 15.1 set), discovered from the shipped
+    // regex; kept complete by the regression test below.
+    '\u{10D40}',
+    '\u{116D0}',
+    '\u{116DA}',
+    '\u{11BF0}',
+    '\u{16130}',
+    '\u{16D70}',
+    '\u{1CCF0}',
+    '\u{1E5F1}',
 ];
 
 /// One decimal digit's value 0-9, matching the server's Python `int()`: the ASCII
@@ -258,5 +269,42 @@ mod tests {
             extract_anchor_ids("<c>\u{0663}</c><c>\u{0661}</c>"),
             vec![3, 1]
         ); // ٣ ١
+    }
+
+    #[test]
+    fn every_digit_the_anchor_regex_matches_parses_to_its_value() {
+        // `ANCHOR_RE` uses `\d` (Unicode `Nd`); `ND_ZEROS` must cover the same
+        // Unicode version `regex` ships. A maximal run of matched digits is a
+        // whole number of `Nd` blocks (ten contiguous, value 0-9), so the i-th
+        // codepoint of the run has value `i % 10`.
+        let digit = Regex::new(r"^\d$").unwrap();
+        let is_digit = |cp: u32| char::from_u32(cp).is_some_and(|c| digit.is_match(&c.to_string()));
+        let mut cp = 0u32;
+        while cp <= 0x10FFFF {
+            if !is_digit(cp) {
+                cp += 1;
+                continue;
+            }
+            let start = cp;
+            while cp <= 0x10FFFF && is_digit(cp) {
+                cp += 1;
+            }
+            let len = cp - start;
+            assert_eq!(
+                len % 10,
+                0,
+                "digit run at U+{start:04X} is not whole blocks"
+            );
+            for off in 0..len {
+                let c = char::from_u32(start + off).unwrap();
+                assert_eq!(
+                    decimal_digit_value(c),
+                    Some(off % 10),
+                    "U+{:04X} must parse to {}",
+                    start + off,
+                    off % 10
+                );
+            }
+        }
     }
 }
