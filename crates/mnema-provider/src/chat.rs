@@ -5,7 +5,9 @@
 //! `/chat/completions`, ported from the server's `app/llm/litellm_provider.py`
 //! — model and messages only, no sampling parameters (§7.4, spec §PR 2).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::{Error, http};
 
 /// One chat message, in the shape OpenRouter's `/chat/completions` accepts.
 ///
@@ -29,6 +31,53 @@ pub struct Message {
 pub enum MessageRole {
     System,
     User,
+}
+
+/// The provider's answer, read only as far as the one field this call needs.
+/// Separate private structs, `Deserialize` only — the mirror of `Message`
+/// being `Serialize` only.
+#[derive(Deserialize)]
+struct Completion {
+    choices: Vec<Choice>,
+}
+
+#[derive(Deserialize)]
+struct Choice {
+    message: CompletionMessage,
+}
+
+#[derive(Deserialize)]
+struct CompletionMessage {
+    content: String,
+}
+
+/// Sends `messages` to the chat model and returns its answer verbatim.
+///
+/// Ported from `app/llm/litellm_provider.py:96,139-150`: model and messages
+/// only, no streaming and no sampling parameters (§7.4). The returned text is
+/// untouched — anchors, whitespace and all — because resolving `<c>N</c>`
+/// belongs to `mnema-rag` and the empty-answer refusal belongs to the bridge
+/// (spec §4); this call's one job is the round trip.
+pub fn complete(base: &str, key: &str, model: &str, messages: &[Message]) -> Result<String, Error> {
+    let request = serde_json::json!({ "model": model, "messages": messages }).to_string();
+    let (status, answer) = http::post_json(base, "/chat/completions", key, &request)?;
+    if status != 200 {
+        return Err(crate::probe::attach_reason(
+            crate::error_for_status(status, crate::KeySent::Yes),
+            &answer,
+            key,
+        ));
+    }
+    let completion: Completion = serde_json::from_str(&answer)
+        .map_err(|_| Error::Malformed("the chat answer is not the shape this code expects"))?;
+    let text = completion
+        .choices
+        .into_iter()
+        .next()
+        .ok_or(Error::Malformed("the chat answer carried no choices"))?
+        .message
+        .content;
+    Ok(text)
 }
 
 #[cfg(test)]

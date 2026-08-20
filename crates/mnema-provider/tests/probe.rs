@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use mnema_mock_provider::{MockServer, Reply, two_vectors};
 use mnema_provider::{
-    Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_embedding_model, check_key, embed,
-    list_models,
+    Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_embedding_model, check_key, complete,
+    embed, list_models,
 };
 use unicode_general_category::{GeneralCategory, get_general_category};
 
@@ -1961,4 +1961,111 @@ fn no_transformation_of_the_key_reaches_a_message_through_embeds_200_body() {
         );
         assert_a_defence_is_visible_to_a_reader(label, &sentence);
     }
+}
+
+// --- complete (chat) ---------------------------------------------------
+//
+// PR 2: the chat-completions call (spec §PR 2). `probe`'s tests above
+// exercise the two entry checks; these exercise generation — the request it
+// builds, the text it reads back, and every way a chat answer can fail
+// without the key ever reaching a message.
+
+/// The two messages a real call carries — a system rule and a user question —
+/// built the way `build_messages` (PR 3) will, so these tests exercise the
+/// shape `complete` actually sends.
+fn probe_messages() -> Vec<mnema_provider::Message> {
+    use mnema_provider::{Message, MessageRole};
+    vec![
+        Message {
+            role: MessageRole::System,
+            content: "answer with citations".into(),
+        },
+        Message {
+            role: MessageRole::User,
+            content: "what did the report say?".into(),
+        },
+    ]
+}
+
+#[test]
+fn a_completion_comes_back_as_its_text() {
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"choices":[{"message":{"content":"Rivers rise. <c>1</c>"}}]}"#,
+    )]);
+    let answer = complete(server.base(), KEY, "vendor/chat-model", &probe_messages())
+        .expect("a well-formed completion");
+    assert_eq!(
+        answer, "Rivers rise. <c>1</c>",
+        "complete returns the model's text verbatim — anchors and all — for mnema-rag to resolve"
+    );
+}
+
+#[test]
+fn the_chat_call_posts_to_chat_completions_with_the_key_only_in_a_header() {
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"choices":[{"message":{"content":"ok"}}]}"#,
+    )]);
+    complete(server.base(), KEY, "vendor/chat-model", &probe_messages()).expect("usable");
+    let request = server.request();
+    let request_line = request.lines().next().unwrap_or_default();
+    assert!(
+        request_line.starts_with("POST /chat/completions "),
+        "the chat call is a POST to /chat/completions: {request_line}"
+    );
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {}", KEY.to_ascii_lowercase())),
+        "the key must travel in the header: {request}"
+    );
+    assert!(
+        !request_line.contains(KEY),
+        "the key must travel only in the header, never in the request line/query string: \
+         {request_line}"
+    );
+}
+
+#[test]
+fn the_body_carries_the_model_and_messages_and_no_sampling_parameters() {
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"choices":[{"message":{"content":"ok"}}]}"#,
+    )]);
+    complete(server.base(), KEY, "vendor/chat-model", &probe_messages()).expect("usable");
+    let request = server.request();
+    let body = request.rsplit("\r\n\r\n").next().expect("a body");
+    let parsed: serde_json::Value = serde_json::from_str(body).expect("the body is JSON");
+
+    assert_eq!(parsed["model"], "vendor/chat-model");
+    let messages = parsed["messages"].as_array().expect("messages is an array");
+    assert_eq!(messages.len(), 2, "system and user: {body}");
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "answer with citations");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "what did the report say?");
+
+    // §7.4 and §PR 2: v1 sends no streaming and no sampling parameters. A model
+    // that answered differently under a stray temperature would make this
+    // product's answers depend on a knob nobody set.
+    for absent in ["stream", "temperature", "max_tokens", "service_tier"] {
+        assert!(
+            parsed.get(absent).is_none(),
+            "v1 must not send {absent:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn content_present_but_empty_is_returned_as_empty_text_not_an_error() {
+    // The EmptyCompletion refusal is the bridge's ruling (spec §4), reached by
+    // trimming this return value — not complete's. An empty string is a valid
+    // (if unhelpful) completion, and complete must hand it back so the seam
+    // above it, which alone knows what an empty answer means for `ask`, can
+    // decide. Turning it into an error here would move that decision into the
+    // wrong module and hide a real (empty) provider answer behind a shape error.
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"choices":[{"message":{"content":""}}]}"#,
+    )]);
+    let answer = complete(server.base(), KEY, "m", &probe_messages())
+        .expect("an empty completion is still a completion");
+    assert_eq!(answer, "");
 }
