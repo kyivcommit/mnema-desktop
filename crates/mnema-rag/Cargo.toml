@@ -6,3 +6,4 @@ publish.workspace = true
 
 [dependencies]
 regex = { workspace = true }
+mnema-provider = { path = "../mnema-provider" }

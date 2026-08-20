@@ -2798,6 +2798,7 @@ dependencies = [
 name = "mnema-rag"
 version = "0.0.0"
 dependencies = [
+ "mnema-provider",
  "regex",
 ]
 
