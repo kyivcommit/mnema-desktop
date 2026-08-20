@@ -62,8 +62,10 @@ _out/
 # --- OS ---
 .DS_Store
 
-# local-only operator guidance for Claude Code (not committed), same as the server repository
+# local-only operator guidance for Claude Code and Codex (not committed), same as the server
+# repository — each is a symlink into docs/private/, so the guidance is versioned there, not here
 CLAUDE.md
+AGENTS.md
 
 # The design document and the workflow output it comes from live in a separate private
 # repository, cloned here as docs/private/. Nothing under it is part of this repository:
