@@ -26,6 +26,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { asSentence, LEAVES_UNKNOWN_INDEX } from "./render.js";
 
 // A deferred promise, which is the whole technique: an IPC call the test can
 // leave hanging until the thing that must happen first has happened.
@@ -1262,6 +1263,112 @@ test("the search form's submit is disabled while a content-arm write is in fligh
     w.el("search-submit").disabled,
     false,
     "the submit was left disabled after its content-arm write settled",
+  );
+});
+
+// Codex round 5 (inline on `ui/main.js:928`): an unreadable index left Search
+// pressable under a local-only disclosure while the backend `search` reads the
+// arms from the DB and would still send. The window cannot know the arm state
+// when the index read fails, so it must fail closed — gate Search and say the
+// promise is unknown, not "content is off".
+test("an unreadable index closes search and stops promising local-only", async () => {
+  let call = 0;
+  const w = await boot({
+    model_settings: () => {
+      call += 1;
+      // `boot()` issues two settings reads of its own (main.js's two top-level
+      // `await refreshSettings()`), so calls 1 and 2 are consumed before the
+      // test body runs — both readable here, so the premise below holds.
+      if (call <= 2) {
+        return {
+          key: { kind: "present" },
+          platform: "mac",
+          index: {
+            kind: "read",
+            activeSpace: 1,
+            embeddedChunks: 8,
+            totalChunks: 9,
+            failedChunks: 0,
+            embeddedChunksEverywhere: 8,
+            embeddingModel: "vendor/m",
+            rerankModel: null,
+            chatModel: null,
+            searchTextArm: true,
+            searchContentArm: true,
+          },
+        };
+      }
+      return {
+        key: { kind: "present" },
+        platform: "mac",
+        index: { kind: "unreadable", cause: "readFailed", reason: "boom" },
+      };
+    },
+  });
+
+  assert.equal(w.el("search-submit").disabled, false, "premise: a readable index opened search");
+
+  // A further settings read (boot already issued two), now unreadable, from a
+  // reachable settings action — call 3.
+  await w.press("forget");
+
+  assert.equal(
+    w.el("search-submit").disabled,
+    true,
+    "search stayed pressable while the index was unreadable and the arm state unknown",
+  );
+  assert.equal(
+    w.el("disclosure").textContent,
+    asSentence(LEAVES_UNKNOWN_INDEX),
+    "the disclosure kept making a local-only promise the failed read cannot back",
+  );
+});
+
+// The fail-closed state must recover: a later readable read reopens Search and
+// restores a real disclosure, so a transient failure does not wedge the window.
+test("a readable index after an unreadable one reopens search", async () => {
+  let call = 0;
+  const readable = {
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  };
+  const w = await boot({
+    model_settings: () => {
+      call += 1;
+      // Calls 1–2 are boot()'s own two reads (readable); the first press below
+      // is call 3 (unreadable), the second is call 4 (readable again).
+      if (call === 3) {
+        return {
+          key: { kind: "present" },
+          platform: "mac",
+          index: { kind: "unreadable", cause: "readFailed", reason: "boom" },
+        };
+      }
+      return readable;
+    },
+  });
+
+  await w.press("forget"); // call 3 → unreadable → shut
+  assert.equal(w.el("search-submit").disabled, true, "premise: the unreadable read closed search");
+
+  await w.press("forget"); // call 4 → readable → reopens
+  assert.equal(
+    w.el("search-submit").disabled,
+    false,
+    "search stayed shut after a readable read reconciled the index",
   );
 });
 

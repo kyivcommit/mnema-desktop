@@ -29,6 +29,8 @@ import {
   DISCLOSURE_TEXT,
   LEAVES_NOTHING,
   LEAVES_EVERYTHING,
+  LEAVES_INDEXING_ONLY,
+  LEAVES_UNKNOWN_INDEX,
   KEY_STATE_TEXT,
   asSentence,
   keyStoreNote,
@@ -533,6 +535,11 @@ test("a key state this build does not know promises neither everything nor nothi
   const unknown = disclosureSentence({ kind: "somethingFutureAndUnknown" });
   assert.notEqual(unknown, LEAVES_NOTHING);
   assert.notEqual(unknown, LEAVES_EVERYTHING);
+});
+
+test("the unreadable-index disclosure states unknown rather than a local-only promise", () => {
+  assert.match(LEAVES_UNKNOWN_INDEX, /unknown/);
+  assert.notEqual(LEAVES_UNKNOWN_INDEX, LEAVES_INDEXING_ONLY);
 });
 
 // The sentence `Error::NoKey`'s own doc calls forbidden: telling someone whose

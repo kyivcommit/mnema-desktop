@@ -19,6 +19,7 @@ import {
   listFailed,
   selectId,
   disclosureSentence,
+  LEAVES_UNKNOWN_INDEX,
   asSentence,
   keyStoreNote,
   keyStateSentence,
@@ -83,6 +84,15 @@ const results = el("results");
 // first time `drawSettings` actually draws.
 let pendingConfigWrites = 0;
 let authoritativeStateRead = false;
+// A fourth, privacy reason for `syncSearchGate` to stay shut (§3.3, Codex round
+// 5): the most recently drawn settings read was **not** an authoritative index
+// read. When `IndexSettings` is `unreadable` the window cannot know whether the
+// content arm is on, so it must not open Search or promise anything about what
+// leaves — the backend `search` reads the arms straight from the DB and would
+// send regardless. Distinct from `authoritativeStateRead` (which only records
+// that *some* read has landed): this one goes false again on a transient
+// unreadable read, so Search fails closed until a readable read reconciles it.
+let indexReadable = false;
 
 // U-3 (adversarial pass, F-A6): a third, independent reason to stay shut —
 // a search already in flight. A flag, not a counter like
@@ -98,11 +108,11 @@ let searchInFlight = false;
 
 // The one place that answers "may a search be submitted now" (§3.1) — every
 // other line in this file that used to write `#search-submit`'s `disabled`
-// itself now reports a fact to one of the three variables above and calls
+// itself now reports a fact to one of the four variables above and calls
 // this instead.
 const syncSearchGate = () => {
   el("search-submit").disabled =
-    !authoritativeStateRead || pendingConfigWrites > 0 || searchInFlight;
+    !authoritativeStateRead || !indexReadable || pendingConfigWrites > 0 || searchInFlight;
 };
 // Forces the closed reading immediately, rather than waiting for the first
 // caller that happens to touch the barrier. The markup (`index.html`)
@@ -664,8 +674,13 @@ const drawArmState = () => {
 // the disclosure sentence too`.
 const drawArmStateAndDisclosure = () => {
   const { text, content } = drawArmState();
+  // When the index could not be read, the arm state is unknown, so the
+  // disclosure must say so rather than make the evidence-free "content is off"
+  // promise `disclosureSentence`'s own doc (render.js) forbids.
   el("disclosure").textContent = asSentence(
-    disclosureSentence(keyState, { contentArmRuns: content.checked, textRuns: text.checked }),
+    indexReadable
+      ? disclosureSentence(keyState, { contentArmRuns: content.checked, textRuns: text.checked })
+      : LEAVES_UNKNOWN_INDEX,
   );
 };
 
@@ -921,6 +936,10 @@ const drawSettings = (settings, askedAt, armAskedAt, armWriteInFlightAtIssue) =>
   el("discard-vectors").textContent = discardVectorsLabel(offer);
   el("discard-vectors-note").textContent = discardVectorsNote(offer);
   const read = settings.index?.kind === "read" ? settings.index : null;
+  // Reconciled on every draw: an unreadable index leaves this false, which both
+  // holds Search shut (`syncSearchGate`) and switches the disclosure below to
+  // the unknown-index sentence instead of a promise no read backs.
+  indexReadable = read !== null;
   showRecorded("embedding", read && read.embeddingModel);
   showRecorded("rerank", read && read.rerankModel);
   showRecorded("chat", read && read.chatModel);

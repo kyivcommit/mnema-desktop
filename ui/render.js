@@ -453,6 +453,13 @@ export const LEAVES_EVERYTHING =
 // same promise a key that is sitting right there would make false.
 export const LEAVES_UNKNOWN =
   "Whether anything leaves this machine is unknown: the key store could not be read.";
+// The index's own not-knowing, distinct from the key store's (`LEAVES_UNKNOWN`)
+// and the credential envelope's (`LEAVES_UNSAID`): the settings read failed, so
+// whether the content arm is on — and therefore whether a question leaves — is
+// unknown. A definite "content is off" here is exactly the evidence-free promise
+// `disclosureSentence`'s own doc forbids.
+export const LEAVES_UNKNOWN_INDEX =
+  "Whether anything leaves this machine is unknown: the index could not be read.";
 // A different not-knowing from the one above, and worth its own words: there,
 // the store was asked and would not answer; here, it answered something this
 // build has no name for.
