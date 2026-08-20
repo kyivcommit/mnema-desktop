@@ -183,4 +183,38 @@ mod tests {
             "no empty parens for a bare header"
         );
     }
+
+    #[test]
+    fn an_explicit_language_switches_the_directive_and_drops_the_reminder() {
+        let messages = build_messages("q?", &[], Some("uk"));
+        assert!(
+            messages[0].content.ends_with(
+                "language (BCP-47 / ISO code): uk. The SOURCE passages may be in a different \
+                 language; translate any facts or quotes you cite into that language. Do NOT \
+                 state which language you are using — just give the answer."
+            ),
+            "system tail: {}",
+            messages[0].content
+        );
+        assert!(
+            !messages[1].content.contains(AUTO_USER_REMINDER),
+            "ISO mode appends no auto reminder: {}",
+            messages[1].content
+        );
+    }
+
+    #[test]
+    fn whitespace_only_and_the_word_auto_are_treated_as_auto() {
+        for lang in [Some("   "), Some("AUTO"), Some("Auto"), None] {
+            let messages = build_messages("q?", &[], lang);
+            assert!(
+                messages[0].content.ends_with(AUTO_DIRECTIVE),
+                "{lang:?} must select the auto directive"
+            );
+            assert!(
+                messages[1].content.ends_with(AUTO_USER_REMINDER),
+                "{lang:?} must append the auto reminder"
+            );
+        }
+    }
 }
