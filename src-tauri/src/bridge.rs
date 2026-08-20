@@ -250,40 +250,41 @@ fn resolve_content_query(
     }
 }
 
-/// Off the main thread for the reason given on [`open_index`].
-///
-/// Both arms, fused by `mnema_search::search`, in place of the lexical arm
-/// alone D29 left this command with. The arms come from `meta`, never a
-/// parameter — the window already saved a choice through
-/// [`set_search_arms`].
-///
-/// The key is asked for only when `arms.content` is on — pinned by
-/// `a_text_only_search_does_not_touch_a_credential_store_it_does_not_need`
-/// — and only [`Error::NoKey`] then turns into no provider.
-///
-/// Everything from the lexical arm through fusion through citation
-/// resolution runs inside one [`mnema_index::Db::read_snapshot`], so a
-/// rebuild committing on the job's own connection mid-search cannot hand a
-/// reused chunk id's citation to the wrong text. [`resolve_content_query`]
-/// runs first and resolves what the content arm needs — including any
-/// reason it has nothing to run on — before that snapshot ever opens, so
-/// the snapshot holds no network call and [`ContentArmReport::NoKey`],
-/// [`ContentArmReport::NoModel`] and a broken credential store all reach
-/// the answer the same way `content_failure` always did: as an override
-/// applied after the snapshot closes, in place of whatever
-/// `mnema_search::search` answered on its own. Pinned by
-/// `a_broken_credential_store_does_not_take_the_text_arm_down_with_it`.
-#[tauri::command(async)]
-pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer, Error> {
-    let arms = state.with_index(|db| {
+/// The two arm rows, read the one way `search` and `ask` must agree on.
+/// `meta`'s own rule (`arm_is_on`, D106) decides on/off.
+fn read_arms(state: &State<'_, AppState>) -> Result<Arms, Error> {
+    state.with_index(|db| {
         Ok(Arms {
             text: arm_is_on(db.meta_get(mnema_index::META_SEARCH_TEXT_ARM)?),
             content: arm_is_on(db.meta_get(mnema_index::META_SEARCH_CONTENT_ARM)?),
         })
-    })?;
+    })
+}
 
+/// Both arms, resolved and fused, in place of the lexical arm alone D29 left
+/// `search` with — now the *one* copy `search` and `ask` share, so the two can
+/// never drift (spec §5). Returns the hits plus each arm's report, because the
+/// `content_override` merge (the most drift-prone half) belongs here, not
+/// duplicated at each caller.
+///
+/// The content arm's network embed runs in [`resolve_content_query`] *before*
+/// the read snapshot opens (I5, spec §5): `retrieve` takes `&State`, not an
+/// already-open `&Db`, precisely so it can hold the "embed → snapshot" order
+/// itself. Pinned by `the_content_arm_embeds_the_query_before_it_locks_the_index`.
+///
+/// The key is asked for only when `arms.content` is on and only
+/// [`Error::NoKey`] then turns into no provider, so a text-only search touches
+/// no credential store and a broken one costs only the content arm — pinned by
+/// `a_text_only_search_does_not_touch_a_credential_store_it_does_not_need` and
+/// `a_broken_credential_store_does_not_take_the_text_arm_down_with_it`.
+fn retrieve(
+    state: &State<'_, AppState>,
+    query: &str,
+    arms: Arms,
+    limit: i64,
+) -> Result<(Vec<Hit>, TextArmReport, ContentArmReport), Error> {
     let (provider, content_failure) = if arms.content {
-        match crate::models::key(&state) {
+        match crate::models::key(state) {
             Ok(key) => (
                 Some(Provider {
                     base: state.provider_base().to_string(),
@@ -299,18 +300,18 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
     };
 
     let (content_query, content_override) =
-        resolve_content_query(&state, &provider, &query, arms.content, content_failure)?;
+        resolve_content_query(state, &provider, query, arms.content, content_failure)?;
 
     state.with_index(|db| {
         db.read_snapshot(|db| {
             let found = mnema_search::search(
                 db,
                 content_query,
-                &query,
+                query,
                 arms.text,
                 SEARCH_QUERY_RULE,
                 SEARCH_FUSION_RULE,
-                SEARCH_LIMIT,
+                limit,
             )?;
 
             // A chunk that vanished between the fuse and this read is not an
@@ -333,13 +334,27 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
             }
 
             let content = content_override.unwrap_or_else(|| found.content.into());
-
-            Ok(SearchAnswer {
-                hits,
-                text: found.text.into(),
-                content,
-            })
+            Ok((hits, found.text.into(), content))
         })
+    })
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// The thin caller over [`read_arms`] and [`retrieve`]: the whole retrieval
+/// chain — the arms, the content arm's embed before the snapshot (I5), fusion,
+/// and citation resolution inside one [`mnema_index::Db::read_snapshot`] — now
+/// lives in [`retrieve`], so `search` and a later `ask` share one copy and
+/// cannot drift (spec §5). All this command still owns is the shape it answers
+/// the window with.
+#[tauri::command(async)]
+pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer, Error> {
+    let arms = read_arms(&state)?;
+    let (hits, text, content) = retrieve(&state, &query, arms, SEARCH_LIMIT)?;
+    Ok(SearchAnswer {
+        hits,
+        text,
+        content,
     })
 }
 

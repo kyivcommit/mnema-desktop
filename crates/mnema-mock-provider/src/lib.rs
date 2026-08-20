@@ -21,6 +21,11 @@ pub struct Reply {
     /// lies about its own length on purpose — the real wire shape of a
     /// connection that stops mid-transfer.
     declared_extra: usize,
+    /// A barrier the server thread waits on *before* writing this reply, so
+    /// this request can be held in flight while a test does something else and
+    /// only then releases it. `None` for every reply that answers as soon as
+    /// it is dequeued — which is all of them but [`Reply::gated`].
+    gate: Option<std::sync::Arc<std::sync::Barrier>>,
 }
 
 impl Reply {
@@ -30,6 +35,7 @@ impl Reply {
             body: body.to_string(),
             delay: Duration::ZERO,
             declared_extra: 0,
+            gate: None,
         }
     }
     pub fn status(status: u16, body: &str) -> Self {
@@ -38,6 +44,7 @@ impl Reply {
             body: body.to_string(),
             delay: Duration::ZERO,
             declared_extra: 0,
+            gate: None,
         }
     }
     pub fn slow(seconds: u64) -> Self {
@@ -46,6 +53,7 @@ impl Reply {
             body: "{}".into(),
             delay: Duration::from_secs(seconds),
             declared_extra: 0,
+            gate: None,
         }
     }
 
@@ -68,6 +76,22 @@ impl Reply {
             body: body.to_string(),
             delay: Duration::from_secs(seconds),
             declared_extra: 0,
+            gate: None,
+        }
+    }
+
+    /// A reply that waits on `barrier` before it is written. The server thread
+    /// blocks at the barrier when this request arrives, so a test can prove that
+    /// some other work (an index-lock acquisition) can complete *while this
+    /// request is in flight* — the request is answered only once the test also
+    /// reaches the barrier. Deterministic: no sleeps, no races.
+    pub fn gated(barrier: std::sync::Arc<std::sync::Barrier>, body: &str) -> Self {
+        Self {
+            status: 200,
+            body: body.to_string(),
+            delay: Duration::from_secs(0),
+            declared_extra: 0,
+            gate: Some(barrier),
         }
     }
 
@@ -96,6 +120,7 @@ impl Reply {
             body: body.to_string(),
             delay: Duration::ZERO,
             declared_extra: 64,
+            gate: None,
         }
     }
 }
@@ -143,6 +168,12 @@ impl MockServer {
                 }
                 match replies.next() {
                     Some(reply) => {
+                        // The request is already on `seen` (above), so a test
+                        // watching for it knows this reply is in flight; hold it
+                        // here until that test reaches the barrier too.
+                        if let Some(barrier) = &reply.gate {
+                            barrier.wait();
+                        }
                         thread::sleep(reply.delay);
                         write_reply(&mut stream, reply.status, &reply.body, reply.declared_extra);
                     }
@@ -257,4 +288,11 @@ pub fn two_vectors(width: usize) -> String {
         row(0),
         row(1)
     )
+}
+
+/// One vector of `width`, in the shape the provider answers a one-text embed
+/// request (a query) with. `embed_query` sends exactly one text.
+pub fn one_vector(width: usize) -> String {
+    let row = (0..width).map(|_| "0.1").collect::<Vec<_>>().join(",");
+    format!(r#"{{"data":[{{"embedding":[{row}],"index":0}}]}}"#)
 }

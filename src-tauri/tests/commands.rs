@@ -17,7 +17,7 @@ use mnema_desktop::job::JobEvent;
 use mnema_desktop::models::set_key;
 use mnema_desktop::state::AppState;
 use mnema_desktop::walk_job;
-use mnema_mock_provider::{MockServer, Reply};
+use mnema_mock_provider::{MockServer, Reply, one_vector};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, Channel, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, mock_builder, mock_context, noop_assets};
@@ -1037,6 +1037,113 @@ fn an_index_failure_inside_the_content_arm_stays_local_to_it() {
         answer["content"]["kind"],
         json!("failed"),
         "the content arm alone must report the failure: {answer}"
+    );
+}
+
+/// I5 (spec §5): the one network call the content arm makes must run before
+/// any read snapshot opens, so a slow provider cannot block a writer's
+/// checkpoint. Proven here without a single sleep. The embed reply is held in
+/// flight on a barrier; a probe thread waits until the embed has actually
+/// reached the mock, then takes the index lock and only *then* releases the
+/// reply. Taking that lock is possible only while the embed runs outside the
+/// mutex — move the embed inside the snapshot and the probe blocks on the lock
+/// forever, the barrier never releases, and `search` deadlocks. The watchdog
+/// turns that deadlock into a loud failure rather than a silent hang.
+///
+/// Set up like `an_index_failure_inside_the_content_arm_stays_local_to_it` —
+/// a real provider, a key, a model adopted — but without dropping the space,
+/// so the content arm reaches its one embed instead of failing before it.
+#[test]
+fn the_content_arm_embeds_the_query_before_it_locks_the_index() {
+    const KEY: &str = "test-key-not-a-real-one-i5";
+    const MODEL: &str = "baai/bge-m3";
+    const DIM: usize = 1024;
+    const CREDITS: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#;
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let server = MockServer::new(vec![
+        // `set_key` checks the key against `/credits` before it stores it.
+        Reply::ok(CREDITS),
+        // The content arm's one embed, held in flight until the probe releases it.
+        Reply::gated(barrier.clone(), &one_vector(DIM)),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+
+    state.open_index().expect("the index opens");
+    set_key(state.clone(), KEY.into()).expect("the key is accepted");
+    state
+        .with_index(|db| {
+            db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
+        })
+        .expect("the default model is adopted");
+
+    // `set_key`'s own `/credits` request is already queued on the mock; take it
+    // so the probe's `server.request()` below waits for the embed and nothing
+    // else. The reply order already pairs it with `Reply::ok(CREDITS)`.
+    server.request();
+
+    let text_dir = fixture_dir();
+    let webview = main_webview(&app);
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": text_dir.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    run_walk_to_completion(&app, root);
+
+    // The probe runs on its own thread and reaches the managed state through the
+    // app handle — `AppState` is neither `Clone` nor `Send`, but `AppHandle`
+    // is `Send + 'static`. It waits until the embed request has landed on the
+    // mock (so it is provably in flight), then takes the index lock. In correct
+    // code the lock is free while the embed is in flight; move the embed inside
+    // the snapshot and this `with_index` blocks forever and never reaches the
+    // barrier below, so the embed reply is never written and `search` hangs.
+    let handle = app.handle().clone();
+    let probe_barrier = barrier.clone();
+    let probe = std::thread::spawn(move || {
+        server.request();
+        handle
+            .state::<AppState>()
+            .with_index(|_db| Ok::<(), mnema_index::Error>(()))
+            .expect("the index lock must be free while the query embeds");
+        probe_barrier.wait();
+    });
+
+    // `search` runs on this thread, so an I5 regression hangs it here. A
+    // watchdog turns that hang into a loud, per-run failure. It aborts only on a
+    // genuine timeout — a normal panic (say `search` was rejected) drops the
+    // sender and the watchdog stands down, leaving the real failure to report.
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if let Err(mpsc::RecvTimeoutError::Timeout) = done_rx.recv_timeout(Duration::from_secs(20))
+        {
+            eprintln!(
+                "I5 regression: `search` deadlocked — the query appears to embed inside the \
+                 index mutex rather than before the read snapshot opens"
+            );
+            std::process::abort();
+        }
+    });
+
+    let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    // Stand the watchdog down before joining anything a deadlock would have held.
+    let _ = done_tx.send(());
+    probe.join().expect("the probe thread panicked");
+    watchdog.join().expect("the watchdog thread panicked");
+
+    assert_eq!(
+        answer["content"]["kind"],
+        json!("answered"),
+        "the content arm must have embedded and answered: {answer}"
+    );
+    assert!(
+        answer["hits"].as_array().is_some_and(|h| !h.is_empty()),
+        "the fused hits must reach the window: {answer}"
     );
 }
 
