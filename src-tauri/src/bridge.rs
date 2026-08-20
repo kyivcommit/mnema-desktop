@@ -258,11 +258,7 @@ fn resolve_content_query(
 /// is the *same* `Coordinate::render` the citation UI shows, so the model reads
 /// what the person will.
 ///
-/// `#[allow(dead_code)]`: the only caller is the `ask` command, landing in
-/// Task 5 (R5's own pattern, applied here too) — until then only the test
-/// below calls this, invisible to a non-test build. Removed once `ask` maps
-/// `hits.iter().map(passage_from_hit)`.
-#[allow(dead_code)]
+/// The one caller is [`ask`], which maps `hits.iter().map(passage_from_hit)`.
 fn passage_from_hit(hit: &Hit) -> mnema_rag::Passage {
     let locator = hit.coordinate.render();
     let meta = [hit.relative_path.as_deref().unwrap_or(""), locator.as_str()]
@@ -281,14 +277,9 @@ fn passage_from_hit(hit: &Hit) -> mnema_rag::Passage {
 /// window never sees this — it sees [`AskAnswer`] — and `Ready` carries the key
 /// for the immediate `complete` call, which must not reach a log line.
 ///
-/// `#[allow(dead_code)]` (R5, as `passage_from_hit` above): the only caller is
-/// the `ask` command, landing in Task 5 — nothing reads a field until then. The
-/// allow sits on *both* the enum and its `chat_readiness` below because two
-/// distinct dead-code sub-lints fire, attributed to two items: the enum's here
-/// covers `Ready`'s `model`/`key` "never read" (no code destructures the value
-/// until Task 5's `let ChatReadiness::Ready { .. }`), and the function's covers
-/// its own "never used". Both are removed once `ask` consumes the gate.
-#[allow(dead_code)]
+/// [`ask`] is the caller that reads it: its `let ChatReadiness::Ready { model,
+/// key }` destructures the value and every other variant opens the
+/// citations-only branch.
 enum ChatReadiness {
     /// `META_CHAT_MODEL` absent, empty, or whitespace only.
     NoModel,
@@ -303,10 +294,6 @@ enum ChatReadiness {
 /// The gate. `?` still stops the whole command on a poisoned or unopened index
 /// (as every command does); `NoKey`/`KeyUnreadable` become states, not errors,
 /// so a missing key answers with citations rather than failing.
-///
-/// `#[allow(dead_code)]`: see the enum above for why the allow is on both — this
-/// one silences "function never used" until Task 5's `ask` calls it.
-#[allow(dead_code)]
 fn chat_readiness(state: &State<'_, AppState>) -> Result<ChatReadiness, Error> {
     let model = state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL))?;
     let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
@@ -426,6 +413,133 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
         text,
         content,
     })
+}
+
+/// A citation in a generated answer: the existing [`Hit`], plus which anchor
+/// resolved to it. Not the server's `Citation` (no `document_id`/`bbox`/
+/// `snippet`/verify fields — spec §6): the desktop set.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskCitation {
+    pub anchor: usize,
+    pub chunk_id: i64,
+    pub text: String,
+    pub relative_path: Option<String>,
+    pub section_title: Option<String>,
+    pub coordinate: Coordinate,
+}
+
+/// Why generation did not produce an answer (spec §6). Ports the server's two
+/// guards (`service.py:66-68,80-82`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum RefusalKind {
+    /// `Ready` but retrieval found nothing — chat is not called at all.
+    NoCandidates,
+    /// `Ready`, chat was called, and the model answered with nothing.
+    EmptyCompletion,
+}
+
+/// What [`ask`] answers with. Different states are different variants, never a
+/// `null` (the shape [`TextArmReport`]/[`ContentArmReport`] share). Every
+/// variant carries the arm reports, because retrieval is identical across them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum AskAnswer {
+    Generated {
+        answer: String,
+        citations: Vec<AskCitation>,
+        text: TextArmReport,
+        content: ContentArmReport,
+    },
+    CitationsOnly {
+        citations: Vec<Hit>,
+        text: TextArmReport,
+        content: ContentArmReport,
+    },
+    Refused {
+        /// Renamed on the wire because [`RefusalKind`] is itself
+        /// `#[serde(tag = "kind")]`: the field's own `kind` would collide with
+        /// this enum's tag and one would silently overwrite the other. The
+        /// payload is `{"kind":"refused","reason":{"kind":"noCandidates"}}`
+        /// (ruling R4).
+        #[serde(rename = "reason")]
+        kind: RefusalKind,
+        text: TextArmReport,
+        content: ContentArmReport,
+    },
+}
+
+/// How many passages `ask` puts in the prompt (port `app/api/ask.py:18`,
+/// `top_k = Field(8)`), passed to [`retrieve`] as its `limit`.
+const ASK_TOP_K: i64 = 8;
+
+/// Answer a question over the index with cited sources (spec §4). Retrieval is
+/// the shared [`retrieve`]; generation runs iff [`ChatReadiness::Ready`] (the
+/// private gate, spec §7.2). Off the main thread for the reason [`search`]
+/// gives.
+///
+/// The four branches, in order: any non-`Ready` readiness answers with the
+/// citations retrieval already found ([`AskAnswer::CitationsOnly`]) and never
+/// reaches the chat model — the gate. `Ready` with no hits refuses before
+/// calling chat (`NoCandidates`, `service.py:66-68`); a `Ready` call the model
+/// answers blankly refuses after (`EmptyCompletion`, `service.py:80-82`);
+/// otherwise the anchors the model wrote become citations.
+#[tauri::command(async)]
+pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error> {
+    let arms = read_arms(&state)?;
+    let (hits, text, content) = retrieve(&state, &query, arms, ASK_TOP_K)?;
+
+    let ChatReadiness::Ready { model, key } = chat_readiness(&state)? else {
+        return Ok(AskAnswer::CitationsOnly {
+            citations: hits,
+            text,
+            content,
+        });
+    };
+
+    if hits.is_empty() {
+        return Ok(AskAnswer::Refused {
+            kind: RefusalKind::NoCandidates,
+            text,
+            content,
+        });
+    }
+
+    let passages: Vec<mnema_rag::Passage> = hits.iter().map(passage_from_hit).collect();
+    let base = state.provider_base().to_string();
+    match mnema_rag::answer(&base, &key, &model, &query, &passages, None)? {
+        None => Ok(AskAnswer::Refused {
+            kind: RefusalKind::EmptyCompletion,
+            text,
+            content,
+        }),
+        Some(a) => {
+            let citations = a
+                .cited
+                .iter()
+                .map(|&n| {
+                    // resolve_anchors guarantees 1 <= n <= passages.len() ==
+                    // hits.len(), so hits[n - 1] is always in range (spec §6).
+                    let h = &hits[n - 1];
+                    AskCitation {
+                        anchor: n,
+                        chunk_id: h.chunk_id,
+                        text: h.text.clone(),
+                        relative_path: h.relative_path.clone(),
+                        section_title: h.section_title.clone(),
+                        coordinate: h.coordinate.clone(),
+                    }
+                })
+                .collect();
+            Ok(AskAnswer::Generated {
+                answer: a.text,
+                citations,
+                text,
+                content,
+            })
+        }
+    }
 }
 
 /// The one way the window changes a toggle. `search` reads the same two rows,
