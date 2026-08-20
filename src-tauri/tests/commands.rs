@@ -1389,6 +1389,19 @@ fn ask_without_a_chat_model_returns_citations_only_and_makes_no_chat_call() {
 
     let text_dir = fixture_dir();
     let webview = main_webview(&app);
+    // Content arm explicitly on, not the D106 "absent row means on" default:
+    // this is the privacy-gate test, and it proves generation stays off by
+    // showing the ask makes the content arm's query embed and no chat call. If
+    // the product default ever flipped to off, that embed would vanish and this
+    // test would fail on a 10 s `request()` timeout with a misleading message
+    // rather than a clear gate signal. Pinning the arm keeps the guarantee the
+    // test asserts independent of that default.
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .expect("set_search_arms was rejected");
     let root = call(
         &webview,
         "add_watched_folder",
