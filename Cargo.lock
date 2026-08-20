@@ -2795,6 +2795,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnema-rag"
+version = "0.0.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "mnema-search"
 version = "0.0.0"
 dependencies = [
