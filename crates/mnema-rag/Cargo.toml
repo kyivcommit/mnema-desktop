@@ -1,0 +1,8 @@
+[package]
+name = "mnema-rag"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+regex = { workspace = true }

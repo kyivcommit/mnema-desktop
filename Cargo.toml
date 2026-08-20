@@ -13,6 +13,7 @@ members = [
     "crates/mnema-mock-provider",
     "crates/mnema-pool",
     "crates/mnema-provider",
+    "crates/mnema-rag",
     "crates/mnema-search",
     "crates/mnema-secrets",
     "crates/mnema-walk",
@@ -81,4 +82,8 @@ comrak = "0.54.0"
 # TLS-inspecting corporate proxy gets a handshake failure and no way to act on
 # it, which is a support case this product cannot answer.
 ureq = { version = "3.3", features = ["json", "platform-verifier"] }
+# The `<c>N</c>` anchor grammar in `mnema-rag`, and nowhere else — a small,
+# well-understood port of the server's `app/rag/anchors.py`. Already in
+# Cargo.lock transitively, so declaring it direct pins no new version.
+regex = "1"
 mnema-mock-provider = { path = "crates/mnema-mock-provider" }
