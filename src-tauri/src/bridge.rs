@@ -250,40 +250,98 @@ fn resolve_content_query(
     }
 }
 
-/// Off the main thread for the reason given on [`open_index`].
+/// A retrieved [`Hit`] as a prompt [`Passage`]: the source text verbatim, and a
+/// meta line that is `relative_path` and the rendered locator joined by ` · `,
+/// each dropped when empty (spec §7.1). The join-non-empty is what keeps a
+/// document with no coordinate (`Coordinate::None`) from trailing a bare " · ",
+/// and a document with no path (`write.rs:76-80`) from leading one. The locator
+/// is the *same* `Coordinate::render` the citation UI shows, so the model reads
+/// what the person will.
 ///
-/// Both arms, fused by `mnema_search::search`, in place of the lexical arm
-/// alone D29 left this command with. The arms come from `meta`, never a
-/// parameter — the window already saved a choice through
-/// [`set_search_arms`].
+/// The one caller is [`ask`], which maps `hits.iter().map(passage_from_hit)`.
+fn passage_from_hit(hit: &Hit) -> mnema_rag::Passage {
+    let locator = hit.coordinate.render();
+    let meta = [hit.relative_path.as_deref().unwrap_or(""), locator.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    mnema_rag::Passage {
+        text: hit.text.clone(),
+        meta,
+    }
+}
+
+/// Whether the chat step may run, read from `meta` and the credential store the
+/// way [`ContentArmReport`] is (spec §6). Not `Serialize` and not `Debug`: the
+/// window never sees this — it sees [`AskAnswer`] — and `Ready` carries the key
+/// for the immediate `complete` call, which must not reach a log line.
 ///
-/// The key is asked for only when `arms.content` is on — pinned by
-/// `a_text_only_search_does_not_touch_a_credential_store_it_does_not_need`
-/// — and only [`Error::NoKey`] then turns into no provider.
-///
-/// Everything from the lexical arm through fusion through citation
-/// resolution runs inside one [`mnema_index::Db::read_snapshot`], so a
-/// rebuild committing on the job's own connection mid-search cannot hand a
-/// reused chunk id's citation to the wrong text. [`resolve_content_query`]
-/// runs first and resolves what the content arm needs — including any
-/// reason it has nothing to run on — before that snapshot ever opens, so
-/// the snapshot holds no network call and [`ContentArmReport::NoKey`],
-/// [`ContentArmReport::NoModel`] and a broken credential store all reach
-/// the answer the same way `content_failure` always did: as an override
-/// applied after the snapshot closes, in place of whatever
-/// `mnema_search::search` answered on its own. Pinned by
-/// `a_broken_credential_store_does_not_take_the_text_arm_down_with_it`.
-#[tauri::command(async)]
-pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer, Error> {
-    let arms = state.with_index(|db| {
+/// [`ask`] is the caller that reads it: its `let ChatReadiness::Ready { model,
+/// key }` destructures the value and every other variant opens the
+/// citations-only branch.
+enum ChatReadiness {
+    /// `META_CHAT_MODEL` absent, empty, or whitespace only.
+    NoModel,
+    /// A model is set but no key has been entered (v1 OpenRouter needs one).
+    NoKey,
+    /// A model is set but the credential store could not be read.
+    KeyUnreadable,
+    /// A model and a key: the only state that opens the generation branch.
+    Ready { model: String, key: String },
+}
+
+/// The gate. `?` still stops the whole command on a poisoned or unopened index
+/// (as every command does); `NoKey`/`KeyUnreadable` become states, not errors,
+/// so a missing key answers with citations rather than failing.
+fn chat_readiness(state: &State<'_, AppState>) -> Result<ChatReadiness, Error> {
+    let model = state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL))?;
+    let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
+        return Ok(ChatReadiness::NoModel);
+    };
+    match crate::models::key(state) {
+        Ok(key) => Ok(ChatReadiness::Ready { model, key }),
+        Err(Error::NoKey) => Ok(ChatReadiness::NoKey),
+        Err(Error::Secrets(_)) => Ok(ChatReadiness::KeyUnreadable),
+        Err(e) => Err(e),
+    }
+}
+
+/// The two arm rows, read the one way `search` and `ask` must agree on.
+/// `meta`'s own rule (`arm_is_on`, D106) decides on/off.
+fn read_arms(state: &State<'_, AppState>) -> Result<Arms, Error> {
+    state.with_index(|db| {
         Ok(Arms {
             text: arm_is_on(db.meta_get(mnema_index::META_SEARCH_TEXT_ARM)?),
             content: arm_is_on(db.meta_get(mnema_index::META_SEARCH_CONTENT_ARM)?),
         })
-    })?;
+    })
+}
 
+/// Both arms, resolved and fused, in place of the lexical arm alone D29 left
+/// `search` with — now the *one* copy `search` and `ask` share, so the two can
+/// never drift (spec §5). Returns the hits plus each arm's report, because the
+/// `content_override` merge (the most drift-prone half) belongs here, not
+/// duplicated at each caller.
+///
+/// The content arm's network embed runs in [`resolve_content_query`] *before*
+/// the read snapshot opens (I5, spec §5): `retrieve` takes `&State`, not an
+/// already-open `&Db`, precisely so it can hold the "embed → snapshot" order
+/// itself. Pinned by `the_content_arm_embeds_the_query_before_it_locks_the_index`.
+///
+/// The key is asked for only when `arms.content` is on and only
+/// [`Error::NoKey`] then turns into no provider, so a text-only search touches
+/// no credential store and a broken one costs only the content arm — pinned by
+/// `a_text_only_search_does_not_touch_a_credential_store_it_does_not_need` and
+/// `a_broken_credential_store_does_not_take_the_text_arm_down_with_it`.
+fn retrieve(
+    state: &State<'_, AppState>,
+    query: &str,
+    arms: Arms,
+    limit: i64,
+) -> Result<(Vec<Hit>, TextArmReport, ContentArmReport), Error> {
     let (provider, content_failure) = if arms.content {
-        match crate::models::key(&state) {
+        match crate::models::key(state) {
             Ok(key) => (
                 Some(Provider {
                     base: state.provider_base().to_string(),
@@ -299,18 +357,18 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
     };
 
     let (content_query, content_override) =
-        resolve_content_query(&state, &provider, &query, arms.content, content_failure)?;
+        resolve_content_query(state, &provider, query, arms.content, content_failure)?;
 
     state.with_index(|db| {
         db.read_snapshot(|db| {
             let found = mnema_search::search(
                 db,
                 content_query,
-                &query,
+                query,
                 arms.text,
                 SEARCH_QUERY_RULE,
                 SEARCH_FUSION_RULE,
-                SEARCH_LIMIT,
+                limit,
             )?;
 
             // A chunk that vanished between the fuse and this read is not an
@@ -333,14 +391,177 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
             }
 
             let content = content_override.unwrap_or_else(|| found.content.into());
-
-            Ok(SearchAnswer {
-                hits,
-                text: found.text.into(),
-                content,
-            })
+            Ok((hits, found.text.into(), content))
         })
     })
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// The thin caller over [`read_arms`] and [`retrieve`]: the whole retrieval
+/// chain — the arms, the content arm's embed before the snapshot (I5), fusion,
+/// and citation resolution inside one [`mnema_index::Db::read_snapshot`] — now
+/// lives in [`retrieve`], so `search` and a later `ask` share one copy and
+/// cannot drift (spec §5). All this command still owns is the shape it answers
+/// the window with.
+#[tauri::command(async)]
+pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer, Error> {
+    let arms = read_arms(&state)?;
+    let (hits, text, content) = retrieve(&state, &query, arms, SEARCH_LIMIT)?;
+    Ok(SearchAnswer {
+        hits,
+        text,
+        content,
+    })
+}
+
+/// A citation in a generated answer: the existing [`Hit`], plus which anchor
+/// resolved to it. Not the server's `Citation` (no `document_id`/`bbox`/
+/// `snippet`/verify fields — spec §6): the desktop set.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskCitation {
+    pub anchor: usize,
+    pub chunk_id: i64,
+    pub text: String,
+    pub relative_path: Option<String>,
+    pub section_title: Option<String>,
+    pub coordinate: Coordinate,
+}
+
+/// Why generation did not produce an answer (spec §6). Ports the server's two
+/// guards (`service.py:66-68,80-82`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum RefusalKind {
+    /// `Ready` but retrieval found nothing — chat is not called at all.
+    NoCandidates,
+    /// `Ready`, chat was called, and the model answered with nothing.
+    EmptyCompletion,
+}
+
+/// What [`ask`] answers with. Different states are different variants, never a
+/// `null` (the shape [`TextArmReport`]/[`ContentArmReport`] share). Every
+/// variant carries the arm reports, because retrieval is identical across them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum AskAnswer {
+    Generated {
+        answer: String,
+        citations: Vec<AskCitation>,
+        text: TextArmReport,
+        content: ContentArmReport,
+    },
+    CitationsOnly {
+        citations: Vec<Hit>,
+        text: TextArmReport,
+        content: ContentArmReport,
+    },
+    Refused {
+        /// Renamed on the wire because [`RefusalKind`] is itself
+        /// `#[serde(tag = "kind")]`: the field's own `kind` would collide with
+        /// this enum's tag and one would silently overwrite the other. The
+        /// payload is `{"kind":"refused","reason":{"kind":"noCandidates"}}`
+        /// (ruling R4).
+        #[serde(rename = "reason")]
+        kind: RefusalKind,
+        text: TextArmReport,
+        content: ContentArmReport,
+    },
+}
+
+/// How many passages `ask` puts in the prompt (port `app/api/ask.py:18`,
+/// `top_k = Field(8)`), passed to [`retrieve`] as its `limit`.
+const ASK_TOP_K: i64 = 8;
+
+/// The longest query `ask` accepts (port `app/api/ask.py:17`,
+/// `Field(max_length=2048)`). Characters, not bytes — Python `str` length
+/// counts code points, and so does `query.chars().count()` below.
+const MAX_ASK_QUERY: usize = 2048;
+
+/// Answer a question over the index with cited sources (spec §4). Retrieval is
+/// the shared [`retrieve`]; generation runs iff [`ChatReadiness::Ready`] (the
+/// private gate, spec §7.2). Off the main thread for the reason [`search`]
+/// gives.
+///
+/// The query guards run first, before `read_arms` or `retrieve`, so a blank
+/// or over-long query is rejected before any index or network work (both
+/// halves of `ask.py:17`'s `min_length=1, max_length=2048`; the blank guard
+/// keeps a meaningless question from reaching the billable query embed —
+/// the D115 mechanism through this caller — and the length guard resolves
+/// spec §12). Then the four branches, in order: any non-`Ready` readiness
+/// answers with the citations retrieval already found
+/// ([`AskAnswer::CitationsOnly`]) and never reaches the chat model — the
+/// gate. `Ready` with no hits refuses before calling chat (`NoCandidates`,
+/// `service.py:66-68`); a `Ready` call the model answers blankly refuses
+/// after (`EmptyCompletion`, `service.py:80-82`); otherwise the anchors the
+/// model wrote become citations.
+#[tauri::command(async)]
+pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error> {
+    if query.trim().is_empty() {
+        return Err(Error::QueryBlank);
+    }
+    let chars = query.chars().count();
+    if chars > MAX_ASK_QUERY {
+        return Err(Error::QueryTooLong {
+            chars,
+            limit: MAX_ASK_QUERY,
+        });
+    }
+
+    let arms = read_arms(&state)?;
+    let (hits, text, content) = retrieve(&state, &query, arms, ASK_TOP_K)?;
+
+    let ChatReadiness::Ready { model, key } = chat_readiness(&state)? else {
+        return Ok(AskAnswer::CitationsOnly {
+            citations: hits,
+            text,
+            content,
+        });
+    };
+
+    if hits.is_empty() {
+        return Ok(AskAnswer::Refused {
+            kind: RefusalKind::NoCandidates,
+            text,
+            content,
+        });
+    }
+
+    let passages: Vec<mnema_rag::Passage> = hits.iter().map(passage_from_hit).collect();
+    let base = state.provider_base().to_string();
+    match mnema_rag::answer(&base, &key, &model, &query, &passages, None)? {
+        None => Ok(AskAnswer::Refused {
+            kind: RefusalKind::EmptyCompletion,
+            text,
+            content,
+        }),
+        Some(a) => {
+            let citations = a
+                .cited
+                .iter()
+                .map(|&n| {
+                    // resolve_anchors guarantees 1 <= n <= passages.len() ==
+                    // hits.len(), so hits[n - 1] is always in range (spec §6).
+                    let h = &hits[n - 1];
+                    AskCitation {
+                        anchor: n,
+                        chunk_id: h.chunk_id,
+                        text: h.text.clone(),
+                        relative_path: h.relative_path.clone(),
+                        section_title: h.section_title.clone(),
+                        coordinate: h.coordinate.clone(),
+                    }
+                })
+                .collect();
+            Ok(AskAnswer::Generated {
+                answer: a.text,
+                citations,
+                text,
+                content,
+            })
+        }
+    }
 }
 
 /// The one way the window changes a toggle. `search` reads the same two rows,
@@ -556,5 +777,48 @@ mod tests {
                 reachable: 9,
             }
         ));
+    }
+
+    /// The test moved from PR 3 (D121): `Coordinate::None` must not leave a
+    /// dangling `" · "`, and a missing path must not lead one — join-non-empty
+    /// is what `passage_from_hit` exists to guarantee.
+    #[test]
+    fn a_passage_joins_the_path_and_the_locator_and_never_dangles_the_separator() {
+        use mnema_core::Coordinate;
+
+        let both = Hit {
+            chunk_id: 1,
+            text: "body".into(),
+            relative_path: Some("notes/a.txt".into()),
+            section_title: None,
+            coordinate: Coordinate::Page { number: 3 },
+        };
+        assert_eq!(passage_from_hit(&both).meta, "notes/a.txt · с. 3");
+
+        // A document with no verifiable coordinate: the path alone, no trailing
+        // " · " (the dangling-separator bug join-non-empty exists to prevent).
+        let no_coord = Hit {
+            coordinate: Coordinate::None,
+            ..both.clone()
+        };
+        assert_eq!(passage_from_hit(&no_coord).meta, "notes/a.txt");
+
+        // No path (write.rs:76-80), a real coordinate: the locator alone.
+        let no_path = Hit {
+            relative_path: None,
+            ..both.clone()
+        };
+        assert_eq!(passage_from_hit(&no_path).meta, "с. 3");
+
+        // Neither: an empty meta, which build_messages renders as a bare [N].
+        let neither = Hit {
+            relative_path: None,
+            coordinate: Coordinate::None,
+            ..both.clone()
+        };
+        assert_eq!(passage_from_hit(&neither).meta, "");
+
+        // text is carried verbatim.
+        assert_eq!(passage_from_hit(&both).text, "body");
     }
 }

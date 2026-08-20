@@ -17,12 +17,12 @@ use mnema_desktop::job::JobEvent;
 use mnema_desktop::models::set_key;
 use mnema_desktop::state::AppState;
 use mnema_desktop::walk_job;
-use mnema_mock_provider::{MockServer, Reply};
+use mnema_mock_provider::{MockServer, Reply, one_vector};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, Channel, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, mock_builder, mock_context, noop_assets};
 use tauri::webview::InvokeRequest;
-use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
+use tauri::{Manager, State, WebviewWindow, WebviewWindowBuilder};
 
 /// A provider address with nothing behind it. Nothing in this file calls the
 /// provider, and a base that refuses instantly is how a future test that starts
@@ -1040,6 +1040,113 @@ fn an_index_failure_inside_the_content_arm_stays_local_to_it() {
     );
 }
 
+/// I5 (spec §5): the one network call the content arm makes must run before
+/// any read snapshot opens, so a slow provider cannot block a writer's
+/// checkpoint. Proven here without a single sleep. The embed reply is held in
+/// flight on a barrier; a probe thread waits until the embed has actually
+/// reached the mock, then takes the index lock and only *then* releases the
+/// reply. Taking that lock is possible only while the embed runs outside the
+/// mutex — move the embed inside the snapshot and the probe blocks on the lock
+/// forever, the barrier never releases, and `search` deadlocks. The watchdog
+/// turns that deadlock into a loud failure rather than a silent hang.
+///
+/// Set up like `an_index_failure_inside_the_content_arm_stays_local_to_it` —
+/// a real provider, a key, a model adopted — but without dropping the space,
+/// so the content arm reaches its one embed instead of failing before it.
+#[test]
+fn the_content_arm_embeds_the_query_before_it_locks_the_index() {
+    const KEY: &str = "test-key-not-a-real-one-i5";
+    const MODEL: &str = "baai/bge-m3";
+    const DIM: usize = 1024;
+    const CREDITS: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#;
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let server = MockServer::new(vec![
+        // `set_key` checks the key against `/credits` before it stores it.
+        Reply::ok(CREDITS),
+        // The content arm's one embed, held in flight until the probe releases it.
+        Reply::gated(barrier.clone(), &one_vector(DIM)),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+
+    state.open_index().expect("the index opens");
+    set_key(state.clone(), KEY.into()).expect("the key is accepted");
+    state
+        .with_index(|db| {
+            db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
+        })
+        .expect("the default model is adopted");
+
+    // `set_key`'s own `/credits` request is already queued on the mock; take it
+    // so the probe's `server.request()` below waits for the embed and nothing
+    // else. The reply order already pairs it with `Reply::ok(CREDITS)`.
+    server.request();
+
+    let text_dir = fixture_dir();
+    let webview = main_webview(&app);
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": text_dir.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    run_walk_to_completion(&app, root);
+
+    // The probe runs on its own thread and reaches the managed state through the
+    // app handle — `AppState` is neither `Clone` nor `Send`, but `AppHandle`
+    // is `Send + 'static`. It waits until the embed request has landed on the
+    // mock (so it is provably in flight), then takes the index lock. In correct
+    // code the lock is free while the embed is in flight; move the embed inside
+    // the snapshot and this `with_index` blocks forever and never reaches the
+    // barrier below, so the embed reply is never written and `search` hangs.
+    let handle = app.handle().clone();
+    let probe_barrier = barrier.clone();
+    let probe = std::thread::spawn(move || {
+        server.request();
+        handle
+            .state::<AppState>()
+            .with_index(|_db| Ok::<(), mnema_index::Error>(()))
+            .expect("the index lock must be free while the query embeds");
+        probe_barrier.wait();
+    });
+
+    // `search` runs on this thread, so an I5 regression hangs it here. A
+    // watchdog turns that hang into a loud, per-run failure. It aborts only on a
+    // genuine timeout — a normal panic (say `search` was rejected) drops the
+    // sender and the watchdog stands down, leaving the real failure to report.
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if let Err(mpsc::RecvTimeoutError::Timeout) = done_rx.recv_timeout(Duration::from_secs(20))
+        {
+            eprintln!(
+                "I5 regression: `search` deadlocked — the query appears to embed inside the \
+                 index mutex rather than before the read snapshot opens"
+            );
+            std::process::abort();
+        }
+    });
+
+    let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    // Stand the watchdog down before joining anything a deadlock would have held.
+    let _ = done_tx.send(());
+    probe.join().expect("the probe thread panicked");
+    watchdog.join().expect("the watchdog thread panicked");
+
+    assert_eq!(
+        answer["content"]["kind"],
+        json!("answered"),
+        "the content arm must have embedded and answered: {answer}"
+    );
+    assert!(
+        answer["hits"].as_array().is_some_and(|h| !h.is_empty()),
+        "the fused hits must reach the window: {answer}"
+    );
+}
+
 /// D106: absent means on, for both arms. `mnema-index`'s own
 /// `an_index_that_never_saw_the_toggles_has_both_arms_on` pins that the raw
 /// row is absent; this pins what `search` does with that absence, the seam a
@@ -1233,6 +1340,369 @@ fn a_broken_credential_store_does_not_take_the_text_arm_down_with_it() {
         json!("failed"),
         "a real store failure must be reported as failed, not silently read as \
          no key: {answer}"
+    );
+}
+
+/// A 200 `/credits` body `check_key` accepts, so `set_key` stores the key
+/// instead of failing — the shape `an_index_failure_inside_the_content_arm`
+/// and the I5 test already use. Every `ask_*` test below needs it: `set_key`
+/// always checks the key against `/credits` before storing it, so that
+/// request is the first reply the mock must hold, ahead of the ask's own.
+const ASK_CREDITS: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#;
+
+/// Saves a chat model the way the window's `set_chat_model` command does —
+/// straight into `META_CHAT_MODEL` (`models.rs`), the row `chat_readiness`
+/// reads. Called directly rather than through the IPC because `set_chat_model`
+/// is `pub` and the point here is only to reach the `Ready` gate, not to prove
+/// registration (which `search`'s own registration test already covers).
+fn set_chat_model_via(state: &State<'_, AppState>, model: &str) {
+    mnema_desktop::models::set_chat_model(state.clone(), model.into())
+        .expect("the chat model is saved");
+}
+
+/// The private gate (spec §7.2): with no chat model set, `ask` must answer
+/// with citations and never call the chat model at all. The content arm is on
+/// with a model adopted and a key entered, so the gate is provably not vacuous
+/// — retrieval makes exactly one `/embeddings` call, carrying the *query*
+/// (not citation bytes, [[assert-both-directions]]), and zero
+/// `/chat/completions`. `set_key`'s own `/credits` request is drained first so
+/// the request read after the ask is the embed and nothing else.
+#[test]
+fn ask_without_a_chat_model_returns_citations_only_and_makes_no_chat_call() {
+    const KEY: &str = "test-key-ask-citations-only";
+    const MODEL: &str = "baai/bge-m3";
+    const DIM: usize = 1024;
+
+    // set_key's /credits, then the ask's query embed (content arm on).
+    let server = MockServer::new(vec![Reply::ok(ASK_CREDITS), Reply::ok(&one_vector(DIM))]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    set_key(state.clone(), KEY.into()).unwrap();
+    state
+        .with_index(|db| {
+            db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
+        })
+        .unwrap();
+    // deliberately NO chat model set.
+
+    let text_dir = fixture_dir();
+    let webview = main_webview(&app);
+    // Content arm explicitly on, not the D106 "absent row means on" default:
+    // this is the privacy-gate test, and it proves generation stays off by
+    // showing the ask makes the content arm's query embed and no chat call. If
+    // the product default ever flipped to off, that embed would vanish and this
+    // test would fail on a 10 s `request()` timeout with a misleading message
+    // rather than a clear gate signal. Pinning the arm keeps the guarantee the
+    // test asserts independent of that default.
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .expect("set_search_arms was rejected");
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": text_dir.path().display().to_string() }),
+    )
+    .unwrap()
+    .as_i64()
+    .unwrap();
+    run_walk_to_completion(&app, root);
+
+    // Drain set_key's own /credits so the next request read is the ask's embed.
+    let credits = server.request();
+    assert!(
+        credits.contains("/credits"),
+        "the one setup request is the key check: {credits}"
+    );
+
+    let answer = call(&webview, "ask", json!({ "query": "fox" })).expect("ask was rejected");
+    assert_eq!(
+        answer["kind"],
+        json!("citationsOnly"),
+        "no chat model → citationsOnly: {answer}"
+    );
+    assert!(
+        answer["citations"]
+            .as_array()
+            .is_some_and(|c| !c.is_empty()),
+        "the citations the window draws must not be empty: {answer}"
+    );
+
+    // Exactly one further request, and it is the embed — the query, not chat.
+    let embed = server.request();
+    assert!(
+        embed.contains("/embeddings"),
+        "the ask's one call must be the query embed: {embed}"
+    );
+    assert!(
+        embed.contains("fox"),
+        "the embed body must be the query, not citation bytes: {embed}"
+    );
+    assert!(
+        server.request_if_any().is_none(),
+        "no chat request may have been made"
+    );
+}
+
+/// `Ready` (a model and a key) but retrieval found nothing → `Refused`
+/// `{NoCandidates}`, and the chat model is NOT called (`service.py:66-68`).
+/// The index is empty, so the text arm finds nothing; the content arm is off,
+/// so no query embed competes — the only request on the wire is `set_key`'s
+/// `/credits`, which is drained before the no-chat assertion.
+#[test]
+fn ask_with_a_model_but_no_candidates_refuses_without_calling_chat() {
+    const KEY: &str = "test-key-ask-nocandidates";
+    // Only set_key's /credits is expected; any request past it is a surplus (599).
+    let server = MockServer::new(vec![Reply::ok(ASK_CREDITS)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    set_key(state.clone(), KEY.into()).unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+
+    let webview = main_webview(&app);
+    // Content arm off so no query embed runs; the index is empty so the text
+    // arm finds nothing — Ready, with zero hits.
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .unwrap();
+
+    let answer =
+        call(&webview, "ask", json!({ "query": "nothing indexed" })).expect("ask was rejected");
+    assert_eq!(answer["kind"], json!("refused"), "{answer}");
+    assert_eq!(answer["reason"]["kind"], json!("noCandidates"), "{answer}");
+
+    // Drain set_key's own /credits request, then prove chat was never called.
+    let credits = server.request();
+    assert!(
+        credits.contains("/credits"),
+        "the one setup request is the key check: {credits}"
+    );
+    assert!(
+        server.request_if_any().is_none(),
+        "NoCandidates must not call chat"
+    );
+}
+
+/// The anchor→citation mapping, and the off-by-one silent lie it exists to
+/// prevent (spec §9). `resolve_anchors` guarantees `1 <= n <= passages.len()
+/// == hits.len()`, so ordinal `n` maps to `hits[n-1]`. Two documents with
+/// identical searchable text tie in BM25 rank, so `matching`'s
+/// `ORDER BY rank, chunk_fts.rowid` orders them by chunk id — insertion order
+/// (the tie-break `matching_breaks_bm25_ties_by_chunk_id` pins). The content
+/// arm is off, so the single-arm RRF preserves that order exactly: the first
+/// written document is the first fused hit, the second written the second. The
+/// mock completion cites `<c>2</c>`, so the one citation's `chunkId` must be
+/// the SECOND document's — asserting the `chunkId`, not merely `anchor == 2`
+/// or a count, is the only check an off-by-one that shows the neighbour fails.
+#[test]
+fn ask_maps_each_anchor_to_the_right_citation_and_generates() {
+    const KEY: &str = "test-key-ask-generated";
+    const BODY: &str = "quantum entanglement resonance";
+
+    // The chat completion cites the second source.
+    let completion = serde_json::json!({
+        "choices": [{ "message": { "content": "The second source answers <c>2</c>." } }]
+    })
+    .to_string();
+    let server = MockServer::new(vec![Reply::ok(ASK_CREDITS), Reply::ok(&completion)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    set_key(state.clone(), KEY.into()).unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+
+    let webview = main_webview(&app);
+    // Content off so no embed request competes with the chat request.
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .unwrap();
+
+    // Two documents, identical text: they tie in rank and order by chunk id,
+    // so the first written is the first fused hit and the second the second.
+    let (_first_chunk, second_chunk) = state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>((
+                write_one_document(db, &"a".repeat(64), BODY),
+                write_one_document(db, &"b".repeat(64), BODY),
+            ))
+        })
+        .unwrap();
+
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    assert_eq!(
+        answer["kind"],
+        json!("generated"),
+        "Ready + hits + a real completion → generated: {answer}"
+    );
+    let citations = answer["citations"].as_array().expect("citations array");
+    assert_eq!(
+        citations.len(),
+        1,
+        "only the cited anchor becomes a citation: {answer}"
+    );
+    assert_eq!(citations[0]["anchor"], json!(2), "{answer}");
+    assert_eq!(
+        citations[0]["chunkId"],
+        json!(second_chunk),
+        "<c>2</c> must resolve to the SECOND fused hit's chunk, not the first \
+         — the off-by-one silent lie (spec §9): {answer}"
+    );
+}
+
+/// `Ready`, chat was called, and the model answered with nothing → `Refused`
+/// `{EmptyCompletion}`, never `Generated{answer:""}` (`service.py:80-82`). One
+/// indexed document so retrieval is non-empty and the chat step is reached;
+/// the completion is whitespace only, which `mnema_rag::answer` reports as
+/// `Ok(None)`.
+#[test]
+fn ask_with_an_empty_completion_refuses_as_empty_completion() {
+    const KEY: &str = "test-key-ask-empty";
+    const BODY: &str = "quantum entanglement resonance";
+
+    let completion =
+        serde_json::json!({ "choices": [{ "message": { "content": "  \n " } }] }).to_string();
+    let server = MockServer::new(vec![Reply::ok(ASK_CREDITS), Reply::ok(&completion)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    set_key(state.clone(), KEY.into()).unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+
+    let webview = main_webview(&app);
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .unwrap();
+    state
+        .with_index(|db| Ok::<_, mnema_index::Error>(write_one_document(db, &"c".repeat(64), BODY)))
+        .unwrap();
+
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    assert_eq!(
+        answer["kind"],
+        json!("refused"),
+        "a blank completion is a refusal, not an empty answer: {answer}"
+    );
+    assert_eq!(
+        answer["reason"]["kind"],
+        json!("emptyCompletion"),
+        "{answer}"
+    );
+}
+
+/// Port of `ask.py:17` (`Field(max_length=2048)`): the query is capped at
+/// 2048 characters, not bytes — Python `str` length counts code points, so
+/// the probe repeats a two-byte character, catching a `len()` (bytes)
+/// confused for `chars().count()` (chars). The guard runs before
+/// `read_arms`/`retrieve` (spec §12), so a minimal app — no index open, no
+/// provider configured — is enough: an over-long query must never reach
+/// either. The at-limit half only needs the length rejection to be absent;
+/// it may still fail later on `IndexNotOpen`, since no index was opened.
+#[test]
+fn ask_rejects_a_query_longer_than_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let too_long = "я".repeat(2049); // 2049 chars, multi-byte on purpose
+    let error = call(&webview, "ask", json!({ "query": too_long }))
+        .expect_err("2049 characters must be rejected");
+    let message = error.as_str().unwrap().to_lowercase();
+    assert!(
+        message.contains("too long") || message.contains("2048"),
+        "unhelpful message: {error}"
+    );
+
+    // The boundary is inclusive: 2048 is allowed (does not error on length).
+    let at_limit = "я".repeat(2048);
+    let ok = call(&webview, "ask", json!({ "query": at_limit }));
+    assert!(
+        ok.is_ok() || !ok.unwrap_err().as_str().unwrap().contains("2048"),
+        "2048 chars must not be rejected for length"
+    );
+}
+
+/// The lower half of `ask.py:17`'s `Field(..., min_length=1, max_length=2048)`:
+/// a blank question is rejected before any retrieval. The server's `min_length=1`
+/// rejects only the empty string; we trim, so a whitespace-only question — as
+/// meaningless as an empty one — is rejected too. Why it matters beyond
+/// tidiness: with the content arm on, a blank query still reaches
+/// `resolve_content_query`, which sends an external, billable `/embeddings`
+/// request, and if that returns hits while chat is `Ready`, those passages go
+/// to `/chat/completions` — the D115 billable-request mechanism through the new
+/// `ask` caller. Here the content arm is on AND a chat model is set, so every
+/// reason retrieval and generation WOULD fire; a blank ask that makes no
+/// request past `set_key`'s `/credits` proves the guard runs first, not a
+/// missing precondition.
+#[test]
+fn ask_rejects_a_blank_query_before_any_retrieval() {
+    const KEY: &str = "test-key-ask-blank";
+    const MODEL: &str = "baai/bge-m3";
+    const DIM: usize = 1024;
+
+    // Only `set_key`'s `/credits` is queued — no reply for a query embed or a
+    // chat call, because the guard must return before either could be made. Any
+    // request past `/credits` is a surplus (599), which would fail the test.
+    let server = MockServer::new(vec![Reply::ok(ASK_CREDITS)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    set_key(state.clone(), KEY.into()).unwrap();
+    state
+        .with_index(|db| {
+            db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
+        })
+        .unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+
+    let webview = main_webview(&app);
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .expect("set_search_arms was rejected");
+
+    // Drain `set_key`'s own `/credits` so a later request read would be the ask's.
+    let credits = server.request();
+    assert!(
+        credits.contains("/credits"),
+        "the one setup request is the key check: {credits}"
+    );
+
+    for blank in ["", "   ", " \n\t "] {
+        let error = call(&webview, "ask", json!({ "query": blank }))
+            .expect_err("a blank question must be rejected");
+        assert!(
+            error.as_str().unwrap_or_default().contains("blank"),
+            "a blank question should be refused as blank; got {error}"
+        );
+    }
+
+    // The guard returned before retrieval on every blank: no billable query
+    // embed, no chat call.
+    assert!(
+        server.request_if_any().is_none(),
+        "a blank ask must make no request — no billable embed, no chat call"
     );
 }
 

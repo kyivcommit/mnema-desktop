@@ -15,6 +15,20 @@ use serde::{Serialize, Serializer};
 pub enum Error {
     #[error("the index is not open")]
     IndexNotOpen,
+    /// `ask`'s query is longer than the server accepts (`app/api/ask.py:17`,
+    /// `Field(max_length=2048)`). Carries the count and the limit and nothing
+    /// else — never the query text, which could be the sensitive part of what
+    /// somebody typed.
+    #[error("the question is too long: {chars} characters, the limit is {limit}")]
+    QueryTooLong { chars: usize, limit: usize },
+    /// `ask`'s query is blank — empty or whitespace only. The server's
+    /// `Field(..., min_length=1)` (`app/api/ask.py:17`) rejects the empty
+    /// string; trimming rejects a whitespace-only question too, since it is as
+    /// meaningless and would still send a billable query embed before being
+    /// found to answer nothing. No payload — there is nothing about a blank
+    /// question worth carrying, and the query text stays out of the log line.
+    #[error("the question is blank")]
+    QueryBlank,
     #[error("could not create the data directory {path}: {source}")]
     DataDir {
         path: String,
