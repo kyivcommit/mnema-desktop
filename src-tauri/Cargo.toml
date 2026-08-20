@@ -57,6 +57,11 @@ mnema-embed = { path = "../crates/mnema-embed" }
 # this graph — `mnema-index` and `mnema-provider` are both already here by
 # name — which `tests/dependency_boundary.rs` was re-run to confirm.
 mnema-search = { path = "../crates/mnema-search" }
+# The prompt-building crate: turns retrieved `Passage`s into the messages sent
+# to the provider (`mnema_rag::answer`). `bridge.rs` builds a `Passage` from
+# each `Hit` — that join is this crate's boundary, not `mnema-rag`'s, since
+# `mnema-rag` knows nothing about `Coordinate` or the database.
+mnema-rag = { path = "../crates/mnema-rag" }
 tauri = { version = "2.11", features = [] }
 tauri-plugin-single-instance = "2.4"
 tauri-plugin-dialog = "2"

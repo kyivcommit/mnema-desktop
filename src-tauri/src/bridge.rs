@@ -250,6 +250,32 @@ fn resolve_content_query(
     }
 }
 
+/// A retrieved [`Hit`] as a prompt [`Passage`]: the source text verbatim, and a
+/// meta line that is `relative_path` and the rendered locator joined by ` · `,
+/// each dropped when empty (spec §7.1). The join-non-empty is what keeps a
+/// document with no coordinate (`Coordinate::None`) from trailing a bare " · ",
+/// and a document with no path (`write.rs:76-80`) from leading one. The locator
+/// is the *same* `Coordinate::render` the citation UI shows, so the model reads
+/// what the person will.
+///
+/// `#[allow(dead_code)]`: the only caller is the `ask` command, landing in
+/// Task 5 (R5's own pattern, applied here too) — until then only the test
+/// below calls this, invisible to a non-test build. Removed once `ask` maps
+/// `hits.iter().map(passage_from_hit)`.
+#[allow(dead_code)]
+fn passage_from_hit(hit: &Hit) -> mnema_rag::Passage {
+    let locator = hit.coordinate.render();
+    let meta = [hit.relative_path.as_deref().unwrap_or(""), locator.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    mnema_rag::Passage {
+        text: hit.text.clone(),
+        meta,
+    }
+}
+
 /// The two arm rows, read the one way `search` and `ask` must agree on.
 /// `meta`'s own rule (`arm_is_on`, D106) decides on/off.
 fn read_arms(state: &State<'_, AppState>) -> Result<Arms, Error> {
@@ -571,5 +597,48 @@ mod tests {
                 reachable: 9,
             }
         ));
+    }
+
+    /// The test moved from PR 3 (D121): `Coordinate::None` must not leave a
+    /// dangling `" · "`, and a missing path must not lead one — join-non-empty
+    /// is what `passage_from_hit` exists to guarantee.
+    #[test]
+    fn a_passage_joins_the_path_and_the_locator_and_never_dangles_the_separator() {
+        use mnema_core::Coordinate;
+
+        let both = Hit {
+            chunk_id: 1,
+            text: "body".into(),
+            relative_path: Some("notes/a.txt".into()),
+            section_title: None,
+            coordinate: Coordinate::Page { number: 3 },
+        };
+        assert_eq!(passage_from_hit(&both).meta, "notes/a.txt · с. 3");
+
+        // A document with no verifiable coordinate: the path alone, no trailing
+        // " · " (the dangling-separator bug join-non-empty exists to prevent).
+        let no_coord = Hit {
+            coordinate: Coordinate::None,
+            ..both.clone()
+        };
+        assert_eq!(passage_from_hit(&no_coord).meta, "notes/a.txt");
+
+        // No path (write.rs:76-80), a real coordinate: the locator alone.
+        let no_path = Hit {
+            relative_path: None,
+            ..both.clone()
+        };
+        assert_eq!(passage_from_hit(&no_path).meta, "с. 3");
+
+        // Neither: an empty meta, which build_messages renders as a bare [N].
+        let neither = Hit {
+            relative_path: None,
+            coordinate: Coordinate::None,
+            ..both.clone()
+        };
+        assert_eq!(passage_from_hit(&neither).meta, "");
+
+        // text is carried verbatim.
+        assert_eq!(passage_from_hit(&both).text, "body");
     }
 }
