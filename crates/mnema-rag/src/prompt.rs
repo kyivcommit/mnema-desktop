@@ -139,4 +139,48 @@ mod tests {
         assert_eq!(messages[1].role, MessageRole::User);
         assert_eq!(messages[0].content, EXPECTED_SYSTEM_AUTO);
     }
+
+    fn two_passages() -> Vec<Passage> {
+        vec![
+            Passage {
+                text: "The sky is blue.".into(),
+                meta: "docs/sky.txt".into(),
+            },
+            Passage {
+                text: "Grass is green.".into(),
+                meta: "docs/grass.md · Розділ 2".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_user_turn_numbers_sources_with_meta_then_the_question_and_reminder() {
+        let messages = build_messages("What colour is the sky?", &two_passages(), None);
+        let expected = concat!(
+            "Sources:\n\n",
+            "[1] (docs/sky.txt)\nThe sky is blue.\n\n",
+            "[2] (docs/grass.md · Розділ 2)\nGrass is green.\n\n",
+            "Question: What colour is the sky?\n\n",
+            "Write your entire answer in the same language as the Question above.",
+        );
+        assert_eq!(messages[1].content, expected);
+    }
+
+    #[test]
+    fn a_source_with_empty_meta_gets_a_bare_bracket_header() {
+        let passages = vec![Passage {
+            text: "Bare.".into(),
+            meta: String::new(),
+        }];
+        let messages = build_messages("q?", &passages, None);
+        assert!(
+            messages[1].content.contains("[1]\nBare."),
+            "empty meta must yield `[1]` with no parens: {}",
+            messages[1].content
+        );
+        assert!(
+            !messages[1].content.contains("[1] ("),
+            "no empty parens for a bare header"
+        );
+    }
 }
