@@ -106,6 +106,36 @@ let indexReadable = false;
 // together would make either wait on the other's redraw for no reason.
 let searchInFlight = false;
 
+// The mirror of `syncSearchGate`, for the other direction of the barrier (Codex
+// round 6): a config write already holds the search submit shut; symmetrically,
+// an in-flight search must hold every privacy-affecting control shut, or the
+// live disclosure can flip to a false local-only promise while `search` is still
+// sending the question it captured at submit (`bridge.rs:278-302`). One predicate
+// so "a search is out" — and any future reason — lives in one formula, not in a
+// per-control `disabled` a later control silently skips (the exact failure
+// `main.js:70-76` records, and the reason this is round 6 of the same class).
+const configFrozenBySearch = () => searchInFlight;
+// The single writer of these controls' `disabled`. None of them writes `disabled`
+// anywhere else today; if `drawSettings`/a role fill ever does, OR this in
+// (`... || configFrozenBySearch()`) or call this last in that redraw. The arm
+// checkboxes are NOT here — they have their own sole writer, `drawArmState`
+// (below). `discard-vectors` is frozen independently of its `hidden` (a
+// background read can un-hide it mid-search): visible but untouchable.
+const syncConfigControls = () => {
+  const frozen = configFrozenBySearch();
+  for (const id of [
+    "key",
+    "key-submit",
+    "forget",
+    "embedding-model",
+    "discard-vectors",
+    "rerank-model",
+    "chat-model",
+  ]) {
+    el(id).disabled = frozen;
+  }
+};
+
 // The one place that answers "may a search be submitted now" (§3.1) — every
 // other line in this file that used to write `#search-submit`'s `disabled`
 // itself now reports a fact to one of the four variables above and calls
@@ -121,6 +151,11 @@ const syncSearchGate = () => {
 // included — that models the element without parsing the markup's own
 // attributes.
 syncSearchGate();
+// Same reasoning, other direction: a freshly-mounted window (and this file's
+// own test harness) must start with the config controls in a defined
+// `disabled=false` state, not whatever `undefined` the DOM would otherwise
+// leave them at before the first `searchInFlight` transition ever runs.
+syncConfigControls();
 
 // Wraps a config-mutating handler's **whole** body — its `invoke` and
 // whatever redraw follows it, not the `invoke` alone. The disclosure this
@@ -554,6 +589,8 @@ el("search-form").addEventListener("submit", async (event) => {
   const issue = searchAsked;
   searchInFlight = true;
   syncSearchGate();
+  drawArmState();
+  syncConfigControls();
   try {
     const answer = await search(query);
     // An answer older than one already on screen has nothing to add and
@@ -602,9 +639,15 @@ el("search-form").addEventListener("submit", async (event) => {
     el("content-arm-state").textContent = "";
   } finally {
     // Reopens on both the success and the failure path above — round 3's
-    // own bug (F3) was a handler that only reopened on one of them.
+    // own bug (F3) was a handler that only reopened on one of them. Round 6
+    // (Edit 3): the same `finally` is what re-enables the arm checkboxes
+    // and the rest of the frozen config controls on both paths too — a
+    // one-directional reopen here would repeat F3's own mistake one level
+    // up, this time for the barrier's other direction.
     searchInFlight = false;
     syncSearchGate();
+    drawArmState();
+    syncConfigControls();
   }
 });
 
@@ -654,10 +697,10 @@ const drawArmState = () => {
     modelChosen: armModelChosen,
   });
   el("arm-text").checked = state.text.checked;
-  el("arm-text").disabled = state.text.disabled || armWritesInFlight > 0;
+  el("arm-text").disabled = state.text.disabled || armWritesInFlight > 0 || searchInFlight;
   el("arm-text-note").textContent = state.text.note;
   el("arm-content").checked = state.content.checked;
-  el("arm-content").disabled = state.content.disabled || armWritesInFlight > 0;
+  el("arm-content").disabled = state.content.disabled || armWritesInFlight > 0 || searchInFlight;
   el("arm-content-note").textContent = state.content.note;
   return state;
 };

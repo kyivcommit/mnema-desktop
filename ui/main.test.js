@@ -26,7 +26,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { asSentence, LEAVES_UNKNOWN_INDEX } from "./render.js";
+import { asSentence, LEAVES_EVERYTHING, LEAVES_UNKNOWN_INDEX } from "./render.js";
 
 // A deferred promise, which is the whole technique: an IPC call the test can
 // leave hanging until the thing that must happen first has happened.
@@ -2512,5 +2512,242 @@ test("a settled, failed search reopens the gate for the next submit (U-3)", asyn
   );
   second.resolve(emptyAnswer());
   await submitB;
+  await settleEverything();
+});
+
+// Codex round 6 (P1, `main.js:660`): the barrier `searchInFlight` builds was
+// one-directional — it disabled only `#search-submit`, and every
+// privacy-affecting control (the two arm checkboxes, the key form, both
+// model pickers, discard-vectors) stayed live while `search` was still
+// embedding/sending the query it captured at submit (`bridge.rs:278-302`).
+// So a toggle mid-search could flip `#disclosure` to a false local-only
+// promise over a question that was, in fact, still leaving the machine.
+// This is the 4th P1 of this class in this file's history (`main.js:70-76`
+// records the 3rd), so the fix is one predicate every privacy control reads,
+// not a per-control patch — and this test enumerates that control set by
+// name rather than asserting a summary, because the set is open (memory
+// "Definition by enumeration") and a one-directional assertion is satisfied
+// by zero (memory "Assert both directions"). Mirrors the enumerating shape
+// of "the search form's submit is disabled while an arm write is in flight
+// ..." above (`main.test.js:987`), one level up: every control, not one.
+test("every privacy control is frozen while a search is in flight, and re-enabled once it settles", async () => {
+  const contentArmed = () => ({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  const w = await boot({ model_settings: () => contentArmed() });
+
+  const frozenIds = [
+    "arm-text",
+    "arm-content",
+    "key",
+    "key-submit",
+    "forget",
+    "embedding-model",
+    "discard-vectors",
+    "rerank-model",
+    "chat-model",
+  ];
+
+  for (const id of frozenIds) {
+    assert.equal(w.el(id).disabled, false, `premise: ${id} starts enabled`);
+  }
+  assert.equal(
+    w.el("disclosure").textContent,
+    asSentence(LEAVES_EVERYTHING),
+    "premise: the content-armed boot promised everything leaves",
+  );
+
+  const s = w.hold("search");
+  w.el("query").value = "q";
+  const submit = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  for (const id of frozenIds) {
+    assert.equal(w.el(id).disabled, true, `${id} stayed clickable while a search was in flight`);
+  }
+  assert.equal(
+    w.el("disclosure").textContent,
+    asSentence(LEAVES_EVERYTHING),
+    "the disclosure sentence itself changed while nothing in the DB did",
+  );
+
+  s.resolve({
+    hits: [],
+    text: { kind: "answered", matched: 0 },
+    content: { kind: "answered", matched: 0, embedded: 0, total: 0, reachable: 0 },
+  });
+  await submit;
+  await settleEverything();
+
+  for (const id of frozenIds) {
+    assert.equal(
+      w.el(id).disabled,
+      false,
+      `${id} was left disabled after a successful search settled`,
+    );
+  }
+});
+
+// The mirror of the test above, on the failure path — round 3's own bug
+// (F3) lived exactly here, in a handler that reopened correctly on success
+// and not on rejection. The `finally` block that clears `searchInFlight`
+// already covers both paths (`main.js:603-608`), so this pins that the
+// redraw calls added there (Edit 3) inherited that coverage rather than
+// being wired only to the success branch.
+test("every privacy control is re-enabled once an in-flight search fails, not only when it succeeds", async () => {
+  const contentArmed = () => ({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  const w = await boot({ model_settings: () => contentArmed() });
+
+  const frozenIds = [
+    "arm-text",
+    "arm-content",
+    "key",
+    "key-submit",
+    "forget",
+    "embedding-model",
+    "discard-vectors",
+    "rerank-model",
+    "chat-model",
+  ];
+
+  const s = w.hold("search");
+  w.el("query").value = "q";
+  const submit = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  for (const id of frozenIds) {
+    assert.equal(w.el(id).disabled, true, `premise: ${id} froze while the search was in flight`);
+  }
+
+  s.reject(new Error("net"));
+  await submit;
+  await settleEverything();
+
+  for (const id of frozenIds) {
+    assert.equal(
+      w.el(id).disabled,
+      false,
+      `${id} was left disabled after a failed search settled (finally)`,
+    );
+  }
+});
+
+// The adversarial half (design §3.2/§3.3): freezing the controls stops a
+// *click* from reaching the store, but it does not stop a background
+// `model_settings` read from landing mid-search and re-running
+// `drawArmStateAndDisclosure`. If `searchInFlight` were a one-shot write at
+// the submit site instead of a term inside `drawArmState`'s own formula
+// (Edit 2), that redraw would silently re-open the checkboxes — the exact
+// "widened back by an unrelated redraw" bug `main.js:70-76` already
+// records, one level up. The read here carries the *same* disposition the
+// search itself captured, which by §3.2 is what every such read must carry
+// while nothing frozen can write — so the checkboxes must stay shut and the
+// sentence must not move. A second variant lands a transient `unreadable`
+// read instead: the sentence must fail closed to `LEAVES_UNKNOWN_INDEX`,
+// never back to a local-only promise (§3.3).
+test("a background settings read landing mid-search does not thaw the freeze or flip the disclosure", async () => {
+  const contentArmed = () => ({
+    key: { kind: "present" },
+    platform: "mac",
+    index: {
+      kind: "read",
+      activeSpace: 1,
+      embeddedChunks: 8,
+      totalChunks: 9,
+      failedChunks: 0,
+      embeddedChunksEverywhere: 8,
+      embeddingModel: "vendor/m",
+      rerankModel: null,
+      chatModel: null,
+      searchTextArm: true,
+      searchContentArm: true,
+    },
+  });
+  const w = await boot({ model_settings: () => contentArmed() });
+
+  const s = w.hold("search");
+  w.el("query").value = "q";
+  const submit = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(w.el("arm-text").disabled, true, "premise: the search froze the text arm");
+  assert.equal(w.el("arm-content").disabled, true, "premise: the search froze the content arm");
+
+  // Issued from `forget`, not from the submit above — the same idiom as "a
+  // settings read issued before an arm write does not revert it ..."
+  // (`main.test.js:937`): hold the read, trigger a reachable settings
+  // action, then resolve it once the assertions below are ready for it.
+  const read = w.hold("model_settings");
+  await w.press("forget");
+  read.resolve(contentArmed());
+  await settleEverything();
+
+  assert.equal(
+    w.el("arm-text").disabled,
+    true,
+    "a background settings redraw mid-search re-opened the text arm",
+  );
+  assert.equal(
+    w.el("arm-content").disabled,
+    true,
+    "a background settings redraw mid-search re-opened the content arm",
+  );
+  assert.equal(
+    w.el("disclosure").textContent,
+    asSentence(LEAVES_EVERYTHING),
+    "a background settings redraw carrying the same disposition still moved the disclosure",
+  );
+
+  const unreadableRead = w.hold("model_settings");
+  await w.press("forget");
+  unreadableRead.resolve({
+    key: { kind: "present" },
+    platform: "mac",
+    index: { kind: "unreadable", cause: "readFailed", reason: "boom" },
+  });
+  await settleEverything();
+
+  assert.equal(
+    w.el("disclosure").textContent,
+    asSentence(LEAVES_UNKNOWN_INDEX),
+    "a transient unreadable read mid-search did not fail closed to unknown",
+  );
+
+  s.resolve({
+    hits: [],
+    text: { kind: "answered", matched: 0 },
+    content: { kind: "answered", matched: 0, embedded: 0, total: 0, reachable: 0 },
+  });
+  await submit;
   await settleEverything();
 });
