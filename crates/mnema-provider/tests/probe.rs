@@ -2013,9 +2013,10 @@ fn the_chat_call_posts_to_chat_completions_with_the_key_only_in_a_header() {
         "the chat call is a POST to /chat/completions: {request_line}"
     );
     assert!(
-        request
-            .to_ascii_lowercase()
-            .contains(&format!("authorization: bearer {}", KEY.to_ascii_lowercase())),
+        request.to_ascii_lowercase().contains(&format!(
+            "authorization: bearer {}",
+            KEY.to_ascii_lowercase()
+        )),
         "the key must travel in the header: {request}"
     );
     assert!(
@@ -2101,11 +2102,13 @@ fn a_200_with_an_error_envelope_keeps_the_providers_sentence() {
     let server = MockServer::new(vec![Reply::ok(
         r#"{"error":{"message":"quota exceeded for this account"}}"#,
     )]);
-    let err =
-        complete(server.base(), KEY, "m", &probe_messages()).expect_err("an error, not a completion");
+    let err = complete(server.base(), KEY, "m", &probe_messages())
+        .expect_err("an error, not a completion");
     match err {
         Error::ErrorInsteadOfCompletion { reason } => assert!(
-            reason.to_string().contains("quota exceeded for this account"),
+            reason
+                .to_string()
+                .contains("quota exceeded for this account"),
             "the provider's own sentence must survive: {reason}"
         ),
         other => panic!("expected ErrorInsteadOfCompletion, got {other:?}"),
