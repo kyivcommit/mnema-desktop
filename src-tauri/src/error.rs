@@ -15,6 +15,12 @@ use serde::{Serialize, Serializer};
 pub enum Error {
     #[error("the index is not open")]
     IndexNotOpen,
+    /// `ask`'s query is longer than the server accepts (`app/api/ask.py:17`,
+    /// `Field(max_length=2048)`). Carries the count and the limit and nothing
+    /// else — never the query text, which could be the sensitive part of what
+    /// somebody typed.
+    #[error("the question is too long: {chars} characters, the limit is {limit}")]
+    QueryTooLong { chars: usize, limit: usize },
     #[error("could not create the data directory {path}: {source}")]
     DataDir {
         path: String,

@@ -1595,6 +1595,38 @@ fn ask_with_an_empty_completion_refuses_as_empty_completion() {
     );
 }
 
+/// Port of `ask.py:17` (`Field(max_length=2048)`): the query is capped at
+/// 2048 characters, not bytes — Python `str` length counts code points, so
+/// the probe repeats a two-byte character, catching a `len()` (bytes)
+/// confused for `chars().count()` (chars). The guard runs before
+/// `read_arms`/`retrieve` (spec §12), so a minimal app — no index open, no
+/// provider configured — is enough: an over-long query must never reach
+/// either. The at-limit half only needs the length rejection to be absent;
+/// it may still fail later on `IndexNotOpen`, since no index was opened.
+#[test]
+fn ask_rejects_a_query_longer_than_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let too_long = "я".repeat(2049); // 2049 chars, multi-byte on purpose
+    let error = call(&webview, "ask", json!({ "query": too_long }))
+        .expect_err("2049 characters must be rejected");
+    let message = error.as_str().unwrap().to_lowercase();
+    assert!(
+        message.contains("too long") || message.contains("2048"),
+        "unhelpful message: {error}"
+    );
+
+    // The boundary is inclusive: 2048 is allowed (does not error on length).
+    let at_limit = "я".repeat(2048);
+    let ok = call(&webview, "ask", json!({ "query": at_limit }));
+    assert!(
+        ok.is_ok() || !ok.unwrap_err().as_str().unwrap().contains("2048"),
+        "2048 chars must not be rejected for length"
+    );
+}
+
 /// The channel a real webview passes is a string of this shape. Nothing
 /// receives the messages here — `run_walk_to_completion` above is what
 /// proves the walk itself works, by calling the command function directly so

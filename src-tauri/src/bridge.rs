@@ -474,19 +474,35 @@ pub enum AskAnswer {
 /// `top_k = Field(8)`), passed to [`retrieve`] as its `limit`.
 const ASK_TOP_K: i64 = 8;
 
+/// The longest query `ask` accepts (port `app/api/ask.py:17`,
+/// `Field(max_length=2048)`). Characters, not bytes — Python `str` length
+/// counts code points, and so does `query.chars().count()` below.
+const MAX_ASK_QUERY: usize = 2048;
+
 /// Answer a question over the index with cited sources (spec §4). Retrieval is
 /// the shared [`retrieve`]; generation runs iff [`ChatReadiness::Ready`] (the
 /// private gate, spec §7.2). Off the main thread for the reason [`search`]
 /// gives.
 ///
-/// The four branches, in order: any non-`Ready` readiness answers with the
-/// citations retrieval already found ([`AskAnswer::CitationsOnly`]) and never
-/// reaches the chat model — the gate. `Ready` with no hits refuses before
-/// calling chat (`NoCandidates`, `service.py:66-68`); a `Ready` call the model
-/// answers blankly refuses after (`EmptyCompletion`, `service.py:80-82`);
-/// otherwise the anchors the model wrote become citations.
+/// The length guard runs first, before `read_arms` or `retrieve`, so an
+/// over-long query is rejected before any index or network work (resolves
+/// spec §12). Then the four branches, in order: any non-`Ready` readiness
+/// answers with the citations retrieval already found
+/// ([`AskAnswer::CitationsOnly`]) and never reaches the chat model — the
+/// gate. `Ready` with no hits refuses before calling chat (`NoCandidates`,
+/// `service.py:66-68`); a `Ready` call the model answers blankly refuses
+/// after (`EmptyCompletion`, `service.py:80-82`); otherwise the anchors the
+/// model wrote become citations.
 #[tauri::command(async)]
 pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error> {
+    let chars = query.chars().count();
+    if chars > MAX_ASK_QUERY {
+        return Err(Error::QueryTooLong {
+            chars,
+            limit: MAX_ASK_QUERY,
+        });
+    }
+
     let arms = read_arms(&state)?;
     let (hits, text, content) = retrieve(&state, &query, arms, ASK_TOP_K)?;
 
