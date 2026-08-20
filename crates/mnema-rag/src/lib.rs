@@ -4,4 +4,4 @@
 
 mod anchors;
 
-pub use anchors::resolve_anchors;
+pub use anchors::{extract_anchor_ids, resolve_anchors};

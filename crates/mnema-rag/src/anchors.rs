@@ -31,6 +31,22 @@ fn canonicalize(text: &str) -> String {
     SHORTHAND_RE.replace_all(text, "<c>${1}</c>").into_owned()
 }
 
+/// Distinct anchor ordinals in first-occurrence order, no range filtering
+/// (`app/rag/anchors.py:34-42`). Used by the deferred verify cycle, not by the
+/// answer seam.
+pub fn extract_anchor_ids(text: &str) -> Vec<usize> {
+    let text = canonicalize(text);
+    let mut seen: Vec<usize> = Vec::new();
+    for caps in ANCHOR_RE.captures_iter(&text) {
+        if let Ok(k) = caps[1].parse::<usize>()
+            && !seen.contains(&k)
+        {
+            seen.push(k);
+        }
+    }
+    seen
+}
+
 /// Strip out-of-range anchors; return the cleaned text and the valid ordinals in
 /// first-occurrence order. An ordinal is valid iff `1 <= N <= n_candidates`;
 /// invalid (hallucinated or out of range) anchors are removed from the text so
@@ -100,5 +116,10 @@ mod tests {
         let (clean, ids) = resolve_anchors("x<c>1</c>y", 0);
         assert_eq!(clean, "xy");
         assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn extract_returns_distinct_ids_in_first_occurrence_order() {
+        assert_eq!(extract_anchor_ids("<c>3</c><c>1</c><c>3</c>"), vec![3, 1]);
     }
 }
