@@ -484,8 +484,11 @@ const MAX_ASK_QUERY: usize = 2048;
 /// private gate, spec §7.2). Off the main thread for the reason [`search`]
 /// gives.
 ///
-/// The length guard runs first, before `read_arms` or `retrieve`, so an
-/// over-long query is rejected before any index or network work (resolves
+/// The query guards run first, before `read_arms` or `retrieve`, so a blank
+/// or over-long query is rejected before any index or network work (both
+/// halves of `ask.py:17`'s `min_length=1, max_length=2048`; the blank guard
+/// keeps a meaningless question from reaching the billable query embed —
+/// the D115 mechanism through this caller — and the length guard resolves
 /// spec §12). Then the four branches, in order: any non-`Ready` readiness
 /// answers with the citations retrieval already found
 /// ([`AskAnswer::CitationsOnly`]) and never reaches the chat model — the
@@ -495,6 +498,9 @@ const MAX_ASK_QUERY: usize = 2048;
 /// model wrote become citations.
 #[tauri::command(async)]
 pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error> {
+    if query.trim().is_empty() {
+        return Err(Error::QueryBlank);
+    }
     let chars = query.chars().count();
     if chars > MAX_ASK_QUERY {
         return Err(Error::QueryTooLong {

@@ -1640,6 +1640,72 @@ fn ask_rejects_a_query_longer_than_the_limit() {
     );
 }
 
+/// The lower half of `ask.py:17`'s `Field(..., min_length=1, max_length=2048)`:
+/// a blank question is rejected before any retrieval. The server's `min_length=1`
+/// rejects only the empty string; we trim, so a whitespace-only question — as
+/// meaningless as an empty one — is rejected too. Why it matters beyond
+/// tidiness: with the content arm on, a blank query still reaches
+/// `resolve_content_query`, which sends an external, billable `/embeddings`
+/// request, and if that returns hits while chat is `Ready`, those passages go
+/// to `/chat/completions` — the D115 billable-request mechanism through the new
+/// `ask` caller. Here the content arm is on AND a chat model is set, so every
+/// reason retrieval and generation WOULD fire; a blank ask that makes no
+/// request past `set_key`'s `/credits` proves the guard runs first, not a
+/// missing precondition.
+#[test]
+fn ask_rejects_a_blank_query_before_any_retrieval() {
+    const KEY: &str = "test-key-ask-blank";
+    const MODEL: &str = "baai/bge-m3";
+    const DIM: usize = 1024;
+
+    // Only `set_key`'s `/credits` is queued — no reply for a query embed or a
+    // chat call, because the guard must return before either could be made. Any
+    // request past `/credits` is a surplus (599), which would fail the test.
+    let server = MockServer::new(vec![Reply::ok(ASK_CREDITS)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    set_key(state.clone(), KEY.into()).unwrap();
+    state
+        .with_index(|db| {
+            db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
+        })
+        .unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+
+    let webview = main_webview(&app);
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .expect("set_search_arms was rejected");
+
+    // Drain `set_key`'s own `/credits` so a later request read would be the ask's.
+    let credits = server.request();
+    assert!(
+        credits.contains("/credits"),
+        "the one setup request is the key check: {credits}"
+    );
+
+    for blank in ["", "   ", " \n\t "] {
+        let error = call(&webview, "ask", json!({ "query": blank }))
+            .expect_err("a blank question must be rejected");
+        assert!(
+            error.as_str().unwrap_or_default().contains("blank"),
+            "a blank question should be refused as blank; got {error}"
+        );
+    }
+
+    // The guard returned before retrieval on every blank: no billable query
+    // embed, no chat call.
+    assert!(
+        server.request_if_any().is_none(),
+        "a blank ask must make no request — no billable embed, no chat call"
+    );
+}
+
 /// The channel a real webview passes is a string of this shape. Nothing
 /// receives the messages here — `run_walk_to_completion` above is what
 /// proves the walk itself works, by calling the command function directly so
