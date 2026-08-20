@@ -6,6 +6,7 @@
 //! base URL rather than as another code path.
 
 mod catalogue;
+mod chat;
 mod http;
 mod probe;
 
@@ -13,6 +14,7 @@ pub use catalogue::{
     Catalogue, InputLimit, MIN_CONTEXT_TOKENS, ModelEntry, Price, RecordId, Refusal, Role,
     UnreadableRecord, models_from_json,
 };
+pub use chat::{Message, MessageRole};
 pub use probe::{
     Balance, EmbeddingCheck, KeyCheck, ProviderMessage, SanitisedText, check_embedding_model,
     check_key, embed,
