@@ -2156,3 +2156,60 @@ fn a_refused_key_on_the_chat_call_does_not_leak_it() {
     let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("refused");
     assert!(matches!(err, Error::Unauthorised { .. }), "got {err:?}");
 }
+
+/// The same scan that runs over `check_key` and `check_embedding_model`, now
+/// over the third call that renders a provider's body — a revoked key echoed
+/// back inside a 401 message, through `attach_reason`. `assert_a_defence_fired`
+/// is the positive half: not "the key is absent" (which a call that rendered
+/// nothing satisfies) but "the defence I am testing is the one that acted".
+#[test]
+fn no_transformation_of_the_key_reaches_a_chat_failure() {
+    for (label, transformed, needle) in key_transformations(KEY) {
+        let body = format!(r#"{{"error":{{"message":"invalid credential: {transformed}"}}}}"#);
+        let server = MockServer::new(vec![Reply::status(401, &body)]);
+        let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("must fail");
+        let rendered = format!("{err} / {err:?}");
+        let visually = strip_for_test_oracle(&rendered).to_ascii_lowercase();
+        assert!(
+            !visually.contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak from the chat call, even to a reader who \
+             cannot see an invisible character: {rendered}"
+        );
+        assert_a_defence_fired(label, &rendered);
+    }
+}
+
+/// The 200 path renders provider bytes too (`ErrorInsteadOfCompletion`) — the
+/// same second place a body becomes rendered text that
+/// `unreadable_embeddings_answer` is, guarded one call over by
+/// `no_transformation_of_the_key_reaches_a_message_through_a_200_body`. A scan
+/// that only ran failure statuses would miss it. The status is 200, which is
+/// what makes this a different path from the 401 scan above, not a second
+/// spelling of it — and `assert_a_defence_is_visible_to_a_reader` is the
+/// stricter oracle that path needs, keyed on the rendered sentence rather than
+/// the `Debug` word `Withheld` a derived `Debug` prints regardless.
+#[test]
+fn no_transformation_of_the_key_reaches_a_chat_200_error_envelope() {
+    for (label, transformed, needle) in key_transformations(KEY) {
+        let body = format!(r#"{{"error":{{"message":"quota exhausted for {transformed}"}}}}"#);
+        let server = MockServer::new(vec![Reply::ok(&body)]);
+        let err = complete(server.base(), KEY, "m", &probe_messages())
+            .expect_err("a 200 error envelope is still a failure");
+        let sentence = err.to_string();
+        assert!(
+            !strip_for_test_oracle(&sentence)
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak into the sentence a person reads on a 200: \
+             {sentence}"
+        );
+        let debug = format!("{err:?}");
+        assert!(
+            !strip_for_test_oracle(&debug)
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak into the Debug form either: {debug}"
+        );
+        assert_a_defence_is_visible_to_a_reader(label, &sentence);
+    }
+}
