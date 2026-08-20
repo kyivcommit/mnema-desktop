@@ -276,6 +276,50 @@ fn passage_from_hit(hit: &Hit) -> mnema_rag::Passage {
     }
 }
 
+/// Whether the chat step may run, read from `meta` and the credential store the
+/// way [`ContentArmReport`] is (spec §6). Not `Serialize` and not `Debug`: the
+/// window never sees this — it sees [`AskAnswer`] — and `Ready` carries the key
+/// for the immediate `complete` call, which must not reach a log line.
+///
+/// `#[allow(dead_code)]` (R5, as `passage_from_hit` above): the only caller is
+/// the `ask` command, landing in Task 5 — nothing reads a field until then. The
+/// allow sits on *both* the enum and its `chat_readiness` below because two
+/// distinct dead-code sub-lints fire, attributed to two items: the enum's here
+/// covers `Ready`'s `model`/`key` "never read" (no code destructures the value
+/// until Task 5's `let ChatReadiness::Ready { .. }`), and the function's covers
+/// its own "never used". Both are removed once `ask` consumes the gate.
+#[allow(dead_code)]
+enum ChatReadiness {
+    /// `META_CHAT_MODEL` absent, empty, or whitespace only.
+    NoModel,
+    /// A model is set but no key has been entered (v1 OpenRouter needs one).
+    NoKey,
+    /// A model is set but the credential store could not be read.
+    KeyUnreadable,
+    /// A model and a key: the only state that opens the generation branch.
+    Ready { model: String, key: String },
+}
+
+/// The gate. `?` still stops the whole command on a poisoned or unopened index
+/// (as every command does); `NoKey`/`KeyUnreadable` become states, not errors,
+/// so a missing key answers with citations rather than failing.
+///
+/// `#[allow(dead_code)]`: see the enum above for why the allow is on both — this
+/// one silences "function never used" until Task 5's `ask` calls it.
+#[allow(dead_code)]
+fn chat_readiness(state: &State<'_, AppState>) -> Result<ChatReadiness, Error> {
+    let model = state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL))?;
+    let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
+        return Ok(ChatReadiness::NoModel);
+    };
+    match crate::models::key(state) {
+        Ok(key) => Ok(ChatReadiness::Ready { model, key }),
+        Err(Error::NoKey) => Ok(ChatReadiness::NoKey),
+        Err(Error::Secrets(_)) => Ok(ChatReadiness::KeyUnreadable),
+        Err(e) => Err(e),
+    }
+}
+
 /// The two arm rows, read the one way `search` and `ask` must agree on.
 /// `meta`'s own rule (`arm_is_on`, D106) decides on/off.
 fn read_arms(state: &State<'_, AppState>) -> Result<Arms, Error> {
