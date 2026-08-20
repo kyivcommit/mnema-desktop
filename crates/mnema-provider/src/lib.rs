@@ -6,6 +6,7 @@
 //! base URL rather than as another code path.
 
 mod catalogue;
+mod chat;
 mod http;
 mod probe;
 
@@ -13,6 +14,7 @@ pub use catalogue::{
     Catalogue, InputLimit, MIN_CONTEXT_TOKENS, ModelEntry, Price, RecordId, Refusal, Role,
     UnreadableRecord, models_from_json,
 };
+pub use chat::{Message, MessageRole, complete};
 pub use probe::{
     Balance, EmbeddingCheck, KeyCheck, ProviderMessage, SanitisedText, check_embedding_model,
     check_key, embed,
@@ -288,6 +290,15 @@ pub enum Error {
     /// that was true about it all along.
     #[error("the provider answered 200 with an error instead of embeddings: {reason}")]
     ErrorInsteadOfEmbeddings { reason: ProviderMessage },
+    /// A 200 whose body is the provider's own error envelope, not a completion
+    /// — the chat mirror of `ErrorInsteadOfEmbeddings`. A gateway answering
+    /// `200` with `{"error":{"message":"quota exceeded"}}` used to read as
+    /// `Malformed`'s generic "wrong shape", throwing away the one sentence that
+    /// says what to do. `reason` is not an `Option`: this variant exists
+    /// *because* a message was found and survived sanitising; a 200 with no
+    /// readable message stays `Malformed`.
+    #[error("the provider answered 200 with an error instead of a completion: {reason}")]
+    ErrorInsteadOfCompletion { reason: ProviderMessage },
     /// The status was read successfully, but reading the rest of the
     /// response failed — kept apart from `Transport`, which means the
     /// opposite: no answer was ever read at all. `detail` is `ureq`'s own

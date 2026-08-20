@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use mnema_mock_provider::{MockServer, Reply, two_vectors};
 use mnema_provider::{
-    Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_embedding_model, check_key, embed,
-    list_models,
+    Balance, Error, MIN_CONTEXT_TOKENS, Refusal, Role, check_embedding_model, check_key, complete,
+    embed, list_models,
 };
 use unicode_general_category::{GeneralCategory, get_general_category};
 
@@ -1961,4 +1961,272 @@ fn no_transformation_of_the_key_reaches_a_message_through_embeds_200_body() {
         );
         assert_a_defence_is_visible_to_a_reader(label, &sentence);
     }
+}
+
+// --- complete (chat) ---------------------------------------------------
+//
+// PR 2: the chat-completions call (spec §PR 2). `probe`'s tests above
+// exercise the two entry checks; these exercise generation — the request it
+// builds, the text it reads back, and every way a chat answer can fail
+// without the key ever reaching a message.
+
+/// The two messages a real call carries — a system rule and a user question —
+/// built the way `build_messages` (PR 3) will, so these tests exercise the
+/// shape `complete` actually sends.
+fn probe_messages() -> Vec<mnema_provider::Message> {
+    use mnema_provider::{Message, MessageRole};
+    vec![
+        Message {
+            role: MessageRole::System,
+            content: "answer with citations".into(),
+        },
+        Message {
+            role: MessageRole::User,
+            content: "what did the report say?".into(),
+        },
+    ]
+}
+
+#[test]
+fn a_completion_comes_back_as_its_text() {
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"choices":[{"message":{"content":"Rivers rise. <c>1</c>"}}]}"#,
+    )]);
+    let answer = complete(server.base(), KEY, "vendor/chat-model", &probe_messages())
+        .expect("a well-formed completion");
+    assert_eq!(
+        answer, "Rivers rise. <c>1</c>",
+        "complete returns the model's text verbatim — anchors and all — for mnema-rag to resolve"
+    );
+}
+
+#[test]
+fn the_chat_call_posts_to_chat_completions_with_the_key_only_in_a_header() {
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"choices":[{"message":{"content":"ok"}}]}"#,
+    )]);
+    complete(server.base(), KEY, "vendor/chat-model", &probe_messages()).expect("usable");
+    let request = server.request();
+    let request_line = request.lines().next().unwrap_or_default();
+    assert!(
+        request_line.starts_with("POST /chat/completions "),
+        "the chat call is a POST to /chat/completions: {request_line}"
+    );
+    assert!(
+        request.to_ascii_lowercase().contains(&format!(
+            "authorization: bearer {}",
+            KEY.to_ascii_lowercase()
+        )),
+        "the key must travel in the header: {request}"
+    );
+    assert!(
+        !request_line.contains(KEY),
+        "the key must travel only in the header, never in the request line/query string: \
+         {request_line}"
+    );
+}
+
+#[test]
+fn the_body_carries_the_model_and_messages_and_no_sampling_parameters() {
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"choices":[{"message":{"content":"ok"}}]}"#,
+    )]);
+    complete(server.base(), KEY, "vendor/chat-model", &probe_messages()).expect("usable");
+    let request = server.request();
+    let body = request.rsplit("\r\n\r\n").next().expect("a body");
+    let parsed: serde_json::Value = serde_json::from_str(body).expect("the body is JSON");
+
+    assert_eq!(parsed["model"], "vendor/chat-model");
+    let messages = parsed["messages"].as_array().expect("messages is an array");
+    assert_eq!(messages.len(), 2, "system and user: {body}");
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "answer with citations");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "what did the report say?");
+
+    // §7.4 and §PR 2: v1 sends no streaming and no sampling parameters. A model
+    // that answered differently under a stray temperature would make this
+    // product's answers depend on a knob nobody set.
+    for absent in ["stream", "temperature", "max_tokens", "service_tier"] {
+        assert!(
+            parsed.get(absent).is_none(),
+            "v1 must not send {absent:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn content_present_but_empty_is_returned_as_empty_text_not_an_error() {
+    // The EmptyCompletion refusal is the bridge's ruling (spec §4), reached by
+    // trimming this return value — not complete's. An empty string is a valid
+    // (if unhelpful) completion, and complete must hand it back so the seam
+    // above it, which alone knows what an empty answer means for `ask`, can
+    // decide. Turning it into an error here would move that decision into the
+    // wrong module and hide a real (empty) provider answer behind a shape error.
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"choices":[{"message":{"content":""}}]}"#,
+    )]);
+    let answer = complete(server.base(), KEY, "m", &probe_messages())
+        .expect("an empty completion is still a completion");
+    assert_eq!(answer, "");
+}
+
+#[test]
+fn an_empty_choices_list_is_refused_not_returned_as_empty_text() {
+    // Distinct from `content:""` above: there the model answered, emptily;
+    // here the answer has no choice to read at all. One is a completion the
+    // bridge judges, the other is a shape this build cannot read.
+    let server = MockServer::new(vec![Reply::ok(r#"{"choices":[]}"#)]);
+    let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("no choices");
+    match err {
+        Error::Malformed(reason) => assert!(
+            reason.contains("no choices"),
+            "an empty choices list must be named for what it is: {reason}"
+        ),
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_choice_without_content_is_refused() {
+    let server = MockServer::new(vec![Reply::ok(r#"{"choices":[{"message":{}}]}"#)]);
+    let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("no content");
+    assert!(matches!(err, Error::Malformed(_)), "got {err:?}");
+}
+
+#[test]
+fn a_200_with_an_error_envelope_keeps_the_providers_sentence() {
+    // A gateway — or the provider — answering 200 with an error instead of a
+    // completion. The same case `check_embedding_model` handles; folding it
+    // into "wrong shape" would drop the one sentence that says what to do.
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"error":{"message":"quota exceeded for this account"}}"#,
+    )]);
+    let err = complete(server.base(), KEY, "m", &probe_messages())
+        .expect_err("an error, not a completion");
+    match err {
+        Error::ErrorInsteadOfCompletion { reason } => assert!(
+            reason
+                .to_string()
+                .contains("quota exceeded for this account"),
+            "the provider's own sentence must survive: {reason}"
+        ),
+        other => panic!("expected ErrorInsteadOfCompletion, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_200_that_is_not_json_at_all_is_named_not_a_completion() {
+    let server = MockServer::new(vec![Reply::ok(
+        "<html><body>Sign in to the network</body></html>",
+    )]);
+    let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("not JSON");
+    match err {
+        Error::Malformed(reason) => assert!(
+            reason.contains("not JSON"),
+            "an HTML page must be named as not-JSON, not a generic parse failure: {reason}"
+        ),
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn every_refusing_status_on_the_chat_call_keeps_its_verdict_and_the_sentence() {
+    for status in [401, 403, 429, 500] {
+        let sentence = format!("the provider's own sentence about {status}");
+        let body = format!(r#"{{"error":{{"message":"{sentence}"}}}}"#);
+        let server = MockServer::new(vec![Reply::status(status, &body)]);
+        let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("refused");
+        let right_variant = match status {
+            401 => matches!(err, Error::Unauthorised { .. }),
+            403 => matches!(err, Error::Forbidden { .. }),
+            429 => matches!(err, Error::RateLimited { .. }),
+            _ => matches!(err, Error::Provider { status: 500, .. }),
+        };
+        assert!(right_variant, "status {status}: got {err:?}");
+        assert!(
+            err.to_string().contains(&sentence),
+            "status {status}: the provider's explanation must reach the message: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_key_on_the_chat_call_does_not_leak_it() {
+    // A cheap direct check of the header path's verdict; the exhaustive
+    // transformation scan is Task 4.
+    let server = MockServer::new(vec![Reply::status(401, r#"{"error":{"message":"nope"}}"#)]);
+    let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("refused");
+    assert!(matches!(err, Error::Unauthorised { .. }), "got {err:?}");
+}
+
+/// The same scan that runs over `check_key` and `check_embedding_model`, now
+/// over the third call that renders a provider's body — a revoked key echoed
+/// back inside a 401 message, through `attach_reason`. `assert_a_defence_fired`
+/// is the positive half: not "the key is absent" (which a call that rendered
+/// nothing satisfies) but "the defence I am testing is the one that acted".
+#[test]
+fn no_transformation_of_the_key_reaches_a_chat_failure() {
+    for (label, transformed, needle) in key_transformations(KEY) {
+        let body = format!(r#"{{"error":{{"message":"invalid credential: {transformed}"}}}}"#);
+        let server = MockServer::new(vec![Reply::status(401, &body)]);
+        let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("must fail");
+        let rendered = format!("{err} / {err:?}");
+        let visually = strip_for_test_oracle(&rendered).to_ascii_lowercase();
+        assert!(
+            !visually.contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak from the chat call, even to a reader who \
+             cannot see an invisible character: {rendered}"
+        );
+        assert_a_defence_fired(label, &rendered);
+    }
+}
+
+/// The 200 path renders provider bytes too (`ErrorInsteadOfCompletion`) — the
+/// same second place a body becomes rendered text that
+/// `unreadable_embeddings_answer` is, guarded one call over by
+/// `no_transformation_of_the_key_reaches_a_message_through_a_200_body`. A scan
+/// that only ran failure statuses would miss it. The status is 200, which is
+/// what makes this a different path from the 401 scan above, not a second
+/// spelling of it — and `assert_a_defence_is_visible_to_a_reader` is the
+/// stricter oracle that path needs, keyed on the rendered sentence rather than
+/// the `Debug` word `Withheld` a derived `Debug` prints regardless.
+#[test]
+fn no_transformation_of_the_key_reaches_a_chat_200_error_envelope() {
+    for (label, transformed, needle) in key_transformations(KEY) {
+        let body = format!(r#"{{"error":{{"message":"quota exhausted for {transformed}"}}}}"#);
+        let server = MockServer::new(vec![Reply::ok(&body)]);
+        let err = complete(server.base(), KEY, "m", &probe_messages())
+            .expect_err("a 200 error envelope is still a failure");
+        let sentence = err.to_string();
+        assert!(
+            !strip_for_test_oracle(&sentence)
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak into the sentence a person reads on a 200: \
+             {sentence}"
+        );
+        let debug = format!("{err:?}");
+        assert!(
+            !strip_for_test_oracle(&debug)
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
+            "transformation {label:?} must not leak into the Debug form either: {debug}"
+        );
+        assert_a_defence_is_visible_to_a_reader(label, &sentence);
+    }
+}
+
+/// A body cut off on a refusal still carries the refusal's verdict, not the
+/// answer — the same trade `check_key` and `check_embedding_model` make, now on
+/// the chat path. A truncated 401 must say the key was refused, not "reading
+/// the response body failed": the `BodyUnreadable` status-narrowing arm in
+/// `complete` is the code that makes that true, and every other chat test sends
+/// a complete body, so this is the one that exercises it. Without that arm the
+/// error is `BodyUnreadable { status: 401 }` and this goes red.
+#[test]
+fn a_body_that_never_finishes_on_a_chat_401_still_says_the_key_was_refused() {
+    let server = MockServer::new(vec![Reply::truncated_status(401, r#"{"error":"#)]);
+    let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("refused");
+    assert!(matches!(err, Error::Unauthorised { .. }), "got {err:?}");
 }
