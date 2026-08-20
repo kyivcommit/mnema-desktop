@@ -7,7 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, http};
+use crate::probe::{attach_reason, extract_provider_message};
+use crate::{Error, KeySent, error_for_status, http};
 
 /// One chat message, in the shape OpenRouter's `/chat/completions` accepts.
 ///
@@ -60,16 +61,26 @@ struct CompletionMessage {
 /// (spec §4); this call's one job is the round trip.
 pub fn complete(base: &str, key: &str, model: &str, messages: &[Message]) -> Result<String, Error> {
     let request = serde_json::json!({ "model": model, "messages": messages }).to_string();
-    let (status, answer) = http::post_json(base, "/chat/completions", key, &request)?;
+    let (status, answer) = match http::post_json(base, "/chat/completions", key, &request) {
+        Ok(pair) => pair,
+        // A body cut off on a refusal still carries the refusal's verdict, not
+        // the answer — the same trade `check_key`/`check_embedding_model` make.
+        // No 404 here: unlike the embedding check, a 404 from chat has no
+        // special "no such model" verdict, so it keeps `BodyUnreadable`.
+        Err(Error::BodyUnreadable { status, .. }) if matches!(status, 401 | 403 | 429) => {
+            return Err(error_for_status(status, KeySent::Yes));
+        }
+        Err(other) => return Err(other),
+    };
     if status != 200 {
-        return Err(crate::probe::attach_reason(
-            crate::error_for_status(status, crate::KeySent::Yes),
+        return Err(attach_reason(
+            error_for_status(status, KeySent::Yes),
             &answer,
             key,
         ));
     }
-    let completion: Completion = serde_json::from_str(&answer)
-        .map_err(|_| Error::Malformed("the chat answer is not the shape this code expects"))?;
+    let completion: Completion =
+        serde_json::from_str(&answer).map_err(|e| unreadable_completion(&answer, key, &e))?;
     let text = completion
         .choices
         .into_iter()
@@ -78,6 +89,30 @@ pub fn complete(base: &str, key: &str, model: &str, messages: &[Message]) -> Res
         .message
         .content;
     Ok(text)
+}
+
+/// A 200 this build could not read as a completion, named for which problem it
+/// was — the chat mirror of `probe::unreadable_embeddings_answer`. The first
+/// case is the provider's own error envelope, kept whole; the rest are the
+/// three `models_from_json` tells apart. A choice with no `content` field falls
+/// into `Data` here ("JSON, but not the shape this code expects"), which is the
+/// honest thing to say about it.
+fn unreadable_completion(body: &str, key: &str, error: &serde_json::Error) -> Error {
+    if let Some(reason) = extract_provider_message(body, key) {
+        return Error::ErrorInsteadOfCompletion { reason };
+    }
+    Error::Malformed(match error.classify() {
+        serde_json::error::Category::Syntax => {
+            "the chat answer is not JSON at all — likely a proxy or gateway page, \
+             not the provider itself"
+        }
+        serde_json::error::Category::Eof => {
+            "the chat answer stopped in the middle of the JSON — a truncated response"
+        }
+        serde_json::error::Category::Data | serde_json::error::Category::Io => {
+            "the chat answer is JSON, but not the shape this code expects"
+        }
+    })
 }
 
 #[cfg(test)]

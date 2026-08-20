@@ -474,7 +474,12 @@ struct ProviderErrorDetail {
 /// else: a body that does not fit is not itself a problem worth surfacing
 /// here — the status already answered the one question this call promises
 /// to answer.
-fn extract_provider_message(body: &str, key: &str) -> Option<ProviderMessage> {
+///
+/// `pub(crate)` (PR 2): `chat::complete` reads the same
+/// `{"error":{"message"}}` shape out of a 200 that is an error rather than a
+/// completion, the way `unreadable_embeddings_answer` does — the same reuse
+/// `attach_reason` already serves one path over.
+pub(crate) fn extract_provider_message(body: &str, key: &str) -> Option<ProviderMessage> {
     let envelope: ProviderErrorEnvelope = serde_json::from_str(body).ok()?;
     ProviderMessage::new(&envelope.error.message?, Redaction::Key(key))
 }

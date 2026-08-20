@@ -2069,3 +2069,90 @@ fn content_present_but_empty_is_returned_as_empty_text_not_an_error() {
         .expect("an empty completion is still a completion");
     assert_eq!(answer, "");
 }
+
+#[test]
+fn an_empty_choices_list_is_refused_not_returned_as_empty_text() {
+    // Distinct from `content:""` above: there the model answered, emptily;
+    // here the answer has no choice to read at all. One is a completion the
+    // bridge judges, the other is a shape this build cannot read.
+    let server = MockServer::new(vec![Reply::ok(r#"{"choices":[]}"#)]);
+    let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("no choices");
+    match err {
+        Error::Malformed(reason) => assert!(
+            reason.contains("no choices"),
+            "an empty choices list must be named for what it is: {reason}"
+        ),
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_choice_without_content_is_refused() {
+    let server = MockServer::new(vec![Reply::ok(r#"{"choices":[{"message":{}}]}"#)]);
+    let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("no content");
+    assert!(matches!(err, Error::Malformed(_)), "got {err:?}");
+}
+
+#[test]
+fn a_200_with_an_error_envelope_keeps_the_providers_sentence() {
+    // A gateway — or the provider — answering 200 with an error instead of a
+    // completion. The same case `check_embedding_model` handles; folding it
+    // into "wrong shape" would drop the one sentence that says what to do.
+    let server = MockServer::new(vec![Reply::ok(
+        r#"{"error":{"message":"quota exceeded for this account"}}"#,
+    )]);
+    let err =
+        complete(server.base(), KEY, "m", &probe_messages()).expect_err("an error, not a completion");
+    match err {
+        Error::ErrorInsteadOfCompletion { reason } => assert!(
+            reason.to_string().contains("quota exceeded for this account"),
+            "the provider's own sentence must survive: {reason}"
+        ),
+        other => panic!("expected ErrorInsteadOfCompletion, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_200_that_is_not_json_at_all_is_named_not_a_completion() {
+    let server = MockServer::new(vec![Reply::ok(
+        "<html><body>Sign in to the network</body></html>",
+    )]);
+    let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("not JSON");
+    match err {
+        Error::Malformed(reason) => assert!(
+            reason.contains("not JSON"),
+            "an HTML page must be named as not-JSON, not a generic parse failure: {reason}"
+        ),
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn every_refusing_status_on_the_chat_call_keeps_its_verdict_and_the_sentence() {
+    for status in [401, 403, 429, 500] {
+        let sentence = format!("the provider's own sentence about {status}");
+        let body = format!(r#"{{"error":{{"message":"{sentence}"}}}}"#);
+        let server = MockServer::new(vec![Reply::status(status, &body)]);
+        let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("refused");
+        let right_variant = match status {
+            401 => matches!(err, Error::Unauthorised { .. }),
+            403 => matches!(err, Error::Forbidden { .. }),
+            429 => matches!(err, Error::RateLimited { .. }),
+            _ => matches!(err, Error::Provider { status: 500, .. }),
+        };
+        assert!(right_variant, "status {status}: got {err:?}");
+        assert!(
+            err.to_string().contains(&sentence),
+            "status {status}: the provider's explanation must reach the message: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_key_on_the_chat_call_does_not_leak_it() {
+    // A cheap direct check of the header path's verdict; the exhaustive
+    // transformation scan is Task 4.
+    let server = MockServer::new(vec![Reply::status(401, r#"{"error":{"message":"nope"}}"#)]);
+    let err = complete(server.base(), KEY, "m", &probe_messages()).expect_err("refused");
+    assert!(matches!(err, Error::Unauthorised { .. }), "got {err:?}");
+}
