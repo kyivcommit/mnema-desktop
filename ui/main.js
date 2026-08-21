@@ -129,7 +129,6 @@ const syncConfigControls = () => {
     "forget",
     "embedding-model",
     "discard-vectors",
-    "rerank-model",
     "chat-model",
     "query",
   ]) {
@@ -985,7 +984,6 @@ const drawSettings = (settings, askedAt, armAskedAt, armWriteInFlightAtIssue) =>
   // the unknown-index sentence instead of a promise no read backs.
   indexReadable = read !== null;
   showRecorded("embedding", read && read.embeddingModel);
-  showRecorded("rerank", read && read.rerankModel);
   showRecorded("chat", read && read.chatModel);
   armKeyPresent = settings.key?.kind === "present";
   armModelChosen = Boolean(read && read.embeddingModel);
@@ -1325,19 +1323,20 @@ el("embed").addEventListener("click", async () => {
   });
 });
 
-// The spec (§2) classifies these two as Class B, not Class A — neither
-// touches what leaves the machine — but they reach the core through a
+// The spec (§2) classifies this as Class B, not Class A — it does not
+// touch what leaves the machine — but it reaches the core through a
 // **computed** command name, `command` below rather than a string literal,
 // which is exactly the shape `main.test.js`'s site test has to be able to
 // see so a future Class A mutation cannot hide behind the same pattern.
+// (rerank was the second entry here until D123 deferred it out of v1; the
+// loop shape is kept so the pattern stays visible and rerank drops back in.)
 // Gated here anyway, deliberately wider than §2 strictly asks:
 // telling "this identifier happens to be Class B" from "this identifier is
 // a new Class A write" needs more than a source-text pin can prove, and
 // gating every config mutation through the one barrier — matching model or
-// not — costs a search no more than the round trip these two already pay
-// for. See the report for the argument in full.
+// not — costs a search no more than the round trip this listener already
+// pays for. See the report for the argument in full.
 for (const [role, command] of [
-  ["rerank", "set_rerank_model"],
   ["chat", "set_chat_model"],
 ]) {
   el(selectId(role)).addEventListener("change", async (event) => {
