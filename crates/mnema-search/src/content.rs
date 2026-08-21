@@ -72,11 +72,23 @@ pub enum ContentArm {
     /// `reachable < total` is what actually signals incomplete coverage.
     /// Pinned by
     /// `a_pending_documents_embedded_chunks_are_not_claimed_as_coverage`.
+    ///
+    /// `inspected` (D115①) is the pool this arm's own `knn_live_chunks` could
+    /// actually rank — [`mnema_index::Db::eligible_embedded_chunk_count`],
+    /// eligible *and* embedded. Neither `embedded` nor `reachable` is that
+    /// number on its own: `embedded` also counts a vector behind a document
+    /// the arm cannot reach, and `reachable` also counts an eligible chunk
+    /// with no vector yet, so each can overstate what a search actually
+    /// looked at. `inspected <= embedded` and `inspected <= reachable`
+    /// always; equality with `reachable` is the case pinned by
+    /// `eligible_embedded_equals_reachable_when_every_eligible_chunk_is_embedded`
+    /// (`mnema-index/tests/space.rs`).
     Answered {
         chunks: Vec<i64>,
         embedded: i64,
         total: i64,
         reachable: i64,
+        inspected: i64,
     },
 }
 
@@ -163,11 +175,20 @@ pub(crate) fn content_arm_answered(db: &Db, space_id: i64, vector: &[f32], k: i6
             };
         }
     };
+    let inspected = match db.eligible_embedded_chunk_count(space_id) {
+        Ok(n) => n,
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
+    };
     ContentArm::Answered {
         chunks,
         embedded,
         total,
         reachable,
+        inspected,
     }
 }
 

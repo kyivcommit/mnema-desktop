@@ -142,6 +142,7 @@ pub enum ContentArmReport {
         embedded: i64,
         total: i64,
         reachable: i64,
+        inspected: i64,
     },
 }
 
@@ -157,11 +158,13 @@ impl From<ContentArm> for ContentArmReport {
                 embedded,
                 total,
                 reachable,
+                inspected,
             } => Self::Answered {
                 matched: chunks.len(),
                 embedded,
                 total,
                 reachable,
+                inspected,
             },
         }
     }
@@ -740,6 +743,7 @@ mod tests {
                 embedded: 0,
                 total: 0,
                 reachable: 0,
+                inspected: 0,
             },
         ]
         .iter()
@@ -753,11 +757,13 @@ mod tests {
         assert_eq!(spellings, ["off", "noKey", "noModel", "failed", "answered"]);
     }
 
-    /// `matched`, `embedded`, `total` and `reachable` carry the arm's own
-    /// numbers, not a placeholder: replacing `chunks.len()` with `0`, or
-    /// dropping the new field, in the `From` impl above must fail this,
-    /// without needing a live provider to reach the content arm's
-    /// `Answered` case at all.
+    /// `matched`, `embedded`, `total`, `reachable` and `inspected` carry the
+    /// arm's own numbers, not a placeholder: replacing `chunks.len()` with
+    /// `0`, or dropping any of the new fields, in the `From` impl above must
+    /// fail this, without needing a live provider to reach the content
+    /// arm's `Answered` case at all. `inspected: 5` is distinct from every
+    /// other field here on purpose, so a `From` that copied `reachable` (or
+    /// zeroed `inspected`) fails this specific field, not merely the shape.
     #[test]
     fn an_answered_arm_report_carries_the_real_numbers_not_a_placeholder() {
         assert!(matches!(
@@ -772,12 +778,14 @@ mod tests {
                 embedded: 7,
                 total: 12,
                 reachable: 9,
+                inspected: 5,
             }),
             ContentArmReport::Answered {
                 matched: 2,
                 embedded: 7,
                 total: 12,
                 reachable: 9,
+                inspected: 5,
             }
         ));
     }

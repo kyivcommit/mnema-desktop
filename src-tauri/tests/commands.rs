@@ -1147,6 +1147,95 @@ fn the_content_arm_embeds_the_query_before_it_locks_the_index() {
     );
 }
 
+/// D115① (part 2): `content["inspected"]` is the honest eligible-and-embedded
+/// pool [`mnema_index::Db::eligible_embedded_chunk_count`] computes, not
+/// [`mnema_index::Db::embedded_chunk_count`]'s wider count of every vector,
+/// ineligible ones included. One end-to-end test rather than a separate Rust
+/// unit test plus a render test: either half can pass on its own without the
+/// `ContentArm` → `ContentArmReport` → serde passthrough actually being
+/// wired, so only the IPC boundary proves the wiring.
+///
+/// The fixture writes two vectors in the same space: one behind an `Indexed`
+/// document (eligible and embedded — `inspected` must count it) and one
+/// behind a document [`write_one_document`] left `Indexed` but is downgraded
+/// back to `Pending` right after (embedded, not eligible — `embedded` must
+/// count it and `inspected` must not). This is the same eligible-vs-embedded
+/// split `eligible_embedded_counts_only_chunks_that_are_both`
+/// (`mnema-index/tests/space.rs`) pins at the `Db` layer, driven here through
+/// the real `search` command instead.
+#[test]
+fn search_reports_the_inspected_pool_not_the_embedded_count() {
+    const KEY: &str = "test-key-not-a-real-one-inspected-pool";
+    const MODEL: &str = "baai/bge-m3";
+    const DIM: usize = 1024;
+    const CREDITS: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#;
+
+    let server = MockServer::new(vec![
+        Reply::ok(CREDITS),          // set_key's own /credits check
+        Reply::ok(&one_vector(DIM)), // search's content-arm query embed
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+
+    state.open_index().expect("the index opens");
+    set_key(state.clone(), KEY.into()).expect("the key is accepted");
+
+    state
+        .with_index(|db| {
+            let adopted =
+                db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")?;
+
+            // Eligible and embedded: an Indexed document with a vector — the
+            // one chunk `inspected` must count.
+            let eligible_doc = "e".repeat(64);
+            let eligible_chunk =
+                write_one_document(db, &eligible_doc, "a real question about foxes");
+            db.upsert_vector(adopted.space_id, eligible_chunk, &vec![1.0f32; DIM])?;
+
+            // Embedded, NOT eligible: `write_one_document` leaves its document
+            // `Indexed`, so it is downgraded back to `Pending` here — a vector
+            // behind a document `search` cannot reach. `embedded_chunk_count`
+            // still counts it; `inspected` must not.
+            let pending_doc = "d".repeat(64);
+            let pending_chunk = write_one_document(db, &pending_doc, "unrelated pending text");
+            db.set_document_status(&pending_doc, mnema_index::DocumentStatus::Pending)?;
+            db.upsert_vector(adopted.space_id, pending_chunk, &vec![0.5f32; DIM])?;
+
+            Ok(())
+        })
+        .expect("the fixture is written");
+
+    let webview = main_webview(&app);
+    let answer =
+        call(&webview, "search", json!({ "query": "real question" })).expect("search was rejected");
+
+    let content = &answer["content"];
+    assert_eq!(
+        content["kind"],
+        json!("answered"),
+        "the content arm must have answered: {answer}"
+    );
+    assert_eq!(
+        content["embedded"],
+        json!(2),
+        "both vectors are counted here, eligible or not: {answer}"
+    );
+    assert!(
+        content["inspected"].is_i64(),
+        "content[\"inspected\"] must be present: {answer}"
+    );
+    let inspected = content["inspected"].as_i64().unwrap();
+    assert_eq!(
+        inspected, 1,
+        "only the eligible, embedded chunk is inspectable: {answer}"
+    );
+    assert!(
+        inspected < content["embedded"].as_i64().unwrap(),
+        "inspected must be the honest, narrower pool, not the wider embedded count: {answer}"
+    );
+}
+
 /// D106: absent means on, for both arms. `mnema-index`'s own
 /// `an_index_that_never_saw_the_toggles_has_both_arms_on` pins that the raw
 /// row is absent; this pins what `search` does with that absence, the seam a

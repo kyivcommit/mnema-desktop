@@ -201,6 +201,7 @@ fn the_content_arms_silences_are_told_apart_by_type() {
             embedded: 0,
             total: 9,
             reachable: 9,
+            inspected: 0,
         },
     ];
     // Each is distinct from every other, including each `NotConfigured`
@@ -221,6 +222,7 @@ fn an_empty_answer_still_carries_its_coverage() {
         embedded: 3,
         total: 9,
         reachable: 6,
+        inspected: 2,
     };
     match arm {
         ContentArm::Answered {
@@ -228,9 +230,10 @@ fn an_empty_answer_still_carries_its_coverage() {
             embedded,
             total,
             reachable,
+            inspected,
         } => {
             assert!(chunks.is_empty());
-            assert_eq!((embedded, total, reachable), (3, 9, 6));
+            assert_eq!((embedded, total, reachable, inspected), (3, 9, 6, 2));
         }
         other => panic!("expected an answer, got {other:?}"),
     }
@@ -256,10 +259,17 @@ fn the_content_arm_turns_a_query_into_nearest_chunks() {
             embedded,
             total,
             reachable,
+            inspected,
         } => {
             assert_eq!(chunks.first(), Some(&f.chunk_ids[1]));
             let all = f.chunk_ids.len() as i64;
-            assert_eq!((embedded, total, reachable), (all, all, all));
+            // Every chunk here is both eligible and embedded, so `inspected`
+            // — D115①'s honest pool — agrees with the other three marginals
+            // rather than trailing them.
+            assert_eq!(
+                (embedded, total, reachable, inspected),
+                (all, all, all, all)
+            );
         }
         other => panic!("expected an answer, got {other:?}"),
     }
@@ -379,6 +389,7 @@ fn a_pending_documents_embedded_chunks_are_not_claimed_as_coverage() {
             embedded,
             total,
             reachable,
+            inspected,
         } => {
             assert!(
                 !chunks.contains(&rebuilding_chunk),
@@ -396,6 +407,18 @@ fn a_pending_documents_embedded_chunks_are_not_claimed_as_coverage() {
             assert!(
                 reachable < total,
                 "coverage must not read as complete while a document is mid-rebuild"
+            );
+            // D115①: the pending chunk's vector inflates `embedded` but must
+            // not inflate `inspected` — the exact overstatement this field
+            // exists to remove. Every reachable chunk here is also embedded,
+            // so `inspected` agrees with `reachable`, not with `embedded`.
+            assert_eq!(
+                inspected, 3,
+                "the pending chunk's vector must not count toward the inspected pool"
+            );
+            assert!(
+                inspected < embedded,
+                "inspected must be the honest pool, strictly below embedded here"
             );
         }
         other => panic!("expected an answer, got {other:?}"),
@@ -440,6 +463,7 @@ fn an_orphaned_vector_still_reports_embedded_above_total() {
             embedded,
             total,
             reachable,
+            inspected,
         } => {
             assert!(
                 !chunks.contains(&999_999),
@@ -460,6 +484,14 @@ fn an_orphaned_vector_still_reports_embedded_above_total() {
             assert!(
                 embedded > total,
                 "the pre-existing anomaly must stay visible after this fix"
+            );
+            // D115①: `ELIGIBLE_CHUNK` joins through the `chunk` table, so an
+            // id with no chunk row cannot match it — the orphan is excluded
+            // from `inspected` the same way it is already excluded from
+            // `total`, and `inspected` agrees with `reachable` here.
+            assert_eq!(
+                inspected, 3,
+                "the orphan vector must not count toward the inspected pool either"
             );
         }
         other => panic!("expected an answer, got {other:?}"),
