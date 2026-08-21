@@ -282,7 +282,9 @@ export function toggleState({ savedText, savedContent, keyPresent, modelChosen }
 // `models.rs::role_from` is the Rust half and is pinned there by
 // `every_role_the_provider_has_is_named_by_a_string_the_window_can_send`; these
 // strings are what that function is sent.
-export const ROLES = ["embedding", "rerank", "chat"];
+// `rerank` is deferred out of v1 (D123): its backend role stays dormant, so the
+// window exposes two of the three roles `models.rs::role_from` still accepts.
+export const ROLES = ["embedding", "chat"];
 
 // The id of one role's picker. Here rather than in `main.js` for the reason six
 // discriminants moved here one round ago: `main.js` is an entry point with no
@@ -294,7 +296,6 @@ export const selectId = (role) => `${role}-model`;
 
 export const ROLE_NAME = {
   embedding: "embedding",
-  rerank: "reranking",
   chat: "answering",
 };
 

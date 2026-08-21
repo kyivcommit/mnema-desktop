@@ -97,9 +97,17 @@
         -->
         <button id="discard-vectors" type="button" hidden></button>
         <p id="discard-vectors-note" class="muted"></p>
+        <!--
+          Reranking is deferred out of v1 (D123). Its backend slot stays dormant
+          — Role::Rerank, META_RERANK_MODEL, set_rerank_model — the way D29 kept
+          local models, and returns with the rerank pass in a later cycle. To
+          restore: uncomment this control and put "rerank" back into ui/render.js
+          (ROLES, ROLE_NAME) and the three ui/main.js sites (the freeze list,
+          showRecorded, the model-picker change loop).
         <label>Reranking <select id="rerank-model"></select></label>
         <p id="rerank-model-unreadable" class="muted"></p>
         <p id="rerank-model-missing" class="muted"></p>
+        -->
         <label>Answers <select id="chat-model"></select></label>
         <p id="chat-model-unreadable" class="muted"></p>
         <p id="chat-model-missing" class="muted"></p>

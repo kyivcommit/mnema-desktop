@@ -1565,7 +1565,7 @@ test("a refused press leaves the bar as it was and puts the settings line back",
 // `invokeSites` finds every textual `invoke(` occurrence with no filter on
 // what follows it. `classifyInvokeArg` then reads the first argument and
 // returns `literal` (a command name), `computed` (a bare identifier — the
-// `set_rerank_model`/`set_chat_model` loop's `command` variable) or
+// model-picker loop's `command` variable) or
 // `unclassified` — and an unclassified shape is itself reported, by name,
 // whether or not the call also turns out to be gated, because a shape this
 // scan cannot read is a shape it cannot vouch for. `aliasSites` catches the
@@ -1889,7 +1889,7 @@ const invokeSites = (src) => {
 
 // Reads one call's leading argument. `literal` is a command name this test
 // can look up in `OUT_OF_SCOPE_COMMANDS`; `computed` is a bare identifier —
-// the `set_rerank_model`/`set_chat_model` loop's `command` — that this test
+// the model-picker loop's `command` — that this test
 // cannot name but can still confirm is gated. Anything else (a template
 // literal, a member expression, a nested call) is `unclassified`, and U-1's
 // shape 1, `` invoke(`set_${role}_model`, …) ``, is exactly this: it is
@@ -2020,8 +2020,8 @@ test("every config-mutating invoke() in main.js is inside withSearchGated(...), 
 // close that route — it cannot, an allowlist has to stay editable — but it
 // narrows the most likely form of it: every command this file actually
 // mutates config through is named `set_*` or `forget_*` (`set_key`,
-// `set_search_arms`, `set_embedding_model`, `set_rerank_model`,
-// `set_chat_model`, `forget_key`), so a name shaped like one of those
+// `set_search_arms`, `set_embedding_model`, `set_chat_model`,
+// `forget_key`), so a name shaped like one of those
 // showing up in the allowlist is the shape of the mistake to catch, not a
 // coincidence.
 test("no out-of-scope command name looks like a config mutation", () => {
@@ -2558,7 +2558,6 @@ test("every privacy control is frozen while a search is in flight, and re-enable
     "forget",
     "embedding-model",
     "discard-vectors",
-    "rerank-model",
     "chat-model",
   ];
 
@@ -2636,7 +2635,6 @@ test("every privacy control is re-enabled once an in-flight search fails, not on
     "forget",
     "embedding-model",
     "discard-vectors",
-    "rerank-model",
     "chat-model",
   ];
 

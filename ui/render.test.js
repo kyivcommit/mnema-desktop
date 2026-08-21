@@ -2561,7 +2561,7 @@ test("a failure sentence names what failed and carries the reason it was given",
   for (const [what, text] of [
     ["the list", listNotReadSentence("dns error")],
     ["the embedding model", embeddingModelNotRecordedSentence("index: no such space 7")],
-    ["a role", roleNotRecordedSentence("rerank", "dns error")],
+    ["a role", roleNotRecordedSentence("chat", "dns error")],
   ]) {
     assert.doesNotMatch(text, /undefined|\[object Object\]/, `${what}: ${text}`);
     assert.match(text, /could not be read|not recorded/, `${what}: ${text}`);
@@ -2569,7 +2569,7 @@ test("a failure sentence names what failed and carries the reason it was given",
 
   const said = ROLES.map((role) => roleNotRecordedSentence(role, "dns error"));
   assert.equal(new Set(said).size, ROLES.length, `two roles read alike: ${said}`);
-  assert.match(roleNotRecordedSentence("rerank", "dns error"), /reranking/);
+  assert.match(roleNotRecordedSentence("chat", "dns error"), /answering/);
   assert.match(roleNotRecordedSentence("somethingFutureAndUnknown", "dns error"),
     /somethingFutureAndUnknown/,
     "a role this build does not know is named, not rendered as undefined");
