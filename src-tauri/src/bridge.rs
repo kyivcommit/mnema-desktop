@@ -406,6 +406,9 @@ fn retrieve(
 /// the window with.
 #[tauri::command(async)]
 pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer, Error> {
+    if query.trim().is_empty() {
+        return Err(Error::QueryBlank);
+    }
     let arms = read_arms(&state)?;
     let (hits, text, content) = retrieve(&state, &query, arms, SEARCH_LIMIT)?;
     Ok(SearchAnswer {

@@ -1706,6 +1706,60 @@ fn ask_rejects_a_blank_query_before_any_retrieval() {
     );
 }
 
+/// Mirror of `ask_rejects_a_blank_query_before_any_retrieval` for `search`
+/// (spec §2.1, D115②). With the content arm on, a blank query used to reach
+/// `resolve_content_query` and its billable `/embeddings`; the guard mirrors
+/// `ask`'s, so `search` refuses blank before any retrieval. `search` needs no
+/// chat model — it never generates.
+#[test]
+fn search_rejects_a_blank_query_before_any_retrieval() {
+    const KEY: &str = "test-key-search-blank";
+    const MODEL: &str = "baai/bge-m3";
+    const DIM: usize = 1024;
+
+    // Only `set_key`'s `/credits` is queued; any request past it is a surplus.
+    let server = MockServer::new(vec![Reply::ok(ASK_CREDITS)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    set_key(state.clone(), KEY.into()).unwrap();
+    state
+        .with_index(|db| {
+            db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
+        })
+        .unwrap();
+
+    let webview = main_webview(&app);
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .expect("set_search_arms was rejected");
+
+    // Drain `set_key`'s own `/credits`.
+    let credits = server.request();
+    assert!(
+        credits.contains("/credits"),
+        "the one setup request is the key check: {credits}"
+    );
+
+    for blank in ["", "   ", " \n\t "] {
+        let error = call(&webview, "search", json!({ "query": blank }))
+            .expect_err("a blank query must be rejected");
+        assert!(
+            error.as_str().unwrap_or_default().contains("blank"),
+            "a blank query should be refused as blank; got {error}"
+        );
+    }
+
+    assert!(
+        server.request_if_any().is_none(),
+        "a blank search must make no request — no billable embed"
+    );
+}
+
 /// The channel a real webview passes is a string of this shape. Nothing
 /// receives the messages here — `run_walk_to_completion` above is what
 /// proves the walk itself works, by calling the command function directly so
