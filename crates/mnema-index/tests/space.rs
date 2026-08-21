@@ -1746,6 +1746,150 @@ fn eligible_chunk_count_excludes_a_pending_documents_chunks() {
     );
 }
 
+/// D115①: the honest pool `Db::knn_searchable` inspects is `{table} ∩
+/// ELIGIBLE_CHUNK` — the vectors a search can actually rank, behind an
+/// `indexed` document. [`Db::embedded_chunk_count`] (every vector, ineligible
+/// ones too) and [`Db::eligible_chunk_count`] (every eligible chunk, embedded
+/// or not) each overstate it, and the content arm's coverage sentence read
+/// one of them as if it were this. The intersection here is built strictly
+/// below both marginals, so a count that quietly returned either marginal is a
+/// different number — not merely a shorter list.
+#[test]
+fn eligible_embedded_counts_only_chunks_that_are_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+
+    // Eligible AND embedded — the only chunk the content arm can inspect.
+    // `support::one_chunk` sets its document `Indexed`.
+    let both = support::one_chunk(&db);
+    db.upsert_vector(space, both, &support::unit_vector_1024())
+        .unwrap();
+
+    // Eligible, no vector: present in `eligible_chunk_count`, absent from the
+    // vec table.
+    let bare_doc = "b".repeat(64);
+    let _bare = write_one_chunk(&db, &bare_doc, "eligible, never embedded");
+    db.set_document_status(&bare_doc, DocumentStatus::Indexed)
+        .unwrap();
+
+    // Embedded, not eligible: a vector behind a document left `Pending`
+    // (`write_one_chunk` keeps `insert_document`'s default), so it is in the
+    // vec table but `knn_searchable`'s eligibility pre-filter rejects it.
+    let pending_doc = "c".repeat(64);
+    let embedded_only = write_one_chunk(&db, &pending_doc, "embedded, not eligible");
+    db.upsert_vector(space, embedded_only, &support::other_unit_vector_1024())
+        .unwrap();
+
+    assert_eq!(
+        db.embedded_chunk_count(space).unwrap(),
+        2,
+        "two vectors written; this marginal counts both, eligible or not"
+    );
+    assert_eq!(
+        db.eligible_chunk_count().unwrap(),
+        2,
+        "two indexed documents; this marginal counts both, embedded or not"
+    );
+    assert_eq!(
+        db.eligible_embedded_chunk_count(space).unwrap(),
+        1,
+        "only the chunk that is BOTH eligible and embedded is inspectable"
+    );
+}
+
+/// A `chunk_id` recorded on more than one embedding-bookkeeping route counts
+/// once, and a route the content arm cannot search does not count at all. The
+/// inspected pool is the vector table alone — `knn_searchable` ranks nothing
+/// else — so a `chunk_embedding_state` `state = 1` row ("done" bookkeeping
+/// with no vector behind it) is not inspectable and must not inflate the
+/// count. `x` carries a vector AND such a row, so it is "recorded twice" yet
+/// must count once; `y` carries only the row, so it must not count. A
+/// dual-source count copied from [`Db::embedded_chunk_count`]'s `UNION` would
+/// read `2` (x + y) — or `3` with `x` double-counted; the honest one reads
+/// `1`. The bookkeeping rows are written raw because nothing in the product
+/// writes that table yet, the same caveat `tests/adopt.rs`'s
+/// `one_chunk_recorded_in_both_places_is_counted_once` sets out.
+#[test]
+fn eligible_embedded_does_not_double_count_a_duplicated_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+
+    // x: eligible, a vector, AND a `state = 1` row for the same (space, chunk)
+    // — recorded on both routes, must still count once.
+    let x = support::one_chunk(&db);
+    db.upsert_vector(space, x, &support::unit_vector_1024())
+        .unwrap();
+    db.conn()
+        .execute(
+            "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state)
+             VALUES (?1, ?2, 'hash', 1)",
+            rusqlite::params![space, x],
+        )
+        .unwrap();
+
+    // y: eligible, a `state = 1` row but NO vector — bookkeeping the vec table
+    // does not back, so it is outside the pool a search can rank.
+    let y_doc = "b".repeat(64);
+    let y = write_one_chunk(&db, &y_doc, "done bookkeeping, no vector");
+    db.set_document_status(&y_doc, DocumentStatus::Indexed)
+        .unwrap();
+    db.conn()
+        .execute(
+            "INSERT INTO chunk_embedding_state (space_id, chunk_id, content_hash, state)
+             VALUES (?1, ?2, 'hash', 1)",
+            rusqlite::params![space, y],
+        )
+        .unwrap();
+
+    assert_eq!(
+        db.eligible_embedded_chunk_count(space).unwrap(),
+        1,
+        "x counts once despite two records; y, embedded only in bookkeeping \
+         the vec table does not back, does not count"
+    );
+}
+
+/// Regression against a systematically-low or constant count: when every
+/// eligible chunk is embedded and nothing is held back, the inspected pool is
+/// the whole reachable set, so this equals [`Db::eligible_chunk_count`]
+/// exactly. A count that always trailed reachable — or returned a constant —
+/// would part from it here rather than agree.
+#[test]
+fn eligible_embedded_equals_reachable_when_every_eligible_chunk_is_embedded() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let space = support::space_1024(&db);
+
+    // Three eligible chunks across three documents, each given a vector.
+    let a = support::one_chunk(&db);
+    db.upsert_vector(space, a, &support::unit_vector_1024())
+        .unwrap();
+
+    let b_doc = "b".repeat(64);
+    let b = write_one_chunk(&db, &b_doc, "second eligible chunk");
+    db.set_document_status(&b_doc, DocumentStatus::Indexed)
+        .unwrap();
+    db.upsert_vector(space, b, &support::other_unit_vector_1024())
+        .unwrap();
+
+    let c_doc = "c".repeat(64);
+    let c = write_one_chunk(&db, &c_doc, "third eligible chunk");
+    db.set_document_status(&c_doc, DocumentStatus::Indexed)
+        .unwrap();
+    db.upsert_vector(space, c, &support::unit_vector_1024())
+        .unwrap();
+
+    let reachable = db.eligible_chunk_count().unwrap();
+    assert_eq!(reachable, 3, "three eligible chunks, all embedded");
+    assert_eq!(
+        db.eligible_embedded_chunk_count(space).unwrap(),
+        reachable,
+        "every eligible chunk has a vector, so the inspected pool is all of them"
+    );
+}
+
 // -------------------------------------------------------------- Finding 6
 
 /// T4 (design §6, §9): `delete_document` sweeps a document's vectors by
