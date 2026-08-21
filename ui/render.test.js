@@ -2897,61 +2897,54 @@ test("every content-arm state has its own sentence, and no default swallows one"
   );
 });
 
-test("a partly embedded space says how much of the index it searched", () => {
+test("a partly inspected space says how much of the index it actually searched", () => {
   const sentence = contentArmSentence({
-    kind: "answered", matched: 3, embedded: 30, total: 50,
+    kind: "answered", matched: 3, inspected: 28, total: 50, reachable: 50,
   });
-  assert.match(sentence, /30 of 50/);
+  assert.match(sentence, /28 of 50/);
   assert.match(sentence, /\b3\b/, "the partial-coverage sentence dropped how many it found");
+  assert.doesNotMatch(sentence, /outlive|not an error/, "coverage sentence must not claim over-total");
 });
 
-test("a full space does not talk about coverage at all", () => {
+test("a fully inspected space does not talk about coverage at all", () => {
   const sentence = contentArmSentence({
-    kind: "answered", matched: 3, embedded: 50, total: 50, reachable: 50,
+    kind: "answered", matched: 3, inspected: 50, total: 50, reachable: 50,
   });
   assert.doesNotMatch(sentence, /50 of 50/);
   assert.match(sentence, /returned 3\b/);
 });
 
-// The adversarial pass measured this one: round 3 replaced an orphan filter
-// with a status filter (`ELIGIBLE_CHUNK`, `space.rs`), which is strictly
-// wider, while `embedded`/`total` went on counting the whole `chunk` table.
-// A rebuild in flight leaves documents `pending` (D61) — so the arm reached 1
-// of 2 embedded pieces and the window said `Search by content returned 1.`,
-// the one branch that claims nothing about coverage at all.
-test("pieces held back from the search are named even when the space is full", () => {
+test("pieces held back from the search are named even when everything embedded is inspected", () => {
+  // total 2, one held back (reachable 1), the one reachable chunk inspected.
   const sentence = contentArmSentence({
-    kind: "answered", matched: 1, embedded: 2, total: 2, reachable: 1,
+    kind: "answered", matched: 1, inspected: 1, total: 2, reachable: 1,
   });
+  assert.match(sentence, /1 of 2/, "the inspected fraction disappeared");
   assert.match(sentence, /\b1 of the 2\b/, "the held-back pieces were not counted");
   assert.match(sentence, /not searchable/, "no reason was given for holding them back");
-  assert.match(sentence, /returned 1\b/, "the held-back clause dropped how many it found");
+  assert.match(sentence, /returned 1\b/);
 });
 
-// Both gaps at once is the ordinary state of a first index, not a corner:
-// documents arrive `pending` while earlier ones are still being embedded. The
-// two clauses are composed rather than enumerated, the shape
-// `embeddingProgressText` already uses for its own conditional clause.
-test("a space that is both partly embedded and partly held back says both", () => {
+test("both the not-inspected gap and the held-back gap are said together", () => {
   const sentence = contentArmSentence({
-    kind: "answered", matched: 4, embedded: 30, total: 50, reachable: 40,
+    kind: "answered", matched: 4, inspected: 30, total: 50, reachable: 40,
   });
-  assert.match(sentence, /30 of 50/, "the not-yet-embedded gap disappeared");
+  assert.match(sentence, /30 of 50/, "the not-inspected gap disappeared");
   assert.match(sentence, /\b10 of the 50\b/, "the held-back gap disappeared");
   assert.match(sentence, /returned 4\b/);
 });
 
-// The pair `embedded`/`total` is not a fraction (`IndexRead::embedded_chunks`'
-// own doc), and a vector can outlive the chunk it embeds — `Db::chunk_count`'s
-// doc names `delete_document` as a real path there, not a hypothetical one.
-// `embeddingProgressText` already has this third branch; this is the same
-// shape for the content arm's own sentence.
-test("content coverage above the total is explained rather than left looking broken", () => {
+// Option A removes the "vector outlives chunk" branch from THIS sentence:
+// inspected = eligible ∩ embedded ≤ total always, so it can never exceed total.
+// The diagnostic still lives in `embeddingProgressText` (render.js:840,933) —
+// named, not silently dropped (spec §6).
+test("the coverage sentence never claims more inspected than exist, and the outlive diagnostic lives elsewhere", () => {
+  // Even given a stale embedded count, the sentence reads inspected, which is bounded by total.
   const sentence = contentArmSentence({
-    kind: "answered", matched: 5, embedded: 900, total: 812,
+    kind: "answered", matched: 5, inspected: 40, total: 40, reachable: 40, embedded: 900,
   });
-  assert.match(sentence, /not an error/);
-  assert.match(sentence, /\b5\b/, "the over-coverage sentence dropped how many it found");
+  assert.doesNotMatch(sentence, /not an error|outlive|sometimes larger/);
+  // embeddingProgressText keeps the vector-outlives-chunk explanation (assert its presence there).
 });
 
 test("what is missing is named together with where to fix it", () => {

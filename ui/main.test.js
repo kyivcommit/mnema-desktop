@@ -2751,3 +2751,68 @@ test("a background settings read landing mid-search does not thaw the freeze or 
   await submit;
   await settleEverything();
 });
+
+// D117: nothing stopped the query field itself while a search was in
+// flight, so a second, different question could be typed over the first
+// before its answer came back — the field would then show a newer query
+// beside an older query's answer, with nothing on screen saying which one
+// produced it. `#query` joins `syncConfigControls`'s id list (`main.js:124`)
+// like every other control above, so it is pinned by its own test rather
+// than folded into "every privacy control is frozen ..." (`main.test.js:2533`):
+// that enumeration documents the privacy invariant specifically, and D117 is
+// a different reason to freeze through the same single writer.
+test("#query is frozen while a search is in flight, and re-enabled once it settles", async () => {
+  const w = await boot();
+
+  assert.equal(w.el("query").disabled, false, "premise: query starts editable");
+
+  const s = w.hold("search");
+  w.el("query").value = "q";
+  const submit = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(
+    w.el("query").disabled,
+    true,
+    "the query field stayed editable while a search was in flight",
+  );
+
+  s.resolve({
+    hits: [],
+    text: { kind: "answered", matched: 0 },
+    content: { kind: "answered", matched: 0, embedded: 0, total: 0, reachable: 0 },
+  });
+  await submit;
+  await settleEverything();
+
+  assert.equal(
+    w.el("query").disabled,
+    false,
+    "the query field was left frozen after a successful search settled",
+  );
+});
+
+// The mirror on the failure path — the `finally` block that clears
+// `searchInFlight` covers both settle paths (`main.js:640-651`), and F3
+// (`main.test.js:984-986`) was exactly a handler wired to only one of them.
+// A test that only ever resolved `search` would not have caught that class.
+test("#query is re-enabled once an in-flight search fails, not only when it succeeds", async () => {
+  const w = await boot();
+
+  const s = w.hold("search");
+  w.el("query").value = "q";
+  const submit = w.el("search-form").listeners.get("submit")({ preventDefault: () => {} });
+  await settleEverything();
+
+  assert.equal(w.el("query").disabled, true, "premise: query froze while the search was in flight");
+
+  s.reject(new Error("net"));
+  await submit;
+  await settleEverything();
+
+  assert.equal(
+    w.el("query").disabled,
+    false,
+    "the query field was left frozen after a failed search settled (finally)",
+  );
+});

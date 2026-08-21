@@ -1673,36 +1673,22 @@ export const CONTENT_ARM_TEXT = {
   noModel: () =>
     "Search by content needs an embedding model. Choose one under Models.",
   failed: (arm) => `Search by content could not be reached: ${arm.reason}`,
-  // Three cases over `embedded`/`total`, and a clause over `reachable` that
-  // composes with each — the shape `embeddingProgressText` already uses, and
-  // the reason this is not a fourth and fifth case: the two gaps are
-  // independent and a first index has both at once. Only the `embedded ===
-  // total` case is silent about coverage, and only while nothing is held
-  // back; the others all have to say `matched` too, since no "looked at"
-  // clause on its own says whether anything was found.
+  // Two cases over `inspected`/`total`, and a `heldBack` clause over `reachable`
+  // that composes with each. `inspected` (the knn pool, `eligible ∩ embedded`)
+  // replaces `embedded` as the honest numerator (D115①): `embedded` counted
+  // vectors the arm could not reach. `inspected ≤ total` always, so there is no
+  // over-total branch here — the vector-outlives-chunk diagnostic lives in
+  // `embeddingProgressText`, not in this sentence.
   answered: (arm) => {
-    // `total` counts chunks that exist, `reachable` the ones a search could
-    // return: `ELIGIBLE_CHUNK` (`space.rs`) drops every chunk whose document
-    // is not `indexed`, which an ordinary rebuild causes (D61). No reason is
-    // claimed, because `pending`, `failed` and `skipped` all land here and
-    // this window cannot tell them apart. Pinned by `pieces held back from
-    // the search are named even when the space is full`.
     const heldBack =
       arm.reachable < arm.total
         ? ` ${arm.total - arm.reachable} of the ${arm.total} are under documents that are ` +
           "not searchable right now, so this search could not reach them."
         : "";
-    if (arm.embedded < arm.total) {
+    if (arm.inspected < arm.total) {
       return (
-        `Search by content looked at ${arm.embedded} of ${arm.total} pieces — the rest have ` +
-        `no vectors yet, and it returned ${arm.matched}.` + heldBack
-      );
-    }
-    if (arm.embedded > arm.total) {
-      return (
-        `Search by content returned ${arm.matched} — it looked at ${arm.embedded} of ` +
-        `${arm.total} pieces, and a vector can outlive the piece it embeds, so the first ` +
-        "number is sometimes larger; this is not an error." + heldBack
+        `Search by content looked at ${arm.inspected} of ${arm.total} pieces — the rest ` +
+        `have no vectors yet or are held back, and it returned ${arm.matched}.` + heldBack
       );
     }
     return `Search by content returned ${arm.matched}.` + heldBack;

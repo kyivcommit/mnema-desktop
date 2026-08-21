@@ -889,6 +889,49 @@ impl Db {
         )?)
     }
 
+    /// How many chunks the content arm could actually inspect in this space —
+    /// [`Db::knn_searchable`]'s own pool, the vector table intersected with
+    /// [`ELIGIBLE_CHUNK`] (`space.rs:595`), counted once per chunk. This is the
+    /// honest denominator D115① asks for: [`Db::embedded_chunk_count`] counts
+    /// every vector, ineligible ones included, and [`Db::eligible_chunk_count`]
+    /// counts every eligible chunk whether or not it has a vector — each
+    /// overstates what a search looked at, and the content arm's coverage
+    /// sentence read one of them as if it were this.
+    ///
+    /// **Reuses [`ELIGIBLE_CHUNK`]** — the same string [`Db::knn_searchable`]'s
+    /// pre-filter runs, not a fresh eligibility clause — so this count and what
+    /// the arm searches cannot drift into disagreeing about which chunks are
+    /// reachable.
+    ///
+    /// **The source is the vector table alone, and deliberately not the `UNION`
+    /// [`Db::embedded_chunk_count`] takes.** That method also reads
+    /// `chunk_embedding_state` rows with `state = 1` — bookkeeping that a chunk
+    /// is "done" — because for "what would a model change cost" a chunk recorded
+    /// done counts whether or not its vector has landed. Here the question is
+    /// the opposite one: `knn_searchable` ranks the vector table and nothing
+    /// else, so a chunk with a `state = 1` row and no vector is one the arm
+    /// cannot inspect, and counting it would re-introduce the very overstatement
+    /// D115① removes. `count(DISTINCT chunk_id)` is defensive on top of that —
+    /// `chunk_id` is the vec0 table's `INTEGER PRIMARY KEY` (`space.rs:243`), so
+    /// no chunk appears in it twice today — kept so that a later move to a
+    /// multi-source pool cannot silently double-count.
+    ///
+    /// `table` is never caller text: the same reasoning
+    /// [`Db::embedded_chunk_count`] relies on for interpolating a table name
+    /// into SQL — it comes only from `embedding_space.vec_table`, which the
+    /// schema's own CHECK pins to `'vec_emb_' || id`.
+    pub fn eligible_embedded_chunk_count(&self, space_id: i64) -> Result<i64, Error> {
+        let table = self.space(space_id)?.table;
+        Ok(self.conn().query_row(
+            &format!(
+                "SELECT count(DISTINCT chunk_id) FROM {table}
+                  WHERE chunk_id IN (SELECT c.id {ELIGIBLE_CHUNK})"
+            ),
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The next `limit` chunks this space has no embedding for — the computed
     /// queue, asked fresh, which is the shape [`Db::clear_document_content`]'s
     /// own doc comment already argued for before anything asked it.

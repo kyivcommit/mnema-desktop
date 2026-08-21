@@ -131,6 +131,7 @@ const syncConfigControls = () => {
     "discard-vectors",
     "rerank-model",
     "chat-model",
+    "query",
   ]) {
     el(id).disabled = frozen;
   }
