@@ -124,8 +124,8 @@ pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
-/// Builds and runs the application. Returns only when the last window closes or
-/// start-up fails.
+/// Builds and runs the application. Returns only when the tray's Quit calls
+/// `app.exit(0)`, or start-up fails (§6: window closes hide, Cmd+Q is prevented).
 pub fn run() -> anyhow::Result<()> {
     // Process-global, and it must precede every connection: a connection opened
     // before registration never sees the extension and only fails much later, at
