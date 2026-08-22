@@ -4,6 +4,8 @@
 //! and are verified by the live `cargo tauri dev` run, not here.
 
 use mnema_desktop::tray::MENU_ITEMS;
+use tauri::WebviewWindowBuilder;
+use tauri::test::{mock_builder, mock_context, noop_assets};
 
 #[test]
 fn the_tray_menu_is_the_spec_menu_in_order() {
@@ -28,4 +30,38 @@ fn the_tray_menu_is_the_spec_menu_in_order() {
         assert!(seen.insert(*id), "duplicate tray menu id: {id}");
         assert!(!label.is_empty(), "empty label for tray id {id}");
     }
+}
+
+fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+    mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application")
+}
+
+#[test]
+fn focus_launcher_targets_the_launcher_window() {
+    let app = mock_app();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    // Found and acted on the launcher.
+    assert!(
+        mnema_desktop::focus_launcher(app.handle()),
+        "focus_launcher did not find the `launcher` window"
+    );
+}
+
+#[test]
+fn focus_launcher_reports_a_missing_launcher() {
+    // The other direction: with no `launcher` window (only some other label),
+    // it must report false rather than silently targeting the wrong window —
+    // this is what fails while the ported code still looks for `main`.
+    let app = mock_app();
+    WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("failed to build the main webview");
+    assert!(
+        !mnema_desktop::focus_launcher(app.handle()),
+        "focus_launcher acted on a window that is not the launcher"
+    );
 }

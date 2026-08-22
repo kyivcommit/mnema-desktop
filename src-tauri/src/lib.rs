@@ -83,6 +83,38 @@ pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Resu
     Ok(())
 }
 
+/// Shows the launcher and focuses it, returning whether the launcher window was
+/// there to act on. The single-instance callback and the tray's "show search"
+/// item share this. §6: the launcher *hides*, so it is *shown* — not
+/// unminimized, which never re-opens a hidden window. A test drives this against
+/// the mock runtime, where the real window manager is absent, which is why the
+/// return value is the found-ness of the window and not its resulting focus.
+pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    match app.get_webview_window("launcher") {
+        Some(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+            true
+        }
+        None => false,
+    }
+}
+
+/// The global shortcut's action: hide the launcher if it is up, otherwise show
+/// and focus it. The visibility branch is exercised by the live run — the mock
+/// runtime does not track a real window's visibility — so the CI seam is
+/// `focus_launcher`, not this.
+pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("launcher") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
 /// Builds and runs the application. Returns only when the last window closes or
 /// start-up fails.
 pub fn run() -> anyhow::Result<()> {
@@ -92,19 +124,32 @@ pub fn run() -> anyhow::Result<()> {
     // nothing, which is what makes it safe to do unconditionally. G7.0 §5.7.
     mnema_index::register_vector_extension().context("registering the sqlite-vec extension")?;
 
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
+
+    let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
+    let global_shortcut = tauri_plugin_global_shortcut::Builder::new()
+        .with_shortcut(alt_space)
+        .context("registering the ⌥Space shortcut")?
+        .with_handler(|app, _shortcut, event| {
+            // Only one shortcut is registered, so no need to match it; act on
+            // the press edge, not the release.
+            if event.state() == ShortcutState::Pressed {
+                toggle_launcher(app);
+            }
+        })
+        .build();
+
     tauri::Builder::default()
         // Registered before anything else, as the plugin requires. Two instances
         // over one SQLite file is a second writer that can only wait, an
         // indexing job running twice over the same folder, and the cloud spend
         // for it billed twice.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // The second process exits as soon as it has handed its arguments
-            // over. All that is left to do here is show the window the user was
-            // asking for.
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            // The second process has handed its arguments over and will exit;
+            // show the launcher the user asked for. §6: show, not unminimize —
+            // the launcher is hidden, and unminimize does not re-open a hidden
+            // window.
+            focus_launcher(app);
         }))
         // Native folder picking, gated by `dialog:allow-open` in
         // `capabilities/default.json` rather than the text field
@@ -113,6 +158,7 @@ pub fn run() -> anyhow::Result<()> {
         // spec would keep.
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_positioner::init())
+        .plugin(global_shortcut)
         .setup(|app| {
             manage_state(app.handle())?;
             tray::build_tray(app.handle())?;

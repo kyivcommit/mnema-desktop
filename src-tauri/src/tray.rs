@@ -31,9 +31,8 @@ fn label(id: &str) -> &'static str {
 }
 
 /// Builds the tray icon and its menu, and wires the menu events. Returns an
-/// error the `setup` hook propagates. The visible-toggle for `show_search` is a
-/// Task-2.3 stub here — `crate::focus_launcher` does not exist until that task,
-/// which replaces this arm with `crate::focus_launcher(app)`.
+/// error the `setup` hook propagates. `show_search` shares `crate::focus_launcher`
+/// with the single-instance callback and the ⌥Space handler.
 pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let status = MenuItem::with_id(app, "status", label("status"), false, None::<&str>)?;
     let show_search =
@@ -86,12 +85,7 @@ pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show_search" => {
-                // Task-2.3 stub: replaced with `crate::focus_launcher(app)` once
-                // that function exists. Same behaviour, just not the shared path.
-                if let Some(w) = app.get_webview_window("launcher") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
+                crate::focus_launcher(app);
             }
             "open_settings" => {
                 if let Some(window) = app.get_webview_window("settings") {
