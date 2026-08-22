@@ -152,87 +152,88 @@ pub fn sync_activation_policy<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 /// The app menu's ⌘Q item id: it closes the settings window instead of quitting.
 const CMD_Q_CLOSE_SETTINGS: &str = "cmd_q_close_settings";
 
-/// The application menu — the standard items MINUS the native Quit. On macOS
+/// The application menu on macOS — the standard items MINUS the native Quit.
 /// `PredefinedMenuItem::quit` maps to AppKit `terminate:`, which cannot be vetoed
 /// (tao has no `applicationShouldTerminate`), so it would quit the app past the
 /// ExitRequested guard and past §6 — even from a hidden menu bar, since a menu
 /// key-equivalent stays live. In its place ⌘Q is a custom item that hides the
-/// settings window; the app is quit ONLY from the tray's «Вийти» (§6). Off macOS
-/// the default menu stands until the cross-platform pass (PR 10). The menu bar is
-/// shown only while settings is visible (`sync_activation_policy`).
+/// settings window; the app is quit ONLY from the tray's «Вийти» (§6). The menu
+/// bar is shown only while settings is visible (`sync_activation_policy`).
+#[cfg(target_os = "macos")]
 fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> tauri::Result<tauri::menu::Menu<R>> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return tauri::menu::Menu::default(app);
-    }
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-    #[cfg(target_os = "macos")]
-    {
-        use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let pkg = app.package_info();
+    let about = AboutMetadata {
+        name: Some(pkg.name.clone()),
+        version: Some(pkg.version.to_string()),
+        ..Default::default()
+    };
 
-        let pkg = app.package_info();
-        let about = AboutMetadata {
-            name: Some(pkg.name.clone()),
-            version: Some(pkg.version.to_string()),
-            ..Default::default()
-        };
+    // ⌘Q → close the settings window, never quit. Custom (not the predefined
+    // Quit), so it runs our handler instead of `terminate:`.
+    let close_settings = MenuItem::with_id(
+        app,
+        CMD_Q_CLOSE_SETTINGS,
+        "Закрити налаштування",
+        true,
+        Some("CmdOrCtrl+Q"),
+    )?;
 
-        // ⌘Q → close the settings window, never quit. Custom (not the predefined
-        // Quit), so it runs our handler instead of `terminate:`.
-        let close_settings = MenuItem::with_id(
-            app,
-            CMD_Q_CLOSE_SETTINGS,
-            "Закрити налаштування",
-            true,
-            Some("CmdOrCtrl+Q"),
-        )?;
+    let app_menu = Submenu::with_items(
+        app,
+        pkg.name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &close_settings,
+        ],
+    )?;
 
-        let app_menu = Submenu::with_items(
-            app,
-            pkg.name.clone(),
-            true,
-            &[
-                &PredefinedMenuItem::about(app, None, Some(about))?,
-                &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::services(app, None)?,
-                &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::hide(app, None)?,
-                &PredefinedMenuItem::hide_others(app, None)?,
-                &PredefinedMenuItem::separator(app)?,
-                &close_settings,
-            ],
-        )?;
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
 
-        let edit_menu = Submenu::with_items(
-            app,
-            "Edit",
-            true,
-            &[
-                &PredefinedMenuItem::undo(app, None)?,
-                &PredefinedMenuItem::redo(app, None)?,
-                &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::cut(app, None)?,
-                &PredefinedMenuItem::copy(app, None)?,
-                &PredefinedMenuItem::paste(app, None)?,
-                &PredefinedMenuItem::select_all(app, None)?,
-            ],
-        )?;
+    let window_menu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
 
-        let window_menu = Submenu::with_items(
-            app,
-            "Window",
-            true,
-            &[
-                &PredefinedMenuItem::minimize(app, None)?,
-                &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::close_window(app, None)?,
-            ],
-        )?;
+    Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
+}
 
-        Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
-    }
+/// Off macOS the ⌘Q → `terminate:` problem does not arise; keep the default menu
+/// until the cross-platform pass (PR 10).
+#[cfg(not(target_os = "macos"))]
+fn build_app_menu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> tauri::Result<tauri::menu::Menu<R>> {
+    tauri::menu::Menu::default(app)
 }
 
 /// Builds and runs the application. Returns only when the tray's «Вийти» calls
