@@ -12,6 +12,7 @@ pub mod job;
 pub mod models;
 pub mod paths;
 pub mod state;
+pub mod tray;
 pub mod walk_job;
 
 use anyhow::Context as _;
@@ -111,8 +112,10 @@ pub fn run() -> anyhow::Result<()> {
         // to exercise `add_watched_folder`, but not something the interface
         // spec would keep.
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_positioner::init())
         .setup(|app| {
             manage_state(app.handle())?;
+            tray::build_tray(app.handle())?;
             Ok(())
         })
         .invoke_handler(invoke_handler())
