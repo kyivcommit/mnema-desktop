@@ -17,6 +17,7 @@ pub mod walk_job;
 
 use anyhow::Context as _;
 use tauri::Manager as _;
+use tauri_plugin_positioner::{Position, WindowExt as _};
 
 /// Everything the webview is allowed to call, in one place.
 ///
@@ -93,6 +94,11 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     match app.get_webview_window("launcher") {
         Some(window) => {
             let _ = window.show();
+            // §6: put the launcher where the menu-bar item is, next to the tray,
+            // before focusing it. `move_window` no-ops where the tray position is
+            // unknown, so this is safe against the mock runtime and against
+            // platforms that never record one; exact placement is tuned in PR 10.
+            let _ = window.move_window(Position::TrayCenter);
             let _ = window.set_focus();
             true
         }
@@ -110,6 +116,9 @@ pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
             let _ = window.hide();
         } else {
             let _ = window.show();
+            // Same as `focus_launcher`'s show path: position at the tray before
+            // focusing (§6). No-ops where the tray position is unknown.
+            let _ = window.move_window(Position::TrayCenter);
             let _ = window.set_focus();
         }
     }
@@ -159,6 +168,17 @@ pub fn run() -> anyhow::Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(global_shortcut)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // §6: the tray is the only way to quit. A window close hides the
+                // window and keeps it alive, so a hidden webview keeps its DOM —
+                // an unsaved query or a result set survives dismissal (§7.3,
+                // "what disappears"). Real exit is `app.exit(0)` from the tray's
+                // Quit, which is not a window close and so is not prevented here.
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .setup(|app| {
             manage_state(app.handle())?;
             tray::build_tray(app.handle())?;
