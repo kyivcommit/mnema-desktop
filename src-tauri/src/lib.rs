@@ -9,6 +9,7 @@ pub mod bridge;
 pub mod embed_job;
 pub mod error;
 pub mod job;
+pub mod locale;
 pub mod models;
 pub mod paths;
 pub mod state;
