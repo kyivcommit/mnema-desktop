@@ -72,8 +72,10 @@ fn the_command_surface_still_builds() {
         .invoke_handler(mnema_desktop::invoke_handler())
         .build(mock_context(noop_assets()))
         .expect("the invoke handler no longer builds");
-    // No PR 2 command carries a data payload — dismissal is webview-side via
-    // `core:window:allow-hide`, showing is Rust-side. This is a guard against a
-    // later task quietly adding an ungoverned command to the shell.
+    // A build-time smoke that PR 2 kept the command registration intact:
+    // `invoke_handler` still composes and the mock app builds. PR 2 adds no
+    // webview command (dismissal is webview-side via `core:window:allow-hide`,
+    // showing is Rust-side). NB: this proves the handler builds — it does NOT
+    // detect a later task *adding* a command; that would still compile.
     let _ = app;
 }
