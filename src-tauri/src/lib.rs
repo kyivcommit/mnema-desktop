@@ -149,8 +149,95 @@ pub fn sync_activation_policy<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     let _ = app;
 }
 
-/// Builds and runs the application. Returns only when the tray's Quit calls
-/// `app.exit(0)`, or start-up fails (§6: window closes hide, Cmd+Q is prevented).
+/// The app menu's ⌘Q item id: it closes the settings window instead of quitting.
+const CMD_Q_CLOSE_SETTINGS: &str = "cmd_q_close_settings";
+
+/// The application menu — the standard items MINUS the native Quit. On macOS
+/// `PredefinedMenuItem::quit` maps to AppKit `terminate:`, which cannot be vetoed
+/// (tao has no `applicationShouldTerminate`), so it would quit the app past the
+/// ExitRequested guard and past §6 — even from a hidden menu bar, since a menu
+/// key-equivalent stays live. In its place ⌘Q is a custom item that hides the
+/// settings window; the app is quit ONLY from the tray's «Вийти» (§6). Off macOS
+/// the default menu stands until the cross-platform pass (PR 10). The menu bar is
+/// shown only while settings is visible (`sync_activation_policy`).
+fn build_app_menu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> tauri::Result<tauri::menu::Menu<R>> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return tauri::menu::Menu::default(app);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+        let pkg = app.package_info();
+        let about = AboutMetadata {
+            name: Some(pkg.name.clone()),
+            version: Some(pkg.version.to_string()),
+            ..Default::default()
+        };
+
+        // ⌘Q → close the settings window, never quit. Custom (not the predefined
+        // Quit), so it runs our handler instead of `terminate:`.
+        let close_settings = MenuItem::with_id(
+            app,
+            CMD_Q_CLOSE_SETTINGS,
+            "Закрити налаштування",
+            true,
+            Some("CmdOrCtrl+Q"),
+        )?;
+
+        let app_menu = Submenu::with_items(
+            app,
+            pkg.name.clone(),
+            true,
+            &[
+                &PredefinedMenuItem::about(app, None, Some(about))?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::services(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::hide(app, None)?,
+                &PredefinedMenuItem::hide_others(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &close_settings,
+            ],
+        )?;
+
+        let edit_menu = Submenu::with_items(
+            app,
+            "Edit",
+            true,
+            &[
+                &PredefinedMenuItem::undo(app, None)?,
+                &PredefinedMenuItem::redo(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::cut(app, None)?,
+                &PredefinedMenuItem::copy(app, None)?,
+                &PredefinedMenuItem::paste(app, None)?,
+                &PredefinedMenuItem::select_all(app, None)?,
+            ],
+        )?;
+
+        let window_menu = Submenu::with_items(
+            app,
+            "Window",
+            true,
+            &[
+                &PredefinedMenuItem::minimize(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::close_window(app, None)?,
+            ],
+        )?;
+
+        Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
+    }
+}
+
+/// Builds and runs the application. Returns only when the tray's «Вийти» calls
+/// `app.exit(0)`, or start-up fails (§6: window closes and ⌘Q hide, never quit —
+/// the tray is the only exit).
 pub fn run() -> anyhow::Result<()> {
     // Process-global, and it must precede every connection: a connection opened
     // before registration never sees the extension and only fails much later, at
@@ -193,6 +280,17 @@ pub fn run() -> anyhow::Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(global_shortcut)
+        .menu(build_app_menu)
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == CMD_Q_CLOSE_SETTINGS {
+                // §6: ⌘Q closes the settings window (hide, keep state) and never
+                // quits the app; the tray's «Вийти» is the only quit.
+                if let Some(window) = app.get_webview_window("settings") {
+                    let _ = window.hide();
+                }
+                sync_activation_policy(app);
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // §6: the tray is the only way to quit. A window close hides the
