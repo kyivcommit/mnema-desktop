@@ -1177,12 +1177,12 @@ mod tests {
     /// this file compiling — which is the part that makes a maintainer look at
     /// the list at all.
     ///
-    /// What it cannot do is reach `ui/render.test.js`, where the mirrored lists
-    /// for `EndReason` live. There is nothing to mirror into yet — the window
-    /// has no renderer for these — and a JS list that nothing asserts against
-    /// goes stale while looking authoritative. That half belongs with the
-    /// renderer; `ui/render.test.js` already runs in CI, so it has somewhere to
-    /// land.
+    /// What it cannot do is pin the window's own mirrored lists for `EndReason`:
+    /// there is nothing to mirror into yet — the Svelte frontend has no renderer
+    /// for these — and a JS list that nothing asserts against goes stale while
+    /// looking authoritative. That half belongs with the renderer; when it lands
+    /// (the interface cycle), the frontend's Vitest suite — which this repo now
+    /// runs in CI — is where the mirror and its assertions go.
     #[test]
     fn every_discriminant_the_window_sees_has_its_camel_case_spelling_pinned() {
         // Two shapes, and they are read differently on purpose. `KeyState` and

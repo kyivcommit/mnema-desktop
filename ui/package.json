@@ -1,7 +1,23 @@
 {
+  "name": "mnema-ui",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "dev": "vite",
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "svelte": "^5",
+    "@sveltejs/vite-plugin-svelte": "^5",
+    "vite": "^6",
+    "typescript": "^5",
+    "svelte-check": "^4",
+    "vitest": "^3",
+    "@testing-library/svelte": "^5",
+    "jsdom": "^25",
+    "@types/node": "^26"
   }
 }

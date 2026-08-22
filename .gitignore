@@ -11,10 +11,18 @@ target/
 # `generate_context!` will not compile without them.
 /src-tauri/gen/schemas/
 
-# --- Node / the copied React interface ---
-node_modules/
-dist/
-.vite/
+# --- Node / the Svelte frontend under ui/ ---
+# ui/dist is Vite's build output and ui/node_modules its installed deps (Vite's
+# own cache lives under node_modules/.vite, so it is covered here too) — both are
+# generated, neither is source. ui/package-lock.json IS committed: `npm ci`
+# builds from it, both in CI's frontend build+test gate and in the bundle's
+# beforeBuildCommand. Anchored to ui/ the way `/vendor/` below is, and for the
+# reason its comment gives: an unanchored `node_modules/`/`dist/` matches a
+# directory of that name at any depth, and this repository has exactly one Node
+# tree. src-tauri does not need ui/dist to compile — measured, see ci.yml — so a
+# missing build output here never blocks a `cargo` command.
+ui/dist/
+ui/node_modules/
 
 # --- Python, for the experiments only ---
 __pycache__/
@@ -27,8 +35,8 @@ __pycache__/
 # lives in that script and in crates/mnema-extract, which is where it belongs —
 # committing the binary would put a copy of the decision in a place nobody reads.
 # Anchored: an unanchored `vendor/` matches a directory of that name at any depth,
-# and the React interface being ported from the server repository is exactly the
-# kind of tree that could end up hiding source under one.
+# and the Svelte frontend under `ui/` is exactly the kind of tree that could end
+# up hiding source under one.
 /vendor/
 
 # --- staged sidecars ---
