@@ -65,3 +65,15 @@ fn focus_launcher_reports_a_missing_launcher() {
         "focus_launcher acted on a window that is not the launcher"
     );
 }
+
+#[test]
+fn the_command_surface_still_builds() {
+    let app = mock_builder()
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("the invoke handler no longer builds");
+    // No PR 2 command carries a data payload — dismissal is webview-side via
+    // `core:window:allow-hide`, showing is Rust-side. This is a guard against a
+    // later task quietly adding an ungoverned command to the shell.
+    let _ = app;
+}

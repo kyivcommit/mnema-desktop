@@ -185,6 +185,19 @@ pub fn run() -> anyhow::Result<()> {
             Ok(())
         })
         .invoke_handler(invoke_handler())
-        .run(tauri::generate_context!())
-        .context("running the application")
+        .build(tauri::generate_context!())
+        .context("building the application")?
+        .run(|_app, event| {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                // §6: the tray's Quit is the only exit. A window close or macOS
+                // Cmd+Q fires ExitRequested with `code: None`; the tray's
+                // `app.exit(0)` carries `Some(0)`. Prevent the former, allow the
+                // latter — together with the CloseRequested→hide handler, the
+                // resident can be quit only from the tray.
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
+        });
+    Ok(())
 }
