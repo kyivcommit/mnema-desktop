@@ -11,13 +11,28 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
-        "label": "main",
-        "title": "Mnema",
+        "label": "launcher",
         "url": "launcher.html",
-        "width": 1100,
-        "height": 720
+        "width": 720,
+        "height": 480,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "center": true,
+        "visible": true
+      },
+      {
+        "label": "settings",
+        "url": "settings.html",
+        "title": "Mnema — Налаштування",
+        "width": 900,
+        "height": 640,
+        "visible": false
       }
     ],
     "security": {
