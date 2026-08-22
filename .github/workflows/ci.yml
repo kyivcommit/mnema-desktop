@@ -150,41 +150,43 @@ jobs:
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # `ui/` has its own test suite (`ui/render.test.js`, pure functions with
-      # no browser and no mocked `window.__TAURI__`) — added after a fix round
-      # found a Critical here that nothing before it would have caught on a
-      # regression. Gated to one leg of the matrix: it is plain JS with
-      # nothing OS-specific in it, so running it on both platforms would only
-      # double the cost for the same answer, the same reasoning the keychain
-      # step below applies the other way (macOS only, because the binding
-      # under test is macOS-only).
+      # The Svelte frontend's own gate: it builds and runs its unit tests here.
+      # Gated to one leg of the matrix, the reasoning the old vanilla suite gave
+      # and it still holds — this is plain TypeScript and JS with nothing
+      # OS-specific in it, so running it on both platforms would only double the
+      # cost for the same answer, the mirror of the keychain step below (macOS
+      # only, because the binding it tests is macOS-only).
       #
-      # A runner image ships a `node` already, but which version is exactly
-      # the kind of drift `rust-toolchain.toml` and this file's own pinned
-      # actions exist to avoid — so it is provisioned explicitly here rather
-      # than left to whatever happens to be on the image. `lts/*` tracks
-      # whichever LTS line is current instead of a number that goes stale on
-      # its own.
-      - name: Node.js, for ui/'s own test suite
+      # It is NOT here because `src-tauri` needs the build output to compile — it
+      # does not. `generate_context!` embeds `frontendDist` (../ui/dist), but a
+      # missing directory is not a compile error on tauri 2.x: measured, with
+      # ui/dist moved aside, `cargo check`/`clippy`/`build -p mnema-desktop` all
+      # succeed, debug and release, with no warning. So there is deliberately no
+      # frontend build above `clippy`/`test`, which compile mnema-desktop and do
+      # not need it. This step earns its place as the cheap, early gate on the
+      # frontend itself — a broken `vite build` or a svelte-check failure —
+      # which would otherwise surface only in the far heavier macOS bundle job.
+      #
+      # A runner image ships a `node` already, but which version is exactly the
+      # drift `rust-toolchain.toml` and this file's pinned actions exist to
+      # avoid, so it is provisioned explicitly. `lts/*` tracks the current LTS
+      # line instead of a number that goes stale on its own.
+      - name: Node.js, for building and testing the Svelte frontend
         if: runner.os == 'Linux'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 'lts/*'
-      # ⚠️ **`npm test`, not a list of files.** This step named
-      # `ui/render.test.js` explicitly, so `ui/main.test.js` — added to drive
-      # `main.js` through the two IPC orderings a source-text assertion cannot
-      # decide — would have been a suite that runs on a developer's machine and
-      # never in CI. A gate reached by accident is not a gate, and this
-      # repository has already paid for one: a whole leg of the mutation harness
-      # went unexecuted for sixteen tasks. `package.json`'s script is
-      # `node --test`, which discovers every `*.test.js` under `ui/`, so a suite
-      # added later is run here without this file being touched again.
-      - name: ui/'s own tests
+      # `npm ci`, not `npm install`: it builds from the committed lockfile and
+      # fails rather than silently resolving something new. `npm run build` is
+      # `svelte-check && vite build` (ui/package.json), the type-check and the
+      # production build in one; `npm run test` is Vitest, which `run build`
+      # does not cover.
+      - name: Build the Svelte frontend and run its unit tests
         if: runner.os == 'Linux'
         run: |
-          node --check ui/main.js
-          node --check ui/render.js
-          npm test --prefix ui
+          npm ci --prefix ui
+          npm --prefix ui run build
+          npm --prefix ui run test
       # mnema-extract binds to a prebuilt Pdfium library, which is not committed:
       # it is 7.7 MB and reproducible from a pinned, checksum-verified release.
       # The tests need it too — they fail on a missing library rather than on
@@ -392,6 +394,16 @@ jobs:
       # until it silently was not, and the check below is what noticed.
       - name: Vendor the pinned Pdfium build, which the bundle now ships
         run: scripts/fetch-pdfium.sh
+      # `cargo tauri build` runs beforeBuildCommand (scripts/before-build.sh),
+      # which does `npm ci` and `npm run build` to produce the ui/dist this
+      # bundle embeds — so it needs a node, provisioned explicitly for the same
+      # reason the check job's is rather than trusting whatever the image ships.
+      # Unlike check's frontend gate this is not optional: without the build
+      # there is no frontend to package. `lts/*` matches the check job.
+      - name: Node.js, for the frontend the bundle embeds
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 'lts/*'
       - run: cargo tauri build
       # Never `|| true`, never a grep whose failure is swallowed. The script
       # opens the .dmg and looks at the application inside it; every state it
