@@ -35,8 +35,8 @@ __pycache__/
 # lives in that script and in crates/mnema-extract, which is where it belongs —
 # committing the binary would put a copy of the decision in a place nobody reads.
 # Anchored: an unanchored `vendor/` matches a directory of that name at any depth,
-# and the React interface being ported from the server repository is exactly the
-# kind of tree that could end up hiding source under one.
+# and the Svelte frontend under `ui/` is exactly the kind of tree that could end
+# up hiding source under one.
 /vendor/
 
 # --- staged sidecars ---
