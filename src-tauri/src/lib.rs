@@ -124,6 +124,31 @@ pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+/// Keeps the macOS activation policy in step with the settings window: the app
+/// is an `Accessory` (no Dock icon, no menu bar — a menu-bar resident) while
+/// only the launcher and tray are up, and becomes `Regular` (Dock icon + the
+/// standard menu bar) while the settings window is visible. §6/§8: the standard
+/// menu belongs to the settings window, not the launcher. A no-op off macOS,
+/// where the method does not exist; OS-level, so it is verified by the live run,
+/// not a headless test.
+pub fn sync_activation_policy<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    #[cfg(target_os = "macos")]
+    {
+        let settings_visible = app
+            .get_webview_window("settings")
+            .and_then(|window| window.is_visible().ok())
+            .unwrap_or(false);
+        let policy = if settings_visible {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        };
+        let _ = app.set_activation_policy(policy);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
 /// Builds and runs the application. Returns only when the tray's Quit calls
 /// `app.exit(0)`, or start-up fails (§6: window closes hide, Cmd+Q is prevented).
 pub fn run() -> anyhow::Result<()> {
@@ -176,12 +201,20 @@ pub fn run() -> anyhow::Result<()> {
                 // "what disappears"). Real exit is `app.exit(0)` from the tray's
                 // Quit, which is not a window close and so is not prevented here.
                 let _ = window.hide();
+                // Hiding the settings window drops the resident back to
+                // Accessory (no Dock icon / menu bar); hiding the launcher while
+                // settings is still up leaves the policy unchanged. §6/§8.
+                sync_activation_policy(window.app_handle());
                 api.prevent_close();
             }
         })
         .setup(|app| {
             manage_state(app.handle())?;
             tray::build_tray(app.handle())?;
+            // §6/§8: start as a menu-bar resident — no Dock icon, no menu bar
+            // (settings is hidden at startup). The standard menu returns only
+            // while the settings window is visible.
+            sync_activation_policy(app.handle());
             Ok(())
         })
         .invoke_handler(invoke_handler())

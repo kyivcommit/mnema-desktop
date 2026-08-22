@@ -92,6 +92,9 @@ pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
                     let _ = window.show();
                     let _ = window.set_focus();
                 }
+                // Settings is now up → become a Regular app so it carries the
+                // standard macOS menu bar (§8). No-op off macOS.
+                crate::sync_activation_policy(app);
             }
             "quit" => app.exit(0),
             // status is disabled; pause_indexing / check_updates are PR 9.
