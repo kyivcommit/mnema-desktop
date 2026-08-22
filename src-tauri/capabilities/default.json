@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Lets the main window ask the OS for a folder to watch. Every other command this application defines is its own, not a plugin's, and reaches the window without an entry here — see `src-tauri/src/lib.rs::invoke_handler`.",
-  "windows": ["main"],
+  "description": "Lets the settings window ask the OS for a folder to watch. Every command this application defines is its own, not a plugin's, and reaches its window without an entry here — see `src-tauri/src/lib.rs::invoke_handler`.",
+  "windows": ["settings"],
   "permissions": ["dialog:allow-open"]
 }

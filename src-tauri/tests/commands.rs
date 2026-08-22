@@ -2325,13 +2325,14 @@ fn malformed_open_dialog_args() -> Value {
 /// D48: the ACL classifies a request by its origin, and Windows serves the
 /// webview from a different one than macOS does — `local_origin()`'s own doc
 /// comment has the measured history of what hardcoding the wrong constant
-/// broke last time. `call()` already routes through it for every command in
-/// this file; this test is not exempt just because the command it reaches
-/// belongs to a plugin rather than to this crate.
+/// broke last time. The folder picker belongs to the settings window (§9.2),
+/// which `capabilities/default.json` now names.
 #[test]
-fn the_main_window_may_reach_the_folder_picker() {
+fn the_settings_window_may_reach_the_folder_picker() {
     let app = app_with_real_capabilities();
-    let webview = main_webview(&app);
+    let webview = WebviewWindowBuilder::new(&app, "settings", Default::default())
+        .build()
+        .expect("failed to build the settings mock webview");
 
     let error = call(&webview, "plugin:dialog|open", malformed_open_dialog_args())
         .expect_err("a non-boolean `directory` must not deserialize into `OpenDialogOptions`");
@@ -2347,14 +2348,14 @@ fn the_main_window_may_reach_the_folder_picker() {
     // registered to handle it.
     assert!(
         message.contains("invalid type") && message.contains("expected a boolean"),
-        "the `main` window did not reach `OpenDialogOptions` deserialization — either the ACL \
+        "the `settings` window did not reach `OpenDialogOptions` deserialization — either the ACL \
          refused it, or the dialog plugin was never registered to answer it: {message}"
     );
 }
 
 /// The counterweight to the test above: without it, a capability that
 /// granted `dialog:allow-open` to every window regardless of `windows: [
-/// "main"]` would pass the positive test for the same reason a capability
+/// "settings"]` would pass the positive test for the same reason a capability
 /// scoped correctly would, and nothing here would tell the two apart.
 #[test]
 fn a_window_the_capability_does_not_name_may_not_reach_the_folder_picker() {
