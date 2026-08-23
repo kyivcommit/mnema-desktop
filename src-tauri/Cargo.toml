@@ -68,8 +68,11 @@ tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+# The interface locale (§D129): OS locale detection for `LocaleChoice::Auto`.
+sys-locale = "0.3"
 
 [dev-dependencies]
 # `test` brings in the mock runtime. Declared here rather than as a feature of
@@ -95,5 +98,4 @@ mnema-mock-provider = { workspace = true }
 # credential store at all. Enabling a feature from `[dev-dependencies]` does not
 # enable it for `cargo build`, so nothing here reaches a shipped binary.
 mnema-secrets = { path = "../crates/mnema-secrets", features = ["test-store"] }
-serde_json = { workspace = true }
 tempfile = { workspace = true }

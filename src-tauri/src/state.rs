@@ -43,6 +43,11 @@ pub struct AppState {
     /// about a job that is already running.
     running: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
+    /// The interface locale (§D129): the persisted choice and what it resolves
+    /// to. Set once at start-up by `resolve_effective` (Task 6) and again by
+    /// `locale::apply_choice` on every change; read by `get_locale` and by
+    /// tray/menu construction so both agree with what was last written.
+    locale: Mutex<crate::locale::LocaleState>,
 }
 
 impl AppState {
@@ -60,11 +65,46 @@ impl AppState {
             db: Mutex::new(None),
             running: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
+            // Safe default; overwritten at startup by `resolve_effective`
+            // before any window draws (Task 6).
+            locale: Mutex::new(crate::locale::LocaleState {
+                choice: crate::locale::LocaleChoice::Auto,
+                effective: crate::locale::Lang::En,
+            }),
         }
     }
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// A copy of the current locale state — `LocaleState` is `Copy`, so this
+    /// hands back a value rather than a guard, the same reasoning as every
+    /// other getter here: no caller holds this lock across an await point or a
+    /// whole command.
+    ///
+    /// Recovers a poisoned lock instead of panicking (`into_inner` on the
+    /// `PoisonError`, not `expect`): the guarded value is a plain `Copy`
+    /// struct with no invariant a panicking holder could have left broken, and
+    /// a wrong menu label is a smaller failure than losing the window over it
+    /// — the same trade [`crate::error::Error::StatePoisoned`] documents for
+    /// `db`, made explicit here instead of typed, because this getter's
+    /// signature (matching the brief) returns `LocaleState`, not a `Result`.
+    pub fn locale(&self) -> crate::locale::LocaleState {
+        *self
+            .locale
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Overwrites the locale state — called by `locale::apply_choice` after a
+    /// successful write to prefs, and once at start-up by `resolve_effective`
+    /// (Task 6). Same poison-recovery reasoning as [`AppState::locale`].
+    pub fn set_locale_state(&self, s: crate::locale::LocaleState) {
+        *self
+            .locale
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = s;
     }
 
     pub fn worker_path(&self) -> &Path {

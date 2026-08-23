@@ -9,6 +9,12 @@ pub fn index_path(app_local_data_dir: &Path) -> PathBuf {
     app_local_data_dir.join("index.sqlite")
 }
 
+/// The app-preferences file, beside the index. Available at start-up (unlike the
+/// index DB), because the tray needs the locale before any folder is opened.
+pub fn prefs_path(app_local_data_dir: &Path) -> PathBuf {
+    app_local_data_dir.join("prefs.json")
+}
+
 /// Where the extraction worker binary is, for a real, running application.
 ///
 /// One path serves both `cargo run` / `cargo tauri dev` and a packaged build,
