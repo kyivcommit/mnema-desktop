@@ -31,7 +31,17 @@ locale.subscribe((l) => syncDocument(l)); // reactive, no component remount
 export async function bootLocale() {
   const { invoke } = await import('@tauri-apps/api/core');
   const { listen } = await import('@tauri-apps/api/event');
+  // Register the listener BEFORE taking the startup snapshot. A language switch
+  // that lands during boot would otherwise fall in the gap between the snapshot
+  // reply and a later listen(), and be lost until the next switch — leaving two
+  // windows able to disagree (reviewer F1). A live event is always newer than
+  // the snapshot, so once one has arrived it must win: the snapshot only seeds
+  // the locale when no switch happened during boot.
+  let liveEventSeen = false;
+  await listen<'uk' | 'en'>('locale-changed', (e) => {
+    liveEventSeen = true;
+    setLocale(e.payload);
+  });
   const reply = await invoke<{ choice: string; effective: 'uk' | 'en' }>('get_locale');
-  initLocale(reply.effective);
-  await listen<'uk' | 'en'>('locale-changed', (e) => setLocale(e.payload));
+  if (!liveEventSeen) initLocale(reply.effective);
 }
