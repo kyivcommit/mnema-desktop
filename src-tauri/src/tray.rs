@@ -43,6 +43,34 @@ pub const TRAY_ITEM_IDS: &[&str] = &[
     "quit",
 ];
 
+/// The «Мова» submenu's three items as pure `(id, label, checked)` data —
+/// the only part of the submenu that carries a decision (which language is
+/// currently selected). Kept separate from `CheckMenuItem` construction so a
+/// headless test can catch a wrong-variant mapping (e.g. `lang_en` compared
+/// against `LocaleChoice::Uk`) or an all-checked/all-unchecked slip — neither
+/// of which any other test here would catch, and the built `Menu` itself is
+/// macOS main-thread-only (see `TRAY_ITEM_IDS`), so this is the only headless
+/// path to it.
+fn lang_menu_items(lang: Lang, choice: LocaleChoice) -> [(&'static str, String, bool); 3] {
+    [
+        (
+            "lang_auto",
+            locale::t(lang, Key::LangAuto).to_string(),
+            choice == LocaleChoice::Auto,
+        ),
+        (
+            "lang_uk",
+            locale::endonym(LocaleChoice::Uk).to_string(),
+            choice == LocaleChoice::Uk,
+        ),
+        (
+            "lang_en",
+            locale::endonym(LocaleChoice::En).to_string(),
+            choice == LocaleChoice::En,
+        ),
+    ]
+}
+
 /// Assembles the tray menu for a resolved language and the persisted choice
 /// behind it — §8, plus the «Мова» submenu (§D129) that lets the user pin a
 /// language or return to Auto (`lang_auto`/`lang_uk`/`lang_en`, checked to
@@ -77,33 +105,18 @@ pub fn build_tray_menu<R: Runtime>(
         None::<&str>,
     )?;
 
-    // «Мова»: Auto plus the two supported languages, in their own endonyms
-    // (`locale::endonym` — never a Cyrillic literal here, or the hardcode
-    // guard trips). Exactly one is checked, matching the persisted `choice`.
-    let lang_auto = CheckMenuItem::with_id(
-        app,
-        "lang_auto",
-        locale::t(lang, Key::LangAuto),
-        true,
-        choice == LocaleChoice::Auto,
-        None::<&str>,
-    )?;
-    let lang_uk = CheckMenuItem::with_id(
-        app,
-        "lang_uk",
-        locale::endonym(LocaleChoice::Uk),
-        true,
-        choice == LocaleChoice::Uk,
-        None::<&str>,
-    )?;
-    let lang_en = CheckMenuItem::with_id(
-        app,
-        "lang_en",
-        locale::endonym(LocaleChoice::En),
-        true,
-        choice == LocaleChoice::En,
-        None::<&str>,
-    )?;
+    // «Мова»: Auto plus the two supported languages, in their own endonyms.
+    // The (id, label, checked) triples come from `lang_menu_items` — pure
+    // data, headlessly tested — rather than being computed inline here.
+    let [
+        (auto_id, auto_label, auto_checked),
+        (uk_id, uk_label, uk_checked),
+        (en_id, en_label, en_checked),
+    ] = lang_menu_items(lang, choice);
+    let lang_auto =
+        CheckMenuItem::with_id(app, auto_id, auto_label, true, auto_checked, None::<&str>)?;
+    let lang_uk = CheckMenuItem::with_id(app, uk_id, uk_label, true, uk_checked, None::<&str>)?;
+    let lang_en = CheckMenuItem::with_id(app, en_id, en_label, true, en_checked, None::<&str>)?;
     let language_menu = Submenu::with_id_and_items(
         app,
         "lang_menu",
@@ -222,5 +235,37 @@ mod tests {
     #[should_panic(expected = "unknown tray id")]
     fn tray_label_rejects_an_unknown_id() {
         tray_label(Lang::En, "not_a_real_id");
+    }
+
+    #[test]
+    fn exactly_one_language_item_is_checked_and_it_matches_choice() {
+        use LocaleChoice::*;
+        for (choice, checked_id) in [(Auto, "lang_auto"), (Uk, "lang_uk"), (En, "lang_en")] {
+            let items = lang_menu_items(Lang::En, choice);
+            for (id, _label, checked) in &items {
+                // The item matching `choice` is checked, and — same assertion,
+                // both directions at once — the other two are not.
+                assert_eq!(
+                    *checked,
+                    *id == checked_id,
+                    "wrong checked state: {id} @ {choice:?}"
+                );
+            }
+            // Belt against an all-checked or all-unchecked slip, which the
+            // per-item comparison above would not catch on its own.
+            assert_eq!(items.iter().filter(|(_, _, c)| *c).count(), 1);
+        }
+    }
+
+    #[test]
+    fn language_items_are_wired_to_the_catalog() {
+        let it = lang_menu_items(Lang::En, LocaleChoice::Auto);
+        assert_eq!(
+            [it[0].0, it[1].0, it[2].0],
+            ["lang_auto", "lang_uk", "lang_en"]
+        );
+        assert_eq!(it[0].1, locale::t(Lang::En, Key::LangAuto));
+        assert_eq!(it[1].1, locale::endonym(LocaleChoice::Uk));
+        assert_eq!(it[2].1, locale::endonym(LocaleChoice::En));
     }
 }
