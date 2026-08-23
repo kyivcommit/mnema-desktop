@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { t, setLocale } from './index';
+import { messages, type Key } from './catalog';
 
 describe('i18n', () => {
   it('returns the string for the active locale', () => {
@@ -23,5 +24,13 @@ describe('i18n', () => {
     expect(f(21)).toBe('21 документ');
     expect(f(22)).toBe('22 документи');
     expect(f(111)).toBe('111 документів');
+  });
+
+  it('every catalog value is non-empty in both locales', () => {
+    for (const loc of ['uk', 'en'] as const) {
+      for (const key of Object.keys(messages[loc]) as Key[]) {
+        expect(messages[loc][key].length, `${loc}.${key} is empty`).toBeGreaterThan(0);
+      }
+    }
   });
 });
