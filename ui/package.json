@@ -10,17 +10,18 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2"
+    "@tauri-apps/api": "^2",
+    "intl-messageformat": "^11.2.14"
   },
   "devDependencies": {
-    "svelte": "^5",
     "@sveltejs/vite-plugin-svelte": "^5",
-    "vite": "^6",
-    "typescript": "^5",
-    "svelte-check": "^4",
-    "vitest": "^3",
     "@testing-library/svelte": "^5",
+    "@types/node": "^26",
     "jsdom": "^25",
-    "@types/node": "^26"
+    "svelte": "^5",
+    "svelte-check": "^4",
+    "typescript": "^5",
+    "vite": "^6",
+    "vitest": "^3"
   }
 }
