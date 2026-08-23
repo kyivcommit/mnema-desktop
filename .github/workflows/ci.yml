@@ -295,6 +295,25 @@ jobs:
           # Scoped to `--test roundtrip` so this stays the keychain step: the
           # rest of the crate's tests already ran under `cargo test --workspace`.
           cargo test -p mnema-secrets --test roundtrip -- --include-ignored
+      # The start-up smoke test — the guard the unit suite structurally cannot
+      # be. The app menu is built with `muda`, which must run on the real main
+      # thread, so no `#[test]` (a worker thread) can build the app in-process;
+      # that is why a build-time `app.path()` panic shipped green through
+      # `cargo test --workspace` + every review — nothing there launches the app.
+      # This launches the real binary and fails if it dies during start-up.
+      #
+      # macOS only: the app menu is a macOS surface, and launching needs a
+      # display, which the runner session provides. `--include-ignored`, never
+      # `--ignored`, for the reason the keychain step above spells out (a dropped
+      # attribute would otherwise make it select zero tests and pass green).
+      #
+      # First-run note: this is the one step whose environment (a GUI-capable
+      # runner session) could not be verified before merge; if the runner cannot
+      # bring up a window, fall back to running it locally / from the pre-push
+      # hook rather than weakening it into a non-blocking step.
+      - name: App start-up smoke test (launches the real binary)
+        if: runner.os == 'macOS'
+        run: cargo test -p mnema-desktop --test launch_smoke -- --include-ignored
 
   mutations:
     # The instrument that proves a test is load-bearing. It ran by hand only
