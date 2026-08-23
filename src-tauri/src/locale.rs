@@ -394,6 +394,38 @@ mod tests {
         assert_eq!(read_choice(dir.path()), LocaleChoice::Uk);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn failed_write_keeps_the_previous_choice() {
+        // On a persist failure the tray callback logs and rebuilds its menu from
+        // the UNCHANGED AppState ("старий вибір лишається", spec §5.8). That is
+        // only correct because `write_choice` is atomic (temp + rename): a failed
+        // write must both surface as an error AND leave the previously persisted
+        // choice intact. This pins that invariant — an in-place write would go
+        // red here (the file, writable inside a read-only dir, would be truncated
+        // to the new value). The callback's own log + menu rebuild live in a muda
+        // main-thread closure and are covered by the live run, not this test.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        write_choice(dir.path(), LocaleChoice::Uk).unwrap();
+
+        // Read-only data dir: creating the sibling temp file must fail.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let failed = write_choice(dir.path(), LocaleChoice::En);
+        // Restore perms first, so the tempdir cleans up whatever the asserts do.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(
+            failed.is_err(),
+            "a write into a read-only dir must surface an error"
+        );
+        assert_eq!(
+            read_choice(dir.path()),
+            LocaleChoice::Uk,
+            "a failed write must not change the persisted choice"
+        );
+    }
+
     #[test]
     fn every_key_has_both_languages_and_is_non_empty() {
         for &key in ALL_KEYS {

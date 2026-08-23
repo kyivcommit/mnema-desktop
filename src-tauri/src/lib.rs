@@ -328,9 +328,15 @@ pub fn run() -> anyhow::Result<()> {
             "quit" => app.exit(0),
             // §D129: pin a language or return to Auto. Both this callback and
             // the `set_locale` command go through `apply_choice` (persist →
-            // update state → `apply_locale`), the one path. A write failure is
-            // logged inside `apply_choice`, not surfaced: a tray callback has no
-            // UI channel of its own (§6).
+            // update state → `apply_locale`), the one path. A tray callback has
+            // no UI channel of its own (§6), so on a persist failure we log the
+            // error and rebuild the tray menu from the UNCHANGED LocaleState:
+            // macOS has already flipped the clicked CheckMenuItem, and because
+            // `apply_choice` fails at the persist step before it touches state
+            // (locale.rs `write_choice(...)?`), this returns the checkmark to the
+            // still-current choice ("старий вибір лишається", spec §5.8). The
+            // `set_locale` command returns the same error to its caller for PR 9's
+            // in-UI channel.
             "lang_auto" | "lang_uk" | "lang_en" => {
                 use crate::locale::LocaleChoice;
                 let choice = match event.id().as_ref() {
@@ -339,7 +345,18 @@ pub fn run() -> anyhow::Result<()> {
                     _ => LocaleChoice::Auto,
                 };
                 let state = app.state::<state::AppState>();
-                let _ = crate::locale::apply_choice(app, &state, choice);
+                if let Err(e) = crate::locale::apply_choice(app, &state, choice) {
+                    eprintln!("mnema: language change failed to persist: {e}");
+                    // Restore the checkmark: the OS toggled it on click, but the
+                    // choice never changed, so rebuild from the current state.
+                    let current = state.locale();
+                    if let Some(tray) = app.tray_by_id("mnema-tray")
+                        && let Ok(menu) =
+                            crate::tray::build_tray_menu(app, current.effective, current.choice)
+                    {
+                        let _ = tray.set_menu(Some(menu));
+                    }
+                }
             }
             _ => {}
         })
