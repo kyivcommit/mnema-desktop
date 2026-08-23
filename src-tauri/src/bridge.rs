@@ -832,4 +832,104 @@ mod tests {
         // text is carried verbatim.
         assert_eq!(passage_from_hit(&both).text, "body");
     }
+
+    #[test]
+    fn text_arm_report_camel_case_spellings_are_pinned() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value(TextArmReport::Off).unwrap(),
+            json!({ "kind": "off" })
+        );
+        assert_eq!(
+            serde_json::to_value(TextArmReport::Answered { matched: 3 }).unwrap(),
+            json!({ "kind": "answered", "matched": 3 })
+        );
+    }
+
+    #[test]
+    fn refusal_kind_wire_spellings_are_pinned() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value(RefusalKind::NoCandidates).unwrap(),
+            json!({ "kind": "noCandidates" })
+        );
+        assert_eq!(
+            serde_json::to_value(RefusalKind::EmptyCompletion).unwrap(),
+            json!({ "kind": "emptyCompletion" })
+        );
+    }
+
+    #[test]
+    fn ask_answer_tags_and_refused_nesting_are_pinned() {
+        use serde_json::json;
+        let generated = AskAnswer::Generated {
+            answer: "a".into(),
+            citations: vec![],
+            text: TextArmReport::Off,
+            content: ContentArmReport::Off,
+        };
+        assert_eq!(
+            serde_json::to_value(&generated).unwrap()["kind"],
+            json!("generated")
+        );
+
+        let citations_only = AskAnswer::CitationsOnly {
+            citations: vec![],
+            text: TextArmReport::Off,
+            content: ContentArmReport::Off,
+        };
+        assert_eq!(
+            serde_json::to_value(&citations_only).unwrap()["kind"],
+            json!("citationsOnly")
+        );
+
+        let refused = AskAnswer::Refused {
+            kind: RefusalKind::NoCandidates,
+            text: TextArmReport::Off,
+            content: ContentArmReport::Off,
+        };
+        let v = serde_json::to_value(&refused).unwrap();
+        // The reason is nested under `reason`, not `kind` (ruling R4, bridge.rs:466-476).
+        assert_eq!(v["kind"], json!("refused"));
+        assert_eq!(v["reason"]["kind"], json!("noCandidates"));
+    }
+
+    #[test]
+    fn ask_citation_field_names_are_pinned() {
+        use serde_json::json;
+        let c = AskCitation {
+            anchor: 1,
+            chunk_id: 42,
+            text: "t".into(),
+            relative_path: Some("a/b.md".into()),
+            section_title: Some("S".into()),
+            coordinate: Coordinate::None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["anchor"], json!(1));
+        assert_eq!(v["chunkId"], json!(42));
+        assert_eq!(v["text"], json!("t")); // every field asserted, incl. the ones stable across casings
+        assert_eq!(v["relativePath"], json!("a/b.md"));
+        assert_eq!(v["sectionTitle"], json!("S"));
+        assert_eq!(v["coordinate"], json!({ "kind": "none" }));
+    }
+
+    #[test]
+    fn hit_field_names_are_pinned() {
+        use serde_json::json;
+        let h = Hit {
+            chunk_id: 7,
+            text: "t".into(),
+            relative_path: None,
+            section_title: None,
+            coordinate: Coordinate::Page { number: 2 },
+        };
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v["chunkId"], json!(7));
+        assert_eq!(v["text"], json!("t")); // every field asserted (Finding 2)
+        // Option::None → null (present key, null value) — both directions.
+        assert_eq!(v["relativePath"], json!(null));
+        assert_eq!(v["sectionTitle"], json!(null));
+        assert_eq!(v["coordinate"], json!({ "kind": "page", "number": 2 }));
+    }
 }
