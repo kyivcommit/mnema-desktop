@@ -35,6 +35,14 @@ pub enum Error {
         path: String,
         source: std::io::Error,
     },
+    /// `locale::write_choice` failed — the prefs file could not be written
+    /// (permissions, a full disk, a data dir that vanished underneath it).
+    /// `#[from]`, unlike [`Error::DataDir`] above: there is no separate path
+    /// to attach here, since `write_choice` already names the file inside its
+    /// own `std::io::Error` context where one is available, and this is the
+    /// first variant that needs `From<std::io::Error>` at all.
+    #[error("could not write preferences: {0}")]
+    Prefs(#[from] std::io::Error),
     #[error("index: {0}")]
     Index(#[from] mnema_index::Error),
     /// A window sent a `root_id` `watched_root` has no row for — a folder
@@ -244,5 +252,26 @@ impl From<mnema_provider::Error> for Error {
 impl Serialize for Error {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `write_choice(...)?` inside `locale::apply_choice` needs `Error` to
+    /// implement `From<std::io::Error>`. Red-first: this fails to compile
+    /// until `Error::Prefs` exists, and once it does, the IPC boundary's only
+    /// shape for a rejected command — the `Serialize` impl above, which emits
+    /// `Display` — must carry both the fixed prefix and the io error's own
+    /// text, not swallow either.
+    #[test]
+    fn prefs_error_serializes_to_its_display_string() {
+        let err = Error::Prefs(std::io::Error::other("disk full"));
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(
+            json,
+            serde_json::Value::String("could not write preferences: disk full".to_string())
+        );
     }
 }

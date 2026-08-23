@@ -48,6 +48,8 @@ pub fn invoke_handler<R: tauri::Runtime>()
         models::model_settings,
         walk_job::start_walk_job,
         embed_job::start_embed_job,
+        locale::get_locale,
+        locale::set_locale,
     ]
 }
 

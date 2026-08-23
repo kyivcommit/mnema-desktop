@@ -3,7 +3,9 @@
 //! `mnema-core::Coordinate::render` is prompt-only and deliberately untouched.
 
 use crate::paths;
+use serde::Serialize;
 use std::path::Path;
+use tauri::{AppHandle, Manager, Runtime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -185,6 +187,97 @@ pub fn write_choice(data_dir: &Path, choice: LocaleChoice) -> std::io::Result<()
     std::fs::rename(&tmp, &path)
 }
 
+/// What the runtime seam carries: the persisted choice, and what it currently
+/// resolves to. `Copy` so [`crate::state::AppState::locale`] can hand back a
+/// value instead of a guard.
+#[derive(Debug, Clone, Copy)]
+pub struct LocaleState {
+    pub choice: LocaleChoice,
+    pub effective: Lang,
+}
+
+/// AppHandle-free core, so the resolution is unit-testable without a runtime.
+pub fn effective_core(data_dir: &Path, os: Option<&str>) -> LocaleState {
+    let choice = read_choice(data_dir);
+    LocaleState {
+        choice,
+        effective: resolve(choice, os),
+    }
+}
+
+/// Idempotent: reads prefs + the OS locale and resolves. Safe to call at both
+/// menu build-time and in `.setup` (spec §5.3/§5.7). If the data dir cannot be
+/// located (should not happen post-startup — `manage_state` `?`s it at
+/// `lib.rs:77`), fall back to Auto→OS→EN rather than a bogus empty path.
+pub fn resolve_effective<R: Runtime>(app: &AppHandle<R>) -> LocaleState {
+    let os = sys_locale::get_locale();
+    match app.path().app_local_data_dir() {
+        Ok(dir) => effective_core(&dir, os.as_deref()),
+        Err(_) => LocaleState {
+            choice: LocaleChoice::Auto,
+            effective: resolve(LocaleChoice::Auto, os.as_deref()),
+        },
+    }
+}
+
+/// The IPC shape of [`LocaleState`]. A string rather than the enums
+/// themselves: the enums have no `Serialize`, and the webview needs
+/// `"auto"|"uk"|"en"` / `"uk"|"en"`, not a derived Rust-shaped encoding.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocaleReply {
+    pub choice: String,
+    pub effective: String,
+}
+
+fn lang_tag(l: Lang) -> &'static str {
+    match l {
+        Lang::Uk => "uk",
+        Lang::En => "en",
+    }
+}
+
+#[tauri::command]
+pub fn get_locale(state: tauri::State<'_, crate::state::AppState>) -> LocaleReply {
+    let s = state.locale();
+    LocaleReply {
+        choice: choice_to_str(s.choice).into(),
+        effective: lang_tag(s.effective).into(),
+    }
+}
+
+/// The shared path for a language change, used by BOTH the `set_locale`
+/// command and the tray callback (Task 6): persist → update state → apply
+/// natively. Writes to the data dir `AppState` resolved at startup
+/// (`state.rs:16`).
+pub fn apply_choice<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &crate::state::AppState,
+    choice: LocaleChoice,
+) -> Result<(), crate::error::Error> {
+    write_choice(state.data_dir(), choice)?; // a write failure surfaces (spec §6)
+    let effective = resolve(choice, sys_locale::get_locale().as_deref());
+    state.set_locale_state(LocaleState { choice, effective });
+    apply_locale(app, effective); // Task 6 fills apply_locale
+    Ok(())
+}
+
+/// Applies a resolved language to whatever is already on screen — the tray
+/// menu labels and any open window. Left empty until Task 6 builds the tray
+/// menu there is anything to relabel; `apply_choice` already calls it so the
+/// wiring for that task is a body, not a new call site.
+// filled in Task 6
+fn apply_locale<R: Runtime>(_app: &AppHandle<R>, _lang: Lang) {}
+
+#[tauri::command]
+pub fn set_locale<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, crate::state::AppState>,
+    choice: String,
+) -> Result<(), crate::error::Error> {
+    apply_choice(&app, &state, choice_from_str(&choice))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +366,25 @@ mod tests {
     fn tray_labels_differ_by_language() {
         assert_eq!(t(Lang::Uk, Key::TrayQuit), "Вийти");
         assert_eq!(t(Lang::En, Key::TrayQuit), "Quit");
+    }
+
+    // resolve_effective is split so the AppHandle-free core is testable:
+    #[test]
+    fn effective_core_reads_choice_then_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        // No prefs → Auto → follows OS.
+        assert_eq!(
+            effective_core(dir.path(), Some("uk-UA")).effective,
+            Lang::Uk
+        );
+        assert_eq!(
+            effective_core(dir.path(), Some("de-DE")).effective,
+            Lang::En
+        );
+        // Explicit pin ignores OS.
+        write_choice(dir.path(), LocaleChoice::En).unwrap();
+        let s = effective_core(dir.path(), Some("uk-UA"));
+        assert_eq!(s.choice, LocaleChoice::En);
+        assert_eq!(s.effective, Lang::En);
     }
 }
