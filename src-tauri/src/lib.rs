@@ -165,16 +165,16 @@ const CMD_Q_CLOSE_SETTINGS: &str = "cmd_q_close_settings";
 #[cfg(target_os = "macos")]
 pub(crate) fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
+    lang: crate::locale::Lang,
 ) -> tauri::Result<tauri::menu::Menu<R>> {
     use crate::locale::{self, Key};
     use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-    // Built at start-up and again on every language change
-    // (`locale::apply_locale`), so it resolves the effective language itself
-    // rather than taking it as an argument: `AppState` need not exist yet at the
-    // first build (§5.3), so `resolve_effective` reads prefs + the OS directly.
-    let lang = locale::resolve_effective(app).effective;
-
+    // `lang` is passed in, never resolved here: the first build runs during
+    // `build()`, before the path resolver exists, so calling `app.path()` /
+    // `resolve_effective` inside this function panics ("state() called before
+    // manage()"). Callers pass the language — `boot_lang()` (OS-only) at the
+    // first build, the resolved effective in `.setup` and `apply_locale`.
     let pkg = app.package_info();
     let about = AboutMetadata {
         name: Some(pkg.name.clone()),
@@ -242,6 +242,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
+    _lang: crate::locale::Lang,
 ) -> tauri::Result<tauri::menu::Menu<R>> {
     tauri::menu::Menu::default(app)
 }
@@ -291,7 +292,7 @@ pub fn run() -> anyhow::Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(global_shortcut)
-        .menu(build_app_menu)
+        .menu(|app| build_app_menu(app, crate::locale::boot_lang()))
         // All menu events — the app menu's ⌘Q AND every tray item — dispatch to
         // this one app-level handler. `muda` registers `Builder::on_menu_event`
         // and the tray's menu into the same app-level listeners, so events fire
@@ -364,6 +365,13 @@ pub fn run() -> anyhow::Result<()> {
             // reads it back to label its menu (`tray::build_tray`).
             let st = locale::resolve_effective(app.handle());
             app.state::<state::AppState>().set_locale_state(st);
+            // The first app menu was built during `build()` from the OS locale
+            // alone (`boot_lang` — no path resolver yet to read prefs). Rebuild
+            // it now from the resolved language so an explicit saved choice that
+            // differs from the OS shows the moment the menu bar first appears.
+            if let Ok(menu) = build_app_menu(app.handle(), st.effective) {
+                let _ = app.handle().set_menu(menu);
+            }
             tray::build_tray(app.handle())?;
             // The settings window's native title in the resolved language. It is
             // hidden at start-up, so this is what it shows the first time it is

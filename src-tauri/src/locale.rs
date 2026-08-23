@@ -205,10 +205,11 @@ pub fn effective_core(data_dir: &Path, os: Option<&str>) -> LocaleState {
     }
 }
 
-/// Idempotent: reads prefs + the OS locale and resolves. Safe to call at both
-/// menu build-time and in `.setup` (spec §5.3/§5.7). If the data dir cannot be
-/// located (should not happen post-startup — `manage_state` `?`s it at
-/// `lib.rs:77`), fall back to Auto→OS→EN rather than a bogus empty path.
+/// Reads the persisted choice + the OS locale and resolves the effective
+/// language. Calls `app.path()`, which PANICS if the path resolver is not yet
+/// managed — so this must run in or after `.setup`, NEVER from the menu-build
+/// closure (that path uses [`boot_lang`], which needs no resolver). If the data
+/// dir cannot be located, fall back to Auto→OS→EN rather than a bogus path.
 pub fn resolve_effective<R: Runtime>(app: &AppHandle<R>) -> LocaleState {
     let os = sys_locale::get_locale();
     match app.path().app_local_data_dir() {
@@ -218,6 +219,17 @@ pub fn resolve_effective<R: Runtime>(app: &AppHandle<R>) -> LocaleState {
             effective: resolve(LocaleChoice::Auto, os.as_deref()),
         },
     }
+}
+
+/// The language for the FIRST app-menu build, which happens during `build()`
+/// before the path resolver (and `AppState`) exist — so it cannot read prefs
+/// and must NOT call `app.path()` (that panics: "state() called before
+/// manage()"). Resolves from the OS locale alone; `.setup` rebuilds the menu
+/// with the persisted choice once the resolver is up, and `apply_locale`
+/// rebuilds it on every change (the app menu stays hidden until settings opens,
+/// after both later rebuilds have run).
+pub fn boot_lang() -> Lang {
+    resolve(LocaleChoice::Auto, sys_locale::get_locale().as_deref())
 }
 
 /// The IPC shape of [`LocaleState`]. A string rather than the enums
@@ -289,7 +301,7 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
     // (§5.7) — so a change made from the tray with the menu bar hidden is
     // already applied when it next shows. Off macOS this is the default menu
     // and the rebuild is a harmless no-op.
-    if let Ok(menu) = crate::build_app_menu(app) {
+    if let Ok(menu) = crate::build_app_menu(app, lang) {
         let _ = app.set_menu(menu);
     }
     // Broadcast the new language so any open webview can re-render its own
@@ -414,5 +426,14 @@ mod tests {
         let s = effective_core(dir.path(), Some("uk-UA"));
         assert_eq!(s.choice, LocaleChoice::En);
         assert_eq!(s.effective, Lang::En);
+    }
+
+    #[test]
+    fn boot_lang_needs_no_app_handle_or_path_resolver() {
+        // The first app-menu build calls this during `build()`, before the
+        // Tauri runtime / path resolver exist. That it is callable with nothing
+        // — no AppHandle, no `app.path()` — is the regression guard for the
+        // start-up panic a menu-closure `resolve_effective` once caused.
+        assert!(matches!(boot_lang(), Lang::Uk | Lang::En));
     }
 }
