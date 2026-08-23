@@ -41,6 +41,84 @@ pub fn resolve(choice: LocaleChoice, os: Option<&str>) -> Lang {
     }
 }
 
+/// The canonical set of translatable strings the Rust side owns. Every key must
+/// resolve in both languages — the `match` in `t` is exhaustive over `(Lang,
+/// Key)`, so a new variant without both arms fails to compile; the completeness
+/// test below is the belt to that compiler-enforced brace. Translatable TEXT
+/// only: no emoji, no shortcut hints (e.g. `(⌥Space)`), no endonyms — those are
+/// composed at the call site or, for endonyms, live in `endonym` below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    TrayStatus,        // "Проіндексовано —" / "Indexed —"
+    TrayShowSearch,    // "Показати пошук" / "Show search"
+    TrayOpenSettings,  // "Відкрити налаштування" / "Open settings"
+    TrayPauseIndexing, // "Пауза індексації" / "Pause indexing"
+    TrayCheckUpdates,  // "Перевірити оновлення" / "Check for updates"
+    TrayQuit,          // "Вийти" / "Quit"
+    MenuLanguage,      // submenu title "Мова" / "Language"
+    LangAuto,          // "Авто (система)" / "Auto (system)"
+    SettingsTitle,     // "Налаштування" / "Settings" (window title after "Mnema — ")
+    CloseSettings,     // "Закрити налаштування" / "Close Settings"
+    MenuEdit,          // "Редагувати" / "Edit"
+    MenuWindow,        // "Вікно" / "Window"
+}
+
+pub const ALL_KEYS: &[Key] = &[
+    Key::TrayStatus,
+    Key::TrayShowSearch,
+    Key::TrayOpenSettings,
+    Key::TrayPauseIndexing,
+    Key::TrayCheckUpdates,
+    Key::TrayQuit,
+    Key::MenuLanguage,
+    Key::LangAuto,
+    Key::SettingsTitle,
+    Key::CloseSettings,
+    Key::MenuEdit,
+    Key::MenuWindow,
+];
+
+pub fn t(lang: Lang, key: Key) -> &'static str {
+    use Key::*;
+    match (lang, key) {
+        (Lang::Uk, TrayStatus) => "Проіндексовано —",
+        (Lang::En, TrayStatus) => "Indexed —",
+        (Lang::Uk, TrayShowSearch) => "Показати пошук",
+        (Lang::En, TrayShowSearch) => "Show search",
+        (Lang::Uk, TrayOpenSettings) => "Відкрити налаштування",
+        (Lang::En, TrayOpenSettings) => "Open settings",
+        (Lang::Uk, TrayPauseIndexing) => "Пауза індексації",
+        (Lang::En, TrayPauseIndexing) => "Pause indexing",
+        (Lang::Uk, TrayCheckUpdates) => "Перевірити оновлення",
+        (Lang::En, TrayCheckUpdates) => "Check for updates",
+        (Lang::Uk, TrayQuit) => "Вийти",
+        (Lang::En, TrayQuit) => "Quit",
+        (Lang::Uk, MenuLanguage) => "Мова",
+        (Lang::En, MenuLanguage) => "Language",
+        (Lang::Uk, LangAuto) => "Авто (система)",
+        (Lang::En, LangAuto) => "Auto (system)",
+        (Lang::Uk, SettingsTitle) => "Налаштування",
+        (Lang::En, SettingsTitle) => "Settings",
+        (Lang::Uk, CloseSettings) => "Закрити налаштування",
+        (Lang::En, CloseSettings) => "Close Settings",
+        (Lang::Uk, MenuEdit) => "Редагувати",
+        (Lang::En, MenuEdit) => "Edit",
+        (Lang::Uk, MenuWindow) => "Вікно",
+        (Lang::En, MenuWindow) => "Window",
+    }
+}
+
+/// Language names shown in their own language (endonyms) for the selector. These
+/// live here (not in `tray.rs`) so the hardcode guard stays green — a Cyrillic
+/// endonym in `tray.rs` would trip it (P1-3). `Auto`'s label is `Key::LangAuto`.
+pub fn endonym(choice: LocaleChoice) -> &'static str {
+    match choice {
+        LocaleChoice::Uk => "Українська",
+        LocaleChoice::En => "English",
+        LocaleChoice::Auto => "", // Auto uses t(lang, Key::LangAuto) instead
+    }
+}
+
 const LOCALE_KEY: &str = "locale";
 
 fn choice_to_str(c: LocaleChoice) -> &'static str {
@@ -181,5 +259,19 @@ mod tests {
         assert_eq!(parsed["theme"], "dark", "unknown field dropped: {raw}");
         assert_eq!(parsed["locale"], "uk", "locale not updated: {raw}");
         assert_eq!(read_choice(dir.path()), LocaleChoice::Uk);
+    }
+
+    #[test]
+    fn every_key_has_both_languages_and_is_non_empty() {
+        for &key in ALL_KEYS {
+            assert!(!t(Lang::Uk, key).is_empty(), "UK missing for {key:?}");
+            assert!(!t(Lang::En, key).is_empty(), "EN missing for {key:?}");
+        }
+    }
+
+    #[test]
+    fn tray_labels_differ_by_language() {
+        assert_eq!(t(Lang::Uk, Key::TrayQuit), "Вийти");
+        assert_eq!(t(Lang::En, Key::TrayQuit), "Quit");
     }
 }
