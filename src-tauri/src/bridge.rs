@@ -868,20 +868,19 @@ mod tests {
             text: TextArmReport::Off,
             content: ContentArmReport::Off,
         };
-        assert_eq!(
-            serde_json::to_value(&generated).unwrap()["kind"],
-            json!("generated")
-        );
+        let gv = serde_json::to_value(&generated).unwrap();
+        assert_eq!(gv["kind"], json!("generated"));
+        assert_eq!(gv["answer"], json!("a")); // field name pinned — the TS side mirrors `answer`
+        assert_eq!(gv["citations"], json!([])); // field name pinned ([] ≠ Null, so a rename/drop fails)
 
         let citations_only = AskAnswer::CitationsOnly {
             citations: vec![],
             text: TextArmReport::Off,
             content: ContentArmReport::Off,
         };
-        assert_eq!(
-            serde_json::to_value(&citations_only).unwrap()["kind"],
-            json!("citationsOnly")
-        );
+        let cv = serde_json::to_value(&citations_only).unwrap();
+        assert_eq!(cv["kind"], json!("citationsOnly"));
+        assert_eq!(cv["citations"], json!([])); // field name pinned
 
         let refused = AskAnswer::Refused {
             kind: RefusalKind::NoCandidates,
@@ -924,12 +923,21 @@ mod tests {
             section_title: None,
             coordinate: Coordinate::Page { number: 2 },
         };
-        let v = serde_json::to_value(&h).unwrap();
-        assert_eq!(v["chunkId"], json!(7));
-        assert_eq!(v["text"], json!("t")); // every field asserted (Finding 2)
-        // Option::None → null (present key, null value) — both directions.
-        assert_eq!(v["relativePath"], json!(null));
-        assert_eq!(v["sectionTitle"], json!(null));
-        assert_eq!(v["coordinate"], json!({ "kind": "page", "number": 2 }));
+        // Full-object compare, not per-field: `serde_json::Value` indexing returns
+        // Null for an ABSENT key too, so `v["relativePath"] == null` would still
+        // pass if the key were dropped (skip_serializing_if) or renamed — the
+        // satisfied-by-zero hole the "assert both directions" rule exists to stop.
+        // Comparing the whole object distinguishes present-null from absent and
+        // matches the three sibling pin tests.
+        assert_eq!(
+            serde_json::to_value(&h).unwrap(),
+            json!({
+                "chunkId": 7,
+                "text": "t",
+                "relativePath": null,
+                "sectionTitle": null,
+                "coordinate": { "kind": "page", "number": 2 }
+            })
+        );
     }
 }
