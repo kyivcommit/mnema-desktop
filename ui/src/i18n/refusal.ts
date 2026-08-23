@@ -1,6 +1,6 @@
 import { t } from './index';
-
-export type RefusalKind = 'noCandidates' | 'emptyCompletion';
+import type { RefusalKind } from '../lib/ipc';
+export type { RefusalKind };
 
 export function refusalText(kind: RefusalKind): string {
   switch (kind) {
