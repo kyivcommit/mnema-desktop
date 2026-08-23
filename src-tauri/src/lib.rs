@@ -163,10 +163,17 @@ const CMD_Q_CLOSE_SETTINGS: &str = "cmd_q_close_settings";
 /// settings window; the app is quit ONLY from the tray's «Вийти» (§6). The menu
 /// bar is shown only while settings is visible (`sync_activation_policy`).
 #[cfg(target_os = "macos")]
-fn build_app_menu<R: tauri::Runtime>(
+pub(crate) fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> tauri::Result<tauri::menu::Menu<R>> {
+    use crate::locale::{self, Key};
     use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    // Built at start-up and again on every language change
+    // (`locale::apply_locale`), so it resolves the effective language itself
+    // rather than taking it as an argument: `AppState` need not exist yet at the
+    // first build (§5.3), so `resolve_effective` reads prefs + the OS directly.
+    let lang = locale::resolve_effective(app).effective;
 
     let pkg = app.package_info();
     let about = AboutMetadata {
@@ -180,7 +187,7 @@ fn build_app_menu<R: tauri::Runtime>(
     let close_settings = MenuItem::with_id(
         app,
         CMD_Q_CLOSE_SETTINGS,
-        "Закрити налаштування",
+        locale::t(lang, Key::CloseSettings),
         true,
         Some("CmdOrCtrl+Q"),
     )?;
@@ -203,7 +210,7 @@ fn build_app_menu<R: tauri::Runtime>(
 
     let edit_menu = Submenu::with_items(
         app,
-        "Edit",
+        locale::t(lang, Key::MenuEdit),
         true,
         &[
             &PredefinedMenuItem::undo(app, None)?,
@@ -218,7 +225,7 @@ fn build_app_menu<R: tauri::Runtime>(
 
     let window_menu = Submenu::with_items(
         app,
-        "Window",
+        locale::t(lang, Key::MenuWindow),
         true,
         &[
             &PredefinedMenuItem::minimize(app, None)?,
@@ -233,7 +240,7 @@ fn build_app_menu<R: tauri::Runtime>(
 /// Off macOS the ⌘Q → `terminate:` problem does not arise; keep the default menu
 /// until the cross-platform pass (PR 10).
 #[cfg(not(target_os = "macos"))]
-fn build_app_menu<R: tauri::Runtime>(
+pub(crate) fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> tauri::Result<tauri::menu::Menu<R>> {
     tauri::menu::Menu::default(app)
@@ -285,15 +292,55 @@ pub fn run() -> anyhow::Result<()> {
         .plugin(tauri_plugin_positioner::init())
         .plugin(global_shortcut)
         .menu(build_app_menu)
-        .on_menu_event(|app, event| {
-            if event.id().as_ref() == CMD_Q_CLOSE_SETTINGS {
-                // §6: ⌘Q closes the settings window (hide, keep state) and never
-                // quits the app; the tray's «Вийти» is the only quit.
+        // All menu events — the app menu's ⌘Q AND every tray item — dispatch to
+        // this one app-level handler. `muda` registers `Builder::on_menu_event`
+        // and the tray's menu into the same app-level listeners, so events fire
+        // here regardless of `set_menu`; a closure bound to the tray instead
+        // would need re-attaching on every language change's `set_menu` (Task
+        // 6). The tray builder therefore keeps only `on_tray_icon_event`.
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            // §6: ⌘Q closes the settings window (hide, keep state) and never
+            // quits the app; the tray's «Вийти» is the only quit.
+            id if id == CMD_Q_CLOSE_SETTINGS => {
                 if let Some(window) = app.get_webview_window("settings") {
                     let _ = window.hide();
                 }
                 sync_activation_policy(app);
             }
+            // §6: show, not unminimize — the launcher is hidden. The bool it
+            // returns (window found) has no meaning off a live window manager.
+            "show_search" => {
+                focus_launcher(app);
+            }
+            // Moved here from the tray builder (Task 5): reveal and focus the
+            // settings window, then let the resident become Regular (Dock icon
+            // + menu bar) while it is up (§6/§8).
+            "open_settings" => {
+                if let Some(window) = app.get_webview_window("settings") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                sync_activation_policy(app);
+            }
+            // §6: the tray's «Вийти» is the only real exit. `Some(0)` is what
+            // the ExitRequested guard lets through.
+            "quit" => app.exit(0),
+            // §D129: pin a language or return to Auto. Both this callback and
+            // the `set_locale` command go through `apply_choice` (persist →
+            // update state → `apply_locale`), the one path. A write failure is
+            // logged inside `apply_choice`, not surfaced: a tray callback has no
+            // UI channel of its own (§6).
+            "lang_auto" | "lang_uk" | "lang_en" => {
+                use crate::locale::LocaleChoice;
+                let choice = match event.id().as_ref() {
+                    "lang_uk" => LocaleChoice::Uk,
+                    "lang_en" => LocaleChoice::En,
+                    _ => LocaleChoice::Auto,
+                };
+                let state = app.state::<state::AppState>();
+                let _ = crate::locale::apply_choice(app, &state, choice);
+            }
+            _ => {}
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -312,7 +359,21 @@ pub fn run() -> anyhow::Result<()> {
         })
         .setup(|app| {
             manage_state(app.handle())?;
+            // §D129: resolve the interface language once at start-up (prefs → OS
+            // → EN) and seed it into `AppState` BEFORE the tray is built, which
+            // reads it back to label its menu (`tray::build_tray`).
+            let st = locale::resolve_effective(app.handle());
+            app.state::<state::AppState>().set_locale_state(st);
             tray::build_tray(app.handle())?;
+            // The settings window's native title in the resolved language. It is
+            // hidden at start-up, so this is what it shows the first time it is
+            // opened; a later language change re-titles it via `apply_locale`.
+            if let Some(w) = app.get_webview_window("settings") {
+                let _ = w.set_title(&format!(
+                    "Mnema — {}",
+                    locale::t(st.effective, locale::Key::SettingsTitle)
+                ));
+            }
             // §6/§8: start as a menu-bar resident — no Dock icon, no menu bar
             // (settings is hidden at startup). The standard menu returns only
             // while the settings window is visible.

@@ -5,7 +5,7 @@
 use crate::paths;
 use serde::Serialize;
 use std::path::Path;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -262,12 +262,40 @@ pub fn apply_choice<R: Runtime>(
     Ok(())
 }
 
-/// Applies a resolved language to whatever is already on screen — the tray
-/// menu labels and any open window. Left empty until Task 6 builds the tray
-/// menu there is anything to relabel; `apply_choice` already calls it so the
-/// wiring for that task is a body, not a new call site.
-// filled in Task 6
-fn apply_locale<R: Runtime>(_app: &AppHandle<R>, _lang: Lang) {}
+/// Applies a resolved language to everything already on screen: the tray menu
+/// (labels + the «Мова» checkmarks), the settings window's native title, and
+/// the macOS app menu — then broadcasts the change so the webview can follow.
+///
+/// Reads the persisted choice back from `AppState`, which `apply_choice` has
+/// already updated before calling here, so the checkmarks land on the NEW
+/// choice rather than the old one. Every step is best-effort (`let _ =`): a
+/// language change relabels as much as it can even if one surface refuses, and
+/// this runs from a tray callback with no error channel of its own (§6).
+fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
+    let choice = app.state::<crate::state::AppState>().locale().choice;
+    // The tray menu is rebuilt whole and swapped in via `set_menu`; the tray
+    // icon and its `on_tray_icon_event` (the positioner) are left in place.
+    if let Some(tray) = app.tray_by_id("mnema-tray")
+        && let Ok(menu) = crate::tray::build_tray_menu(app, lang, choice)
+    {
+        let _ = tray.set_menu(Some(menu));
+    }
+    // The settings window's native OS title, re-set whether or not it is
+    // visible so an already-open or merely-hidden window is right next time.
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.set_title(&format!("Mnema — {}", t(lang, Key::SettingsTitle)));
+    }
+    // The macOS app menu, rebuilt always — not only while settings is visible
+    // (§5.7) — so a change made from the tray with the menu bar hidden is
+    // already applied when it next shows. Off macOS this is the default menu
+    // and the rebuild is a harmless no-op.
+    if let Ok(menu) = crate::build_app_menu(app) {
+        let _ = app.set_menu(menu);
+    }
+    // Broadcast the new language so any open webview can re-render its own
+    // strings; the native chrome above is already relabelled.
+    let _ = app.emit("locale-changed", lang_tag(lang));
+}
 
 #[tauri::command]
 pub fn set_locale<R: Runtime>(
