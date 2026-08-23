@@ -12,11 +12,14 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 
 describe('i18n wiring', () => {
   it('keeps input state across a locale switch', async () => {
-    const { getByRole } = render(Launcher);
+    const { getByRole, container } = render(Launcher);
     const input = getByRole('textbox') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'draft query' } });
-    setLocale('en');
+    setLocale('uk'); // a REAL switch away from the 'en' module default — 'en' would be a no-op
+    await tick();
     expect(input.value).toBe('draft query'); // no remount
+    // the switch actually took effect, so "no remount" isn't just "nothing happened"
+    expect(container.querySelector('[aria-label]')!.getAttribute('aria-label')).toContain('Пін');
   });
 
   it('switches the pin label UK↔EN (spec §7)', async () => {
@@ -28,6 +31,13 @@ describe('i18n wiring', () => {
 
   it('syncs document.documentElement.lang to the locale', () => {
     syncDocument('uk');
+    expect(document.documentElement.lang).toBe('uk');
+  });
+
+  it('the module-level locale subscription — not just syncDocument itself — drives document.lang', () => {
+    // Reset first: a 'uk' left over from another test must not paper over broken wiring here.
+    document.documentElement.lang = '';
+    setLocale('uk');
     expect(document.documentElement.lang).toBe('uk');
   });
 });
