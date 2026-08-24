@@ -120,7 +120,90 @@ pub struct PathEntry {
     pub reader_version: i64,
 }
 
+pub struct WatchedRootRow {
+    pub id: i64,
+    pub absolute_path: String,
+}
+
+pub struct IndexedFileRow {
+    pub relative_path: String,
+    pub document_id: String,
+}
+
+pub struct RecentDocRow {
+    pub document_id: String,
+    pub relative_path: String,
+    pub watched_root_id: i64,
+    pub created_at: i64,
+}
+
 impl Db {
+    /// Every watched folder, in the order the user added them.
+    pub fn list_watched_roots(&self) -> Result<Vec<WatchedRootRow>, Error> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT id, absolute_path FROM watched_root ORDER BY added_at, id")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(WatchedRootRow {
+                    id: r.get(0)?,
+                    absolute_path: r.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The indexed documents' paths under one root, sorted — the left card's
+    /// "Files" neighbours (§7). Only `status = 'indexed'`: a pending, failed or
+    /// skipped path is not part of the searchable corpus and cannot be cited.
+    pub fn indexed_files_under_root(&self, root_id: i64) -> Result<Vec<IndexedFileRow>, Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT p.relative_path, p.document_id
+               FROM path p
+               JOIN document d ON d.id = p.document_id
+              WHERE p.watched_root_id = ?1 AND d.status = 'indexed'
+              ORDER BY p.relative_path",
+        )?;
+        let rows = stmt
+            .query_map([root_id], |r| {
+                Ok(IndexedFileRow {
+                    relative_path: r.get(0)?,
+                    document_id: r.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The most-recently-indexed documents, newest first, each once. `created_at`
+    /// is "entered the index" time; content addressing means an edited file is a
+    /// new document with a new `created_at`, so this is honest recency.
+    pub fn recent_indexed_documents(&self, limit: i64) -> Result<Vec<RecentDocRow>, Error> {
+        let mut stmt = self.conn().prepare(
+            // One MIN() aggregate: SQLite takes the bare watched_root_id from the
+            // same row that produced MIN(relative_path), so the pair is consistent.
+            "SELECT d.id, MIN(p.relative_path), p.watched_root_id, d.created_at
+               FROM document d
+               JOIN path p ON p.document_id = d.id
+              WHERE d.status = 'indexed'
+              GROUP BY d.id
+              ORDER BY d.created_at DESC, d.id
+              LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit], |r| {
+                Ok(RecentDocRow {
+                    document_id: r.get(0)?,
+                    relative_path: r.get(1)?,
+                    watched_root_id: r.get(2)?,
+                    created_at: r.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn insert_watched_root(&self, absolute_path: &str) -> Result<i64, Error> {
         self.conn().execute(
             "INSERT INTO watched_root (absolute_path) VALUES (?1)",
