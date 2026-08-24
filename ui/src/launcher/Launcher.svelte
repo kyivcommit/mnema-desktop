@@ -6,6 +6,7 @@
   import SearchLine from './SearchLine.svelte';
 
   let query = $state('');
+  let echo = $state('');
   let pinned = $state(false);
   let launcherState = $state<LauncherState>({ kind: 'idle' });
 
@@ -17,14 +18,17 @@
   // (the F2/PR#19 lesson: an eaten error is a class the owner has already caught).
   async function runSearch(raw: string) {
     if (launcherState.kind === 'inFlight') return; // one ask at a time (Finding 5)
+    echo = '';
     const check = checkQuery(raw);
     if (!check.ok) { launcherState = { kind: 'error', reason: check.reason }; return; }
     launcherState = { kind: 'inFlight', query: check.query };
     try {
       const answer = await ask(check.query);
       launcherState = stateFromAnswer(check.query, answer);
+      query = '';          // §7: line clears on ready
+      echo = check.query;  // §7: query echoes as a chat bubble
     } catch (e) {
-      console.error('ask failed', e);
+      console.error('ask failed', e); // query stays in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
     }
   }
@@ -40,6 +44,10 @@
 
 <main>
   <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
+
+  {#if echo}
+    <div class="query-echo" data-testid="query-echo">{echo}</div>
+  {/if}
 
   {#if launcherState.kind === 'generated'}
     <div data-testid="answer-stub">{launcherState.answer.answer}</div>

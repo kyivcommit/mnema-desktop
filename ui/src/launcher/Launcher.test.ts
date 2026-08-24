@@ -46,6 +46,15 @@ test('a query that refuses shows the F message', async () => {
   expect(screen.getByRole('status').textContent).toMatch(/found|знайдено/i);
 });
 
+test('on ready the line clears and the query echoes', async () => {
+  mockBackend(refusedNoCandidates); // any successful answer clears+echoes; a refusal is one
+  render(Launcher);
+  await submit('echo me');
+  await screen.findByRole('status');
+  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe(''); // line cleared
+  expect(screen.getByTestId('query-echo').textContent).toBe('echo me');    // echoed
+});
+
 test('a rejected ask is visible and logged, not swallowed (Finding 1)', async () => {
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
   mockBackend('the index is not open', { reject: true }); // what with_index → IndexNotOpen becomes on the wire

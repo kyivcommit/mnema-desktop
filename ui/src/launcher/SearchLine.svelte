@@ -1,7 +1,7 @@
 <script lang="ts">
   import { locale, t } from '../i18n';
   import { refusalText } from '../i18n/refusal';
-  import type { LauncherState } from './state';
+  import { MAX_ASK_QUERY, type LauncherState } from './state';
 
   let { state, onSubmit, query = $bindable('') }: {
     state: LauncherState;
@@ -18,7 +18,7 @@
     void $locale;
     if (state.kind !== 'error') return '';
     if (state.reason === 'blank') return t('query_blank');
-    if (state.reason === 'tooLong') return t('query_too_long', { limit: 2048 });
+    if (state.reason === 'tooLong') return t('query_too_long', { limit: MAX_ASK_QUERY });
     return t('query_failed'); // askFailed
   });
   const refusalMessage = $derived.by(() => {
@@ -37,5 +37,11 @@
     <p class="guard" role="alert">{errorText}</p>
   {:else if state.kind === 'refused'}
     <p class="refusal" role="status">{refusalMessage}</p>
+  {/if}
+  {#if state.kind === 'inFlight'}
+    <span class="spinner" role="progressbar" aria-label={t('phase_chat')}></span>
+    <p class="phases" data-testid="phases" role="status">
+      {t('phase_text')} ✓ · {t('phase_content')} ✓ · {t('phase_chat')}…
+    </p>
   {/if}
 </div>
