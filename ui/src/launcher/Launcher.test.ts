@@ -106,3 +106,16 @@ test('a pinned launcher ignores click-outside (blur) — the pin disables it', a
   await fireEvent.blur(window);
   expect(hide).not.toHaveBeenCalled();
 });
+
+test('the arms row seeds from model_settings — a present key enables content', async () => {
+  invoke.mockImplementation((cmd: string) =>
+    cmd === 'model_settings'
+      ? Promise.resolve({ key: { kind: 'present' }, index: { kind: 'read', searchTextArm: true, searchContentArm: true } })
+      : Promise.resolve());
+  render(Launcher);
+  await vi.waitFor(() => {
+    const content = (screen.getAllByRole('checkbox') as HTMLInputElement[])[1];
+    expect(content.disabled).toBe(false); // seed applied: present key enables content
+  });
+  expect(invoke).toHaveBeenCalledWith('model_settings');
+});

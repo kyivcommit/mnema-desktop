@@ -10,6 +10,13 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getCurrentWebviewWindow: () => ({ hide: vi.fn() }),
 }));
 
+// Launcher now calls model_settings() on mount (Task 7's arms-row seed); there is no
+// global setupFiles mock for @tauri-apps/api/core (vite.config.ts test block), so
+// without this the real invoke would run here.
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: () => Promise.resolve({ key: { kind: 'absent' }, index: { kind: 'read', searchTextArm: true, searchContentArm: false } }),
+}));
+
 describe('i18n wiring', () => {
   it('keeps input state across a locale switch', async () => {
     const { getByRole, container } = render(Launcher);

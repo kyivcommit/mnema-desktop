@@ -1,17 +1,34 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask } from '../lib/ipc';
+  import { ask, modelSettings } from '../lib/ipc';
   import { checkQuery, stateFromAnswer, type LauncherState } from './state';
+  import Arms from './Arms.svelte';
   import SearchLine from './SearchLine.svelte';
 
   let query = $state('');
   let echo = $state('');
   let pinned = $state(false);
   let launcherState = $state<LauncherState>({ kind: 'idle' });
+  let provider = $state(false);
+  let textOn = $state(true);
+  let contentOn = $state(false);
 
   const appWindow = getCurrentWebviewWindow();
   const pinLabel = $derived.by(() => { void $locale; return `${t('pin')} 📌`; });
+
+  onMount(() => {
+    // Seed the arms row once. Non-fatal: on failure the row stays on its
+    // text-only default rather than blocking the launcher (the F2/PR#19 lesson:
+    // log, do not swallow).
+    modelSettings()
+      .then((s) => {
+        provider = s.key.kind === 'present';
+        if (s.index.kind === 'read') { textOn = s.index.searchTextArm; contentOn = s.index.searchContentArm; }
+      })
+      .catch((e) => console.error('model_settings failed', e));
+  });
 
   // The owner validates and calls ask — the whole machine goes through state.ts
   // (Findings 1/3). A rejected ask becomes a visible error, never a silent reset
@@ -44,6 +61,7 @@
 
 <main>
   <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
+  <Arms bind:textOn bind:contentOn {provider} />
 
   {#if echo}
     <div class="query-echo" data-testid="query-echo">{echo}</div>
