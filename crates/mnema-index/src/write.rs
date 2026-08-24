@@ -134,7 +134,10 @@ pub struct RecentDocRow {
     pub document_id: String,
     pub relative_path: String,
     pub watched_root_id: i64,
-    pub created_at: i64,
+    /// The chunk/done completion time (`ingest_stage.updated_at`), not the
+    /// document's `created_at`: recency is when indexing *finished*, which a
+    /// rebuild refreshes, not when the still-`pending` row was first inserted.
+    pub indexed_at: i64,
 }
 
 impl Db {
@@ -176,19 +179,38 @@ impl Db {
         Ok(rows)
     }
 
-    /// The most-recently-indexed documents, newest first, each once. `created_at`
-    /// is "entered the index" time; content addressing means an edited file is a
-    /// new document with a new `created_at`, so this is honest recency.
+    /// The most-recently-*completed* documents, newest first, each once.
+    ///
+    /// Recency is the chunk/done checkpoint's `ingest_stage.updated_at`, not
+    /// `document.created_at`. `created_at` is stamped when the still-`pending`
+    /// row is first inserted, before any chunk is written, and a rebuild keeps
+    /// that original value; ordering by it reports when a file first *entered*
+    /// the index, not when it became searchable. The chunk/done stage is
+    /// written when the document finishes and refreshed on every rebuild, so
+    /// its `updated_at` is the honest "finished indexing" time.
+    ///
+    /// `'chunk'`/`'done'` are hardcoded, not imported: they are `mnema-ingest`'s
+    /// `STAGE_CHUNK`/`STATUS_DONE` (`mnema-ingest/src/lib.rs`, written at
+    /// `:597`), but `mnema-index` must not depend on `mnema-ingest` — that edge
+    /// is the wrong way round and would be a cycle. The INNER JOIN also means an
+    /// `indexed` document with no chunk/done stage row is not listed; the
+    /// pipeline records that stage when it finishes a document, so this excludes
+    /// nothing under the real lifecycle — but a test must record the stage, not
+    /// only set the status.
     pub fn recent_indexed_documents(&self, limit: i64) -> Result<Vec<RecentDocRow>, Error> {
         let mut stmt = self.conn().prepare(
             // One MIN() aggregate: SQLite takes the bare watched_root_id from the
-            // same row that produced MIN(relative_path), so the pair is consistent.
-            "SELECT d.id, MIN(p.relative_path), p.watched_root_id, d.created_at
+            // same row that produced MIN(relative_path), so the pair is
+            // consistent. `s.updated_at` is likewise unambiguous under GROUP BY
+            // d.id: the ingest_stage PK is (content_hash, stage), so there is
+            // exactly one 'chunk' row per document.
+            "SELECT d.id, MIN(p.relative_path), p.watched_root_id, s.updated_at
                FROM document d
                JOIN path p ON p.document_id = d.id
+               JOIN ingest_stage s ON s.content_hash = d.id AND s.stage = 'chunk' AND s.status = 'done'
               WHERE d.status = 'indexed'
               GROUP BY d.id
-              ORDER BY d.created_at DESC, d.id
+              ORDER BY s.updated_at DESC, d.id
               LIMIT ?1",
         )?;
         let rows = stmt
@@ -197,7 +219,7 @@ impl Db {
                     document_id: r.get(0)?,
                     relative_path: r.get(1)?,
                     watched_root_id: r.get(2)?,
-                    created_at: r.get(3)?,
+                    indexed_at: r.get(3)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

@@ -89,7 +89,7 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
             document_id: d.document_id,
             root_id: d.watched_root_id,
             relative_path: d.relative_path,
-            indexed_at: d.created_at,
+            indexed_at: d.indexed_at,
         })
         .collect();
 
@@ -97,9 +97,18 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
 }
 
 /// Off the main thread for the reason given on [`crate::bridge::open_index`].
+///
+/// The whole listing is read inside one [`mnema_index::Db::read_snapshot`], not
+/// as three autocommit reads. The roots-and-files reads and the recents read
+/// would otherwise be able to straddle the indexing job's `pending → indexed`
+/// commit — landing on its own connection, outside the window's mutex — and the
+/// returned listing could then carry a recent whose `(rootId, relativePath)` is
+/// absent from every `roots[].files`, a torn read the selection consumer (PR 6)
+/// cannot resolve. `build_tree_listing` only reads, so it is a safe closure for
+/// `read_snapshot`.
 #[tauri::command(async)]
 pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
-    state.with_index(build_tree_listing)
+    state.with_index(|db| db.read_snapshot(build_tree_listing))
 }
 
 #[cfg(test)]

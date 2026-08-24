@@ -2612,13 +2612,25 @@ fn list_tree_enumerates_roots_indexed_files_and_recents() {
             }
             db.set_document_status(&older, DocumentStatus::Indexed)?;
             db.set_document_status(&newer, DocumentStatus::Indexed)?;
+            // Recency is the chunk/done completion time (`ingest_stage`), not
+            // `document.created_at`. `pending` carries a chunk/done stage too —
+            // the state a downgraded document is in — and the newest one, so the
+            // indexed-only filter (not the INNER JOIN) is what keeps it out of
+            // recents.
+            for id in [&older, &newer, &pending] {
+                db.record_stage(id, "chunk", "done")?;
+            }
             db.conn().execute(
-                "UPDATE document SET created_at = 1000 WHERE id = ?1",
+                "UPDATE ingest_stage SET updated_at = 1000 WHERE content_hash = ?1 AND stage = 'chunk'",
                 [&older],
             )?;
             db.conn().execute(
-                "UPDATE document SET created_at = 2000 WHERE id = ?1",
+                "UPDATE ingest_stage SET updated_at = 2000 WHERE content_hash = ?1 AND stage = 'chunk'",
                 [&newer],
+            )?;
+            db.conn().execute(
+                "UPDATE ingest_stage SET updated_at = 3000 WHERE content_hash = ?1 AND stage = 'chunk'",
+                [&pending],
             )?;
             // Two paths under A, deliberately out of sorted order; the pending doc under B.
             db.insert_path(

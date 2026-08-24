@@ -25,8 +25,8 @@
 # before any ORDER BY is applied — removing the clause is therefore a
 # likely-equivalent mutant (STILL GREEN for a reason that says nothing about
 # the code), not a case that proves the sort is load-bearing.
-# `recent_indexed_documents`'s own `ORDER BY d.created_at DESC, d.id` has no
-# such shortcut — it orders by a column the primary key does not — which is
+# `recent_indexed_documents`'s own `ORDER BY s.updated_at DESC, d.id` has no
+# such shortcut — it orders by a column no primary key walks in order — which is
 # exactly why that one gets a case below and this one does not.
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -34,14 +34,14 @@
 
 case_ "recents: newest-first flips to oldest-first" \
   crates/mnema-index/src/write.rs \
-  's~              ORDER BY d\.created_at DESC, d\.id~              ORDER BY d.created_at ASC, d.id~' \
-  'ORDER BY d.created_at ASC, d.id' \
-  mnema-index 'recent_indexed_documents_orders_by_created_at_desc_indexed_only' --test tree
+  's~              ORDER BY s\.updated_at DESC, d\.id~              ORDER BY s.updated_at ASC, d.id~' \
+  'ORDER BY s.updated_at ASC, d.id' \
+  mnema-index 'recent_indexed_documents_orders_by_completion_desc_indexed_only' --test tree
 
 case_ "recents: newest-first flips to oldest-first, end to end" \
   crates/mnema-index/src/write.rs \
-  's~              ORDER BY d\.created_at DESC, d\.id~              ORDER BY d.created_at ASC, d.id~' \
-  'ORDER BY d.created_at ASC, d.id' \
+  's~              ORDER BY s\.updated_at DESC, d\.id~              ORDER BY s.updated_at ASC, d.id~' \
+  'ORDER BY s.updated_at ASC, d.id' \
   mnema-desktop 'list_tree_enumerates_roots_indexed_files_and_recents' --test commands
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,13 +67,13 @@ case_ "indexed_files_under_root: the indexed-only filter is dropped, end to end"
 case_ "recent_indexed_documents: the indexed-only filter is dropped" \
   crates/mnema-index/src/write.rs \
   "s~              WHERE d\.status = 'indexed'\n~~" \
-  '               JOIN path p ON p.document_id = d.id
-              GROUP BY d.id' \
-  mnema-index 'recent_indexed_documents_orders_by_created_at_desc_indexed_only' --test tree
+  "               JOIN ingest_stage s ON s.content_hash = d.id AND s.stage = 'chunk' AND s.status = 'done'
+              GROUP BY d.id" \
+  mnema-index 'recent_indexed_documents_orders_by_completion_desc_indexed_only' --test tree
 
 case_ "recent_indexed_documents: the indexed-only filter is dropped, end to end" \
   crates/mnema-index/src/write.rs \
   "s~              WHERE d\.status = 'indexed'\n~~" \
-  '               JOIN path p ON p.document_id = d.id
-              GROUP BY d.id' \
+  "               JOIN ingest_stage s ON s.content_hash = d.id AND s.stage = 'chunk' AND s.status = 'done'
+              GROUP BY d.id" \
   mnema-desktop 'list_tree_enumerates_roots_indexed_files_and_recents' --test commands
