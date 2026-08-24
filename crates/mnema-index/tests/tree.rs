@@ -185,3 +185,92 @@ fn recent_indexed_documents_orders_by_created_at_desc_indexed_only() {
         ("new.txt", root)
     );
 }
+
+#[test]
+fn recent_indexed_documents_dedupes_and_respects_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/root").unwrap();
+
+    let older = "a".repeat(64);
+    let newer = "b".repeat(64);
+    db.insert_document(&older, "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    db.insert_document(&newer, "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    db.set_document_status(&older, DocumentStatus::Indexed)
+        .unwrap();
+    db.set_document_status(&newer, DocumentStatus::Indexed)
+        .unwrap();
+    db.conn()
+        .execute(
+            "UPDATE document SET created_at = 1000 WHERE id = ?1",
+            [&older],
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "UPDATE document SET created_at = 2000 WHERE id = ?1",
+            [&newer],
+        )
+        .unwrap();
+
+    // `older` gets two paths, inserted out of sorted order — the MIN, "a.txt",
+    // must be the one the dedup carries, not whichever path happened to be
+    // inserted first.
+    db.insert_path(
+        root,
+        "z.txt",
+        &older,
+        OnDisk {
+            size_bytes: 1,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+    db.insert_path(
+        root,
+        "a.txt",
+        &older,
+        OnDisk {
+            size_bytes: 1,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+    db.insert_path(
+        root,
+        "b.txt",
+        &newer,
+        OnDisk {
+            size_bytes: 1,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+
+    // Dedup: `older` has two path rows but must appear once, carrying the MIN
+    // relative_path — proves the bare (non-aggregated) watched_root_id also
+    // comes from that same MIN row, not an arbitrary one GROUP BY picked.
+    let recents = db.recent_indexed_documents(50).unwrap();
+    assert_eq!(recents.len(), 2);
+    let older_row = recents
+        .iter()
+        .find(|d| d.document_id == older)
+        .expect("the deduped document is present exactly once");
+    assert_eq!(
+        (older_row.relative_path.as_str(), older_row.watched_root_id),
+        ("a.txt", root)
+    );
+
+    // LIMIT: two indexed documents exist, but limit=1 returns only the newest.
+    let top = db.recent_indexed_documents(1).unwrap();
+    assert_eq!(top.len(), 1);
+    assert_eq!(top[0].document_id, newer);
+}
