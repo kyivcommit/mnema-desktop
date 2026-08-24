@@ -119,3 +119,21 @@ test('the arms row seeds from model_settings — a present key enables content',
   });
   expect(invoke).toHaveBeenCalledWith('model_settings');
 });
+
+test('the arms row seeds from model_settings — searchTextArm:false unchecks the text arm', async () => {
+  // The test above only proves the provider flag reached the row (content's
+  // `disabled` depends solely on `provider`). This proves the arm *values*
+  // flow too: `textOn` defaults to true, so an unchanged default would pass
+  // silently — seeding false is the only way to catch a broken or renamed
+  // `s.index.searchTextArm` read.
+  invoke.mockImplementation((cmd: string) =>
+    cmd === 'model_settings'
+      ? Promise.resolve({ key: { kind: 'present' }, index: { kind: 'read', searchTextArm: false, searchContentArm: true } })
+      : Promise.resolve());
+  render(Launcher);
+  await vi.waitFor(() => {
+    const text = (screen.getAllByRole('checkbox') as HTMLInputElement[])[0];
+    expect(text.checked).toBe(false); // seed applied: searchTextArm:false flowed to the checkbox
+  });
+  expect(invoke).toHaveBeenCalledWith('model_settings');
+});

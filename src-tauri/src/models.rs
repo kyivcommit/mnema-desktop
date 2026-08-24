@@ -1302,6 +1302,17 @@ mod tests {
             );
         }
 
+        // The tag alone is not the whole contract: `Launcher.svelte` reads
+        // `s.index.searchTextArm` / `s.index.searchContentArm` straight off this
+        // variant to seed the arms row. A rename of either field would leave
+        // every assertion above green — they only ever check `kind` — while the
+        // seed silently reads `undefined`.
+        let read = serde_json::to_value(IndexSettings::Read(empty_read())).unwrap();
+        assert!(
+            read.get("searchTextArm").is_some() && read.get("searchContentArm").is_some(),
+            "IndexSettings::Read must carry searchTextArm/searchContentArm — the launcher arms-seed reads them by name: {read}"
+        );
+
         let cause = |c: UnreadableCause| -> &'static str {
             match c {
                 UnreadableCause::NotOpen => "notOpen",
