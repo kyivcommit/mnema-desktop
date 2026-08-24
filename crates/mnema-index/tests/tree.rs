@@ -190,7 +190,8 @@ fn recent_indexed_documents_orders_by_created_at_desc_indexed_only() {
 fn recent_indexed_documents_dedupes_and_respects_limit() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh(&dir);
-    let root = db.insert_watched_root("/tmp/root").unwrap();
+    let root_a = db.insert_watched_root("/tmp/a").unwrap();
+    let root_b = db.insert_watched_root("/tmp/b").unwrap();
 
     let older = "a".repeat(64);
     let newer = "b".repeat(64);
@@ -215,11 +216,11 @@ fn recent_indexed_documents_dedupes_and_respects_limit() {
         )
         .unwrap();
 
-    // `older` gets two paths, inserted out of sorted order — the MIN, "a.txt",
-    // must be the one the dedup carries, not whichever path happened to be
-    // inserted first.
+    // `older` is the SAME document (one sha256) indexed under TWO roots — the
+    // real "same content in two folders" case. Its MIN relative_path, "a.txt",
+    // lives under root_b; its other path, "z.txt", is under root_a.
     db.insert_path(
-        root,
+        root_a,
         "z.txt",
         &older,
         OnDisk {
@@ -231,7 +232,7 @@ fn recent_indexed_documents_dedupes_and_respects_limit() {
     )
     .unwrap();
     db.insert_path(
-        root,
+        root_b,
         "a.txt",
         &older,
         OnDisk {
@@ -243,7 +244,7 @@ fn recent_indexed_documents_dedupes_and_respects_limit() {
     )
     .unwrap();
     db.insert_path(
-        root,
+        root_a,
         "b.txt",
         &newer,
         OnDisk {
@@ -255,9 +256,11 @@ fn recent_indexed_documents_dedupes_and_respects_limit() {
     )
     .unwrap();
 
-    // Dedup: `older` has two path rows but must appear once, carrying the MIN
-    // relative_path — proves the bare (non-aggregated) watched_root_id also
-    // comes from that same MIN row, not an arbitrary one GROUP BY picked.
+    // Dedup: `older` has two path rows under DIFFERENT roots but must appear
+    // once, carrying the MIN relative_path AND that same row's watched_root_id.
+    // "a.txt" (the MIN) is under root_b while "z.txt" is under root_a, so
+    // asserting ("a.txt", root_b) proves the bare watched_root_id is taken from
+    // the MIN row — not the other path's row that GROUP BY could have picked.
     let recents = db.recent_indexed_documents(50).unwrap();
     assert_eq!(recents.len(), 2);
     let older_row = recents
@@ -266,7 +269,7 @@ fn recent_indexed_documents_dedupes_and_respects_limit() {
         .expect("the deduped document is present exactly once");
     assert_eq!(
         (older_row.relative_path.as_str(), older_row.watched_root_id),
-        ("a.txt", root)
+        ("a.txt", root_b)
     );
 
     // LIMIT: two indexed documents exist, but limit=1 returns only the newest.
