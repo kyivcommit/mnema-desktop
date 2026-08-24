@@ -2587,3 +2587,111 @@ fn a_model_change_that_says_nothing_about_the_existing_vectors_is_refused() {
          — the bare word appears in this command's own name in the same message: {refused}"
     );
 }
+
+#[test]
+fn list_tree_enumerates_roots_indexed_files_and_recents() {
+    use mnema_core::OnDisk; // SourceKind is already in file scope (commands.rs:14, from mnema_core)
+    use mnema_index::DocumentStatus;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let (root_a, root_b) = state
+        .with_index(|db| {
+            let a = db.insert_watched_root("/tmp/alpha")?;
+            let b = db.insert_watched_root("/tmp/beta")?;
+
+            let older = "a".repeat(64);
+            let newer = "b".repeat(64);
+            let pending = "c".repeat(64);
+            for id in [&older, &newer, &pending] {
+                db.insert_document(id, "text/plain", 1, SourceKind::Document)?;
+            }
+            db.set_document_status(&older, DocumentStatus::Indexed)?;
+            db.set_document_status(&newer, DocumentStatus::Indexed)?;
+            db.conn().execute(
+                "UPDATE document SET created_at = 1000 WHERE id = ?1",
+                [&older],
+            )?;
+            db.conn().execute(
+                "UPDATE document SET created_at = 2000 WHERE id = ?1",
+                [&newer],
+            )?;
+            // Two paths under A, deliberately out of sorted order; the pending doc under B.
+            db.insert_path(
+                a,
+                "notes/old.txt",
+                &older,
+                OnDisk {
+                    size_bytes: 1,
+                    mtime: 1,
+                },
+                "text",
+                1,
+            )?;
+            db.insert_path(
+                a,
+                "new.txt",
+                &newer,
+                OnDisk {
+                    size_bytes: 1,
+                    mtime: 1,
+                },
+                "text",
+                1,
+            )?;
+            db.insert_path(
+                b,
+                "draft.txt",
+                &pending,
+                OnDisk {
+                    size_bytes: 1,
+                    mtime: 1,
+                },
+                "text",
+                1,
+            )?;
+            Ok::<_, mnema_index::Error>((a, b))
+        })
+        .unwrap();
+
+    // Through the IPC, by name — the doctrine (`commands.rs:1-6`): a direct call
+    // proves nothing about registration or whether fields survive the camelCase
+    // rename. `call` returns `Result<Value, Value>` (`commands.rs:174`).
+    let v = call(&webview, "list_tree", json!({})).expect("list_tree was rejected");
+
+    let roots = v["roots"].as_array().unwrap();
+    assert_eq!(roots.len(), 2);
+    // Roots in add order; basename is the display name; camelCase on the wire.
+    assert_eq!(roots[0]["rootId"].as_i64().unwrap(), root_a);
+    assert_eq!(roots[0]["name"], "alpha");
+    assert_eq!(roots[1]["rootId"].as_i64().unwrap(), root_b);
+
+    // Root A: indexed paths only, sorted ("new.txt" < "notes/old.txt").
+    let files_a: Vec<&str> = roots[0]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["relativePath"].as_str().unwrap())
+        .collect();
+    assert_eq!(files_a, vec!["new.txt", "notes/old.txt"]);
+    // Root B: the pending doc is excluded — an empty, still-listed root.
+    assert!(roots[1]["files"].as_array().unwrap().is_empty());
+
+    // Recents: newest first, indexed-only (the pending doc is absent).
+    let recents = v["recents"].as_array().unwrap();
+    let rec: Vec<&str> = recents
+        .iter()
+        .map(|d| d["relativePath"].as_str().unwrap())
+        .collect();
+    assert_eq!(rec, vec!["new.txt", "notes/old.txt"]);
+    assert_eq!(recents[0]["indexedAt"].as_i64().unwrap(), 2000);
+    assert_eq!(recents[0]["rootId"].as_i64().unwrap(), root_a);
+
+    // Wire shape, both directions: snake_case must not leak (guards rename_all).
+    assert!(roots[0].get("root_id").is_none());
+    assert!(recents[0].get("indexed_at").is_none());
+}
