@@ -1302,6 +1302,27 @@ mod tests {
             );
         }
 
+        // The tag alone is not the whole contract: `Launcher.svelte` reads
+        // `s.index.searchTextArm` / `s.index.searchContentArm` straight off this
+        // variant to seed the arms row. A rename of either field would leave
+        // every assertion above green — they only ever check `kind` — while the
+        // seed silently reads `undefined`. The launcher's provider gate (§9.1 /
+        // owner ruling 2026-08-24) reads `embeddingModel` the same way; a rename
+        // would leave the gate reading `undefined`, and `undefined != null`
+        // wrongly enables content — so this field is pinned too.
+        // `.get(…).is_some()` (not `== null`) is deliberate: `embedding_model:
+        // None` serialises to `null` with the key **present**, so `is_some()` is
+        // true for a real (even null-valued) field and false only for an
+        // absent/renamed one.
+        let read = serde_json::to_value(IndexSettings::Read(empty_read())).unwrap();
+        assert!(
+            read.get("searchTextArm").is_some()
+                && read.get("searchContentArm").is_some()
+                && read.get("embeddingModel").is_some(),
+            "IndexSettings::Read must carry searchTextArm/searchContentArm (arms seed) and embeddingModel \
+             (the launcher provider gate reads it by name): {read}"
+        );
+
         let cause = |c: UnreadableCause| -> &'static str {
             match c {
                 UnreadableCause::NotOpen => "notOpen",
@@ -1712,5 +1733,47 @@ mod tests {
                 "`{error}` was sorted into the wrong thing for a person to do"
             );
         }
+    }
+
+    /// Tauri v2 gates the frontend event API (`listen`) behind a capability
+    /// permission. `bootLocale` (`ui/src/i18n/index.ts`) calls
+    /// `listen('locale-changed', …)` before its startup snapshot, so on a
+    /// window that lacks the permission the call rejects and `bootLocale`
+    /// throws before the snapshot ever runs — the window stays on the
+    /// `en` default and the live switch is never wired up. Both windows must
+    /// declare the permission.
+    ///
+    /// ⚠️ **What this proves and what it does not.** This parses the two
+    /// capability files this build ships and asserts each `permissions`
+    /// array names `core:event:allow-listen` — the file the Tauri runtime
+    /// reads its ACL from, so an absent entry here is the actual defect. It
+    /// cannot prove the runtime actually delivers the event at that
+    /// identifier; that proof is the owner's live re-smoke, out of a unit
+    /// test's reach.
+    #[test]
+    fn both_windows_capability_files_grant_core_event_allow_listen() {
+        let assert_grants = |label: &str, raw: &str| {
+            let json: serde_json::Value =
+                serde_json::from_str(raw).expect("capability file must be valid JSON");
+            let permissions = json["permissions"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{label} must have a permissions array: {json}"));
+            assert!(
+                permissions
+                    .iter()
+                    .any(|p| p.as_str() == Some("core:event:allow-listen")),
+                "{label} permissions must include core:event:allow-listen — without it \
+                 `listen(\"locale-changed\", …)` in bootLocale is denied and the locale \
+                 switch silently does nothing: {permissions:?}"
+            );
+        };
+        assert_grants(
+            "src-tauri/capabilities/launcher.json",
+            include_str!("../capabilities/launcher.json"),
+        );
+        assert_grants(
+            "src-tauri/capabilities/default.json",
+            include_str!("../capabilities/default.json"),
+        );
     }
 }

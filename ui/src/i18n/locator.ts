@@ -1,11 +1,6 @@
 import { t } from './index';
-
-export type Coordinate =
-  | { kind: 'page'; number: number }
-  | { kind: 'line'; start: number; end: number }
-  | { kind: 'sheet_rows'; sheet: string; start: number; end: number }
-  | { kind: 'section'; title: string }
-  | { kind: 'none' };
+import type { Coordinate } from '../lib/ipc';
+export type { Coordinate };
 
 const range = (a: number, b: number) => (a === b ? `${a}` : `${a}–${b}`);
 

@@ -152,4 +152,40 @@ mod tests {
             "a range must show both ends: {rendered}"
         );
     }
+
+    #[test]
+    fn coordinate_wire_shape_is_pinned() {
+        use serde_json::json;
+        // The wire is snake_case (the §10 exception). Both directions: the `kind`
+        // spelling AND every field name are asserted, so a rename_all flip or a
+        // field rename fails here — not silently on the Svelte side.
+        assert_eq!(
+            serde_json::to_value(Coordinate::Page { number: 3 }).unwrap(),
+            json!({ "kind": "page", "number": 3 })
+        );
+        assert_eq!(
+            serde_json::to_value(Coordinate::Line { start: 5, end: 7 }).unwrap(),
+            json!({ "kind": "line", "start": 5, "end": 7 })
+        );
+        assert_eq!(
+            serde_json::to_value(Coordinate::SheetRows {
+                sheet: "S1".into(),
+                start: 2,
+                end: 4
+            })
+            .unwrap(),
+            json!({ "kind": "sheet_rows", "sheet": "S1", "start": 2, "end": 4 })
+        );
+        assert_eq!(
+            serde_json::to_value(Coordinate::Section {
+                title: "Intro".into()
+            })
+            .unwrap(),
+            json!({ "kind": "section", "title": "Intro" })
+        );
+        assert_eq!(
+            serde_json::to_value(Coordinate::None).unwrap(),
+            json!({ "kind": "none" })
+        );
+    }
 }

@@ -3,5 +3,5 @@
   "identifier": "launcher",
   "description": "The launcher dismisses itself (Esc, click-outside) by hiding — never closing — so its state survives. Showing it is done from Rust (⌥Space, the tray, single-instance) and needs no capability here.",
   "windows": ["launcher"],
-  "permissions": ["core:window:allow-hide"]
+  "permissions": ["core:window:allow-hide", "core:event:allow-listen"]
 }

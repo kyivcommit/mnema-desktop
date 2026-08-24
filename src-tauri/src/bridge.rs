@@ -832,4 +832,112 @@ mod tests {
         // text is carried verbatim.
         assert_eq!(passage_from_hit(&both).text, "body");
     }
+
+    #[test]
+    fn text_arm_report_camel_case_spellings_are_pinned() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value(TextArmReport::Off).unwrap(),
+            json!({ "kind": "off" })
+        );
+        assert_eq!(
+            serde_json::to_value(TextArmReport::Answered { matched: 3 }).unwrap(),
+            json!({ "kind": "answered", "matched": 3 })
+        );
+    }
+
+    #[test]
+    fn refusal_kind_wire_spellings_are_pinned() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value(RefusalKind::NoCandidates).unwrap(),
+            json!({ "kind": "noCandidates" })
+        );
+        assert_eq!(
+            serde_json::to_value(RefusalKind::EmptyCompletion).unwrap(),
+            json!({ "kind": "emptyCompletion" })
+        );
+    }
+
+    #[test]
+    fn ask_answer_tags_and_refused_nesting_are_pinned() {
+        use serde_json::json;
+        let generated = AskAnswer::Generated {
+            answer: "a".into(),
+            citations: vec![],
+            text: TextArmReport::Off,
+            content: ContentArmReport::Off,
+        };
+        let gv = serde_json::to_value(&generated).unwrap();
+        assert_eq!(gv["kind"], json!("generated"));
+        assert_eq!(gv["answer"], json!("a")); // field name pinned — the TS side mirrors `answer`
+        assert_eq!(gv["citations"], json!([])); // field name pinned ([] ≠ Null, so a rename/drop fails)
+
+        let citations_only = AskAnswer::CitationsOnly {
+            citations: vec![],
+            text: TextArmReport::Off,
+            content: ContentArmReport::Off,
+        };
+        let cv = serde_json::to_value(&citations_only).unwrap();
+        assert_eq!(cv["kind"], json!("citationsOnly"));
+        assert_eq!(cv["citations"], json!([])); // field name pinned
+
+        let refused = AskAnswer::Refused {
+            kind: RefusalKind::NoCandidates,
+            text: TextArmReport::Off,
+            content: ContentArmReport::Off,
+        };
+        let v = serde_json::to_value(&refused).unwrap();
+        // The reason is nested under `reason`, not `kind` (ruling R4, bridge.rs:466-476).
+        assert_eq!(v["kind"], json!("refused"));
+        assert_eq!(v["reason"]["kind"], json!("noCandidates"));
+    }
+
+    #[test]
+    fn ask_citation_field_names_are_pinned() {
+        use serde_json::json;
+        let c = AskCitation {
+            anchor: 1,
+            chunk_id: 42,
+            text: "t".into(),
+            relative_path: Some("a/b.md".into()),
+            section_title: Some("S".into()),
+            coordinate: Coordinate::None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["anchor"], json!(1));
+        assert_eq!(v["chunkId"], json!(42));
+        assert_eq!(v["text"], json!("t")); // every field asserted, incl. the ones stable across casings
+        assert_eq!(v["relativePath"], json!("a/b.md"));
+        assert_eq!(v["sectionTitle"], json!("S"));
+        assert_eq!(v["coordinate"], json!({ "kind": "none" }));
+    }
+
+    #[test]
+    fn hit_field_names_are_pinned() {
+        use serde_json::json;
+        let h = Hit {
+            chunk_id: 7,
+            text: "t".into(),
+            relative_path: None,
+            section_title: None,
+            coordinate: Coordinate::Page { number: 2 },
+        };
+        // Full-object compare, not per-field: `serde_json::Value` indexing returns
+        // Null for an ABSENT key too, so `v["relativePath"] == null` would still
+        // pass if the key were dropped (skip_serializing_if) or renamed — the
+        // satisfied-by-zero hole the "assert both directions" rule exists to stop.
+        // Comparing the whole object distinguishes present-null from absent and
+        // matches the three sibling pin tests.
+        assert_eq!(
+            serde_json::to_value(&h).unwrap(),
+            json!({
+                "chunkId": 7,
+                "text": "t",
+                "relativePath": null,
+                "sectionTitle": null,
+                "coordinate": { "kind": "page", "number": 2 }
+            })
+        );
+    }
 }
