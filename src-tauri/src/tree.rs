@@ -101,3 +101,50 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
 pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
     state.with_index(build_tree_listing)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> TreeListing {
+        TreeListing {
+            roots: vec![TreeRoot {
+                root_id: 7,
+                absolute_path: "/tmp/alpha".into(),
+                name: "alpha".into(),
+                files: vec![TreeFile {
+                    relative_path: "a.txt".into(),
+                    document_id: "d".repeat(64),
+                }],
+            }],
+            recents: vec![RecentDoc {
+                document_id: "d".repeat(64),
+                root_id: 7,
+                relative_path: "a.txt".into(),
+                indexed_at: 2000,
+            }],
+        }
+    }
+
+    #[test]
+    fn wire_shape_is_camel_case() {
+        let v = serde_json::to_value(sample()).unwrap();
+        let root = &v["roots"][0];
+        let recent = &v["recents"][0];
+
+        // Present, camelCase.
+        assert!(root["rootId"].is_i64());
+        assert!(root["absolutePath"].is_string());
+        assert!(root["files"][0]["relativePath"].is_string());
+        assert!(root["files"][0]["documentId"].is_string());
+        assert!(recent["indexedAt"].is_i64());
+        assert!(recent["documentId"].is_string());
+
+        // Absent — the snake_case names must not leak (guards rename_all).
+        assert!(root.get("root_id").is_none());
+        assert!(root.get("absolute_path").is_none());
+        assert!(root["files"][0].get("relative_path").is_none());
+        assert!(recent.get("indexed_at").is_none());
+        assert!(recent.get("document_id").is_none());
+    }
+}
