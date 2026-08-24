@@ -56,6 +56,27 @@ test('on ready the line clears and the query echoes', async () => {
   expect(screen.getByTestId('query-echo').textContent).toBe('echo me');    // echoed
 });
 
+test('a draft typed while an ask is in flight survives the ready-clear (Codex #3)', async () => {
+  // The input stays editable in state D. If a user types a new draft while the
+  // first ask is pending, the unconditional `query=''` on ready would wipe it.
+  // Clear only when the line still holds the submitted query.
+  let resolveAsk!: (v: unknown) => void;
+  const pending = new Promise((r) => { resolveAsk = r; });
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'ask') return pending;
+    return Promise.resolve();
+  });
+  render(Launcher);
+  await submit('first question'); // Q1 → in flight
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  await fireEvent.input(box, { target: { value: 'second draft' } }); // type Q2 while pending
+  resolveAsk(refusedNoCandidates); // Q1's answer arrives
+  await screen.findByRole('status'); // ready
+  expect(box.value).toBe('second draft'); // the draft was NOT wiped by the clear
+  expect(screen.getByTestId('query-echo').textContent).toBe('first question'); // Q1 still echoed
+});
+
 test('a rejected ask is visible and logged, not swallowed', async () => {
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
   mockBackend('the index is not open', { reject: true }); // what with_index → IndexNotOpen becomes on the wire

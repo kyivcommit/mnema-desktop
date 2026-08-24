@@ -42,7 +42,10 @@
     try {
       const answer = await ask(check.query);
       launcherState = stateFromAnswer(check.query, answer);
-      query = '';          // §7: line clears on ready
+      // §7: line clears on ready — but only if it still holds the submitted
+      // query. A draft typed while the ask was in flight is kept, not wiped
+      // (Codex #3).
+      if (query === raw) query = '';
       echo = check.query;  // §7: query echoes as a chat bubble
     } catch (e) {
       console.error('ask failed', e); // query stays in the line for a retry
