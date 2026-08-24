@@ -20,8 +20,8 @@
 
   onMount(() => {
     // Seed the arms row once. Non-fatal: on failure the row stays on its
-    // text-only default rather than blocking the launcher (the F2/PR#19 lesson:
-    // log, do not swallow).
+    // text-only default rather than blocking the launcher — log, do not
+    // swallow.
     modelSettings()
       .then((s) => {
         provider = s.key.kind === 'present';
@@ -30,11 +30,11 @@
       .catch((e) => console.error('model_settings failed', e));
   });
 
-  // The owner validates and calls ask — the whole machine goes through state.ts
-  // (Findings 1/3). A rejected ask becomes a visible error, never a silent reset
-  // (the F2/PR#19 lesson: an eaten error is a class the owner has already caught).
+  // The owner validates and calls ask — the whole machine goes through
+  // state.ts. A rejected ask becomes a visible error, never a silent reset:
+  // an eaten error is easy to miss.
   async function runSearch(raw: string) {
-    if (launcherState.kind === 'inFlight') return; // one ask at a time (Finding 5)
+    if (launcherState.kind === 'inFlight') return; // one ask at a time
     echo = '';
     const check = checkQuery(raw);
     if (!check.ok) { launcherState = { kind: 'error', reason: check.reason }; return; }

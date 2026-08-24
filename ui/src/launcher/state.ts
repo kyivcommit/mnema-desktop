@@ -22,7 +22,7 @@ export type LauncherState =
   | { kind: 'generated'; query: string; answer: Extract<AskAnswer, { kind: 'generated' }> } // B (PR 6)
   | { kind: 'citationsOnly'; query: string; answer: Extract<AskAnswer, { kind: 'citationsOnly' }> } // E (PR 6)
   | { kind: 'refused'; reason: Refusal } // F
-  | { kind: 'error'; reason: 'blank' | 'tooLong' | 'askFailed' }; // the query guard AND a rejected ask (Findings 1/3): every non-idle state goes through the machine, so `error` is live and Architecture ("state.ts holds the machine") is true
+  | { kind: 'error'; reason: 'blank' | 'tooLong' | 'askFailed' }; // the query guard AND a rejected ask: every non-idle state goes through the machine, so `error` is live
 
 export function stateFromAnswer(query: string, a: AskAnswer): LauncherState {
   switch (a.kind) {

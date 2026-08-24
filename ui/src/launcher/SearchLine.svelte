@@ -12,7 +12,7 @@
   const placeholder = $derived.by(() => { void $locale; return t('search_placeholder'); });
 
   // Every message is driven by the machine's state, not a local guard — so a
-  // rejected `ask` (askFailed) is as visible as a blank query (Findings 1/3).
+  // rejected `ask` (askFailed) is as visible as a blank query.
   // void $locale so the text follows a live language switch.
   const errorText = $derived.by(() => {
     void $locale;

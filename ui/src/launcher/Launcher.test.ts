@@ -8,8 +8,9 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () =>
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 
-// Answers each command separately. `model_settings` (Task 7's mount seed) always
-// resolves so it never crashes a render; `ask` is what each test controls.
+// Answers each command separately. `model_settings` (the launcher's mount
+// seed) always resolves so it never crashes a render; `ask` is what each
+// test controls.
 const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', searchTextArm: true, searchContentArm: false } };
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   invoke.mockImplementation((cmd: string) => {
@@ -55,7 +56,7 @@ test('on ready the line clears and the query echoes', async () => {
   expect(screen.getByTestId('query-echo').textContent).toBe('echo me');    // echoed
 });
 
-test('a rejected ask is visible and logged, not swallowed (Finding 1)', async () => {
+test('a rejected ask is visible and logged, not swallowed', async () => {
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
   mockBackend('the index is not open', { reject: true }); // what with_index → IndexNotOpen becomes on the wire
   render(Launcher);
@@ -74,7 +75,7 @@ test('a generated answer renders the B stub, not a refusal', async () => {
   expect(screen.queryByRole('status')).toBeNull(); // not a refusal
 });
 
-test('a second submit while in flight is ignored — one ask at a time (Finding 5)', async () => {
+test('a second submit while in flight is ignored — one ask at a time', async () => {
   mockBackend(new Promise(() => {})); // ask never resolves (Promise.resolve of a pending promise stays pending) → in flight
   render(Launcher);
   await submit('first');
