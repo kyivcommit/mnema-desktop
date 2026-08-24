@@ -14,7 +14,7 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 // global setupFiles mock for @tauri-apps/api/core (vite.config.ts test block), so
 // without this the real invoke would run here.
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: () => Promise.resolve({ key: { kind: 'absent' }, index: { kind: 'read', searchTextArm: true, searchContentArm: false } }),
+  invoke: () => Promise.resolve({ key: { kind: 'absent' }, index: { kind: 'read', embeddingModel: null, searchTextArm: true, searchContentArm: false } }),
 }));
 
 describe('i18n wiring', () => {

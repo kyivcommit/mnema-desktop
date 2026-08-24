@@ -3,7 +3,7 @@
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
   import { ask, modelSettings } from '../lib/ipc';
-  import { checkQuery, stateFromAnswer, type LauncherState } from './state';
+  import { checkQuery, stateFromAnswer, providerReady, type LauncherState } from './state';
   import Arms from './Arms.svelte';
   import SearchLine from './SearchLine.svelte';
 
@@ -24,7 +24,7 @@
     // swallow.
     modelSettings()
       .then((s) => {
-        provider = s.key.kind === 'present';
+        provider = providerReady(s);
         if (s.index.kind === 'read') { textOn = s.index.searchTextArm; contentOn = s.index.searchContentArm; }
       })
       .catch((e) => console.error('model_settings failed', e));

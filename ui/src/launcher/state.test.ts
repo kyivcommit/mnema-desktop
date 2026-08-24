@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest';
-import { checkQuery, MAX_ASK_QUERY, stateFromAnswer } from './state';
+import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, providerReady } from './state';
 import { generated, citationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
+import type { ModelSettings } from '../lib/ipc';
 
 test('a blank query is rejected', () => {
   expect(checkQuery('')).toEqual({ ok: false, reason: 'blank' });
@@ -36,4 +37,40 @@ test('AskAnswer maps to the right launcher state', () => {
   expect(stateFromAnswer('q', citationsOnly)).toMatchObject({ kind: 'citationsOnly' });
   expect(stateFromAnswer('q', refusedNoCandidates)).toMatchObject({ kind: 'refused', reason: { kind: 'noCandidates' } });
   expect(stateFromAnswer('q', refusedEmptyCompletion)).toMatchObject({ kind: 'refused', reason: { kind: 'emptyCompletion' } });
+});
+
+// §9.1 / owner ruling 2026-08-24: content search needs a provider key AND a
+// chosen embedding model — key-presence alone (the old rule) is not enough.
+// Four cases, both directions, and the second is the exact configuration the
+// owner's live run hit: a key with no chosen model.
+const presentKey: ModelSettings['key'] = { kind: 'present' };
+const absentKey: ModelSettings['key'] = { kind: 'absent' };
+const readWithModel: ModelSettings['index'] = {
+  kind: 'read',
+  embeddingModel: 'text-embedding-3-small',
+  searchTextArm: true,
+  searchContentArm: false,
+};
+const readNoModel: ModelSettings['index'] = {
+  kind: 'read',
+  embeddingModel: null,
+  searchTextArm: true,
+  searchContentArm: false,
+};
+const unreadableIndex: ModelSettings['index'] = { kind: 'unreadable', cause: 'notOpen', reason: '' };
+
+test('providerReady: a present key and a chosen model → true', () => {
+  expect(providerReady({ key: presentKey, index: readWithModel })).toBe(true);
+});
+
+test('providerReady: a present key with no chosen model → false (the live-smoke config)', () => {
+  expect(providerReady({ key: presentKey, index: readNoModel })).toBe(false);
+});
+
+test('providerReady: a present key with an unreadable index → false', () => {
+  expect(providerReady({ key: presentKey, index: unreadableIndex })).toBe(false);
+});
+
+test('providerReady: an absent key, even with a chosen model → false', () => {
+  expect(providerReady({ key: absentKey, index: readWithModel })).toBe(false);
 });

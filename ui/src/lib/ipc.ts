@@ -66,7 +66,7 @@ export type KeyState =
   | { kind: 'unreadable'; cause: string; reason: string };
 
 export type IndexSettings =
-  | { kind: 'read'; searchTextArm: boolean; searchContentArm: boolean }
+  | { kind: 'read'; embeddingModel: string | null; searchTextArm: boolean; searchContentArm: boolean }
   | { kind: 'unreadable'; cause: string; reason: string };
 
 export type ModelSettings = { key: KeyState; index: IndexSettings };

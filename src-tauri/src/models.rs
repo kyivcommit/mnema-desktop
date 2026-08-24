@@ -1306,11 +1306,21 @@ mod tests {
         // `s.index.searchTextArm` / `s.index.searchContentArm` straight off this
         // variant to seed the arms row. A rename of either field would leave
         // every assertion above green — they only ever check `kind` — while the
-        // seed silently reads `undefined`.
+        // seed silently reads `undefined`. The launcher's provider gate (§9.1 /
+        // owner ruling 2026-08-24) reads `embeddingModel` the same way; a rename
+        // would leave the gate reading `undefined`, and `undefined != null`
+        // wrongly enables content — so this field is pinned too.
+        // `.get(…).is_some()` (not `== null`) is deliberate: `embedding_model:
+        // None` serialises to `null` with the key **present**, so `is_some()` is
+        // true for a real (even null-valued) field and false only for an
+        // absent/renamed one.
         let read = serde_json::to_value(IndexSettings::Read(empty_read())).unwrap();
         assert!(
-            read.get("searchTextArm").is_some() && read.get("searchContentArm").is_some(),
-            "IndexSettings::Read must carry searchTextArm/searchContentArm — the launcher arms-seed reads them by name: {read}"
+            read.get("searchTextArm").is_some()
+                && read.get("searchContentArm").is_some()
+                && read.get("embeddingModel").is_some(),
+            "IndexSettings::Read must carry searchTextArm/searchContentArm (arms seed) and embeddingModel \
+             (the launcher provider gate reads it by name): {read}"
         );
 
         let cause = |c: UnreadableCause| -> &'static str {

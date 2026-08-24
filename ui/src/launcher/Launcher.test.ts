@@ -11,7 +11,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // Answers each command separately. `model_settings` (the launcher's mount
 // seed) always resolves so it never crashes a render; `ask` is what each
 // test controls.
-const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', searchTextArm: true, searchContentArm: false } };
+const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', embeddingModel: null, searchTextArm: true, searchContentArm: false } };
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
@@ -108,16 +108,41 @@ test('a pinned launcher ignores click-outside (blur) — the pin disables it', a
   expect(hide).not.toHaveBeenCalled();
 });
 
-test('the arms row seeds from model_settings — a present key enables content', async () => {
+test('the arms row seeds from model_settings — a present key and a chosen model enable content', async () => {
   invoke.mockImplementation((cmd: string) =>
     cmd === 'model_settings'
-      ? Promise.resolve({ key: { kind: 'present' }, index: { kind: 'read', searchTextArm: true, searchContentArm: true } })
+      ? Promise.resolve({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true } })
       : Promise.resolve());
   render(Launcher);
   await vi.waitFor(() => {
     const content = (screen.getAllByRole('checkbox') as HTMLInputElement[])[1];
-    expect(content.disabled).toBe(false); // seed applied: present key enables content
+    expect(content.disabled).toBe(false); // seed applied: present key + chosen model enable content
   });
+  expect(invoke).toHaveBeenCalledWith('model_settings');
+});
+
+// §9.1 / owner ruling 2026-08-24: the exact configuration the owner's live run hit — a stored
+// provider key with no chosen embedding model. A key alone cannot embed a query, so content must
+// stay disabled. Against the pre-fix `provider = s.key.kind === 'present'` this fails (content
+// would wrongly enable on a present key alone) — that failure is the regression proof.
+//
+// `searchTextArm: false` here is not part of the ruling under test — it is a marker seeded away
+// from `textOn`'s `true` default so the `waitFor` below cannot pass before `model_settings`
+// resolves. `content.disabled` alone is already `true` in the pre-seed default (provider starts
+// `false`), so asserting it directly would pass vacuously, seed or no seed.
+test('the arms row seeds from model_settings — a present key with no chosen model leaves content disabled', async () => {
+  invoke.mockImplementation((cmd: string) =>
+    cmd === 'model_settings'
+      ? Promise.resolve({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: null, searchTextArm: false, searchContentArm: false } })
+      : Promise.resolve());
+  render(Launcher);
+  await vi.waitFor(() => {
+    // Proves the seed actually ran before the real assertion below reads `provider`'s result.
+    const text = (screen.getAllByRole('checkbox') as HTMLInputElement[])[0];
+    expect(text.checked).toBe(false);
+  });
+  const content = (screen.getAllByRole('checkbox') as HTMLInputElement[])[1];
+  expect(content.disabled).toBe(true); // no chosen model: content stays off despite a present key
   expect(invoke).toHaveBeenCalledWith('model_settings');
 });
 
@@ -129,7 +154,7 @@ test('the arms row seeds from model_settings — searchTextArm:false unchecks th
   // `s.index.searchTextArm` read.
   invoke.mockImplementation((cmd: string) =>
     cmd === 'model_settings'
-      ? Promise.resolve({ key: { kind: 'present' }, index: { kind: 'read', searchTextArm: false, searchContentArm: true } })
+      ? Promise.resolve({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'text-embedding-3-small', searchTextArm: false, searchContentArm: true } })
       : Promise.resolve());
   render(Launcher);
   await vi.waitFor(() => {

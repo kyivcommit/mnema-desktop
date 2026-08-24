@@ -1,4 +1,4 @@
-import type { AskAnswer, Refusal } from '../lib/ipc';
+import type { AskAnswer, Refusal, ModelSettings } from '../lib/ipc';
 
 // Mirrors MAX_ASK_QUERY (bridge.rs:486). Backend is the source of truth; this
 // is the convenience mirror so a blank/over-long query never reaches `ask`.
@@ -23,6 +23,19 @@ export type LauncherState =
   | { kind: 'citationsOnly'; query: string; answer: Extract<AskAnswer, { kind: 'citationsOnly' }> } // E (PR 6)
   | { kind: 'refused'; reason: Refusal } // F
   | { kind: 'error'; reason: 'blank' | 'tooLong' | 'askFailed' }; // the query guard AND a rejected ask: every non-idle state goes through the machine, so `error` is live
+
+// §9.1 / owner ruling 2026-08-24: content (network/dense) search is offered only when a provider
+// key is present AND the index has a chosen embedding model. A stored key with no chosen model
+// still cannot embed a query, so key-present alone is not enough. Fail SAFE: `typeof … === 'string'`
+// is true only for a real model name, so a null model — or a wire field renamed away to `undefined`
+// — reads as no-model and content stays OFF, never wrongly ON.
+export function providerReady(s: ModelSettings): boolean {
+  return (
+    s.key.kind === 'present' &&
+    s.index.kind === 'read' &&
+    typeof s.index.embeddingModel === 'string'
+  );
+}
 
 export function stateFromAnswer(query: string, a: AskAnswer): LauncherState {
   switch (a.kind) {
