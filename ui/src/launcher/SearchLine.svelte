@@ -26,6 +26,15 @@
     return state.kind === 'refused' ? refusalText(state.reason.kind) : '';
   });
 
+  // The phase line and the spinner label must follow a live language switch
+  // too: a bare t() in the template establishes no $locale dependency, so it
+  // would stay in whatever language state D was entered in (Codex #4).
+  const phaseChat = $derived.by(() => { void $locale; return t('phase_chat'); });
+  const phaseLine = $derived.by(() => {
+    void $locale;
+    return `${t('phase_text')} ✓ · ${t('phase_content')} ✓ · ${t('phase_chat')}…`;
+  });
+
   function onKeydown(event: KeyboardEvent) {
     if (event.key === 'Enter') onSubmit(query);
   }
@@ -39,9 +48,7 @@
     <p class="refusal" role="status">{refusalMessage}</p>
   {/if}
   {#if state.kind === 'inFlight'}
-    <span class="spinner" role="progressbar" aria-label={t('phase_chat')}></span>
-    <p class="phases" data-testid="phases" role="status">
-      {t('phase_text')} ✓ · {t('phase_content')} ✓ · {t('phase_chat')}…
-    </p>
+    <span class="spinner" role="progressbar" aria-label={phaseChat}></span>
+    <p class="phases" data-testid="phases" role="status">{phaseLine}</p>
   {/if}
 </div>

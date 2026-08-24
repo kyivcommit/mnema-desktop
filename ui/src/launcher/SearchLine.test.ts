@@ -1,6 +1,8 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { expect, test, vi } from 'vitest';
+import { tick } from 'svelte';
 import SearchLine from './SearchLine.svelte';
+import { setLocale } from '../i18n';
 import { MAX_ASK_QUERY, type LauncherState } from './state';
 
 test('state A shows only the search input, no message', () => {
@@ -51,4 +53,24 @@ test('state D shows a spinner and the phase line, query stays in the input', () 
   expect(phases).toMatch(/чат|chat/i);
   expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('my question');
   expect(screen.queryByRole('alert')).toBeNull(); // in flight is not also an error (assert both directions)
+});
+
+test('state D phase line and spinner label follow a live language switch (Codex #4)', async () => {
+  // The phase line and the spinner aria-label were bare `t()` calls with no
+  // `$locale` dependency, so a switch during an in-flight search left them in
+  // the old language while the placeholder/error strings updated. Both
+  // directions: English first, then the switch must reach BOTH the line and
+  // the aria-label.
+  setLocale('en');
+  render(SearchLine, { state: { kind: 'inFlight', query: 'q' }, onSubmit: vi.fn(), query: 'q' });
+  const phases = () => screen.getByTestId('phases').textContent ?? '';
+  const spinnerLabel = () => screen.getByRole('progressbar').getAttribute('aria-label') ?? '';
+  expect(phases()).toContain('text'); // en
+  expect(spinnerLabel()).toBe('chat'); // en
+  setLocale('uk');
+  await tick();
+  expect(phases()).toContain('текст'); // uk — the live switch reached the phase line
+  expect(phases()).toContain('зміст');
+  expect(spinnerLabel()).toBe('чат'); // uk — and the spinner aria-label
+  setLocale('en'); // leave the shared store as it was found
 });
