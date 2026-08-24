@@ -120,7 +120,112 @@ pub struct PathEntry {
     pub reader_version: i64,
 }
 
+pub struct WatchedRootRow {
+    pub id: i64,
+    pub absolute_path: String,
+}
+
+pub struct IndexedFileRow {
+    pub relative_path: String,
+    pub document_id: String,
+}
+
+pub struct RecentDocRow {
+    pub document_id: String,
+    pub relative_path: String,
+    pub watched_root_id: i64,
+    /// The chunk/done completion time (`ingest_stage.updated_at`), not the
+    /// document's `created_at`: recency is when indexing *finished*, which a
+    /// rebuild refreshes, not when the still-`pending` row was first inserted.
+    pub indexed_at: i64,
+}
+
 impl Db {
+    /// Every watched folder, in the order the user added them.
+    pub fn list_watched_roots(&self) -> Result<Vec<WatchedRootRow>, Error> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT id, absolute_path FROM watched_root ORDER BY added_at, id")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(WatchedRootRow {
+                    id: r.get(0)?,
+                    absolute_path: r.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The indexed documents' paths under one root, sorted — the left card's
+    /// "Files" neighbours (§7). Only `status = 'indexed'`: a pending, failed or
+    /// skipped path is not part of the searchable corpus and cannot be cited.
+    pub fn indexed_files_under_root(&self, root_id: i64) -> Result<Vec<IndexedFileRow>, Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT p.relative_path, p.document_id
+               FROM path p
+               JOIN document d ON d.id = p.document_id
+              WHERE p.watched_root_id = ?1 AND d.status = 'indexed'
+              ORDER BY p.relative_path",
+        )?;
+        let rows = stmt
+            .query_map([root_id], |r| {
+                Ok(IndexedFileRow {
+                    relative_path: r.get(0)?,
+                    document_id: r.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The most-recently-*completed* documents, newest first, each once.
+    ///
+    /// Recency is the chunk/done checkpoint's `ingest_stage.updated_at`, not
+    /// `document.created_at`. `created_at` is stamped when the still-`pending`
+    /// row is first inserted, before any chunk is written, and a rebuild keeps
+    /// that original value; ordering by it reports when a file first *entered*
+    /// the index, not when it became searchable. The chunk/done stage is
+    /// written when the document finishes and refreshed on every rebuild, so
+    /// its `updated_at` is the honest "finished indexing" time.
+    ///
+    /// `'chunk'`/`'done'` are hardcoded, not imported: they are `mnema-ingest`'s
+    /// `STAGE_CHUNK`/`STATUS_DONE` (`mnema-ingest/src/lib.rs`, written at
+    /// `:597`), but `mnema-index` must not depend on `mnema-ingest` — that edge
+    /// is the wrong way round and would be a cycle. The INNER JOIN also means an
+    /// `indexed` document with no chunk/done stage row is not listed; the
+    /// pipeline records that stage when it finishes a document, so this excludes
+    /// nothing under the real lifecycle — but a test must record the stage, not
+    /// only set the status.
+    pub fn recent_indexed_documents(&self, limit: i64) -> Result<Vec<RecentDocRow>, Error> {
+        let mut stmt = self.conn().prepare(
+            // One MIN() aggregate: SQLite takes the bare watched_root_id from the
+            // same row that produced MIN(relative_path), so the pair is
+            // consistent. `s.updated_at` is likewise unambiguous under GROUP BY
+            // d.id: the ingest_stage PK is (content_hash, stage), so there is
+            // exactly one 'chunk' row per document.
+            "SELECT d.id, MIN(p.relative_path), p.watched_root_id, s.updated_at
+               FROM document d
+               JOIN path p ON p.document_id = d.id
+               JOIN ingest_stage s ON s.content_hash = d.id AND s.stage = 'chunk' AND s.status = 'done'
+              WHERE d.status = 'indexed'
+              GROUP BY d.id
+              ORDER BY s.updated_at DESC, d.id
+              LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit], |r| {
+                Ok(RecentDocRow {
+                    document_id: r.get(0)?,
+                    relative_path: r.get(1)?,
+                    watched_root_id: r.get(2)?,
+                    indexed_at: r.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn insert_watched_root(&self, absolute_path: &str) -> Result<i64, Error> {
         self.conn().execute(
             "INSERT INTO watched_root (absolute_path) VALUES (?1)",

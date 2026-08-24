@@ -2587,3 +2587,281 @@ fn a_model_change_that_says_nothing_about_the_existing_vectors_is_refused() {
          — the bare word appears in this command's own name in the same message: {refused}"
     );
 }
+
+#[test]
+fn list_tree_enumerates_roots_indexed_files_and_recents() {
+    use mnema_core::OnDisk; // SourceKind is already in file scope (commands.rs:14, from mnema_core)
+    use mnema_index::DocumentStatus;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let (root_a, root_b) = state
+        .with_index(|db| {
+            let a = db.insert_watched_root("/tmp/alpha")?;
+            let b = db.insert_watched_root("/tmp/beta")?;
+
+            let older = "a".repeat(64);
+            let newer = "b".repeat(64);
+            let pending = "c".repeat(64);
+            for id in [&older, &newer, &pending] {
+                db.insert_document(id, "text/plain", 1, SourceKind::Document)?;
+            }
+            db.set_document_status(&older, DocumentStatus::Indexed)?;
+            db.set_document_status(&newer, DocumentStatus::Indexed)?;
+            // Recency is the chunk/done completion time (`ingest_stage`), not
+            // `document.created_at`. `pending` carries a chunk/done stage too —
+            // the state a downgraded document is in — and the newest one, so the
+            // indexed-only filter (not the INNER JOIN) is what keeps it out of
+            // recents.
+            for id in [&older, &newer, &pending] {
+                db.record_stage(id, "chunk", "done")?;
+            }
+            db.conn().execute(
+                "UPDATE ingest_stage SET updated_at = 1000 WHERE content_hash = ?1 AND stage = 'chunk'",
+                [&older],
+            )?;
+            db.conn().execute(
+                "UPDATE ingest_stage SET updated_at = 2000 WHERE content_hash = ?1 AND stage = 'chunk'",
+                [&newer],
+            )?;
+            db.conn().execute(
+                "UPDATE ingest_stage SET updated_at = 3000 WHERE content_hash = ?1 AND stage = 'chunk'",
+                [&pending],
+            )?;
+            // Two paths under A, deliberately out of sorted order; the pending doc under B.
+            db.insert_path(
+                a,
+                "notes/old.txt",
+                &older,
+                OnDisk {
+                    size_bytes: 1,
+                    mtime: 1,
+                },
+                "text",
+                1,
+            )?;
+            db.insert_path(
+                a,
+                "new.txt",
+                &newer,
+                OnDisk {
+                    size_bytes: 1,
+                    mtime: 1,
+                },
+                "text",
+                1,
+            )?;
+            db.insert_path(
+                b,
+                "draft.txt",
+                &pending,
+                OnDisk {
+                    size_bytes: 1,
+                    mtime: 1,
+                },
+                "text",
+                1,
+            )?;
+            Ok::<_, mnema_index::Error>((a, b))
+        })
+        .unwrap();
+
+    // Through the IPC, by name — the doctrine (`commands.rs:1-6`): a direct call
+    // proves nothing about registration or whether fields survive the camelCase
+    // rename. `call` returns `Result<Value, Value>` (`commands.rs:174`).
+    let v = call(&webview, "list_tree", json!({})).expect("list_tree was rejected");
+
+    let roots = v["roots"].as_array().unwrap();
+    assert_eq!(roots.len(), 2);
+    // Roots in add order; basename is the display name; camelCase on the wire.
+    assert_eq!(roots[0]["rootId"].as_i64().unwrap(), root_a);
+    assert_eq!(roots[0]["name"], "alpha");
+    assert_eq!(roots[1]["rootId"].as_i64().unwrap(), root_b);
+
+    // Root A: indexed paths only, sorted ("new.txt" < "notes/old.txt").
+    let files_a: Vec<&str> = roots[0]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["relativePath"].as_str().unwrap())
+        .collect();
+    assert_eq!(files_a, vec!["new.txt", "notes/old.txt"]);
+    // Root B: the pending doc is excluded — an empty, still-listed root.
+    assert!(roots[1]["files"].as_array().unwrap().is_empty());
+
+    // Recents: newest first, indexed-only (the pending doc is absent).
+    let recents = v["recents"].as_array().unwrap();
+    let rec: Vec<&str> = recents
+        .iter()
+        .map(|d| d["relativePath"].as_str().unwrap())
+        .collect();
+    assert_eq!(rec, vec!["new.txt", "notes/old.txt"]);
+    assert_eq!(recents[0]["indexedAt"].as_i64().unwrap(), 2000);
+    assert_eq!(recents[0]["rootId"].as_i64().unwrap(), root_a);
+
+    // Wire shape, both directions: snake_case must not leak (guards rename_all).
+    assert!(roots[0].get("root_id").is_none());
+    assert!(recents[0].get("indexed_at").is_none());
+}
+
+/// One indexed document the tree listing returns, written the way the pipeline
+/// leaves it: an `Indexed` status, a `chunk`/`done` stage (so
+/// [`mnema_index::Db::recent_indexed_documents`]'s INNER JOIN reaches it) and a
+/// real path under `root`. The four writes
+/// [`list_tree_enumerates_roots_indexed_files_and_recents`] already makes,
+/// gathered into one call for the race guard's decoys and its intruder.
+fn seed_indexed_file(db: &mnema_index::Db, root: i64, id: &str, relative_path: &str) {
+    use mnema_core::OnDisk;
+    db.insert_document(id, "text/plain", 1, SourceKind::Document)
+        .expect("seed: insert_document");
+    db.set_document_status(id, mnema_index::DocumentStatus::Indexed)
+        .expect("seed: set_document_status");
+    db.record_stage(id, "chunk", "done")
+        .expect("seed: record_stage");
+    db.insert_path(
+        root,
+        relative_path,
+        id,
+        OnDisk {
+            size_bytes: 1,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .expect("seed: insert_path");
+}
+
+/// Coherence-only, never false-red — the tree twin of
+/// [`assert_coherent_or_absent`]. Every `recents[i]`'s `(rootId,
+/// relativePath)` must be one the same listing reports under some
+/// `roots[].files`. A coherent listing passes whichever way the race fell — the
+/// intruder in both phases or in neither; only a torn read, a recent reaching
+/// the listing while its file is absent from every `roots[].files`, fails.
+///
+/// One direction on purpose: `recents ⊆ files` is the whole invariant
+/// `read_snapshot` buys here, and requiring equality would false-red on the
+/// ordinary case where `files` holds far more than the `RECENTS_LIMIT` rows
+/// `recents` caps at.
+fn assert_coherent_recents(v: &Value) {
+    let mut files: std::collections::HashSet<(i64, String)> = std::collections::HashSet::new();
+    for root in v["roots"].as_array().expect("a roots array") {
+        let root_id = root["rootId"].as_i64().expect("a rootId");
+        for f in root["files"].as_array().expect("a files array") {
+            let rel = f["relativePath"].as_str().expect("a relativePath");
+            files.insert((root_id, rel.to_string()));
+        }
+    }
+    for rec in v["recents"].as_array().expect("a recents array") {
+        let pair = (
+            rec["rootId"].as_i64().expect("a recent rootId"),
+            rec["relativePath"]
+                .as_str()
+                .expect("a recent relativePath")
+                .to_string(),
+        );
+        assert!(
+            files.contains(&pair),
+            "recents carries {:?} under root {}, absent from every roots[].files — a torn read: \
+             list_tree returned a state the index never held: {v}",
+            pair.1,
+            pair.0
+        );
+    }
+}
+
+/// The P1-1 fix (`src-tauri/src/tree.rs`): `list_tree` reads the whole listing
+/// inside one [`mnema_index::Db::read_snapshot`]. The `mnema-index` regression
+/// (`the_tree_listing_reads_files_and_recents_from_one_snapshot`) composes the
+/// two phases by hand and proves the *snapshot* holds; it pins nothing about
+/// whether `list_tree` ITSELF wraps its reads — revert the command to
+/// `with_index(build_tree_listing)` (three autocommit reads) and that test, and
+/// the whole suite, stays green. The search path closed this exact gap with
+/// [`a_rebuild_racing_the_ipc_search_does_not_reach_its_citation`], and this
+/// mirrors it for `list_tree`. See the private guard-report for the measured
+/// catch rate.
+///
+/// A second connection commits a full new indexed document — path and
+/// chunk/done stage — while the real `list_tree` IPC command runs. Under one
+/// snapshot the intruder is in neither the files nor the recents; under
+/// autocommit it can reach the recents read (phase 2) while the files read
+/// (phase 1) already snapshotted without it, and [`assert_coherent_recents`]
+/// fails on that tear.
+#[test]
+fn a_write_racing_the_ipc_list_tree_cannot_tear_recents_from_its_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    // The window and this writer are two connections on one file — the running
+    // indexing job's shape, the same arrangement `a_search_through_the_ipc_
+    // finds_what_another_connection_wrote` relies on. The root is committed on
+    // the writer; the window sees it across the connection.
+    let writer = mnema_index::open(&path).unwrap();
+    let root = writer
+        .insert_watched_root(&dir.path().display().to_string())
+        .unwrap();
+
+    // Widen the race window the way the search fixture uses 6000 decoys: many
+    // indexed files under the root make `indexed_files_under_root`'s
+    // `ORDER BY relative_path` (phase 1) materialise a temp b-tree over every
+    // row before it returns — low milliseconds, the same order as the writer's
+    // head start below — and it is the gap between that read and the recents
+    // read (phase 2) an autocommit `list_tree` leaves for the writer to land in.
+    // One transaction around the seed keeps setup fast; it changes no read cost.
+    const DECOYS: usize = 6000;
+    writer.conn().execute_batch("BEGIN").unwrap();
+    for i in 0..DECOYS {
+        seed_indexed_file(
+            &writer,
+            root,
+            &format!("{i:064x}"),
+            &format!("decoy/{i:06}.txt"),
+        );
+    }
+    // Rank every decoy below any live `unixepoch()`, so the intruder — whose
+    // chunk/done stage stamps the real clock — always reaches recents' top
+    // `RECENTS_LIMIT` when phase 2 sees it. Without this the intruder ties the
+    // decoys on the one-second `unixepoch()` grid and its place in recents would
+    // turn on `d.id`, not on whether the race reached the recents read.
+    writer
+        .conn()
+        .execute(
+            "UPDATE ingest_stage SET updated_at = 1 WHERE stage = 'chunk'",
+            [],
+        )
+        .unwrap();
+    writer.conn().execute_batch("COMMIT").unwrap();
+
+    // Control, before the writer thread exists to race against: the listing is
+    // coherent on its own, so a failure below can only mean the race reached the
+    // recents read.
+    let control = call(&webview, "list_tree", json!({})).expect("list_tree was rejected");
+    assert_coherent_recents(&control);
+
+    let intruder = "f".repeat(64);
+    let writer_handle = std::thread::spawn(move || {
+        // A short, deliberately generous head start over the listing this thread
+        // races: the files read's sort over `DECOYS` rows, comment above, gives
+        // the commit room to land after that read's snapshot but before the
+        // recents read.
+        std::thread::sleep(Duration::from_millis(2));
+        // A full new indexed document under the root. Its chunk/done
+        // `unixepoch()` puts it at the head of recents; it is absent from any
+        // `roots[].files` a phase-1 snapshot took before this commit landed —
+        // which is what makes a recent for it, with no matching file, provable
+        // incoherence rather than a harmless extra row.
+        seed_indexed_file(&writer, root, &intruder, "intruder.txt");
+    });
+
+    let v = call(&webview, "list_tree", json!({})).expect("list_tree was rejected");
+    writer_handle.join().expect("the writer thread panicked");
+
+    assert_coherent_recents(&v);
+}

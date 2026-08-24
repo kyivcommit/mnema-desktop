@@ -14,6 +14,7 @@ pub mod models;
 pub mod paths;
 pub mod state;
 pub mod tray;
+mod tree;
 pub mod walk_job;
 
 use anyhow::Context as _;
@@ -38,6 +39,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::start_probe_job,
         bridge::cancel_job,
         bridge::job_status,
+        tree::list_tree,
         models::provider_models,
         models::key_present,
         models::set_key,
