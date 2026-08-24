@@ -207,7 +207,7 @@ case_ "commands: job_status is registered" \
   src-tauri/src/lib.rs \
   's{        bridge::job_status,\n}{}' \
   'bridge::cancel_job,
-        models::provider_models,' \
+        tree::list_tree,' \
   mnema-desktop 'the_window_can_ask_whether_a_job_is_running' --test commands
 
 case_ "commands: a new job does not inherit the last cancellation" \
