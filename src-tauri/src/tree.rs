@@ -1,7 +1,9 @@
-//! Read-only enumeration for the launcher's left card (§7): watched folders,
-//! their indexed files, and recently-indexed documents. Read-only, so it adds
-//! no data-loss surface (spec §12); it simply reflects the index at query time.
-//! PR 5's `source_around` will join this module.
+//! Read-only reads for the launcher's two side cards: the left card's watched
+//! folders, their indexed files, and recently-indexed documents (§7,
+//! [`list_tree`]); the right card's paragraphs around a cited passage (§7.1,
+//! [`source_around`]). Read-only, so neither command adds a data-loss surface
+//! (spec §12) — they only reflect the index at query time, and `source_around`
+//! refuses rather than answer with text a rebuild has since replaced.
 
 use crate::error::Error;
 use crate::state::AppState;

@@ -897,8 +897,8 @@ impl Db {
     /// page` that starts the cascade. That order is load-bearing, not
     /// stylistic: once the cascade has taken the chunks there is no
     /// `chunk.document_id` left to look their vector ids up by, and
-    /// [`Db::delete_watched_root`] (`write.rs:292`) keeps the same ordering
-    /// for the same reason.
+    /// [`Db::delete_watched_root`] keeps the same ordering for the same
+    /// reason.
     ///
     /// The sharper fact underneath is why leaving this unreached would have
     /// been worse than clutter: `chunk.id` is `INTEGER PRIMARY KEY`
@@ -953,8 +953,8 @@ impl Db {
         same_connection(self, tx);
         // Before the pages go: once the cascade has taken the chunks there is
         // no `chunk.document_id` left to look their ids up by — the same
-        // ordering `delete_watched_root` keeps (`write.rs:292`). A `vec0`
-        // table is the target of no foreign key, so nothing else reaches it.
+        // ordering `delete_watched_root` keeps. A `vec0` table is the target
+        // of no foreign key, so nothing else reaches it.
         crate::space::delete_vectors_for_document_in(tx, id)?;
         tx.execute("DELETE FROM page WHERE document_id = ?1", params![id])?;
         crate::journal::write_document_status(tx, id, DocumentStatus::Pending)
