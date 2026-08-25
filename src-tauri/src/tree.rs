@@ -550,6 +550,163 @@ mod tests {
         }
     }
 
+    /// A `Segment` as the index stores one: four values, all different from
+    /// each other, so a mirror that dropped or permuted a field cannot pass by
+    /// coincidence.
+    fn sample_segment() -> Segment {
+        Segment {
+            block_id: 41,
+            start: 3,
+            end: 16,
+            block_start: 17,
+        }
+    }
+
+    /// One `Excerpt` carrying every camelCase field this PR puts on the wire.
+    ///
+    /// ⚠️ `spans` is built with `.into()` rather than `WireSegment::from(…)`
+    /// **on purpose**, and it is what makes Step 3's red-proof possible: the
+    /// reflexive `impl From<T> for T` means this line still compiles if
+    /// `spans` is changed to a bare `Vec<Segment>` — the mutation "delete the
+    /// conversion and send `Segment` straight" — so that mutation shows up as
+    /// a failing assertion about `block_start`, not as a compile error the
+    /// harness would report as a broken case.
+    fn sample_excerpt() -> SourceAround {
+        SourceAround::Excerpt {
+            blocks: vec![SourceBlock {
+                block_id: 41,
+                kind: "paragraph".into(),
+                text: "Ціна оцифрування одного аркуша становить дві гривні.".into(),
+                page_no: 3,
+                reading_order: 2,
+            }],
+            spans: vec![sample_segment().into()],
+            document_id: "d".repeat(64),
+            section_title: Some("Розділ перший".into()),
+            has_more_before: true,
+            has_more_after: false,
+            freshness: Freshness::FileChanged,
+        }
+    }
+
+    /// The wire contract PR 6 matches on (§10), asserted in both directions for
+    /// each of the three shapes this PR adds.
+    ///
+    /// The three are not one rule. `SourceAround` is an **enum**, where
+    /// `rename_all` renames the variants only and `rename_all_fields` is what
+    /// renames the fields of a struct variant — the trap this plan measured
+    /// rather than reasoned from the `AskAnswer` precedent, whose struct
+    /// variants are all one-word fields. `SourceBlock` and `WireSegment` are
+    /// plain **structs**, where `rename_all` does rename fields. And `Segment`
+    /// itself carries no rename at all, which is why `WireSegment` exists.
+    #[test]
+    fn source_wire_shape_is_camel_case() {
+        let v = serde_json::to_value(sample_excerpt()).unwrap();
+
+        // The variant tag, which is what a caller switches on.
+        assert_eq!(v["kind"], "excerpt");
+
+        // Present, camelCase — the struct-variant fields `rename_all` alone
+        // would have left in snake_case.
+        assert!(v["documentId"].is_string());
+        assert!(v["sectionTitle"].is_string());
+        assert!(v["hasMoreBefore"].is_boolean());
+        assert!(v["hasMoreAfter"].is_boolean());
+        // Absent, the other direction: a payload carrying both spellings would
+        // satisfy the six assertions above while PR 6 read the wrong one.
+        assert!(v.get("document_id").is_none());
+        assert!(v.get("section_title").is_none());
+        assert!(v.get("has_more_before").is_none());
+        assert!(v.get("has_more_after").is_none());
+
+        // ⚠️ `relativePath` is **not** a field of `Excerpt` and must not become
+        // one: no read method can produce a path for the excerpt (`ChunkAnchor`
+        // carries none, and `PathOccupant::relative_path` is the caller's own
+        // query key), so it could only ever echo the input back and disagree
+        // with nothing. Asserted in both spellings, because reinstating it in
+        // either would be the regression.
+        assert!(v.get("relativePath").is_none());
+        assert!(v.get("relative_path").is_none());
+
+        // `SourceBlock`.
+        let block = &v["blocks"][0];
+        assert!(block["blockId"].is_i64());
+        assert!(block["pageNo"].is_i64());
+        assert!(block["readingOrder"].is_i64());
+        assert!(block["kind"].is_string());
+        assert!(block["text"].is_string());
+        assert!(block.get("block_id").is_none());
+        assert!(block.get("page_no").is_none());
+        assert!(block.get("reading_order").is_none());
+
+        // `WireSegment`.
+        let span = &v["spans"][0];
+        assert!(span["blockId"].is_i64());
+        assert!(span["blockStart"].is_u64());
+        assert!(span.get("block_id").is_none());
+        assert!(span.get("block_start").is_none());
+
+        // The refusal variant and its cause, both tags.
+        let gone = serde_json::to_value(SourceAround::Gone {
+            reason: GoneReason::IdReused,
+        })
+        .unwrap();
+        assert_eq!(gone["kind"], "gone");
+        assert_eq!(gone["reason"]["kind"], "idReused");
+        assert!(gone.get("blocks").is_none());
+        let missing = serde_json::to_value(SourceAround::Gone {
+            reason: GoneReason::NoSuchChunk,
+        })
+        .unwrap();
+        assert_eq!(missing["reason"]["kind"], "noSuchChunk");
+
+        // Every `Freshness` tag, because the set is closed (the outcomes of two
+        // comparisons) and a card must render each: a default branch drawing
+        // `Current` for a tag it does not recognise is how a stale excerpt gets
+        // shown as fresh.
+        for (variant, tag) in [
+            (Freshness::Current, "current"),
+            (Freshness::Reindexed, "reindexed"),
+            (Freshness::FileChanged, "fileChanged"),
+            (Freshness::FileMissing, "fileMissing"),
+            (Freshness::NoPath, "noPath"),
+        ] {
+            let f = serde_json::to_value(&variant).unwrap();
+            assert_eq!(f["kind"], tag, "{variant:?} crossed as {f}");
+        }
+        assert_eq!(v["freshness"]["kind"], "fileChanged");
+    }
+
+    /// The `WireSegment` conversion is load-bearing, so this proves it rather
+    /// than assuming it.
+    ///
+    /// [`mnema_core::Segment`] is **persisted** — `chunk.char_span` stores a
+    /// `Vec<Segment>` as JSON and the schema's `CHECK` and its
+    /// `chunk_span_blocks_bi` trigger both read that JSON *by key* — so the
+    /// type cannot be given a `rename_all` and crosses as `block_start`.
+    /// Sending it straight is the mutation this test is written against: delete
+    /// the conversion, make `spans` a `Vec<Segment>`, and the two assertions
+    /// below go red while everything else still compiles.
+    ///
+    /// Both directions: the mirror must be camelCase **and** must carry the
+    /// same four values, in the same roles — a conversion that swapped `start`
+    /// for `block_start` would ship a perfectly camelCase, perfectly wrong
+    /// highlight.
+    #[test]
+    fn a_real_segment_crosses_the_wire_through_its_camel_case_mirror() {
+        let segment = sample_segment();
+        let v = serde_json::to_value(sample_excerpt()).unwrap();
+        let span = &v["spans"][0];
+
+        assert_eq!(span["blockId"], segment.block_id);
+        assert_eq!(span["start"], segment.start);
+        assert_eq!(span["end"], segment.end);
+        assert_eq!(span["blockStart"], segment.block_start);
+
+        assert!(span.get("block_start").is_none());
+        assert!(span.get("block_id").is_none());
+    }
+
     #[test]
     fn wire_shape_is_camel_case() {
         let v = serde_json::to_value(sample()).unwrap();
