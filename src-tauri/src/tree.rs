@@ -20,8 +20,9 @@ const RECENTS_LIMIT: i64 = 50;
 ///
 /// The radius is the caller's choice — the card shows one paragraph either
 /// side, a scrolling card wants more — but a client must not be able to ask
-/// for a whole book. **Clamped, not rejected:** a radius of `0` or one larger
-/// than this is answered, not refused.
+/// for a whole book. **Clamped, not rejected:** `0` is answered as `1` (the
+/// passage's own block plus one either side), and anything above this ceiling
+/// is answered at the ceiling. Neither is an error.
 ///
 /// ⚠️ That promise covers the values that reach the command. The parameter is
 /// `u32`, so a negative or fractional radius is refused one layer earlier, by
@@ -135,7 +136,8 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
 /// their snake_case names without this second attribute. Measured, not
 /// reasoned: without it `Excerpt` ships `document_id` and `has_more_before`
 /// inside a camelCase payload. The `AskAnswer` precedent (`bridge.rs:448-451`)
-/// does not warn, because every field of its struct variants is one word.
+/// does not warn (its variants are at `bridge.rs:455-475`), because every
+/// field of its struct variants is one word.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
     rename_all = "camelCase",
@@ -147,7 +149,9 @@ pub enum SourceAround {
         /// The blocks in document reading order: `radius` before the passage's
         /// own block(s), those blocks, then `radius` after.
         blocks: Vec<SourceBlock>,
-        /// Where to paint, measured into `SourceBlock::text` by `blockStart`.
+        /// Where to paint. See [`WireSegment`] for the unit and the arithmetic
+        /// — both are easy to get wrong from the payload alone, and getting
+        /// them wrong moves the highlight silently.
         spans: Vec<WireSegment>,
         /// The excerpt's own provenance — the content hash of the document the
         /// blocks actually came from, so a caller can see it disagreeing with
@@ -256,7 +260,21 @@ pub struct SourceBlock {
 /// — the `CHECK` extracts `$[0].block_id` and the `chunk_span_blocks_bi`
 /// trigger extracts `$.block_id`. Renaming the field would make every stored
 /// row unreadable and both guards blind. The same "local mirror at the seam"
-/// move `Hit` already makes for `Citation` (`bridge.rs:88-92`).
+/// move `Hit` already makes for `Citation` (`bridge.rs:93-101`).
+/// 🔴 **How to paint from this, because the payload alone does not say.**
+///
+/// - `blockStart` is the offset **into the text of the block `blockId` names**,
+///   which is in `blocks`. That is where the highlight begins.
+/// - `start`/`end` are offsets into the **chunk's own text**, and the chunk's
+///   text is *not* on the wire. Their only use here is the length:
+///   `len = end - start`. Do not index anything with them.
+/// - 🔴 **The unit is Unicode scalar values, not UTF-16 code units.** Every
+///   offset this pipeline emits comes from `text.chars().count()`. For Cyrillic
+///   and Latin the two agree; one emoji or any character outside the BMP
+///   earlier in the paragraph and they diverge, moving the highlight with no
+///   error anywhere. In JavaScript that means `[...text].slice(a, b).join("")`,
+///   **never** `text.slice(a, b)`. `ui/src/launcher/state.ts` already counts
+///   code points for the same reason (D131).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireSegment {
@@ -359,7 +377,9 @@ enum Composed {
 /// relative path with *different* content, where the document term is the only
 /// thing that says which row the citation meant. Both are `all = 2,
 /// named = 1`; no rule over those counts separates them. Measured, not
-/// assumed. Left as is, and recorded in §14 so PR 6 knows the contract.
+/// assumed. Left as is; the contract PR 6 must build on is the doc comment on
+/// [`Freshness::NoPath`] above, which enumerates all three states that reach
+/// it.
 fn cited_occupant(
     db: &Db,
     document_id: &str,

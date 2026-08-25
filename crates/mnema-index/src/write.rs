@@ -279,6 +279,19 @@ impl Db {
     /// The chunk's own identity and where it sits in the document's reading
     /// order, or `None` if no chunk carries this id.
     ///
+    /// ⚠️ **`AND b2.document_id = c.document_id` is hardening no test can
+    /// reach today, and it is labelled rather than dressed up as covered.**
+    /// The join walks block ids out of `char_span`, and the schema warns that
+    /// those ids live *outside* `ON DELETE CASCADE` while `block.id` is reused:
+    /// "Re-extracting a single page would leave ids in char_span that resolve
+    /// to a live block of another document" (`schema.sql`, above the
+    /// `chunk_span_blocks_bi` trigger). Nothing re-extracts a single page
+    /// today — blocks are only ever deleted a whole document at a time — so
+    /// the state is unreachable and **the mutant that removes this predicate
+    /// survives the suite**. It stays because it is one term and it makes the
+    /// query correct under the scenario the schema itself names; it is not
+    /// claimed to be tested.
+    ///
     /// `first_reading_order`/`last_reading_order` are the min/max
     /// `reading_order` over every block the chunk's `char_span` names, joined
     /// straight through `json_each` rather than re-derived from `spans` in
@@ -295,6 +308,7 @@ impl Db {
                JOIN page p ON p.id = b.page_id
                JOIN json_each(c.char_span) je
                JOIN block b2 ON b2.id = json_extract(je.value, '$.block_id')
+                             AND b2.document_id = c.document_id
               WHERE c.id = ?1
               GROUP BY c.id",
         )?;

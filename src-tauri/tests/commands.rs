@@ -3271,6 +3271,99 @@ fn write_paragraph_document(
 /// `rename_all` on an *enum* renames variants only, so without
 /// `rename_all_fields` this ships `document_id` and `has_more_before` inside a
 /// camelCase payload.
+/// The passage is on page 2 of three, and the window crosses both boundaries.
+///
+/// Every other fixture that reaches `source_around` puts its document on a
+/// single page, so the seam `chunk_anchor.page_no` → `reading_window(?2)` was
+/// only ever exercised with a page number handed in by a unit test. This is the
+/// sixth instance of the cycle's one recurring gap — the fixture not building
+/// the state the code branches on — and the one the branch review predicted.
+#[test]
+fn source_around_crosses_page_boundaries_on_a_real_multi_page_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "8".repeat(64);
+    let passage = PARAGRAPHS[0].to_string();
+    let chunk = state
+        .with_index(|db| {
+            // The decoy first, so the real document's page ids are nowhere near
+            // its page numbers.
+            write_decoy_document(db);
+            db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
+            let mut anchor = None;
+            for page_no in 1..=3 {
+                let page = db.insert_page(&doc, page_no, "native:txt", None)?;
+                for i in 1..=2 {
+                    let text = format!("p{page_no}b{i}");
+                    let block = db.insert_block(
+                        page,
+                        &Block {
+                            block_type: BlockType::Paragraph,
+                            reading_order: i,
+                            language: None,
+                            text: if page_no == 2 && i == 1 {
+                                passage.clone()
+                            } else {
+                                text
+                            },
+                            line_start: None,
+                            line_end: None,
+                        },
+                    )?;
+                    if page_no == 2 && i == 1 {
+                        anchor = Some(block);
+                    }
+                }
+            }
+            let chunk = db.insert_chunk(
+                &doc,
+                0,
+                &passage,
+                &Locator {
+                    spans: vec![Segment {
+                        block_id: anchor.expect("the anchor block"),
+                        start: 0,
+                        end: passage.chars().count() as u32,
+                        block_start: 0,
+                    }],
+                    coordinate: Coordinate::Page { number: 2 },
+                },
+                SourceKind::Document,
+            )?;
+            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
+            Ok::<_, mnema_index::Error>(chunk)
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({ "chunkId": chunk, "passageText": passage, "radius": 2 }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    // Two blocks back reaches page 1; two forward reaches page 3.
+    let pages: Vec<i64> = v["blocks"]
+        .as_array()
+        .expect("a blocks array")
+        .iter()
+        .map(|b| b["pageNo"].as_i64().expect("a pageNo"))
+        .collect();
+    assert_eq!(
+        pages,
+        vec![1, 1, 2, 2, 3],
+        "the window must cross both page boundaries in document reading order: {v}"
+    );
+    assert_eq!(v["blocks"][2]["text"], json!(passage), "{v}");
+    assert_eq!(v["hasMoreBefore"], json!(false), "{v}");
+    assert_eq!(v["hasMoreAfter"], json!(true), "p3b2 is beyond: {v}");
+}
+
 /// An **asymmetric** window: nothing before the passage, more after it.
 ///
 /// Every other IPC fixture in this file returns the two `hasMore` flags with

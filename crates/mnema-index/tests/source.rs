@@ -291,6 +291,47 @@ fn insert_decoy_document(db: &Db) {
 
 // ----------------------------------------------------------------- reading_window
 
+/// The `radius.max(0)` guard, which had eight lines of reasoning and no test.
+///
+/// `reading_window` is `pub`, and the command's `u32` clamp does not protect
+/// it. A negative radius without the guard is silently catastrophic rather
+/// than loud: `LIMIT -1` means *no limit* in SQLite, `radius as usize` wraps to
+/// a huge number so `truncate` does nothing, and `len > -1` makes both flags
+/// true — the whole document returned, with two lies about it.
+#[test]
+fn reading_window_treats_a_negative_radius_as_zero_rather_than_no_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let doc = db
+        .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
+    for i in 1..=5 {
+        db.insert_block(page, &block(i, &format!("b{i}"))).unwrap();
+    }
+
+    // ⚠️ `-2`, not `-1`, and the difference is the whole test. At `-1` the
+    // guard is a no-op: `limit = radius + 1` is `0`, and `LIMIT 0` returns no
+    // rows, which is what the guarded path returns anyway. At `-2` the limit
+    // is `-1`, and in SQLite `LIMIT -1` means *no limit* — every block before
+    // and after the anchor comes back, `truncate` is a no-op because
+    // `radius as usize` has wrapped, and both flags read `len > -2`. That is
+    // the catastrophe; `-1` cannot see it. (The first draft of this test used
+    // `-1` and the mutant survived it.)
+    let window = db.reading_window(&doc, 1, 3, 3, -2).unwrap();
+
+    let texts: Vec<&str> = window.blocks.iter().map(|b| b.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["b3"],
+        "a negative radius must degrade to zero — the anchor block alone — not \
+         to an unbounded LIMIT that returns the whole document"
+    );
+    // Both flags stay honest: there really is more on each side.
+    assert!(window.has_more_before);
+    assert!(window.has_more_after);
+}
+
 /// Three pages of three blocks, anchored in the middle, so that **both** sides
 /// of the window cross a page boundary and both `has_more` flags are true.
 ///

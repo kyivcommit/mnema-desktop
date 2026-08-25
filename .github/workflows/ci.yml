@@ -377,7 +377,9 @@ jobs:
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
       - name: Run this cycle's mutation cases
-        run: scripts/mutation-check.sh scripts/mutations/embedding.sh
+        run: |
+          scripts/mutation-check.sh scripts/mutations/source.sh
+          scripts/mutation-check.sh scripts/mutations/embedding.sh
 
   bundle:
     # One architecture per package rather than a universal binary: a universal
