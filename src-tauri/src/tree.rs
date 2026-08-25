@@ -437,12 +437,13 @@ fn decide_freshness(occupant: Option<&PathOccupant>, document_id: &str) -> Fresh
     let Some(disk) = mnema_walk::stat(&full) else {
         return Freshness::FileMissing;
     };
-    // The cheap arm's own comparison, not a new one:
+    // The cheap arm's own comparison, negated, not a new one:
     // `recorded.size_bytes == disk.size_bytes && recorded.mtime == disk.mtime`
     // is two of the five conditions `mnema-ingest` already asks
-    // (`mnema-ingest/src/lib.rs:295-296`). Both halves, because a same-length
-    // edit moves only the mtime and a touch moves only the mtime — dropping
-    // either operand loses a whole class of edit silently.
+    // (`mnema-ingest/src/lib.rs:295-296`), and the negated form is what
+    // `displaces()` uses (`:1196`). Both halves, because an edit that keeps the
+    // length moves only the mtime — dropping either operand loses a whole
+    // class of edit silently, which is why the two are separate tests.
     if disk.size_bytes != occupant.size_bytes || disk.mtime != occupant.mtime {
         return Freshness::FileChanged;
     }
