@@ -236,38 +236,6 @@ case_ "path_occupant: the root predicate is widened to <=" \
   'WHERE p.watched_root_id <= ?1 AND p.relative_path = ?2' \
   mnema-index 'path_occupant_reports_the_row_as_it_stands' --test source
 
-case_ "path_occupant: the path predicate is widened to match everything" \
-  crates/mnema-index/src/write.rs \
-  's~WHERE p\.watched_root_id = \?1 AND p\.relative_path = \?2~WHERE p.watched_root_id = ?1 AND (p.relative_path = ?2 OR 1 = 1)~' \
-  'WHERE p.watched_root_id = ?1 AND (p.relative_path = ?2 OR 1 = 1)' \
-  mnema-desktop 'source_around_reports_reindexed_when_the_cited_path_now_names_another_document' --test commands
-
-# ⚠️ Measured, so it is not re-attempted: for the root predicate, `OR 1 = 1`
-# is NOT a usable mutant here — SQLite still returns the correct row under it
-# on every fixture in this file (`path_occupant_reports_the_row_as_it_stands`'s
-# decoy root sorts BEFORE the real one, so both a correct query and an
-# `OR 1 = 1` one land on the decoy's row only if the decoy is returned first,
-# which it is not: the real root's own predicate already narrows to it). Only
-# `<= ?1` bites, which is the one cased above.
-
-# ═══════════════════════════════════════════════════════════════════════════
-# roots_of_document_at: the document term
-
-case_ "roots_of_document_at: the document term is widened to match every document" \
-  crates/mnema-index/src/write.rs \
-  's~WHERE document_id = \?1 AND relative_path = \?2~WHERE (document_id = ?1 OR 1 = 1) AND relative_path = ?2~' \
-  'WHERE (document_id = ?1 OR 1 = 1) AND relative_path = ?2' \
-  mnema-index 'roots_of_document_at_returns_only_the_roots_whose_row_still_names_the_document' --test source
-
-case_ "roots_of_document_at: the document term is widened to match every document, end to end" \
-  crates/mnema-index/src/write.rs \
-  's~WHERE document_id = \?1 AND relative_path = \?2~WHERE (document_id = ?1 OR 1 = 1) AND relative_path = ?2~' \
-  'WHERE (document_id = ?1 OR 1 = 1) AND relative_path = ?2' \
-  mnema-desktop 'source_around_resolves_the_root_by_document_when_two_roots_share_the_path' --test commands
-
-# ═══════════════════════════════════════════════════════════════════════════
-# chunk_anchor: the reading-order range, swapped
-
 case_ "chunk_anchor: MIN and MAX reading_order are swapped" \
   crates/mnema-index/src/write.rs \
   's~MIN\(b2\.reading_order\), MAX\(b2\.reading_order\)~MAX(b2.reading_order), MIN(b2.reading_order)~' \
@@ -299,23 +267,26 @@ case_ "the identity pin refuses everything" \
   mnema-desktop 'source_around_admits_a_byte_identical_passage_text' --test commands
 
 # ═══════════════════════════════════════════════════════════════════════════
-# tree.rs: cited_occupant's two-branch root resolution
+# tree.rs: cited_occupant refuses an ambiguous location
 #
-# Both cases mutate the same `if`/`else` — one loses the fallback branch
-# entirely, the other takes it unconditionally — so each needs the fixture
-# that exercises the branch the mutation removes.
+# There used to be two branches here — narrow by document, else fall back to
+# the location — and two cases for them. Owner review on PR #22 showed what
+# the narrowing costs: two roots holding the SAME document at one path answer
+# `noPath`, and then editing one copy leaves a single survivor, so the same
+# citation flips to `current` — confident exactly when the cited copy may be
+# the stale one. The two situations are shape-identical from the index, so the
+# narrowing is gone and the blunt rule stands: more than one row at the cited
+# path and we cannot say which copy was meant.
+#
+# `first()` is the mutation that matters now: it is the plausible "just pick
+# one" a later reader would write, and it is precisely the unearned
+# confidence the review removed.
 
-case_ "cited_occupant: the fallback branch is deleted" \
+case_ "cited_occupant: an ambiguous location picks a root instead of refusing" \
   src-tauri/src/tree.rs \
-  's~    let candidates = if named\.is_empty\(\) \{\n        db\.roots_holding_path\(relative_path\)\?\n    \} else \{\n        named\n    \};~    let candidates = named;~' \
-  'let candidates = named;' \
-  mnema-desktop 'source_around_reports_reindexed_when_the_cited_path_now_names_another_document' --test commands
-
-case_ "cited_occupant: only the fallback branch runs" \
-  src-tauri/src/tree.rs \
-  's~    let candidates = if named\.is_empty\(\) \{\n        db\.roots_holding_path\(relative_path\)\?\n    \} else \{\n        named\n    \};~    let candidates = db.roots_holding_path(relative_path)?;~' \
-  'let candidates = db.roots_holding_path(relative_path)?;' \
-  mnema-desktop 'source_around_resolves_the_root_by_document_when_two_roots_share_the_path' --test commands
+  's~    let \[root\] = roots\.as_slice\(\) else \{~    let Some(root) = roots.first() else {~' \
+  'let Some(root) = roots.first() else {' \
+  mnema-desktop 'source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_document_differs' --test commands
 
 # ═══════════════════════════════════════════════════════════════════════════
 # tree.rs: a missing section title ships no key, rather than an explicit null

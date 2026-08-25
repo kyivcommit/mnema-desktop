@@ -4432,19 +4432,23 @@ fn source_around_clamps_an_enormous_radius_to_a_bounded_window() {
     assert_eq!(v["hasMoreAfter"], json!(true), "{v}");
 }
 
-/// The two resolution branches must be **distinguishable**, and until this
-/// test they were not: replacing `cited_occupant`'s whole body with the
-/// fallback alone (`roots_holding_path`) left every other test in this file
-/// green. Found by review, verified by enumerating the fixtures — each of
-/// them has either one root, or two roots where both branches happen to
-/// return the same answer.
+/// Two roots share the cited path, and the answer is `noPath` **even though
+/// the document could have disambiguated it**. That is the decision, not a
+/// shortcut.
 ///
-/// Here they diverge. Two roots hold `dohov-01.md`, but with **different**
-/// bytes, so they are two documents and only one of them is the cited one.
-/// Narrowing by document picks that root and the verdict is honest; the
-/// fallback alone would see two candidates and answer `noPath`.
+/// An earlier version of this branch narrowed the candidates by document and
+/// answered `current` here. Owner review on PR #22 reproduced what that costs
+/// in the case it cannot see: two roots holding the *same* document at one
+/// path also answer `noPath`, and editing one copy leaves a single survivor —
+/// so the same citation flips to `current`, growing confident exactly when the
+/// cited copy may be the stale one. The two situations are shape-identical
+/// from the index, so the blunt rule is the honest one.
+///
+/// What it costs is this test: a verdict that *could* have been right is now
+/// withheld. The excerpt is still returned; only the freshness tag degrades to
+/// "cannot tell".
 #[test]
-fn source_around_resolves_the_root_by_document_when_two_roots_share_the_path() {
+fn source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_document_differs() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let state = app.state::<AppState>();
@@ -4513,9 +4517,10 @@ fn source_around_resolves_the_root_by_document_when_two_roots_share_the_path() {
     assert_eq!(v["kind"], json!("excerpt"), "{v}");
     assert_eq!(
         v["freshness"]["kind"],
-        json!("current"),
-        "root A holds the cited document at this path and its file is untouched — the document \
-         term is what disambiguates, and without it this is two candidates and `noPath`: {v}"
+        json!("noPath"),
+        "two rows hold the cited path, so nothing here can say which copy the citation meant — \
+         and picking the one whose document matches is exactly the confidence owner review \
+         showed is unearned: {v}"
     );
 }
 

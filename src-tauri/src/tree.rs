@@ -382,19 +382,23 @@ enum Composed {
 /// it.
 fn cited_occupant(
     db: &Db,
-    document_id: &str,
     cited_relative_path: Option<&str>,
 ) -> Result<Option<PathOccupant>, mnema_index::Error> {
     let Some(relative_path) = cited_relative_path else {
         return Ok(None);
     };
-    let named = db.roots_of_document_at(document_id, relative_path)?;
-    let candidates = if named.is_empty() {
-        db.roots_holding_path(relative_path)?
-    } else {
-        named
-    };
-    let [root] = candidates.as_slice() else {
+    // 🔴 Ambiguity is measured over the **location**, and narrowing by document
+    // is deliberately gone. It used to pick the row whose document matched, and
+    // owner review on PR #22 reproduced what that costs: two roots holding the
+    // same document at one path answer `noPath`, and then editing *one* copy
+    // leaves a single survivor — so the same citation starts answering
+    // `current`, growing confident at the moment it should grow careful. The
+    // two states that narrowing would separate are shape-identical from the
+    // index (`all = 2, named = 1` in both), so the honest rule is the blunt
+    // one: more than one row at the cited path, and we cannot say which copy
+    // the citation meant.
+    let roots = db.roots_holding_path(relative_path)?;
+    let [root] = roots.as_slice() else {
         return Ok(None);
     };
     db.path_occupant(*root, relative_path)
@@ -446,7 +450,7 @@ fn build_source_around(
         anchor.last_reading_order,
         radius,
     )?;
-    let occupant = cited_occupant(db, &anchor.document_id, cited_relative_path)?;
+    let occupant = cited_occupant(db, cited_relative_path)?;
 
     Ok(Composed::Pending {
         excerpt: ExcerptFields {

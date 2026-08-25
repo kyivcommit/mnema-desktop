@@ -337,6 +337,27 @@ impl Db {
     /// compare against that pair with a SQLite row-value comparison and cross
     /// page boundaries by construction.
     ///
+    /// 🔴 **Whitespace-only blocks are excluded, and that is not tidiness.**
+    ///
+    /// ⚠️ The trim set is given explicitly — `trim(text, ' ' || char(9, 10,
+    /// 13, 11, 12))` — because SQLite's **one-argument** `trim` removes spaces
+    /// and nothing else, so a tab-only block sailed straight through the first
+    /// version of this fix and the test caught it. That set is ASCII
+    /// whitespace, which is what the line-based readers can emit; `str::trim`,
+    /// which `chunk_blocks` uses, spans all of Unicode, so a block of
+    /// non-breaking spaces would still be counted here. Said plainly because
+    /// it is an approximation of the chunker's rule, not a match.
+    /// `chunk_blocks` skips a block whose text trims to nothing
+    /// (`mnema-chunk/src/lib.rs`), so such a block can never be a passage — but
+    /// readers do store them: the text reader treats a line of spaces as
+    /// content, not a separator, and one sitting between two blank lines
+    /// becomes its own row. Counting them here made `radius` mean *stored
+    /// rows* instead of *visible source*: with `[real, spaces, passage, tab,
+    /// real]` and `radius = 1` the card got the two blank blocks and neither
+    /// real neighbour. Found by owner review on PR #22. The predicate is the
+    /// chunker's own, so the window shows exactly the blocks a passage could
+    /// have come from.
+    ///
     /// Each side is `LIMIT radius + 1`, trimmed to `radius`, with the flag set
     /// from whether the extra row arrived — not a separate `COUNT(*)`, so the
     /// two halves of one question cannot come to disagree.
@@ -359,7 +380,7 @@ impl Db {
             "SELECT b.id, b.type, b.text, p.page_no, b.reading_order
                FROM block b
                JOIN page p ON p.id = b.page_id
-              WHERE b.document_id = ?1 AND p.page_no = ?2
+              WHERE b.document_id = ?1 AND trim(b.text, ' ' || char(9, 10, 13, 11, 12)) <> '' AND p.page_no = ?2
                 AND b.reading_order BETWEEN ?3 AND ?4
               ORDER BY b.reading_order",
         )?;
@@ -380,7 +401,7 @@ impl Db {
             "SELECT b.id, b.type, b.text, p.page_no, b.reading_order
                FROM block b
                JOIN page p ON p.id = b.page_id
-              WHERE b.document_id = ?1 AND (p.page_no, b.reading_order) < (?2, ?3)
+              WHERE b.document_id = ?1 AND trim(b.text, ' ' || char(9, 10, 13, 11, 12)) <> '' AND (p.page_no, b.reading_order) < (?2, ?3)
               ORDER BY p.page_no DESC, b.reading_order DESC
               LIMIT ?4",
         )?;
@@ -400,7 +421,7 @@ impl Db {
             "SELECT b.id, b.type, b.text, p.page_no, b.reading_order
                FROM block b
                JOIN page p ON p.id = b.page_id
-              WHERE b.document_id = ?1 AND (p.page_no, b.reading_order) > (?2, ?3)
+              WHERE b.document_id = ?1 AND trim(b.text, ' ' || char(9, 10, 13, 11, 12)) <> '' AND (p.page_no, b.reading_order) > (?2, ?3)
               ORDER BY p.page_no ASC, b.reading_order ASC
               LIMIT ?4",
         )?;
@@ -475,44 +496,6 @@ impl Db {
             "SELECT watched_root_id FROM path WHERE relative_path = ?1 ORDER BY watched_root_id",
         )?;
         let rows = stmt.query_map(params![relative_path], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    /// Which roots hold **this document** at **this exact relative path** —
-    /// the first branch of the root resolution, and the one answerable from
-    /// the document's own side.
-    ///
-    /// Unlike [`Db::roots_holding_path`] this can use `ix_path_document`
-    /// (`schema.sql:88`), which is why it is the ordinary path and that one is
-    /// the fallback. The two are not interchangeable in meaning either: this
-    /// asks "does the cited location still name the cited document", the
-    /// question `Freshness::Reindexed` is read off, and an empty answer is the
-    /// signal to fall back rather than a failure.
-    ///
-    /// ⚠️ An empty answer has **two** causes, not the one an earlier draft of
-    /// this comment named: the cited copy was edited and repointed, **or** the
-    /// citation's path was never this document's and belongs to some other
-    /// root's file of the same name. The caller cannot distinguish them, which
-    /// is why `Freshness::Reindexed` is worded as a statement about the path
-    /// rather than about a re-index having happened.
-    ///
-    /// `Vec` for the same reason `roots_holding_path` returns one: the same
-    /// relative path can exist under two roots, and with content addressing
-    /// two copies of one file are one document, so more than one row here is
-    /// legal. More than one candidate in **either** branch is `NoPath`, never
-    /// a guess — a guessed root is a confident verdict about the wrong file.
-    pub fn roots_of_document_at(
-        &self,
-        document_id: &str,
-        relative_path: &str,
-    ) -> Result<Vec<i64>, Error> {
-        let mut stmt = self.conn().prepare(
-            "SELECT watched_root_id
-               FROM path
-              WHERE document_id = ?1 AND relative_path = ?2
-              ORDER BY watched_root_id",
-        )?;
-        let rows = stmt.query_map(params![document_id, relative_path], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
