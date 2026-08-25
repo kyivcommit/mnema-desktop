@@ -452,15 +452,46 @@ impl Db {
     /// `(watched_root_id, relative_path)` and `ix_path_document` on
     /// `document_id`; neither leads with `relative_path`, so a query keyed on
     /// it alone can use neither. Accepted for v1 — performance is not a
-    /// requirement here — but **do not read this as "it only runs on the
-    /// fallback branch"**: that justification was written before there was a
-    /// way to resolve a root from the document side, and until one exists the
-    /// caller reaches this on the ordinary path too.
+    /// requirement here — and since [`Db::roots_of_document_at`] exists this
+    /// really is the fallback: the ordinary call resolves its root from the
+    /// document side and never reaches here. It is entered only when no row at
+    /// that path names the cited document any more, which is the repoint case.
     pub fn roots_holding_path(&self, relative_path: &str) -> Result<Vec<i64>, Error> {
         let mut stmt = self.conn().prepare(
             "SELECT watched_root_id FROM path WHERE relative_path = ?1 ORDER BY watched_root_id",
         )?;
         let rows = stmt.query_map(params![relative_path], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Which roots hold **this document** at **this exact relative path** —
+    /// the first branch of the root resolution, and the one answerable from
+    /// the document's own side.
+    ///
+    /// Unlike [`Db::roots_holding_path`] this can use `ix_path_document`
+    /// (`schema.sql:88`), which is why it is the ordinary path and that one is
+    /// the fallback. The two are not interchangeable in meaning either: this
+    /// asks "does the cited location still name the cited document", the
+    /// question `Freshness::Reindexed` is read off, and an empty answer is the
+    /// signal to fall back rather than a failure.
+    ///
+    /// `Vec` for the same reason `roots_holding_path` returns one: the same
+    /// relative path can exist under two roots, and with content addressing
+    /// two copies of one file are one document, so more than one row here is
+    /// legal. More than one candidate in **either** branch is `NoPath`, never
+    /// a guess — a guessed root is a confident verdict about the wrong file.
+    pub fn roots_of_document_at(
+        &self,
+        document_id: &str,
+        relative_path: &str,
+    ) -> Result<Vec<i64>, Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT watched_root_id
+               FROM path
+              WHERE document_id = ?1 AND relative_path = ?2
+              ORDER BY watched_root_id",
+        )?;
+        let rows = stmt.query_map(params![document_id, relative_path], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

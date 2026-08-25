@@ -396,3 +396,76 @@ fn reading_window_reports_more_before_when_exactly_one_block_is_out_of_range() {
     let texts: Vec<&str> = window.blocks.iter().map(|b| b.text.as_str()).collect();
     assert_eq!(texts, vec!["b2", "b3", "b4", "b5"]);
 }
+
+/// Step 0 of Task 5.3: the **first** branch of the root resolution, the one
+/// answerable from the document's own side.
+///
+/// Without it the caller has to reach `roots_holding_path` — a full scan of
+/// `path`, which can use neither index — on every ordinary call, turning the
+/// fallback into the normal path and falsifying that method's own doc comment.
+///
+/// Three roots, and each is load-bearing:
+///
+/// - `root_a` holds the document at the cited path — the row that must come
+///   back.
+/// - `root_b` held it too and has since been repointed at a second document,
+///   which is what a walk of an edited copy does (`repoint`,
+///   `mnema-ingest/src/lib.rs:657`). It must **not** come back: the method
+///   answers "which roots still name this document here", not "which roots
+///   ever did".
+/// - `root_c` holds the same document at a *different* relative path. It must
+///   not come back either, and without it a query that dropped the
+///   `relative_path` predicate would be indistinguishable from a correct one.
+#[test]
+fn roots_of_document_at_returns_only_the_roots_whose_row_still_names_the_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+
+    let root_a = db.insert_watched_root("/tmp/a").unwrap();
+    let root_b = db.insert_watched_root("/tmp/b").unwrap();
+    let root_c = db.insert_watched_root("/tmp/c").unwrap();
+    let doc = db
+        .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    let edited = db
+        .insert_document(&"b".repeat(64), "text/plain", 2, SourceKind::Document)
+        .unwrap();
+
+    let disk = OnDisk {
+        size_bytes: 1,
+        mtime: 1,
+    };
+    db.insert_path(root_a, "shared.txt", &doc, disk, "text", 1)
+        .unwrap();
+    db.insert_path(root_b, "shared.txt", &doc, disk, "text", 1)
+        .unwrap();
+    db.insert_path(root_c, "elsewhere.txt", &doc, disk, "text", 1)
+        .unwrap();
+
+    // Before the repoint both roots hold it, so the `Vec` is not decoration:
+    // the ambiguity the caller must turn into `NoPath` is real.
+    assert_eq!(
+        db.roots_of_document_at(&doc, "shared.txt").unwrap(),
+        vec![root_a, root_b]
+    );
+
+    // A walk re-indexes root_b's copy: that row names the new document now.
+    db.delete_path(root_b, "shared.txt").unwrap();
+    db.insert_path(root_b, "shared.txt", &edited, disk, "text", 1)
+        .unwrap();
+
+    assert_eq!(
+        db.roots_of_document_at(&doc, "shared.txt").unwrap(),
+        vec![root_a],
+        "root_b's row names the edited document now, and root_c holds this \
+         document at a different path"
+    );
+
+    // Both directions: a pair no row carries answers with an empty list, not
+    // with whatever the last query found.
+    assert!(
+        db.roots_of_document_at(&doc, "never-indexed.txt")
+            .unwrap()
+            .is_empty()
+    );
+}
