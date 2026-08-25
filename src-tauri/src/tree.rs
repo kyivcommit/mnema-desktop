@@ -675,6 +675,41 @@ mod tests {
             assert_eq!(f["kind"], tag, "{variant:?} crossed as {f}");
         }
         assert_eq!(v["freshness"]["kind"], "fileChanged");
+
+        // A missing section title crosses as `null`, **present**, not as an
+        // absent key. The distinction is this crate's standing one — `Citation`
+        // makes the argument for `relative_path`, and PR 4's `list_tree` test
+        // pins it the same way: "we do not know" and "the value is empty" must
+        // not render as the same thing. Measured, not assumed: marking the
+        // field `skip_serializing_if = "Option::is_none"` passed every other
+        // assertion in this file.
+        let SourceAround::Excerpt {
+            blocks,
+            spans,
+            document_id,
+            has_more_before,
+            has_more_after,
+            freshness,
+            ..
+        } = sample_excerpt()
+        else {
+            unreachable!("sample_excerpt is an Excerpt")
+        };
+        let untitled = serde_json::to_value(SourceAround::Excerpt {
+            blocks,
+            spans,
+            document_id,
+            section_title: None,
+            has_more_before,
+            has_more_after,
+            freshness,
+        })
+        .unwrap();
+        assert!(
+            untitled.get("sectionTitle").is_some(),
+            "a page with no section title must still carry the key: {untitled}"
+        );
+        assert!(untitled["sectionTitle"].is_null(), "{untitled}");
     }
 
     /// The `WireSegment` conversion is load-bearing, so this proves it rather
