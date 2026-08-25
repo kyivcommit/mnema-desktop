@@ -3046,6 +3046,11 @@ fn source_around_admits_a_byte_identical_passage_text() {
         json!(STORED),
         "the excerpt must carry the passage's own paragraph: {v}"
     );
+    // The false direction of both flags, which no other test through the IPC
+    // asserts: this document is one block, so there is nothing either side. A
+    // flag hardcoded `true` passes the happy path above and only this.
+    assert_eq!(v["hasMoreBefore"], json!(false), "{v}");
+    assert_eq!(v["hasMoreAfter"], json!(false), "{v}");
 }
 
 /// The other cause, and without it `GoneReason::NoSuchChunk` is a variant
@@ -4113,4 +4118,79 @@ fn source_around_clamps_an_enormous_radius_to_a_bounded_window() {
     // document.
     assert_eq!(v["hasMoreBefore"], json!(true), "{v}");
     assert_eq!(v["hasMoreAfter"], json!(true), "{v}");
+}
+
+/// Two watched roots hold the same file at the same relative path, and a
+/// citation carries no root (`bridge.rs:433`) — so there is no honest way to
+/// say which of the two the verdict would be about.
+///
+/// `NoPath`, never a guess. A guessed root produces a **confident verdict
+/// about the wrong file**, which is worse than admitting the lookup could not
+/// be resolved: the card would draw "актуально" over a passage whose cited
+/// copy had been edited an hour ago.
+///
+/// This fixture is here because the `mnema-index` suite learned the lesson the
+/// expensive way — three mutants survived Task 5.1 for no reason other than
+/// that every fixture held exactly one document and one root. Nothing else in
+/// this file builds two roots holding one path, so without it the whole
+/// ambiguity branch is unfalsifiable: `candidates.first()` would pass every
+/// other test here.
+#[test]
+fn source_around_reports_no_path_when_two_roots_hold_the_cited_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "0".repeat(64);
+    let (chunk, passage) = state
+        .with_index(|db| {
+            let seeded = write_paragraph_document(
+                db,
+                &doc,
+                &PARAGRAPHS,
+                2,
+                0,
+                PARAGRAPHS[2].chars().count() as u32,
+            );
+            let original = PARAGRAPHS.join("\n\n");
+            for name in ["corpus-a", "corpus-b"] {
+                let corpus = dir.path().join(name);
+                std::fs::create_dir_all(&corpus).unwrap();
+                let root = db.insert_watched_root(corpus.to_str().unwrap())?;
+                // Same bytes under both roots: with content addressing that is
+                // one document, so both `path` rows legally name it and the
+                // first resolution branch returns two candidates.
+                record_real_file(db, &corpus, root, "dohov-01.md", &doc, &original);
+            }
+            Ok::<_, mnema_index::Error>(seeded)
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedRelativePath": "dohov-01.md",
+            "radius": 1,
+        }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(
+        v["freshness"]["kind"],
+        json!("noPath"),
+        "two roots hold this path and the citation names neither, so no verdict about the file \
+         is honest — picking one is a confident answer about a file the user may not have \
+         cited: {v}"
+    );
+    assert_eq!(
+        v["blocks"][1]["text"],
+        json!(PARAGRAPHS[2]),
+        "an unresolvable location is not a refusal — the indexed text still comes back: {v}"
+    );
 }
