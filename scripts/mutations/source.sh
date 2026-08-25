@@ -228,7 +228,10 @@ case_ "reading_window: p.page_no swapped for p.id throughout, end to end" \
   mnema-desktop 'source_around_returns_the_paragraphs_around_a_cited_passage' --test commands
 
 # ═══════════════════════════════════════════════════════════════════════════
-# path_occupant: the root and path predicates
+# path_occupant: the root predicate
+#
+# The path predicate's case used to sit here too; it now has its own section
+# further down, because it was lost and restored separately.
 
 case_ "path_occupant: the root predicate is widened to <=" \
   crates/mnema-index/src/write.rs \
@@ -271,14 +274,23 @@ case_ "the identity pin refuses everything" \
 #
 # The readers store a line of spaces as a block on purpose (mnema-extract's
 # text reader treats it as content, not a separator), while chunk_blocks skips
-# exactly those — so such a block can never be a passage, and counting it made
-# `radius` mean stored rows instead of visible source. Found by owner review on
-# PR #22.
+# those **and more** — its rule is Unicode `str::trim`
+# (`crates/mnema-chunk/src/lib.rs:121`), and this SQL set is a strict subset of
+# it (see the note on `Db::reading_window`). Counting such blocks made `radius`
+# mean stored rows instead of visible source. Found by owner review on PR #22.
 #
 # ⚠️ One case per occurrence, and the mutation is the SINGLE-argument `trim`,
 # because that is the mistake that was actually made here: SQLite's `trim(X)`
 # removes spaces and nothing else, so the first version of this fix let a
 # tab-only block straight through. It is the likeliest way to break it again.
+#
+# ⚠️ **No case guards the *widening* direction.** `Db::reading_window`'s doc
+# argues that the SQL set being a subset of the chunker's makes the predicate
+# safe (nothing it excludes could have been a passage, so the anchor can never
+# be emptied). Measured by review: adding a NON-whitespace character to the
+# trim set leaves the whole suite green, because no fixture has a block that
+# would then become empty. The subset property is argued, not measured — write
+# a case for it only alongside a fixture that could go red, or it is decoration.
 #
 # The anchor case is the one that needed a fixture built for it: every test but
 # one anchors on a single block, where `BETWEEN n AND n` cannot contain a
@@ -306,10 +318,14 @@ case_ "reading_window: the after query counts blank blocks" \
 # ═══════════════════════════════════════════════════════════════════════════
 # path_occupant: the path predicate
 #
-# ⚠️ Measured, so it is not re-attempted: for the ROOT predicate below,
-# `OR 1 = 1` is not a usable mutant — SQLite still returns the right row under
-# it, so the case would measure nothing. Only `<= ?1` bites. For the PATH
-# predicate here, `OR 1 = 1` does bite.
+# ⚠️ Measured, so it is not re-attempted: for the ROOT predicate **above**,
+# `OR 1 = 1` is NOT a usable mutant — SQLite still returns the correct row
+# under it on every fixture in this file
+# (`path_occupant_reports_the_row_as_it_stands`'s decoy root sorts BEFORE the
+# real one, so both a correct query and an `OR 1 = 1` one land on the decoy's
+# row only if the decoy is returned first, which it is not: the real root's own
+# predicate already narrows to it). Only `<= ?1` bites there. For the PATH
+# predicate in this section, `OR 1 = 1` does bite.
 #
 # 🔴 This case was deleted by mistake while removing roots_of_document_at's
 # cases — it mutates path_occupant and has nothing to do with that method. It

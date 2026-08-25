@@ -293,9 +293,11 @@ fn insert_decoy_document(db: &Db) {
 
 /// Whitespace-only blocks do not count against the radius.
 ///
-/// Owner review on PR #22 reproduced this: with `[real, spaces, passage, tab,
-/// real]` and `radius = 1` the window returned the two blank blocks and hid
-/// **both** real neighbours. The readers store them on purpose — the text
+/// Owner review on PR #22 reproduced this with `[real, spaces, passage, tab,
+/// real]` and `radius = 1`: the window returned the two blank blocks and hid
+/// **both** real neighbours. ⚠️ That is the owner's reproduction, not the
+/// fixture below — this one uses ` \t ` on **both** sides, and the comment on
+/// it says why a spaces-only blank would measure nothing here. The readers store them on purpose — the text
 /// reader treats a line of spaces as content, so one between two blank lines
 /// becomes its own row — while `chunk_blocks` skips them, so no passage can
 /// ever come from one. Counting them made `radius` mean stored rows instead of

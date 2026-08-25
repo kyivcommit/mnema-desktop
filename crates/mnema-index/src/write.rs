@@ -354,7 +354,9 @@ impl Db {
     /// becomes its own row. Counting them here made `radius` mean *stored
     /// rows* instead of *visible source*: with `[real, spaces, passage, tab,
     /// real]` and `radius = 1` the card got the two blank blocks and neither
-    /// real neighbour. Found by owner review on PR #22.
+    /// real neighbour. (That list is the owner's reproduction; the fixtures
+    /// that pin this use a mixed ` \t ` blank, for the reason given in
+    /// `crates/mnema-index/tests/source.rs`.) Found by owner review on PR #22.
     ///
     /// The predicate is a **subset** of the chunker's rule, not the same rule
     /// (see the trim-set note above), and the direction of that inequality is
@@ -495,8 +497,9 @@ impl Db {
     /// The earlier doc comment here called this acceptable *because* it was the
     /// fallback branch, reached only after a document-side lookup missed. That
     /// branch is gone (see `cited_occupant`), so the condition the acceptance
-    /// rested on is gone with it: this now runs for every `source_around` that
-    /// carries a cited path. **Still accepted for v1** — a personal corpus, one
+    /// rested on is gone with it: this now runs for every `source_around`
+    /// that gets **past the identity pin** with a cited path — a refused citation
+    /// returns before reaching it. **Still accepted for v1** — a personal corpus, one
     /// scan per click on a citation — but accepted knowingly, as a decision
     /// rather than as an inherited sentence. If it ever matters the fix is an
     /// index on `relative_path`, which is a migration.
