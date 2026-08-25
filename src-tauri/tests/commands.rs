@@ -4630,6 +4630,12 @@ fn a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragra
 
     let mut excerpts = 0usize;
     let mut refusals = 0usize;
+    // Split, because the two refusals are two different racing states and one
+    // number cannot say which was reached: `idReused` means the reader landed
+    // on a *rebuilt* chunk, `noSuchChunk` that it landed in the gap between
+    // `clear_document_content` and the rebuild. Lumping them is the
+    // [two-truths-one-message] shape at the level of the record itself.
+    let mut reused = 0usize;
     for _ in 0..ROUNDS {
         let v = call(
             &webview,
@@ -4639,7 +4645,12 @@ fn a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragra
         .expect("source_around was rejected");
         match v["kind"].as_str().expect("a kind tag") {
             "excerpt" => excerpts += 1,
-            "gone" => refusals += 1,
+            "gone" => {
+                refusals += 1;
+                if v["reason"]["kind"] == json!("idReused") {
+                    reused += 1;
+                }
+            }
             other => panic!("source_around answered with an unknown variant {other:?}: {v}"),
         }
         assert_excerpt_holds_its_passage(&v, ORIGINAL);
@@ -4651,7 +4662,8 @@ fn a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragra
     // reached a racing state at all; one-sided means the guard is decoration
     // this run, and that goes in the ledger rather than passing as a green.
     eprintln!(
-        "source_around race: {ROUNDS} calls -> excerpt={excerpts} gone={refusals}; \
-         writer rebuilt {rebuilds} times"
+        "source_around race: {ROUNDS} calls -> excerpt={excerpts} gone={refusals} \
+         (idReused={reused}, noSuchChunk={}); writer rebuilt {rebuilds} times",
+        refusals - reused
     );
 }
