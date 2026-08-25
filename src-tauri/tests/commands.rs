@@ -2938,6 +2938,59 @@ fn source_around_refuses_a_chunk_id_a_rebuild_has_handed_to_other_text() {
     );
 }
 
+/// The pin is **exact** equality, and this is the test that says so.
+///
+/// The plan forbids `contains`, trimming and normalising alike, but only the
+/// empty-`passageText` case is red against `contains` — a pin rewritten as
+/// `a.text.trim() != passage_text.trim()` passed every other test in this
+/// file, which the controller's mutation run caught. A rebuild that adds or
+/// drops surrounding whitespace produces exactly that state: the chunk at this
+/// id is a *different* chunk, and a trimming comparison calls it the same one
+/// and then hands back the neighbourhood of the wrong passage.
+///
+/// ⚠️ **The other direction cannot be asserted yet, and that is booked, not
+/// forgotten.** "Byte-identical text is NOT refused" is what stops this being
+/// satisfied by a pin that refuses everything — but under Task 5.2 nothing can
+/// come back un-refused: the excerpt arm is `todo!()`, and a panic inside a
+/// command reaches `call` as a `RecvError` panic rather than a value, so the
+/// assertion cannot even be written. **Task 5.3 owes it:** a byte-identical
+/// `passageText` must return an `Excerpt`, and that is the half that closes
+/// this pair.
+#[test]
+fn source_around_refuses_a_passage_that_differs_only_in_surrounding_whitespace() {
+    const STORED: &str = "Ставка залишається незмінною протягом усього строку.";
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "9".repeat(64);
+    let chunk = state
+        .with_index(|db| Ok::<_, mnema_index::Error>(write_one_document(db, &doc, STORED)))
+        .unwrap();
+
+    let padded = format!("  {STORED}\n");
+    let v = call(
+        &webview,
+        "source_around",
+        json!({ "chunkId": chunk, "passageText": padded, "radius": 1 }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(
+        v["kind"],
+        json!("gone"),
+        "the stored text and the echoed passage differ, and only trimming makes them equal — \
+         the pin must refuse rather than answer about a chunk it was not asked about: {v}"
+    );
+    assert!(
+        v.get("blocks").is_none(),
+        "a refusal must carry no text at all: {v}"
+    );
+}
+
 /// The other cause, and without it `GoneReason::NoSuchChunk` is a variant
 /// nothing produces. `clear_document_content` cascades the document's pages,
 /// blocks and chunks away (`write.rs:676-685`) and a rebuild has not landed
