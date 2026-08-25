@@ -3555,12 +3555,16 @@ fn source_around_covers_every_block_a_multi_block_chunk_spans() {
             write_decoy_document(db);
             db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
             let page = db.insert_page(&doc, 1, "native:txt", Some("Розділ перший"))?;
-            // PARAGRAPHS, but with the third row replaced by a line of
-            // spaces — what the text reader stores for exactly that input.
+            // PARAGRAPHS, but with the third row replaced by a blank line —
+            // what the text reader stores for exactly that input.
+            //
+            // ⚠️ A tab among the spaces, deliberately: SQLite's one-argument
+            // `trim` strips spaces only, so a spaces-only row is excluded even
+            // by the broken predicate and this fixture would measure nothing.
             let rows: Vec<&str> = vec![
                 PARAGRAPHS[0],
                 PARAGRAPHS[1],
-                "   ",
+                " \t ",
                 PARAGRAPHS[3],
                 PARAGRAPHS[4],
             ];

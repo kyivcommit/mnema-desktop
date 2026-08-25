@@ -308,7 +308,12 @@ fn reading_window_skips_blocks_a_chunk_could_never_have_come_from() {
         .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
         .unwrap();
     let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
-    for (i, text) in ["real before", "   ", "passage", "\t", "real after"]
+    // ⚠️ Each blank carries a **tab**, not spaces alone, and that is the whole
+    // discriminating power of this fixture: SQLite's one-argument `trim`
+    // removes spaces and nothing else, so a spaces-only blank is excluded even
+    // by the broken predicate and proves nothing. A blank the broken predicate
+    // would keep is the only kind that measures anything here.
+    for (i, text) in ["real before", " \t ", "passage", " \t ", "real after"]
         .iter()
         .enumerate()
     {
