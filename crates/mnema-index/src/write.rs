@@ -140,6 +140,56 @@ pub struct RecentDocRow {
     pub indexed_at: i64,
 }
 
+/// The chunk's own identity and where it sits in the document's reading
+/// order — PR 5's identity pin plus the anchor `source_around` windows
+/// around. See `docs/private/superpowers/plans/2026-08-25-desktop-pr5-source-around.md`.
+pub struct ChunkAnchor {
+    pub document_id: String,
+    pub text: String,
+    pub spans: Vec<Segment>,
+    pub section_title: Option<String>,
+    pub page_no: i64,
+    /// min / max `reading_order` over the chunk's span blocks — all on one
+    /// page (`schema.sql:211-212`).
+    pub first_reading_order: i64,
+    pub last_reading_order: i64,
+}
+
+/// One block as `reading_window` returns it: the paragraph text plus enough
+/// to place it (`kind` verbatim from `block.type`, so a caller can drop page
+/// headers/footers without the backend baking that display choice in).
+pub struct SourceBlockRow {
+    pub block_id: i64,
+    pub kind: String,
+    pub text: String,
+    pub page_no: i64,
+    pub reading_order: i64,
+}
+
+/// The blocks around a reading-order range, plus whether more exist on each
+/// side — `before + anchor + after`, in document reading order.
+pub struct ReadingWindow {
+    pub blocks: Vec<SourceBlockRow>,
+    pub has_more_before: bool,
+    pub has_more_after: bool,
+}
+
+/// The `path` row at a cited location, exactly as it stands — the input to
+/// the freshness comparison. Keyed on the **location**, not on the document:
+/// see the plan's "Freshness is keyed on the cited path" section for the two
+/// defects keying on `document_id` produces.
+pub struct PathOccupant {
+    pub watched_root_id: i64,
+    pub root_absolute_path: String,
+    pub relative_path: String,
+    pub size_bytes: i64,
+    pub mtime: i64,
+    /// Which document this row names **now**. Equal to the anchor's
+    /// `document_id` until a walk repoints it; different afterwards, which is
+    /// what `Freshness::Reindexed` is read off.
+    pub current_document_id: String,
+}
+
 impl Db {
     /// Every watched folder, in the order the user added them.
     pub fn list_watched_roots(&self) -> Result<Vec<WatchedRootRow>, Error> {
@@ -224,6 +274,74 @@ impl Db {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// The chunk's own identity and where it sits in the document's reading
+    /// order, or `None` if no chunk carries this id.
+    ///
+    /// `first_reading_order`/`last_reading_order` are the min/max
+    /// `reading_order` over every block the chunk's `char_span` names, joined
+    /// straight through `json_each` rather than re-derived from `spans` in
+    /// Rust — the schema's own `chunk_span_blocks_bi` trigger already
+    /// guarantees every one of those blocks sits on the anchor block's page
+    /// (`schema.sql:211-212`), so `p.page_no` from the anchor's own page is
+    /// the page for all of them.
+    pub fn chunk_anchor(&self, chunk_id: i64) -> Result<Option<ChunkAnchor>, Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT c.document_id, c.text, c.char_span, p.section_title, p.page_no,
+                    MIN(b2.reading_order), MAX(b2.reading_order)
+               FROM chunk c
+               JOIN block b ON b.id = c.block_id
+               JOIN page p ON p.id = b.page_id
+               JOIN json_each(c.char_span) je
+               JOIN block b2 ON b2.id = json_extract(je.value, '$.block_id')
+              WHERE c.id = ?1
+              GROUP BY c.id",
+        )?;
+        let mut rows = stmt.query(params![chunk_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let span_json: String = row.get(2)?;
+        Ok(Some(ChunkAnchor {
+            document_id: row.get(0)?,
+            text: row.get(1)?,
+            spans: serde_json::from_str(&span_json).map_err(Error::Json)?,
+            section_title: row.get(3)?,
+            page_no: row.get(4)?,
+            first_reading_order: row.get(5)?,
+            last_reading_order: row.get(6)?,
+        }))
+    }
+
+    /// The blocks around a reading-order range, plus whether more exist on
+    /// each side.
+    pub fn reading_window(
+        &self,
+        document_id: &str,
+        page_no: i64,
+        first_reading_order: i64,
+        last_reading_order: i64,
+        radius: i64,
+    ) -> Result<ReadingWindow, Error> {
+        let _ = (document_id, page_no, first_reading_order, last_reading_order, radius);
+        unimplemented!()
+    }
+
+    /// The row at one exact location, or `None` when no row is there at all.
+    pub fn path_occupant(
+        &self,
+        watched_root_id: i64,
+        relative_path: &str,
+    ) -> Result<Option<PathOccupant>, Error> {
+        let _ = (watched_root_id, relative_path);
+        unimplemented!()
+    }
+
+    /// Which root a document's cited copy sits under.
+    pub fn roots_holding_path(&self, relative_path: &str) -> Result<Vec<i64>, Error> {
+        let _ = relative_path;
+        unimplemented!()
     }
 
     pub fn insert_watched_root(&self, absolute_path: &str) -> Result<i64, Error> {
