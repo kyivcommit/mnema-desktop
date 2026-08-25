@@ -239,6 +239,21 @@ fn roots_holding_path_returns_every_root() {
 /// radius of 2 must cross the page boundary and return exactly page 1's last
 /// two blocks before it — not merely "at least one", which a window
 /// returning a single block would also satisfy.
+/// Three pages of three blocks, anchored in the middle, so that **both** sides
+/// of the window cross a page boundary and both `has_more` flags are true.
+///
+/// The shape is load-bearing, and a smaller one hid two live mutants. With an
+/// anchor whose before-side and after-side each stay inside one page,
+/// `ORDER BY p.page_no DESC, b.reading_order DESC` and the bare
+/// `ORDER BY b.reading_order DESC` return the same rows — `reading_order` is
+/// unique only per page (`ix_block_page`, `schema.sql:140`), so it is not a
+/// document ordinal, and the difference only shows when the candidates span
+/// two pages and the values collide across them. Here `p1b3` and `p2b3` both
+/// carry `reading_order = 3`, which is what makes the page term load-bearing.
+///
+/// Both flags are asserted **true** here; the two tests below assert them
+/// false. Neither direction alone is coverage: a flag hardcoded either way
+/// passes one of the pair.
 #[test]
 fn reading_window_returns_radius_blocks_each_side_in_document_reading_order() {
     let dir = tempfile::tempdir().unwrap();
@@ -247,29 +262,30 @@ fn reading_window_returns_radius_blocks_each_side_in_document_reading_order() {
         .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
         .unwrap();
 
-    let page1 = db.insert_page(&doc, 1, "native:txt", None).unwrap();
-    let page2 = db.insert_page(&doc, 2, "native:txt", None).unwrap();
-
-    let mut p1_blocks = Vec::new();
-    for i in 1..=4 {
-        p1_blocks.push(
-            db.insert_block(page1, &block(i, &format!("p1b{i}")))
-                .unwrap(),
-        );
-    }
-    let mut p2_blocks = Vec::new();
-    for i in 1..=4 {
-        p2_blocks.push(
-            db.insert_block(page2, &block(i, &format!("p2b{i}")))
-                .unwrap(),
-        );
+    for page_no in 1..=3 {
+        let page = db.insert_page(&doc, page_no, "native:txt", None).unwrap();
+        for i in 1..=3 {
+            db.insert_block(page, &block(i, &format!("p{page_no}b{i}")))
+                .unwrap();
+        }
     }
 
-    let window = db.reading_window(&doc, 2, 1, 1, 2).unwrap();
+    // Anchor: page 2, reading_order 2. Radius 3 leaves exactly one block over
+    // on each side (`p1b1` before, `p3b3` after), so both flags must be true.
+    let window = db.reading_window(&doc, 2, 2, 2, 3).unwrap();
 
     let texts: Vec<&str> = window.blocks.iter().map(|b| b.text.as_str()).collect();
-    assert_eq!(texts, vec!["p1b3", "p1b4", "p2b1", "p2b2", "p2b3"]);
-    let _ = (p1_blocks, p2_blocks);
+    assert_eq!(
+        texts,
+        vec!["p1b2", "p1b3", "p2b1", "p2b2", "p2b3", "p3b1", "p3b2"]
+    );
+    assert!(window.has_more_before, "p1b1 is out of range before");
+    assert!(window.has_more_after, "p3b3 is out of range after");
+
+    // The page term is what puts p1b3 before p2b1 despite the larger
+    // reading_order; pinned so dropping it from either ORDER BY goes red.
+    let pages: Vec<i64> = window.blocks.iter().map(|b| b.page_no).collect();
+    assert_eq!(pages, vec![1, 1, 2, 2, 2, 3, 3]);
 }
 
 /// Both directions of the flag: an anchor at the very start of the document,
