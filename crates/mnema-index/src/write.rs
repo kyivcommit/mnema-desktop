@@ -140,6 +140,56 @@ pub struct RecentDocRow {
     pub indexed_at: i64,
 }
 
+/// The chunk's own identity and where it sits in the document's reading
+/// order — PR 5's identity pin plus the anchor `source_around` windows
+/// around (§12).
+pub struct ChunkAnchor {
+    pub document_id: String,
+    pub text: String,
+    pub spans: Vec<Segment>,
+    pub section_title: Option<String>,
+    pub page_no: i64,
+    /// min / max `reading_order` over the chunk's span blocks — all on one
+    /// page (`schema.sql:211-212`).
+    pub first_reading_order: i64,
+    pub last_reading_order: i64,
+}
+
+/// One block as `reading_window` returns it: the paragraph text plus enough
+/// to place it (`kind` verbatim from `block.type`, so a caller can drop page
+/// headers/footers without the backend baking that display choice in).
+pub struct SourceBlockRow {
+    pub block_id: i64,
+    pub kind: String,
+    pub text: String,
+    pub page_no: i64,
+    pub reading_order: i64,
+}
+
+/// The blocks around a reading-order range, plus whether more exist on each
+/// side — `before + anchor + after`, in document reading order.
+pub struct ReadingWindow {
+    pub blocks: Vec<SourceBlockRow>,
+    pub has_more_before: bool,
+    pub has_more_after: bool,
+}
+
+/// The `path` row at a cited location, exactly as it stands — the input to
+/// the freshness comparison. Keyed on the **location**, not on the document:
+/// see the plan's "Freshness is keyed on the cited path" section for the two
+/// defects keying on `document_id` produces.
+pub struct PathOccupant {
+    pub watched_root_id: i64,
+    pub root_absolute_path: String,
+    pub relative_path: String,
+    pub size_bytes: i64,
+    pub mtime: i64,
+    /// Which document this row names **now**. Equal to the anchor's
+    /// `document_id` until a walk repoints it; different afterwards, which is
+    /// what `Freshness::Reindexed` is read off.
+    pub current_document_id: String,
+}
+
 impl Db {
     /// Every watched folder, in the order the user added them.
     pub fn list_watched_roots(&self) -> Result<Vec<WatchedRootRow>, Error> {
@@ -224,6 +274,241 @@ impl Db {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// The chunk's own identity and where it sits in the document's reading
+    /// order, or `None` if no chunk carries this id.
+    ///
+    /// ⚠️ **`AND b2.document_id = c.document_id` is hardening no test can
+    /// reach today, and it is labelled rather than dressed up as covered.**
+    /// The join walks block ids out of `char_span`, and the schema warns that
+    /// those ids live *outside* `ON DELETE CASCADE` while `block.id` is reused:
+    /// "Re-extracting a single page would leave ids in char_span that resolve
+    /// to a live block of another document" (`schema.sql`, above the
+    /// `chunk_span_blocks_bi` trigger). Nothing re-extracts a single page
+    /// today — blocks are only ever deleted a whole document at a time — so
+    /// the state is unreachable and **the mutant that removes this predicate
+    /// survives the suite**. It stays because it is one term and it makes the
+    /// query correct under the scenario the schema itself names; it is not
+    /// claimed to be tested.
+    ///
+    /// `first_reading_order`/`last_reading_order` are the min/max
+    /// `reading_order` over every block the chunk's `char_span` names, joined
+    /// straight through `json_each` rather than re-derived from `spans` in
+    /// Rust — the schema's own `chunk_span_blocks_bi` trigger already
+    /// guarantees every one of those blocks sits on the anchor block's page
+    /// (`schema.sql:211-212`), so `p.page_no` from the anchor's own page is
+    /// the page for all of them.
+    pub fn chunk_anchor(&self, chunk_id: i64) -> Result<Option<ChunkAnchor>, Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT c.document_id, c.text, c.char_span, p.section_title, p.page_no,
+                    MIN(b2.reading_order), MAX(b2.reading_order)
+               FROM chunk c
+               JOIN block b ON b.id = c.block_id
+               JOIN page p ON p.id = b.page_id
+               JOIN json_each(c.char_span) je
+               JOIN block b2 ON b2.id = json_extract(je.value, '$.block_id')
+                             AND b2.document_id = c.document_id
+              WHERE c.id = ?1
+              GROUP BY c.id",
+        )?;
+        let mut rows = stmt.query(params![chunk_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let span_json: String = row.get(2)?;
+        Ok(Some(ChunkAnchor {
+            document_id: row.get(0)?,
+            text: row.get(1)?,
+            spans: serde_json::from_str(&span_json).map_err(Error::Json)?,
+            section_title: row.get(3)?,
+            page_no: row.get(4)?,
+            first_reading_order: row.get(5)?,
+            last_reading_order: row.get(6)?,
+        }))
+    }
+
+    /// The blocks around a reading-order range, plus whether more exist on
+    /// each side.
+    ///
+    /// Document reading order is `(page.page_no, block.reading_order)`, not
+    /// `reading_order` alone — that column is unique only per page
+    /// (`ix_block_page`, `schema.sql:140`) — so the before/after queries below
+    /// compare against that pair with a SQLite row-value comparison and cross
+    /// page boundaries by construction.
+    ///
+    /// 🔴 **Whitespace-only blocks are excluded, and that is not tidiness.**
+    ///
+    /// ⚠️ The trim set is given explicitly — `trim(text, ' ' || char(9, 10,
+    /// 13, 11, 12))` — because SQLite's **one-argument** `trim` removes spaces
+    /// and nothing else, so a tab-only block sailed straight through the first
+    /// version of this fix and the test caught it. That set is ASCII
+    /// whitespace, which is what the line-based readers can emit; `str::trim`,
+    /// which `chunk_blocks` uses, spans all of Unicode, so a block of
+    /// non-breaking spaces would still be counted here. Said plainly because
+    /// it is an approximation of the chunker's rule, not a match.
+    /// `chunk_blocks` skips a block whose text trims to nothing
+    /// (`mnema-chunk/src/lib.rs`), so such a block can never be a passage — but
+    /// readers do store them: the text reader treats a line of spaces as
+    /// content, not a separator, and one sitting between two blank lines
+    /// becomes its own row. Counting them here made `radius` mean *stored
+    /// rows* instead of *visible source*: with `[real, spaces, passage, tab,
+    /// real]` and `radius = 1` the card got the two blank blocks and neither
+    /// real neighbour. (That list is the owner's reproduction; the fixtures
+    /// that pin this use a mixed ` \t ` blank, for the reason given in
+    /// `crates/mnema-index/tests/source.rs`.) Found by owner review on PR #22.
+    ///
+    /// The predicate is a **subset** of the chunker's rule, not the same rule
+    /// (see the trim-set note above), and the direction of that inequality is
+    /// what makes it safe: everything this excludes, the chunker excludes too,
+    /// so the anchor can never be emptied and a `span`'s block is always still
+    /// in the window.
+    ///
+    /// Each side is `LIMIT radius + 1`, trimmed to `radius`, with the flag set
+    /// from whether the extra row arrived — not a separate `COUNT(*)`, so the
+    /// two halves of one question cannot come to disagree.
+    pub fn reading_window(
+        &self,
+        document_id: &str,
+        page_no: i64,
+        first_reading_order: i64,
+        last_reading_order: i64,
+        radius: i64,
+    ) -> Result<ReadingWindow, Error> {
+        // A negative radius is nonsense, and silently catastrophic rather than
+        // loud: `LIMIT -1` means *no limit* in SQLite, `radius as usize` wraps
+        // to a huge number so `truncate` does nothing, and `len > -1` makes
+        // both flags true — the whole document returned, with two lies about
+        // it. The command clamps to `1..=MAX_RADIUS`, but this method is `pub`
+        // and its own guard must not depend on that.
+        let radius = radius.max(0);
+        let mut anchor_stmt = self.conn().prepare(
+            "SELECT b.id, b.type, b.text, p.page_no, b.reading_order
+               FROM block b
+               JOIN page p ON p.id = b.page_id
+              WHERE b.document_id = ?1 AND trim(b.text, ' ' || char(9, 10, 13, 11, 12)) <> '' AND p.page_no = ?2
+                AND b.reading_order BETWEEN ?3 AND ?4
+              ORDER BY b.reading_order",
+        )?;
+        let anchor_blocks = anchor_stmt
+            .query_map(
+                params![
+                    document_id,
+                    page_no,
+                    first_reading_order,
+                    last_reading_order
+                ],
+                source_block_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let limit = radius + 1;
+        let mut before_stmt = self.conn().prepare(
+            "SELECT b.id, b.type, b.text, p.page_no, b.reading_order
+               FROM block b
+               JOIN page p ON p.id = b.page_id
+              WHERE b.document_id = ?1 AND trim(b.text, ' ' || char(9, 10, 13, 11, 12)) <> '' AND (p.page_no, b.reading_order) < (?2, ?3)
+              ORDER BY p.page_no DESC, b.reading_order DESC
+              LIMIT ?4",
+        )?;
+        // Closest-first (descending); the (radius+1)-th row, if present, only
+        // says "there is more" and is never part of the returned window.
+        let mut before = before_stmt
+            .query_map(
+                params![document_id, page_no, first_reading_order, limit],
+                source_block_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more_before = before.len() as i64 > radius;
+        before.truncate(radius as usize);
+        before.reverse();
+
+        let mut after_stmt = self.conn().prepare(
+            "SELECT b.id, b.type, b.text, p.page_no, b.reading_order
+               FROM block b
+               JOIN page p ON p.id = b.page_id
+              WHERE b.document_id = ?1 AND trim(b.text, ' ' || char(9, 10, 13, 11, 12)) <> '' AND (p.page_no, b.reading_order) > (?2, ?3)
+              ORDER BY p.page_no ASC, b.reading_order ASC
+              LIMIT ?4",
+        )?;
+        let mut after = after_stmt
+            .query_map(
+                params![document_id, page_no, last_reading_order, limit],
+                source_block_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more_after = after.len() as i64 > radius;
+        after.truncate(radius as usize);
+
+        let mut blocks = before;
+        blocks.extend(anchor_blocks);
+        blocks.extend(after);
+
+        Ok(ReadingWindow {
+            blocks,
+            has_more_before,
+            has_more_after,
+        })
+    }
+
+    /// The row at one exact location, or `None` when no row is there at all.
+    /// `watched_root` is joined for the absolute path a `stat` needs, so the
+    /// freshness comparison does not pay for a second round trip inside the
+    /// snapshot.
+    pub fn path_occupant(
+        &self,
+        watched_root_id: i64,
+        relative_path: &str,
+    ) -> Result<Option<PathOccupant>, Error> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT p.watched_root_id, wr.absolute_path, p.relative_path,
+                        p.size_bytes, p.mtime, p.document_id
+                   FROM path p
+                   JOIN watched_root wr ON wr.id = p.watched_root_id
+                  WHERE p.watched_root_id = ?1 AND p.relative_path = ?2",
+                params![watched_root_id, relative_path],
+                |r| {
+                    Ok(PathOccupant {
+                        watched_root_id: r.get(0)?,
+                        root_absolute_path: r.get(1)?,
+                        relative_path: r.get(2)?,
+                        size_bytes: r.get(3)?,
+                        mtime: r.get(4)?,
+                        current_document_id: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Which root a document's cited copy sits under, so a caller can turn a
+    /// bare `relative_path` from a citation into the `(root, path)` pair
+    /// `path_occupant` needs. `Vec`, not `Option`: the same relative path can
+    /// exist under two roots, and collapsing that to one would silently pick
+    /// a file the user did not cite.
+    ///
+    /// 🔴 **A full scan of `path`, on every call — not on a fallback.** The
+    /// only indexes are the primary key `(watched_root_id, relative_path)` and
+    /// `ix_path_document` on `document_id` (`schema.sql`); neither leads with
+    /// `relative_path`, so a query keyed on it alone can use neither.
+    ///
+    /// The earlier doc comment here called this acceptable *because* it was the
+    /// fallback branch, reached only after a document-side lookup missed. That
+    /// branch is gone (see `cited_occupant`), so the condition the acceptance
+    /// rested on is gone with it: this now runs for every `source_around`
+    /// that gets **past the identity pin** with a cited path — a refused citation
+    /// returns before reaching it. **Still accepted for v1** — a personal corpus, one
+    /// scan per click on a citation — but accepted knowingly, as a decision
+    /// rather than as an inherited sentence. If it ever matters the fix is an
+    /// index on `relative_path`, which is a migration.
+    pub fn roots_holding_path(&self, relative_path: &str) -> Result<Vec<i64>, Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT watched_root_id FROM path WHERE relative_path = ?1 ORDER BY watched_root_id",
+        )?;
+        let rows = stmt.query_map(params![relative_path], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn insert_watched_root(&self, absolute_path: &str) -> Result<i64, Error> {
@@ -621,8 +906,8 @@ impl Db {
     /// page` that starts the cascade. That order is load-bearing, not
     /// stylistic: once the cascade has taken the chunks there is no
     /// `chunk.document_id` left to look their vector ids up by, and
-    /// [`Db::delete_watched_root`] (`write.rs:292`) keeps the same ordering
-    /// for the same reason.
+    /// [`Db::delete_watched_root`] keeps the same ordering for the same
+    /// reason.
     ///
     /// The sharper fact underneath is why leaving this unreached would have
     /// been worse than clutter: `chunk.id` is `INTEGER PRIMARY KEY`
@@ -677,8 +962,8 @@ impl Db {
         same_connection(self, tx);
         // Before the pages go: once the cascade has taken the chunks there is
         // no `chunk.document_id` left to look their ids up by — the same
-        // ordering `delete_watched_root` keeps (`write.rs:292`). A `vec0`
-        // table is the target of no foreign key, so nothing else reaches it.
+        // ordering `delete_watched_root` keeps. A `vec0` table is the target
+        // of no foreign key, so nothing else reaches it.
         crate::space::delete_vectors_for_document_in(tx, id)?;
         tx.execute("DELETE FROM page WHERE document_id = ?1", params![id])?;
         crate::journal::write_document_status(tx, id, DocumentStatus::Pending)
@@ -934,6 +1219,18 @@ impl Db {
         }
         Ok(out)
     }
+}
+
+/// Maps one row of the `block JOIN page` shape `reading_window`'s three
+/// queries share into a [`SourceBlockRow`].
+fn source_block_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SourceBlockRow> {
+    Ok(SourceBlockRow {
+        block_id: r.get(0)?,
+        kind: r.get(1)?,
+        text: r.get(2)?,
+        page_no: r.get(3)?,
+        reading_order: r.get(4)?,
+    })
 }
 
 /// Panics unless `tx` is a transaction on `db`'s own connection.

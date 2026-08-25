@@ -18,7 +18,8 @@ pub use search::QueryRule;
 pub use space::{AdoptedSpace, Neighbours, PendingChunk, VectorRole};
 pub use text_prep::{prepare_for_search, search_terms};
 pub use write::{
-    Citation, INDEX_FORMAT_VERSION, IndexedFileRow, PathEntry, RecentDocRow, WatchedRootRow,
+    ChunkAnchor, Citation, INDEX_FORMAT_VERSION, IndexedFileRow, PathEntry, PathOccupant,
+    ReadingWindow, RecentDocRow, SourceBlockRow, WatchedRootRow,
 };
 
 impl Error {

@@ -7,7 +7,7 @@
 case_ "write: a rebuild takes its document's vectors with it (D88)" \
   crates/mnema-index/src/write.rs \
   's{        crate::space::delete_vectors_for_document_in\(tx, id\)\?;\n}{}' \
-  'table is the target of no foreign key, so nothing else reaches it.
+  'of no foreign key, so nothing else reaches it.
         tx.execute("DELETE FROM page' \
   mnema-index 'clearing_a_document_takes_its_vectors' --test citation
 
