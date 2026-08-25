@@ -351,30 +351,42 @@ case_ "WireSegment::from swaps block_start for start" \
 # ═══════════════════════════════════════════════════════════════════════════
 # tree.rs: the index reads leave their one read_snapshot
 #
-# 🔴 This is the case that proves the race guard actually raced; the identity
-# pin's own red-proof (above) does not. Removing the pin reddens the race test
-# after ANY rebuild with no interleaving at all — its failure text names the
-# very first replacement, so it re-proves the pin that the pin's own case
-# already proves deterministically. Unwrapping the snapshot instead fails with
-# an EMPTY passage: the pin reads the chunk alive while the window reads it
-# already deleted, inside one command, which no non-interleaved run can
-# produce. Measured 2026-08-25, 3/3 by the implementer and 3/3 again by the
-# controller. Keep both cases; a later reader who deletes this one as
-# redundant with the pin's is deleting the only case that proves the
-# interleaving, not merely the refusal.
+# 🔴 DELIBERATELY NOT A CASE HERE. Read this before adding one back.
 #
-# `Ok::<_, mnema_index::Error>(db).and_then(|db| {` replaces the method call
-# with an equivalent-typed one that runs the same closure with no transaction
-# around it: `read_snapshot` opens one deferred read transaction spanning
-# every statement inside; `and_then` on an already-`Ok` value just calls the
-# closure, so `chunk_anchor`, `reading_window` and `path_occupant` each run as
-# their own autocommit read against whatever is committed at that instant.
-
-case_ "source_around: the one read_snapshot is unwrapped" \
-  src-tauri/src/tree.rs \
-  's~db\.read_snapshot\(\|db\| \{~Ok::<_, mnema_index::Error>(db).and_then(|db| {~' \
-  'Ok::<_, mnema_index::Error>(db).and_then(|db| {' \
-  mnema-desktop 'a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragraphs' --test commands
+# The mutation is:
+#
+#   src-tauri/src/tree.rs
+#   's~db\.read_snapshot\(\|db\| \{~Ok::<_, mnema_index::Error>(db).and_then(|db| {~'
+#
+# It replaces the method with an equivalent-typed call that runs the same
+# closure with no transaction around it, so `chunk_anchor`, `reading_window`
+# and `path_occupant` each read whatever is committed at their own instant.
+# It is the ONLY mutation that proves the race guard actually raced — the
+# identity pin's own case does not, because removing the pin reddens that test
+# after any rebuild with no interleaving at all.
+#
+# It is not a case because **its kill is statistical**, and measured as such
+# rather than assumed. 2026-08-25, ten runs of
+# `cargo test -p mnema-desktop --test commands a_rebuild_racing_the_ipc_source_around`:
+#
+#   this mutation form  RED RED RED RED RED
+#   the wrapper removed RED RED RED GREEN RED
+#
+# Nine of ten. The harness runs each case once, so roughly one run in ten it
+# would report STILL GREEN with nothing wrong. That is worse than no case at
+# all: a signal that cries wolf teaches the next reader to discount
+# STILL GREEN, and STILL GREEN is the one word in this harness that must never
+# be discounted.
+#
+# So the proof is a controller ritual instead, recorded in the cycle ledger:
+# apply the mutation by hand, run the race test five times, record how many
+# reddened AND the failure text. Two texts appear, and both are tears —
+# `paragraphs: ""` (the window found the chunk already deleted while the pin
+# had found it alive) and `paragraphs: "…редакція N"` (the window found the
+# rebuilt text). ⚠️ The second text also appears when the PIN is removed with
+# the snapshot intact, where nothing tore at all, so the text alone does not
+# discriminate: only the empty one is unambiguous, and its absence in a given
+# run proves nothing either way.
 
 # ═══════════════════════════════════════════════════════════════════════════
 # tree.rs: decide_freshness
