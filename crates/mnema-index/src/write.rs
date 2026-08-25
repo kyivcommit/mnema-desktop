@@ -354,9 +354,13 @@ impl Db {
     /// becomes its own row. Counting them here made `radius` mean *stored
     /// rows* instead of *visible source*: with `[real, spaces, passage, tab,
     /// real]` and `radius = 1` the card got the two blank blocks and neither
-    /// real neighbour. Found by owner review on PR #22. The predicate is the
-    /// chunker's own, so the window shows exactly the blocks a passage could
-    /// have come from.
+    /// real neighbour. Found by owner review on PR #22.
+    ///
+    /// The predicate is a **subset** of the chunker's rule, not the same rule
+    /// (see the trim-set note above), and the direction of that inequality is
+    /// what makes it safe: everything this excludes, the chunker excludes too,
+    /// so the anchor can never be emptied and a `span`'s block is always still
+    /// in the window.
     ///
     /// Each side is `LIMIT radius + 1`, trimmed to `radius`, with the flag set
     /// from whether the extra row arrived — not a separate `COUNT(*)`, so the
@@ -483,14 +487,19 @@ impl Db {
     /// exist under two roots, and collapsing that to one would silently pick
     /// a file the user did not cite.
     ///
-    /// ⚠️ **A full scan of `path`.** The only indexes are the primary key
-    /// `(watched_root_id, relative_path)` and `ix_path_document` on
-    /// `document_id`; neither leads with `relative_path`, so a query keyed on
-    /// it alone can use neither. Accepted for v1 — performance is not a
-    /// requirement here — and since [`Db::roots_of_document_at`] exists this
-    /// really is the fallback: the ordinary call resolves its root from the
-    /// document side and never reaches here. It is entered only when no row at
-    /// that path names the cited document any more, which is the repoint case.
+    /// 🔴 **A full scan of `path`, on every call — not on a fallback.** The
+    /// only indexes are the primary key `(watched_root_id, relative_path)` and
+    /// `ix_path_document` on `document_id` (`schema.sql`); neither leads with
+    /// `relative_path`, so a query keyed on it alone can use neither.
+    ///
+    /// The earlier doc comment here called this acceptable *because* it was the
+    /// fallback branch, reached only after a document-side lookup missed. That
+    /// branch is gone (see `cited_occupant`), so the condition the acceptance
+    /// rested on is gone with it: this now runs for every `source_around` that
+    /// carries a cited path. **Still accepted for v1** — a personal corpus, one
+    /// scan per click on a citation — but accepted knowingly, as a decision
+    /// rather than as an inherited sentence. If it ever matters the fix is an
+    /// index on `relative_path`, which is a migration.
     pub fn roots_holding_path(&self, relative_path: &str) -> Result<Vec<i64>, Error> {
         let mut stmt = self.conn().prepare(
             "SELECT watched_root_id FROM path WHERE relative_path = ?1 ORDER BY watched_root_id",

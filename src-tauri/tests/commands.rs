@@ -3531,10 +3531,20 @@ fn source_around_covers_every_block_a_multi_block_chunk_spans() {
     state.open_index().expect("the index opens");
     let webview = main_webview(&app);
 
-    // Blocks 2 and 3 of PARAGRAPHS, joined: the chunk starts inside block 2
-    // and runs to the end of block 3.
+    // Blocks 2 and 4 of PARAGRAPHS, joined, with a **whitespace-only block
+    // between them**: the chunk starts inside block 2 and runs to the end of
+    // block 4, so `chunk_anchor` reports the range 2..4 and the anchor query's
+    // own `BETWEEN` covers the blank row in the middle.
+    //
+    // 🔴 That blank row is why the anchor query carries the whitespace
+    // predicate too, and until this fixture nothing exercised it: every other
+    // test anchors on a single block, where `BETWEEN 3 AND 3` cannot contain a
+    // neighbour of any kind. The chunker skips blank blocks
+    // (`mnema-chunk/src/lib.rs`), so a chunk legitimately spans *across* one —
+    // and without the predicate the excerpt would show it inside the quotation
+    // itself.
     let head: String = PARAGRAPHS[1].chars().skip(17).collect();
-    let tail = PARAGRAPHS[2].to_string();
+    let tail = PARAGRAPHS[3].to_string();
     let passage = format!("{head}{tail}");
     let head_chars = head.chars().count() as u32;
     let tail_chars = tail.chars().count() as u32;
@@ -3545,7 +3555,16 @@ fn source_around_covers_every_block_a_multi_block_chunk_spans() {
             write_decoy_document(db);
             db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
             let page = db.insert_page(&doc, 1, "native:txt", Some("Розділ перший"))?;
-            let blocks: Vec<i64> = PARAGRAPHS
+            // PARAGRAPHS, but with the third row replaced by a line of
+            // spaces — what the text reader stores for exactly that input.
+            let rows: Vec<&str> = vec![
+                PARAGRAPHS[0],
+                PARAGRAPHS[1],
+                "   ",
+                PARAGRAPHS[3],
+                PARAGRAPHS[4],
+            ];
+            let blocks: Vec<i64> = rows
                 .iter()
                 .enumerate()
                 .map(|(i, text)| {
@@ -3575,7 +3594,7 @@ fn source_around_covers_every_block_a_multi_block_chunk_spans() {
                             block_start: 17,
                         },
                         Segment {
-                            block_id: blocks[2],
+                            block_id: blocks[3],
                             start: head_chars,
                             end: head_chars + tail_chars,
                             block_start: 0,
@@ -3611,8 +3630,9 @@ fn source_around_covers_every_block_a_multi_block_chunk_spans() {
         .collect();
     assert_eq!(
         texts,
-        vec![PARAGRAPHS[0], PARAGRAPHS[1], PARAGRAPHS[2], PARAGRAPHS[3]],
-        "the window must span both of the anchor's blocks, not just its first: {v}"
+        vec![PARAGRAPHS[0], PARAGRAPHS[1], PARAGRAPHS[3], PARAGRAPHS[4]],
+        "the window must span both of the anchor's blocks and skip the blank row between \
+         them — a blank inside the quotation is the anchor query's own predicate: {v}"
     );
 
     // One span per source block, each measuring into its OWN block.
@@ -4481,10 +4501,10 @@ fn source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_docum
                 &PARAGRAPHS.join("\n\n"),
             );
 
-            // Root B holds a DIFFERENT file at the same relative path. Two
-            // candidates by location, one by document — which is the whole
-            // point: the citation names a path, the anchor names a document,
-            // and together they are unambiguous.
+            // Root B holds a DIFFERENT file at the same relative path. The
+            // document *could* pick root A here — and that is exactly the
+            // narrowing owner review removed, because the situation where it
+            // guesses wrong looks identical from the index.
             let corpus_b = dir.path().join("corpus-b");
             std::fs::create_dir_all(&corpus_b).unwrap();
             let root_b = db.insert_watched_root(corpus_b.to_str().unwrap())?;

@@ -218,9 +218,9 @@ pub enum Freshness {
     /// is true either way (the cited path does name another document); only
     /// the explanation would differ, and this cannot supply it.
     ///
-    /// Reachable **only** through the fallback branch of `cited_occupant`: the
-    /// first branch selects rows that name this document, so its occupant's
-    /// `current_document_id` always matches and can never produce this.
+    /// Reached when the single `path` row at the cited location names some
+    /// other document. (It used to be described in terms of `cited_occupant`'s
+    /// two branches; there is one path through that function now.)
     Reindexed,
     /// The path still names this document, but the bytes on disk have moved:
     /// no walk has reached it yet. What is shown is what was indexed.
@@ -235,8 +235,9 @@ pub enum Freshness {
     ///    from inside an archive, or whose last copy on disk was deleted);
     /// 2. no `path` row holds that relative path under any root — the row
     ///    vanished between the two IPC calls;
-    /// 3. more than one root holds it and nothing distinguishes them, so a
-    ///    verdict would be about a file the user may not have cited.
+    /// 3. more than one root holds that relative path — **whether or not
+    ///    anything distinguishes them**, see `cited_occupant` — so a verdict
+    ///    would be about a file the user may not have cited.
     NoPath,
 }
 
@@ -349,37 +350,32 @@ enum Composed {
 /// The `path` row the freshness verdict is read off, or `None` when there is
 /// no single honest one.
 ///
-/// Keyed on the **cited location**, never on the document: after a walk
-/// repoints an edited copy, `WHERE document_id = ?` no longer sees that copy
-/// at all and returns some other, untouched one — reporting `Current` for a
-/// passage whose cited copy is stale.
+/// **Keyed on the cited location, and on nothing else.** A citation carries a
+/// `relative_path` but no root (`bridge.rs:433`), so the rule is blunt: exactly
+/// one `path` row at that relative path, or `None`. Keying on the document
+/// instead is wrong in a way that took two reviews to see — after a walk
+/// repoints an edited copy, `WHERE document_id = ?` no longer sees that copy at
+/// all and returns some other, untouched one, reporting `Current` for a passage
+/// whose cited copy is stale.
 ///
-/// A citation carries a `relative_path` but no root (`bridge.rs:433`), and the
-/// same relative path can exist under two roots, so the root is resolved in
-/// two branches and the order is the point:
+/// 🔴 **Narrowing the candidates by document is deliberately gone, and this is
+/// the second decision, not a restatement of the first.** An earlier version
+/// kept both: resolve by document, fall back to the location. Owner review on
+/// PR #22 reproduced what that costs — two roots holding the *same* document at
+/// one path answer `None`, and then editing one copy leaves a single survivor,
+/// so the same citation starts answering `Current`, growing confident at the
+/// moment it should grow careful. The two situations are shape-identical from
+/// the index (two rows at the path, one naming this document, in both), so no
+/// rule over those counts separates them — which is the argument *for* the
+/// blunt rule, not against it.
 ///
-/// 1. the roots whose row at that path **still names this document** — the
-///    ordinary case, and the one that can use `ix_path_document`;
-/// 2. failing that, any root holding that path at all — the repoint case,
-///    where by definition no row names our document any more.
-///
-/// **More than one candidate in *either* branch is `None`.**
-///
-/// ⚠️ Read that literally and no further: ambiguity is measured **inside the
-/// branch that ran**, not over the location. Two roots hold `x.md` with
-/// identical bytes — one document, two rows — and the first branch returns
-/// both, so the answer is `None`. Edit one copy: a walk repoints it, the
-/// first branch now returns exactly one root, and the verdict becomes
-/// confident at the moment it should become less so.
-///
-/// That residual is **not fixable by counting**. It is shape-identical to the
-/// case this narrowing exists to answer correctly — two roots holding the same
-/// relative path with *different* content, where the document term is the only
-/// thing that says which row the citation meant. Both are `all = 2,
-/// named = 1`; no rule over those counts separates them. Measured, not
-/// assumed. Left as is; the contract PR 6 must build on is the doc comment on
-/// [`Freshness::NoPath`] above, which enumerates all three states that reach
-/// it.
+/// ⚠️ **The cost is real and larger than "a verdict withheld".** Two watched
+/// roots that share a relative path — two note folders each holding a
+/// `README.md` — now yield `NoPath` for every citation out of such a file,
+/// permanently, including cases the old narrowing answered correctly. It is
+/// latent today (PR 6 is the first consumer), and the proper fix is to carry
+/// the **root** in the citation, which PR 6 must do anyway for the identity the
+/// same review asked for. Booked there, not left as a silent trade.
 fn cited_occupant(
     db: &Db,
     cited_relative_path: Option<&str>,
@@ -387,16 +383,6 @@ fn cited_occupant(
     let Some(relative_path) = cited_relative_path else {
         return Ok(None);
     };
-    // 🔴 Ambiguity is measured over the **location**, and narrowing by document
-    // is deliberately gone. It used to pick the row whose document matched, and
-    // owner review on PR #22 reproduced what that costs: two roots holding the
-    // same document at one path answer `noPath`, and then editing *one* copy
-    // leaves a single survivor — so the same citation starts answering
-    // `current`, growing confident at the moment it should grow careful. The
-    // two states that narrowing would separate are shape-identical from the
-    // index (`all = 2, named = 1` in both), so the honest rule is the blunt
-    // one: more than one row at the cited path, and we cannot say which copy
-    // the citation meant.
     let roots = db.roots_holding_path(relative_path)?;
     let [root] = roots.as_slice() else {
         return Ok(None);

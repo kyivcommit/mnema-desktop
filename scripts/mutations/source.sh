@@ -267,6 +267,61 @@ case_ "the identity pin refuses everything" \
   mnema-desktop 'source_around_admits_a_byte_identical_passage_text' --test commands
 
 # ═══════════════════════════════════════════════════════════════════════════
+# reading_window: whitespace-only blocks do not count against the radius
+#
+# The readers store a line of spaces as a block on purpose (mnema-extract's
+# text reader treats it as content, not a separator), while chunk_blocks skips
+# exactly those — so such a block can never be a passage, and counting it made
+# `radius` mean stored rows instead of visible source. Found by owner review on
+# PR #22.
+#
+# ⚠️ One case per occurrence, and the mutation is the SINGLE-argument `trim`,
+# because that is the mistake that was actually made here: SQLite's `trim(X)`
+# removes spaces and nothing else, so the first version of this fix let a
+# tab-only block straight through. It is the likeliest way to break it again.
+#
+# The anchor case is the one that needed a fixture built for it: every test but
+# one anchors on a single block, where `BETWEEN n AND n` cannot contain a
+# neighbour of any kind. A chunk legitimately spans *across* a blank block, and
+# `source_around_covers_every_block_a_multi_block_chunk_spans` now builds that.
+
+case_ "reading_window: the anchor query counts blank blocks inside the quotation" \
+  crates/mnema-index/src/write.rs \
+  "s~AND trim\(b\.text, ' ' \|\| char\(9, 10, 13, 11, 12\)\) <> '' AND p\.page_no~AND trim(b.text) <> '' AND p.page_no~" \
+  "AND trim(b.text) <> '' AND p.page_no" \
+  mnema-desktop 'source_around_covers_every_block_a_multi_block_chunk_spans' --test commands
+
+case_ "reading_window: the before query counts blank blocks" \
+  crates/mnema-index/src/write.rs \
+  "s~AND trim\(b\.text, ' ' \|\| char\(9, 10, 13, 11, 12\)\) <> '' AND \(p\.page_no, b\.reading_order\) <~AND trim(b.text) <> '' AND (p.page_no, b.reading_order) <~" \
+  "AND trim(b.text) <> '' AND (p.page_no, b.reading_order) <" \
+  mnema-index 'reading_window_skips_blocks_a_chunk_could_never_have_come_from' --test source
+
+case_ "reading_window: the after query counts blank blocks" \
+  crates/mnema-index/src/write.rs \
+  "s~AND trim\(b\.text, ' ' \|\| char\(9, 10, 13, 11, 12\)\) <> '' AND \(p\.page_no, b\.reading_order\) >~AND trim(b.text) <> '' AND (p.page_no, b.reading_order) >~" \
+  "AND trim(b.text) <> '' AND (p.page_no, b.reading_order) >" \
+  mnema-index 'reading_window_skips_blocks_a_chunk_could_never_have_come_from' --test source
+
+# ═══════════════════════════════════════════════════════════════════════════
+# path_occupant: the path predicate
+#
+# ⚠️ Measured, so it is not re-attempted: for the ROOT predicate below,
+# `OR 1 = 1` is not a usable mutant — SQLite still returns the right row under
+# it, so the case would measure nothing. Only `<= ?1` bites. For the PATH
+# predicate here, `OR 1 = 1` does bite.
+#
+# 🔴 This case was deleted by mistake while removing roots_of_document_at's
+# cases — it mutates path_occupant and has nothing to do with that method. It
+# was verified still killing its test on the head it was deleted from.
+
+case_ "path_occupant: the path predicate is widened to match everything" \
+  crates/mnema-index/src/write.rs \
+  "s~WHERE p\.watched_root_id = \?1 AND p\.relative_path = \?2~WHERE p.watched_root_id = ?1 AND (p.relative_path = ?2 OR 1 = 1)~" \
+  'AND (p.relative_path = ?2 OR 1 = 1)' \
+  mnema-desktop 'source_around_reports_reindexed_when_the_cited_path_now_names_another_document' --test commands
+
+# ═══════════════════════════════════════════════════════════════════════════
 # tree.rs: cited_occupant refuses an ambiguous location
 #
 # There used to be two branches here — narrow by document, else fall back to
