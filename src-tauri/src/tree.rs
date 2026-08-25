@@ -6,7 +6,7 @@
 use crate::error::Error;
 use crate::state::AppState;
 use mnema_core::Segment;
-use mnema_index::Db;
+use mnema_index::{Db, PathOccupant};
 use serde::Serialize;
 use tauri::State;
 
@@ -136,10 +136,6 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
     tag = "kind"
 )]
 pub enum SourceAround {
-    // Defined in full here, constructed by the arm Task 5.3 puts where
-    // `build_source_around`'s `todo!()` stands. The allow goes when the
-    // `todo!()` does; the two are one temporary state, not two.
-    #[allow(dead_code)]
     Excerpt {
         /// The blocks in document reading order: `radius` before the passage's
         /// own block(s), those blocks, then `radius` after.
@@ -191,9 +187,10 @@ pub enum GoneReason {
 }
 
 /// How far the indexed text has drifted from the file it was read out of.
-// Every variant is decided by Task 5.3, in the same arm the `Excerpt` above
-// waits on; the allow goes with that one.
-#[allow(dead_code)]
+///
+/// Five variants, and every one of them has a test that produced it: a card
+/// with a default branch drawing `Current` for an unmatched variant is how a
+/// stale excerpt gets shown as fresh.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum Freshness {
@@ -254,40 +251,202 @@ impl From<Segment> for WireSegment {
     }
 }
 
-/// The identity pin, and nothing else yet.
+/// [`SourceAround::Excerpt`] minus its `freshness` — everything one snapshot
+/// can know about a passage that is still there.
 ///
-/// `chunk_id` alone cannot say whether it still names the passage the user
-/// clicked, so the caller echoes the passage text back and this compares it
-/// against `chunk.text` **exactly**. Not `contains`, not trimmed, not
-/// normalised: the text on the wire is `chunk.text` verbatim — `AskCitation.
-/// text` (`bridge.rs:432`) is `h.text.clone()` (`bridge.rs:556`), which is
-/// `Citation::text`, which is the `chunk.text` column (`write.rs:894`) — so
-/// any loosening only widens what a reused id can pass as. A `contains`
-/// comparison would accept `""` and match every chunk in the index.
+/// A struct rather than six fields repeated at the seam: `Excerpt` is built
+/// from it by [`ExcerptFields::with`], so the two cannot drift apart field by
+/// field. It deliberately holds `document_id` **once**; the freshness
+/// comparison reads it from here rather than from a second copy carried
+/// alongside, because two copies of one fact is the class this project has
+/// paid most for and a later refactor comparing the wrong one would be silent.
+struct ExcerptFields {
+    blocks: Vec<SourceBlock>,
+    spans: Vec<WireSegment>,
+    document_id: String,
+    section_title: Option<String>,
+    has_more_before: bool,
+    has_more_after: bool,
+}
+
+impl ExcerptFields {
+    fn with(self, freshness: Freshness) -> SourceAround {
+        SourceAround::Excerpt {
+            blocks: self.blocks,
+            spans: self.spans,
+            document_id: self.document_id,
+            section_title: self.section_title,
+            has_more_before: self.has_more_before,
+            has_more_after: self.has_more_after,
+            freshness,
+        }
+    }
+}
+
+/// What one snapshot can know. The command turns this into a
+/// [`SourceAround`] after the `stat`, which is the only step that needs the
+/// filesystem and the one step that must not happen inside the snapshot.
+enum Composed {
+    /// Nothing further to decide — the pin already refused.
+    Settled(SourceAround),
+    /// An excerpt whose `freshness` is still open, plus the `path` row
+    /// deciding it needs: the recorded size and mtime, the absolute root, and
+    /// which document that location names now. `None` when the citation
+    /// carried no path, when no row is at that location, or when the root
+    /// could not be resolved to exactly one candidate — all three are
+    /// [`Freshness::NoPath`], because a guessed root is a confident verdict
+    /// about the wrong file.
+    Pending {
+        excerpt: ExcerptFields,
+        occupant: Option<PathOccupant>,
+    },
+}
+
+/// The `path` row the freshness verdict is read off, or `None` when there is
+/// no single honest one.
 ///
-/// ⚠️ Signature note: Task 5.3 changes the return type to an intermediate the
-/// command finishes, because `Excerpt` carries a `freshness` that cannot be
-/// decided without a `stat`, and no filesystem call may happen inside
-/// `read_snapshot`. Today every arm this function reaches is settled inside
-/// the snapshot, so it returns the answer directly.
+/// Keyed on the **cited location**, never on the document: after a walk
+/// repoints an edited copy, `WHERE document_id = ?` no longer sees that copy
+/// at all and returns some other, untouched one — reporting `Current` for a
+/// passage whose cited copy is stale.
+///
+/// A citation carries a `relative_path` but no root (`bridge.rs:433`), and the
+/// same relative path can exist under two roots, so the root is resolved in
+/// two branches and the order is the point:
+///
+/// 1. the roots whose row at that path **still names this document** — the
+///    ordinary case, and the one that can use `ix_path_document`;
+/// 2. failing that, any root holding that path at all — the repoint case,
+///    where by definition no row names our document any more.
+///
+/// **More than one candidate in *either* branch is `None`.** The first branch
+/// is not automatically unique: with content addressing the same file under
+/// two watched roots at the same relative path is two legal rows both naming
+/// this document.
+fn cited_occupant(
+    db: &Db,
+    document_id: &str,
+    cited_relative_path: Option<&str>,
+) -> Result<Option<PathOccupant>, mnema_index::Error> {
+    let Some(relative_path) = cited_relative_path else {
+        return Ok(None);
+    };
+    let named = db.roots_of_document_at(document_id, relative_path)?;
+    let candidates = if named.is_empty() {
+        db.roots_holding_path(relative_path)?
+    } else {
+        named
+    };
+    let [root] = candidates.as_slice() else {
+        return Ok(None);
+    };
+    db.path_occupant(*root, relative_path)
+}
+
+/// The identity pin, then everything one snapshot can know about the passage
+/// it let through.
+///
+/// **The pin.** `chunk_id` alone cannot say whether it still names the passage
+/// the user clicked, so the caller echoes the passage text back and this
+/// compares it against `chunk.text` **exactly**. Not `contains`, not trimmed,
+/// not normalised: the text on the wire is `chunk.text` verbatim —
+/// `AskCitation.text` (`bridge.rs:432`) is `h.text.clone()` (`bridge.rs:556`),
+/// which is `Citation::text`, which is the `chunk.text` column
+/// (`write.rs:894`) — so any loosening only widens what a reused id can pass
+/// as. A `contains` comparison would accept `""` and match every chunk in the
+/// index.
+///
+/// **Why it cannot return a finished answer.** `Excerpt` carries a
+/// `freshness`, and `Current`/`FileChanged`/`FileMissing` are undecidable
+/// without a `stat` — which must not happen in here: this whole function runs
+/// inside [`mnema_index::Db::read_snapshot`], holding a deferred read
+/// transaction, inside `with_index`, holding the state mutex. A `stat` on a
+/// sleeping network drive inside both would block every other command on a
+/// filesystem round-trip. So the ingredients come back and the command
+/// decides.
 fn build_source_around(
     db: &Db,
     chunk_id: i64,
     passage_text: &str,
-    _cited_relative_path: Option<&str>,
-    _radius: i64,
-) -> Result<SourceAround, mnema_index::Error> {
+    cited_relative_path: Option<&str>,
+    radius: i64,
+) -> Result<Composed, mnema_index::Error> {
     let Some(anchor) = db.chunk_anchor(chunk_id)? else {
-        return Ok(SourceAround::Gone {
+        return Ok(Composed::Settled(SourceAround::Gone {
             reason: GoneReason::NoSuchChunk,
-        });
+        }));
     };
     if anchor.text != passage_text {
-        return Ok(SourceAround::Gone {
+        return Ok(Composed::Settled(SourceAround::Gone {
             reason: GoneReason::IdReused,
-        });
+        }));
     }
-    todo!("Task 5.3: the excerpt and its freshness")
+
+    let window = db.reading_window(
+        &anchor.document_id,
+        anchor.page_no,
+        anchor.first_reading_order,
+        anchor.last_reading_order,
+        radius,
+    )?;
+    let occupant = cited_occupant(db, &anchor.document_id, cited_relative_path)?;
+
+    Ok(Composed::Pending {
+        excerpt: ExcerptFields {
+            blocks: window
+                .blocks
+                .into_iter()
+                .map(|b| SourceBlock {
+                    block_id: b.block_id,
+                    kind: b.kind,
+                    text: b.text,
+                    page_no: b.page_no,
+                    reading_order: b.reading_order,
+                })
+                .collect(),
+            spans: anchor.spans.into_iter().map(WireSegment::from).collect(),
+            document_id: anchor.document_id,
+            section_title: anchor.section_title,
+            has_more_before: window.has_more_before,
+            has_more_after: window.has_more_after,
+        },
+        occupant,
+    })
+}
+
+/// How far the indexed text has drifted from the file it was read out of.
+///
+/// The only filesystem call `source_around` makes, and it is here rather than
+/// in the composer for the reason given there. `mnema_walk::stat`
+/// (`mnema-walk/src/lib.rs:371`) rather than a hand-rolled `SystemTime`
+/// conversion: `mtime` is **nanoseconds**, and the one place that number is
+/// derived is the one place it can be got wrong.
+fn decide_freshness(occupant: Option<&PathOccupant>, document_id: &str) -> Freshness {
+    let Some(occupant) = occupant else {
+        return Freshness::NoPath;
+    };
+    // Before the filesystem, because the index already knows the answer here
+    // and it is a different answer. A walk that has re-indexed this location
+    // has repointed the row at a new document; the file on disk then matches
+    // *that* document's recorded numbers perfectly, and a `stat` would report
+    // `Current` for a passage whose cited copy has already been replaced.
+    if occupant.current_document_id != document_id {
+        return Freshness::Reindexed;
+    }
+    let full = std::path::Path::new(&occupant.root_absolute_path).join(&occupant.relative_path);
+    let Some(disk) = mnema_walk::stat(&full) else {
+        return Freshness::FileMissing;
+    };
+    // The cheap arm's own comparison, not a new one:
+    // `recorded.size_bytes == disk.size_bytes && recorded.mtime == disk.mtime`
+    // is two of the five conditions `mnema-ingest` already asks
+    // (`mnema-ingest/src/lib.rs:295-296`). Both halves, because a same-length
+    // edit moves only the mtime and a touch moves only the mtime — dropping
+    // either operand loses a whole class of edit silently.
+    if disk.size_bytes != occupant.size_bytes || disk.mtime != occupant.mtime {
+        return Freshness::FileChanged;
+    }
+    Freshness::Current
 }
 
 /// The paragraphs around a cited passage, read out of the index — never off
@@ -295,7 +454,13 @@ fn build_source_around(
 /// `default-src 'self'`.
 ///
 /// Off the main thread for the reason given on [`crate::bridge::open_index`],
-/// and every index read inside one [`mnema_index::Db::read_snapshot`].
+/// and every **index** read inside one
+/// [`mnema_index::Db::read_snapshot`] — but the `stat` deliberately outside
+/// it. The snapshot holds a deferred read transaction for its whole body and
+/// `with_index` holds the state mutex for the whole call; a filesystem
+/// round-trip inside both would block every other command on a volume that
+/// happens to be asleep. So the closure returns the ingredients and the
+/// verdict is decided out here.
 #[tauri::command(async)]
 pub fn source_around(
     state: State<'_, AppState>,
@@ -305,7 +470,7 @@ pub fn source_around(
     radius: u32,
 ) -> Result<SourceAround, Error> {
     let radius = radius.clamp(1, MAX_RADIUS) as i64;
-    state.with_index(|db| {
+    let composed = state.with_index(|db| {
         db.read_snapshot(|db| {
             build_source_around(
                 db,
@@ -315,6 +480,13 @@ pub fn source_around(
                 radius,
             )
         })
+    })?;
+    Ok(match composed {
+        Composed::Settled(answer) => answer,
+        Composed::Pending { excerpt, occupant } => {
+            let freshness = decide_freshness(occupant.as_ref(), &excerpt.document_id);
+            excerpt.with(freshness)
+        }
     })
 }
 
