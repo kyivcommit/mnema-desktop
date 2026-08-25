@@ -2865,3 +2865,163 @@ fn a_write_racing_the_ipc_list_tree_cannot_tear_recents_from_its_files() {
 
     assert_coherent_recents(&v);
 }
+
+/// Hazard (1) of PR 5's "what disappears" pass, and what makes
+/// `source_around` different from every read before it: `ask` and
+/// `source_around` are **two IPC calls seconds apart**. The client holds a
+/// `chunkId` from the first and sends it to the second, and no snapshot can
+/// span them — they are two transactions by construction. `chunk.id` is
+/// `INTEGER PRIMARY KEY` *without* `AUTOINCREMENT` (`schema.sql:149`), so
+/// SQLite derives the next id as `max(id) + 1` and hands the ids of deleted
+/// rows out again; a rebuild of the most recently indexed document deletes
+/// exactly the top of that space. Answering with the new chunk's
+/// neighbourhood under the citation the user clicked is precisely "answer
+/// with text the file no longer contains", so the command refuses instead.
+#[test]
+fn source_around_refuses_a_chunk_id_a_rebuild_has_handed_to_other_text() {
+    const ORIGINAL: &str = "Ціна оцифрування одного аркуша становить дві гривні.";
+    const REBUILT: &str = "Ставка залишається незмінною протягом усього строку.";
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "7".repeat(64);
+    let (before, after) = state
+        .with_index(|db| {
+            let before = write_one_document(db, &doc, ORIGINAL);
+            db.clear_document_content(&doc)?;
+            let after = rebuild_one_chunk(db, &doc, REBUILT);
+            Ok::<_, mnema_index::Error>((before, after))
+        })
+        .unwrap();
+
+    // The fixture is the hazard only if SQLite really handed the id back.
+    // Asserted loudly rather than skipped with a `return`: a quiet skip
+    // leaves the test satisfied by a state it never reached. And on the
+    // **chunk** rowid specifically — `block.id` and `chunk.id` are separate
+    // rowid spaces, both reused, and `rebuild_one_chunk` mints one of each,
+    // so a fixture that compared block ids would pass while proving nothing.
+    assert_eq!(
+        after, before,
+        "SQLite did not hand the chunk rowid back, so this fixture never reached the id-reuse \
+         hazard it is named for"
+    );
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({ "chunkId": before, "passageText": ORIGINAL, "radius": 1 }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(
+        v["kind"],
+        json!("gone"),
+        "the id now carries different text, and the command answered with something other than \
+         a refusal: {v}"
+    );
+    assert_eq!(
+        v["reason"]["kind"],
+        json!("idReused"),
+        "a chunk does carry that id — it is simply not this passage — so the refusal must say \
+         which of the two causes it was: {v}"
+    );
+    // Both directions. A `Gone` that still shipped the new chunk's
+    // neighbourhood would satisfy a `kind`-only assertion, and the whole
+    // point of the refusal is that no text comes back.
+    assert!(
+        v.get("blocks").is_none(),
+        "a refusal must carry no text at all; this one shipped the other passage's blocks: {v}"
+    );
+}
+
+/// The other cause, and without it `GoneReason::NoSuchChunk` is a variant
+/// nothing produces. `clear_document_content` cascades the document's pages,
+/// blocks and chunks away (`write.rs:676-685`) and a rebuild has not landed
+/// yet — the gap a watcher's re-index leaves open between two IPC calls.
+#[test]
+fn source_around_reports_no_such_chunk_when_nothing_carries_the_id() {
+    const ORIGINAL: &str = "Обсяг зібрання становить дванадцять тисяч аркушів.";
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "8".repeat(64);
+    let chunk = state
+        .with_index(|db| {
+            let chunk = write_one_document(db, &doc, ORIGINAL);
+            db.clear_document_content(&doc)?;
+            Ok::<_, mnema_index::Error>(chunk)
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({ "chunkId": chunk, "passageText": ORIGINAL, "radius": 1 }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(v["kind"], json!("gone"), "nothing carries that id: {v}");
+    assert_eq!(
+        v["reason"]["kind"],
+        json!("noSuchChunk"),
+        "no chunk carries that id at all, which is a different cause from an id handed to other \
+         text — collapsing the two loses the only thing that tells a rebuild-in-flight from a \
+         reused id: {v}"
+    );
+    assert!(
+        v.get("blocks").is_none(),
+        "a refusal must carry no text at all: {v}"
+    );
+}
+
+/// [assert-both-directions] at the level of the pin itself. A pin written as
+/// "the stored text *contains* the passage" would accept `""` and match every
+/// chunk in the index — an id-reuse check satisfied by absence. The
+/// comparison is exact equality, so an empty passage against a live chunk
+/// with non-empty text is a refusal, not an excerpt.
+#[test]
+fn source_around_refuses_an_empty_passage_text_rather_than_matching_anything() {
+    const LIVE: &str = "Загальна ціна обчислюється множенням ставки і кількості аркушів.";
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "9".repeat(64);
+    let chunk = state
+        .with_index(|db| Ok::<_, mnema_index::Error>(write_one_document(db, &doc, LIVE)))
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({ "chunkId": chunk, "passageText": "", "radius": 1 }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(
+        v["kind"],
+        json!("gone"),
+        "an empty passage matched a live chunk, so the pin is satisfied by absence: {v}"
+    );
+    assert_eq!(
+        v["reason"]["kind"],
+        json!("idReused"),
+        "the chunk is there and its text is not the empty passage, which is the reused-id \
+         cause, not the missing-chunk one: {v}"
+    );
+    assert!(
+        v.get("blocks").is_none(),
+        "a refusal must carry no text at all: {v}"
+    );
+}

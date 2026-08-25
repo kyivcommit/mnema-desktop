@@ -40,6 +40,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::cancel_job,
         bridge::job_status,
         tree::list_tree,
+        tree::source_around,
         models::provider_models,
         models::key_present,
         models::set_key,
