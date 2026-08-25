@@ -18,8 +18,13 @@ const RECENTS_LIMIT: i64 = 50;
 ///
 /// The radius is the caller's choice — the card shows one paragraph either
 /// side, a scrolling card wants more — but a client must not be able to ask
-/// for a whole book. **Clamped, not rejected:** a bad radius is not a reason
-/// to show the user nothing.
+/// for a whole book. **Clamped, not rejected:** a radius of `0` or one larger
+/// than this is answered, not refused.
+///
+/// ⚠️ That promise covers the values that reach the command. The parameter is
+/// `u32`, so a negative or fractional radius is refused one layer earlier, by
+/// deserialisation, and the caller gets an error rather than a clamped
+/// answer. PR 6 must always send a non-negative integer.
 const MAX_RADIUS: u32 = 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -197,16 +202,35 @@ pub enum Freshness {
     /// The path still names this document and the file matches the size and
     /// mtime recorded at index time.
     Current,
-    /// The path now names a different document: a walk has already re-indexed
-    /// this file. What is shown is what was indexed.
+    /// The cited path now names a **different document**. What is shown is
+    /// what was indexed.
+    ///
+    /// ⚠️ **Two causes, not one**, and the index cannot tell them apart: a
+    /// walk re-indexed the cited copy and `repoint` gave its row to the new
+    /// content hash — or that location was never this document's, and some
+    /// other root simply holds a file of the same relative name. The verdict
+    /// is true either way (the cited path does name another document); only
+    /// the explanation would differ, and this cannot supply it.
+    ///
+    /// Reachable **only** through the fallback branch of `cited_occupant`: the
+    /// first branch selects rows that name this document, so its occupant's
+    /// `current_document_id` always matches and can never produce this.
     Reindexed,
     /// The path still names this document, but the bytes on disk have moved:
     /// no walk has reached it yet. What is shown is what was indexed.
     FileChanged,
     /// Nothing at that path any more (or it cannot be measured).
     FileMissing,
-    /// The document has no `path` row — indexed from inside an archive, or its
-    /// last copy on disk was deleted. Nothing to compare against.
+    /// **The cited location cannot be pinned down** — nothing to compare
+    /// against. Three states reach it, and a caller rendering this tag must
+    /// not say "the file is gone", because two of them are not that:
+    ///
+    /// 1. the citation carried no `relativePath` at all (a document indexed
+    ///    from inside an archive, or whose last copy on disk was deleted);
+    /// 2. no `path` row holds that relative path under any root — the row
+    ///    vanished between the two IPC calls;
+    /// 3. more than one root holds it and nothing distinguishes them, so a
+    ///    verdict would be about a file the user may not have cited.
     NoPath,
 }
 
@@ -226,7 +250,7 @@ pub struct SourceBlock {
 ///
 /// ⚠️ **Do not "fix" this by putting `rename_all` on `Segment` itself.** That
 /// type is *persisted*: `chunk.char_span` stores `serde_json::to_string` of a
-/// `Vec<Segment>` (`write.rs:840`) and the schema reads the stored JSON by key
+/// `Vec<Segment>` (`Db::insert_chunk_in`) and the schema reads the stored JSON by key
 /// — the `CHECK` extracts `$[0].block_id` and the `chunk_span_blocks_bi`
 /// trigger extracts `$.block_id`. Renaming the field would make every stored
 /// row unreadable and both guards blind. The same "local mirror at the seam"
@@ -319,10 +343,21 @@ enum Composed {
 /// 2. failing that, any root holding that path at all — the repoint case,
 ///    where by definition no row names our document any more.
 ///
-/// **More than one candidate in *either* branch is `None`.** The first branch
-/// is not automatically unique: with content addressing the same file under
-/// two watched roots at the same relative path is two legal rows both naming
-/// this document.
+/// **More than one candidate in *either* branch is `None`.**
+///
+/// ⚠️ Read that literally and no further: ambiguity is measured **inside the
+/// branch that ran**, not over the location. Two roots hold `x.md` with
+/// identical bytes — one document, two rows — and the first branch returns
+/// both, so the answer is `None`. Edit one copy: a walk repoints it, the
+/// first branch now returns exactly one root, and the verdict becomes
+/// confident at the moment it should become less so.
+///
+/// That residual is **not fixable by counting**. It is shape-identical to the
+/// case this narrowing exists to answer correctly — two roots holding the same
+/// relative path with *different* content, where the document term is the only
+/// thing that says which row the citation meant. Both are `all = 2,
+/// named = 1`; no rule over those counts separates them. Measured, not
+/// assumed. Left as is, and recorded in §14 so PR 6 knows the contract.
 fn cited_occupant(
     db: &Db,
     document_id: &str,
@@ -352,7 +387,7 @@ fn cited_occupant(
 /// not normalised: the text on the wire is `chunk.text` verbatim —
 /// `AskCitation.text` (`bridge.rs:432`) is `h.text.clone()` (`bridge.rs:556`),
 /// which is `Citation::text`, which is the `chunk.text` column
-/// (`write.rs:894`) — so any loosening only widens what a reused id can pass
+/// (read back by `Db::citation`) — so any loosening only widens what a reused id can pass
 /// as. A `contains` comparison would accept `""` and match every chunk in the
 /// index.
 ///

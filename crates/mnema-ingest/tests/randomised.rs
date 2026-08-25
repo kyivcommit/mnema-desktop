@@ -2039,7 +2039,7 @@ impl World {
     /// cannot see anything the first one does not. It would not be idle
     /// modelling, either: a second root is also the only way this file could
     /// exercise `Db::delete_watched_root`'s own `NOT EXISTS` clause
-    /// (`crates/mnema-index/src/write.rs:172`, the query that decides
+    /// (in `Db::delete_watched_root`, the query that decides
     /// whether a document survives deleting the *other* root — it only ever
     /// has one to compare against here), which nothing random touches today.
     fn check_no_orphan_documents(

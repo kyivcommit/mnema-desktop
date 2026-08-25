@@ -918,7 +918,7 @@ fn the_indexing_job_is_given_its_own_connection_not_the_windows() {
 }
 
 /// The window needs a citation, not a chunk id. `mnema-index` already
-/// re-exports `Citation` and it is `Serialize` (`write.rs:11`), so this
+/// re-exports `Citation` and it is `Serialize` (its derive in `write.rs`), so this
 /// crosses the seam without touching the dependency graph — the seam was
 /// simply never crossed.
 #[test]
@@ -3055,7 +3055,7 @@ fn source_around_admits_a_byte_identical_passage_text() {
 
 /// The other cause, and without it `GoneReason::NoSuchChunk` is a variant
 /// nothing produces. `clear_document_content` cascades the document's pages,
-/// blocks and chunks away (`write.rs:676-685`) and a rebuild has not landed
+/// blocks and chunks away (`Db::clear_document_content_in`) and a rebuild has not landed
 /// yet — the gap a watcher's re-index leaves open between two IPC calls.
 #[test]
 fn source_around_reports_no_such_chunk_when_nothing_carries_the_id() {
@@ -3339,21 +3339,6 @@ fn source_around_returns_the_paragraphs_around_a_cited_passage() {
     assert!(block.get("reading_order").is_none(), "{v}");
 }
 
-/// 🔴 The span that reaches the wire is measured in **characters**, and this
-/// test is red against a byte implementation rather than silently green.
-///
-/// `&str[a..b]` indexes bytes; every offset this pipeline emits is a character
-/// offset — `mnema-chunk` says so in the words of a defect already paid for
-/// once, "a byte-offset implementation passes every test written over ASCII
-/// and then shows itself as a citation quoting the wrong slice of the first
-/// Ukrainian chunk" (`crates/mnema-chunk/src/view.rs:5-9`). The paragraph here
-/// is Cyrillic, so every character before the passage is two bytes and the two
-/// readings cannot coincide.
-///
-/// The assertion is not "the number came back": it is that the slice
-/// `blockStart` names inside the block's own text **is** the passage. That is
-/// what the highlight is painted from, and a number nothing is measured with
-/// is not evidence.
 /// A chunk that spans **two** blocks — the state no fixture in this cycle
 /// built through the IPC, and two mutants lived in the gap.
 ///
@@ -3494,6 +3479,21 @@ fn source_around_covers_every_block_a_multi_block_chunk_spans() {
     );
 }
 
+/// 🔴 The span that reaches the wire is measured in **characters**, and this
+/// test is red against a byte implementation rather than silently green.
+///
+/// `&str[a..b]` indexes bytes; every offset this pipeline emits is a character
+/// offset — `mnema-chunk` says so in the words of a defect already paid for
+/// once, "a byte-offset implementation passes every test written over ASCII
+/// and then shows itself as a citation quoting the wrong slice of the first
+/// Ukrainian chunk" (`crates/mnema-chunk/src/view.rs:5-9`). The paragraph here
+/// is Cyrillic, so every character before the passage is two bytes and the two
+/// readings cannot coincide.
+///
+/// The assertion is not "the number came back": it is that the slice
+/// `blockStart` names inside the block's own text **is** the passage. That is
+/// what the highlight is painted from, and a number nothing is measured with
+/// is not evidence.
 #[test]
 fn source_around_spans_measure_into_the_block_in_characters() {
     // "Ціна оцифрування " is 17 characters and 32 bytes, so a byte reading of
@@ -3920,14 +3920,17 @@ fn source_around_reports_file_changed_when_only_the_mtime_moved() {
 
     let full = corpus.join("dohov-01.md");
     let original = PARAGRAPHS.join("\n\n");
-    // Same character count, so the same byte count: one Cyrillic letter for
-    // another.
-    let edited = original.replacen("дванадцять", "тринадцятеро", 1);
-    let edited = if edited.len() == original.len() {
-        edited
-    } else {
-        original.replacen('і', "и", 1)
-    };
+    // One Cyrillic letter for another of the same UTF-8 width, so the file's
+    // length does not move and only its mtime can. Asserted below rather than
+    // trusted — this fixture's whole job is to isolate one of the two operands
+    // `decide_freshness` compares.
+    let edited = original.replacen('і', "и", 1);
+    assert_eq!(
+        edited.len(),
+        original.len(),
+        "the edit must not change the byte length, or this test cannot tell \
+         a moved mtime from a moved size"
+    );
     std::fs::write(&full, &edited).unwrap();
     let indexed_at = std::fs::metadata(&full).unwrap().modified().unwrap();
     set_mtime(&full, indexed_at - Duration::from_secs(3600));
@@ -4258,6 +4261,152 @@ fn source_around_clamps_an_enormous_radius_to_a_bounded_window() {
     // document.
     assert_eq!(v["hasMoreBefore"], json!(true), "{v}");
     assert_eq!(v["hasMoreAfter"], json!(true), "{v}");
+}
+
+/// The two resolution branches must be **distinguishable**, and until this
+/// test they were not: replacing `cited_occupant`'s whole body with the
+/// fallback alone (`roots_holding_path`) left every other test in this file
+/// green. Found by review, verified by enumerating the fixtures — each of
+/// them has either one root, or two roots where both branches happen to
+/// return the same answer.
+///
+/// Here they diverge. Two roots hold `dohov-01.md`, but with **different**
+/// bytes, so they are two documents and only one of them is the cited one.
+/// Narrowing by document picks that root and the verdict is honest; the
+/// fallback alone would see two candidates and answer `noPath`.
+#[test]
+fn source_around_resolves_the_root_by_document_when_two_roots_share_the_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "3".repeat(64);
+    let other = "4".repeat(64);
+    let (chunk, passage) = state
+        .with_index(|db| {
+            let seeded = write_paragraph_document(
+                db,
+                &doc,
+                &PARAGRAPHS,
+                2,
+                0,
+                PARAGRAPHS[2].chars().count() as u32,
+            );
+
+            // Root A holds the cited document.
+            let corpus_a = dir.path().join("corpus-a");
+            std::fs::create_dir_all(&corpus_a).unwrap();
+            let root_a = db.insert_watched_root(corpus_a.to_str().unwrap())?;
+            record_real_file(
+                db,
+                &corpus_a,
+                root_a,
+                "dohov-01.md",
+                &doc,
+                &PARAGRAPHS.join("\n\n"),
+            );
+
+            // Root B holds a DIFFERENT file at the same relative path. Two
+            // candidates by location, one by document — which is the whole
+            // point: the citation names a path, the anchor names a document,
+            // and together they are unambiguous.
+            let corpus_b = dir.path().join("corpus-b");
+            std::fs::create_dir_all(&corpus_b).unwrap();
+            let root_b = db.insert_watched_root(corpus_b.to_str().unwrap())?;
+            db.insert_document(&other, "text/plain", 1, SourceKind::Document)?;
+            record_real_file(
+                db,
+                &corpus_b,
+                root_b,
+                "dohov-01.md",
+                &other,
+                "зовсім інший текст",
+            );
+
+            Ok::<_, mnema_index::Error>(seeded)
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedRelativePath": "dohov-01.md",
+            "radius": 1,
+        }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(
+        v["freshness"]["kind"],
+        json!("current"),
+        "root A holds the cited document at this path and its file is untouched — the document \
+         term is what disambiguates, and without it this is two candidates and `noPath`: {v}"
+    );
+}
+
+/// The cited path exists nowhere: both branches come back empty.
+///
+/// The everyday shape of it is a row that vanished between the two IPC calls.
+/// Nothing covered it — the neighbouring test named "no path" does not build
+/// this state, it simply omits `citedRelativePath` — so the empty-fallback
+/// arm had no oracle at all.
+#[test]
+fn source_around_reports_no_path_when_no_row_holds_the_cited_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "5".repeat(64);
+    let (chunk, passage) = state
+        .with_index(|db| {
+            let seeded = write_paragraph_document(
+                db,
+                &doc,
+                &PARAGRAPHS,
+                2,
+                0,
+                PARAGRAPHS[2].chars().count() as u32,
+            );
+            let (corpus, root) = watched_corpus(db, dir.path());
+            record_real_file(
+                db,
+                &corpus,
+                root,
+                "dohov-01.md",
+                &doc,
+                &PARAGRAPHS.join("\n\n"),
+            );
+            Ok::<_, mnema_index::Error>(seeded)
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedRelativePath": "nowhere.md",
+            "radius": 1,
+        }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(
+        v["freshness"]["kind"],
+        json!("noPath"),
+        "no row holds that path under any root, so there is nothing to compare against and \
+         nothing may be guessed: {v}"
+    );
 }
 
 /// Two watched roots hold the same file at the same relative path, and a

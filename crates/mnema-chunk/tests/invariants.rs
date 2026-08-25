@@ -592,7 +592,7 @@ fn no_source_character_appears_twice_in_one_chunk() {
 #[test]
 fn spans_are_ordered_and_never_overlap() {
     // These are exactly the conditions `mnema_index::write::validate_locator`
-    // enforces at insert time (`crates/mnema-index/src/write.rs:222-253`).
+    // enforces at insert time (`validate_locator`, called from `insert_chunk_in`).
     // Asserted here so a failure names the chunker rather than the database.
     let join_len = n_chars(JOIN) as u32;
     for case in cases() {

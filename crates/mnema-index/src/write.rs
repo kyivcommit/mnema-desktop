@@ -475,6 +475,13 @@ impl Db {
     /// question `Freshness::Reindexed` is read off, and an empty answer is the
     /// signal to fall back rather than a failure.
     ///
+    /// ⚠️ An empty answer has **two** causes, not the one an earlier draft of
+    /// this comment named: the cited copy was edited and repointed, **or** the
+    /// citation's path was never this document's and belongs to some other
+    /// root's file of the same name. The caller cannot distinguish them, which
+    /// is why `Freshness::Reindexed` is worded as a statement about the path
+    /// rather than about a re-index having happened.
+    ///
     /// `Vec` for the same reason `roots_holding_path` returns one: the same
     /// relative path can exist under two roots, and with content addressing
     /// two copies of one file are one document, so more than one row here is

@@ -87,7 +87,7 @@ pub fn remove_watched_folder(state: State<'_, AppState>, root_id: i64) -> Result
 }
 
 /// The window needs a citation, not a chunk id. `mnema-index` already
-/// re-exports `Citation` and it is `Serialize` (`write.rs:11`), so this
+/// re-exports `Citation` and it is `Serialize` (its derive in `write.rs`), so this
 /// crosses the seam without touching the dependency graph — the seam was
 /// simply never crossed.
 #[derive(Debug, Clone, Serialize)]

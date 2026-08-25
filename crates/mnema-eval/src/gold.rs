@@ -44,7 +44,7 @@ pub(crate) fn canonical(text: &str) -> String {
 /// (`a_doubled_space_in_the_sentence_still_finds_the_chunk`); a hard wrap,
 /// chunk side (`a_line_break_inside_the_chunk_does_not_hide_the_sentence`). The
 /// caller owes chunks of an `indexed` document —
-/// `crates/mnema-index/src/write.rs:812` does not filter by status; task 9's
+/// `Db::chunks_of_document` does not filter by status; task 9's
 /// preflight checks it.
 pub fn resolve_gold(chunks: &[(i64, String)], sentence: &str) -> Gold {
     let needle = canonical(sentence);
