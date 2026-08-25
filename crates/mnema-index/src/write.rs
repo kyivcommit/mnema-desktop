@@ -142,7 +142,7 @@ pub struct RecentDocRow {
 
 /// The chunk's own identity and where it sits in the document's reading
 /// order — PR 5's identity pin plus the anchor `source_around` windows
-/// around. See `docs/private/superpowers/plans/2026-08-25-desktop-pr5-source-around.md`.
+/// around (§12).
 pub struct ChunkAnchor {
     pub document_id: String,
     pub text: String,
@@ -334,6 +334,13 @@ impl Db {
         last_reading_order: i64,
         radius: i64,
     ) -> Result<ReadingWindow, Error> {
+        // A negative radius is nonsense, and silently catastrophic rather than
+        // loud: `LIMIT -1` means *no limit* in SQLite, `radius as usize` wraps
+        // to a huge number so `truncate` does nothing, and `len > -1` makes
+        // both flags true — the whole document returned, with two lies about
+        // it. The command clamps to `1..=MAX_RADIUS`, but this method is `pub`
+        // and its own guard must not depend on that.
+        let radius = radius.max(0);
         let mut anchor_stmt = self.conn().prepare(
             "SELECT b.id, b.type, b.text, p.page_no, b.reading_order
                FROM block b
@@ -441,10 +448,14 @@ impl Db {
     /// exist under two roots, and collapsing that to one would silently pick
     /// a file the user did not cite.
     ///
-    /// A full scan of `path` — accepted for v1, see the plan's Task 5.1 doc
-    /// comment on this method for why neither existing index leads with
-    /// `relative_path`, and why that is fine on the fallback branch this
-    /// runs on.
+    /// ⚠️ **A full scan of `path`.** The only indexes are the primary key
+    /// `(watched_root_id, relative_path)` and `ix_path_document` on
+    /// `document_id`; neither leads with `relative_path`, so a query keyed on
+    /// it alone can use neither. Accepted for v1 — performance is not a
+    /// requirement here — but **do not read this as "it only runs on the
+    /// fallback branch"**: that justification was written before there was a
+    /// way to resolve a root from the document side, and until one exists the
+    /// caller reaches this on the ordinary path too.
     pub fn roots_holding_path(&self, relative_path: &str) -> Result<Vec<i64>, Error> {
         let mut stmt = self.conn().prepare(
             "SELECT watched_root_id FROM path WHERE relative_path = ?1 ORDER BY watched_root_id",

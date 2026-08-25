@@ -2985,6 +2985,16 @@ fn source_around_refuses_a_passage_that_differs_only_in_surrounding_whitespace()
         "the stored text and the echoed passage differ, and only trimming makes them equal — \
          the pin must refuse rather than answer about a chunk it was not asked about: {v}"
     );
+    // The cause matters as much as the refusal. A chunk *does* carry this id,
+    // so `idReused` is the only honest answer; a regression reporting
+    // `noSuchChunk` would satisfy a `kind`-only assertion while the message
+    // above told whoever read it the wrong story.
+    assert_eq!(
+        v["reason"]["kind"],
+        json!("idReused"),
+        "a chunk carries that id — it is simply not this passage — so the refusal must name \
+         which of the two causes it was: {v}"
+    );
     assert!(
         v.get("blocks").is_none(),
         "a refusal must carry no text at all: {v}"

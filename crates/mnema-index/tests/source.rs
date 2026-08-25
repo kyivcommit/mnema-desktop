@@ -85,8 +85,36 @@ fn path_occupant_reports_the_row_as_it_stands() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh(&dir);
 
+    // Inserted FIRST, so it holds the *lower* id: a root predicate widened
+    // from `= ?1` to `<= ?1` then reaches this row instead, which is the
+    // mutant nothing caught while every fixture had a single root. It holds
+    // the same relative path deliberately — the predicate under test is the
+    // root one, so the path must not be what distinguishes them.
+    let other_root = db.insert_watched_root("/tmp/other").unwrap();
+    let other_doc = db
+        .insert_document(&"b".repeat(64), "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    db.insert_path(
+        other_root,
+        "a.txt",
+        &other_doc,
+        OnDisk {
+            size_bytes: 1,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+
     let root = db.insert_watched_root("/tmp/root").unwrap();
+    assert!(
+        other_root < root,
+        "the decoy root must sort before the real one"
+    );
     let doc = db
+        // 10 and 77 differ on purpose: a query reading `document.size_bytes`
+        // instead of `path.size_bytes` would pass if the two matched.
         .insert_document(&"a".repeat(64), "text/plain", 10, SourceKind::Document)
         .unwrap();
     db.insert_path(
@@ -94,7 +122,7 @@ fn path_occupant_reports_the_row_as_it_stands() {
         "a.txt",
         &doc,
         OnDisk {
-            size_bytes: 10,
+            size_bytes: 77,
             mtime: 1234,
         },
         "text",
@@ -109,7 +137,7 @@ fn path_occupant_reports_the_row_as_it_stands() {
     assert_eq!(occupant.watched_root_id, root);
     assert_eq!(occupant.root_absolute_path, "/tmp/root");
     assert_eq!(occupant.relative_path, "a.txt");
-    assert_eq!(occupant.size_bytes, 10);
+    assert_eq!(occupant.size_bytes, 77);
     assert_eq!(occupant.mtime, 1234);
     assert_eq!(occupant.current_document_id, doc);
 }
@@ -226,19 +254,43 @@ fn roots_holding_path_returns_every_root() {
     )
     .unwrap();
 
-    let mut roots = db.roots_holding_path("shared.txt").unwrap();
-    roots.sort();
-    let mut expected = vec![root_a, root_b];
-    expected.sort();
-    assert_eq!(roots, expected);
+    // Not sorted here on purpose: the method's own `ORDER BY watched_root_id`
+    // is what makes the answer deterministic, and sorting both sides would
+    // leave that clause unpinned.
+    let roots = db.roots_holding_path("shared.txt").unwrap();
+    assert_eq!(roots, vec![root_a, root_b]);
+}
+
+/// A second document, inserted **before** the one under test, and it kills two
+/// mutants that survived while every fixture here held exactly one document.
+///
+/// 1. `WHERE b.document_id = ?1` widened to `(… OR 1 = 1)` — a window not
+///    scoped to a document at all — was invisible: with one document, "every
+///    block" and "this document's blocks" are the same set. That mutant is
+///    literally "return another document's paragraphs under the user's
+///    citation", the hazard the whole PR exists to refuse.
+/// 2. `p.page_no` swapped for `p.id` was invisible because pages inserted
+///    first and in order get `id == page_no`. Inserting a decoy first pushes
+///    the real document's page ids past its page numbers, so the two stop
+///    coinciding.
+///
+/// Its blocks carry `reading_order` values that collide with the real
+/// document's, so a query that forgot the document term would interleave them.
+fn insert_decoy_document(db: &Db) {
+    let decoy = db
+        .insert_document(&"d".repeat(64), "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    for page_no in 1..=2 {
+        let page = db.insert_page(&decoy, page_no, "native:txt", None).unwrap();
+        for i in 1..=3 {
+            db.insert_block(page, &block(i, &format!("DECOY p{page_no}b{i}")))
+                .unwrap();
+        }
+    }
 }
 
 // ----------------------------------------------------------------- reading_window
 
-/// Two pages of four blocks each; the anchor is page 2's first block. A
-/// radius of 2 must cross the page boundary and return exactly page 1's last
-/// two blocks before it — not merely "at least one", which a window
-/// returning a single block would also satisfy.
 /// Three pages of three blocks, anchored in the middle, so that **both** sides
 /// of the window cross a page boundary and both `has_more` flags are true.
 ///
@@ -258,6 +310,7 @@ fn roots_holding_path_returns_every_root() {
 fn reading_window_returns_radius_blocks_each_side_in_document_reading_order() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh(&dir);
+    insert_decoy_document(&db);
     let doc = db
         .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
         .unwrap();
@@ -296,6 +349,7 @@ fn reading_window_returns_radius_blocks_each_side_in_document_reading_order() {
 fn reading_window_reports_no_more_when_the_document_ends() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh(&dir);
+    insert_decoy_document(&db);
     let doc = db
         .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
         .unwrap();
@@ -320,6 +374,7 @@ fn reading_window_reports_no_more_when_the_document_ends() {
 fn reading_window_reports_more_before_when_exactly_one_block_is_out_of_range() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh(&dir);
+    insert_decoy_document(&db);
     let doc = db
         .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
         .unwrap();
