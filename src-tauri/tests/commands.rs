@@ -3271,6 +3271,68 @@ fn write_paragraph_document(
 /// `rename_all` on an *enum* renames variants only, so without
 /// `rename_all_fields` this ships `document_id` and `has_more_before` inside a
 /// camelCase payload.
+/// An **asymmetric** window: nothing before the passage, more after it.
+///
+/// Every other IPC fixture in this file returns the two `hasMore` flags with
+/// the same value — `(false, false)`, `(true, true)`, `(true, true)` — so
+/// swapping the two fields where the excerpt is assembled survived the whole
+/// suite. The index-level test that *is* asymmetric never crosses the mapping
+/// in `tree.rs`, so it cannot catch it either.
+///
+/// The loss is not abstract: the mockup's leading "…" is drawn from these
+/// flags, and a swap paints it on the side where there is nothing more.
+#[test]
+fn source_around_reports_more_after_but_not_before_at_the_start_of_a_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "7".repeat(64);
+    // Anchor on paragraph 1 — nothing precedes it — with a radius of 1 while
+    // three paragraphs follow.
+    let (chunk, passage) = state
+        .with_index(|db| {
+            write_decoy_document(db);
+            Ok::<_, mnema_index::Error>(write_paragraph_document(
+                db,
+                &doc,
+                &PARAGRAPHS,
+                0,
+                0,
+                PARAGRAPHS[0].chars().count() as u32,
+            ))
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({ "chunkId": chunk, "passageText": passage, "radius": 1 }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(
+        v["hasMoreBefore"],
+        json!(false),
+        "the anchor is the document's first block, so there is nothing before it: {v}"
+    );
+    assert_eq!(
+        v["hasMoreAfter"],
+        json!(true),
+        "paragraphs 3..5 are beyond a radius of 1: {v}"
+    );
+    let texts: Vec<&str> = v["blocks"]
+        .as_array()
+        .expect("a blocks array")
+        .iter()
+        .map(|b| b["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, vec![PARAGRAPHS[0], PARAGRAPHS[1]], "{v}");
+}
+
 #[test]
 fn source_around_returns_the_paragraphs_around_a_cited_passage() {
     let dir = tempfile::tempdir().unwrap();
@@ -3333,7 +3395,21 @@ fn source_around_returns_the_paragraphs_around_a_cited_passage() {
     assert!(block["blockId"].is_i64(), "{v}");
     assert_eq!(block["kind"], json!("paragraph"), "{v}");
     assert_eq!(block["pageNo"], json!(1), "{v}");
-    assert!(block["readingOrder"].is_i64(), "{v}");
+    // The VALUE, not merely the type. `readingOrder` is what PR 6 may sort or
+    // label by, and nothing else in the tree asserted it: returning `block.id`
+    // in its place compiles, leaves the order, the texts and `pageNo` correct,
+    // and ships rowids as reading order.
+    let orders: Vec<i64> = v["blocks"]
+        .as_array()
+        .expect("a blocks array")
+        .iter()
+        .map(|b| b["readingOrder"].as_i64().expect("an integer readingOrder"))
+        .collect();
+    assert_eq!(
+        orders,
+        vec![2, 3, 4],
+        "the window is paragraphs 2..4 of one page, so these are their reading orders: {v}"
+    );
     assert!(block.get("block_id").is_none(), "{v}");
     assert!(block.get("page_no").is_none(), "{v}");
     assert!(block.get("reading_order").is_none(), "{v}");
@@ -4520,6 +4596,32 @@ fn assert_excerpt_holds_its_passage(v: &Value, passage: &str) {
          window returned beside it does not contain that passage — two statements in one command \
          read two different moments, and these are another passage's paragraphs: {joined:?}"
     );
+
+    // The second half of coherence, and the text check alone cannot see it.
+    // The writer rebuilds the ORIGINAL text every other round, so a torn read
+    // can return a *new* block carrying the *same* text: `joined` then contains
+    // the passage and this looked green, while `spans` still named the block
+    // that was deleted. PR 6 would paint the highlight nowhere, or into the
+    // wrong paragraph.
+    //
+    // Never falsely red: in any coherent slice every span's block is in the
+    // window by construction — `reading_window` takes the anchor blocks as
+    // `reading_order BETWEEN first AND last`, and those two are the MIN and MAX
+    // over exactly the blocks the spans name.
+    let block_ids: Vec<i64> = v["blocks"]
+        .as_array()
+        .expect("an excerpt carries a blocks array")
+        .iter()
+        .map(|b| b["blockId"].as_i64().expect("a blockId"))
+        .collect();
+    for span in v["spans"].as_array().expect("an excerpt carries spans") {
+        let named = span["blockId"].as_i64().expect("a span blockId");
+        assert!(
+            block_ids.contains(&named),
+            "a span names block {named}, which is not among the blocks returned beside it \
+             ({block_ids:?}) — the spans and the window read two different moments"
+        );
+    }
 }
 
 /// Hazard (1) with the rebuild landing *during* the command rather than before
@@ -4657,6 +4759,17 @@ fn a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragra
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let rebuilds = writer_handle.join().expect("the writer thread panicked");
+
+    // The one fact about this run that is NOT machine-dependent, so it is the
+    // one thing asserted rather than printed: the writer stops only after all
+    // 200 IPC round-trips are done, so zero rebuilds means the writer never
+    // ran and these were 200 uncontended calls — a green that proves nothing.
+    // The excerpt/gone split genuinely does depend on timing, which is why it
+    // is printed for a person to read instead.
+    assert!(
+        rebuilds > 0,
+        "the writer never rebuilt once, so nothing raced and this run is not evidence"
+    );
 
     // Read with `-- --nocapture`. Both counts non-zero is what says the fixture
     // reached a racing state at all; one-sided means the guard is decoration
