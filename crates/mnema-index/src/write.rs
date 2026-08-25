@@ -329,19 +329,53 @@ impl Db {
     }
 
     /// The row at one exact location, or `None` when no row is there at all.
+    /// `watched_root` is joined for the absolute path a `stat` needs, so the
+    /// freshness comparison does not pay for a second round trip inside the
+    /// snapshot.
     pub fn path_occupant(
         &self,
         watched_root_id: i64,
         relative_path: &str,
     ) -> Result<Option<PathOccupant>, Error> {
-        let _ = (watched_root_id, relative_path);
-        unimplemented!()
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT p.watched_root_id, wr.absolute_path, p.relative_path,
+                        p.size_bytes, p.mtime, p.document_id
+                   FROM path p
+                   JOIN watched_root wr ON wr.id = p.watched_root_id
+                  WHERE p.watched_root_id = ?1 AND p.relative_path = ?2",
+                params![watched_root_id, relative_path],
+                |r| {
+                    Ok(PathOccupant {
+                        watched_root_id: r.get(0)?,
+                        root_absolute_path: r.get(1)?,
+                        relative_path: r.get(2)?,
+                        size_bytes: r.get(3)?,
+                        mtime: r.get(4)?,
+                        current_document_id: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
-    /// Which root a document's cited copy sits under.
+    /// Which root a document's cited copy sits under, so a caller can turn a
+    /// bare `relative_path` from a citation into the `(root, path)` pair
+    /// `path_occupant` needs. `Vec`, not `Option`: the same relative path can
+    /// exist under two roots, and collapsing that to one would silently pick
+    /// a file the user did not cite.
+    ///
+    /// A full scan of `path` — accepted for v1, see the plan's Task 5.1 doc
+    /// comment on this method for why neither existing index leads with
+    /// `relative_path`, and why that is fine on the fallback branch this
+    /// runs on.
     pub fn roots_holding_path(&self, relative_path: &str) -> Result<Vec<i64>, Error> {
-        let _ = relative_path;
-        unimplemented!()
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT watched_root_id FROM path WHERE relative_path = ?1 ORDER BY watched_root_id")?;
+        let rows = stmt.query_map(params![relative_path], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn insert_watched_root(&self, absolute_path: &str) -> Result<i64, Error> {
