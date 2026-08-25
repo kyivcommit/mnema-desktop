@@ -316,6 +316,16 @@ impl Db {
 
     /// The blocks around a reading-order range, plus whether more exist on
     /// each side.
+    ///
+    /// Document reading order is `(page.page_no, block.reading_order)`, not
+    /// `reading_order` alone — that column is unique only per page
+    /// (`ix_block_page`, `schema.sql:140`) — so the before/after queries below
+    /// compare against that pair with a SQLite row-value comparison and cross
+    /// page boundaries by construction.
+    ///
+    /// Each side is `LIMIT radius + 1`, trimmed to `radius`, with the flag set
+    /// from whether the extra row arrived — not a separate `COUNT(*)`, so the
+    /// two halves of one question cannot come to disagree.
     pub fn reading_window(
         &self,
         document_id: &str,
@@ -324,8 +334,73 @@ impl Db {
         last_reading_order: i64,
         radius: i64,
     ) -> Result<ReadingWindow, Error> {
-        let _ = (document_id, page_no, first_reading_order, last_reading_order, radius);
-        unimplemented!()
+        let mut anchor_stmt = self.conn().prepare(
+            "SELECT b.id, b.type, b.text, p.page_no, b.reading_order
+               FROM block b
+               JOIN page p ON p.id = b.page_id
+              WHERE b.document_id = ?1 AND p.page_no = ?2
+                AND b.reading_order BETWEEN ?3 AND ?4
+              ORDER BY b.reading_order",
+        )?;
+        let anchor_blocks = anchor_stmt
+            .query_map(
+                params![
+                    document_id,
+                    page_no,
+                    first_reading_order,
+                    last_reading_order
+                ],
+                source_block_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let limit = radius + 1;
+        let mut before_stmt = self.conn().prepare(
+            "SELECT b.id, b.type, b.text, p.page_no, b.reading_order
+               FROM block b
+               JOIN page p ON p.id = b.page_id
+              WHERE b.document_id = ?1 AND (p.page_no, b.reading_order) < (?2, ?3)
+              ORDER BY p.page_no DESC, b.reading_order DESC
+              LIMIT ?4",
+        )?;
+        // Closest-first (descending); the (radius+1)-th row, if present, only
+        // says "there is more" and is never part of the returned window.
+        let mut before = before_stmt
+            .query_map(
+                params![document_id, page_no, first_reading_order, limit],
+                source_block_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more_before = before.len() as i64 > radius;
+        before.truncate(radius as usize);
+        before.reverse();
+
+        let mut after_stmt = self.conn().prepare(
+            "SELECT b.id, b.type, b.text, p.page_no, b.reading_order
+               FROM block b
+               JOIN page p ON p.id = b.page_id
+              WHERE b.document_id = ?1 AND (p.page_no, b.reading_order) > (?2, ?3)
+              ORDER BY p.page_no ASC, b.reading_order ASC
+              LIMIT ?4",
+        )?;
+        let mut after = after_stmt
+            .query_map(
+                params![document_id, page_no, last_reading_order, limit],
+                source_block_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more_after = after.len() as i64 > radius;
+        after.truncate(radius as usize);
+
+        let mut blocks = before;
+        blocks.extend(anchor_blocks);
+        blocks.extend(after);
+
+        Ok(ReadingWindow {
+            blocks,
+            has_more_before,
+            has_more_after,
+        })
     }
 
     /// The row at one exact location, or `None` when no row is there at all.
@@ -371,9 +446,9 @@ impl Db {
     /// `relative_path`, and why that is fine on the fallback branch this
     /// runs on.
     pub fn roots_holding_path(&self, relative_path: &str) -> Result<Vec<i64>, Error> {
-        let mut stmt = self
-            .conn()
-            .prepare("SELECT watched_root_id FROM path WHERE relative_path = ?1 ORDER BY watched_root_id")?;
+        let mut stmt = self.conn().prepare(
+            "SELECT watched_root_id FROM path WHERE relative_path = ?1 ORDER BY watched_root_id",
+        )?;
         let rows = stmt.query_map(params![relative_path], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -1086,6 +1161,18 @@ impl Db {
         }
         Ok(out)
     }
+}
+
+/// Maps one row of the `block JOIN page` shape `reading_window`'s three
+/// queries share into a [`SourceBlockRow`].
+fn source_block_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SourceBlockRow> {
+    Ok(SourceBlockRow {
+        block_id: r.get(0)?,
+        kind: r.get(1)?,
+        text: r.get(2)?,
+        page_no: r.get(3)?,
+        reading_order: r.get(4)?,
+    })
 }
 
 /// Panics unless `tx` is a transaction on `db`'s own connection.
