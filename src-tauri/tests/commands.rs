@@ -4483,3 +4483,175 @@ fn source_around_reports_no_path_when_two_roots_hold_the_cited_path() {
         "an unresolvable location is not a refusal — the indexed text still comes back: {v}"
     );
 }
+
+/// The excerpt is coherent with the pin that let it through, or it is a
+/// refusal. That is the whole oracle, and it is deliberately not an *order*.
+///
+/// [`assert_coherent_or_absent`]'s Round-3 reasoning applies verbatim one level
+/// up. Which state a racing call reflects is the race's business: a call that
+/// loses it outright and answers `Gone` has seen one coherent moment and is not
+/// a defect, and demanding a particular winner would false-red on exactly that.
+/// What can never be true is an `Excerpt` whose own blocks do not contain the
+/// passage it was pinned to — the assertion is conditioned on the same fact
+/// that made the response possible, since an excerpt exists *only* because
+/// `chunk.text == passageText` at the moment the pin read it, so a window read
+/// from that same moment must hold that text. If it does not, two statements
+/// inside one command read two different moments and the user is looking at
+/// another passage's paragraphs under their own citation.
+///
+/// ⚠️ **The blocks are compared joined, not one by one.** "Some block contains
+/// the passage" is only equivalent for a single-block chunk; a passage spanning
+/// two blocks is contained in neither alone, and a future multi-block fixture
+/// would silently invert an oracle written the other way.
+fn assert_excerpt_holds_its_passage(v: &Value, passage: &str) {
+    if v["kind"] != json!("excerpt") {
+        return;
+    }
+    let joined = v["blocks"]
+        .as_array()
+        .expect("an excerpt carries a blocks array")
+        .iter()
+        .map(|b| b["text"].as_str().expect("a block text"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains(passage),
+        "the excerpt exists only because the pin read {passage:?} as this chunk's text, but the \
+         window returned beside it does not contain that passage — two statements in one command \
+         read two different moments, and these are another passage's paragraphs: {joined:?}"
+    );
+}
+
+/// Hazard (1) with the rebuild landing *during* the command rather than before
+/// it — the last thing the deterministic pin tests cannot reach.
+///
+/// [`source_around_refuses_a_chunk_id_a_rebuild_has_handed_to_other_text`]
+/// proves the pin against a rebuild that has already committed. It says nothing
+/// about a rebuild that commits *between* the pin's own `chunk_anchor` read and
+/// the `reading_window` read that follows it. Under one
+/// [`mnema_index::Db::read_snapshot`] those two statements see one moment and
+/// the excerpt carries the paragraphs of the passage the pin let through;
+/// without it they can see two, and the answer is the new chunk's
+/// neighbourhood under the user's citation. See
+/// [`assert_excerpt_holds_its_passage`] for why the oracle is coherence.
+///
+/// **Two fixture constraints, both found by review before this was written.**
+///
+/// 1. The writer must not rebuild the *same* text every round. Rebuild with the
+///    original and the pin passes every single time, `Gone` never occurs, and
+///    the "both outcomes" requirement then fails for a reason that has nothing
+///    to do with the code. It alternates instead — the original text, then a
+///    replacement unique to its round — so consecutive rounds always differ and
+///    both outcomes stay reachable for the whole run.
+/// 2. The oracle is valid only for a single-block chunk, and
+///    [`rebuild_one_chunk`] mints exactly one block and one single-`Segment`
+///    chunk. The joined-blocks comparison keeps that from being a hidden
+///    premise.
+///
+/// **The distribution is recorded, not asserted, and that is deliberate.** This
+/// is an unsynchronised thread race: how it falls is machine-dependent, and a
+/// fast runner can win or lose every round. So the assertion fails *only* on an
+/// incoherent excerpt, never on the distribution — a one-sided run is not a red
+/// build, it is a silent loss of coverage, which is why the counts are printed
+/// for a person to read into the ledger rather than asserted here
+/// ([gate-reached-by-accident]).
+#[test]
+fn a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragraphs() {
+    const ORIGINAL: &str = "Ціна оцифрування одного аркуша становить дві гривні.";
+    // The reader's calls. Fixed here rather than tuned when it flakes.
+    const ROUNDS: usize = 200;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    // The window and this writer are two connections on one file — the running
+    // indexing job's shape, the same arrangement the search and `list_tree`
+    // race fixtures rely on.
+    let writer = mnema_index::open(&path).unwrap();
+    let doc = "3".repeat(64);
+    let target = write_one_document(&writer, &doc, ORIGINAL);
+
+    // The fixture is the hazard only if SQLite hands the chunk rowid back after
+    // a rebuild. If it did not, every call below would answer `noSuchChunk`,
+    // the excerpt arm would never run, and a green race would mean nothing.
+    // Asserted loudly rather than skipped with a `return`.
+    writer.clear_document_content(&doc).unwrap();
+    let again = rebuild_one_chunk(&writer, &doc, ORIGINAL);
+    assert_eq!(
+        again, target,
+        "SQLite did not hand the chunk rowid back, so this fixture cannot reach the id-reuse \
+         hazard it races against"
+    );
+
+    // Control, before the writer thread exists to race against: the command
+    // answers with a coherent excerpt on its own, so anything below can only be
+    // the race.
+    let control = call(
+        &webview,
+        "source_around",
+        json!({ "chunkId": target, "passageText": ORIGINAL, "radius": 1 }),
+    )
+    .expect("source_around was rejected");
+    assert_eq!(
+        control["kind"],
+        json!("excerpt"),
+        "the fixture must answer with an excerpt before anything races it: {control}"
+    );
+    assert_excerpt_holds_its_passage(&control, ORIGINAL);
+
+    // The writer runs until the reader is done rather than for a fixed count:
+    // two DB writes are far cheaper than a full IPC round trip, so a
+    // fixed-count writer would finish early and leave most of the reader's
+    // calls running against a settled index — a green run with no race in it.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer_stop = std::sync::Arc::clone(&stop);
+    let writer_doc = doc.clone();
+    let writer_handle = std::thread::spawn(move || {
+        let mut round = 0usize;
+        while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let text = if round.is_multiple_of(2) {
+                ORIGINAL.to_string()
+            } else {
+                // Unique to the round, so no two consecutive rebuilds write the
+                // same text and the pin has something to refuse.
+                format!("Ставка залишається незмінною, редакція {round}.")
+            };
+            writer
+                .clear_document_content(&writer_doc)
+                .expect("clear the target document");
+            rebuild_one_chunk(&writer, &writer_doc, &text);
+            round += 1;
+        }
+        round
+    });
+
+    let mut excerpts = 0usize;
+    let mut refusals = 0usize;
+    for _ in 0..ROUNDS {
+        let v = call(
+            &webview,
+            "source_around",
+            json!({ "chunkId": target, "passageText": ORIGINAL, "radius": 1 }),
+        )
+        .expect("source_around was rejected");
+        match v["kind"].as_str().expect("a kind tag") {
+            "excerpt" => excerpts += 1,
+            "gone" => refusals += 1,
+            other => panic!("source_around answered with an unknown variant {other:?}: {v}"),
+        }
+        assert_excerpt_holds_its_passage(&v, ORIGINAL);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let rebuilds = writer_handle.join().expect("the writer thread panicked");
+
+    // Read with `-- --nocapture`. Both counts non-zero is what says the fixture
+    // reached a racing state at all; one-sided means the guard is decoration
+    // this run, and that goes in the ledger rather than passing as a green.
+    eprintln!(
+        "source_around race: {ROUNDS} calls -> excerpt={excerpts} gone={refusals}; \
+         writer rebuilt {rebuilds} times"
+    );
+}
