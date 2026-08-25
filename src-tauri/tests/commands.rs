@@ -3354,6 +3354,146 @@ fn source_around_returns_the_paragraphs_around_a_cited_passage() {
 /// `blockStart` names inside the block's own text **is** the passage. That is
 /// what the highlight is painted from, and a number nothing is measured with
 /// is not evidence.
+/// A chunk that spans **two** blocks — the state no fixture in this cycle
+/// built through the IPC, and two mutants lived in the gap.
+///
+/// The chunker can end a chunk mid-paragraph and carry it into the next, so
+/// `char_span` holds one `Segment` per source block (`mnema-core/src/locator.rs`)
+/// and `ChunkAnchor` reports a `first_reading_order`/`last_reading_order`
+/// **range**. Every other `source_around` test uses a single-segment chunk,
+/// where first == last and one span is all there is — so collapsing the range
+/// to its first block, or truncating `spans` to its first element, changed
+/// nothing any test could see. Both are real losses: the first drops the
+/// paragraph the passage ends in, the second drops a highlight the card is
+/// supposed to paint.
+///
+/// The schema pins both anchor blocks to one page (`chunk_span_blocks_bi`), so
+/// this is the widest anchor the index can hold, not an invented one.
+#[test]
+fn source_around_covers_every_block_a_multi_block_chunk_spans() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    // Blocks 2 and 3 of PARAGRAPHS, joined: the chunk starts inside block 2
+    // and runs to the end of block 3.
+    let head: String = PARAGRAPHS[1].chars().skip(17).collect();
+    let tail = PARAGRAPHS[2].to_string();
+    let passage = format!("{head}{tail}");
+    let head_chars = head.chars().count() as u32;
+    let tail_chars = tail.chars().count() as u32;
+
+    let doc = "6".repeat(64);
+    let chunk = state
+        .with_index(|db| {
+            write_decoy_document(db);
+            db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
+            let page = db.insert_page(&doc, 1, "native:txt", Some("Розділ перший"))?;
+            let blocks: Vec<i64> = PARAGRAPHS
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    db.insert_block(
+                        page,
+                        &Block {
+                            block_type: BlockType::Paragraph,
+                            reading_order: i as i64 + 1,
+                            language: None,
+                            text: (*text).to_string(),
+                            line_start: None,
+                            line_end: None,
+                        },
+                    )
+                })
+                .collect::<Result<_, _>>()?;
+            let chunk = db.insert_chunk(
+                &doc,
+                0,
+                &passage,
+                &Locator {
+                    spans: vec![
+                        Segment {
+                            block_id: blocks[1],
+                            start: 0,
+                            end: head_chars,
+                            block_start: 17,
+                        },
+                        Segment {
+                            block_id: blocks[2],
+                            start: head_chars,
+                            end: head_chars + tail_chars,
+                            block_start: 0,
+                        },
+                    ],
+                    coordinate: Coordinate::None,
+                },
+                SourceKind::Document,
+            )?;
+            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
+            Ok::<_, mnema_index::Error>(chunk)
+        })
+        .unwrap();
+
+    // radius 1: one block either side of the anchor's TWO blocks.
+    let v = call(
+        &webview,
+        "source_around",
+        json!({ "chunkId": chunk, "passageText": passage, "radius": 1 }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+
+    // Both anchor blocks are in the window, and so is one block either side.
+    // Asserted as an exact list: "contains paragraph 3" is satisfied by a
+    // window that dropped paragraph 2, which is the mutant.
+    let texts: Vec<&str> = v["blocks"]
+        .as_array()
+        .expect("blocks")
+        .iter()
+        .map(|b| b["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        texts,
+        vec![PARAGRAPHS[0], PARAGRAPHS[1], PARAGRAPHS[2], PARAGRAPHS[3]],
+        "the window must span both of the anchor's blocks, not just its first: {v}"
+    );
+
+    // One span per source block, each measuring into its OWN block.
+    let spans = v["spans"].as_array().expect("spans");
+    assert_eq!(
+        spans.len(),
+        2,
+        "a chunk over two blocks needs two spans, or the card paints one \
+         highlight where the passage has two: {v}"
+    );
+    assert_eq!(spans[0]["blockStart"], json!(17), "{v}");
+    assert_eq!(spans[1]["blockStart"], json!(0), "{v}");
+    assert_eq!(spans[0]["end"], json!(head_chars), "{v}");
+    assert_eq!(spans[1]["end"], json!(head_chars + tail_chars), "{v}");
+
+    // And the slices they name, in characters, reassemble the passage.
+    let slice_of = |ix: usize, block_ix: usize| -> String {
+        let sp = &spans[ix];
+        let start = sp["blockStart"].as_u64().unwrap() as usize;
+        let len = (sp["end"].as_u64().unwrap() - sp["start"].as_u64().unwrap()) as usize;
+        v["blocks"][block_ix]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .skip(start)
+            .take(len)
+            .collect()
+    };
+    assert_eq!(
+        format!("{}{}", slice_of(0, 1), slice_of(1, 2)),
+        passage,
+        "the two spans must reassemble the passage out of their own blocks: {v}"
+    );
+}
+
 #[test]
 fn source_around_spans_measure_into_the_block_in_characters() {
     // "Ціна оцифрування " is 17 characters and 32 bytes, so a byte reading of
