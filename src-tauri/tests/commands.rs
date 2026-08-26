@@ -996,6 +996,15 @@ fn search_returns_citations_not_ids() {
     assert!(!hits.is_empty());
     assert!(hits[0]["text"].as_str().unwrap().contains("fox"));
     assert!(hits[0]["relativePath"].is_string());
+    // Pins `retrieve`'s `Hit` construction: the walked file sits under
+    // exactly one watched root, so `Citation::root_id` — and `Hit::root_id`
+    // echoing it — must name that root, not a hardcoded or blanked stand-in
+    // (owner review, F1 on PR #23).
+    assert_eq!(
+        hits[0]["rootId"],
+        json!(root),
+        "rootId must name the watched root the walked file sits under: {answer}"
+    );
     // A real count, not a placeholder: `matched: chunks.len()` in
     // `bridge.rs`'s `From<TextArm>` mutated to `matched: 0` must fail this
     // specific assertion, not merely the non-empty check above.
@@ -1676,6 +1685,29 @@ fn ask_maps_each_anchor_to_the_right_citation_and_generates() {
             ))
         })
         .unwrap();
+    // The second document sits under exactly one watched root — the
+    // fixture the `rootId` assertion below needs, so the seam from
+    // `retrieve`'s `Hit` construction through `ask`'s `AskCitation`
+    // construction is not left to the two `document_id`/`ord` assertions
+    // alone (owner review, F1 on PR #23).
+    let root = state
+        .with_index(|db| {
+            use mnema_core::OnDisk;
+            let root = db.insert_watched_root("/tmp/ask-citation-identity")?;
+            db.insert_path(
+                root,
+                "b.txt",
+                &"b".repeat(64),
+                OnDisk {
+                    size_bytes: 1,
+                    mtime: 1,
+                },
+                "text",
+                1,
+            )?;
+            Ok::<_, mnema_index::Error>(root)
+        })
+        .unwrap();
 
     let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
         .expect("ask was rejected");
@@ -1710,6 +1742,13 @@ fn ask_maps_each_anchor_to_the_right_citation_and_generates() {
         citations[0]["ord"],
         json!(0),
         "ord must be read from the chunk's own row, not hardcoded: {answer}"
+    );
+    assert_eq!(
+        citations[0]["rootId"],
+        json!(root),
+        "rootId must name the watched root the SECOND document's path is \
+         under, not a hardcoded or blanked value smuggled through \
+         Hit/AskCitation (owner review, F1 on PR #23): {answer}"
     );
 }
 

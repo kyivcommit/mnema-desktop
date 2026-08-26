@@ -432,8 +432,8 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
 }
 
 /// A citation in a generated answer: the existing [`Hit`], plus which anchor
-/// resolved to it. Not the server's `Citation` (no `document_id`/`bbox`/
-/// `snippet`/verify fields — spec §6): the desktop set.
+/// resolved to it. Not the server's `Citation` (no `bbox`/`snippet`/verify
+/// fields — spec §6, D124): the desktop set.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AskCitation {

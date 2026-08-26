@@ -351,9 +351,11 @@ enum Composed {
 /// no single honest one.
 ///
 /// **Keyed on the cited location — now the cited *root*, when the citation
-/// carries one — and on nothing else.** A citation minted since Task 1 carries
-/// `rootId` (`AskCitation::root_id`); one minted before it, or one the client sends
-/// with `citedRootId: null`, falls back to the location-only rule this
+/// carries one — and on nothing else.** A citation carries `rootId`
+/// (`AskCitation::root_id`) whenever its chunk's document sits under exactly
+/// one watched root; `citedRootId: null` is not a stale client but the
+/// legitimate answer for zero or several roots (`Citation::root_id`,
+/// `write.rs:95-106`), and falls back to the location-only rule this
 /// function used before that field existed. Keying on the document instead of
 /// the location is wrong in a way that took two reviews to see — after a walk
 /// repoints an edited copy, `WHERE document_id = ?` no longer sees that copy at
@@ -389,9 +391,11 @@ fn cited_occupant(
     };
     match cited_root_id {
         Some(root) => db.path_occupant(root, relative_path),
-        // No root on the citation — a citation minted before this field
-        // existed, or one the caller genuinely could not name one root for.
-        // Unchanged fallback: exactly one root holds the path, or no verdict.
+        // No root on the citation — its chunk's document names zero or
+        // several distinct watched roots, so `Citation::root_id` was `None`
+        // when this citation was minted (`write.rs:95-106`), not a citation
+        // from before the field existed. Unchanged fallback: exactly one root
+        // holds the path, or no verdict.
         None => {
             let roots = db.roots_holding_path(relative_path)?;
             let [root] = roots.as_slice() else {
@@ -549,8 +553,10 @@ fn decide_freshness(occupant: Option<&PathOccupant>, document_id: &str) -> Fresh
 /// exactly, never defaulted or skipped when absent: a client that could omit
 /// them would turn the pin off for itself, silently. `cited_root_id` is the
 /// odd one out and stays `Option`: it feeds `Freshness` only (via
-/// `cited_occupant`), never the refusal above, so a citation minted before
-/// this field existed can still ask and still get a verdict — a degraded one,
+/// `cited_occupant`), never the refusal above, because it is legitimately
+/// absent whenever the chunk's document sits under zero or several distinct
+/// watched roots (`Citation::root_id`, `write.rs:95-106`) — a citation for
+/// such a document can still ask and still get a verdict, a degraded one,
 /// through the fallback `cited_occupant` keeps for exactly that case.
 ///
 /// Eight parameters mirrors the wire contract (§10) one field at a time —
