@@ -5,7 +5,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'search_placeholder' | 'query_blank' | 'query_too_long' | 'query_failed'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'arm_text' | 'arm_content'
-  | 'card_tree' | 'card_answer' | 'card_source';
+  | 'card_tree' | 'card_answer' | 'card_source'
+  | 'no_path_on_disk' | 'answer_heading' | 'citations_heading';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
@@ -23,6 +24,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
     arm_text: 'текст', arm_content: 'зміст',
     card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
+    no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
   },
   en: {
     pin: 'Pin',
@@ -39,5 +41,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
     arm_text: 'text', arm_content: 'content',
     card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
+    no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
   },
 };
