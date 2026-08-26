@@ -149,7 +149,11 @@ test('two citations in one paragraph paint two highlights, from two calls merged
 });
 
 test('a sibling from another document is not fetched and does not paint', async () => {
-  mockSourceFor({ 42: excerptSpanA });
+  // Chunk 9 is `hitOtherDocument`'s, and it is mocked even though this test
+  // asserts it is never asked. Without it the forbidden call THROWS under the
+  // probe, the card renders its failure state, and the test reddens on a missing
+  // `hl` instead of on the call count that names its claim (R3).
+  mockSourceFor({ 42: excerptSpanA, 9: { ...excerptSpanA, documentId: 'doc-2' } });
   // hitOtherDocument is 'doc-2'; the clicked citation is 'doc-1'.
   render(Source, { selected: citationA, siblings: [citationA, hitOtherDocument] });
 
@@ -481,6 +485,96 @@ test('a stale sibling does not drive data-pending to zero while the current call
   expect(screen.queryByTestId('source-loading')).toBeNull();
 });
 
+// --- a new selection starts clean (R1) --------------------------------------
+//
+// 🔴 The effect's reset block is one rule — a new selection starts clean — and it
+// is four assignments. Three of them could be deleted with the whole suite green.
+// Each has its own test below, so each line falls alone and on its own claim; a
+// latched flag is the worst failure shape this card has, because it survives
+// every later click and the suite stays green through all of them.
+
+test('a new selection does not show the previous one\'s text while its own answer is in flight', async () => {
+  const second = deferred<SourceAround>();
+  invoke.mockResolvedValueOnce(excerptSpanA).mockImplementationOnce(() => second.promise);
+
+  const { rerender } = render(Source, { selected: citationA, siblings: [citationA] });
+  await settled();
+  expect(screen.getByTestId('source-body').textContent).toContain(SPAN_A_TEXT);
+
+  await rerender({ selected: citationB, siblings: [citationB] });
+  await flush();
+  // `answer = null`: the card is loading, not still showing the previous
+  // citation's paragraphs under the new citation's header.
+  expect(screen.getByTestId('source-loading')).toBeTruthy();
+  expect(screen.queryByTestId('source-block')).toBeNull();
+  expect(screen.queryByTestId('hl')).toBeNull();
+
+  // Both directions: the new answer does arrive and does replace it.
+  second.resolve({ ...excerptSpanA, spans: [] });
+  await settled();
+  expect(screen.queryByTestId('source-loading')).toBeNull();
+  expect(screen.getByTestId('source-body').textContent).toContain(SPAN_A_TEXT);
+});
+
+test('a good citation clicked after a failed one clears the failure message', async () => {
+  invoke
+    .mockRejectedValueOnce(new Error('source_around failed'))
+    .mockResolvedValueOnce(excerptSpanA);
+
+  const { rerender } = render(Source, { selected: citationA, siblings: [citationA] });
+  await settled();
+  expect(screen.getByTestId('source-failed')).toBeTruthy();
+
+  await rerender({ selected: citationB, siblings: [citationB] });
+  await settled();
+  // `failed = false`: latched, this message covers a working card for the rest
+  // of the session.
+  expect(screen.queryByTestId('source-failed')).toBeNull();
+  expect(screen.getByTestId('freshness').textContent).toBe('Up to date');
+  expect(screen.getByTestId('source-body').textContent).toContain(SPAN_A_TEXT);
+});
+
+// Given by the re-review, validated as passing on `1967f1b` unmodified.
+test('a good citation clicked after a mismatched one shows its text again', async () => {
+  invoke.mockImplementation((_cmd: string, args: { chunkId: number }) =>
+    Promise.resolve(args?.chunkId === 42 ? { ...excerptSpanA, documentId: 'doc-999' } : excerptSpanA));
+
+  const { rerender } = render(Source, { selected: citationA, siblings: [citationA] });
+  await settled();
+  expect(screen.getByTestId('freshness').textContent).toBe(
+    'This excerpt came from a different document than the citation',
+  );
+
+  await rerender({ selected: citationB, siblings: [citationB] }); // a good one
+  await settled();
+  // `mismatched = false`: latched, this card shows the wrong-document badge and
+  // NO text for every citation clicked afterwards — its own purpose, inverted.
+  expect(screen.getByTestId('freshness').textContent).toBe('Up to date');
+  expect(screen.getByTestId('source-body').textContent).toContain(SPAN_A_TEXT);
+  expect(screen.getAllByTestId('hl')).toHaveLength(1);
+});
+
+test('a previous selection\'s sibling highlight does not survive into the next one', async () => {
+  invoke
+    .mockResolvedValueOnce(excerptSpanA) // click 1, clicked
+    .mockResolvedValueOnce(excerptSpanB) // click 1, sibling — its span is on block 11
+    .mockResolvedValueOnce({ ...excerptSpanA, spans: [] }); // click 2, clicked: block 11 again, no spans
+
+  const { rerender } = render(Source, { selected: citationA, siblings: [citationA, citationB] });
+  await settled();
+  expect(marks()).toHaveLength(2);
+
+  await rerender({ selected: citationB, siblings: [citationB] });
+  await settled();
+  // `siblingSpans = []`: the leftover span is for a block the NEW window also
+  // holds, so it would paint — the previous citation's highlight on this one's
+  // text, which is the failure this whole PR exists to prevent.
+  expect(screen.queryByTestId('hl')).toBeNull();
+  // Both directions: the new excerpt's own text is on screen, so "no highlight"
+  // is not "no card".
+  expect(screen.getByTestId('source-body').textContent).toContain(SPAN_A_TEXT);
+});
+
 // --- the header, the failure and the language switch ------------------------
 
 // Ruling S: this header and `Answer`'s preview label are ONE rule (Decision 1),
@@ -491,12 +585,20 @@ test('the card header names the file by the same three branches as the preview l
     [firstCitation(generatedArchived), /p\. 12/, /no path/i],
     [firstCitation(generatedNoPath), /no path on disk/i, /·/],
   ] as const) {
-    mockSource(excerptSpanA);
+    // The excerpt must agree with the citation it is mocked for: `excerptSpanA`
+    // is 'doc-1', while two of these three citations are 'doc-3' and 'doc-4', so
+    // an unadjusted mock would put both of those iterations on M2's error card
+    // and couple this test's `settled()` to M2's reset (R2).
+    mockSource({ ...excerptSpanA, documentId: citation.documentId });
     const { unmount } = render(Source, { selected: citation, siblings: [citation] });
 
     // Settle the card first: an assertion read off a still-pending render is
     // green for a reason that has nothing to do with the header.
     await settled();
+    // And pin that it settled onto the REAL card: if the mock above ever drifts
+    // back to a fixed 'doc-1', two of these three iterations silently move to
+    // M2's error card and this loop stops exercising what its name says (R2).
+    expect(screen.getByTestId('freshness').textContent, citation.documentId).toBe('Up to date');
     const header = screen.getByTestId('source-header').textContent!.trim();
     expect(header, citation.documentId).toMatch(expected);
     expect(header, citation.documentId).not.toMatch(forbidden);
