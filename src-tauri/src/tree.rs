@@ -350,13 +350,15 @@ enum Composed {
 /// The `path` row the freshness verdict is read off, or `None` when there is
 /// no single honest one.
 ///
-/// **Keyed on the cited location, and on nothing else.** A citation carries a
-/// `relative_path` but no root (`bridge.rs:433`), so the rule is blunt: exactly
-/// one `path` row at that relative path, or `None`. Keying on the document
-/// instead is wrong in a way that took two reviews to see — after a walk
+/// **Keyed on the cited location — now the cited *root*, when the citation
+/// carries one — and on nothing else.** A citation minted since Task 1 carries
+/// `rootId` (`bridge.rs:433`); one minted before it, or one the client sends
+/// with `citedRootId: null`, falls back to the location-only rule this
+/// function used before that field existed. Keying on the document instead of
+/// the location is wrong in a way that took two reviews to see — after a walk
 /// repoints an edited copy, `WHERE document_id = ?` no longer sees that copy at
-/// all and returns some other, untouched one, reporting `Current` for a passage
-/// whose cited copy is stale.
+/// all and returns some other, untouched one, reporting `Current` for a
+/// passage whose cited copy is stale.
 ///
 /// 🔴 **Narrowing the candidates by document is deliberately gone, and this is
 /// the second decision, not a restatement of the first.** An earlier version
@@ -369,39 +371,62 @@ enum Composed {
 /// rule over those counts separates them — which is the argument *for* the
 /// blunt rule, not against it.
 ///
-/// ⚠️ **The cost is real and larger than "a verdict withheld".** Two watched
-/// roots that share a relative path — two note folders each holding a
-/// `README.md` — now yield `NoPath` for every citation out of such a file,
-/// permanently, including cases the old narrowing answered correctly. It is
-/// latent today (PR 6 is the first consumer), and the proper fix is to carry
-/// the **root** in the citation, which PR 6 must do anyway for the identity the
-/// same review asked for. Booked there, not left as a silent trade.
+/// **PR 6 closes the cost the doc comment above used to book here.** Two
+/// watched roots that share a relative path — two note folders each holding a
+/// `README.md` — no longer lose the verdict permanently: a citation minted
+/// with `rootId` names which of the two copies was cited, and `path_occupant`
+/// is asked about that one directly, skipping the ambiguity scan below
+/// entirely. Only a citation with no root to name — `citedRootId: null` — still
+/// falls back to the blunt "exactly one candidate, or `None`" rule, which is
+/// unchanged from before this PR.
 fn cited_occupant(
     db: &Db,
+    cited_root_id: Option<i64>,
     cited_relative_path: Option<&str>,
 ) -> Result<Option<PathOccupant>, mnema_index::Error> {
     let Some(relative_path) = cited_relative_path else {
         return Ok(None);
     };
-    let roots = db.roots_holding_path(relative_path)?;
-    let [root] = roots.as_slice() else {
-        return Ok(None);
-    };
-    db.path_occupant(*root, relative_path)
+    match cited_root_id {
+        Some(root) => db.path_occupant(root, relative_path),
+        // No root on the citation — a citation minted before this field
+        // existed, or one the caller genuinely could not name one root for.
+        // Unchanged fallback: exactly one root holds the path, or no verdict.
+        None => {
+            let roots = db.roots_holding_path(relative_path)?;
+            let [root] = roots.as_slice() else {
+                return Ok(None);
+            };
+            db.path_occupant(*root, relative_path)
+        }
+    }
 }
 
 /// The identity pin, then everything one snapshot can know about the passage
 /// it let through.
 ///
-/// **The pin.** `chunk_id` alone cannot say whether it still names the passage
-/// the user clicked, so the caller echoes the passage text back and this
-/// compares it against `chunk.text` **exactly**. Not `contains`, not trimmed,
-/// not normalised: the text on the wire is `chunk.text` verbatim —
-/// `AskCitation.text` (`bridge.rs:432`) is `h.text.clone()` (`bridge.rs:556`),
-/// which is `Citation::text`, which is the `chunk.text` column
-/// (read back by `Db::citation`) — so any loosening only widens what a reused id can pass
-/// as. A `contains` comparison would accept `""` and match every chunk in the
-/// index.
+/// **The pin has two halves, and both must hold.** `chunk_id` alone cannot say
+/// whether it still names the passage the user clicked, so the caller echoes
+/// the passage's occurrence identity — `documentId` and `ord` (Task 1) — and
+/// its text, and this compares each against the chunk the id names now.
+///
+/// - **The text** is compared against `chunk.text` **exactly**. Not
+///   `contains`, not trimmed, not normalised: the text on the wire is
+///   `chunk.text` verbatim — `AskCitation.text` (`bridge.rs:432`) is
+///   `h.text.clone()` (`bridge.rs:556`), which is `Citation::text`, which is
+///   the `chunk.text` column (read back by `Db::citation`) — so any loosening
+///   only widens what a reused id can pass as. A `contains` comparison would
+///   accept `""` and match every chunk in the index.
+/// - **The identity** — `document_id` and `ord` — catches what byte-identical
+///   text cannot: `chunk.id` is reused across documents just as readily as
+///   within one (`schema.sql:149`, no `AUTOINCREMENT`), and two documents
+///   whose middle paragraph happens to be identical make the text pin alone
+///   powerless. `ord` is the other half — the same paragraph repeated *inside*
+///   one document reuses `document_id` but not `ord`
+///   (`UNIQUE(document_id, ord)`, `schema.sql:168`). Neither pin is redundant
+///   with the other: identity says *which* chunk this claims to be, the text
+///   says its content did not change under a re-index that kept the same
+///   `(document_id, ord)`.
 ///
 /// **Why it cannot return a finished answer.** `Excerpt` carries a
 /// `freshness`, and `Current`/`FileChanged`/`FileMissing` are undecidable
@@ -411,10 +436,14 @@ fn cited_occupant(
 /// sleeping network drive inside both would block every other command on a
 /// filesystem round-trip. So the ingredients come back and the command
 /// decides.
+#[allow(clippy::too_many_arguments)]
 fn build_source_around(
     db: &Db,
     chunk_id: i64,
     passage_text: &str,
+    cited_document_id: &str,
+    cited_ord: i64,
+    cited_root_id: Option<i64>,
     cited_relative_path: Option<&str>,
     radius: i64,
 ) -> Result<Composed, mnema_index::Error> {
@@ -428,6 +457,11 @@ fn build_source_around(
             reason: GoneReason::IdReused,
         }));
     }
+    if anchor.document_id != cited_document_id || anchor.ord != cited_ord {
+        return Ok(Composed::Settled(SourceAround::Gone {
+            reason: GoneReason::IdReused,
+        }));
+    }
 
     let window = db.reading_window(
         &anchor.document_id,
@@ -436,7 +470,7 @@ fn build_source_around(
         anchor.last_reading_order,
         radius,
     )?;
-    let occupant = cited_occupant(db, cited_relative_path)?;
+    let occupant = cited_occupant(db, cited_root_id, cited_relative_path)?;
 
     Ok(Composed::Pending {
         excerpt: ExcerptFields {
@@ -509,11 +543,28 @@ fn decide_freshness(occupant: Option<&PathOccupant>, document_id: &str) -> Fresh
 /// round-trip inside both would block every other command on a volume that
 /// happens to be asleep. So the closure returns the ingredients and the
 /// verdict is decided out here.
+///
+/// `cited_document_id`/`cited_ord` are mandatory — the occurrence identity
+/// `Hit`/`AskCitation` mint for every citation since Task 1 — and are compared
+/// exactly, never defaulted or skipped when absent: a client that could omit
+/// them would turn the pin off for itself, silently. `cited_root_id` is the
+/// odd one out and stays `Option`: it feeds `Freshness` only (via
+/// `cited_occupant`), never the refusal above, so a citation minted before
+/// this field existed can still ask and still get a verdict — a degraded one,
+/// through the fallback `cited_occupant` keeps for exactly that case.
+///
+/// Eight parameters mirrors the wire contract (§10) one field at a time —
+/// splitting them into a struct would be a seam this command's only caller
+/// (`ipc.ts`'s `sourceAround`) does not need.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(async)]
 pub fn source_around(
     state: State<'_, AppState>,
     chunk_id: i64,
     passage_text: String,
+    cited_document_id: String,
+    cited_ord: i64,
+    cited_root_id: Option<i64>,
     cited_relative_path: Option<String>,
     radius: u32,
 ) -> Result<SourceAround, Error> {
@@ -524,6 +575,9 @@ pub fn source_around(
                 db,
                 chunk_id,
                 &passage_text,
+                &cited_document_id,
+                cited_ord,
+                cited_root_id,
                 cited_relative_path.as_deref(),
                 radius,
             )

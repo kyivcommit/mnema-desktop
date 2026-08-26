@@ -66,6 +66,7 @@ fn chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks() 
         .unwrap()
         .expect("the chunk we just inserted");
     assert_eq!(anchor.document_id, doc);
+    assert_eq!(anchor.ord, 0);
     assert_eq!(anchor.text, full_text);
     assert_eq!(anchor.spans, locator.spans);
     assert_eq!(anchor.section_title.as_deref(), Some("Section One"));

@@ -478,6 +478,53 @@ fn write_one_document(db: &mnema_index::Db, id: &str, text: &str) -> i64 {
     rebuild_one_chunk(db, id, text)
 }
 
+/// Like [`rebuild_one_chunk`], but at a caller-chosen `ord` and
+/// `reading_order`, on a `page` the caller already opened.
+///
+/// `rebuild_one_chunk` hardcodes `ord = 0`, which cannot build Task 2's
+/// intra-document duplicate: two occurrences of identical text need two
+/// different `ord`s (`UNIQUE(document_id, ord)`, `schema.sql:168`), and two
+/// different blocks to sit in (`ix_block_page` needs distinct
+/// `reading_order`s on one page).
+fn insert_chunk_at(
+    db: &mnema_index::Db,
+    doc: &str,
+    page: i64,
+    ord: i64,
+    reading_order: i64,
+    text: &str,
+) -> i64 {
+    let block = db
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order,
+                language: None,
+                text: text.to_string(),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap();
+    db.insert_chunk(
+        doc,
+        ord,
+        text,
+        &Locator {
+            spans: vec![Segment {
+                block_id: block,
+                start: 0,
+                end: text.chars().count() as u32,
+                block_start: 0,
+            }],
+            coordinate: Coordinate::None,
+        },
+        SourceKind::Document,
+    )
+    .unwrap()
+}
+
 /// Round-2 review, F1: nothing pinned that `bridge::search` itself wraps
 /// its own work in `Db::read_snapshot`, only that the mechanism works
 /// (`crates/mnema-search/tests/snapshot_boundary.rs`) — removing that call
@@ -2927,7 +2974,13 @@ fn source_around_refuses_a_chunk_id_a_rebuild_has_handed_to_other_text() {
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": before, "passageText": ORIGINAL, "radius": 1 }),
+        json!({
+            "chunkId": before,
+            "passageText": ORIGINAL,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -2950,6 +3003,168 @@ fn source_around_refuses_a_chunk_id_a_rebuild_has_handed_to_other_text() {
         v.get("blocks").is_none(),
         "a refusal must carry no text at all; this one shipped the other passage's blocks: {v}"
     );
+}
+
+/// Task 2's own reproduction of owner-Codex **P1** on PR #22, which the test
+/// above cannot reach: that fixture reuses a chunk id inside *one* document,
+/// so the TEXT pin alone already refuses it. `chunk.id` is reused across
+/// DOCUMENTS just as readily (`schema.sql:149`, no `AUTOINCREMENT`), and two
+/// documents whose middle paragraph happens to be byte-identical make the
+/// text pin powerless: the reused id's text still matches, so it would let
+/// the wrong document's neighbourhood through under the user's citation.
+/// `documentId`/`ord` (Task 1) are what the identity pin now compares beside
+/// the text.
+#[test]
+fn source_around_refuses_a_reused_id_whose_text_is_byte_identical() {
+    const SHARED: &str = "The identical middle paragraph.";
+    const NEIGHBOUR_B_BEFORE: &str = "Before B, only in doc_b.";
+    const NEIGHBOUR_B_AFTER: &str = "After B, only in doc_b.";
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc_a = "a".repeat(64);
+    let doc_b = "b".repeat(64);
+    let (cited_chunk, cited_ord, reused) = state
+        .with_index(|db| {
+            let before = write_one_document(db, &doc_a, SHARED);
+            let ord = db.citation(before)?.unwrap().ord;
+            db.delete_document(&doc_a)?;
+
+            // doc_b's SHARED paragraph is inserted FIRST, so it — not one of
+            // its neighbours — is the chunk that receives the id doc_a's
+            // deletion just freed: `chunk.id` is `max(rowid) + 1`
+            // (`schema.sql:149`), so whichever chunk is written next gets it,
+            // regardless of where it sits in reading order. The neighbours
+            // exist so a leaked answer has something of doc_b's own to be
+            // caught carrying.
+            db.insert_document(&doc_b, "text/plain", 1, SourceKind::Document)?;
+            let page = db.insert_page(&doc_b, 1, "native:txt", None)?;
+            let reused = insert_chunk_at(db, &doc_b, page, 1, 2, SHARED);
+            insert_chunk_at(db, &doc_b, page, 0, 1, NEIGHBOUR_B_BEFORE);
+            insert_chunk_at(db, &doc_b, page, 2, 3, NEIGHBOUR_B_AFTER);
+            db.set_document_status(&doc_b, mnema_index::DocumentStatus::Indexed)?;
+
+            Ok::<_, mnema_index::Error>((before, ord, reused))
+        })
+        .unwrap();
+
+    // The fixture is the hazard only if the id really came back — asserted
+    // loudly, never skipped (the idiom at `commands.rs:2905-2915`).
+    assert_eq!(
+        reused, cited_chunk,
+        "SQLite did not reuse the chunk id, so this fixture proves nothing"
+    );
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({
+            "chunkId": cited_chunk,
+            "passageText": SHARED,
+            "citedDocumentId": doc_a,
+            "citedOrd": cited_ord,
+            "citedRootId": null,
+            "citedRelativePath": null,
+            "radius": 1,
+        }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(
+        v["kind"],
+        json!("gone"),
+        "the text is byte-identical, but the reused id now belongs to another document — only \
+         the identity pin can refuse this, the text pin cannot: {v}"
+    );
+    assert_eq!(v["reason"]["kind"], json!("idReused"), "{v}");
+    assert!(
+        v.get("blocks").is_none(),
+        "a Gone answer must carry no text at all: {v}"
+    );
+    let rendered = v.to_string();
+    assert!(
+        !rendered.contains(NEIGHBOUR_B_BEFORE) && !rendered.contains(NEIGHBOUR_B_AFTER),
+        "the other document's paragraphs must not appear anywhere in the answer: {rendered}"
+    );
+}
+
+/// Step 5's second red: `documentId` alone cannot see a duplicate INSIDE one
+/// document. The same paragraph twice at different `ord`s reuses neither
+/// `chunk.id` (`schema.sql:149`) nor `document_id` when the id is handed back
+/// to the OTHER occurrence — only `ord` (`UNIQUE(document_id, ord)`,
+/// `schema.sql:168`) tells the two apart, and the text is identical too, so
+/// the text pin cannot catch this one either.
+#[test]
+fn source_around_refuses_a_reused_id_within_the_same_document_at_a_different_ord() {
+    const SAME: &str = "Boilerplate paragraph repeated twice.";
+    const THROWAWAY: &str = "A throwaway paragraph, wasting one id.";
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "d".repeat(64);
+    let (cited_chunk, after) = state
+        .with_index(|db| {
+            db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
+            let page = db.insert_page(&doc, 1, "native:txt", None)?;
+            insert_chunk_at(db, &doc, page, 0, 1, SAME);
+            // The SECOND occurrence — `ord = 1` — is the one the client cites.
+            let second = insert_chunk_at(db, &doc, page, 1, 2, SAME);
+            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
+
+            // A rebuild: everything under `doc` is cleared and rewritten. One
+            // throwaway chunk consumes the id the FIRST occurrence held, so
+            // the next chunk written — at `ord = 0`, the first occurrence's
+            // own ord — is the one that lands on the SECOND occurrence's old
+            // (cited) id.
+            db.clear_document_content(&doc)?;
+            let page2 = db.insert_page(&doc, 1, "native:txt", None)?;
+            insert_chunk_at(db, &doc, page2, 9, 1, THROWAWAY);
+            let after = insert_chunk_at(db, &doc, page2, 0, 2, SAME);
+            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
+
+            Ok::<_, mnema_index::Error>((second, after))
+        })
+        .unwrap();
+
+    // The fixture is the hazard only if the rebuild really landed the cited
+    // id on the ord=0 occurrence — asserted loudly, never assumed.
+    assert_eq!(
+        after, cited_chunk,
+        "the rebuild did not hand the cited id to the ord=0 occurrence, so this fixture does \
+         not reach the case it is named for"
+    );
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({
+            "chunkId": cited_chunk,
+            "passageText": SAME,
+            "citedDocumentId": doc,
+            "citedOrd": 1,
+            "citedRootId": null,
+            "citedRelativePath": null,
+            "radius": 1,
+        }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(
+        v["kind"],
+        json!("gone"),
+        "the document and the text both match, but the ord does not — only ord tells this \
+         document's two identical paragraphs apart: {v}"
+    );
+    assert_eq!(v["reason"]["kind"], json!("idReused"), "{v}");
+    assert!(v.get("blocks").is_none(), "{v}");
 }
 
 /// The pin is **exact** equality, and this is the test that says so.
@@ -2989,7 +3204,13 @@ fn source_around_refuses_a_passage_that_differs_only_in_surrounding_whitespace()
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": padded, "radius": 1 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": padded,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -3041,7 +3262,13 @@ fn source_around_admits_a_byte_identical_passage_text() {
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": STORED, "radius": 1 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": STORED,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -3093,7 +3320,13 @@ fn source_around_reports_no_such_chunk_when_nothing_carries_the_id() {
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": ORIGINAL, "radius": 1 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": ORIGINAL,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -3134,7 +3367,13 @@ fn source_around_refuses_an_empty_passage_text_rather_than_matching_anything() {
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": "", "radius": 1 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": "",
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -3356,7 +3595,13 @@ fn source_around_crosses_page_boundaries_on_a_real_multi_page_document() {
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": passage, "radius": 2 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 2,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -3416,7 +3661,13 @@ fn source_around_reports_more_after_but_not_before_at_the_start_of_a_document() 
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": passage, "radius": 1 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -3466,7 +3717,13 @@ fn source_around_returns_the_paragraphs_around_a_cited_passage() {
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": passage, "radius": 1 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -3631,7 +3888,13 @@ fn source_around_covers_every_block_a_multi_block_chunk_spans() {
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": passage, "radius": 1 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -3746,7 +4009,13 @@ fn source_around_spans_measure_into_the_block_in_characters() {
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": passage, "radius": 1 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -3858,6 +4127,8 @@ fn source_around_reports_current_when_the_file_still_matches_what_was_indexed() 
         json!({
             "chunkId": chunk,
             "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
             "citedRelativePath": "dohov-01.md",
             "radius": 1,
         }),
@@ -3904,7 +4175,13 @@ fn source_around_reports_no_path_when_the_document_has_none() {
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": passage, "radius": 1 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -3966,6 +4243,8 @@ fn source_around_reports_file_missing_when_the_file_is_gone_from_disk() {
         json!({
             "chunkId": chunk,
             "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
             "citedRelativePath": "dohov-01.md",
             "radius": 1,
         }),
@@ -4086,6 +4365,8 @@ fn source_around_reports_file_changed_when_only_the_size_moved() {
         json!({
             "chunkId": chunk,
             "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
             "citedRelativePath": "dohov-01.md",
             "radius": 1,
         }),
@@ -4158,6 +4439,8 @@ fn source_around_reports_file_changed_when_only_the_mtime_moved() {
         json!({
             "chunkId": chunk,
             "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
             "citedRelativePath": "dohov-01.md",
             "radius": 1,
         }),
@@ -4248,6 +4531,8 @@ fn source_around_reports_reindexed_when_the_cited_path_now_names_another_documen
         json!({
             "chunkId": chunk,
             "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
             "citedRelativePath": "dohov-01.md",
             "radius": 1,
         }),
@@ -4335,6 +4620,8 @@ fn source_around_reports_gone_when_the_single_copy_of_a_file_is_re_indexed() {
         json!({
             "chunkId": chunk,
             "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
             "citedRelativePath": "dohov-01.md",
             "radius": 1,
         }),
@@ -4386,7 +4673,13 @@ fn source_around_clamps_a_zero_radius_up_to_one_rather_than_returning_nothing() 
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": passage, "radius": 0 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 0,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -4443,7 +4736,13 @@ fn source_around_clamps_an_enormous_radius_to_a_bounded_window() {
     let v = call(
         &webview,
         "source_around",
-        json!({ "chunkId": chunk, "passageText": passage, "radius": 10_000 }),
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 10_000,
+        }),
     )
     .expect("source_around was rejected");
 
@@ -4546,6 +4845,8 @@ fn source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_docum
         json!({
             "chunkId": chunk,
             "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
             "citedRelativePath": "dohov-01.md",
             "radius": 1,
         }),
@@ -4606,6 +4907,8 @@ fn source_around_reports_no_path_when_no_row_holds_the_cited_path() {
         json!({
             "chunkId": chunk,
             "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
             "citedRelativePath": "nowhere.md",
             "radius": 1,
         }),
@@ -4675,6 +4978,8 @@ fn source_around_reports_no_path_when_two_roots_hold_the_cited_path() {
         json!({
             "chunkId": chunk,
             "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
             "citedRelativePath": "dohov-01.md",
             "radius": 1,
         }),
@@ -4693,6 +4998,113 @@ fn source_around_reports_no_path_when_two_roots_hold_the_cited_path() {
         v["blocks"][1]["text"],
         json!(PARAGRAPHS[2]),
         "an unresolvable location is not a refusal — the indexed text still comes back: {v}"
+    );
+}
+
+/// Step 6: a citation minted since Task 1 carries `rootId`, and that is what
+/// lets `cited_occupant` resolve an otherwise-ambiguous path without guessing.
+/// Both directions on the same two-root fixture: naming the root reaches a
+/// real verdict, and the same call without one still gets the honest `NoPath`
+/// the test above pins — Task 2 must not have narrowed that fallback.
+#[test]
+fn source_around_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold_the_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "1".repeat(64);
+    let other = "2".repeat(64);
+    let (chunk, passage, root_a) = state
+        .with_index(|db| {
+            let (chunk, passage) = write_paragraph_document(
+                db,
+                &doc,
+                &PARAGRAPHS,
+                2,
+                0,
+                PARAGRAPHS[2].chars().count() as u32,
+            );
+
+            let corpus_a = dir.path().join("corpus-a");
+            std::fs::create_dir_all(&corpus_a).unwrap();
+            let root_a = db.insert_watched_root(corpus_a.to_str().unwrap())?;
+            record_real_file(
+                db,
+                &corpus_a,
+                root_a,
+                "README.md",
+                &doc,
+                &PARAGRAPHS.join("\n\n"),
+            );
+
+            // A second root, same relative path, a DIFFERENT document — the
+            // ambiguity the fallback in `cited_occupant` refuses rather than
+            // guess through.
+            let corpus_b = dir.path().join("corpus-b");
+            std::fs::create_dir_all(&corpus_b).unwrap();
+            let root_b = db.insert_watched_root(corpus_b.to_str().unwrap())?;
+            db.insert_document(&other, "text/plain", 1, SourceKind::Document)?;
+            record_real_file(
+                db,
+                &corpus_b,
+                root_b,
+                "README.md",
+                &other,
+                "інший документ у корені B",
+            );
+
+            Ok::<_, mnema_index::Error>((chunk, passage, root_a))
+        })
+        .unwrap();
+
+    // The cited root names root A directly, so the ambiguity with root B
+    // never has to be resolved.
+    let named = call(
+        &webview,
+        "source_around",
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "citedRootId": root_a,
+            "citedRelativePath": "README.md",
+            "radius": 1,
+        }),
+    )
+    .expect("source_around was rejected");
+    assert_eq!(named["kind"], json!("excerpt"), "{named}");
+    assert_eq!(
+        named["freshness"]["kind"],
+        json!("current"),
+        "the citation names root A, so the file's own root — not the ambiguity with root B — \
+         decides the verdict: {named}"
+    );
+
+    // The same call, but the citation carries no root at all — the fallback
+    // Task 2 must leave exactly as honest as it already was.
+    let unnamed = call(
+        &webview,
+        "source_around",
+        json!({
+            "chunkId": chunk,
+            "passageText": passage,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "citedRootId": null,
+            "citedRelativePath": "README.md",
+            "radius": 1,
+        }),
+    )
+    .expect("source_around was rejected");
+    assert_eq!(unnamed["kind"], json!("excerpt"), "{unnamed}");
+    assert_eq!(
+        unnamed["freshness"]["kind"],
+        json!("noPath"),
+        "with no root on the citation, two roots hold this path and nothing may be guessed: \
+         {unnamed}"
     );
 }
 
@@ -4830,7 +5242,13 @@ fn a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragra
     let control = call(
         &webview,
         "source_around",
-        json!({ "chunkId": target, "passageText": ORIGINAL, "radius": 1 }),
+        json!({
+            "chunkId": target,
+            "passageText": ORIGINAL,
+            "citedDocumentId": doc,
+            "citedOrd": 0,
+            "radius": 1,
+        }),
     )
     .expect("source_around was rejected");
     assert_eq!(
@@ -4878,7 +5296,13 @@ fn a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragra
         let v = call(
             &webview,
             "source_around",
-            json!({ "chunkId": target, "passageText": ORIGINAL, "radius": 1 }),
+            json!({
+                "chunkId": target,
+                "passageText": ORIGINAL,
+                "citedDocumentId": doc,
+                "citedOrd": 0,
+                "radius": 1,
+            }),
         )
         .expect("source_around was rejected");
         match v["kind"].as_str().expect("a kind tag") {

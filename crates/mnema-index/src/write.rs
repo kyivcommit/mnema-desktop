@@ -169,6 +169,11 @@ pub struct RecentDocRow {
 /// around (§12).
 pub struct ChunkAnchor {
     pub document_id: String,
+    /// `chunk.ord` — the other half of the occurrence identity `source_around`
+    /// pins against, beside `document_id`. Closes the intra-document
+    /// duplicate: the same paragraph twice in one file reuses `document_id`
+    /// but not `ord` (`UNIQUE(document_id, ord)`, `schema.sql:168`).
+    pub ord: i64,
     pub text: String,
     pub spans: Vec<Segment>,
     pub section_title: Option<String>,
@@ -325,7 +330,7 @@ impl Db {
     /// the page for all of them.
     pub fn chunk_anchor(&self, chunk_id: i64) -> Result<Option<ChunkAnchor>, Error> {
         let mut stmt = self.conn().prepare(
-            "SELECT c.document_id, c.text, c.char_span, p.section_title, p.page_no,
+            "SELECT c.document_id, c.ord, c.text, c.char_span, p.section_title, p.page_no,
                     MIN(b2.reading_order), MAX(b2.reading_order)
                FROM chunk c
                JOIN block b ON b.id = c.block_id
@@ -340,15 +345,16 @@ impl Db {
         let Some(row) = rows.next()? else {
             return Ok(None);
         };
-        let span_json: String = row.get(2)?;
+        let span_json: String = row.get(3)?;
         Ok(Some(ChunkAnchor {
             document_id: row.get(0)?,
-            text: row.get(1)?,
+            ord: row.get(1)?,
+            text: row.get(2)?,
             spans: serde_json::from_str(&span_json).map_err(Error::Json)?,
-            section_title: row.get(3)?,
-            page_no: row.get(4)?,
-            first_reading_order: row.get(5)?,
-            last_reading_order: row.get(6)?,
+            section_title: row.get(4)?,
+            page_no: row.get(5)?,
+            first_reading_order: row.get(6)?,
+            last_reading_order: row.get(7)?,
         }))
     }
 

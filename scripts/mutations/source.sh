@@ -270,6 +270,26 @@ case_ "the identity pin refuses everything" \
   mnema-desktop 'source_around_admits_a_byte_identical_passage_text' --test commands
 
 # ═══════════════════════════════════════════════════════════════════════════
+# tree.rs: the occurrence-identity pin (Task 2) — documentId and ord, beside
+# the text
+#
+# The text pin above cannot see a reused id that lands on identical text: two
+# documents whose middle paragraph happens to be byte-identical, or the same
+# paragraph twice inside one document. `document_id` and `ord` are what catch
+# each, and this drops only the `ord` half — `document_id` alone still refuses
+# the CROSS-document case, so the marker is a symbol name (never a line
+# number: line citations into this file have gone stale before) and the test
+# below is chosen because it is the one case where `document_id` matches and
+# only `ord` differs, so dropping `ord` and nothing else is what makes it
+# redden.
+
+case_ "the occurrence-identity pin drops its ord half" \
+  src-tauri/src/tree.rs \
+  's~anchor\.document_id != cited_document_id \|\| anchor\.ord != cited_ord~anchor.document_id != cited_document_id~' \
+  'if anchor.document_id != cited_document_id {' \
+  mnema-desktop 'source_around_refuses_a_reused_id_within_the_same_document_at_a_different_ord' --test commands
+
+# ═══════════════════════════════════════════════════════════════════════════
 # reading_window: whitespace-only blocks do not count against the radius
 #
 # The readers store a line of spaces as a block on purpose (mnema-extract's
@@ -352,10 +372,17 @@ case_ "path_occupant: the path predicate is widened to match everything" \
 # `first()` is the mutation that matters now: it is the plausible "just pick
 # one" a later reader would write, and it is precisely the unearned
 # confidence the review removed.
+#
+# 🔴 Task 2 moved this line into the `None` arm of a `match cited_root_id`
+# (`citedRootId` names one root directly and skips the ambiguity scan
+# entirely), at a deeper indent — the pattern below is re-aimed at its new
+# 12-space form, or it reports zero hits and a BROKEN CASE. Re-aimed
+# 2026-08-26; the test it targets is unaffected: it never sends `citedRootId`,
+# so it still exercises this exact fallback arm.
 
 case_ "cited_occupant: an ambiguous location picks a root instead of refusing" \
   src-tauri/src/tree.rs \
-  's~    let \[root\] = roots\.as_slice\(\) else \{~    let Some(root) = roots.first() else {~' \
+  's~            let \[root\] = roots\.as_slice\(\) else \{~            let Some(root) = roots.first() else {~' \
   'let Some(root) = roots.first() else {' \
   mnema-desktop 'source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_document_differs' --test commands
 
