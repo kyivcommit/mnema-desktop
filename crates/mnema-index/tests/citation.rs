@@ -276,7 +276,7 @@ fn citation_carries_document_ord_and_a_root_only_when_unambiguous() {
     // doc_a lives under root_a; doc_b under root_b, so no (root, path) key
     // collides yet.
     let chunk_a = seed_one_chunk(&db, root_a, &doc_a, "README.md", "Alpha paragraph.");
-    seed_one_chunk(&db, root_b, &doc_b, "NOTES.md", "Beta paragraph.");
+    let chunk_b = seed_one_chunk(&db, root_b, &doc_b, "NOTES.md", "Beta paragraph.");
 
     let c = db.citation(chunk_a).unwrap().unwrap();
     assert_eq!(c.document_id, doc_a);
@@ -285,6 +285,46 @@ fn citation_carries_document_ord_and_a_root_only_when_unambiguous() {
         c.root_id,
         Some(root_a),
         "one root holds it, so name that root"
+    );
+
+    // A citation from a DIFFERENT lone root than root_a's: `root_id` must name
+    // the root actually found, not a hardcoded id that happens to match
+    // whichever root the fixture inserts first.
+    let cb = db.citation(chunk_b).unwrap().unwrap();
+    assert_eq!(
+        cb.root_id,
+        Some(root_b),
+        "a lone root must be named as itself, not a stand-in for 'exactly one'"
+    );
+
+    // A SECOND CHUNK IN THE SAME DOCUMENT distinguishes `ord` from a
+    // hardcoded zero: two occurrences of text inside one document share
+    // `document_id` but not `ord` (`UNIQUE(document_id, ord)`, `schema.sql:168`).
+    let page_a2 = db.insert_page(&doc_a, 2, "native:txt", None).unwrap();
+    let block_a2 = db
+        .insert_block(page_a2, &paragraph(0, "Alpha paragraph two.", None, None))
+        .unwrap();
+    let chunk_a2 = db
+        .insert_chunk(
+            &doc_a,
+            1,
+            "Alpha paragraph two.",
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block_a2,
+                    start: 0,
+                    end: "Alpha paragraph two.".chars().count() as u32,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        )
+        .unwrap();
+    let c2 = db.citation(chunk_a2).unwrap().unwrap();
+    assert_eq!(
+        c2.ord, 1,
+        "a second chunk in the same document must not share the first chunk's ord"
     );
 
     // A SECOND COPY IN THE SAME ROOT is still one root — two `path` rows, one
