@@ -928,17 +928,25 @@ mod tests {
             ord: 3,
             root_id: Some(7),
         };
-        let v = serde_json::to_value(&c).unwrap();
-        assert_eq!(v["anchor"], json!(1));
-        assert_eq!(v["chunkId"], json!(42));
-        assert_eq!(v["text"], json!("t")); // every field asserted, incl. the ones stable across casings
-        assert_eq!(v["relativePath"], json!("a/b.md"));
-        assert_eq!(v["sectionTitle"], json!("S"));
-        assert_eq!(v["coordinate"], json!({ "kind": "none" }));
-        assert_eq!(v["documentId"], json!("doc-1"));
-        assert_eq!(v["ord"], json!(3));
-        assert_eq!(v["rootId"], json!(7)); // Some(7) renders as a plain number, not { "Some": 7 }
-        assert!(v.get("document_id").is_none()); // never the snake_case spelling
+        // Full-object compare, not per-field — same reason as
+        // `hit_field_names_are_pinned` below: indexing a `serde_json::Value`
+        // by key only ever looks up keys the test already names, so a field
+        // this struct grows later (or one renamed to the snake_case spelling)
+        // would pass every per-field assert here silently.
+        assert_eq!(
+            serde_json::to_value(&c).unwrap(),
+            json!({
+                "anchor": 1,
+                "chunkId": 42,
+                "text": "t",
+                "relativePath": "a/b.md",
+                "sectionTitle": "S",
+                "coordinate": { "kind": "none" },
+                "documentId": "doc-1",
+                "ord": 3,
+                "rootId": 7
+            })
+        );
     }
 
     #[test]
