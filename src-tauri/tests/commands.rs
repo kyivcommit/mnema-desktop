@@ -3043,8 +3043,16 @@ fn source_around_refuses_a_reused_id_whose_text_is_byte_identical() {
             // caught carrying.
             db.insert_document(&doc_b, "text/plain", 1, SourceKind::Document)?;
             let page = db.insert_page(&doc_b, 1, "native:txt", None)?;
-            let reused = insert_chunk_at(db, &doc_b, page, 1, 2, SHARED);
-            insert_chunk_at(db, &doc_b, page, 0, 1, NEIGHBOUR_B_BEFORE);
+            // `ord = 0` here, matching `cited_ord` (doc_a's SHARED chunk is its
+            // only one, so `write_one_document` gives it ord 0 too): the two
+            // documents now agree on BOTH the text and the ord, so only
+            // `document_id` tells them apart. Reused id + matching text +
+            // matching ord used to make this fixture prove nothing about the
+            // `document_id` half of the pin — dropping that half entirely left
+            // 71 tests green, because every other fixture in the file also
+            // varies `ord` alongside `document_id`.
+            let reused = insert_chunk_at(db, &doc_b, page, 0, 2, SHARED);
+            insert_chunk_at(db, &doc_b, page, 1, 1, NEIGHBOUR_B_BEFORE);
             insert_chunk_at(db, &doc_b, page, 2, 3, NEIGHBOUR_B_AFTER);
             db.set_document_status(&doc_b, mnema_index::DocumentStatus::Indexed)?;
 

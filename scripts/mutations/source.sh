@@ -289,6 +289,20 @@ case_ "the occurrence-identity pin drops its ord half" \
   'if anchor.document_id != cited_document_id {' \
   mnema-desktop 'source_around_refuses_a_reused_id_within_the_same_document_at_a_different_ord' --test commands
 
+# This drops the OTHER half — `document_id` — and keeps only `ord`. Found by a
+# fix-round review reproducing owner-Codex P1 a second way: every fixture that
+# exercises the identity pin used to vary `document_id` and `ord` TOGETHER, so
+# either half alone always agreed with the other about the verdict, and this
+# mutation left 71 tests green. Fixed by giving `source_around_refuses_a_reused_id_whose_text_is_byte_identical`'s
+# reused chunk the SAME `ord` its cited counterpart has (both 0) — the state
+# where only `document_id` differs.
+
+case_ "the occurrence-identity pin drops its document_id half" \
+  src-tauri/src/tree.rs \
+  's~anchor\.document_id != cited_document_id \|\| ~~' \
+  'if anchor.ord != cited_ord {' \
+  mnema-desktop 'source_around_refuses_a_reused_id_whose_text_is_byte_identical' --test commands
+
 # ═══════════════════════════════════════════════════════════════════════════
 # reading_window: whitespace-only blocks do not count against the radius
 #
