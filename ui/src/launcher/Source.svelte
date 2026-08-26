@@ -87,6 +87,9 @@
 
   let answer = $state<SourceAround | null>(null);
   let failed = $state(false);
+  // M2: the clicked excerpt came back naming a document other than the one the
+  // citation names. See the check itself for why this exists at all.
+  let mismatched = $state(false);
   let siblingSpans = $state<WireSegment[]>([]);
   // Monotonic. `ask` and `source_around` are separate IPC round trips and a
   // person clicks faster than they return, so an answer for an older click must
@@ -115,6 +118,7 @@
     const id = ++request;
     answer = null;
     failed = false;
+    mismatched = false;
     siblingSpans = [];
     pending = 1;
 
@@ -123,31 +127,64 @@
         if (id !== request) return;
         answer = got;
 
+        // M1: the answer's kind is asked ONCE, and everything that depends on
+        // it lives below. It used to be asked twice — once to decide whether to
+        // build `toAsk`, again to leave the function — and the second copy could
+        // be deleted with the whole suite green. It is not merely dead code
+        // though: it carries the narrowing that `extra.documentId !==
+        // got.documentId` needs, so the repair is to ask once, not to delete a
+        // copy. Zeroing `pending` here is the job the first copy was doing.
+        if (got.kind !== 'excerpt') {
+          pending = 0;
+          return;
+        }
+
+        // 🔴 M2 — deliberate defence against a guarantee that lives in another
+        // repository. PR 6a pins `documentId` + `ord` in Rust and answers
+        // `Gone { idReused }` when the clicked citation and the chunk disagree,
+        // so this branch is unreachable while that holds. It exists because this
+        // component cannot see that invariant, and because the price of it
+        // regressing is the worst thing this card could do: another document's
+        // text under this document's name, badged as up to date. Treated exactly
+        // as a `Gone` is — a reason shown, and NO text. Note the two sibling
+        // filters below use two different reference values (the citation's
+        // `documentId` before the call, the excerpt's after it); this is the one
+        // place those two are compared with each other.
+        if (got.documentId !== clicked.documentId) {
+          mismatched = true;
+          pending = 0;
+          return;
+        }
+
         // The clicked citation's excerpt IS the card: its blocks, its two
         // `hasMore*` flags, its freshness. Siblings contribute only spans —
         // never blocks, never flags, never a verdict — and `paintBlocks` above
         // is what confines those spans to the blocks this window shows.
         const asked = new Set([occurrence(clicked)]);
         const toAsk: (AskCitation | Hit)[] = [];
-        if (got.kind === 'excerpt') {
-          for (const sibling of siblings) {
-            // Ruling U, before any call: a citation in another document is not
-            // even asked.
-            if (sibling.documentId !== clicked.documentId) continue;
-            const key = occurrence(sibling);
-            if (asked.has(key)) continue;
-            asked.add(key);
-            toAsk.push(sibling);
-          }
+        for (const sibling of siblings) {
+          // Ruling U, before any call: a citation in another document is not
+          // even asked.
+          if (sibling.documentId !== clicked.documentId) continue;
+          const key = occurrence(sibling);
+          if (asked.has(key)) continue;
+          asked.add(key);
+          toAsk.push(sibling);
         }
         // The clicked round trip is done and the sibling ones are counted in the
         // same step, so `pending` never dips to zero between the two.
         pending = toAsk.length;
-        if (got.kind !== 'excerpt') return;
 
         for (const sibling of toAsk) {
           sourceAround(sibling)
             .then((extra) => {
+              // 🔴 I3: the sibling's OWN staleness guard, and it is not the
+              // clicked one's. A sibling round trip from a previous selection
+              // lands seconds late and would append straight into
+              // `siblingSpans` — a highlight belonging to a citation the person
+              // is no longer looking at. The document check below does not save
+              // this: the stale sibling and the current excerpt can both be the
+              // same document.
               if (id !== request) return;
               // A sibling answering `Gone` contributes nothing and changes no
               // verdict.
@@ -167,6 +204,11 @@
               console.error('source_around (sibling) failed', e);
             })
             .finally(() => {
+              // 🔴 I4: `data-pending` is the anchor every test in this card's
+              // suite waits on. A stale sibling decrementing the CURRENT
+              // selection's counter would make the card report itself settled
+              // while its own round trip is still in flight — silently
+              // re-opening the trap this field was added to close.
               if (id === request) pending -= 1;
             });
         }
@@ -179,7 +221,11 @@
       });
   });
 
-  const excerpt = $derived(answer !== null && answer.kind === 'excerpt' ? answer : null);
+  // M2: a mismatched excerpt is not the card's text, so nothing downstream of
+  // here — no block, no highlight, no ellipsis — can render it.
+  const excerpt = $derived(
+    !mismatched && answer !== null && answer.kind === 'excerpt' ? answer : null,
+  );
 
   const painted = $derived(
     excerpt === null
@@ -227,6 +273,9 @@
     void $locale;
     const got = answer;
     if (got === null) return '';
+    // M2 outranks the freshness verdict: a verdict about the wrong document
+    // would be true of that document and false of the one on the header.
+    if (mismatched) return t('source_wrong_document');
     return got.kind === 'gone' ? goneText(got.reason) : freshnessText(got.freshness);
   });
 </script>

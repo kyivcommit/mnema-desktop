@@ -11,7 +11,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
   | 'fresh_file_missing' | 'fresh_no_path'
   | 'gone_no_such_chunk' | 'gone_id_reused'
-  | 'source_loading' | 'source_failed';
+  | 'source_loading' | 'source_failed' | 'source_wrong_document';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
@@ -44,6 +44,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     gone_id_reused: 'Цей ідентифікатор тепер вказує на інший фрагмент',
     source_loading: 'Завантаження джерела…',
     source_failed: 'Не вдалося завантажити джерело.',
+    // M2: shown instead of a freshness verdict when the excerpt names a
+    // different document than the citation does.
+    source_wrong_document: 'Цей уривок походить з іншого документа, ніж цитата',
   },
   en: {
     pin: 'Pin',
@@ -72,5 +75,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     gone_id_reused: 'This identifier now points to another passage',
     source_loading: 'Loading the source…',
     source_failed: 'The source could not be loaded.',
+    source_wrong_document: 'This excerpt came from a different document than the citation',
   },
 };

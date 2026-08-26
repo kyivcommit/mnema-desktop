@@ -42,6 +42,15 @@ function mockSourceFor(byChunkId: Record<number, SourceAround>) {
 function sourceAroundCalls() {
   return invoke.mock.calls.filter(([cmd]) => cmd === 'source_around');
 }
+// Drains the promise chain the effect builds (clicked `.then` -> sibling
+// `.then` -> `.finally`) and then Svelte's own flush. The two re-selection
+// tests below assert that something did NOT happen, so they cannot wait on the
+// DOM; they wait on the queue instead.
+async function flush() {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  await tick();
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => (resolve = r));
@@ -233,6 +242,32 @@ test('touching spans merge into one mark, and only the run holding the clicked s
   expect(found[1].dataset.primary).toBeUndefined();
 });
 
+// 🔴 I1 and I2. Every other fixture in this file puts the CLICKED span first in
+// its run, which makes two guards invisible at once: `last.primary || span.primary`
+// is reached with `last.primary` already true, and the `.sort()` in `paintBlock`
+// is a no-op because `painted` concatenates clicked spans ahead of sibling ones.
+// Both stop being invisible the moment a sibling span starts BEFORE the clicked
+// one — which is the ordinary case of two citations in one paragraph with the
+// SECOND one clicked.
+test('a sibling span that starts before the clicked one merges in full, and the run is still primary', async () => {
+  const siblingFirst: Excerpt = {
+    ...excerptSpanB,
+    spans: [{ blockId: SHARED_BLOCK_ID, start: 3, end: 7, blockStart: 0 }], // len 4 → [0, 4) = 'The '
+  };
+  mockSourceFor({ 42: excerptSpanA, 43: siblingFirst }); // clicked span is [4, 22)
+  render(Source, { selected: citationA, siblings: [citationA, citationB] });
+
+  await settled();
+  const found = marks();
+  expect(found).toHaveLength(1); // [0, 4) touches [4, 22) and the two union
+  // I2: without the sort the earlier sibling run is swallowed and these four
+  // characters vanish from the highlight.
+  expect(found[0].textContent).toBe('The digitisation price');
+  // I1: the run holds the clicked citation's span, so it is primary — and the
+  // clicked span is NOT the first one in it, which is the half nothing pinned.
+  expect(found[0].dataset.primary).toBe('true');
+});
+
 // --- the verdicts -----------------------------------------------------------
 
 test('Gone renders the reason and NO text', async () => {
@@ -249,13 +284,56 @@ test('Gone renders the reason and NO text', async () => {
   expect(status.textContent).not.toBe('This passage is no longer in the index');
 });
 
-test('the other Gone reason reads differently', async () => {
+test('the other Gone reason reads differently, and a Gone answer asks no siblings', async () => {
   mockSource({ kind: 'gone', reason: { kind: 'noSuchChunk' } });
-  render(Source, { selected: citationA, siblings: [citationA] });
+  // A real sibling list, and M1's guard is what keeps this answer reading as a
+  // `Gone`. Measured, so the claim is not larger than the evidence: with that
+  // guard's `return` removed the card falls through to the wrong-document check
+  // (a `Gone` payload carries no `documentId` at all) and badges this vanished
+  // passage as coming from a different document — which is the first assertion
+  // below, not the call count. The call count is the weaker half: for a `Gone`
+  // answer the wrong-document check would stop the sibling calls too.
+  render(Source, { selected: citationA, siblings: [citationA, citationB] });
 
   await settled();
   expect(screen.getByRole('status').textContent).toBe('This passage is no longer in the index');
   expect(screen.queryByTestId('source-block')).toBeNull();
+  expect(sourceAroundCalls()).toHaveLength(1);
+});
+
+// 🔴 M2. Deliberate defence against a guarantee that lives in another
+// repository: PR 6a pins `documentId` + `ord` in Rust, so a clicked citation and
+// its chunk cannot disagree while that holds — but this component cannot see
+// that invariant, and if it ever regresses this card is the surface that shows
+// another document's text under this document's name. Treated as a `Gone` is.
+test('an excerpt naming a different document than the citation shows no text and says why', async () => {
+  // Every chunk answers, siblings included: with `mockSourceFor` the sibling
+  // call the probe unblocks would throw instead, and this test would redden for
+  // a reason unrelated to what it claims.
+  mockSource({ ...excerptSpanA, documentId: 'doc-999' }); // citationA is doc-1
+  render(Source, { selected: citationA, siblings: [citationA, citationB] });
+
+  await settled();
+  expect(screen.getByRole('status').textContent).toBe(
+    'This excerpt came from a different document than the citation',
+  );
+  // No text at all, the way `Gone` renders none.
+  expect(screen.queryByTestId('hl')).toBeNull();
+  expect(screen.queryByTestId('source-block')).toBeNull();
+  expect(screen.getByTestId('source-body').textContent).not.toContain(SPAN_A_TEXT);
+  expect(screen.queryByTestId('more-before')).toBeNull(); // excerptSpanA sets this flag
+  // No sibling is asked either: a window that cannot be trusted is not a window
+  // to merge more spans into.
+  expect(sourceAroundCalls()).toHaveLength(1);
+  // Both directions: the freshness verdict does NOT ride along. It would be true
+  // of doc-999 and false of the file the header names.
+  expect(screen.getByTestId('freshness').textContent).not.toMatch(CURRENT_PATTERN);
+
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('freshness').textContent).toBe(
+    'Цей уривок походить з іншого документа, ніж цитата',
+  );
 });
 
 const CURRENT_PATTERN = /Up to date/;
@@ -344,6 +422,63 @@ test('a slower answer for an older click never paints over a newer one', async (
   await settled();
   expect(screen.getByText(/Excerpt two/)).toBeTruthy();
   expect(screen.queryByText(/Excerpt one/)).toBeNull();
+});
+
+// 🔴 I3. The ordering test above passes `siblings: []`, so it exercises the
+// CLICKED guard and nothing else. A sibling round trip from the previous
+// selection is a separate promise that lands seconds late, and its `.then`
+// appends straight into `siblingSpans`. The document check does not save this:
+// the stale sibling and the current excerpt are both 'doc-1' here on purpose.
+test('a sibling answer for a previous click never paints onto the current card', async () => {
+  const staleSibling = deferred<SourceAround>();
+  const noSpans: Excerpt = { ...excerptSpanA, spans: [] }; // the NEW selection's own window
+  invoke
+    .mockImplementationOnce(() => Promise.resolve(excerptSpanA)) // click 1, clicked
+    .mockImplementationOnce(() => staleSibling.promise) // click 1, sibling
+    .mockImplementationOnce(() => Promise.resolve(noSpans)); // click 2, clicked
+
+  const { rerender } = render(Source, { selected: citationA, siblings: [citationA, citationB] });
+  await flush();
+  await rerender({ selected: citationB, siblings: [citationB] });
+  await settled();
+  expect(screen.queryByTestId('hl')).toBeNull();
+
+  staleSibling.resolve(excerptSpanB); // the previous click's sibling lands late
+  await flush();
+  expect(screen.queryByTestId('hl')).toBeNull();
+  // Both directions: the card is showing the new selection's text, so "no
+  // highlight" is not "no card".
+  expect(screen.getByTestId('source-body').textContent).toContain(SPAN_A_TEXT);
+});
+
+// 🔴 I4. `data-pending` is the anchor all of `settled()` stands on, so the guard
+// that keeps it honest across a re-selection is the one guard whose failure would
+// be invisible to every other test in this file.
+test('a stale sibling does not drive data-pending to zero while the current call is in flight', async () => {
+  const staleSibling = deferred<SourceAround>();
+  const newClicked = deferred<SourceAround>();
+  invoke
+    .mockImplementationOnce(() => Promise.resolve(excerptSpanA))
+    .mockImplementationOnce(() => staleSibling.promise)
+    .mockImplementationOnce(() => newClicked.promise);
+
+  const { rerender } = render(Source, { selected: citationA, siblings: [citationA, citationB] });
+  await flush();
+  await rerender({ selected: citationB, siblings: [citationB] });
+  await flush();
+  const body = () => screen.getByTestId('source-body');
+  expect(body().dataset.pending).toBe('1');
+
+  staleSibling.resolve(excerptSpanB);
+  await flush();
+  expect(screen.getByTestId('source-loading')).toBeTruthy(); // the new call has NOT returned
+  expect(body().dataset.pending).toBe('1');
+
+  // Both directions: the counter is not simply stuck — the current selection's
+  // own answer still takes it to zero.
+  newClicked.resolve({ ...excerptSpanA, spans: [] });
+  await settled();
+  expect(screen.queryByTestId('source-loading')).toBeNull();
 });
 
 // --- the header, the failure and the language switch ------------------------
