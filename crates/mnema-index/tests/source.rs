@@ -57,8 +57,14 @@ fn chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks() 
         ],
         coordinate: Coordinate::Page { number: 1 },
     };
+    // `ord = 4`, not 0: every other assertion on `ChunkAnchor.ord` in the
+    // repository used to be `assert_eq!(anchor.ord, 0)`, on a fixture that
+    // could not tell "read the column" apart from "return a hardcoded 0" —
+    // 27 of 28 `source_around` fixtures through the IPC also cite `ord: 0`.
+    // Non-zero here closes that gap at the layer that reads the column
+    // directly.
     let chunk_id = db
-        .insert_chunk(&doc, 0, &full_text, &locator, SourceKind::Document)
+        .insert_chunk(&doc, 4, &full_text, &locator, SourceKind::Document)
         .unwrap();
 
     let anchor = db
@@ -66,6 +72,7 @@ fn chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks() 
         .unwrap()
         .expect("the chunk we just inserted");
     assert_eq!(anchor.document_id, doc);
+    assert_eq!(anchor.ord, 4);
     assert_eq!(anchor.text, full_text);
     assert_eq!(anchor.spans, locator.spans);
     assert_eq!(anchor.section_title.as_deref(), Some("Section One"));

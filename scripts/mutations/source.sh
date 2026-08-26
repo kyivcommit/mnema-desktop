@@ -245,6 +245,27 @@ case_ "chunk_anchor: MIN and MAX reading_order are swapped" \
   'MAX(b2.reading_order), MIN(b2.reading_order)' \
   mnema-index 'chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks' --test source
 
+# `ChunkAnchor.ord` hardcoded to 0 instead of read from the row. Found by a
+# fix-round review: before it, the only assertion on this field anywhere was
+# `assert_eq!(anchor.ord, 0)`, and 27 of 28 `source_around` fixtures through
+# the IPC cite `ord: 0` too — the one exception expects a REFUSAL, which a
+# hardcoded 0 still produces (`0 != 1`), for the wrong reason. Two cases, one
+# per layer, matching this file's own doctrine (`chunk_anchor` above is the
+# `mnema-index` half; `tree.sh`-style commands.rs case is its "does this
+# reach the command a person calls" half).
+
+case_ "chunk_anchor: ord is hardcoded to 0 instead of read from the row" \
+  crates/mnema-index/src/write.rs \
+  's~ord: row\.get\(1\)\?,~ord: { let _: i64 = row.get(1)?; 0 },~' \
+  'ord: { let _: i64 = row.get(1)?; 0 },' \
+  mnema-index 'chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks' --test source
+
+case_ "chunk_anchor: ord is hardcoded to 0 instead of read from the row, end to end" \
+  crates/mnema-index/src/write.rs \
+  's~ord: row\.get\(1\)\?,~ord: { let _: i64 = row.get(1)?; 0 },~' \
+  'ord: { let _: i64 = row.get(1)?; 0 },' \
+  mnema-desktop 'source_around_admits_a_passage_at_a_nonzero_ord' --test commands
+
 # ═══════════════════════════════════════════════════════════════════════════
 # roots_holding_path: the ambiguity-preserving scan collapses to one row
 
@@ -268,6 +289,40 @@ case_ "the identity pin refuses everything" \
   's~anchor\.text != passage_text~true~' \
   'if true {' \
   mnema-desktop 'source_around_admits_a_byte_identical_passage_text' --test commands
+
+# ═══════════════════════════════════════════════════════════════════════════
+# tree.rs: the occurrence-identity pin (Task 2) — documentId and ord, beside
+# the text
+#
+# The text pin above cannot see a reused id that lands on identical text: two
+# documents whose middle paragraph happens to be byte-identical, or the same
+# paragraph twice inside one document. `document_id` and `ord` are what catch
+# each, and this drops only the `ord` half — `document_id` alone still refuses
+# the CROSS-document case, so the marker is a symbol name (never a line
+# number: line citations into this file have gone stale before) and the test
+# below is chosen because it is the one case where `document_id` matches and
+# only `ord` differs, so dropping `ord` and nothing else is what makes it
+# redden.
+
+case_ "the occurrence-identity pin drops its ord half" \
+  src-tauri/src/tree.rs \
+  's~anchor\.document_id != cited_document_id \|\| anchor\.ord != cited_ord~anchor.document_id != cited_document_id~' \
+  'if anchor.document_id != cited_document_id {' \
+  mnema-desktop 'source_around_refuses_a_reused_id_within_the_same_document_at_a_different_ord' --test commands
+
+# This drops the OTHER half — `document_id` — and keeps only `ord`. Found by a
+# fix-round review reproducing owner-Codex P1 a second way: every fixture that
+# exercises the identity pin used to vary `document_id` and `ord` TOGETHER, so
+# either half alone always agreed with the other about the verdict, and this
+# mutation left 71 tests green. Fixed by giving `source_around_refuses_a_reused_id_whose_text_is_byte_identical`'s
+# reused chunk the SAME `ord` its cited counterpart has (both 0) — the state
+# where only `document_id` differs.
+
+case_ "the occurrence-identity pin drops its document_id half" \
+  src-tauri/src/tree.rs \
+  's~anchor\.document_id != cited_document_id \|\| ~~' \
+  'if anchor.ord != cited_ord {' \
+  mnema-desktop 'source_around_refuses_a_reused_id_whose_text_is_byte_identical' --test commands
 
 # ═══════════════════════════════════════════════════════════════════════════
 # reading_window: whitespace-only blocks do not count against the radius
@@ -352,12 +407,31 @@ case_ "path_occupant: the path predicate is widened to match everything" \
 # `first()` is the mutation that matters now: it is the plausible "just pick
 # one" a later reader would write, and it is precisely the unearned
 # confidence the review removed.
+#
+# 🔴 Task 2 moved this line into the `None` arm of a `match cited_root_id`
+# (`citedRootId` names one root directly and skips the ambiguity scan
+# entirely), at a deeper indent — the pattern below is re-aimed at its new
+# 12-space form, or it reports zero hits and a BROKEN CASE. Re-aimed
+# 2026-08-26; the test it targets is unaffected: it never sends `citedRootId`,
+# so it still exercises this exact fallback arm.
 
 case_ "cited_occupant: an ambiguous location picks a root instead of refusing" \
   src-tauri/src/tree.rs \
-  's~    let \[root\] = roots\.as_slice\(\) else \{~    let Some(root) = roots.first() else {~' \
+  's~            let \[root\] = roots\.as_slice\(\) else \{~            let Some(root) = roots.first() else {~' \
   'let Some(root) = roots.first() else {' \
   mnema-desktop 'source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_document_differs' --test commands
+
+# The `Some(root)` arm — a citation that DOES name a root — had no case at
+# all: every case above targets the `None` fallback. Collapsing it to `Ok(None)`
+# throws away the whole point of naming a root (skip the ambiguity scan and
+# resolve directly), so a citation that names root A among two roots sharing
+# a path gets `noPath` instead of `current`. Found by a fix-round review.
+
+case_ "cited_occupant: naming a root is ignored and answers no verdict" \
+  src-tauri/src/tree.rs \
+  's~Some\(root\) => db\.path_occupant\(root, relative_path\),~Some(_) => Ok(None),~' \
+  'Some(_) => Ok(None),' \
+  mnema-desktop 'source_around_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold_the_path' --test commands
 
 # ═══════════════════════════════════════════════════════════════════════════
 # tree.rs: a missing section title ships no key, rather than an explicit null
