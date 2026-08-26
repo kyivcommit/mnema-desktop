@@ -3302,6 +3302,81 @@ fn source_around_admits_a_byte_identical_passage_text() {
     assert_eq!(v["hasMoreAfter"], json!(false), "{v}");
 }
 
+/// The pin's `ord` half must ADMIT a genuine match, not merely refuse a
+/// mismatch — the gap the two tests above cannot see. Before this test, the
+/// only assertion on `ChunkAnchor.ord` anywhere in the repository was
+/// `assert_eq!(anchor.ord, 0)` (`crates/mnema-index/tests/source.rs`), and 27
+/// of the 28 `source_around` fixtures in this file send `citedOrd: 0`; the
+/// sole exception,
+/// [`source_around_refuses_a_reused_id_within_the_same_document_at_a_different_ord`],
+/// sends a non-zero `citedOrd` expecting a REFUSAL. A `chunk_anchor` that
+/// mapped the `ord` column to a hardcoded `0` would satisfy every one of
+/// those: the 27 zero-citing calls would still match, and the one non-zero
+/// call would still mismatch (`0 != 1`) — refusing for the wrong reason. This
+/// test cites a chunk whose real `ord` is 1 and asks for it back, so only a
+/// build that reads the actual column can pass.
+#[test]
+fn source_around_admits_a_passage_at_a_nonzero_ord() {
+    const FIRST: &str = "Перший абзац, не той, що цитують.";
+    const CITED: &str = "Другий абзац, саме той, що цитують.";
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "c".repeat(64);
+    let cited_chunk = state
+        .with_index(|db| {
+            db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
+            let page = db.insert_page(&doc, 1, "native:txt", None)?;
+            insert_chunk_at(db, &doc, page, 0, 1, FIRST);
+            let cited = insert_chunk_at(db, &doc, page, 1, 2, CITED);
+            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
+            Ok::<_, mnema_index::Error>(cited)
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "source_around",
+        json!({
+            "chunkId": cited_chunk,
+            "passageText": CITED,
+            "citedDocumentId": doc,
+            "citedOrd": 1,
+            "citedRootId": null,
+            "citedRelativePath": null,
+            "radius": 1,
+        }),
+    )
+    .expect("source_around was rejected");
+
+    assert_eq!(
+        v["kind"],
+        json!("excerpt"),
+        "citedOrd 1 matches the cited chunk's real ord, so the pin must admit it — a \
+         chunk_anchor that hardcodes ord to 0 would refuse this call even though it \
+         should pass: {v}"
+    );
+    assert!(
+        v.get("reason").is_none(),
+        "an excerpt carries no refusal reason: {v}"
+    );
+    let texts: Vec<&str> = v["blocks"]
+        .as_array()
+        .expect("a blocks array")
+        .iter()
+        .map(|b| b["text"].as_str().expect("a block text"))
+        .collect();
+    assert_eq!(
+        texts,
+        vec![FIRST, CITED],
+        "the excerpt must contain the cited passage's own text, not merely some text: {v}"
+    );
+}
+
 /// The other cause, and without it `GoneReason::NoSuchChunk` is a variant
 /// nothing produces. `clear_document_content` cascades the document's pages,
 /// blocks and chunks away (`Db::clear_document_content_in`) and a rebuild has not landed

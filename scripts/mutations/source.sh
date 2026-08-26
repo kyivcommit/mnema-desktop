@@ -245,6 +245,27 @@ case_ "chunk_anchor: MIN and MAX reading_order are swapped" \
   'MAX(b2.reading_order), MIN(b2.reading_order)' \
   mnema-index 'chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks' --test source
 
+# `ChunkAnchor.ord` hardcoded to 0 instead of read from the row. Found by a
+# fix-round review: before it, the only assertion on this field anywhere was
+# `assert_eq!(anchor.ord, 0)`, and 27 of 28 `source_around` fixtures through
+# the IPC cite `ord: 0` too — the one exception expects a REFUSAL, which a
+# hardcoded 0 still produces (`0 != 1`), for the wrong reason. Two cases, one
+# per layer, matching this file's own doctrine (`chunk_anchor` above is the
+# `mnema-index` half; `tree.sh`-style commands.rs case is its "does this
+# reach the command a person calls" half).
+
+case_ "chunk_anchor: ord is hardcoded to 0 instead of read from the row" \
+  crates/mnema-index/src/write.rs \
+  's~ord: row\.get\(1\)\?,~ord: { let _: i64 = row.get(1)?; 0 },~' \
+  'ord: { let _: i64 = row.get(1)?; 0 },' \
+  mnema-index 'chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks' --test source
+
+case_ "chunk_anchor: ord is hardcoded to 0 instead of read from the row, end to end" \
+  crates/mnema-index/src/write.rs \
+  's~ord: row\.get\(1\)\?,~ord: { let _: i64 = row.get(1)?; 0 },~' \
+  'ord: { let _: i64 = row.get(1)?; 0 },' \
+  mnema-desktop 'source_around_admits_a_passage_at_a_nonzero_ord' --test commands
+
 # ═══════════════════════════════════════════════════════════════════════════
 # roots_holding_path: the ambiguity-preserving scan collapses to one row
 
