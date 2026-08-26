@@ -217,6 +217,34 @@ export const oneRoot: TreeListing = {
   recents: [],
 };
 
+// ONE document named from TWO roots — the same `documentId` under both, which
+// `mnema-index`'s `delete_watched_root` (write.rs:700-722) exists to handle: a
+// document survives the deletion of one root when another still names it, so
+// `path` rows are per (document, root) and two are legitimate. The tree renders
+// one row per path, so `tree-file-{documentId}` is not unique in this state and
+// more than one row can be current at once. No other fixture builds it, and the
+// selection code branches per row.
+export const oneDocumentTwoRoots: TreeListing = {
+  roots: [
+    {
+      rootId: 1,
+      absolutePath: '/home/u/alpha',
+      name: 'alpha',
+      files: [
+        { relativePath: 'notes/shared.md', documentId: 'doc-shared' },
+        { relativePath: 'notes/other.md', documentId: 'doc-other' },
+      ],
+    },
+    {
+      rootId: 2,
+      absolutePath: '/home/u/beta',
+      name: 'beta',
+      files: [{ relativePath: 'notes/shared.md', documentId: 'doc-shared' }],
+    },
+  ],
+  recents: [],
+};
+
 // Empty but SUCCESSFUL (Ruling N): nothing indexed is not the same event as a
 // listing that could not be read, and the card must not say the same thing.
 export const emptyListing: TreeListing = { roots: [], recents: [] };

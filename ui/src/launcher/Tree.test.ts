@@ -7,6 +7,7 @@ import {
   oneRootTwoFolders,
   oneRootMixedDepths,
   twoRootsSameRelativePath,
+  oneDocumentTwoRoots,
   emptyListing,
   generated,
 } from '../lib/fixtures';
@@ -237,7 +238,15 @@ test('list_tree runs on mount and only on mount, even when the selection changes
 // Ruling J, the positive control. Without it the negative test below is
 // satisfied by zero, and it is THIS one that must redden when the selection
 // logic breaks.
-test('a citation whose document IS in the listing marks exactly one row current', async () => {
+//
+// M1 (review round 1): this test used to be called "marks exactly one row
+// current", which reads as a general contract and is not one — `toHaveLength(1)`
+// is true here only because `oneRoot` holds ONE root with ONE file, so one is
+// the only count the fixture can produce. A document named from two roots has
+// two rows and both are current; that is the real contract, pinned by
+// `a document present under two roots marks every row that shows it` below.
+// The name now says which claim this test actually makes.
+test('a citation whose document IS in the listing marks its only copy current', async () => {
   mockTree(oneRoot);
   render(Tree, { selected: citationFor('doc-1') });
 
@@ -246,6 +255,27 @@ test('a citation whose document IS in the listing marks exactly one row current'
   expect(current).toHaveLength(1);
   expect(current[0]).toBe(screen.getByTestId('tree-file-doc-1'));
   expect(current[0].getAttribute('aria-selected')).toBe('true');
+});
+
+// M1 (review round 1): `tree-file-{documentId}` is NOT unique. One document can
+// be named from two watched roots (`mnema-index/src/write.rs:700-722`), so the
+// same id renders twice and `getByTestId` throws "Found multiple elements" —
+// the id Task 8b selects on. Marking both is the right behaviour: it is one
+// document, cited once, present twice on disk. Nothing pinned it.
+test('a document present under two roots marks every row that shows it', async () => {
+  mockTree(oneDocumentTwoRoots);
+  render(Tree, { selected: citationFor('doc-shared', 'notes/shared.md') });
+
+  const rows = await screen.findAllByTestId('tree-file-doc-shared');
+  expect(rows).toHaveLength(2); // one row per path, under alpha and under beta
+  expect(rows.map((r) => r.getAttribute('aria-current'))).toEqual(['true', 'true']);
+  expect(screen.getAllByRole('treeitem', { current: true })).toHaveLength(2);
+
+  // Both directions: the neighbouring document in the same open folder is not
+  // swept up, so "every row" means every row OF THAT DOCUMENT, not every row.
+  expect(screen.getByTestId('tree-file-doc-other').getAttribute('aria-current')).toBeNull();
+  expect(rows.map((r) => r.getAttribute('aria-selected'))).toEqual(['true', 'true']);
+  expect(screen.getByTestId('tree-file-doc-other').getAttribute('aria-selected')).toBe('false');
 });
 
 test('a citation whose document is no longer in the listing selects nothing and says nothing false', async () => {
@@ -316,4 +346,66 @@ test('the failure message follows a live language switch too', async () => {
   setLocale('uk');
   await tick();
   expect(screen.getByTestId('tree-failed').textContent).toBe('Не вдалося завантажити дерево.');
+});
+
+// M2 (review round 1): this is Ruling N's substance and nothing tested it. The
+// `recents.length === 0` conjunct is what stops a real index with no recent
+// activity from announcing itself as empty; loosened to `||`, `oneRoot` claims
+// "nothing is indexed" while holding a file.
+test('a listing with roots but no recents is not an empty index', async () => {
+  mockTree(oneRoot); // one root, one file, recents: []
+  render(Tree, { selected: null });
+
+  expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
+  expect(screen.queryByTestId('tree-empty')).toBeNull();
+  expect(screen.queryByTestId('tree-failed')).toBeNull();
+
+  // And the Recents tab shows nothing without claiming the index is empty —
+  // an empty tab is not an empty index.
+  await fireEvent.click(screen.getByTestId('tree-tab-recents'));
+  expect(screen.queryByTestId('tree-empty')).toBeNull();
+  expect(screen.queryByTestId('tree-failed')).toBeNull();
+});
+
+// M3 (review round 1): `aria-expanded` is a second statement about the same
+// state as "are the children rendered", and a second signal is free to say the
+// opposite and stay green — the shape already caught once on `aria-selected`.
+test('aria-expanded on a folder says what the folder is actually doing', async () => {
+  mockTree(oneRootTwoFolders);
+  render(Tree, { selected: citationFor('doc-1') }); // notes/a.md — opens notes/
+
+  // The auto-opened folder and its shut sibling, both directions, and each
+  // cross-checked against whether the children are really there.
+  expect((await screen.findByTestId('tree-folder-notes')).getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByTestId('tree-file-doc-1')).toBeTruthy();
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByTestId('tree-file-doc-3')).toBeNull();
+
+  // And it tracks a click in both directions, not just the first one.
+  await fireEvent.click(screen.getByTestId('tree-folder-archive'));
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByTestId('tree-file-doc-3')).toBeTruthy();
+
+  await fireEvent.click(screen.getByTestId('tree-folder-notes'));
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
+});
+
+// M4 (review round 1): same shape one row up — `aria-pressed` is the only thing
+// telling a screen reader which tab is showing, and no test read it.
+test('aria-pressed says which tab is showing', async () => {
+  mockTree(oneRootTwoFolders);
+  render(Tree, { selected: null });
+
+  expect((await screen.findByTestId('tree-tab-files')).getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('tree-tab-recents').getAttribute('aria-pressed')).toBe('false');
+
+  await fireEvent.click(screen.getByTestId('tree-tab-recents'));
+  expect(screen.getByTestId('tree-tab-files').getAttribute('aria-pressed')).toBe('false');
+  expect(screen.getByTestId('tree-tab-recents').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('tree-recent-doc-1')).toBeTruthy(); // the flag agrees with the content
+
+  await fireEvent.click(screen.getByTestId('tree-tab-files'));
+  expect(screen.getByTestId('tree-tab-files').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('tree-tab-recents').getAttribute('aria-pressed')).toBe('false');
 });
