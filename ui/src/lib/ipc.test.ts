@@ -1,4 +1,6 @@
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
+import * as ipc from './ipc';
+import type { SourceAround } from './ipc';
 import {
   generated,
   generatedArchived,
@@ -8,6 +10,41 @@ import {
   refusedNoCandidates,
   refusedEmptyCompletion,
 } from './fixtures';
+
+const invoke = vi.fn();
+vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+
+test('listTree invokes list_tree', async () => {
+  invoke.mockResolvedValue({ roots: [], recents: [] });
+
+  await ipc.listTree();
+
+  expect(invoke).toHaveBeenCalledWith('list_tree');
+});
+
+test('sourceAround echoes the whole identity, not just the id', async () => {
+  if (generated.kind !== 'generated') throw new Error('fixture drifted');
+  invoke.mockResolvedValue({ kind: 'gone', reason: { kind: 'noSuchChunk' } });
+
+  await ipc.sourceAround(generated.citations[0]);
+
+  expect(invoke).toHaveBeenCalledWith('source_around', {
+    chunkId: 42, passageText: 'A cited passage.',
+    citedDocumentId: 'doc-1', citedOrd: 0, citedRootId: 7,
+    citedRelativePath: 'notes/a.md', radius: 3,
+  });
+});
+
+test('SourceAround rejects Rust snake_case wire fields', () => {
+  const source: SourceAround = {
+    kind: 'excerpt', blocks: [], spans: [], documentId: 'doc-1', sectionTitle: null,
+    hasMoreBefore: false, hasMoreAfter: false, freshness: { kind: 'current' },
+    // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
+    has_more_before: false,
+  };
+
+  expect(source.kind).toBe('excerpt');
+});
 
 test('the fixtures carry the pinned AskAnswer tags', () => {
   expect(generated.kind).toBe('generated');
