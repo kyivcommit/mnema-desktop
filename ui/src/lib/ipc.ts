@@ -25,12 +25,20 @@ export type ContentArmReport =
   | { kind: 'failed'; reason: string }
   | { kind: 'answered'; matched: number; embedded: number; total: number; reachable: number; inspected: number };
 
+// documentId/ord/rootId are the citation's occurrence identity (PR 6a,
+// owner-Codex P1 on PR #22): documentId + ord close the reused-chunk-id
+// hazard (chunk.id has no AUTOINCREMENT), and rootId feeds Freshness only —
+// `Some` when exactly one distinct watched root holds the document, `null`
+// when zero or several do (`mnema_index::Citation`'s own doc comment).
 export type Hit = {
   chunkId: number;
   text: string;
   relativePath: string | null;
   sectionTitle: string | null;
   coordinate: Coordinate;
+  documentId: string;
+  ord: number;
+  rootId: number | null;
 };
 
 export type AskCitation = {
@@ -40,6 +48,9 @@ export type AskCitation = {
   relativePath: string | null;
   sectionTitle: string | null;
   coordinate: Coordinate;
+  documentId: string;
+  ord: number;
+  rootId: number | null;
 };
 
 export type AskAnswer =
