@@ -1,6 +1,6 @@
 <script lang="ts">
   import { locale, t } from '../i18n';
-  import { formatLocator } from '../i18n/locator';
+  import { citationLabel } from '../i18n/label';
   import { splitAnchors } from '../lib/anchors';
   import type { AskAnswer, AskCitation } from '../lib/ipc';
 
@@ -30,19 +30,16 @@
     return found;
   }
 
-  // Ruling D: `t()` and `formatLocator()` both read the locale store at call
-  // time but neither is reactive on its own, so the whole preview list is
-  // rebuilt inside one $derived.by that reads $locale — the house pattern
-  // (Arms.svelte:11-12, Cards.svelte:16-18).
+  // Ruling D: `citationLabel()` reads the locale store at call time (through
+  // `t()` and `formatLocator()`) but is not reactive on its own, so the whole
+  // preview list is rebuilt inside one $derived.by that reads $locale — the
+  // house pattern (Arms.svelte:11-12, Cards.svelte:16-18).
+  // Ruling S: the rule itself lives in `i18n/label.ts` and `Source.svelte`
+  // calls the same function — one rule, one place. What stays here is the
+  // reactivity, which is per-component.
   const previews = $derived.by(() => {
     void $locale;
-    return answer.citations.map((c) => {
-      const parts = [c.relativePath, formatLocator(c.coordinate)].filter(
-        (p): p is string => !!p,
-      );
-      const label = parts.length > 0 ? parts.join(' · ') : t('no_path_on_disk');
-      return { citation: c, label };
-    });
+    return answer.citations.map((c) => ({ citation: c, label: citationLabel(c) }));
   });
 </script>
 

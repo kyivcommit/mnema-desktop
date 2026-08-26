@@ -1,4 +1,4 @@
-import type { AskAnswer, AskCitation, Hit, TreeListing } from './ipc';
+import type { AskAnswer, AskCitation, Hit, SourceAround, SourceBlock, TreeListing } from './ipc';
 
 // Anchors 3 and 7, NOT 1 and 2: `anchor` is the model's own ordinal into
 // `hits`, not a position in `citations` (PR 6 plan, Decision 5) — a fixture
@@ -7,7 +7,7 @@ import type { AskAnswer, AskCitation, Hit, TreeListing } from './ipc';
 // `citations[n - 1]`.
 //
 // `relativePath: 'notes/a.md'` is kept as-is on purpose — do not change it.
-const citationA: AskCitation = {
+export const citationA: AskCitation = {
   anchor: 3,
   chunkId: 42,
   ord: 0,
@@ -23,7 +23,7 @@ const citationA: AskCitation = {
 // (mockup:282-283), so a sibling filter keyed on documentId has something to
 // keep. No coordinate, so the preview label's second branch (a path with no
 // verifiable location) is exercised too.
-const citationB: AskCitation = {
+export const citationB: AskCitation = {
   anchor: 7,
   chunkId: 43,
   ord: 1,
@@ -107,7 +107,7 @@ const hit: Hit = {
 
 // A different document entirely (mockup:368-369) — a sibling filter that
 // forgets to compare documentId is visibly wrong against this fixture.
-const hitOtherDocument: Hit = {
+export const hitOtherDocument: Hit = {
   chunkId: 9,
   ord: 0,
   documentId: 'doc-2',
@@ -248,3 +248,93 @@ export const oneDocumentTwoRoots: TreeListing = {
 // Empty but SUCCESSFUL (Ruling N): nothing indexed is not the same event as a
 // listing that could not be read, and the card must not say the same thing.
 export const emptyListing: TreeListing = { roots: [], recents: [] };
+
+// ---------------------------------------------------------------------------
+// Source fixtures (Task 8). Block text is Latin for the same reason the folder
+// names above are (Ruling K/T): `i18n/guard.test.ts:19-21` reads every `.ts`
+// under `src/` outside `src/i18n` that is not a `.test.ts`, and this file is
+// one of them. The astral-prefix block, whose expected highlight is Cyrillic,
+// therefore lives inside `Source.test.ts`, where the guard does not look.
+//
+// 🔴 The span numbers below are the whole point of this fixture set
+// (`src-tauri/src/tree.rs:265-278`): `blockStart` is the offset into the BLOCK
+// and is where the highlight begins; `start`/`end` index the CHUNK's own text,
+// which never reaches the wire, and only their difference is ever used. Every
+// span here keeps `start !== blockStart` on purpose — with the two equal, a
+// suite cannot tell `slice(blockStart, blockStart + (end - start))` from the
+// wrong `slice(start, end)` and both arithmetics look correct forever.
+
+type Excerpt = Extract<SourceAround, { kind: 'excerpt' }>;
+
+/** The block both cited passages land in — the same paragraph (mockup:282-283). */
+export const SHARED_BLOCK_ID = 11;
+/** A second block inside the clicked window, for spans that merge with no clicked span. */
+export const SECOND_BLOCK_ID = 12;
+/** A block the clicked excerpt's window does NOT contain. */
+export const OUTSIDE_BLOCK_ID = 99;
+
+const SHARED_BLOCK_TEXT = 'The digitisation price is fixed, and the archive fee is separate.';
+const SECOND_BLOCK_TEXT = 'Following paragraph about the archive fee schedule.';
+
+/** Code points [4, 22) of the shared block — what `excerptSpanA` paints. */
+export const SPAN_A_TEXT = 'digitisation price';
+/** Code points [41, 52) of the same block, far from span A so the two do not merge. */
+export const SPAN_B_TEXT = 'archive fee';
+
+const block = (blockId: number, text: string): SourceBlock => ({
+  blockId,
+  kind: 'paragraph',
+  text,
+  pageNo: 1,
+  readingOrder: blockId,
+});
+
+// The clicked citation's own window: three blocks in reading order, one span.
+// `hasMoreBefore` and `hasMoreAfter` DISAGREE — they are not the same flag, and
+// a fixture that set them equal would satisfy an ellipsis assertion either way.
+export const excerptSpanA: Excerpt = {
+  kind: 'excerpt',
+  blocks: [
+    block(10, 'Preceding paragraph with no highlight.'),
+    block(SHARED_BLOCK_ID, SHARED_BLOCK_TEXT),
+    block(SECOND_BLOCK_ID, SECOND_BLOCK_TEXT),
+  ],
+  spans: [{ blockId: SHARED_BLOCK_ID, start: 12, end: 30, blockStart: 4 }], // len 18 → [4, 22)
+  documentId: 'doc-1',
+  sectionTitle: 'Intro',
+  hasMoreBefore: true,
+  hasMoreAfter: false,
+  freshness: { kind: 'current' },
+};
+
+// The sibling's own round trip: a DIFFERENT window (block 13 is not in the
+// clicked one) and the opposite `hasMore*` flags, so an implementation that
+// took the sibling's window or ORed its flags is visibly wrong.
+export const excerptSpanB: Excerpt = {
+  kind: 'excerpt',
+  blocks: [
+    block(SHARED_BLOCK_ID, SHARED_BLOCK_TEXT),
+    block(SECOND_BLOCK_ID, SECOND_BLOCK_TEXT),
+    block(13, 'A later paragraph the clicked window does not reach.'),
+  ],
+  spans: [{ blockId: SHARED_BLOCK_ID, start: 7, end: 18, blockStart: 41 }], // len 11 → [41, 52)
+  documentId: 'doc-1',
+  sectionTitle: 'Intro',
+  hasMoreBefore: false,
+  hasMoreAfter: true,
+  freshness: { kind: 'current' },
+};
+
+// A sibling whose only span names a block the clicked window does not hold.
+// Same `documentId` on purpose: if it disagreed, Ruling U's filter would drop
+// it first and the window test would pass for the wrong reason.
+export const excerptInAnotherBlock: Excerpt = {
+  kind: 'excerpt',
+  blocks: [block(OUTSIDE_BLOCK_ID, 'A paragraph outside the clicked window.')],
+  spans: [{ blockId: OUTSIDE_BLOCK_ID, start: 3, end: 12, blockStart: 2 }],
+  documentId: 'doc-1',
+  sectionTitle: null,
+  hasMoreBefore: false,
+  hasMoreAfter: true,
+  freshness: { kind: 'current' },
+};

@@ -7,7 +7,11 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'arm_text' | 'arm_content'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
-  | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed';
+  | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
+  | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
+  | 'fresh_file_missing' | 'fresh_no_path'
+  | 'gone_no_such_chunk' | 'gone_id_reused'
+  | 'source_loading' | 'source_failed';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
@@ -28,6 +32,18 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
     tree_tab_files: 'Файли', tree_tab_recents: 'Нещодавні',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
+    fresh_current: 'Актуально',
+    fresh_reindexed: 'Цей шлях тепер належить іншому документу',
+    fresh_file_changed: 'Файл змінився після індексації',
+    fresh_file_missing: 'Файла немає на диску',
+    // Ruling X: `noPath` has three causes and deletion is only one of them
+    // (`src-tauri/src/tree.rs:226-241`), so this says the location is unknown
+    // and never that the file is gone.
+    fresh_no_path: 'Розташування на диску невідоме',
+    gone_no_such_chunk: 'Цього фрагмента більше немає в індексі',
+    gone_id_reused: 'Цей ідентифікатор тепер вказує на інший фрагмент',
+    source_loading: 'Завантаження джерела…',
+    source_failed: 'Не вдалося завантажити джерело.',
   },
   en: {
     pin: 'Pin',
@@ -47,5 +63,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
     tree_tab_files: 'Files', tree_tab_recents: 'Recents',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
+    fresh_current: 'Up to date',
+    fresh_reindexed: 'This path now names another document',
+    fresh_file_changed: 'The file changed after indexing',
+    fresh_file_missing: 'The file is missing from disk',
+    fresh_no_path: 'The location on disk is unknown',
+    gone_no_such_chunk: 'This passage is no longer in the index',
+    gone_id_reused: 'This identifier now points to another passage',
+    source_loading: 'Loading the source…',
+    source_failed: 'The source could not be loaded.',
   },
 };
