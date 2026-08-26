@@ -6,7 +6,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'arm_text' | 'arm_content'
   | 'card_tree' | 'card_answer' | 'card_source'
-  | 'no_path_on_disk' | 'answer_heading' | 'citations_heading';
+  | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
+  | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
@@ -25,6 +26,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     arm_text: 'текст', arm_content: 'зміст',
     card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
+    tree_tab_files: 'Файли', tree_tab_recents: 'Нещодавні',
+    tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
   },
   en: {
     pin: 'Pin',
@@ -42,5 +45,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     arm_text: 'text', arm_content: 'content',
     card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
+    tree_tab_files: 'Files', tree_tab_recents: 'Recents',
+    tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
   },
 };

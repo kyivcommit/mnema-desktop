@@ -1,4 +1,4 @@
-import type { AskAnswer, AskCitation, Hit } from './ipc';
+import type { AskAnswer, AskCitation, Hit, TreeListing } from './ipc';
 
 // Anchors 3 and 7, NOT 1 and 2: `anchor` is the model's own ordinal into
 // `hits`, not a position in `citations` (PR 6 plan, Decision 5) — a fixture
@@ -147,3 +147,76 @@ export const refusedEmptyCompletion: AskAnswer = {
   text: { kind: 'answered', matched: 2 },
   content: { kind: 'off' },
 };
+
+// ---------------------------------------------------------------------------
+// Tree fixtures (Task 7). Folder names are Latin on purpose (Ruling K): this
+// file is a `.ts` under `ui/src` outside `src/i18n`, so `i18n/guard.test.ts`
+// reads it and a Cyrillic folder name here would turn `npm test` red with a
+// message about hardcoded strings that says nothing about trees. A non-ASCII
+// folder under test lives inside `Tree.test.ts`, where the guard does not look.
+
+// One root, two folders. `notes/a.md` is `doc-1` so the citation fixtures
+// above (`citationA`/`citationB`, both `doc-1` at `notes/a.md`) point into
+// this listing. Task 8b consumes this fixture and requires these two names.
+export const oneRootTwoFolders: TreeListing = {
+  roots: [
+    {
+      rootId: 1,
+      absolutePath: '/home/u/docs',
+      name: 'docs',
+      files: [
+        { relativePath: 'notes/a.md', documentId: 'doc-1' },
+        { relativePath: 'notes/b.md', documentId: 'doc-2' },
+        { relativePath: 'archive/old.md', documentId: 'doc-3' },
+      ],
+    },
+  ],
+  recents: [
+    { documentId: 'doc-1', rootId: 1, relativePath: 'notes/a.md', indexedAt: 1_700_000_100 },
+    { documentId: 'doc-3', rootId: 1, relativePath: 'archive/old.md', indexedAt: 1_700_000_000 },
+  ],
+};
+
+// Two roots holding the SAME relative path under different documentIds. A card
+// that keys its selection on the path string cannot tell these two apart;
+// keying on documentId (Ruling P) can.
+export const twoRootsSameRelativePath: TreeListing = {
+  roots: [
+    { rootId: 1, absolutePath: '/home/u/alpha', name: 'alpha', files: [{ relativePath: 'README.md', documentId: 'doc-a' }] },
+    { rootId: 2, absolutePath: '/home/u/beta', name: 'beta', files: [{ relativePath: 'README.md', documentId: 'doc-b' }] },
+  ],
+  recents: [],
+};
+
+// A file at a root's top level (no `/` at all — `split('/')` returns one
+// element and no folder is created) beside a folder two levels deep, where the
+// nesting has to recurse into itself. Neither shape exists in the fixtures
+// above, and the folder builder branches on both.
+export const oneRootMixedDepths: TreeListing = {
+  roots: [
+    {
+      rootId: 4,
+      absolutePath: '/home/u/mixed',
+      name: 'mixed',
+      files: [
+        { relativePath: 'README.md', documentId: 'doc-r' },
+        { relativePath: 'a/b/c.md', documentId: 'doc-c' },
+        { relativePath: 'a/d.md', documentId: 'doc-d' },
+      ],
+    },
+  ],
+  recents: [],
+};
+
+// A single root holding a single top-level file. The negative selection test
+// (a citation whose document is gone) and its positive control (Ruling J) both
+// render this: the row is on screen either way, so only `aria-current` differs
+// between them and neither test can be satisfied by an empty tree.
+export const oneRoot: TreeListing = {
+  roots: [{ rootId: 3, absolutePath: '/home/u/solo', name: 'solo', files: [{ relativePath: 'a.md', documentId: 'doc-1' }] }],
+  recents: [],
+};
+
+// Empty but SUCCESSFUL (Ruling N): nothing indexed is not the same event as a
+// listing that could not be read, and the card must not say the same thing.
+export const emptyListing: TreeListing = { roots: [], recents: [] };
