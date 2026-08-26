@@ -31,11 +31,21 @@ test('the query echoes as a bubble and the answer renders its anchors as buttons
   expect(screen.getAllByRole('button', { name: /\[3\]|\[7\]/ })).toHaveLength(2);
   const body = screen.getByTestId('answer-body').textContent!;
   // Both directions (review I2): the raw grammar never reaches the DOM, AND
-  // the prose around both anchors actually survives — a mutant that drops
-  // every text segment left only the `not.toMatch(/<c>/)` half satisfied.
+  // the prose around both anchors survives IN ORDER with the anchors between
+  // it. Two `toContain`s were satisfied by any arrangement — re-review N1
+  // measured a reversed-segment mutant rendering
+  // `.[7] and the total cannot exceed the cap[3]Costs four hryvnias` at 88/88
+  // green. The whole string is the claim.
   expect(body).not.toMatch(/<c>/);
-  expect(body).toContain('Costs four hryvnias');
-  expect(body).toContain('cannot exceed the cap');
+  expect(body).toBe('Costs four hryvnias[3] and the total cannot exceed the cap[7].');
+
+  // Re-review N2: presence was defended, identity was not — swapping the two
+  // headings so the prose reads "Citations" and the citation list reads
+  // "Answer" was 88/88 green. Order in the document is the identity.
+  expect(screen.getAllByRole('heading').map((h) => h.textContent)).toEqual([
+    'Answer',
+    'Citations',
+  ]);
 });
 
 test('the anchor resolves by value, not by position', async () => {
