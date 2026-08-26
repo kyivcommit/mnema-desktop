@@ -352,7 +352,7 @@ enum Composed {
 ///
 /// **Keyed on the cited location — now the cited *root*, when the citation
 /// carries one — and on nothing else.** A citation minted since Task 1 carries
-/// `rootId` (`bridge.rs:433`); one minted before it, or one the client sends
+/// `rootId` (`AskCitation::root_id`); one minted before it, or one the client sends
 /// with `citedRootId: null`, falls back to the location-only rule this
 /// function used before that field existed. Keying on the document instead of
 /// the location is wrong in a way that took two reviews to see — after a walk
@@ -412,8 +412,8 @@ fn cited_occupant(
 ///
 /// - **The text** is compared against `chunk.text` **exactly**. Not
 ///   `contains`, not trimmed, not normalised: the text on the wire is
-///   `chunk.text` verbatim — `AskCitation.text` (`bridge.rs:432`) is
-///   `h.text.clone()` (`bridge.rs:556`), which is `Citation::text`, which is
+///   `chunk.text` verbatim — `AskCitation::text` is `Hit::text` cloned when
+///   `ask` builds each citation, which is `Citation::text`, which is
 ///   the `chunk.text` column (read back by `Db::citation`) — so any loosening
 ///   only widens what a reused id can pass as. A `contains` comparison would
 ///   accept `""` and match every chunk in the index.
@@ -554,8 +554,12 @@ fn decide_freshness(occupant: Option<&PathOccupant>, document_id: &str) -> Fresh
 /// through the fallback `cited_occupant` keeps for exactly that case.
 ///
 /// Eight parameters mirrors the wire contract (§10) one field at a time —
-/// splitting them into a struct would be a seam this command's only caller
-/// (`ipc.ts`'s `sourceAround`) does not need.
+/// splitting them into a struct would be a seam no caller needs yet. **There
+/// is no caller yet**: `ui/src/` carries no `sourceAround`
+/// (`grep -rn "sourceAround" ui/src/` is empty) — PR 6b adds `ipc.ts`'s
+/// wrapper, and it is what must send the three parameters this task added
+/// (`citedDocumentId`, `citedOrd`, `citedRootId`), not something already
+/// relying on them today.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command(async)]
 pub fn source_around(
