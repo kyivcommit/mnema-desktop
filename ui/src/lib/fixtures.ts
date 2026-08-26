@@ -46,9 +46,12 @@ export const generated: AskAnswer = {
 };
 
 // Preview-label branch 2 (Decision 1): no path on disk, but a real location.
-// The rule keeps the location — a citation indexed out of an archive still
-// knows it is on page 12 — where the vanilla `hitLocation` would have thrown
-// it away.
+// The rule keeps the location — a citation with no `path` row of its own
+// still knows it is on page 12 — where the vanilla `hitLocation` would have
+// thrown it away. "Archived" here is illustrative, not a proven cause:
+// `schema.sql:66`'s `parent_document_id` models archive membership, but
+// nothing in Rust writes that column yet, so this stands for any document
+// with no path row, not specifically an archive member.
 export const generatedArchived: AskAnswer = {
   kind: 'generated',
   answer: 'An archived source says so<c>1</c>.',

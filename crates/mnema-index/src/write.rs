@@ -96,9 +96,13 @@ pub struct Citation {
     /// document — not "exactly one `path` row". Two copies of a file inside
     /// one folder are two rows under one root (`schema.sql:76-78,85`), and
     /// that root is perfectly nameable; counting rows instead of distinct
-    /// roots would answer `None` there. `None` for zero roots (archive-only,
-    /// or the last copy on disk deleted) and for two-or-more distinct roots —
-    /// both are genuinely "we cannot name one root".
+    /// roots would answer `None` there. `None` for zero roots — a document
+    /// with no `path` row of its own, for whatever reason (its last copy on
+    /// disk was deleted; `schema.sql:66`'s `parent_document_id` also
+    /// describes an archive member this way, but nothing in Rust writes that
+    /// column yet, so it is not a reachable cause today) — and for
+    /// two-or-more distinct roots; both are genuinely "we cannot name one
+    /// root".
     pub root_id: Option<i64>,
 }
 
@@ -1177,6 +1181,15 @@ impl Db {
     /// the selection rule. What a citation should name when one document has
     /// several copies — the first, all of them, the one under the root the query
     /// was scoped to — is the search/RAG spec's decision, still open.
+    ///
+    /// Two separate statements, not one transaction: the `document_id`/`ord`
+    /// row and the root lookup below can each see a different commit from a
+    /// second connection racing this one (the ordinary case that motivated
+    /// `AppState::open_job_index` having its own connection at all — see
+    /// `retrieve`'s comment in `bridge.rs`). The answer is internally
+    /// consistent only when the whole call runs inside one
+    /// [`Db::read_snapshot`]; the one offline caller that does not —
+    /// `mnema-eval`'s `run.rs` — reads whatever each statement happened to see.
     pub fn citation(&self, chunk_id: i64) -> Result<Option<Citation>, Error> {
         let mut stmt = self.conn().prepare(
             "SELECT c.text, c.coordinate, c.char_span, p.section_title, pa.relative_path,
