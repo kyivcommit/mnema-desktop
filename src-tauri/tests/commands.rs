@@ -1650,6 +1650,20 @@ fn ask_maps_each_anchor_to_the_right_citation_and_generates() {
         "<c>2</c> must resolve to the SECOND fused hit's chunk, not the first \
          — the off-by-one silent lie (spec §9): {answer}"
     );
+    // Pins the seam from `retrieve`'s `Hit` construction through `ask`'s
+    // `AskCitation` construction: both must carry the chunk's own
+    // `document_id`/`ord` through, not a hardcoded or blanked stand-in.
+    assert_eq!(
+        citations[0]["documentId"],
+        json!("b".repeat(64)),
+        "documentId must name the SECOND document, not a hardcoded or \
+         blanked value smuggled through Hit/AskCitation: {answer}"
+    );
+    assert_eq!(
+        citations[0]["ord"],
+        json!(0),
+        "ord must be read from the chunk's own row, not hardcoded: {answer}"
+    );
 }
 
 /// `Ready`, chat was called, and the model answered with nothing → `Refused`
