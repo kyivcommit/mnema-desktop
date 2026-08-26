@@ -145,6 +145,43 @@ test('the folder holding the selected file is open; the others are not', async (
   expect(screen.getByTestId('tree-folder-archive')).toBeTruthy(); // the shut folder is still listed
 });
 
+// The open/shut state is keyed `${rootId}\0${path}`, not by path alone, so two
+// roots holding a folder of the same name cannot share one flag. That claim had
+// no test: the report asserted the component was correct here and only the test
+// id collided, and half of that was unmeasured. The collision is real and shows
+// up in the first line — `getAllByTestId`, because `getByTestId` throws on two
+// matches.
+test('two roots holding a folder of the same name open and shut independently', async () => {
+  // Local, like `mockTree` (Ruling L): nothing else consumes this shape.
+  mockTree({
+    roots: [
+      { rootId: 1, absolutePath: '/home/u/one', name: 'one', files: [{ relativePath: 'notes/x.md', documentId: 'doc-one' }] },
+      { rootId: 2, absolutePath: '/home/u/two', name: 'two', files: [{ relativePath: 'notes/y.md', documentId: 'doc-two' }] },
+    ],
+    recents: [],
+  });
+  render(Tree, { selected: null });
+
+  expect(await screen.findAllByTestId('tree-folder-notes')).toHaveLength(2);
+  expect(screen.queryByTestId('tree-file-doc-one')).toBeNull();
+  expect(screen.queryByTestId('tree-file-doc-two')).toBeNull();
+
+  // Opening the first root's `notes/` must not open the second root's.
+  await fireEvent.click(screen.getAllByTestId('tree-folder-notes')[0]);
+  expect(screen.getByTestId('tree-file-doc-one')).toBeTruthy();
+  expect(screen.queryByTestId('tree-file-doc-two')).toBeNull();
+
+  await fireEvent.click(screen.getAllByTestId('tree-folder-notes')[1]);
+  expect(screen.getByTestId('tree-file-doc-one')).toBeTruthy();
+  expect(screen.getByTestId('tree-file-doc-two')).toBeTruthy();
+
+  // And shutting one must not shut the other — the direction a shared flag
+  // would still get right by accident if only the opening half were asserted.
+  await fireEvent.click(screen.getAllByTestId('tree-folder-notes')[0]);
+  expect(screen.queryByTestId('tree-file-doc-one')).toBeNull();
+  expect(screen.getByTestId('tree-file-doc-two')).toBeTruthy();
+});
+
 test('the files tab lists each root with its files; the recents tab lists the recent documents', async () => {
   mockTree(oneRootTwoFolders);
   render(Tree, { selected: null });
