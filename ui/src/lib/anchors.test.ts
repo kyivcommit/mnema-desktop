@@ -21,6 +21,17 @@ test('prose that merely looks like an anchor is not one', () => {
   expect(splitAnchors(plain, new Set([1]))).toEqual([{ kind: 'text', text: plain }]);
 });
 
+test.each([
+  '<C>3</C>',
+  '<c> 3</c>',
+  '<c>3 </c>',
+  '<c>+3</c>',
+  '<c>3.0</c>',
+  '<c></c>',
+])('only exact lowercase, unspaced integer anchors resolve: %s', answer => {
+  expect(splitAnchors(answer, new Set([0, 3]))).toEqual([{ kind: 'text', text: answer }]);
+});
+
 test('two anchors in one sentence both resolve', () => {
   expect(splitAnchors('A<c>3</c> and B<c>7</c>.', new Set([3, 7])).filter(s => s.kind === 'anchor'))
     .toEqual([{ kind: 'anchor', n: 3 }, { kind: 'anchor', n: 7 }]);
