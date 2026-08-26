@@ -1,10 +1,16 @@
 import { render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { expect, test } from 'vitest';
+import { afterEach, expect, test } from 'vitest';
 import Cards from './Cards.svelte';
 import { stateFromAnswer } from './state';
 import { generated, refusedNoCandidates, citationsOnly } from '../lib/fixtures';
 import { setLocale } from '../i18n';
+
+// N1 (re-review 1): `locale` is a module-level store shared by every test in
+// this file. The labels test below switches it, and an in-test restore is
+// skipped when an assertion fails first — leaving the next test to fail for a
+// reason that has nothing to do with what it claims. Restore unconditionally.
+afterEach(() => setLocale('en'));
 
 test('idle shows no cards at all (state A is the bare line)', () => {
   render(Cards, { state: { kind: 'idle' }, query: '' });
@@ -64,6 +70,7 @@ test('error shows no cards at all', () => {
 // the Codex ④ defect on PR #20) all held by inspection only. Lifted from the
 // reviewer's probe F.
 test('card labels come from the catalogue, on the right section, and follow a live language switch', async () => {
+  setLocale('en'); // seed, do not inherit: an earlier sibling switching the language must not decide this test
   render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
   expect(screen.getByTestId('card-tree').getAttribute('aria-label')).toBe('Tree');
   expect(screen.getByTestId('card-centre').getAttribute('aria-label')).toBe('Answer');
@@ -73,7 +80,7 @@ test('card labels come from the catalogue, on the right section, and follow a li
   expect(screen.getByTestId('card-tree').getAttribute('aria-label')).toBe('Дерево');
   expect(screen.getByTestId('card-centre').getAttribute('aria-label')).toBe('Відповідь');
 
-  setLocale('en'); // restore — `locale` is a module-level store shared across this file's tests
+  setLocale('en'); // the switch back is part of the claim, not the cleanup — afterEach owns that
   await tick();
   expect(screen.getByTestId('card-tree').getAttribute('aria-label')).toBe('Tree');
   expect(screen.getByTestId('card-centre').getAttribute('aria-label')).toBe('Answer');
