@@ -406,6 +406,10 @@ fn a_document_with_no_path_cites_no_path_rather_than_an_empty_one() {
     let c = db.citation(chunk).unwrap().expect("chunk exists");
     assert_eq!(c.relative_path, None);
     assert_eq!(c.text, "x = 1");
+    assert_eq!(
+        c.root_id, None,
+        "zero roots must not name one, same as two roots (Decision 2)"
+    );
 }
 
 /// The point of stamping the format version per row is that a reindex is
