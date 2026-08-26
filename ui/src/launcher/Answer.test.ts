@@ -2,8 +2,10 @@ import { render, screen, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, expect, test, vi } from 'vitest';
 import Answer from './Answer.svelte';
+import { stateFromAnswer } from './state';
 import { generated, generatedArchived, generatedNoPath } from '../lib/fixtures';
 import { setLocale } from '../i18n';
+import type { AskAnswer } from '../lib/ipc';
 
 // Mirrors Cards.test.ts: `locale` is a module-level store shared by every
 // test in this file. Restore unconditionally so a failed assertion in the
@@ -11,17 +13,34 @@ import { setLocale } from '../i18n';
 // has nothing to do with what it claims.
 afterEach(() => setLocale('en'));
 
+// Review I1: `Answer`'s `answer` prop is narrowed to
+// `Extract<AskAnswer, { kind: 'generated' }>` (it pairs with
+// `LauncherState.generated`, `state.ts:22`, the way Task 8b will mount it),
+// but the fixtures in `lib/fixtures.ts` are declared as the wide `AskAnswer`
+// union. Narrow through the same door `Cards.test.ts:23` already uses
+// (`stateFromAnswer`) instead of widening the component's prop type.
+function gen(a: AskAnswer) {
+  const s = stateFromAnswer('q', a);
+  if (s.kind !== 'generated') throw new Error('fixture is not a generated answer');
+  return s.answer;
+}
+
 test('the query echoes as a bubble and the answer renders its anchors as buttons', () => {
-  render(Answer, { query: 'how much?', answer: generated, onSelect: vi.fn() });
+  render(Answer, { query: 'how much?', answer: gen(generated), onSelect: vi.fn() });
   expect(screen.getByTestId('query-echo').textContent).toBe('how much?');
   expect(screen.getAllByRole('button', { name: /\[3\]|\[7\]/ })).toHaveLength(2);
-  // Both directions: the raw grammar never reaches the DOM.
-  expect(screen.getByTestId('answer-body').textContent).not.toMatch(/<c>/);
+  const body = screen.getByTestId('answer-body').textContent!;
+  // Both directions (review I2): the raw grammar never reaches the DOM, AND
+  // the prose around both anchors actually survives — a mutant that drops
+  // every text segment left only the `not.toMatch(/<c>/)` half satisfied.
+  expect(body).not.toMatch(/<c>/);
+  expect(body).toContain('Costs four hryvnias');
+  expect(body).toContain('cannot exceed the cap');
 });
 
 test('the anchor resolves by value, not by position', async () => {
   const onSelect = vi.fn();
-  render(Answer, { query: 'q', answer: generated, onSelect }); // anchors 3 and 7
+  render(Answer, { query: 'q', answer: gen(generated), onSelect }); // anchors 3 and 7
   await fireEvent.click(screen.getByRole('button', { name: '[7]' }));
   expect(onSelect).toHaveBeenCalledTimes(1);
   const [picked] = onSelect.mock.calls[0];
@@ -30,21 +49,28 @@ test('the anchor resolves by value, not by position', async () => {
 });
 
 test('the preview label is path · locator, and never invents a paragraph number', () => {
-  render(Answer, { query: 'q', answer: generated, onSelect: vi.fn() });
-  const label = screen.getByTestId('preview-3').textContent!;
+  render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() });
+  const preview = screen.getByTestId('preview-3');
+  const label = preview.querySelector('[data-testid="preview-label"]')!.textContent!;
   expect(label).toContain('notes/a.md');
   expect(label).toMatch(/рядки|lines/);
   expect(label).not.toMatch(/абзац|paragraph/);
+  // Review M1: the button's accessible name must be exactly its label — not
+  // the label plus a bare or bracketed ordinal fused onto it. `label` is read
+  // from the `preview-label` span alone, so a sibling `{citation.anchor}`
+  // added anywhere else in the button grows the accessible name without
+  // changing `label`, and this lookup stops finding the button.
+  expect(screen.getByRole('button', { name: label })).toBe(preview);
 });
 
 test('a citation with no coordinate shows the path alone, with no dangling separator', () => {
-  render(Answer, { query: 'q', answer: generated, onSelect: vi.fn() }); // citation 7 has coordinate none
+  render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() }); // citation 7 has coordinate none
   expect(screen.getByTestId('preview-7').querySelector('[data-testid="preview-label"]')!
     .textContent!.trim()).toBe('notes/a.md');
 });
 
 test('no path on disk but a real location keeps the location', () => {
-  render(Answer, { query: 'q', answer: generatedArchived, onSelect: vi.fn() });
+  render(Answer, { query: 'q', answer: gen(generatedArchived), onSelect: vi.fn() });
   const label = screen.getByTestId('preview-1').querySelector('[data-testid="preview-label"]')!.textContent!;
   expect(label).toMatch(/с\. 12|p\. 12/);
   // Both directions: the location is not replaced by the no-path string.
@@ -52,14 +78,14 @@ test('no path on disk but a real location keeps the location', () => {
 });
 
 test('neither path nor location says so rather than rendering an empty label', () => {
-  render(Answer, { query: 'q', answer: generatedNoPath, onSelect: vi.fn() });
+  render(Answer, { query: 'q', answer: gen(generatedNoPath), onSelect: vi.fn() });
   expect(screen.getByTestId('preview-1').querySelector('[data-testid="preview-label"]')!
     .textContent).toMatch(/no path|нема на диску/i);
 });
 
 test('clicking an anchor and clicking its preview both select the same citation', async () => {
   const onSelect = vi.fn();
-  render(Answer, { query: 'q', answer: generated, onSelect });
+  render(Answer, { query: 'q', answer: gen(generated), onSelect });
   await fireEvent.click(screen.getByRole('button', { name: '[7]' }));
   await fireEvent.click(screen.getByTestId('preview-7'));
   expect(onSelect).toHaveBeenCalledTimes(2);
@@ -70,19 +96,28 @@ test('clicking an anchor and clicking its preview both select the same citation'
 // a label computed outside a reactive wrapper freezes at the locale it was
 // first rendered in (D130, the Codex ④ defect on PR #20, Task 5's I2). This
 // is the test the task's seven illustrated ones would not have caught.
-test('the preview label follows a live language switch', async () => {
+// Review I3: the two headings share the same gap — folded into the same
+// switch here rather than left undefended (Task 5's review found the
+// identical class as its Important I2, one component earlier).
+test('the preview label and both headings follow a live language switch', async () => {
   setLocale('en'); // seed, do not inherit: an earlier sibling switching the language must not decide this test
-  render(Answer, { query: 'q', answer: generated, onSelect: vi.fn() });
+  render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() });
   expect(screen.getByTestId('preview-3').querySelector('[data-testid="preview-label"]')!.textContent)
     .toMatch(/lines 5–7/);
+  expect(screen.getByRole('heading', { name: 'Answer' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Citations' })).toBeTruthy();
 
   setLocale('uk');
   await tick();
   expect(screen.getByTestId('preview-3').querySelector('[data-testid="preview-label"]')!.textContent)
     .toMatch(/рядки 5–7/);
+  expect(screen.getByRole('heading', { name: 'Відповідь' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Цитати' })).toBeTruthy();
 
   setLocale('en'); // the switch back is part of the claim, not the cleanup — afterEach owns that
   await tick();
   expect(screen.getByTestId('preview-3').querySelector('[data-testid="preview-label"]')!.textContent)
     .toMatch(/lines 5–7/);
+  expect(screen.getByRole('heading', { name: 'Answer' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Citations' })).toBeTruthy();
 });

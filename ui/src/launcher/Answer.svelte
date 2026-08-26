@@ -4,13 +4,14 @@
   import { splitAnchors } from '../lib/anchors';
   import type { AskAnswer, AskCitation } from '../lib/ipc';
 
-  // `answer` is typed as the full `AskAnswer` union — not narrowed to the
-  // `generated` member — because the fixtures it is fed from (`lib/fixtures.ts`)
-  // are themselves declared `AskAnswer`, and this component (Task 6) is only
-  // ever mounted for state B (kind `generated`); Cards.svelte does that
-  // narrowing at the call site in Task 8b.
+  // Narrowed to the `generated` member (review I1): `LauncherState.generated`
+  // (`state.ts:22`) already carries this exact type, and Task 8b mounts
+  // `Answer` from that state — the compiler should enforce the pairing, not
+  // let a wrong-state mount render two headings over an empty card. Callers
+  // holding a wider `AskAnswer` narrow the way `Cards.test.ts:23` already
+  // does, through `stateFromAnswer`.
   let { answer, query, onSelect }: {
-    answer: AskAnswer;
+    answer: Extract<AskAnswer, { kind: 'generated' }>;
     query: string;
     onSelect: (citation: AskCitation) => void;
   } = $props();
@@ -18,16 +19,13 @@
   const answerHeading = $derived.by(() => { void $locale; return t('answer_heading'); });
   const citationsHeading = $derived.by(() => { void $locale; return t('citations_heading'); });
 
-  const citations = $derived(answer.kind === 'generated' ? answer.citations : []);
-  const answerText = $derived(answer.kind === 'generated' ? answer.answer : '');
-
   // `known` must come from the citations' own anchor values (Decision 5) —
   // an anchor number that has no matching citation stays literal text.
-  const known = $derived(new Set(citations.map((c) => c.anchor)));
-  const segments = $derived(splitAnchors(answerText, known));
+  const known = $derived(new Set(answer.citations.map((c) => c.anchor)));
+  const segments = $derived(splitAnchors(answer.answer, known));
 
   function citationFor(n: number): AskCitation {
-    const found = citations.find((c) => c.anchor === n);
+    const found = answer.citations.find((c) => c.anchor === n);
     if (!found) throw new Error(`Answer: no citation for anchor ${n}`);
     return found;
   }
@@ -38,7 +36,7 @@
   // (Arms.svelte:11-12, Cards.svelte:16-18).
   const previews = $derived.by(() => {
     void $locale;
-    return citations.map((c) => {
+    return answer.citations.map((c) => {
       const parts = [c.relativePath, formatLocator(c.coordinate)].filter(
         (p): p is string => !!p,
       );
