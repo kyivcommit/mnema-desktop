@@ -367,6 +367,47 @@ test('a listing with roots but no recents is not an empty index', async () => {
   expect(screen.queryByTestId('tree-failed')).toBeNull();
 });
 
+// M2, round 2 — the conjunct's OWN test, and the one mutant that survived
+// round 1 (`isEmpty` with `recents.length === 0` deleted) dies here.
+//
+// 🔴 The listing below is one the backend CANNOT currently emit. `roots` comes
+// from `list_watched_roots()` and every `RecentDoc` carries a `watchedRootId`
+// (`src-tauri/src/tree.rs:80-114`), so no watched roots means no indexed
+// documents and so no recents; `tree.rs:116-125` reads the whole listing inside
+// one `read_snapshot` precisely so it cannot carry "a recent whose (rootId,
+// relativePath) is absent from every roots[].files".
+//
+// It is tested anyway, because the claim here is not about the backend. It is
+// that **even handed a state that should be impossible, this card does not say
+// something false** — and a defensive branch is tested with the input it
+// defends against, or it is not tested at all. Without the conjunct the card
+// prints "nothing is indexed" while indexed documents sit on the very next tab:
+// a window claiming what it cannot know, which is the failure this whole card
+// exists to prevent. The unreachability is a property of today's backend, held
+// by one `read_snapshot` in another repository; if this test ever starts
+// describing a reachable state, that is a BACKEND regression, and the card's
+// job in the meantime is to not lie about it.
+test('a listing with recents but no roots — impossible today — still refuses to call itself empty', async () => {
+  mockTree({ roots: [], recents: [{ documentId: 'doc-1', rootId: 1, relativePath: 'notes/a.md', indexedAt: 1_700_000_100 }] });
+  render(Tree, { selected: null });
+
+  // 🔴 Wait on something only the RESOLVED listing can produce. The tabs render
+  // before `listTree()` settles, so anchoring the wait on them would assert
+  // against a still-loading card where `listing` is null and `isEmpty` false for
+  // a reason that has nothing to do with the conjunct — green under the mutant.
+  await fireEvent.click(screen.getByTestId('tree-tab-recents'));
+  expect(await screen.findByTestId('tree-recent-doc-1')).toBeTruthy();
+
+  // Both directions: no empty-index claim, and the documents it would be lying
+  // about are demonstrably on screen next to it.
+  expect(screen.queryByTestId('tree-empty')).toBeNull();
+  expect(screen.queryByTestId('tree-failed')).toBeNull();
+
+  // And the Files tab, where the message would actually be drawn, is silent too.
+  await fireEvent.click(screen.getByTestId('tree-tab-files'));
+  expect(screen.queryByTestId('tree-empty')).toBeNull();
+});
+
 // M3 (review round 1): `aria-expanded` is a second statement about the same
 // state as "are the children rendered", and a second signal is free to say the
 // opposite and stay green — the shape already caught once on `aria-selected`.
