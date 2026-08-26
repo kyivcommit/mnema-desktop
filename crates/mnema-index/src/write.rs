@@ -80,6 +80,26 @@ pub struct Citation {
     pub relative_path: Option<String>,
     pub section_title: Option<String>,
     pub coordinate: Coordinate,
+    /// `chunk.document_id`. Closes the cross-document half of a hazard
+    /// `chunk.id` alone cannot: `chunk.id` is `INTEGER PRIMARY KEY` **without**
+    /// `AUTOINCREMENT` (`schema.sql:149`), so a deleted row's id can be handed
+    /// to an unrelated chunk in a different document. A caller that echoes
+    /// this back alongside the id can tell the two apart; one that echoes only
+    /// the id cannot.
+    pub document_id: String,
+    /// `chunk.ord`. Closes the other half: the same paragraph repeated inside
+    /// *one* document reuses `document_id` but not `ord`
+    /// (`UNIQUE(document_id, ord)`, `schema.sql:168`), so `ord` is what tells
+    /// two occurrences of identical text in the same file apart.
+    pub ord: i64,
+    /// `Some` only when exactly one **distinct watched root** holds this
+    /// document — not "exactly one `path` row". Two copies of a file inside
+    /// one folder are two rows under one root (`schema.sql:76-78,85`), and
+    /// that root is perfectly nameable; counting rows instead of distinct
+    /// roots would answer `None` there. `None` for zero roots (archive-only,
+    /// or the last copy on disk deleted) and for two-or-more distinct roots —
+    /// both are genuinely "we cannot name one root".
+    pub root_id: Option<i64>,
 }
 
 /// One row of `path`, as [`Db::path_entry`] reads it back.
@@ -1159,7 +1179,8 @@ impl Db {
     /// was scoped to — is the search/RAG spec's decision, still open.
     pub fn citation(&self, chunk_id: i64) -> Result<Option<Citation>, Error> {
         let mut stmt = self.conn().prepare(
-            "SELECT c.text, c.coordinate, c.char_span, p.section_title, pa.relative_path
+            "SELECT c.text, c.coordinate, c.char_span, p.section_title, pa.relative_path,
+                    c.document_id, c.ord
                FROM chunk c
                JOIN block b  ON b.id = c.block_id
                JOIN page  p  ON p.id = b.page_id
@@ -1175,12 +1196,39 @@ impl Db {
         };
         let coord_json: String = row.get(1)?;
         let span_json: String = row.get(2)?;
+        let document_id: String = row.get(5)?;
+        let ord: i64 = row.get(6)?;
+
+        // A second, deliberately separate query rather than folding the root
+        // into the join above — that join already narrows with `ORDER BY …
+        // LIMIT 1`, which is exactly the arbitrary single-path pick this field
+        // must not repeat: it answers about every root the document sits
+        // under, not the one the first query happened to pick.
+        //
+        // DISTINCT is load-bearing, not tidy: without it, two `path` rows
+        // under the same root (a second copy of the file in the same folder)
+        // would count as two roots and the document would lose a root it
+        // plainly has.
+        let mut roots = self
+            .conn()
+            .prepare("SELECT DISTINCT watched_root_id FROM path WHERE document_id = ?1 LIMIT 2")?;
+        let found: Vec<i64> = roots
+            .query_map(params![&document_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let root_id = match found.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        };
+
         Ok(Some(Citation {
             text: row.get(0)?,
             coordinate: serde_json::from_str(&coord_json).map_err(Error::Json)?,
             spans: serde_json::from_str(&span_json).map_err(Error::Json)?,
             section_title: row.get(3)?,
             relative_path: row.get(4)?,
+            document_id,
+            ord,
+            root_id,
         }))
     }
 

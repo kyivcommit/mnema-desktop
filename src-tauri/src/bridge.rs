@@ -98,6 +98,13 @@ pub struct Hit {
     pub relative_path: Option<String>,
     pub section_title: Option<String>,
     pub coordinate: Coordinate,
+    /// The occurrence identity a re-index can invalidate but `chunk_id` alone
+    /// cannot reveal — carried so a later `source_around` call can be pinned
+    /// against it (owner-Codex P1 on PR #22; `mnema_index::Citation`'s own
+    /// doc comment explains each field).
+    pub document_id: String,
+    pub ord: i64,
+    pub root_id: Option<i64>,
 }
 
 /// The text arm's outcome, without the chunk ids `hits` already carries.
@@ -389,6 +396,9 @@ fn retrieve(
                         relative_path: c.relative_path,
                         section_title: c.section_title,
                         coordinate: c.coordinate,
+                        document_id: c.document_id,
+                        ord: c.ord,
+                        root_id: c.root_id,
                     });
                 }
             }
@@ -433,6 +443,11 @@ pub struct AskCitation {
     pub relative_path: Option<String>,
     pub section_title: Option<String>,
     pub coordinate: Coordinate,
+    /// See [`Hit::document_id`] — the same identity, echoed from the [`Hit`]
+    /// this citation was resolved from.
+    pub document_id: String,
+    pub ord: i64,
+    pub root_id: Option<i64>,
 }
 
 /// Why generation did not produce an answer (spec §6). Ports the server's two
@@ -557,6 +572,9 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
                         relative_path: h.relative_path.clone(),
                         section_title: h.section_title.clone(),
                         coordinate: h.coordinate.clone(),
+                        document_id: h.document_id.clone(),
+                        ord: h.ord,
+                        root_id: h.root_id,
                     }
                 })
                 .collect();
@@ -803,6 +821,9 @@ mod tests {
             relative_path: Some("notes/a.txt".into()),
             section_title: None,
             coordinate: Coordinate::Page { number: 3 },
+            document_id: "doc-1".into(),
+            ord: 0,
+            root_id: Some(1),
         };
         assert_eq!(passage_from_hit(&both).meta, "notes/a.txt · с. 3");
 
@@ -903,6 +924,9 @@ mod tests {
             relative_path: Some("a/b.md".into()),
             section_title: Some("S".into()),
             coordinate: Coordinate::None,
+            document_id: "doc-1".into(),
+            ord: 3,
+            root_id: Some(7),
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["anchor"], json!(1));
@@ -911,6 +935,10 @@ mod tests {
         assert_eq!(v["relativePath"], json!("a/b.md"));
         assert_eq!(v["sectionTitle"], json!("S"));
         assert_eq!(v["coordinate"], json!({ "kind": "none" }));
+        assert_eq!(v["documentId"], json!("doc-1"));
+        assert_eq!(v["ord"], json!(3));
+        assert_eq!(v["rootId"], json!(7)); // Some(7) renders as a plain number, not { "Some": 7 }
+        assert!(v.get("document_id").is_none()); // never the snake_case spelling
     }
 
     #[test]
@@ -922,13 +950,18 @@ mod tests {
             relative_path: None,
             section_title: None,
             coordinate: Coordinate::Page { number: 2 },
+            document_id: "doc-9".into(),
+            ord: 4,
+            root_id: None,
         };
         // Full-object compare, not per-field: `serde_json::Value` indexing returns
         // Null for an ABSENT key too, so `v["relativePath"] == null` would still
         // pass if the key were dropped (skip_serializing_if) or renamed — the
         // satisfied-by-zero hole the "assert both directions" rule exists to stop.
         // Comparing the whole object distinguishes present-null from absent and
-        // matches the three sibling pin tests.
+        // matches the three sibling pin tests. `rootId: null` here is the other
+        // half of the AskCitation test's `Some(7)`: together they pin both arms
+        // of the Option.
         assert_eq!(
             serde_json::to_value(&h).unwrap(),
             json!({
@@ -936,7 +969,10 @@ mod tests {
                 "text": "t",
                 "relativePath": null,
                 "sectionTitle": null,
-                "coordinate": { "kind": "page", "number": 2 }
+                "coordinate": { "kind": "page", "number": 2 },
+                "documentId": "doc-9",
+                "ord": 4,
+                "rootId": null
             })
         );
     }

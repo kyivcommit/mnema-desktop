@@ -209,6 +209,121 @@ fn a_block_cannot_claim_another_document_than_its_page() {
     );
 }
 
+/// A document with one page, one block and one chunk holding `text`, plus one
+/// `path` row for it at `relative_path` under `root`. Returns the chunk id —
+/// this test's own local idiom, matching how the rest of this file builds the
+/// four-level model (see `fixture_one_page` below) rather than inventing a new
+/// shape.
+fn seed_one_chunk(db: &Db, root: i64, document_id: &str, relative_path: &str, text: &str) -> i64 {
+    db.insert_document(
+        document_id,
+        "text/plain",
+        text.len() as i64,
+        SourceKind::Document,
+    )
+    .unwrap();
+    db.insert_path(root, relative_path, document_id, disk(text), "text", 1)
+        .unwrap();
+    let page = db.insert_page(document_id, 1, "native:txt", None).unwrap();
+    let block = db
+        .insert_block(page, &paragraph(0, text, None, None))
+        .unwrap();
+    db.insert_chunk(
+        document_id,
+        0,
+        text,
+        &Locator {
+            spans: vec![Segment {
+                block_id: block,
+                start: 0,
+                end: text.chars().count() as u32,
+                block_start: 0,
+            }],
+            coordinate: Coordinate::None,
+        },
+        SourceKind::Document,
+    )
+    .unwrap()
+}
+
+/// A plausible `OnDisk` for a fixture `path` row — this test does not exercise
+/// the cheap-reconciliation arm that reads these two numbers, so any
+/// consistent values will do.
+fn disk(text: &str) -> OnDisk {
+    OnDisk {
+        size_bytes: text.len() as i64,
+        mtime: 1,
+    }
+}
+
+/// The root the fixture question in force: the first draft of this test
+/// covered only "one root" and "two roots", never "one root, two rows" — and
+/// the implementation it prescribed (a row count instead of a distinct-root
+/// count) was wrong in exactly that gap. `schema.sql:85`'s primary key is
+/// `(watched_root_id, relative_path)`, and `schema.sql:76-78` says several
+/// paths may name one document — so a second copy of a file inside the SAME
+/// root is two `path` rows under one `watched_root_id`, and must still name
+/// that root.
+#[test]
+fn citation_carries_document_ord_and_a_root_only_when_unambiguous() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+
+    let root_a = db.insert_watched_root("/roots/a").unwrap();
+    let root_b = db.insert_watched_root("/roots/b").unwrap();
+    let doc_a = "a".repeat(64);
+    let doc_b = "b".repeat(64);
+    // doc_a lives under root_a; doc_b under root_b, so no (root, path) key
+    // collides yet.
+    let chunk_a = seed_one_chunk(&db, root_a, &doc_a, "README.md", "Alpha paragraph.");
+    seed_one_chunk(&db, root_b, &doc_b, "NOTES.md", "Beta paragraph.");
+
+    let c = db.citation(chunk_a).unwrap().unwrap();
+    assert_eq!(c.document_id, doc_a);
+    assert_eq!(c.ord, 0);
+    assert_eq!(
+        c.root_id,
+        Some(root_a),
+        "one root holds it, so name that root"
+    );
+
+    // A SECOND COPY IN THE SAME ROOT is still one root — two `path` rows, one
+    // `watched_root_id`. This is the ordinary case, and the one a row count
+    // gets wrong.
+    db.insert_path(
+        root_a,
+        "README (copy).md",
+        &doc_a,
+        disk("Alpha paragraph."),
+        "text",
+        1,
+    )
+    .unwrap();
+    let c = db.citation(chunk_a).unwrap().unwrap();
+    assert_eq!(
+        c.root_id,
+        Some(root_a),
+        "two copies inside one root still name that root"
+    );
+
+    // Now a copy under the OTHER root, at a path root_b does not yet use:
+    // genuinely ambiguous.
+    db.insert_path(
+        root_b,
+        "README.md",
+        &doc_a,
+        disk("Alpha paragraph."),
+        "text",
+        1,
+    )
+    .unwrap();
+    let c = db.citation(chunk_a).unwrap().unwrap();
+    assert_eq!(
+        c.root_id, None,
+        "two roots holding the document must not name one"
+    );
+}
+
 #[test]
 fn one_document_can_live_at_several_paths() {
     let dir = tempfile::tempdir().unwrap();
