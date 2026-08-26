@@ -421,6 +421,18 @@ case_ "cited_occupant: an ambiguous location picks a root instead of refusing" \
   'let Some(root) = roots.first() else {' \
   mnema-desktop 'source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_document_differs' --test commands
 
+# The `Some(root)` arm — a citation that DOES name a root — had no case at
+# all: every case above targets the `None` fallback. Collapsing it to `Ok(None)`
+# throws away the whole point of naming a root (skip the ambiguity scan and
+# resolve directly), so a citation that names root A among two roots sharing
+# a path gets `noPath` instead of `current`. Found by a fix-round review.
+
+case_ "cited_occupant: naming a root is ignored and answers no verdict" \
+  src-tauri/src/tree.rs \
+  's~Some\(root\) => db\.path_occupant\(root, relative_path\),~Some(_) => Ok(None),~' \
+  'Some(_) => Ok(None),' \
+  mnema-desktop 'source_around_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold_the_path' --test commands
+
 # ═══════════════════════════════════════════════════════════════════════════
 # tree.rs: a missing section title ships no key, rather than an explicit null
 
