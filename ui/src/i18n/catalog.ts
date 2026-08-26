@@ -4,7 +4,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
   | 'search_placeholder' | 'query_blank' | 'query_too_long' | 'query_failed'
   | 'phase_text' | 'phase_content' | 'phase_chat'
-  | 'arm_text' | 'arm_content';
+  | 'arm_text' | 'arm_content'
+  | 'card_tree' | 'card_answer' | 'card_source';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
@@ -21,6 +22,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
     arm_text: 'текст', arm_content: 'зміст',
+    card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
   },
   en: {
     pin: 'Pin',
@@ -36,5 +38,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
     arm_text: 'text', arm_content: 'content',
+    card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
   },
 };

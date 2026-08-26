@@ -88,11 +88,11 @@ test('a rejected ask is visible and logged, not swallowed', async () => {
   err.mockRestore();
 });
 
-test('a generated answer renders the B stub, not a refusal', async () => {
+test('a generated answer renders the centre card, not a refusal', async () => {
   mockBackend(generated);
   render(Launcher);
   await submit('q');
-  await screen.findByTestId('answer-stub');
+  await screen.findByTestId('card-centre');
   expect(screen.queryByRole('status')).toBeNull(); // not a refusal
 });
 

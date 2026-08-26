@@ -6,6 +6,7 @@
   import { checkQuery, stateFromAnswer, providerReady, type LauncherState } from './state';
   import Arms from './Arms.svelte';
   import SearchLine from './SearchLine.svelte';
+  import Cards from './Cards.svelte';
 
   let query = $state('');
   let echo = $state('');
@@ -70,11 +71,7 @@
     <div class="query-echo" data-testid="query-echo">{echo}</div>
   {/if}
 
-  {#if launcherState.kind === 'generated'}
-    <div data-testid="answer-stub">{launcherState.answer.answer}</div>
-  {:else if launcherState.kind === 'citationsOnly'}
-    <div data-testid="citations-stub">{launcherState.answer.citations.length}</div>
-  {/if}
+  <Cards state={launcherState} query={echo} />
 
   <button
     class="pin"
