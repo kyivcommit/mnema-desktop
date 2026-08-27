@@ -476,8 +476,8 @@ case_ "the credential store's own sentence is replaced by a summary" \
 
 case_ "the index's own sentence is replaced by a summary" \
   src-tauri/src/models.rs \
-  's~            cause: UnreadableCause::of\(&e\),\n            reason: e\.to_string\(\),~            cause: UnreadableCause::of(\&e),\n            reason: "the index could not be read".to_string(),~' \
-  '            reason: "the index could not be read".to_string(),' \
+  's~            \(cause, _\) => IndexSettings::Unreadable \{\n                cause,\n                reason: e\.to_string\(\),\n            \},~            (cause, _) => IndexSettings::Unreadable {\n                cause,\n                reason: "the index could not be read".to_string(),\n            },~' \
+  '                reason: "the index could not be read".to_string(),' \
   mnema-desktop 'a_key_that_is_there_survives_an_index_that_is_not' --test model_commands
 
 # The harm Task 8 named when it made this command unable to reject anything: if
@@ -486,7 +486,7 @@ case_ "the index's own sentence is replaced by a summary" \
 # like an ordinary cold start.
 case_ "an index that could not be read is answered as an empty one" \
   src-tauri/src/models.rs \
-  's~        Err\(e\) => IndexSettings::Unreadable \{\n            cause: UnreadableCause::of\(&e\),\n            reason: e\.to_string\(\),\n        \},~        Err(_) => IndexSettings::Read(IndexRead {\n            embedding_model: None,\n            embedding_dim: None,\n            active_space: None,\n            embedded_chunks: 0,\n            total_chunks: 0,\n            rerank_model: None,\n            chat_model: None,\n        }),~' \
+  's~        Err\(e\) => match \(UnreadableCause::of\(&e\), state\.boot_open_error\(\)\) \{\n            \(UnreadableCause::NotOpen, Some\(reason\)\) => IndexSettings::Unreadable \{\n                cause: UnreadableCause::ReadFailed,\n                reason,\n            \},\n            \(cause, _\) => IndexSettings::Unreadable \{\n                cause,\n                reason: e\.to_string\(\),\n            \},\n        \},~        Err(_) => IndexSettings::Read(IndexRead {\n            embedding_model: None,\n            embedding_dim: None,\n            active_space: None,\n            embedded_chunks: 0,\n            total_chunks: 0,\n            rerank_model: None,\n            chat_model: None,\n        }),~' \
   '        Err(_) => IndexSettings::Read(IndexRead {' \
   mnema-desktop 'a_key_that_is_there_survives_an_index_that_is_not' --test model_commands
 
