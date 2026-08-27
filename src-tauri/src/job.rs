@@ -749,11 +749,12 @@ mod tests {
     /// The canonical list of `EndReason` discriminants, in the exact
     /// camelCase spelling `#[serde(rename_all = "camelCase")]` produces.
     /// **No window copy exists to pin it against today**: `ui/src/lib/ipc.ts`
-    /// mirrors the ask, search, tree and source wire and none of the job
-    /// events, so this list has one side only until PR 7 gives the indexing
-    /// surface its own. What this test forces is narrower and still real: the
-    /// `match` below has no wildcard arm, so a variant added to `EndReason`
-    /// without a matching line here fails to **compile**, which is what
+    /// mirrors the ask, search, tree and source wire, plus a deliberately narrow
+    /// read of `model_settings` — and none of the job events, so this list has
+    /// one side only until PR 7 gives the indexing surface its own. What this
+    /// test forces is narrower and still real: the `match` below has no
+    /// wildcard arm, so a variant added to `EndReason` without a matching line
+    /// here fails to **compile**, which is what
     /// makes a maintainer look at this list at all rather than letting it go
     /// silently stale. Whoever touches it is the one who has to carry it
     /// across to whatever window comes to read it — this test cannot do that

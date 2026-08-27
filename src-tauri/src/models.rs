@@ -42,7 +42,7 @@ pub fn key_present(state: State<'_, AppState>) -> Result<bool, Error> {
 /// **An empty key is refused here and not by the provider** ([`Error::EmptyKey`],
 /// where the message this replaces is written out). The refusal is in the
 /// command rather than in the window because the window is not the only caller:
-/// a guard in `main.js` leaves this command reachable over the IPC with exactly
+/// a guard on that side leaves this command reachable over the IPC with exactly
 /// the old result, and it is this side that decides whether a request leaves the
 /// machine at all. It is also the only side that can keep the sentence single —
 /// the window renders whatever this returns, so a second refusal over there
@@ -1414,11 +1414,15 @@ mod tests {
     /// below and asserts its tables against it, and nothing ties the two
     /// languages together — tying them would need the cross-language artefact
     /// D39 withdrew. **There is no such copy today**: none of the launcher
-    /// components consumes `Refusal`, `Balance` or `RecordId`, and the mirror
-    /// is booked to PR 7, which owns the settings surfaces. So a
-    /// variant added here still has to be carried across by a person; what this
-    /// buys is that the person is *told*, by a build that stops, instead of
-    /// finding out from a fallback sentence in front of a user.
+    /// components consumes `mnema_provider::Refusal`, `Balance` or `RecordId`.
+    /// The crate is named because `ui/src/lib/ipc.ts:15` exports a `Refusal` of
+    /// its own — the *ask* refusal, `noCandidates` / `emptyCompletion`, read
+    /// through `launcher/state.ts:1` — which is a different type wearing the
+    /// same name. The mirror is booked to PR 7, which owns the settings
+    /// surfaces. So a variant added here still has to be carried across by a
+    /// person; what this buys is that the person is *told*, by a build that
+    /// stops, instead of finding out from a fallback sentence in front of a
+    /// user.
     ///
     /// `Balance::Unreadable` takes a [`mnema_provider::ProviderMessage`], whose
     /// `Text` variant is unconstructible outside `probe.rs` — `SanitisedText`

@@ -59,10 +59,18 @@ test('the anchor resolves by value, not by position', async () => {
 });
 
 test('the preview namespace holds one id per citation and nothing else', () => {
-  // `Cards.test.ts:538` counts these rows with `queryAllByTestId(/^preview-/)`,
-  // so a second testid inside the namespace is counted as a row. The label
-  // used to be `preview-label` and was exactly that; it is `citation-label`
-  // now, the rule `Passages.svelte` already follows for `passage-label`.
+  // The preview rows are queried as a namespace, `queryAllByTestId(/^preview-/)`,
+  // so a second testid inside it is counted as a row. The label used to be
+  // `preview-label` and was exactly that; it is `citation-label` now, the rule
+  // `Passages.svelte` already follows for `passage-label`.
+  //
+  // 🔴 This test is the ONLY thing that catches the collision — measured, by
+  // putting `preview-label` back in the component AND in every query in this
+  // file: 1 failed, 169 passed, and the one is this test. `Cards.test.ts` has a
+  // `/^preview-/` count of its own, but it is in state E, where
+  // `Selection.svelte:87-90` mounts `Passages` and not this component, so that
+  // namespace is empty there whatever the label is called. It cannot witness
+  // this, and an earlier version of this comment cited it as if it could.
   render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() });
   expect(screen.getAllByTestId(/^preview-/).map((el) => el.dataset.testid))
     .toEqual(['preview-3', 'preview-7']);

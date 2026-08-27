@@ -59,10 +59,11 @@
           onclick={() => onSelect(citation)}
         >
           <!-- `citation-label`, NOT `preview-label`: the preview testids are
-               queried as a namespace (`queryAllByTestId(/^preview-/)`,
-               `Cards.test.ts:538`) and a second id inside it would be counted
-               as a preview row. The same rule `Passages.svelte` follows for
-               `passage-label`. -->
+               queried as a namespace (`queryAllByTestId(/^preview-/)`) and a
+               second id inside it is counted as a preview row. Held by ONE
+               test — `the preview namespace holds one id per citation and
+               nothing else`, `Answer.test.ts` — and by nothing else; the same
+               rule `Passages.svelte` follows for `passage-label`. -->
           <span data-testid="citation-label">{label}</span>
         </button>
       </li>
