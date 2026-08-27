@@ -36,7 +36,7 @@
 </script>
 
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { locale, t } from '../i18n';
   import { listTree } from '../lib/ipc';
   import type { AskCitation, Hit, TreeListing } from '../lib/ipc';
@@ -124,6 +124,75 @@
     const k = key(rootId, path);
     toggled = { ...toggled, [k]: !isOpen(rootId, path) };
   }
+
+  // 🔴 Owner review on PR #24, P4. The invariant: when the source card shows a
+  // passage, this card shows which row it came from. Two states broke it, and
+  // `openByDefault` above cannot reach either — it is consulted only where
+  // `toggled` has no entry, and only by the Files tab.
+  //
+  // `toggled` winning over `openByDefault` is Ruling M and it stands: folders
+  // must not snap shut on every question. But "this citation is now selected"
+  // is a DIFFERENT event from "an answer arrived" — it is the person's own
+  // click on a citation, and its entire purpose is to be shown where the
+  // passage came from. So a NEW selection clears the hand-toggle on the folders
+  // along its own path, and on no others: a folder opened or shut somewhere
+  // else is none of this selection's business, and clearing those would be
+  // Ruling M's defect with an extra step.
+  //
+  // Deliberately NOT undone: a person who shuts the folder of the passage
+  // already on screen keeps it shut. They acted on a row they could see, and no
+  // new event has happened since.
+  //
+  // The second half is the Recents tab, where marking a row is not enough
+  // because the selected document may have no row there at all (recents is a
+  // short list of what was indexed last). When the tab on screen cannot show
+  // the selection and the other one can, the card shows the one that can. A tab
+  // the person picks while the selection stands is left alone — this runs on a
+  // CHANGE of selection only.
+  //
+  // The stamp is what makes "a change" precise: it holds the selected document
+  // and the folders on its way, so it also fires when the listing arrives after
+  // the selection did. Everything it writes is read inside `untrack`, so this
+  // effect depends on the selection and the listing, never on what it sets.
+  let lastSelection = '';
+  $effect(() => {
+    const id = selectedId;
+    const l = listing;
+    const onTheWay = openByDefault;
+    const stamp = JSON.stringify([id, [...onTheWay].sort()]);
+    if (stamp === lastSelection) return;
+    lastSelection = stamp;
+    if (id === null || l === null) return;
+
+    untrack(() => {
+      // Only the folders explicitly SHUT by hand on this selection's path, and
+      // they are set open rather than forgotten. Both halves are load-bearing:
+      //
+      // - a folder the person OPENED by hand is not touched at all. Deleting
+      //   its entry was measured and it takes Ruling M's defect back by the
+      //   long way round: with the entry gone the folder is open only while
+      //   the selection is, so it snapped shut the moment the next answer was
+      //   a refusal — a folder the person opened, closing itself on an event
+      //   they did not cause.
+      // - the shut one is set to `true`, not deleted, for the same reason in
+      //   reverse: `true` is what "this folder is open" is written as, and it
+      //   survives the selection going away the way a hand-open does.
+      //
+      // A folder with no entry keeps having none: it is open because the
+      // selection is on its path, and it shuts again when that stops being
+      // true. That is the default, and it is not a person's decision to keep.
+      const next = { ...toggled };
+      let changed = false;
+      for (const k of onTheWay) {
+        if (next[k] === false) { next[k] = true; changed = true; }
+      }
+      if (changed) toggled = next;
+
+      const inRecents = l.recents.some((r) => r.documentId === id);
+      const inFiles = l.roots.some((r) => r.files.some((f) => f.documentId === id));
+      if (tab === 'recents' && !inRecents && inFiles) tab = 'files';
+    });
+  });
 </script>
 
 {#snippet branch(nodes: TreeNode[], rootId: number)}
@@ -197,8 +266,13 @@
       {#each listing?.recents ?? [] as recent (recent.documentId)}
         <li>
           <!-- P5, the same finding one tab over: a focusable button with no
-               action of any kind. A row, rendered as one. -->
+               action of any kind. A row, rendered as one.
+               P4: and it carries the mark, which it never did — selecting a
+               citation while this tab was showing left no current row
+               anywhere, so the source card was reading out a passage the tree
+               could not place. -->
           <span data-testid={`tree-recent-${recent.documentId}`}
+            aria-current={recent.documentId === selectedId ? 'true' : undefined}
             >{recent.relativePath}</span>
         </li>
       {/each}

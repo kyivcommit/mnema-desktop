@@ -342,6 +342,128 @@ test('a citation whose document is no longer in the listing selects nothing and 
   expect(screen.getByTestId('tree-body').textContent).not.toMatch(/no longer|більше немає/i);
 });
 
+// --- P4: the selection must be visible in the tree --------------------------
+//
+// 🔴 Owner review on PR #24, P4. The invariant, in the owner's words: when the
+// source card shows a passage, the tree card shows which row it came from. It
+// broke in two places, both disclosed in the Task 7 report and neither fixed.
+// Every test that existed asserted `aria-current` on a FILE row while the Files
+// tab happened to be showing and no folder had been touched — the two states
+// where the card was already right.
+
+test('the recents tab marks the row the source card is showing', async () => {
+  mockTree(oneRootTwoFolders); // recents: doc-1 and doc-3
+  render(Tree, { selected: citationFor('doc-1') });
+
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  expect(screen.getByTestId('tree-recent-doc-1')).toBeTruthy();
+  // Enumerated: exactly one row on this tab is current, and it is the cited
+  // document's. On the shipped card no recents row carried the attribute at
+  // all, so the whole tab was a listing with nothing marked.
+  expect(currentRows()).toEqual(['tree-recent-doc-1']);
+  expect(screen.getByTestId('tree-recent-doc-3').getAttribute('aria-current')).toBeNull();
+});
+
+// The decision, and its reason. `toggled` wins over `openByDefault` so that
+// folders do not snap shut on every question — that is Ruling M's point and it
+// stands. But "a new citation is now selected" is a different event from "an
+// answer arrived": it is the person's own click on a citation, and its whole
+// purpose is to be shown where the passage came from. So a NEW selection clears
+// the hand-toggle on the folders along its own path, and only on those.
+//
+// What is deliberately NOT undone: a person who shuts the folder of the passage
+// already on screen keeps it shut. They acted on a row they could see, no new
+// event has happened since, and re-opening it under their hands would be the
+// snapping-shut defect with the sign flipped.
+test('a folder the person shut opens again when the next citation lands inside it', async () => {
+  mockTree(oneRootTwoFolders);
+  const { rerender } = render(Tree, { selected: citationFor('doc-1') }); // notes/ opens
+
+  expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
+  await fireEvent.click(screen.getByTestId('tree-folder-notes')); // shut by hand
+  expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
+
+  await rerender({ selected: citationFor('doc-2', 'notes/b.md') }); // a new citation, same folder
+  await tick();
+
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
+  expect(currentRows()).toEqual(['tree-file-doc-2']);
+});
+
+// The control, and the reason the clearing is scoped to the path: a folder the
+// person opened somewhere else is none of the new selection's business. Without
+// this, "clear all the toggles on a new selection" passes the test above and
+// takes Ruling M's defect back.
+test('a new citation leaves the folders the person opened elsewhere exactly as they were', async () => {
+  mockTree(oneRootTwoFolders);
+  const { rerender } = render(Tree, { selected: null });
+
+  await fireEvent.click(await screen.findByTestId('tree-folder-archive')); // opened by hand
+  expect(screen.getByTestId('tree-file-doc-3')).toBeTruthy();
+
+  await rerender({ selected: citationFor('doc-1') }); // lands in notes/, not in archive/
+  await tick();
+
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByTestId('tree-file-doc-3')).toBeTruthy();
+  expect(currentRows()).toEqual(['tree-file-doc-1']);
+});
+
+// 🔴 The other direction of the same rule, and it is here because the first
+// version of the fix broke it: clearing the hand-toggle on the selection's path
+// made a folder the person had OPENED depend on the selection to stay open, so
+// it snapped shut the moment the next answer was a refusal — Ruling M's defect,
+// reached the long way round. The fix sets a shut folder open instead of
+// forgetting what the person did, and this test is what says so. It passes on
+// `14ab473` too: it is the property that had to survive the fix, not a defect.
+test('a folder the person opened stays open after the citation inside it goes away', async () => {
+  mockTree(oneRootTwoFolders);
+  const { rerender } = render(Tree, { selected: null });
+
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes')); // opened by hand
+  await rerender({ selected: citationFor('doc-1') }); // a citation lands inside it
+  await tick();
+  expect(currentRows()).toEqual(['tree-file-doc-1']);
+
+  await rerender({ selected: null }); // the answer goes away
+  await tick();
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByTestId('tree-file-doc-1')).toBeTruthy();
+});
+
+// The other half of the recents finding, and the half `aria-current` alone
+// cannot reach: `doc-2` has no recents row to mark. Marking rows is not the
+// invariant — SHOWING the person which row the passage came from is — so when
+// the tab on screen has no row for the selection and the other tab does, the
+// card shows the one that does. The trigger is a change of selection, which is
+// the person's own click; a tab they choose while the selection stands is left
+// alone (the test below).
+test('a selection with no recents row shows the tab that has one', async () => {
+  mockTree(oneRootTwoFolders); // recents: doc-1, doc-3 — doc-2 is not among them
+  const { rerender } = render(Tree, { selected: null });
+
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  expect(screen.getByTestId('tree-tab-recents').getAttribute('aria-pressed')).toBe('true');
+
+  await rerender({ selected: citationFor('doc-2', 'notes/b.md') });
+  await tick();
+
+  expect(screen.getByTestId('tree-tab-files').getAttribute('aria-pressed')).toBe('true');
+  expect(currentRows()).toEqual(['tree-file-doc-2']);
+});
+
+test('a selection the recents tab CAN show leaves the person on the tab they chose', async () => {
+  mockTree(oneRootTwoFolders);
+  const { rerender } = render(Tree, { selected: null });
+
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  await rerender({ selected: citationFor('doc-1') }); // doc-1 has a recents row
+  await tick();
+
+  expect(screen.getByTestId('tree-tab-recents').getAttribute('aria-pressed')).toBe('true');
+  expect(currentRows()).toEqual(['tree-recent-doc-1']);
+});
+
 // Ruling N: the plan's "never an empty card that looks like an empty index"
 // only means something if the empty index also says something, and something
 // different. Each must show its own message and not the other's.
