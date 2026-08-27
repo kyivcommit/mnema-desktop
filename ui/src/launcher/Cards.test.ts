@@ -470,19 +470,41 @@ test('the tree keeps its rows but lets go of the mark while the next answer is i
 // (`ipc.ts:21-27`) reports the content SEARCH arm, filled by `retrieve` before
 // readiness is consulted — a different question with a different answer.
 //
-// Both halves are asserted: what the rendered banner does say, and that neither
-// locale's catalogue string names a cause. A regex over one rendered locale
-// would leave the other free to drift into naming one.
+// 🔴 Review I3, and it is why the assertions below are `toBe` and not the regex
+// alone. A stem list is an OPEN enumeration: the first round defended Ukrainian
+// with `/…|налаштув/i`, and «Генерування недоступне: чат не налаштовано» — a
+// cause, false in two of the three readiness variants — walked past it one
+// letter short of the stem, with the whole suite green. The round's own probe
+// had happened to pick a string that matched a stem, so it measured the
+// formulation and not the class (`definition-by-enumeration`, and the closed
+// set here is "this exact sentence", not "words that name a cause").
+//
+// So each banner string is pinned exactly, in BOTH locales: any rewording is
+// then a deliberate edit to this file rather than a silent pass. The regex pair
+// stays as a second, weaker net — it is what catches a cause added to a string
+// somebody remembered to update here too.
 const CAUSE = /key|provider|model|credential|setting|ключ|провайдер|модел|обліков|налаштув/i;
 
 test('the state E banner says generation is unavailable and names no cause (Ruling AF)', () => {
   setLocale('en'); // seed, do not inherit
   render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
 
-  expect(screen.getByRole('status').textContent)
+  expect(screen.getByTestId('citations-banner').textContent)
     .toBe('Generation is unavailable. These are the passages the search found.');
-  expect(messages.en.citations_only_banner).not.toMatch(CAUSE);
-  expect(messages.uk.citations_only_banner).not.toMatch(CAUSE);
+
+  // Both locales, both banner forms, closed: the rendered assertion above can
+  // only ever reach one of the four.
+  expect(messages.en.citations_only_banner)
+    .toBe('Generation is unavailable. These are the passages the search found.');
+  expect(messages.uk.citations_only_banner)
+    .toBe('Генерування недоступне. Нижче — уривки, які знайшов пошук.');
+  expect(messages.en.citations_only_banner_empty).toBe('Generation is unavailable.');
+  expect(messages.uk.citations_only_banner_empty).toBe('Генерування недоступне.');
+
+  for (const l of ['uk', 'en'] as const) {
+    expect(messages[l].citations_only_banner).not.toMatch(CAUSE);
+    expect(messages[l].citations_only_banner_empty).not.toMatch(CAUSE);
+  }
 });
 
 // 🔴 Ruling AH. A `Hit` has no `anchor` (`ipc.ts:33-42`), so the rank is the
@@ -502,17 +524,31 @@ test('state E ranks the passages as neutral ordinals, with no answer prose and n
   // No answer prose and no anchor buttons: state E has neither to show.
   expect(screen.queryByTestId('answer-body')).toBeNull();
   expect(screen.queryAllByTestId(/^preview-/)).toHaveLength(0);
+  // Review I1's other side: the "nothing matched" sentence belongs to the empty
+  // branch alone, and a card holding both would contradict itself here too.
+  expect(screen.queryByTestId('citations-empty')).toBeNull();
 });
 
-// 🔴 Ruling AK. Zero hits is an ANSWER — the search ran and found nothing — not
-// the absence of one, so the centre card says so rather than rendering an empty
+// 🔴 Ruling AK, and review I1. Zero hits is an ANSWER — the search ran and
+// found nothing — so the centre card says so rather than rendering an empty
 // list nobody can read.
-test('zero passages is an answer, not an empty card', () => {
+//
+// The assertion is on the WHOLE card text, not `toContain`, and that is the
+// finding. Both AK tests used to be satisfied while the card read "These are
+// the passages the search found. No passages matched this query." — a promise
+// about what follows, denied by the next sentence, and starker in Ukrainian
+// where «Нижче — уривки» points at nothing. That is Ruling AF's own theme one
+// branch over: the card asserting what is not so. `toContain` cannot see it;
+// this can, and it reddens the moment the passage-bearing clause can appear
+// beside the empty one.
+const centreText = (): string =>
+  (screen.getByTestId('card-centre').textContent ?? '').replace(/\s+/g, ' ').trim();
+
+test('zero passages is an answer, and the card does not also promise passages', () => {
   setLocale('en'); // seed, do not inherit
   render(Cards, { state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
 
-  expect(screen.getByTestId('card-centre').textContent)
-    .toContain('No passages matched this query.');
+  expect(centreText()).toBe('Generation is unavailable. No passages matched this query.');
   expect(screen.queryAllByTestId(/^rank-/)).toHaveLength(0);
 });
 
@@ -526,8 +562,8 @@ test('the zero-passages sentence is its own, in both locales (Ruling AK)', async
   render(Cards, { state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
   await tick();
 
-  expect(screen.getByTestId('card-centre').textContent)
-    .toContain('Жоден уривок не відповідає цьому запиту.');
+  expect(centreText())
+    .toBe('Генерування недоступне. Жоден уривок не відповідає цьому запиту.');
   for (const l of ['uk', 'en'] as const) {
     expect(messages[l].citations_only_empty).not.toBe(messages[l].tree_empty);
     expect(messages[l].citations_only_empty).not.toBe(messages[l].source_failed);
@@ -590,4 +626,101 @@ test('two passages in one document: a click asks for the sibling too and paints 
   await waitFor(() =>
     expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true'));
   expect(screen.getByTestId('tree-file-doc-2').getAttribute('aria-current')).toBeNull();
+});
+
+// --- state E: D130, one guard per test (review I2) ---------------------------
+//
+// 🔴 Every `void $locale` in this branch was undefended: three probes removing
+// them one at a time each left the full suite at 161 passed. The guards were
+// correct and load-bearing, and nothing proved they were there — which is the
+// same finding the reviews of Task 5 (I2) and Task 6 (I3) made about their own
+// cards, so this is the third time the shape has been paid for.
+//
+// FOUR tests, not one, and each names a DIFFERENT element: `citationLabel()`,
+// the banner and the empty sentence are three separate `$derived.by` guards,
+// and the card's aria-label is a fourth, one component up in `Selection`. A
+// single test asserting the whole card would go red under any of the four and
+// so would identify none of them — a probe has to be able to name its victim.
+//
+// The switch is what these test, not the seed: `setLocale('uk')` BEFORE a render
+// passes with or without the guard, because the first read happens after it
+// either way. That is exactly how the guards stayed invisible.
+
+test('state E passage labels follow a live language switch', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  // The locator is the one that carries a translated part: `formatLocator`
+  // renders `p. 2` in English and `с. 2` in Ukrainian, so this row moves and
+  // `rank-1`'s bare path would not.
+  expect(screen.getByTestId('rank-2').textContent).toBe('notes/b.md · p. 2');
+
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('rank-2').textContent).toBe('notes/b.md · с. 2');
+
+  setLocale('en'); // the switch back is part of the claim, not the cleanup
+  await tick();
+  expect(screen.getByTestId('rank-2').textContent).toBe('notes/b.md · p. 2');
+});
+
+test('the state E banner follows a live language switch', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  expect(screen.getByTestId('citations-banner').textContent)
+    .toBe('Generation is unavailable. These are the passages the search found.');
+
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('citations-banner').textContent)
+    .toBe('Генерування недоступне. Нижче — уривки, які знайшов пошук.');
+
+  setLocale('en'); // the switch back is part of the claim, not the cleanup
+  await tick();
+  expect(screen.getByTestId('citations-banner').textContent)
+    .toBe('Generation is unavailable. These are the passages the search found.');
+});
+
+// Scoped to `citations-empty`, deliberately NOT to the whole card: the banner
+// sits in the same card and has its own guard, so an assertion on
+// `card-centre.textContent` here would fall to the banner's probe as well and
+// neither test could name which guard it had caught.
+test('the zero-passages sentence follows a live language switch', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Cards, { state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
+  expect(screen.getByTestId('citations-empty').textContent)
+    .toBe('No passages matched this query.');
+
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('citations-empty').textContent)
+    .toBe('Жоден уривок не відповідає цьому запиту.');
+
+  setLocale('en'); // the switch back is part of the claim, not the cleanup
+  await tick();
+  expect(screen.getByTestId('citations-empty').textContent)
+    .toBe('No passages matched this query.');
+});
+
+// 🔴 The controller's aria-label ruling. The region used to announce itself as
+// "Answer"/«Відповідь» while the first sentence inside it said there is no
+// answer — the window stating what is not so, moved into the layer where the
+// person cannot see the contradiction and correct for it. `card-centre` and its
+// `<section>` stay exactly where they were; only the NAME switches on the kind,
+// so this is also the negative that stops the two labels being merged back.
+test("the passages card's label comes from the catalogue and follows a live language switch", async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  expect(screen.getByTestId('card-centre').getAttribute('aria-label')).toBe('Passages');
+
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('card-centre').getAttribute('aria-label')).toBe('Уривки');
+
+  setLocale('en'); // the switch back is part of the claim, not the cleanup
+  await tick();
+  expect(screen.getByTestId('card-centre').getAttribute('aria-label')).toBe('Passages');
+  // Both directions: state B keeps its own name, so one label cannot serve both
+  // (`Cards.test.ts` pins the generated side of this pair above).
+  expect(messages.en.card_passages).not.toBe(messages.en.card_answer);
+  expect(messages.uk.card_passages).not.toBe(messages.uk.card_answer);
 });

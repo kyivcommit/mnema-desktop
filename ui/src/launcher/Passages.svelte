@@ -26,7 +26,19 @@
   // filled before readiness is ever consulted. The wire would need the readiness
   // reason before any card could name one — a PR 7 question, since that is where
   // provider configuration lives.
-  const banner = $derived.by(() => { void $locale; return t('citations_only_banner'); });
+  //
+  // 🔴 Review I1 — and this is why the banner has two forms rather than one.
+  // Its second clause is a promise about what follows ("these are the
+  // passages…", and the Ukrainian form promises them just as plainly), and with
+  // zero hits it was printed directly above the sentence saying there are none:
+  // a card denying, one line down,
+  // what it had just asserted. That is this card's own failure mode turned on
+  // itself, and `toContain` could not see it. The empty form drops the clause it
+  // cannot keep; it does not qualify or soften it.
+  const banner = $derived.by(() => {
+    void $locale;
+    return t(answer.citations.length === 0 ? 'citations_only_banner_empty' : 'citations_only_banner');
+  });
 
   // Ruling AK: zero passages is an ANSWER — the search ran and found nothing —
   // so it gets a sentence rather than an empty list. Its own sentence: not the

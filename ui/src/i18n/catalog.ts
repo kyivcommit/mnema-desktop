@@ -12,7 +12,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'fresh_file_missing' | 'fresh_no_path'
   | 'gone_no_such_chunk' | 'gone_id_reused'
   | 'source_loading' | 'source_failed' | 'source_wrong_document'
-  | 'citations_only_banner' | 'citations_only_empty';
+  | 'card_passages'
+  | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
@@ -30,6 +31,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
     arm_text: 'текст', arm_content: 'зміст',
     card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
+    // Ruling on the state E aria-label: the centre card is one <section>, but
+    // it is not one FACT. Announcing state E as «Відповідь» named the region
+    // for the thing it says is unavailable, where a person using a screen
+    // reader cannot see the contradiction and correct for it.
+    card_passages: 'Уривки',
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
     tree_tab_files: 'Файли', tree_tab_recents: 'Нещодавні',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
@@ -53,7 +59,15 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // shape at `bridge.rs:476-480` carries none of them. So this sentence says
     // only what the payload proves — no cause, and no instruction pointing at a
     // settings screen that might be the wrong one.
+    //
+    // 🔴 Review I1: TWO forms, and the second is not a duplicate. The first
+    // clause is true in both; the second one — «нижче — уривки» — is a promise
+    // about what follows, and with zero hits it was printed directly above
+    // `citations_only_empty` denying it. A card contradicting itself is Ruling
+    // AF's own failure one branch over, so the empty card drops the clause it
+    // cannot keep rather than qualifying it.
     citations_only_banner: 'Генерування недоступне. Нижче — уривки, які знайшов пошук.',
+    citations_only_banner_empty: 'Генерування недоступне.',
     // Ruling AK: its own sentence, distinct from `tree_empty` (nothing indexed
     // at all) and from `source_failed` (a passage that could not be read).
     citations_only_empty: 'Жоден уривок не відповідає цьому запиту.',
@@ -73,6 +87,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
     arm_text: 'text', arm_content: 'content',
     card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
+    card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
     tree_tab_files: 'Files', tree_tab_recents: 'Recents',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
@@ -87,6 +102,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     source_failed: 'The source could not be loaded.',
     source_wrong_document: 'This excerpt came from a different document than the citation',
     citations_only_banner: 'Generation is unavailable. These are the passages the search found.',
+    citations_only_banner_empty: 'Generation is unavailable.',
     citations_only_empty: 'No passages matched this query.',
   },
 };

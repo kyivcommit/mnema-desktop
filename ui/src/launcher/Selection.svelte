@@ -48,11 +48,27 @@
     onSelected(selected);
   });
 
-  const answerLabel = $derived.by(() => { void $locale; return t('card_answer'); });
+  // 🔴 One `<section>`, two names. The centre card is one region, but it is not
+  // one FACT: in state E it announced itself by the answer card's name, in both
+  // locales, while the first sentence inside it said generation is unavailable.
+  // That is the window
+  // stating what is not so — Ruling AF's failure — moved down into the layer
+  // where a person using a screen reader cannot see the contradiction and
+  // correct for it. Only the NAME switches; the element, its `card-centre`
+  // testid and the `{#key}` above it are untouched.
+  //
+  // The label stays HERE rather than moving into `Answer` and `Passages`: the
+  // `<section>` belongs to this component, and splitting one region's identity
+  // across two files would duplicate the `void $locale` pattern a third time —
+  // the drift Rulings AG and AJ exist to stop.
+  const centreLabel = $derived.by(() => {
+    void $locale;
+    return t(answer.kind === 'generated' ? 'card_answer' : 'card_passages');
+  });
   const sourceLabel = $derived.by(() => { void $locale; return t('card_source'); });
 </script>
 
-<section data-testid="card-centre" aria-label={answerLabel}>
+<section data-testid="card-centre" aria-label={centreLabel}>
   {#if generatedAnswer !== null}
     <Answer answer={generatedAnswer} {query} onSelect={(citation) => (selected = citation)} />
   {:else if passagesAnswer !== null}
