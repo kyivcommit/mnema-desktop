@@ -58,7 +58,8 @@
   }
 
   // Hide, never close: a hidden webview keeps state, so `query` and results
-  // survive dismissal (§7.3).
+  // survive dismissal (§6, `…interface-design.md:186` — §7.3 is the dismissal
+  // gestures, and does not speak about state).
   function hide() { appWindow.hide(); }
   function onKeydown(event: KeyboardEvent) { if (event.key === 'Escape') hide(); }
   function onBlur() { if (!pinned) hide(); }

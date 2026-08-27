@@ -47,7 +47,8 @@
   // BEFORE any ask. So one Enter on an empty line, as the first thing a person
   // does, draws this card and fires `list_tree` — and `idle` is assigned in
   // exactly one place, the initial value at `Launcher.svelte:14`, with no path
-  // back, while §7.3 keeps state across a hide. **State A's bareness therefore
+  // back, while §6 keeps state across a hide (`…interface-design.md:186`, not §7.3, which is
+  // dismissal mechanics only). **State A's bareness therefore
   // ends on a stray Enter and does not come back that session.** That is the
   // price, and it is accepted, not overlooked.
   //
