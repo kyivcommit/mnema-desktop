@@ -237,6 +237,16 @@ fn the_boot_opens_the_index() {
         "the fixture must start with no index at {}",
         index.display()
     );
+    assert!(
+        matches!(
+            model_settings(app.state()).index,
+            IndexSettings::Unreadable {
+                cause: UnreadableCause::NotOpen,
+                ..
+            }
+        ),
+        "before the boot, nothing has opened the index yet"
+    );
 
     mnema_desktop::boot_index(app.handle());
 
@@ -244,6 +254,19 @@ fn the_boot_opens_the_index() {
         index.exists(),
         "start-up did not open the index: nothing at {}",
         index.display()
+    );
+    // The file on disk is not the same claim as the window seeing an open
+    // index. A `boot_index` whose body opened a connection and then let it
+    // drop — `let _ = state.open_job_index();`, which creates and migrates
+    // the same file through a route that never touches `AppState::db` — would
+    // satisfy the assertion above and leave `db` at `None`: the P0 this task
+    // exists to close, surviving under a green file-existence check. Reading
+    // `model_settings` back is what a person watches instead of the
+    // filesystem.
+    assert!(
+        matches!(model_settings(app.state()).index, IndexSettings::Read(_)),
+        "the index file exists but the window still cannot read it: {:?}",
+        model_settings(app.state()).index
     );
 }
 
@@ -284,15 +307,29 @@ fn a_failed_boot_open_reaches_the_window_as_read_failed() {
 
     mnema_desktop::boot_index(app.handle());
 
-    assert!(
-        matches!(
-            model_settings(app.state()).index,
-            IndexSettings::Unreadable {
-                cause: UnreadableCause::ReadFailed,
-                ..
-            }
-        ),
+    let IndexSettings::Unreadable { cause, reason } = model_settings(app.state()).index else {
+        panic!("a boot open against an unopenable path must still report Unreadable");
+    };
+    assert_eq!(
+        cause,
+        UnreadableCause::ReadFailed,
         "a boot open that failed was reported as if no boot had run"
+    );
+    // `reason` is bound, not `..`, because `cause` alone is satisfied by a
+    // mutant that keeps `ReadFailed` but writes `reason: e.to_string()`
+    // instead of the boot's own stored sentence — `e` here is always
+    // `Error::IndexNotOpen` (that is what puts this arm in the `NotOpen`
+    // branch to begin with, `models.rs`'s `index_settings`), so that mutant's
+    // `reason` would be `IndexNotOpen`'s fixed Display text, not a diagnosis
+    // of what this boot's open actually failed on. Both directions: it must
+    // not be that sentence, and it must be the failed open's own.
+    assert_ne!(
+        reason, "the index is not open",
+        "the boot's own diagnostic was replaced by `IndexNotOpen`'s fixed sentence: {reason}"
+    );
+    assert!(
+        reason.starts_with("index: "),
+        "the reason does not carry what the failed database open actually said: {reason}"
     );
 }
 

@@ -8,13 +8,18 @@
 # test notice this line going away" — which is the question the missing caller
 # itself failed for the length of the project.
 #
-# Three cases, because the change is three claims and each fails on its own:
-# the boot opens the index; a failed open is kept rather than logged and
-# dropped; and what was kept is what the window is told.
+# Five cases. The first three are the change's three claims, each failing on
+# its own: the boot opens the index; a failed open is kept rather than logged
+# and dropped; and what was kept is what the window is told. The last two
+# strengthen the assertions the first two lean on, once a file existing on
+# disk and a `cause` discriminant turned out not to be enough on their own:
+# a boot that opens a connection nothing keeps still creates the file, and a
+# `reason` nobody reads can be any string at all, including the one sentence
+# this whole task exists to stop the window from showing at the wrong time.
 #
 # ⚠️ **The call site is deliberately NOT a case here, and that is a gap, not an
 # oversight.** What proves `.setup` calls `boot_index` is
-# `a_real_launch_creates_the_index_in_its_data_directory` in `launch_smoke.rs`,
+# `a_real_launch_survives_startup_and_opens_its_index` in `launch_smoke.rs`,
 # and this harness cannot run it: `mutation-check.sh` builds
 # `cargo test -p <pkg> <args> -- --exact <test>` and owns the `--` itself, so no
 # case can pass `--include-ignored` to libtest, and an `#[ignore]`d test selected
@@ -52,4 +57,29 @@ case_ "what the boot recorded must reach the window as ReadFailed" \
   's{cause: UnreadableCause::ReadFailed,\n                reason,}{cause: UnreadableCause::NotOpen,\n                reason,}' \
   'cause: UnreadableCause::NotOpen,
                 reason,' \
+  mnema-desktop 'a_failed_boot_open_reaches_the_window_as_read_failed' --test commands
+
+# A file on disk is not the same claim as `AppState::db` holding the
+# connection: this routes the open through `open_job_index` instead of
+# `open_index`, which still creates and migrates the same file — `open` does
+# not know or care which caller asked — but returns a connection nothing
+# stores, leaving `db` at `None` exactly as it was before this task. Only
+# `the_boot_opens_the_index`'s second assertion, added past the file-exists
+# check, can see this; the first cannot.
+case_ "the boot must store the connection the window reads, not merely create the file" \
+  src-tauri/src/lib.rs \
+  's{    let outcome = state\.open_index\(\);}{    let outcome: Result<(std::path::PathBuf, i64), error::Error> = state.open_job_index().map(|_| (std::path::PathBuf::new(), 0));}' \
+  '    let outcome: Result<(std::path::PathBuf, i64), error::Error> = state.open_job_index().map(|_| (std::path::PathBuf::new(), 0));' \
+  mnema-desktop 'the_boot_opens_the_index' --test commands
+
+# `cause: ReadFailed` survives untouched; only the sentence beside it changes,
+# back to what a bare `IndexNotOpen` would have said instead of what the
+# boot's own open actually failed on. A discriminant-only assertion cannot see
+# this — it is exactly why `a_failed_boot_open_reaches_the_window_as_read_failed`
+# now binds `reason` instead of matching it with `..`.
+case_ "the reason shown must be the boot's own diagnosis, not IndexNotOpen's fixed sentence" \
+  src-tauri/src/models.rs \
+  's{cause: UnreadableCause::ReadFailed,\n                reason,}{cause: UnreadableCause::ReadFailed,\n                reason: e.to_string(),}' \
+  'cause: UnreadableCause::ReadFailed,
+                reason: e.to_string(),' \
   mnema-desktop 'a_failed_boot_open_reaches_the_window_as_read_failed' --test commands

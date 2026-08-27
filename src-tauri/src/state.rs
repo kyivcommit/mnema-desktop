@@ -169,10 +169,16 @@ impl AppState {
     /// Records what the start-up open answered: the failure's own sentence, or
     /// `None` for a success.
     ///
-    /// `None` on success rather than "set it only when it breaks", so a boot
-    /// that recovered cannot leave an earlier failure behind to be read as the
-    /// present state — the class this project keeps paying for is the stale
-    /// artefact that answers about the wrong moment.
+    /// **Total, not conditional** — it is called with `outcome.err().map(...)`
+    /// (`lib.rs:169`) rather than only from an `if let Err(e)`, so it always
+    /// writes a definite answer, success included, instead of writing only on
+    /// failure and leaving a caller to remember to clear the field on the other
+    /// path. `boot_index` (`lib.rs:169`) is this setter's only caller today, run
+    /// once per process, so nothing here actually recovers from an earlier
+    /// failure — what the total shape buys is that a future second caller (a
+    /// retry, a manual re-open exposed from the settings screen) cannot leave a
+    /// stale failure from an earlier call standing after a later one succeeds,
+    /// without that caller having to know to clear this field itself.
     ///
     /// Poison recovery instead of `expect`, the trade [`AppState::locale`]
     /// spells out: behind this lock is a `String` with no invariant a panicking

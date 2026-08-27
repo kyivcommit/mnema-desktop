@@ -101,8 +101,8 @@ pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Resu
 /// answer a question and could not list a tree, and the settings screen read
 /// `Unreadable` for as long as it stayed open. The suite was green because
 /// every test opens the index for itself — the same shape as the start-up panic
-/// `launch_smoke.rs` was written for, and the reason that file gained a second
-/// test.
+/// `launch_smoke.rs` was written for, and the reason that file's guard now also
+/// has to prove `.setup` calls this function, not only that the function works.
 ///
 /// **It returns nothing and cannot fail the boot.** A `?` here would turn an
 /// index this build cannot open — a database written by a newer Mnema, a
@@ -118,6 +118,46 @@ pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Resu
 /// at start-up". The state carries the answer instead — see
 /// [`state::AppState::set_boot_open_error`] and what `models::index_settings`
 /// then does with it.
+///
+/// **This is where "ask what disappears" (CLAUDE.md) binds this task,
+/// contrary to what the plan assumed when it scoped that pass out.** Opening at
+/// boot means start-up now *writes* — `open_index` creates the directory,
+/// creates the file, and runs `apply(&mut conn)`
+/// (`crates/mnema-index/src/open.rs:118`) before anyone has touched a folder.
+/// Four things considered; nothing found that a person can lose.
+///
+/// 1. **A migration against an index a newer build wrote.** `to_latest` wraps
+///    the whole migration set in one transaction
+///    (`crates/mnema-index/src/migrations.rs:85-88`), so "migration number too
+///    high" fails `open` atomically — the file is left exactly as it was, and
+///    the boot reports it rather than starting from it. `AppState::open_index`'s
+///    own doc already names this state; this function is what makes reaching
+///    it silent-but-safe rather than silent-but-lost.
+/// 2. **The boot racing the job's second connection**
+///    (`AppState::open_job_index`, `state.rs:222`). Structurally it cannot,
+///    today: this call runs inside the `Ready`-event handler that Tauri itself
+///    uses to create every configured window and then call this closure, in
+///    that order, before the event loop advances to deliver anything a webview
+///    could send (`tauri-2.11.5/src/app.rs:2524-2533` builds the windows;
+///    `:1414-1416` runs both inside one `RuntimeRunEvent::Ready` arm) — so no
+///    command reaches `with_index` or `open_job_index` before this line has
+///    already run. Were that ever not true, the two connections still could not
+///    corrupt each other: WAL with a five-second busy timeout serialises them
+///    (`crates/mnema-index/src/open.rs:114-115`), and `to_latest` is a no-op
+///    once `user_version` is current, so the loser of the race would wait, not
+///    fail.
+/// 3. **A `data_dir` that cannot be created.** `open_index` reports
+///    `Error::DataDir` (`state.rs:156-157`); nothing existed yet to lose, and
+///    the window is told `ReadFailed` instead of being shown a healthy state it
+///    does not have.
+/// 4. **A second call.** `AppState::open_index`'s own doc says calling it again
+///    drops the previous connection and reopens — recoverable, not lossy — but
+///    this line is the setter's only caller (also cited from
+///    [`state::AppState::set_boot_open_error`]'s doc), so nothing calls it
+///    twice today.
+///
+/// So opening at boot is safe to keep as a write, and does not, on its own,
+/// owe this task a new index-writing command or a wider pass than this one.
 pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     let state = app.state::<state::AppState>();
     let outcome = state.open_index();

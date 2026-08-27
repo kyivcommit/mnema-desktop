@@ -571,11 +571,13 @@ pub fn set_chat_model(state: State<'_, AppState>, model: String) -> Result<(), E
 /// Everything the settings screen draws: the key, and the index.
 ///
 /// **Two halves, because they are two facts and they fail separately.** The key
-/// lives in the OS credential store and the rest lives in a database, and the
-/// database is not open until the window asks it to be — `AppState::db` is
-/// `None` until the first `open_index`, and an index written by a newer Mnema
-/// does not open at all, which is a state the application stays in rather than
-/// passes through. The settings screen is exactly the screen someone opens then.
+/// lives in the OS credential store and the rest lives in a database. The
+/// database is opened once, at start-up, by [`crate::boot_index`] — never by
+/// the window, which has no path to `open_index` at all — so `AppState::db` is
+/// `None` only for as long as that boot call has not finished, or forever if it
+/// failed; an index written by a newer Mnema does not open at all, which is a
+/// state the application stays in rather than passes through. The settings
+/// screen is exactly the screen someone opens then.
 ///
 /// The first version measured the key, then let `with_index` fail, and the
 /// measurement died with the call. One message for two facts: the window could
