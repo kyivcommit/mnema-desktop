@@ -58,12 +58,26 @@
           data-testid={`preview-${citation.anchor}`}
           onclick={() => onSelect(citation)}
         >
-          <!-- `citation-label`, NOT `preview-label`: the preview testids are
-               queried as a namespace (`queryAllByTestId(/^preview-/)`) and a
-               second id inside it is counted as a preview row. Held by ONE
-               test — `the preview namespace holds one id per citation and
-               nothing else`, `Answer.test.ts` — and by nothing else; the same
-               rule `Passages.svelte` follows for `passage-label`. -->
+          <!-- 🔴 Owner review on PR #24, P2. This preview used to render the
+               label ALONE, so the card listing an answer's citations was a
+               list of file paths: a person reading `[7]` in the prose above
+               found nothing in the list carrying that number, and nothing of
+               the passage the sentence rests on. Three parts, in reading
+               order: which anchor this is, what it says, where it came from.
+
+               The anchor is bracketed to match the form it takes in the prose
+               (`[{segment.n}]` above) — the two are the same reference and a
+               person has to be able to pair them by sight.
+
+               `citation-anchor`/`citation-text`/`citation-label`, NOT
+               `preview-*`: the preview testids are queried as a namespace
+               (`queryAllByTestId(/^preview-/)`) and a second id inside it is
+               counted as a preview row. Held by ONE test — `the preview
+               namespace holds one id per citation and nothing else`,
+               `Answer.test.ts` — and by nothing else; the same rule
+               `Passages.svelte` follows for its own row. -->
+          <span data-testid="citation-anchor">[{citation.anchor}]</span>
+          <span data-testid="citation-text">{citation.text}</span>
           <span data-testid="citation-label">{label}</span>
         </button>
       </li>

@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, expect, test, vi } from 'vitest';
 import Answer from './Answer.svelte';
@@ -28,8 +28,13 @@ function gen(a: AskAnswer) {
 test('the query echoes as a bubble and the answer renders its anchors as buttons', () => {
   render(Answer, { query: 'how much?', answer: gen(generated), onSelect: vi.fn() });
   expect(screen.getByTestId('query-echo').textContent).toBe('how much?');
-  expect(screen.getAllByRole('button', { name: /\[3\]|\[7\]/ })).toHaveLength(2);
-  const body = screen.getByTestId('answer-body').textContent!;
+  // Scoped to the prose since P2: the preview rows carry a visible `[N]` of
+  // their own now, and this claim is about the anchors INSIDE the answer —
+  // unscoped it would be satisfied by four buttons, two of which are the
+  // previews, and it would still say "the answer renders its anchors".
+  const answerBody = screen.getByTestId('answer-body');
+  expect(within(answerBody).getAllByRole('button', { name: /\[3\]|\[7\]/ })).toHaveLength(2);
+  const body = answerBody.textContent!;
   // Both directions (review I2): the raw grammar never reaches the DOM, AND
   // the prose around both anchors survives IN ORDER with the anchors between
   // it. Two `toContain`s were satisfied by any arrangement — re-review N1
@@ -76,6 +81,27 @@ test('the preview namespace holds one id per citation and nothing else', () => {
     .toEqual(['preview-3', 'preview-7']);
 });
 
+// 🔴 Owner review on PR #24, P2, and it is written against what the preview
+// SHOWS rather than against its ids. The shipped preview rendered the locator
+// label alone: `citation.text` and the anchor were absent, so the card listing
+// the answer's citations was a list of file paths. The anchor appearing in the
+// prose above does not make the preview itself identifiable — a person reading
+// `[7]` in the sentence has nothing in the list carrying that number.
+//
+// The whole of the row, in order, is the claim: a preview that dropped the
+// text, dropped the anchor, or put them in another order all redden here.
+test('the preview shows the cited passage and its anchor, not only a path', () => {
+  setLocale('en'); // seed, do not inherit
+  render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() });
+
+  const row = (n: number) =>
+    (screen.getByTestId(`preview-${n}`).textContent ?? '').replace(/\s+/g, ' ').trim();
+  expect(row(3)).toBe('[3] A cited passage. notes/a.md · lines 5–7');
+  // The second citation has no coordinate, so its label is the bare path — the
+  // dangling-separator branch, with the passage and anchor beside it.
+  expect(row(7)).toBe('[7] A second cited passage. notes/a.md');
+});
+
 test('the preview label is path · locator, and never invents a paragraph number', () => {
   render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() });
   const preview = screen.getByTestId('preview-3');
@@ -83,12 +109,14 @@ test('the preview label is path · locator, and never invents a paragraph number
   expect(label).toContain('notes/a.md');
   expect(label).toMatch(/рядки|lines/);
   expect(label).not.toMatch(/абзац|paragraph/);
-  // Review M1: the button's accessible name must be exactly its label — not
-  // the label plus a bare or bracketed ordinal fused onto it. `label` is read
-  // from the `citation-label` span alone, so a sibling `{citation.anchor}`
-  // added anywhere else in the button grows the accessible name without
-  // changing `label`, and this lookup stops finding the button.
-  expect(screen.getByRole('button', { name: label })).toBe(preview);
+  // Review M1 asked that the button's accessible name be exactly its label, so
+  // that a bracketed ordinal fused on elsewhere could not grow the name
+  // invisibly. P2 makes the ordinal and the passage text DELIBERATE parts of
+  // the row, so the claim moves rather than disappears: the accessible name is
+  // the whole row and nothing besides — a fourth part added anywhere in the
+  // button still reddens this line, and `label` is still read from the
+  // `citation-label` span alone.
+  expect(screen.getByRole('button', { name: `[3] A cited passage. ${label}` })).toBe(preview);
 });
 
 test('a citation with no coordinate shows the path alone, with no dangling separator', () => {
