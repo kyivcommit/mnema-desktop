@@ -47,7 +47,10 @@
       // query. A draft typed while the ask was in flight is kept, not wiped
       // (Codex #3).
       if (query === raw) query = '';
-      echo = check.query;  // §7: query echoes as a chat bubble
+      // §7: the query echoes as a chat bubble. The bubble itself is drawn by
+      // `Answer` inside the centre card (Task 8b) — the launcher used to draw a
+      // second one of its own here, and in state B both were on screen at once.
+      echo = check.query;
     } catch (e) {
       console.error('ask failed', e); // query stays in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
@@ -66,10 +69,6 @@
 <main>
   <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
   <Arms bind:textOn bind:contentOn {provider} />
-
-  {#if echo}
-    <div class="query-echo" data-testid="query-echo">{echo}</div>
-  {/if}
 
   <Cards state={launcherState} query={echo} />
 

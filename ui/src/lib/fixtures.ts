@@ -45,6 +45,32 @@ export const generated: AskAnswer = {
   content: { kind: 'off' },
 };
 
+// The SECOND answer (Task 8b), with a citation of its OWN — deliberately not a
+// copy of `citationA`/`citationB`. A second answer that shared the first's
+// citations could not show a stale selection surviving: the previous citation
+// would still be a member of the new answer's list, so a card still painting it
+// would look correct. `doc-2` also has a row in `oneRootTwoFolders`, so the tree
+// can mark it. Latin only, like every other string in this file (Ruling K).
+export const generatedOther: AskAnswer = {
+  kind: 'generated',
+  answer: 'A second answer entirely<c>2</c>.',
+  citations: [
+    {
+      anchor: 2,
+      chunkId: 61,
+      ord: 0,
+      documentId: 'doc-2',
+      rootId: 7,
+      text: 'A passage the second answer cites.',
+      relativePath: 'notes/b.md',
+      sectionTitle: null,
+      coordinate: { kind: 'line', start: 1, end: 2 },
+    },
+  ],
+  text: { kind: 'answered', matched: 1 },
+  content: { kind: 'off' },
+};
+
 // Preview-label branch 2 (Decision 1): no path on disk, but a real location.
 // The rule keeps the location — a citation with no `path` row of its own
 // still knows it is on page 12 — where the vanilla `hitLocation` would have

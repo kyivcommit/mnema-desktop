@@ -1,7 +1,7 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
-import { refusedNoCandidates, generated } from '../lib/fixtures';
+import { refusedNoCandidates, generated, oneRootTwoFolders } from '../lib/fixtures';
 
 const hide = vi.fn();
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ hide }) }));
@@ -11,10 +11,18 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // Answers each command separately. `model_settings` (the launcher's mount
 // seed) always resolves so it never crashes a render; `ask` is what each
 // test controls.
+//
+// 🔴 Ruling Y, and it is not optional: from Task 8b `Cards` mounts `Tree`, which
+// calls `list_tree` on mount. Every test that reaches state B goes through it,
+// and the bare `Promise.resolve()` this function used to give unknown commands
+// made the card read `.roots` off `undefined`. A launcher test that never clicks
+// a citation never reaches `source_around`, so that one stays unmocked on
+// purpose — the day one does, it fails loudly rather than painting nothing.
 const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', embeddingModel: null, searchTextArm: true, searchContentArm: false } };
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'ask') return opts.reject ? Promise.reject(askReply) : Promise.resolve(askReply);
     return Promise.resolve();
   });
@@ -47,13 +55,38 @@ test('a query that refuses shows the F message', async () => {
   expect(screen.getByRole('status').textContent).toMatch(/found|знайдено/i);
 });
 
-test('on ready the line clears and the query echoes', async () => {
-  mockBackend(refusedNoCandidates); // any successful answer clears+echoes; a refusal is one
+// Ruling Z: this test used to make both claims at once. The echo half moved to
+// its own test below the moment the bubble stopped being the launcher's: §7
+// gives state F no bubble at all, and `Cards` draws nothing there, so asserting
+// one here would now be asserting something the design says must not exist.
+// The line-clears half is true in every ready state and stays on the refusal.
+test('on ready the line clears', async () => {
+  mockBackend(refusedNoCandidates); // any successful answer clears the line; a refusal is one
   render(Launcher);
   await submit('echo me');
   await screen.findByRole('status');
   expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe(''); // line cleared
-  expect(screen.getByTestId('query-echo').textContent).toBe('echo me');    // echoed
+  expect(screen.queryByTestId('query-echo')).toBeNull(); // and state F shows no bubble at all
+});
+
+// The echo half of the split. The bubble is drawn by `Answer` inside the centre
+// card now (Task 8b), so it exists only where an answer does — state B.
+test('the submitted query echoes as a bubble on a generated answer', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  await submit('echo me');
+  expect(await screen.findByTestId('query-echo')).toBeTruthy();
+  expect(screen.getByTestId('query-echo').textContent).toBe('echo me');
+});
+
+// 🔴 The mutation proof for deleting the launcher's own `query-echo` div
+// (Ruling Z): `Answer` draws one, the launcher drew another, and in state B both
+// were on screen. Leave the div in place and this reads 2.
+test('the launcher renders exactly one query bubble in state B', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  await submit('how much?');
+  expect(await screen.findAllByTestId('query-echo')).toHaveLength(1);
 });
 
 test('a draft typed while an ask is in flight survives the ready-clear (Codex #3)', async () => {
@@ -74,7 +107,9 @@ test('a draft typed while an ask is in flight survives the ready-clear (Codex #3
   resolveAsk(refusedNoCandidates); // Q1's answer arrives
   await screen.findByRole('status'); // ready
   expect(box.value).toBe('second draft'); // the draft was NOT wiped by the clear
-  expect(screen.getByTestId('query-echo').textContent).toBe('first question'); // Q1 still echoed
+  // Ruling Z: the echo assertion is gone, not moved. This test's claim is
+  // `box.value`, `findByRole('status')` above is already its readiness marker,
+  // and state F draws no bubble to assert on any more.
 });
 
 test('a rejected ask is visible and logged, not swallowed', async () => {
