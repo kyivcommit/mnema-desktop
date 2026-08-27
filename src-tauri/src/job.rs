@@ -37,10 +37,11 @@ pub struct Progress {
     ///
     /// **It counts this run, not the space.** The cumulative number for the
     /// active space is `crate::models::IndexRead::failed_chunks`, read from the
-    /// database on the settings screen; a second run starts this one again at
+    /// database for the settings screen; a second run starts this one again at
     /// zero while that one goes on growing. Two numbers about two scopes, and
-    /// `ui/render.js` says which is which rather than letting either be read as
-    /// the other.
+    /// whichever surface shows them owes each its own words rather than letting
+    /// either be read as the other. Neither is on screen today — `ui/src/
+    /// settings/Settings.svelte` is a stub and the settings surfaces are PR 7's.
     pub refused: u64,
     pub seconds_left: Option<u64>,
 }
@@ -132,8 +133,8 @@ pub struct Ended {
     /// Always `0` for the probe. For a walk, mirrors `Progress::skipped`'s own
     /// merge of `WalkProgress::skipped` and `WalkProgress::refused` — the
     /// final counts, not only the ones a throttled progress event happened to
-    /// carry last. Without this, a page reading only the ending (the common
-    /// case: `ui/main.js` overwrites the progress line with the ending's text)
+    /// carry last. Without this, a page reading only the ending — the common
+    /// case, since an ending overwrites whatever the progress line last said —
     /// had no way to say how many files were skipped, only how many were not.
     pub skipped: u64,
     /// Always `true` for the probe, which has no subtree to fail to read.
@@ -746,16 +747,18 @@ mod tests {
     }
 
     /// The canonical list of `EndReason` discriminants, in the exact
-    /// camelCase spelling `#[serde(rename_all = "camelCase")]` produces —
-    /// pinned identically, by hand, in `ui/render.test.js`'s own `END_
-    /// REASONS`. Neither side can see the other's source, so nothing forces
-    /// them to agree; what this test forces is narrower and still real: the
+    /// camelCase spelling `#[serde(rename_all = "camelCase")]` produces.
+    /// **No window copy exists to pin it against today**: `ui/src/lib/ipc.ts`
+    /// mirrors the ask, search, tree and source wire and none of the job
+    /// events, so this list has one side only until PR 7 gives the indexing
+    /// surface its own. What this test forces is narrower and still real: the
     /// `match` below has no wildcard arm, so a variant added to `EndReason`
     /// without a matching line here fails to **compile**, which is what
     /// makes a maintainer look at this list at all rather than letting it go
-    /// silently stale. Whoever touches it is the one who has to remember the
-    /// JS copy — this test cannot do that part, but it makes the Rust half
-    /// of "cannot drift apart silently" true rather than aspirational.
+    /// silently stale. Whoever touches it is the one who has to carry it
+    /// across to whatever window comes to read it — this test cannot do that
+    /// part, but it makes the Rust half of "cannot drift apart silently" true
+    /// rather than aspirational.
     ///
     /// `serde_json::to_value` alongside the hand-written match, not instead
     /// of it: the match is a second, independently typed opinion about the
@@ -792,8 +795,8 @@ mod tests {
         }
     }
 
-    /// Same pairing as the test above, for `FrozenReason` — mirrored in
-    /// `ui/render.test.js`'s `FROZEN_REASONS`.
+    /// Same pairing as the test above, for `FrozenReason`, and with the same
+    /// note: there is no window copy to mirror it against yet (PR 7).
     #[test]
     fn every_frozen_reason_has_its_camel_case_spelling_pinned() {
         let discriminant = |reason: FrozenReason| -> &'static str {

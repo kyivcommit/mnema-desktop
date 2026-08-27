@@ -199,9 +199,9 @@ pub fn start_walk_job(
             ),
         };
         // Dropped **before** the send, not left to the end of this closure:
-        // `JobSlot::drop` is what clears `AppState::running`, and
-        // `ui/main.js` re-enables Start inside the very handler that
-        // receives this `Ended` message. A click landing in the gap between
+        // `JobSlot::drop` is what clears `AppState::running`, and a window is
+        // free to re-enable Start inside the very handler that receives this
+        // `Ended` message. A click landing in the gap between
         // the send and an implicit end-of-scope drop races a slot this
         // thread still holds. Measured directly before this line existed: a
         // second `start_walk_job` issued the instant the first `Ended`

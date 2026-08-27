@@ -428,9 +428,9 @@ fn a_pending_documents_embedded_chunks_are_not_claimed_as_coverage() {
 /// The mirror case F-A1 asked for: an embedded vector with no `chunk` row
 /// at all — `Db::insert_vector`'s own doc names this as the residual gap
 /// [`Db::chunk_count`]'s doc still points to — must still report
-/// `embedded > total`, the anomaly `render.js` already has a branch for.
-/// `reachable`'s addition is a second, independent fact beside that one,
-/// not a replacement for it.
+/// `embedded > total`, the anomaly a reader of these counts needs a branch
+/// for — no window shows them yet; PR 7. `reachable`'s addition is a second,
+/// independent fact beside that one, not a replacement for it.
 #[test]
 fn an_orphaned_vector_still_reports_embedded_above_total() {
     let f = support::indexed_space();

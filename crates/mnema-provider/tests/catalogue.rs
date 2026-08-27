@@ -597,8 +597,8 @@ fn the_states_a_price_arrives_in_are_not_folded_into_one_another() {
             },
         ),
         // A stated zero is a number the provider sent, and stays one. What it
-        // may be rendered as is the window's question, and `ui/render.test.js`
-        // is where it is answered.
+        // may be rendered as — never "free" — is the window's question, and no
+        // window asks it yet: the settings surfaces are PR 7's.
         ("vendor/zero", Price::Known { amount: 0.0 }),
         (
             "vendor/sentinel",
