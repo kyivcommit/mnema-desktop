@@ -51,8 +51,8 @@
   // 🔴 One `<section>`, two names. The centre card is one region, but it is not
   // one FACT: in state E it announced itself by the answer card's name, in both
   // locales, while the first sentence inside it said generation is unavailable.
-  // That is the window
-  // stating what is not so — Ruling AF's failure — moved down into the layer
+  // That is the window stating what is not so — Ruling AF's failure — moved
+  // down into the layer
   // where a person using a screen reader cannot see the contradiction and
   // correct for it. Only the NAME switches; the element, its `card-centre`
   // testid and the `{#key}` above it are untouched.
@@ -61,10 +61,25 @@
   // `<section>` belongs to this component, and splitting one region's identity
   // across two files would duplicate the `void $locale` pattern a third time —
   // the drift Rulings AG and AJ exist to stop.
-  const centreLabel = $derived.by(() => {
-    void $locale;
-    return t(answer.kind === 'generated' ? 'card_answer' : 'card_passages');
-  });
+  //
+  // 🔴 Exhaustive, not a ternary, and for Ruling W's own reason one card over
+  // (`Source.svelte`'s `freshnessText`/`goneText`): a default branch is how a
+  // wrong verdict gets drawn for a variant nobody added a case for. A third
+  // member of `CardAnswer` would compile against `x ? a : b`, render an empty
+  // card — the markup below has `{#if}/{:else if}` and no `else` — and announce
+  // it under the passages name. No test can prove this, because the third
+  // member does not exist to test with; the proof is the compiler's. Add one to
+  // `CardAnswer` and this line stops compiling.
+  function labelFor(a: CardAnswer): string {
+    switch (a.kind) {
+      case 'generated': return t('card_answer');
+      case 'citationsOnly': return t('card_passages');
+    }
+    const unreachable: never = a;
+    return unreachable;
+  }
+
+  const centreLabel = $derived.by(() => { void $locale; return labelFor(answer); });
   const sourceLabel = $derived.by(() => { void $locale; return t('card_source'); });
 </script>
 

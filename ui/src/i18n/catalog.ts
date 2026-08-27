@@ -66,7 +66,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `citations_only_empty` denying it. A card contradicting itself is Ruling
     // AF's own failure one branch over, so the empty card drops the clause it
     // cannot keep rather than qualifying it.
-    citations_only_banner: 'Генерування недоступне. Нижче — уривки, які знайшов пошук.',
+    // Re-review RM1: ICU plural, the mechanism `indexed_documents` above already
+    // uses. Ukrainian needs three arms an integer count can reach — `ASK_TOP_K` is
+    // 8 (`bridge.rs:496`), so one/few/many are all states a person gets to — and a
+    // fixed plural was ungrammatical over a single passage, not merely loose.
+    citations_only_banner: 'Генерування недоступне. Пошук знайшов {count, plural, one {# уривок} few {# уривки} many {# уривків} other {# уривка}}.',
     citations_only_banner_empty: 'Генерування недоступне.',
     // Ruling AK: its own sentence, distinct from `tree_empty` (nothing indexed
     // at all) and from `source_failed` (a passage that could not be read).
@@ -101,7 +105,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     source_loading: 'Loading the source…',
     source_failed: 'The source could not be loaded.',
     source_wrong_document: 'This excerpt came from a different document than the citation',
-    citations_only_banner: 'Generation is unavailable. These are the passages the search found.',
+    citations_only_banner: 'Generation is unavailable. The search found {count, plural, one {# passage} other {# passages}}.',
     citations_only_banner_empty: 'Generation is unavailable.',
     citations_only_empty: 'No passages matched this query.',
   },

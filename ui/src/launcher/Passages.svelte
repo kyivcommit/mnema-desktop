@@ -37,7 +37,10 @@
   // cannot keep; it does not qualify or soften it.
   const banner = $derived.by(() => {
     void $locale;
-    return t(answer.citations.length === 0 ? 'citations_only_banner_empty' : 'citations_only_banner');
+    const count = answer.citations.length;
+    // The count is the card's OWN, passed through to ICU (re-review RM1): the
+    // catalogue owns the arms, this owns which number selects one.
+    return count === 0 ? t('citations_only_banner_empty') : t('citations_only_banner', { count });
   });
 
   // Ruling AK: zero passages is an ANSWER — the search ran and found nothing —

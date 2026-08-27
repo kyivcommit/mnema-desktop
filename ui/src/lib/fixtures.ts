@@ -169,6 +169,20 @@ const hitSameDocument: Hit = {
   coordinate: { kind: 'none' },
 };
 
+// Re-review RM1: ONE passage. `citationsOnly` has two and `emptyCitationsOnly`
+// has none, so the singular was a state nothing built and the banner's plural
+// over a one-item list had to be reasoned about rather than rendered. Ukrainian
+// makes it a grammar question, not a style one, and `ASK_TOP_K` is 8
+// (`bridge.rs:496`) so `one` (1), `few` (2-4) and `many` (5-8) are all states a
+// person can reach; the arms themselves are pinned in `i18n.test.ts`, where a
+// count needs no fixture at all.
+export const citationsOnlyOne: AskAnswer = {
+  kind: 'citationsOnly',
+  citations: [hitOtherDocument],
+  text: { kind: 'answered', matched: 1 },
+  content: { kind: 'noKey' },
+};
+
 export const citationsOnlySameDocument: AskAnswer = {
   kind: 'citationsOnly',
   citations: [hit, hitSameDocument],

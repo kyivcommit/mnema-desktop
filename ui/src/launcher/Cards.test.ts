@@ -8,6 +8,7 @@ import {
   generatedOther,
   refusedNoCandidates,
   citationsOnly,
+  citationsOnlyOne,
   citationsOnlySameDocument,
   emptyCitationsOnly,
   oneRootTwoFolders,
@@ -489,15 +490,26 @@ test('the state E banner says generation is unavailable and names no cause (Ruli
   setLocale('en'); // seed, do not inherit
   render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
 
+  // 🔴 Re-review RI1, and it is FIRST because it is what a screen reader acts
+  // on: `role="status"` is what makes this a live region, so "generation is
+  // unavailable" is announced when the card appears rather than sitting there
+  // silently. Round 1 defended it only by accident — the test located the
+  // banner with `getByRole('status')` — and swapping to the testid locator, on
+  // the strength of a note about a DIFFERENT test's ambiguity after a click,
+  // dropped the guard with the suite green. A locator is not an assertion:
+  // reaching an element by a property is not a claim that it has it.
+  expect(screen.getByTestId('citations-banner').getAttribute('role')).toBe('status');
+
   expect(screen.getByTestId('citations-banner').textContent)
-    .toBe('Generation is unavailable. These are the passages the search found.');
+    .toBe('Generation is unavailable. The search found 2 passages.');
 
   // Both locales, both banner forms, closed: the rendered assertion above can
-  // only ever reach one of the four.
+  // only ever reach one of the four, and it reaches a FORMATTED string while
+  // these reach the ICU pattern behind it (re-review RM1).
   expect(messages.en.citations_only_banner)
-    .toBe('Generation is unavailable. These are the passages the search found.');
+    .toBe('Generation is unavailable. The search found {count, plural, one {# passage} other {# passages}}.');
   expect(messages.uk.citations_only_banner)
-    .toBe('Генерування недоступне. Нижче — уривки, які знайшов пошук.');
+    .toBe('Генерування недоступне. Пошук знайшов {count, plural, one {# уривок} few {# уривки} many {# уривків} other {# уривка}}.');
   expect(messages.en.citations_only_banner_empty).toBe('Generation is unavailable.');
   expect(messages.uk.citations_only_banner_empty).toBe('Генерування недоступне.');
 
@@ -636,15 +648,28 @@ test('two passages in one document: a click asks for the sibling too and paints 
 // same finding the reviews of Task 5 (I2) and Task 6 (I3) made about their own
 // cards, so this is the third time the shape has been paid for.
 //
-// FOUR tests, not one, and each names a DIFFERENT element: `citationLabel()`,
-// the banner and the empty sentence are three separate `$derived.by` guards,
-// and the card's aria-label is a fourth, one component up in `Selection`. A
-// single test asserting the whole card would go red under any of the four and
-// so would identify none of them — a probe has to be able to name its victim.
+// 🔴 THE RULE, in the form that survives being tested (re-review, and it is
+// sharper than the "one test per guard" style maxim this round first wrote):
+//
+//   a live-switch test is scoped to the smallest element whose text the guard
+//   ALONE decides, and every branch that renders a guarded string needs its own
+//   fixture.
+//
+// These four are therefore not four assertions on one thing that could have
+// been folded together. They are TWO FIXTURE STATES — `citationsOnly` and
+// `emptyCitationsOnly` — times the guards each state can reach. The single
+// card-wide alternative was built and measured: it misses `emptyText` outright,
+// because `citationsOnly` never renders `citations-empty` and no assertion over
+// that card can see the guard in any locale; and where it does catch, its
+// failure text is unreadable — under the `ranks` mutation both sides of the
+// diff truncate to the same string, so the red carries no information at all.
+// Coverage forces the split before identification does.
 //
 // The switch is what these test, not the seed: `setLocale('uk')` BEFORE a render
 // passes with or without the guard, because the first read happens after it
-// either way. That is exactly how the guards stayed invisible.
+// either way. That is exactly how the guards stayed invisible. The `en → uk →
+// en` round trip is part of each claim for the same reason — a one-way switch
+// passes for a `$derived` that merely happened to recompute once.
 
 test('state E passage labels follow a live language switch', async () => {
   setLocale('en'); // seed, do not inherit
@@ -667,17 +692,17 @@ test('the state E banner follows a live language switch', async () => {
   setLocale('en'); // seed, do not inherit
   render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
   expect(screen.getByTestId('citations-banner').textContent)
-    .toBe('Generation is unavailable. These are the passages the search found.');
+    .toBe('Generation is unavailable. The search found 2 passages.');
 
   setLocale('uk');
   await tick();
   expect(screen.getByTestId('citations-banner').textContent)
-    .toBe('Генерування недоступне. Нижче — уривки, які знайшов пошук.');
+    .toBe('Генерування недоступне. Пошук знайшов 2 уривки.');
 
   setLocale('en'); // the switch back is part of the claim, not the cleanup
   await tick();
   expect(screen.getByTestId('citations-banner').textContent)
-    .toBe('Generation is unavailable. These are the passages the search found.');
+    .toBe('Generation is unavailable. The search found 2 passages.');
 });
 
 // Scoped to `citations-empty`, deliberately NOT to the whole card: the banner
@@ -723,4 +748,38 @@ test("the passages card's label comes from the catalogue and follows a live lang
   // (`Cards.test.ts` pins the generated side of this pair above).
   expect(messages.en.card_passages).not.toBe(messages.en.card_answer);
   expect(messages.uk.card_passages).not.toBe(messages.uk.card_answer);
+});
+
+// 🔴 Re-review RM1. The banner used to say "these are the passages" over a list
+// of one. In English that is loose; in Ukrainian it is ungrammatical, and the
+// language has three arms an integer count can reach, not two. Both states are
+// rendered here rather than reasoned about — the contrast IS the claim, so it
+// is one test: a banner hardcoded to either arm fails on the other half.
+//
+// `ASK_TOP_K` is 8 (`bridge.rs:496`), so a person can reach `one`, `few` and
+// `many`; the arms themselves are pinned in `i18n.test.ts` at 1, 2 and 5, where
+// a count needs no fixture. What this test adds is the wiring the catalogue
+// cannot show: that the card passes its OWN passage count and not a constant.
+test('the banner agrees in number with the passages it introduces', async () => {
+  setLocale('en'); // seed, do not inherit
+  const { rerender } = render(Cards, { state: stateFromAnswer('q', citationsOnlyOne), query: 'q' });
+  expect(screen.getByTestId('citations-banner').textContent)
+    .toBe('Generation is unavailable. The search found 1 passage.');
+
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('citations-banner').textContent)
+    .toBe('Генерування недоступне. Пошук знайшов 1 уривок.');
+
+  // The same card, two passages: Ukrainian moves `one` → `few`, and the noun
+  // changes with it. A card passing a constant count cannot do this.
+  await rerender({ state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  await tick();
+  expect(screen.getByTestId('citations-banner').textContent)
+    .toBe('Генерування недоступне. Пошук знайшов 2 уривки.');
+
+  setLocale('en');
+  await tick();
+  expect(screen.getByTestId('citations-banner').textContent)
+    .toBe('Generation is unavailable. The search found 2 passages.');
 });
