@@ -569,6 +569,32 @@ test('a folder the person shut opens again when the next citation lands inside i
   expect(currentRows()).toEqual(['tree-file-doc-2']);
 });
 
+// The other side of the same rule, and the one the comment in `Tree.svelte`
+// claimed before anything held it (controller, after the review): the stamp is
+// `[selectedId, folders on its way]`, so a SECOND CITATION OF THE SAME DOCUMENT
+// does not move it — the effect does not re-fire and the hand-shut folder stays
+// shut. That is not a gap in the invariant: the mark says WHICH DOCUMENT the
+// source card is showing, and the document did not change. The person shut that
+// folder while this same document was selected, and nothing has happened since
+// that they did not do themselves.
+test('a second citation of the same document leaves the folder the person shut alone', async () => {
+  mockTree(oneRootTwoFolders);
+  const { rerender } = render(Tree, { selected: citationFor('doc-1') }); // notes/ opens
+
+  expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
+  await fireEvent.click(screen.getByTestId('tree-folder-notes')); // shut by hand
+  expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
+
+  // A different passage of the SAME document — what clicking [7] after [3] does.
+  await rerender({ selected: { ...citationFor('doc-1'), chunkId: 43, ord: 1 } });
+  await tick();
+
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
+  // Both directions: the folder is still on screen, so this is not an empty card.
+  expect(screen.getByTestId('tree-folder-archive')).toBeTruthy();
+});
+
 // The control, and the reason the clearing is scoped to the path: a folder the
 // person opened somewhere else is none of the new selection's business. Without
 // this, "clear all the toggles on a new selection" passes the test above and
