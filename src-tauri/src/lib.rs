@@ -288,10 +288,7 @@ pub fn run() -> anyhow::Result<()> {
             focus_launcher(app);
         }))
         // Native folder picking, gated by `dialog:allow-open` in
-        // `capabilities/default.json` rather than the hand-typed path field the
-        // first shell used before this — gone with that shell in PR 1: a path
-        // typed by hand was enough to exercise `add_watched_folder`, but not
-        // something the interface spec would keep.
+        // `capabilities/default.json`.
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(global_shortcut)
