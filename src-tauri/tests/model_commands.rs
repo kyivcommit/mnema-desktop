@@ -732,9 +732,17 @@ fn the_settings_reach_the_window_tagged_and_in_camel_case() {
 /// index not being there.
 ///
 /// This is the state the settings screen is opened in: `AppState.db` is `None`
-/// until the window calls `open_index`, and an index this build cannot open
-/// leaves it `None` for the rest of the session. Folded into one message, the
-/// screen tells someone who has a key that they have none.
+/// until something opens the index — in the application that is the boot
+/// (`boot_index`, called from `.setup`), never the window, which is why this
+/// fixture opens nothing and reaches the same `None`. Folded into one message,
+/// the screen tells someone who has a key that they have none.
+///
+/// The `NotOpen` below is still the right expectation *here* and would be the
+/// wrong one in the product: a failed boot open is recorded and reaches the
+/// window as `ReadFailed`. Nothing in this fixture boots, so nothing recorded
+/// anything — which is exactly the mirror
+/// `a_failed_boot_open_reaches_the_window_as_read_failed` asserts from the
+/// other side, in `tests/commands.rs`.
 #[test]
 fn a_key_that_is_there_survives_an_index_that_is_not() {
     let fx = Fixture::with_provider_accepting_everything();

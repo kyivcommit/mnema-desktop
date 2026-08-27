@@ -39,6 +39,22 @@ pub struct AppState {
     /// does, because a failure to open must be something the user can read
     /// rather than a process that never draws.
     db: Mutex<Option<Db>>,
+    /// What the start-up open answered, on the runs where what it answered was
+    /// a failure.
+    ///
+    /// `db` is `None` both before anything has opened the index and after an
+    /// open that failed — a failed `open_index` returns before it assigns — so
+    /// `with_index` says `IndexNotOpen` in either case and
+    /// [`crate::models::UnreadableCause`] folds the two into one value, which
+    /// is what its own doc records. This field is the half that was missing.
+    ///
+    /// Only the boot's answer, and that is the whole distinction: every other
+    /// caller of [`AppState::open_index`] is a command, and a command hands its
+    /// rejection back to whoever asked. The boot has nobody to hand it to, so
+    /// an error logged there is an error dropped, and the settings screen then
+    /// draws a person whose index is broken the sentence written for the
+    /// ordinary state at start-up.
+    boot_open_error: Mutex<Option<String>>,
     /// Whether the single job slot is taken. Separate from `cancel`, which is
     /// about a job that is already running.
     running: Arc<AtomicBool>,
@@ -63,6 +79,7 @@ impl AppState {
             provider_base,
             credential_ref,
             db: Mutex::new(None),
+            boot_open_error: Mutex::new(None),
             running: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
             // Safe default; overwritten at startup by `resolve_effective`
@@ -147,6 +164,35 @@ impl AppState {
         let version = db.schema_version()?;
         *self.db.lock().map_err(|_| Error::StatePoisoned)? = Some(db);
         Ok((path, version))
+    }
+
+    /// Records what the start-up open answered: the failure's own sentence, or
+    /// `None` for a success.
+    ///
+    /// `None` on success rather than "set it only when it breaks", so a boot
+    /// that recovered cannot leave an earlier failure behind to be read as the
+    /// present state — the class this project keeps paying for is the stale
+    /// artefact that answers about the wrong moment.
+    ///
+    /// Poison recovery instead of `expect`, the trade [`AppState::locale`]
+    /// spells out: behind this lock is a `String` with no invariant a panicking
+    /// holder could have left half-built, and losing the window over it is a
+    /// larger failure than one wrong sentence on one screen.
+    pub fn set_boot_open_error(&self, reason: Option<String>) {
+        *self
+            .boot_open_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = reason;
+    }
+
+    /// Why the start-up open failed, if it did. A clone rather than a guard,
+    /// for the reason every other getter here hands back a value: no caller
+    /// holds this lock for the length of a command.
+    pub fn boot_open_error(&self) -> Option<String> {
+        self.boot_open_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// A second connection to the same index, for a job that must not hold the

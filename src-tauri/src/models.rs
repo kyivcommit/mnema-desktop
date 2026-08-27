@@ -807,20 +807,32 @@ pub enum IndexSettings {
 /// Why the index said nothing — the discriminant beside
 /// [`IndexSettings::Unreadable`]'s sentence.
 ///
-/// **Two, where the prose named three.** "Never opened" and "opened and failed"
-/// are one value here because this layer genuinely cannot tell them apart:
-/// `AppState::db` is `None` in both cases, since a failed `open_index` returns
-/// before it assigns. The window can separate them, and must — it knows whether
-/// it has called `open_index` and what that answered. What it could not do
-/// before this field is separate either of them from a read that failed on its
-/// own, which is the distinction that decides between "ask the user to open a
-/// folder" and "report a bug".
+/// **Two, where the prose named three** — and the third is no longer dropped.
+/// "Never opened" and "opened and failed" leave `AppState::db` at `None` alike,
+/// since a failed `open_index` returns before it assigns, so the error reaching
+/// this classification is `IndexNotOpen` in both cases and nothing in it can
+/// tell them apart. This paragraph used to hand that job to the window, which
+/// "knows whether it has called `open_index` and what that answered" — the
+/// window had never called it once, which was the defect and not the design.
+/// [`crate::boot_index`] calls it now, and records what it answered in
+/// `AppState`; [`index_settings`] reads that record and reports a failed
+/// start-up open as `ReadFailed` rather than passing `NotOpen` on. What is left
+/// here is the distinction that decides between "ask the user to open a folder"
+/// and "report a bug".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UnreadableCause {
-    /// No index is open. Either the window has not asked for one yet — the
-    /// ordinary state at start-up — or an open failed and left none; see this
-    /// enum's own doc for why those are one value.
+    /// No index is open, and nothing has tried to open one and failed.
+    ///
+    /// It was "the ordinary state at start-up" for as long as nothing opened the
+    /// index at start-up. [`crate::boot_index`] runs at the top of `.setup` now,
+    /// so what this variant says in a running application is that start-up has
+    /// not reached that line yet — a window whose webview is already up and
+    /// invoking while the rest of `.setup` runs can still meet it, and that is
+    /// the honest scope of the claim; an index this build cannot open arrives as
+    /// [`UnreadableCause::ReadFailed`] instead, carrying the boot's own
+    /// sentence. An `AppState` built directly and never booted, which is what
+    /// the tests do, is the state it still describes exactly.
     NotOpen,
     /// An index **is** open and reading it failed. Always a defect of this
     /// build rather than a state of the machine, so a window meeting it is
@@ -849,6 +861,12 @@ impl UnreadableCause {
     /// itself: a fourth way out of that function owes this list a decision.
     /// `a_read_that_failed_is_told_apart_from_an_index_that_is_not_open` pins
     /// the three as they stand.
+    ///
+    /// ⚠️ **Not the last word on `NotOpen`.** [`index_settings`] refines what
+    /// this returns: `NotOpen` with a recorded start-up open failure beside it
+    /// is reported as `ReadFailed`, because one error cannot see a difference
+    /// that `AppState` can. Read on its own, this function answers what the
+    /// error was, not what the window draws.
     fn of(e: &Error) -> Self {
         match e {
             Error::IndexNotOpen => Self::NotOpen,
@@ -989,9 +1007,24 @@ fn index_settings(state: &AppState) -> IndexSettings {
     let read = state.with_index(|db| db.read_snapshot(read_settings));
     match read {
         Ok(settings) => settings,
-        Err(e) => IndexSettings::Unreadable {
-            cause: UnreadableCause::of(&e),
-            reason: e.to_string(),
+        // The refinement [`UnreadableCause::of`] cannot make from where it
+        // stands: it classifies one error, and "no index is open" is the same
+        // error whether nothing has tried to open one yet or the boot tried and
+        // failed. `AppState` carries the boot's answer for exactly this line.
+        //
+        // The sentence shown is the boot's own, not `IndexNotOpen`'s. "The
+        // index is not open" states the consequence, which the `cause` beside
+        // it already says; what the boot recorded names what went wrong, and
+        // `reason` is the field a bug report is pasted from.
+        Err(e) => match (UnreadableCause::of(&e), state.boot_open_error()) {
+            (UnreadableCause::NotOpen, Some(reason)) => IndexSettings::Unreadable {
+                cause: UnreadableCause::ReadFailed,
+                reason,
+            },
+            (cause, _) => IndexSettings::Unreadable {
+                cause,
+                reason: e.to_string(),
+            },
         },
     }
 }

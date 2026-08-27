@@ -90,6 +90,45 @@ pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Resu
     Ok(())
 }
 
+/// Opens the index once, at start-up — because until this existed, nothing in
+/// the product ever did.
+///
+/// `open_index` had no caller outside this crate's tests: a command, its
+/// registration in the invoke handler, and the state method behind it were the
+/// whole of it, and no line under `ui/src/` so much as names the command — so
+/// nothing ever invoked it. `AppState::db` stays `None` until it runs and
+/// `with_index` refuses while it is, so the shipped application could not
+/// answer a question and could not list a tree, and the settings screen read
+/// `Unreadable` for as long as it stayed open. The suite was green because
+/// every test opens the index for itself — the same shape as the start-up panic
+/// `launch_smoke.rs` was written for, and the reason that file gained a second
+/// test.
+///
+/// **It returns nothing and cannot fail the boot.** A `?` here would turn an
+/// index this build cannot open — a database written by a newer Mnema, a
+/// corrupt file — into an application that does not start, and a person who
+/// cannot start it cannot be told why. `AppState::open_index`'s own doc records
+/// the other half of that trade: calling it again re-opens, so a failed open is
+/// recoverable inside the running process rather than only across a restart.
+///
+/// **The error is stored as well as logged**, which is the part that is easy to
+/// leave out. Logged and dropped, a failed boot open is indistinguishable from
+/// a boot that never ran: both leave `db` at `None`, both reach the window as
+/// `IndexNotOpen`, and `UnreadableCause` has to call that "the ordinary state
+/// at start-up". The state carries the answer instead — see
+/// [`state::AppState::set_boot_open_error`] and what `models::index_settings`
+/// then does with it.
+pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let state = app.state::<state::AppState>();
+    let outcome = state.open_index();
+    if let Err(e) = &outcome {
+        // The log line is for the terminal a developer launched from; the stored
+        // sentence is for the person who has no terminal.
+        eprintln!("mnema: the index could not be opened at start-up: {e}");
+    }
+    state.set_boot_open_error(outcome.err().map(|e| e.to_string()));
+}
+
 /// Shows the launcher and focuses it, returning whether the launcher window was
 /// there to act on. The single-instance callback and the tray's "show search"
 /// item share this. §6: the launcher *hides*, so it is *shown* — not
@@ -377,6 +416,12 @@ pub fn run() -> anyhow::Result<()> {
         })
         .setup(|app| {
             manage_state(app.handle())?;
+            // Immediately after the state exists and before anything else in
+            // this closure, so every later step here meets an index that is
+            // already open, and so does every command arriving after start-up —
+            // which is as early as a boot can make it, not a promise about a
+            // webview that is already invoking while `.setup` runs.
+            boot_index(app.handle());
             // §D129: resolve the interface language once at start-up (prefs → OS
             // → EN) and seed it into `AppState` BEFORE the tray is built, which
             // reads it back to label its menu (`tray::build_tray`).

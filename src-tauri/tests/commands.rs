@@ -14,7 +14,7 @@ use std::time::Duration;
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_desktop::bridge;
 use mnema_desktop::job::JobEvent;
-use mnema_desktop::models::set_key;
+use mnema_desktop::models::{IndexSettings, UnreadableCause, model_settings, set_key};
 use mnema_desktop::state::AppState;
 use mnema_desktop::walk_job;
 use mnema_mock_provider::{MockServer, Reply, one_vector};
@@ -207,6 +207,92 @@ fn the_application_puts_the_index_in_the_local_data_directory() {
         app.state::<AppState>().data_dir(),
         expected,
         "the index would not be where the local data directory is"
+    );
+}
+
+/// Start-up opens the index, because until this existed nothing did.
+///
+/// `open_index` was a command with no caller: every mention of it outside this
+/// crate's tests was its own definition, its registration, and the state method
+/// behind it. `AppState::db` stays `None` until one of them runs, and
+/// `with_index` refuses while it is — so a running application could not answer
+/// a question or list a tree, and the settings screen read `Unreadable` for as
+/// long as it was open. Nothing in the suite caught it because every test opens
+/// the index itself.
+///
+/// In-process and not through a launched binary: the directory is chosen once,
+/// in `manage_state`, and `AppState::open_index` reads only what it was handed.
+/// So this test needs no environment redirect and no display, and it fails from
+/// a mutation to `boot_index`'s body rather than from something next to it.
+#[test]
+fn the_boot_opens_the_index() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let app = app_in(dir.path());
+    let index = mnema_desktop::paths::index_path(dir.path());
+
+    // Both directions. Without this half the test passes on a file it did not
+    // create, and would go on passing after the boot stopped opening anything.
+    assert!(
+        !index.exists(),
+        "the fixture must start with no index at {}",
+        index.display()
+    );
+
+    mnema_desktop::boot_index(app.handle());
+
+    assert!(
+        index.exists(),
+        "start-up did not open the index: nothing at {}",
+        index.display()
+    );
+}
+
+/// A boot open that failed is not the same thing as a boot that has not run.
+///
+/// `UnreadableCause` folds "never opened" and "opened and failed" into
+/// `NotOpen` because the layer that reports it cannot tell them apart — and
+/// says, in its own doc, that the window can and must. Once the boot is what
+/// opens the index, the window's half of that is the only half left: a
+/// `boot_index` that logged its error and forgot it would leave a person whose
+/// index is broken reading the sentence written for the ordinary state at
+/// start-up.
+///
+/// A directory where the database file belongs is the cheapest index that
+/// cannot be opened, and it fails inside `mnema_index::open` rather than before
+/// it — which is the path a corrupt file takes too.
+#[test]
+fn a_failed_boot_open_reaches_the_window_as_read_failed() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    std::fs::create_dir(mnema_desktop::paths::index_path(dir.path()))
+        .expect("a directory where the index file belongs");
+    let app = app_in(dir.path());
+
+    // The mirror, and it is the half a fixture forgets: before the boot has run
+    // there is genuinely no index open, and that must still read as `NotOpen`.
+    // Without it, an implementation that answers `ReadFailed` unconditionally
+    // passes.
+    assert!(
+        matches!(
+            model_settings(app.state()).index,
+            IndexSettings::Unreadable {
+                cause: UnreadableCause::NotOpen,
+                ..
+            }
+        ),
+        "before the boot, an index nobody has opened is not a failure"
+    );
+
+    mnema_desktop::boot_index(app.handle());
+
+    assert!(
+        matches!(
+            model_settings(app.state()).index,
+            IndexSettings::Unreadable {
+                cause: UnreadableCause::ReadFailed,
+                ..
+            }
+        ),
+        "a boot open that failed was reported as if no boot had run"
     );
 }
 
