@@ -116,6 +116,9 @@ beforeEach(() => {
 // reason that has nothing to do with what it claims. Restore unconditionally.
 afterEach(() => setLocale('en'));
 
+// 🔴 The whole tree gate rests on this one: `idle` is the ONLY row in §7's state
+// table described as «лише рядок пошуку» — only the search line. Every other
+// state keeps the tree, so this test is the single negative the rule stands on.
 test('idle shows no cards at all (state A is the bare line)', () => {
   render(Cards, { state: { kind: 'idle' }, query: '' });
   expect(screen.queryByTestId('card-tree')).toBeNull();
@@ -130,24 +133,32 @@ test('generated shows tree and centre; source waits for a click', () => {
   expect(screen.queryByTestId('card-source')).toBeNull();
 });
 
-// Controller ruling A: state F (refused) also draws no cards. The plan's
-// illustrated tests only covered A and B — a `state.kind !== 'idle'` guard
-// would pass both of those and still wrongly draw cards here.
-test('refused shows no cards at all (state F)', () => {
+test('refused keeps the tree and draws neither answer nor source (state F)', () => {
   render(Cards, { state: stateFromAnswer('nothing indexed', refusedNoCandidates), query: 'nothing indexed' });
-  expect(screen.queryByTestId('card-tree')).toBeNull();
+  expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
 });
 
-// I1 (review round 1): idle/generated/refused pinned three of `LauncherState`'s
-// six variants; `Cards.svelte` branches on `state.kind`, so the other three
-// — inFlight (D), citationsOnly (E), error — were free to draw cards without
-// reddening anything. citationsOnly matters most: it is the line Task 9 will
-// edit next, and a guard mistakenly written as
-// `state.kind === 'generated' || state.kind === 'citationsOnly'` is the likely
-// one. All three below must independently redden under the reviewer's mutant
-// (`state.kind !== 'idle' && state.kind !== 'refused'`).
+// The six tests above and below cover all six `LauncherState` variants against
+// TWO independent gates, and each one must be readable on its own:
+//
+//   card-tree               — every state except `idle` (ruling I-B)
+//   card-centre, card-source — `generated` only
+//
+// I1 (review round 1) is why all six exist: `Cards.svelte` branches on
+// `state.kind`, so any variant with no test of its own was free to draw the
+// wrong cards without reddening anything. citationsOnly matters most — it is
+// the line Task 9 will edit next, and a guard mistakenly written as
+// `kind === 'generated' || kind === 'citationsOnly'` is the likely one.
+//
+// 🔴 The prose here used to say "all three below must redden under
+// `state.kind !== 'idle' && state.kind !== 'refused'`", which the C1 amendment
+// silently made false for state D — an edit in the test devaluing the sentence
+// three lines above it. What is true now: a mutant that widens the ANSWER gate
+// reddens the `card-centre` negative in D, E, F and error independently, and a
+// mutant that widens or narrows the TREE gate reddens `idle` on one side and
+// the other five on the other.
 // 🔴 Controller ruling C1 (fix round 1) amends this one. The tree's content is
 // the INDEX, not the answer, so it stays on screen while the next answer is
 // fetched; §7's state D row describes the search line and never asks for the
@@ -161,16 +172,19 @@ test('inFlight keeps the tree and draws neither answer nor source (state D)', ()
   expect(screen.queryByTestId('card-source')).toBeNull();
 });
 
-test('citationsOnly shows no cards at all (state E is out of scope here)', () => {
+test('citationsOnly keeps the tree and draws neither answer nor source (state E is Task 9\'s)', () => {
   render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
-  expect(screen.queryByTestId('card-tree')).toBeNull();
+  expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
 });
 
-test('error shows no cards at all', () => {
+// `error` keeps the tree deliberately (ruling I-B): `askFailed` is an answer
+// state, and it is exactly the moment a person retries — losing their folders on
+// the failure they are retrying is C1's defect one gate over.
+test('error keeps the tree and draws neither answer nor source', () => {
   render(Cards, { state: { kind: 'error', reason: 'blank' }, query: '' });
-  expect(screen.queryByTestId('card-tree')).toBeNull();
+  expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
 });
@@ -352,6 +366,30 @@ test('a second answer arriving mid-fetch leaves no excerpt from the first', asyn
   expect(screen.queryByTestId('card-source')).toBeNull();
   expect(screen.queryAllByTestId('hl')).toHaveLength(0);
   expect(screen.getByTestId('answer-body').textContent).toContain('second answer');
+});
+
+// The tag's SECOND witness, and it is a different transition from the one above
+// through a different gate (ruling I-B put the tree on screen in state F too).
+// `Selection` is destroyed by the `{#if}` without ever reporting `null` on its
+// way out, so an untagged mirror keeps the previous answer's row marked under a
+// refusal that found nothing — a file marked as cited by an answer that cites
+// nothing.
+test('the tree lets go of the mark when the next answer is a refusal', async () => {
+  mockTree(oneRootTwoFolders);
+  mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
+  const { rerender } = render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes')); // opened by hand, before any selection
+  await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
+  await settled();
+  expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true');
+
+  await rerender({ state: stateFromAnswer('q2', refusedNoCandidates), query: 'q2' });
+  await tick();
+
+  expect(screen.getByTestId('card-tree')).toBeTruthy();
+  expect(screen.getByTestId('tree-file-doc-1')).toBeTruthy(); // the row is still on screen
+  expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBeNull();
 });
 
 // 🔴 Ruling AC, the half that is easy to lose: only the answer-and-source pair is

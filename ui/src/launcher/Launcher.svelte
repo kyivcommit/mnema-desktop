@@ -72,8 +72,15 @@
 
   <Cards state={launcherState} query={echo} />
 
+  <!-- U1: a stable hook for `i18n/wiring.test.ts`, which reads this button's
+       aria-label to prove the locale switch reached the DOM. It used to find the
+       button as "the first element with any aria-label", which was true only
+       while no labelled card rendered — and the cards are now labelled in five
+       of six states. The accessible name cannot be the selector when it is the
+       thing under test. -->
   <button
     class="pin"
+    data-testid="pin"
     class:active={pinned}
     aria-pressed={pinned}
     aria-label={pinLabel}

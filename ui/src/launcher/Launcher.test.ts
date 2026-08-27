@@ -37,6 +37,45 @@ function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
 const askCalls = () => invoke.mock.calls.filter((c) => c[0] === 'ask');
 const listTreeCalls = () => invoke.mock.calls.filter((c) => c[0] === 'list_tree');
 
+// Answers each `ask` in turn, so one test can drive two questions with different
+// outcomes — the refusal path (ruling I-B) needs a generated answer first and a
+// refusal second. Everything else answers as `mockBackend` does.
+function mockAsks(...replies: unknown[]) {
+  let next = 0;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'ask') return Promise.resolve(replies[Math.min(next++, replies.length - 1)]);
+    return Promise.resolve();
+  });
+}
+
+// The arms-row seeds each need their OWN `model_settings` answer, which is why
+// they cannot use `mockBackend`. They still need every other command answered:
+// they render in state A today, where no card draws, so a blanket
+// `Promise.resolve()` is green for a reason unrelated to what they claim — and
+// one state along `Tree` reads `.roots` off `undefined` and throws. Same trap as
+// Ruling Y, fourth home.
+function mockSettings(settings: unknown) {
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'model_settings') return Promise.resolve(settings);
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    return Promise.resolve();
+  });
+}
+
+// The two product-level sequences below share this opening: one answered
+// question, a folder opened by hand, and a citation clicked — the state a person
+// is actually in when they ask the next thing.
+async function askAndOpenAFolder() {
+  render(Launcher);
+  await submit('first question');
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('first question'));
+  await fireEvent.click(await screen.findByTestId('tree-folder-archive'));
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+  expect(listTreeCalls()).toHaveLength(1);
+}
+
 // Default so the retained PR 2 tests (which just render) never hit an unmocked
 // command; each ask test overrides with its own reply.
 beforeEach(() => { hide.mockClear(); invoke.mockReset(); mockBackend(undefined); });
@@ -145,28 +184,65 @@ test('a generated answer renders the centre card, not a refusal', async () => {
   expect(screen.queryByRole('status')).toBeNull(); // not a refusal
 });
 
-// 🔴 C1, and the only place it can be seen. `Cards` gates its cards on the
-// launcher's state and `runSearch` sets `inFlight` before EVERY ask
-// (`Launcher.svelte:42`), so a tree drawn only for a generated answer is torn
-// down and refetched in the middle of every question — the outcome Ruling AC
-// forbids, reached with no `{#key}` anywhere. `Cards.test.ts` cannot catch it:
-// its `rerender`s can build a transition the product never performs. This test
-// drives the real `runSearch` twice and is anchored on the echo, which only a
-// RESOLVED ask can write (`Launcher.svelte:50`).
-test('a second question neither refetches the tree nor shuts a hand-opened folder', async () => {
+// 🔴 C1, and the only place it can be seen: `Cards.test.ts` drives `Cards` by
+// hand and can build a transition the product never performs, while these tests
+// drive the real `runSearch`. `Cards` gates its cards on the launcher's state
+// and `runSearch` sets `inFlight` before EVERY ask (`Launcher.svelte:42`), so a
+// tree drawn only for a generated answer is torn down and refetched in the
+// middle of every question — the outcome Ruling AC forbids, reached with no
+// `{#key}` anywhere. Both are anchored on the echo, which only a RESOLVED ask
+// can write (`Launcher.svelte:50`).
+//
+// 🔴 I-A: two tests, not one with two assertions. Against the only mutant that
+// exists for them — the pre-fix gate — a single test fails on the `list_tree`
+// count and the folder assertion is never reached, which is the exact shape
+// `Cards.test.ts` split apart one level down.
+test('a second question does not refetch the tree', async () => {
   mockBackend(generated);
-  render(Launcher);
-  await submit('first question');
-  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('first question'));
-
-  await fireEvent.click(await screen.findByTestId('tree-folder-archive')); // opened by hand
-  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
-  expect(listTreeCalls()).toHaveLength(1);
+  await askAndOpenAFolder();
 
   await submit('second question');
   await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('second question'));
 
   expect(listTreeCalls()).toHaveLength(1);
+});
+
+test('a second question does not shut a hand-opened folder', async () => {
+  mockBackend(generated);
+  await askAndOpenAFolder();
+
+  await submit('second question');
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('second question'));
+
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+});
+
+// 🔴 Ruling I-B, the refusal path. §7 calls only state A «лише рядок пошуку»;
+// row F says «тихе повідомлення», which is no more "only the line" than row D's
+// spinner is — and the reason the tree survives D (its content is the INDEX, not
+// the answer) never depended on which answer came back. Measured before the
+// widening: a question that finds nothing destroyed the whole tree card and
+// every folder the person had opened. Anchored on the refusal text, which is
+// unique in the catalogue (`catalog.ts:55`) and which only a resolved ask writes.
+test('a refusal does not refetch the tree', async () => {
+  mockAsks(generated, refusedNoCandidates);
+  await askAndOpenAFolder();
+
+  await submit('nothing indexed');
+  await screen.findByText(/Nothing was found/i);
+
+  expect(screen.getByTestId('card-tree')).toBeTruthy();
+  expect(screen.queryByTestId('card-centre')).toBeNull(); // the answer card really is gone
+  expect(listTreeCalls()).toHaveLength(1);
+});
+
+test('a refusal does not shut a hand-opened folder', async () => {
+  mockAsks(generated, refusedNoCandidates);
+  await askAndOpenAFolder();
+
+  await submit('nothing indexed');
+  await screen.findByText(/Nothing was found/i);
+
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
 });
 
@@ -204,10 +280,7 @@ test('a pinned launcher ignores click-outside (blur) — the pin disables it', a
 });
 
 test('the arms row seeds from model_settings — a present key and a chosen model enable content', async () => {
-  invoke.mockImplementation((cmd: string) =>
-    cmd === 'model_settings'
-      ? Promise.resolve({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true } })
-      : Promise.resolve());
+  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true } });
   render(Launcher);
   await vi.waitFor(() => {
     const content = (screen.getAllByRole('checkbox') as HTMLInputElement[])[1];
@@ -226,10 +299,7 @@ test('the arms row seeds from model_settings — a present key and a chosen mode
 // resolves. `content.disabled` alone is already `true` in the pre-seed default (provider starts
 // `false`), so asserting it directly would pass vacuously, seed or no seed.
 test('the arms row seeds from model_settings — a present key with no chosen model leaves content disabled', async () => {
-  invoke.mockImplementation((cmd: string) =>
-    cmd === 'model_settings'
-      ? Promise.resolve({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: null, searchTextArm: false, searchContentArm: false } })
-      : Promise.resolve());
+  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: null, searchTextArm: false, searchContentArm: false } });
   render(Launcher);
   await vi.waitFor(() => {
     // Proves the seed actually ran before the real assertion below reads `provider`'s result.
@@ -247,10 +317,7 @@ test('the arms row seeds from model_settings — searchTextArm:false unchecks th
   // flow too: `textOn` defaults to true, so an unchanged default would pass
   // silently — seeding false is the only way to catch a broken or renamed
   // `s.index.searchTextArm` read.
-  invoke.mockImplementation((cmd: string) =>
-    cmd === 'model_settings'
-      ? Promise.resolve({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'text-embedding-3-small', searchTextArm: false, searchContentArm: true } })
-      : Promise.resolve());
+  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'text-embedding-3-small', searchTextArm: false, searchContentArm: true } });
   render(Launcher);
   await vi.waitFor(() => {
     const text = (screen.getAllByRole('checkbox') as HTMLInputElement[])[0];

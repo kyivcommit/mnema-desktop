@@ -18,17 +18,29 @@
   // generated member by type, not by assertion.
   const generatedState = $derived(launcherState.kind === 'generated' ? launcherState : null);
 
-  // 🔴 Controller ruling C1: the TREE card also stays up through state D. Its
-  // content is the INDEX, not the answer, so it has no reason to depend on which
-  // answer is on screen — and `runSearch` sets `inFlight` before EVERY ask
-  // (`Launcher.svelte:42`), so gating it on `generated` alone unmounts it in the
-  // middle of every question, refetches `list_tree` and snaps shut every folder
-  // the person opened. That is the outcome Ruling AC forbids, reached with no
-  // `{#key}` anywhere: measured through the real launcher as `list_tree` = 2 and
-  // a hand-opened folder back to `aria-expanded="false"` on the second question.
-  // §7's state D row describes the SEARCH LINE — spinner, placeholder, the query
-  // staying in the box — and never asks for the cards to be torn down.
-  const showTree = $derived(generatedState !== null || launcherState.kind === 'inFlight');
+  // 🔴 Controller rulings C1 and I-B: the TREE card stays up in every state but
+  // `idle`. Its content is the INDEX, not the answer, so it has no reason to
+  // depend on which answer came back — or on whether one came back at all — and
+  // `runSearch` sets `inFlight` before EVERY ask (`Launcher.svelte:42`). Gating
+  // it on `generated` unmounted it in the middle of every question, refetched
+  // `list_tree` and snapped shut every folder the person had opened: measured
+  // through the real launcher as `list_tree` = 2 and `aria-expanded="false"` on
+  // the second question, and again on the third state — a refusal destroyed the
+  // whole card. That is the outcome Ruling AC forbids, reached with no `{#key}`
+  // anywhere.
+  //
+  // ONE condition, and it is grounded in the one thing §7's state table actually
+  // says (`…interface-design.md:196-205`): row A is the only row whose "shows"
+  // column carries the word "only" — only the search line. Row D names spinner,
+  // placeholder and phases; row F names a quiet message; neither asks for
+  // anything to be torn down. (The spec is in Ukrainian and the guard reads this
+  // file, so the wording is glossed rather than quoted — `guard.test.ts:19-21`.)
+  //
+  // `error` is in deliberately: `askFailed` is an answer state and it is exactly
+  // the moment a person retries, so losing their folders on the failure they are
+  // retrying would be the same defect one gate over. `citationsOnly` is Task 9's
+  // and this condition already covers it — a bonus, not a decision made here.
+  const showTree = $derived(launcherState.kind !== 'idle');
 
   // What `Selection` reports up, tagged with the state it belongs to. Read by
   // the tree ONLY — the tree lives outside the keyed block, so it cannot read
