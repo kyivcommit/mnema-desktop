@@ -36,6 +36,22 @@ function citationFor(documentId: string, relativePath: string | null = 'notes/a.
   return { ...generated.citations[0], documentId, relativePath };
 }
 
+// Everything in the card that a keyboard can reach or that claims a role, in
+// document order. Used as a closed enumeration (P5) rather than a spot check.
+function controls() {
+  return [...screen.getByTestId('tree-body').querySelectorAll('button, [tabindex], [role]')]
+    .map((el) => el.getAttribute('data-testid'));
+}
+
+// Every row currently marked as the selection, in document order. Since P5 the
+// rows are not `treeitem`s, so `getAllByRole('treeitem', { current: true })` is
+// no longer the way to ask — and this form is a full enumeration, where the
+// role query only ever counted the rows it happened to match.
+function currentRows() {
+  return [...screen.getByTestId('tree-body').querySelectorAll('[aria-current="true"]')]
+    .map((el) => el.getAttribute('data-testid'));
+}
+
 beforeEach(() => {
   invoke.mockReset();
 });
@@ -96,6 +112,42 @@ test('buildFolderTree mixes the three depths in one root and shares one node per
 });
 
 // --- the rendered card ------------------------------------------------------
+
+// 🔴 Owner review on PR #24, P5. File and recent rows were `<button>`s with no
+// `onclick`: click, Enter and Space all did nothing, and the file rows carried
+// `role="treeitem"` with no enclosing tree or group and no keyboard model. They
+// became buttons to satisfy the 0-warning a11y gate and nothing ever wired an
+// action to them, so the card promised an action it has not got.
+//
+// The decision is the owner's second option — render them as non-interactive
+// rows — because the first is not reachable from here: opening a document from
+// the tree needs a command that takes a `documentId`, and the bridge has none
+// (`lib/ipc.ts:81-107`: `ask`, `set_search_arms`, `list_tree`, `source_around`,
+// `model_settings`; `source_around` needs a chunk that only a citation carries).
+// An action wired to nothing is what this finding IS.
+//
+// The assertion enumerates every focusable or role-bearing element in the card,
+// in document order, so it is a closed statement rather than a spot check: a row
+// that becomes focusable again — or a `role` put back on one — appears in this
+// list. The two tabs and the two folders are here because each has a real
+// action; that is the other direction, and it is what stops "make everything
+// inert" from passing.
+test('only the controls with a real action are controls; the rows are inert', async () => {
+  mockTree(oneRootTwoFolders);
+  render(Tree, { selected: citationFor('doc-1') }); // notes/ is open, so its files are on screen
+
+  expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
+  expect(controls()).toEqual([
+    'tree-tab-files',
+    'tree-tab-recents',
+    'tree-folder-notes',
+    'tree-folder-archive',
+  ]);
+
+  await fireEvent.click(screen.getByTestId('tree-tab-recents'));
+  expect(screen.getByTestId('tree-recent-doc-1')).toBeTruthy();
+  expect(controls()).toEqual(['tree-tab-files', 'tree-tab-recents']);
+});
 
 test('the tree nests files under their folders instead of listing flat paths', async () => {
   mockTree(oneRootTwoFolders);
@@ -212,12 +264,12 @@ test('the selected citation selects its file by documentId, not by path string',
   // doc-a assertion below that catches it; a citation with a non-matching path
   // would only prove that a wrong lookup finds nothing.
   await rerender({ selected: citationFor('doc-b', 'README.md') });
-  expect(screen.getByTestId('tree-file-doc-b').getAttribute('aria-current')).toBe('true');
+  // Enumerated, not two spot checks: `aria-selected` used to be asserted here
+  // as the second statement that could contradict the first, and P5 removed it
+  // with the `treeitem` role it belonged to. What replaces it is the closed
+  // list — exactly one row in the whole card is current, and it is doc-b.
+  expect(currentRows()).toEqual(['tree-file-doc-b']);
   expect(screen.getByTestId('tree-file-doc-a').getAttribute('aria-current')).toBeNull();
-  // `aria-selected` is required on a treeitem (svelte's a11y gate) and would
-  // otherwise ride along undefended, free to say the opposite of aria-current.
-  expect(screen.getByTestId('tree-file-doc-b').getAttribute('aria-selected')).toBe('true');
-  expect(screen.getByTestId('tree-file-doc-a').getAttribute('aria-selected')).toBe('false');
 });
 
 // Ruling M: Task 8b deliberately does not key this card, because `state`
@@ -251,16 +303,11 @@ test('a citation whose document IS in the listing marks its only copy current', 
   render(Tree, { selected: citationFor('doc-1') });
 
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
-  // Reached by testid and asserted as a role, and BEFORE the `getAllByRole`
-  // locator below: after it this line never runs, because the locator throws
-  // first and the role's own failure text never appears. A locator is not an
-  // assertion — rewrite it as a testid query and, without this line, nothing
-  // would be left claiming these rows are tree items at all.
-  expect(screen.getByTestId('tree-file-doc-1').getAttribute('role')).toBe('treeitem');
-  const current = screen.getAllByRole('treeitem', { current: true });
-  expect(current).toHaveLength(1);
-  expect(current[0]).toBe(screen.getByTestId('tree-file-doc-1'));
-  expect(current[0].getAttribute('aria-selected')).toBe('true');
+  // The role assertion this test used to carry went with the role (P5): the
+  // rows are not `treeitem`s any more, and `only the controls with a real
+  // action are controls` is where that is now stated, positively and for the
+  // whole card. What survives here is the claim this test is named for.
+  expect(currentRows()).toEqual(['tree-file-doc-1']);
 });
 
 // M1 (review round 1): `tree-file-{documentId}` is NOT unique. One document can
@@ -275,13 +322,13 @@ test('a document present under two roots marks every row that shows it', async (
   const rows = await screen.findAllByTestId('tree-file-doc-shared');
   expect(rows).toHaveLength(2); // one row per path, under alpha and under beta
   expect(rows.map((r) => r.getAttribute('aria-current'))).toEqual(['true', 'true']);
-  expect(screen.getAllByRole('treeitem', { current: true })).toHaveLength(2);
 
   // Both directions: the neighbouring document in the same open folder is not
   // swept up, so "every row" means every row OF THAT DOCUMENT, not every row.
+  // The enumeration says both halves at once — two current rows, both the
+  // shared document's.
+  expect(currentRows()).toEqual(['tree-file-doc-shared', 'tree-file-doc-shared']);
   expect(screen.getByTestId('tree-file-doc-other').getAttribute('aria-current')).toBeNull();
-  expect(rows.map((r) => r.getAttribute('aria-selected'))).toEqual(['true', 'true']);
-  expect(screen.getByTestId('tree-file-doc-other').getAttribute('aria-selected')).toBe('false');
 });
 
 test('a citation whose document is no longer in the listing selects nothing and says nothing false', async () => {
@@ -291,8 +338,7 @@ test('a citation whose document is no longer in the listing selects nothing and 
   // The row that IS in the listing is on screen either way — the difference
   // between this test and its control is `aria-current`, not an empty tree.
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
-  expect(screen.queryByRole('treeitem', { current: true })).toBeNull();
-  expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-selected')).toBe('false');
+  expect(currentRows()).toEqual([]);
   expect(screen.getByTestId('tree-body').textContent).not.toMatch(/no longer|більше немає/i);
 });
 

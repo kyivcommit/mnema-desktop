@@ -140,13 +140,27 @@
             {@render branch(node.children, rootId)}
           {/if}
         {:else}
-          <button
-            type="button"
-            role="treeitem"
+          <!-- 🔴 Owner review on PR #24, P5. This row was a `<button>` with no
+               `onclick` and a `role="treeitem"` with no enclosing tree, group
+               or keyboard model: click, Enter and Space all did nothing, and a
+               keyboard reached it only to find that out. It is a row, so it is
+               rendered as one.
+
+               The other option — wire the promised action — is not reachable
+               from this card: opening a document needs a command that takes a
+               `documentId` and the bridge has none (`lib/ipc.ts:81-107`;
+               `source_around` needs a chunk, which only a citation carries).
+               A row that says "activate me" and cannot is the finding itself.
+
+               `aria-current` stays: it is a global attribute, valid on any
+               element, and it is what says which row the source card is
+               showing. `aria-selected` goes with the role — it is defined only
+               inside a listbox/grid/tree, and on a bare row it states a
+               membership that no longer exists. -->
+          <span
             data-testid={`tree-file-${node.documentId}`}
-            aria-selected={node.documentId === selectedId}
             aria-current={node.documentId === selectedId ? 'true' : undefined}
-            >{node.name}</button>
+            >{node.name}</span>
         {/if}
       </li>
     {/each}
@@ -182,8 +196,10 @@
     <ul>
       {#each listing?.recents ?? [] as recent (recent.documentId)}
         <li>
-          <button type="button" data-testid={`tree-recent-${recent.documentId}`}
-            >{recent.relativePath}</button>
+          <!-- P5, the same finding one tab over: a focusable button with no
+               action of any kind. A row, rendered as one. -->
+          <span data-testid={`tree-recent-${recent.documentId}`}
+            >{recent.relativePath}</span>
         </li>
       {/each}
     </ul>
