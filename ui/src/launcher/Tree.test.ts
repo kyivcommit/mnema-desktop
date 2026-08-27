@@ -517,6 +517,54 @@ test('a new citation leaves the folders the person opened elsewhere exactly as t
   expect(currentRows()).toEqual(['tree-file-doc-1']);
 });
 
+// 🔴 Review Minor 4: the one case where a hand-shut folder DOES re-open on an
+// event the person did not cause. The stamp holds the folders on the selected
+// document's way, so a refresh that reshapes that chain — the file moved — is a
+// change of stamp and the effect re-fires. It is defensible: the chain really
+// did change, so "which row it came from" changed with it, and the effect can
+// only ever write `false → true`, so no refresh can snap a folder shut. It is
+// pinned here because the rule's comment used to promise more than this, and
+// because nothing else in the suite reaches the state.
+//
+// Passes on `9095fd7`: this is what the code already did, written down.
+test('a refresh that moves the selected file re-opens the folder the person shut', async () => {
+  mockTree(oneRootTwoFolders);
+  render(Tree, { selected: citationFor('doc-1') }); // notes/a.md — notes/ opens
+
+  expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
+  await fireEvent.click(screen.getByTestId('tree-folder-notes')); // shut by hand
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('false');
+
+  const [root] = oneRootTwoFolders.roots;
+  mockTree({ // the same document, one folder deeper
+    roots: [{ ...root, files: [{ relativePath: 'notes/deep/a.md', documentId: 'doc-1' }] }],
+    recents: oneRootTwoFolders.recents,
+  });
+  await fireEvent.focus(window);
+
+  expect(await screen.findByTestId('tree-folder-notes/deep')).toBeTruthy();
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
+  expect(currentRows()).toEqual(['tree-file-doc-1']);
+});
+
+// The control, and the half that makes the case above narrow rather than
+// general: a refresh returning the SAME listing leaves the shut folder shut,
+// because the stamp did not move. Without this, "a refresh re-opens folders"
+// would read as the rule instead of the exception.
+test('a refresh that changes nothing leaves the folder the person shut alone', async () => {
+  mockTree(oneRootTwoFolders);
+  render(Tree, { selected: citationFor('doc-1') });
+
+  expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
+  await fireEvent.click(screen.getByTestId('tree-folder-notes')); // shut by hand
+
+  await fireEvent.focus(window);
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
+});
+
 // 🔴 The other direction of the same rule, and it is here because the first
 // version of the fix broke it: clearing the hand-toggle on the selection's path
 // made a folder the person had OPENED depend on the selection to stay open, so

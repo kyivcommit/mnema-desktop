@@ -75,16 +75,34 @@
   // the second-instance handler) and `src-tauri/src/lib.rs:119-131`
   // (`toggle_launcher`, the global shortcut) both run `show()`, `move_window`,
   // `set_focus()`. They are the only two paths that show the launcher; the
-  // third `show()` in that file belongs to the settings window.
+  // third `show()` in that file belongs to the settings window. And no fourth
+  // path hides in configuration: `src-tauri/tauri.conf.json` declares the
+  // `launcher` window `"visible": false`, so the window manager never raises it
+  // on its own and the two above are the whole set. (Review Minor 2: a grep over
+  // `*.rs` alone leaves that open.)
   //
-  // ⚠️ One link in that chain is still unmeasured, and it is narrower than the
-  // whole: whether a webview `set_focus()` produces a DOM `focus` event on
-  // `window` in the running application. Nobody has run this application yet,
-  // so that step is read from the platform, not from a live launcher.
+  // 🔴 One path needs no Rust at all, and it is the owner's own case (review
+  // Minor 3). With 📌 pin on, `Launcher.svelte:65`'s blur-hide is disabled, so
+  // the launcher stays up and regains DOM focus through ordinary OS window
+  // activation — which is exactly the long-lived launcher that outlives an
+  // index change. That path does not depend on the link below.
+  //
+  // ⚠️ One link is still unmeasured, and it is narrower than the whole: whether
+  // a webview `set_focus()` produces a DOM `focus` event on `window` in the
+  // running application. Nobody has run this application yet, so that step is
+  // read from the platform, not from a live launcher. It is the raise paths
+  // that need it; the pinned path above does not.
   //
   // `loading` is a plain `let`, not `$state`: nothing renders from it. It stops
   // two listings being on the wire at once, where the loser lands last and puts
   // an older index on screen than the one the card already had.
+  //
+  // ⚠️ The cost of dropping rather than deferring (review Minor 7): a focus that
+  // arrives while the mount request is still on the wire is discarded, not
+  // queued, so a launcher raised during its own first fetch shows the snapshot
+  // taken just before it was raised. The window is milliseconds wide and the
+  // next focus refreshes; queueing would trade it for a second request whose
+  // answer nobody is waiting for.
   let loading = false;
   function load() {
     if (loading) return;
@@ -176,9 +194,19 @@
   // else is none of this selection's business, and clearing those would be
   // Ruling M's defect with an extra step.
   //
-  // Deliberately NOT undone: a person who shuts the folder of the passage
-  // already on screen keeps it shut. They acted on a row they could see, and no
-  // new event has happened since.
+  // Deliberately NOT undone by an ANSWER: a person who shuts the folder of the
+  // passage already on screen keeps it shut while the selection stands. They
+  // acted on a row they could see, and no new event has happened since.
+  //
+  // ⚠️ "While the selection stands" is the whole of the promise, and the wider
+  // form this comment used to make was false (review Minor 4). The stamp below
+  // holds the folders on the selected document's way, so a REFRESH that
+  // reshapes that chain — the file moved — re-fires the effect and re-opens the
+  // folder, on an event the person did not cause. That is defensible: the chain
+  // really did change. And it can only ever open, never shut: the loop writes
+  // `false → true` and nothing else. Both halves are pinned in `Tree.test.ts`
+  // (`a refresh that moves the selected file…` and its control, `a refresh that
+  // changes nothing…`).
   //
   // The second half is the Recents tab, where marking a row is not enough
   // because the selected document may have no row there at all (recents is a
