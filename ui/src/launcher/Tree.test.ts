@@ -251,6 +251,12 @@ test('a citation whose document IS in the listing marks its only copy current', 
   render(Tree, { selected: citationFor('doc-1') });
 
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
+  // Reached by testid and asserted as a role, and BEFORE the `getAllByRole`
+  // locator below: after it this line never runs, because the locator throws
+  // first and the role's own failure text never appears. A locator is not an
+  // assertion — rewrite it as a testid query and, without this line, nothing
+  // would be left claiming these rows are tree items at all.
+  expect(screen.getByTestId('tree-file-doc-1').getAttribute('role')).toBe('treeitem');
   const current = screen.getAllByRole('treeitem', { current: true });
   expect(current).toHaveLength(1);
   expect(current[0]).toBe(screen.getByTestId('tree-file-doc-1'));

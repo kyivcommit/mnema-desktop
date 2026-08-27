@@ -279,6 +279,10 @@ test('Gone renders the reason and NO text', async () => {
   render(Source, { selected: citationA, siblings: [citationA] });
 
   await settled();
+  // Reached by testid and asserted as a role, and BEFORE the locator that
+  // reaches it by that role: after it this line never runs, because the
+  // locator throws first. A locator is not an assertion.
+  expect(screen.getByTestId('freshness').getAttribute('role')).toBe('status');
   const status = screen.getByRole('status');
   expect(status.textContent).toBe('This identifier now points to another passage');
   expect(screen.queryByTestId('hl')).toBeNull();
@@ -318,12 +322,15 @@ test('an excerpt naming a different document than the citation shows no text and
   render(Source, { selected: citationA, siblings: [citationA, citationB] });
 
   await settled();
+  // No text at all, the way `Gone` renders none — and these two come BEFORE
+  // the badge check: after it they share its failure text, so a mutant that
+  // lets the text through and a mutant that words the badge wrongly read
+  // identically. Ahead of it they are told apart at no cost.
+  expect(screen.queryByTestId('hl')).toBeNull();
+  expect(screen.queryByTestId('source-block')).toBeNull();
   expect(screen.getByRole('status').textContent).toBe(
     'This excerpt came from a different document than the citation',
   );
-  // No text at all, the way `Gone` renders none.
-  expect(screen.queryByTestId('hl')).toBeNull();
-  expect(screen.queryByTestId('source-block')).toBeNull();
   expect(screen.getByTestId('source-body').textContent).not.toContain(SPAN_A_TEXT);
   expect(screen.queryByTestId('more-before')).toBeNull(); // excerptSpanA sets this flag
   // No sibling is asked either: a window that cannot be trusted is not a window

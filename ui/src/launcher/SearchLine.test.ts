@@ -20,7 +20,12 @@ test('Enter emits onSubmit with the raw query (the owner validates, not the line
 });
 
 test('state error(blank) shows the blank message, not a refusal', () => {
-  render(SearchLine, { state: { kind: 'error', reason: 'blank' } as LauncherState, onSubmit: vi.fn() });
+  const { container } = render(SearchLine, { state: { kind: 'error', reason: 'blank' } as LauncherState, onSubmit: vi.fn() });
+  // The role is a claim here, not the way in: the element is reached by its
+  // class, so the assertion cannot be satisfied by the locator that found it.
+  // Reached by role alone, `role="alert"` survives only while nobody rewrites
+  // the query — a locator is not an assertion.
+  expect(container.querySelector('.guard')!.getAttribute('role')).toBe('alert');
   // Tightened from /query|запит/i: that also matches query_failed's text, so
   // it could not tell blank from askFailed apart.
   expect(screen.getByRole('alert').textContent).toMatch(/enter|введіть/i);
@@ -41,18 +46,30 @@ test('state error(askFailed) shows the failure message (a rejected ask is visibl
 });
 
 test('state F shows the refusal message, not an alert', () => {
-  render(SearchLine, { state: { kind: 'refused', reason: { kind: 'noCandidates' } } as LauncherState, onSubmit: vi.fn() });
+  const { container } = render(SearchLine, { state: { kind: 'refused', reason: { kind: 'noCandidates' } } as LauncherState, onSubmit: vi.fn() });
+  // Reached by class, asserted as a role — see the blank test above.
+  expect(container.querySelector('.refusal')!.getAttribute('role')).toBe('status');
   expect(screen.getByRole('status').textContent).toMatch(/found|знайдено/i);
   expect(screen.queryByRole('alert')).toBeNull();
 });
 
 test('state D shows a spinner and the phase line, query stays in the input', () => {
-  render(SearchLine, { state: { kind: 'inFlight', query: 'my question' }, onSubmit: vi.fn(), query: 'my question' });
+  const { container } = render(SearchLine, { state: { kind: 'inFlight', query: 'my question' }, onSubmit: vi.fn(), query: 'my question' });
+  // Reached by class, asserted as a role — see the blank test above.
+  expect(container.querySelector('.spinner')!.getAttribute('role')).toBe('progressbar');
   expect(screen.getByRole('progressbar')).toBeTruthy();
   const phases = screen.getByTestId('phases').textContent ?? '';
   expect(phases).toMatch(/чат|chat/i);
   expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('my question');
   expect(screen.queryByRole('alert')).toBeNull(); // in flight is not also an error (assert both directions)
+});
+
+test('state D announces the phase line, it is not silent decoration', () => {
+  // `role="status"` on the phase line is the whole of what a screen reader gets
+  // told while a search runs — every other test in this file reaches that
+  // element by its testid, so deleting the role left the suite green.
+  render(SearchLine, { state: { kind: 'inFlight', query: 'q' }, onSubmit: vi.fn(), query: 'q' });
+  expect(screen.getByRole('status')).toBe(screen.getByTestId('phases'));
 });
 
 test('state D phase line and spinner label follow a live language switch (Codex #4)', async () => {

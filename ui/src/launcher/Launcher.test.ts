@@ -338,6 +338,18 @@ test('click-outside (blur) hides the launcher when it is not pinned', async () =
   expect(hide).toHaveBeenCalledOnce();
 });
 
+test('the pin button says whether it is pressed, in both states', async () => {
+  // `aria-pressed` is the only way a screen-reader user learns the launcher is
+  // pinned — the class beside it paints a colour and says nothing. It was
+  // asserted nowhere: the blur test below clicks the button and then watches
+  // `hide`, which is true of a button carrying no state at all.
+  render(Launcher);
+  const pin = screen.getByTestId('pin');
+  expect(pin.getAttribute('aria-pressed')).toBe('false');
+  await fireEvent.click(pin);
+  expect(pin.getAttribute('aria-pressed')).toBe('true');
+});
+
 test('a pinned launcher ignores click-outside (blur) — the pin disables it', async () => {
   render(Launcher);
   await fireEvent.click(screen.getByRole('button', { name: /pin|пін|📌/i }));
