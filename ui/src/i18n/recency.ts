@@ -3,7 +3,7 @@ import { t } from './index';
 // How long ago a document was indexed, for the Recents tab (review Minor 5).
 //
 // 🔴 The unit is what this file exists to get right. `RecentDoc.indexedAt`
-// (`lib/ipc.ts:65`) is `ingest_stage.updated_at` (`mnema-index/src/write.rs:287`),
+// (`lib/ipc.ts:65`) is `ingest_stage.updated_at` (`mnema-index/src/write.rs:286`),
 // an `INTEGER … DEFAULT (unixepoch())` column (`crates/mnema-index/src/schema.sql:261`)
 // — SECONDS since the epoch, where `Date.now()` is milliseconds. A comparison
 // that mixed the two would be wrong by a factor of a thousand and would still
@@ -25,6 +25,14 @@ const DAY = 24 * HOUR;
  * Anything under a minute — including a timestamp in the FUTURE, which a clock
  * change or a machine whose zone moved can produce — reads as "just now" rather
  * than as a negative count.
+ *
+ * ⚠️ This sentence ages on screen, and that is a property the rest of the card
+ * does not have. `Tree.svelte`'s refresh deliberately keeps the listing that
+ * worked when a refresh FAILS — a stale *row* was true of the past and probably
+ * still is, so keeping it is right. A stale *"1 minute ago"* is different: it is
+ * an assertion about **now**, and two hours after a failed refresh it is simply
+ * false. Bounded by the next successful refresh, and every alternative (blank
+ * the label, blank the card) is worse — so it is accepted, not overlooked.
  */
 export function formatIndexedAt(indexedAt: number, nowMs: number): string {
   const delta = Math.floor(nowMs / 1000) - indexedAt;

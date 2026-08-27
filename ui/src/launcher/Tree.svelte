@@ -219,7 +219,11 @@
   // acted on a row they could see, and no new event has happened since.
   //
   // ⚠️ "While the selection stands" is the whole of the promise, and the wider
-  // form this comment used to make was false (review Minor 4). The stamp below
+  // form this comment used to make was false (review Minor 4). It is also
+  // narrower than a reader will take it: a SECOND citation in the same document
+  // does not re-open the folder either, because the stamp does not change — the
+  // shut folder stays shut, and the person keeps the view they chose. Only a
+  // change to the selected document's folder chain moves it. The stamp below
   // holds the folders on the selected document's way, so a REFRESH that
   // reshapes that chain — the file moved — re-fires the effect and re-opens the
   // folder, on an event the person did not cause. That is defensible: the chain
