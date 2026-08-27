@@ -1,8 +1,13 @@
 <script lang="ts">
   import { locale, t } from '../i18n';
   import Answer from './Answer.svelte';
+  import Passages from './Passages.svelte';
   import Source from './Source.svelte';
   import type { AskAnswer, AskCitation, Hit } from '../lib/ipc';
+
+  // The two answers that draw cards (Task 9). `refused` is not one of them and
+  // the type says so, so a refusal cannot reach this component by accident.
+  type CardAnswer = Extract<AskAnswer, { kind: 'generated' | 'citationsOnly' }>;
 
   // 🔴 Ruling AC — why this component exists at all. The selection lives HERE,
   // and `Cards` wraps this component in `{#key state}`. A
@@ -14,11 +19,24 @@
   // component that OWNS the state makes the reset structural rather than
   // remembered, with no frame in which a request can go out for a citation
   // already off screen.
+  //
+  // 🔴 Ruling AJ — this is also the whole of state E's selection. A passage
+  // click IS a citation click: same component, same `{#key}`, same state tag,
+  // and `Source` already takes `AskCitation | Hit` (`Source.svelte:83-86`) so a
+  // `Hit` needs no adaptation. A second selection path would be a second copy of
+  // the reset rule above, and the two would drift.
   let { answer, query, onSelected }: {
-    answer: Extract<AskAnswer, { kind: 'generated' }>;
+    answer: CardAnswer;
     query: string;
     onSelected: (selection: AskCitation | Hit | null) => void;
   } = $props();
+
+  // Narrowed to two consts rather than branched on `answer.kind` in the markup,
+  // so each child receives its own member of the union by type — Ruling AG's
+  // point is that a component handed the wrong member renders nothing and says
+  // nothing, and the compiler is the only thing that catches that.
+  const generatedAnswer = $derived(answer.kind === 'generated' ? answer : null);
+  const passagesAnswer = $derived(answer.kind === 'citationsOnly' ? answer : null);
 
   let selected = $state<AskCitation | Hit | null>(null);
 
@@ -35,7 +53,11 @@
 </script>
 
 <section data-testid="card-centre" aria-label={answerLabel}>
-  <Answer {answer} {query} onSelect={(citation) => (selected = citation)} />
+  {#if generatedAnswer !== null}
+    <Answer answer={generatedAnswer} {query} onSelect={(citation) => (selected = citation)} />
+  {:else if passagesAnswer !== null}
+    <Passages answer={passagesAnswer} onSelect={(passage) => (selected = passage)} />
+  {/if}
 </section>
 
 {#if selected !== null}

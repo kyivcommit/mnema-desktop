@@ -11,7 +11,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
   | 'fresh_file_missing' | 'fresh_no_path'
   | 'gone_no_such_chunk' | 'gone_id_reused'
-  | 'source_loading' | 'source_failed' | 'source_wrong_document';
+  | 'source_loading' | 'source_failed' | 'source_wrong_document'
+  | 'citations_only_banner' | 'citations_only_empty';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
@@ -47,6 +48,15 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // M2: shown instead of a freshness verdict when the excerpt names a
     // different document than the citation does.
     source_wrong_document: 'Цей уривок походить з іншого документа, ніж цитата',
+    // 🔴 Ruling AF: `bridge.rs:536-540` opens state E for any non-`Ready`
+    // readiness, `bridge.rs:293-302` gives that three variants, and the wire
+    // shape at `bridge.rs:476-480` carries none of them. So this sentence says
+    // only what the payload proves — no cause, and no instruction pointing at a
+    // settings screen that might be the wrong one.
+    citations_only_banner: 'Генерування недоступне. Нижче — уривки, які знайшов пошук.',
+    // Ruling AK: its own sentence, distinct from `tree_empty` (nothing indexed
+    // at all) and from `source_failed` (a passage that could not be read).
+    citations_only_empty: 'Жоден уривок не відповідає цьому запиту.',
   },
   en: {
     pin: 'Pin',
@@ -76,5 +86,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     source_loading: 'Loading the source…',
     source_failed: 'The source could not be loaded.',
     source_wrong_document: 'This excerpt came from a different document than the citation',
+    citations_only_banner: 'Generation is unavailable. These are the passages the search found.',
+    citations_only_empty: 'No passages matched this query.',
   },
 };

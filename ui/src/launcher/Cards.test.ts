@@ -8,14 +8,18 @@ import {
   generatedOther,
   refusedNoCandidates,
   citationsOnly,
+  citationsOnlySameDocument,
+  emptyCitationsOnly,
   oneRootTwoFolders,
   emptyListing,
   excerptSpanA,
   excerptSpanB,
+  excerptDocTwo,
   SPAN_A_TEXT,
   SPAN_B_TEXT,
 } from '../lib/fixtures';
 import { setLocale } from '../i18n';
+import { messages } from '../i18n/catalog';
 import type { AskAnswer, SourceAround, TreeListing } from '../lib/ipc';
 import type { LauncherState } from './state';
 
@@ -144,21 +148,22 @@ test('refused keeps the tree and draws neither answer nor source (state F)', () 
 // TWO independent gates, and each one must be readable on its own:
 //
 //   card-tree               — every state except `idle` (ruling I-B)
-//   card-centre, card-source — `generated` only
+//   card-centre             — `generated` AND `citationsOnly` (Task 9)
+//   card-source             — those two, and only after a click
 //
 // I1 (review round 1) is why all six exist: `Cards.svelte` branches on
 // `state.kind`, so any variant with no test of its own was free to draw the
-// wrong cards without reddening anything. citationsOnly matters most — it is
-// the line Task 9 will edit next, and a guard mistakenly written as
-// `kind === 'generated' || kind === 'citationsOnly'` is the likely one.
+// wrong cards without reddening anything.
 //
 // 🔴 The prose here used to say "all three below must redden under
 // `state.kind !== 'idle' && state.kind !== 'refused'`", which the C1 amendment
 // silently made false for state D — an edit in the test devaluing the sentence
-// three lines above it. What is true now: a mutant that widens the ANSWER gate
-// reddens the `card-centre` negative in D, E, F and error independently, and a
-// mutant that widens or narrows the TREE gate reddens `idle` on one side and
-// the other five on the other.
+// three lines above it. It then said the answer gate was `generated` only,
+// which Task 9 made false in turn. What is true now: a mutant that widens the
+// ANSWER gate past those two reddens the `card-centre` negative in D, F and
+// error independently, one that narrows it back to `generated` reddens state E
+// below, and a mutant that widens or narrows the TREE gate reddens `idle` on
+// one side and the other five on the other.
 // 🔴 Controller ruling C1 (fix round 1) amends this one. The tree's content is
 // the INDEX, not the answer, so it stays on screen while the next answer is
 // fetched; §7's state D row describes the search line and never asks for the
@@ -172,10 +177,10 @@ test('inFlight keeps the tree and draws neither answer nor source (state D)', ()
   expect(screen.queryByTestId('card-source')).toBeNull();
 });
 
-test('citationsOnly keeps the tree and draws neither answer nor source (state E is Task 9\'s)', () => {
+test('citationsOnly keeps the tree and draws the centre card; source waits for a click (state E)', () => {
   render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
   expect(screen.getByTestId('card-tree')).toBeTruthy();
-  expect(screen.queryByTestId('card-centre')).toBeNull();
+  expect(screen.getByTestId('card-centre')).toBeTruthy();
   expect(screen.queryByTestId('card-source')).toBeNull();
 });
 
@@ -451,4 +456,138 @@ test('the tree keeps its rows but lets go of the mark while the next answer is i
   expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.getByTestId('tree-file-doc-1')).toBeTruthy(); // the row is still on screen
   expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBeNull();
+});
+
+// --- state E: CitationsOnly (Task 9) ----------------------------------------
+
+// 🔴 Ruling AF, and it is the reason this test does NOT look for the word
+// "key". `bridge.rs:536-540` opens this branch whenever `chat_readiness` is not
+// `Ready`, and `bridge.rs:293-302` gives that three non-ready variants —
+// `NoModel`, `NoKey`, `KeyUnreadable`. The wire shape at `bridge.rs:476-480` is
+// `{ citations, text, content }` and carries NONE of them, so a banner naming a
+// missing key is false in two cases out of three and the card has no way to
+// know which it is in. `content` does not rescue it: `ContentArmReport`
+// (`ipc.ts:21-27`) reports the content SEARCH arm, filled by `retrieve` before
+// readiness is consulted — a different question with a different answer.
+//
+// Both halves are asserted: what the rendered banner does say, and that neither
+// locale's catalogue string names a cause. A regex over one rendered locale
+// would leave the other free to drift into naming one.
+const CAUSE = /key|provider|model|credential|setting|ключ|провайдер|модел|обліков|налаштув/i;
+
+test('the state E banner says generation is unavailable and names no cause (Ruling AF)', () => {
+  setLocale('en'); // seed, do not inherit
+  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+
+  expect(screen.getByRole('status').textContent)
+    .toBe('Generation is unavailable. These are the passages the search found.');
+  expect(messages.en.citations_only_banner).not.toMatch(CAUSE);
+  expect(messages.uk.citations_only_banner).not.toMatch(CAUSE);
+});
+
+// 🔴 Ruling AH. A `Hit` has no `anchor` (`ipc.ts:33-42`), so the rank is the
+// row's own ordinal and its testid is deliberately NOT derivable from any field
+// of the passage. The `toEqual` on the ids is what makes that falsifiable: a
+// mutant keying the testid on `chunkId` would still produce two `rank-` rows
+// and satisfy a bare length assertion, but it would produce `rank-7`/`rank-9`.
+test('state E ranks the passages as neutral ordinals, with no answer prose and no anchors', () => {
+  setLocale('en'); // seed, do not inherit
+  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+
+  const rows = screen.getAllByTestId(/^rank-/);
+  expect(rows.map((r) => r.getAttribute('data-testid'))).toEqual(['rank-1', 'rank-2']);
+  // Labelled by the shared Decision 1 rule (`i18n/label.ts:18`), which already
+  // takes a `Hit` — the second row exercises its path-plus-locator branch.
+  expect(rows.map((r) => r.textContent)).toEqual(['notes/a.md', 'notes/b.md · p. 2']);
+  // No answer prose and no anchor buttons: state E has neither to show.
+  expect(screen.queryByTestId('answer-body')).toBeNull();
+  expect(screen.queryAllByTestId(/^preview-/)).toHaveLength(0);
+});
+
+// 🔴 Ruling AK. Zero hits is an ANSWER — the search ran and found nothing — not
+// the absence of one, so the centre card says so rather than rendering an empty
+// list nobody can read.
+test('zero passages is an answer, not an empty card', () => {
+  setLocale('en'); // seed, do not inherit
+  render(Cards, { state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
+
+  expect(screen.getByTestId('card-centre').textContent)
+    .toContain('No passages matched this query.');
+  expect(screen.queryAllByTestId(/^rank-/)).toHaveLength(0);
+});
+
+// The other half of Ruling AK, and the half a single-locale test cannot see:
+// three different facts get three different sentences. "Nothing is indexed yet"
+// (the tree), "the source could not be loaded" (the right card) and "the search
+// found no passages" are not interchangeable, and Ruling N settled that once
+// already for the tree.
+test('the zero-passages sentence is its own, in both locales (Ruling AK)', async () => {
+  setLocale('uk');
+  render(Cards, { state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
+  await tick();
+
+  expect(screen.getByTestId('card-centre').textContent)
+    .toContain('Жоден уривок не відповідає цьому запиту.');
+  for (const l of ['uk', 'en'] as const) {
+    expect(messages[l].citations_only_empty).not.toBe(messages[l].tree_empty);
+    expect(messages[l].citations_only_empty).not.toBe(messages[l].source_failed);
+  }
+});
+
+// 🔴 Ruling AJ: a passage click is a citation click. Same `Selection`, same
+// `{#key}`, same state tag — `Source` already takes `AskCitation | Hit`
+// (`Source.svelte:83-86`), so a `Hit` needs no adaptation and there is no
+// second selection path to keep in step.
+//
+// The second row is `doc-2` while the first is `doc-1`, so Ruling U's filter
+// must drop the first before any call: ONE round trip, for chunk 9. Anchored on
+// `data-pending === '0'`, which only a resolved answer writes — `findByTestId`
+// alone returns while the (absent) sibling would still be on the wire.
+test('clicking a passage from the second document fetches THAT document, and no sibling from the first', async () => {
+  setLocale('en'); // seed, do not inherit: the header is asserted below
+  mockTree(oneRootTwoFolders);
+  mockSourceFor({ 9: excerptDocTwo });
+
+  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  await fireEvent.click(screen.getByTestId('rank-2'));
+
+  expect(await screen.findByTestId('card-source')).toBeTruthy();
+  await settled();
+  expect(sourceAroundCalls()).toHaveLength(1);
+  expect(sourceAroundCalls()[0][1].chunkId).toBe(9);
+  // Positive, not "not null": the card really is showing the clicked passage's
+  // own file, so a mismatch badge over an empty body cannot satisfy this.
+  expect(screen.getByTestId('source-header').textContent).toBe('notes/b.md · p. 2');
+  expect(screen.getAllByTestId('hl').map((m) => m.textContent)).toEqual(['paragraph']);
+});
+
+// 🔴 The fixture question. `citationsOnly` holds its two passages in two
+// DIFFERENT documents, so the sibling branch of Ruling U never fires from state
+// E and the whole "a passage has a sibling in its own file" path was a state no
+// fixture built. `citationsOnlySameDocument` builds it: both in `doc-1`,
+// distinct occurrences (chunk 7 ord 0, chunk 8 ord 1), so the click produces
+// TWO round trips and the second one's span paints beside the clicked one's
+// (Decision 4). The clicked passage is identified by `data-primary`, never by
+// the order the calls went out in.
+test('two passages in one document: a click asks for the sibling too and paints both', async () => {
+  mockTree(oneRootTwoFolders);
+  mockSourceFor({ 7: excerptSpanA, 8: excerptSpanB }); // both doc-1
+
+  render(Cards, { state: stateFromAnswer('q', citationsOnlySameDocument), query: 'q' });
+  await fireEvent.click(screen.getByTestId('rank-1'));
+
+  expect(await screen.findByTestId('card-source')).toBeTruthy();
+  await settled();
+  expect(sourceAroundCalls().map((c) => c[1].chunkId).sort((a, b) => a - b)).toEqual([7, 8]);
+
+  const marks = screen.getAllByTestId('hl');
+  expect(marks.map((m) => m.textContent)).toEqual([SPAN_A_TEXT, SPAN_B_TEXT]);
+  expect(marks.filter((m) => m.dataset.primary === 'true').map((m) => m.textContent))
+    .toEqual([SPAN_A_TEXT]); // the passage that was clicked, rank 1 / chunk 7
+
+  // The left card marks the cited file by documentId (Ruling AE), exactly as it
+  // does for a generated answer — state E goes through the same report.
+  await waitFor(() =>
+    expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true'));
+  expect(screen.getByTestId('tree-file-doc-2').getAttribute('aria-current')).toBeNull();
 });

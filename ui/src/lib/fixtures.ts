@@ -151,6 +151,31 @@ export const citationsOnly: AskAnswer = {
   content: { kind: 'noKey' },
 };
 
+// 🔴 Task 9's fixture question. `citationsOnly` above holds its two passages in
+// TWO documents, so Ruling U's sibling filter drops the other one before any
+// call and a state E click can only ever produce ONE round trip — the branch
+// where a passage HAS a sibling in its own document is a state nothing built.
+// `chunkId` 8 and `ord` 1 keep it a distinct occurrence from `hit`
+// (`Source.svelte`'s `occurrence` key is documentId + ord + chunkId), and both
+// rows label from `notes/a.md` so the ranks cannot be told apart by their text.
+const hitSameDocument: Hit = {
+  chunkId: 8,
+  ord: 1,
+  documentId: 'doc-1',
+  rootId: 7,
+  text: 'A second bare passage from the same file.',
+  relativePath: 'notes/a.md',
+  sectionTitle: null,
+  coordinate: { kind: 'none' },
+};
+
+export const citationsOnlySameDocument: AskAnswer = {
+  kind: 'citationsOnly',
+  citations: [hit, hitSameDocument],
+  text: { kind: 'answered', matched: 2 },
+  content: { kind: 'noKey' },
+};
+
 // Zero hits is an answer, not the absence of one (the vanilla `searchResultItems`
 // rule this plan re-homes to state E).
 export const emptyCitationsOnly: AskAnswer = {
@@ -346,6 +371,22 @@ export const excerptSpanB: Excerpt = {
   spans: [{ blockId: SHARED_BLOCK_ID, start: 7, end: 18, blockStart: 41 }], // len 11 → [41, 52)
   documentId: 'doc-1',
   sectionTitle: 'Intro',
+  hasMoreBefore: false,
+  hasMoreAfter: true,
+  freshness: { kind: 'current' },
+};
+
+// The window for a passage in `doc-2` (`hitOtherDocument`, chunk 9). Every
+// other excerpt fixture here is `doc-1`, and `Source`'s M2 check compares the
+// excerpt's `documentId` with the CLICKED passage's — so a `doc-1` excerpt
+// answered for a `doc-2` click renders the mismatch badge and no text at all,
+// and a test written on one could not tell that apart from a working card.
+export const excerptDocTwo: Excerpt = {
+  kind: 'excerpt',
+  blocks: [block(20, 'A paragraph from the second file entirely.')],
+  spans: [{ blockId: 20, start: 6, end: 15, blockStart: 2 }], // len 9 → [2, 11)
+  documentId: 'doc-2',
+  sectionTitle: null,
   hasMoreBefore: false,
   hasMoreAfter: true,
   freshness: { kind: 'current' },

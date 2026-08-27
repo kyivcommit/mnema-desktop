@@ -11,12 +11,19 @@
   // this binding is out of the way (`store_rune_conflict`).
   let { state: launcherState, query }: { state: LauncherState; query: string } = $props();
 
-  // The two ANSWER cards appear only for a generated answer (state B) — idle,
-  // citations-only, refused and error draw none of the three, matching the
-  // mockup. citationsOnly (state E) is Task 9's; it stays card-less here (task
-  // brief header). Narrowed rather than a bare boolean so `.answer` below is the
-  // generated member by type, not by assertion.
-  const generatedState = $derived(launcherState.kind === 'generated' ? launcherState : null);
+  // The two ANSWER cards appear for the two states that HAVE an answer to show:
+  // `generated` (state B) and `citationsOnly` (state E, Task 9). idle, inFlight,
+  // refused and error draw none of them, matching the mockup — a refusal has no
+  // passages and no prose, and the search line already carries its message.
+  //
+  // Narrowed rather than a bare boolean so `.answer` below is one of those two
+  // members by type, not by assertion: `Selection` takes exactly that union and
+  // hands each member to the component that can render it (Ruling AG).
+  const answerState = $derived(
+    launcherState.kind === 'generated' || launcherState.kind === 'citationsOnly'
+      ? launcherState
+      : null,
+  );
 
   // 🔴 Controller rulings C1 and I-B: the TREE card stays up in every state but
   // `idle`. Its content is the INDEX, not the answer, so it has no reason to
@@ -94,13 +101,15 @@
   </section>
 {/if}
 
-{#if generatedState !== null}
+{#if answerState !== null}
   <!-- Only the answer-and-source pair is keyed, and the key is on the component
        that owns the selection (Ruling AC) — see `Selection.svelte` for why a key
-       around the cards alone resets nothing. -->
-  {#key generatedState}
+       around the cards alone resets nothing. The key is the STATE object, so a
+       generated answer followed by a citations-only one recreates the selection
+       just as two generated answers do. -->
+  {#key answerState}
     <Selection
-      answer={generatedState.answer}
+      answer={answerState.answer}
       {query}
       onSelected={(value) => (reported = { state: launcherState, value })} />
   {/key}
