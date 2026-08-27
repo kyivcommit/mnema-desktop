@@ -38,6 +38,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { locale, t } from '../i18n';
+  import { formatIndexedAt } from '../i18n/recency';
   import { listTree } from '../lib/ipc';
   import type { AskCitation, Hit, TreeListing } from '../lib/ipc';
 
@@ -135,6 +136,25 @@
   const roots = $derived(
     (listing?.roots ?? []).map((root) => ({ root, nodes: buildFolderTree(root.files) })),
   );
+  // Review Minor 5: the Recents rows carry WHEN each document was indexed. The
+  // whole list is rebuilt inside one `$derived.by` that reads `$locale` —
+  // `formatIndexedAt` goes through `t()` and is not reactive on its own, the
+  // house pattern (`Answer.svelte:40-43`, `Passages.svelte:62-69`).
+  //
+  // The clock is read here rather than ticked: these labels do not update on
+  // their own, they are recomputed when the listing changes, when the language
+  // changes, and — since P3 — every time the launcher is raised, which is the
+  // only moment a person is reading them. A timer would redraw the card behind
+  // a person who is not looking at it.
+  const recents = $derived.by(() => {
+    void $locale;
+    const now = Date.now();
+    return (listing?.recents ?? []).map((recent) => ({
+      recent,
+      indexed: formatIndexedAt(recent.indexedAt, now),
+    }));
+  });
+
   const isEmpty = $derived(
     listing !== null && listing.roots.length === 0 && listing.recents.length === 0,
   );
@@ -330,17 +350,24 @@
     {/each}
   {:else}
     <ul>
-      {#each listing?.recents ?? [] as recent (recent.documentId)}
+      {#each recents as { recent, indexed } (recent.documentId)}
         <li>
           <!-- P5, the same finding one tab over: a focusable button with no
                action of any kind. A row, rendered as one.
                P4: and it carries the mark, which it never did — selecting a
                citation while this tab was showing left no current row
                anywhere, so the source card was reading out a passage the tree
-               could not place. -->
+               could not place.
+               Minor 5: and it says how recently the document was indexed, which
+               is the fact that makes a list called Recents an ordering a person
+               can see rather than one they have to take on trust.
+               `recent-path`/`recent-indexed`, NOT `tree-recent-*`: the row ids
+               are a namespace and a second id inside it would be counted as a
+               row — the same rule `Passages` and `Answer` follow. -->
           <span data-testid={`tree-recent-${recent.documentId}`}
             aria-current={recent.documentId === selectedId ? 'true' : undefined}
-            >{recent.relativePath}</span>
+            ><span data-testid="recent-path">{recent.relativePath}</span>
+            <span data-testid="recent-indexed">{indexed}</span></span>
         </li>
       {/each}
     </ul>

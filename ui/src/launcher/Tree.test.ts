@@ -76,7 +76,13 @@ beforeEach(() => {
 // Mirrors Cards.test.ts / Answer.test.ts: `locale` is a module-level store
 // shared by every test in this file, and an in-test restore is skipped when an
 // assertion fails first. Restore unconditionally.
-afterEach(() => setLocale('en'));
+afterEach(() => {
+  setLocale('en');
+  // The recency tests pin `Date.now`; restore unconditionally, for the same
+  // reason the locale is restored here — an assertion that fails first would
+  // otherwise leave the next test running against a frozen clock.
+  vi.restoreAllMocks();
+});
 
 // --- the pure folder builder ------------------------------------------------
 // Depth is what the nesting branches on, and a render can only ever show one
@@ -458,6 +464,71 @@ test('a citation whose document is no longer in the listing selects nothing and 
 // Every test that existed asserted `aria-current` on a FILE row while the Files
 // tab happened to be showing and no folder had been touched — the two states
 // where the card was already right.
+
+// 🔴 Review Minor 5 — the class of the owner's five findings, one notch down.
+// The wire carries `indexedAt` for every recent document (`ipc.ts:65`), the card
+// is called Recents, and it rendered a path and nothing else: its ordering was
+// asserted by nothing a person could see, and the one fact that makes the list
+// mean anything never reached the screen.
+//
+// The assertion is the whole of each row's visible text, in order, in both
+// locales. The two fixture documents are 100 seconds apart on purpose, and the
+// clock is pinned so they land on 4 and 5 minutes — which in Ukrainian are
+// different plural arms (few and many), so a single-locale or single-row test
+// could not see a hardcoded form.
+const RECENTS_NOW = 1_700_000_340_000; // 240 s after doc-1, 340 s after doc-3
+
+test('the recents rows say how recently each document was indexed', async () => {
+  setLocale('en'); // seed, do not inherit
+  vi.spyOn(Date, 'now').mockReturnValue(RECENTS_NOW);
+  mockTree(oneRootTwoFolders);
+  render(Tree, { selected: null });
+
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  const rowText = (el: HTMLElement) => (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+  expect([
+    rowText(screen.getByTestId('tree-recent-doc-1')),
+    rowText(screen.getByTestId('tree-recent-doc-3')),
+  ]).toEqual([
+    'notes/a.md 4 minutes ago',
+    'archive/old.md 5 minutes ago',
+  ]);
+});
+
+test('the recency follows a live language switch, through both plural arms', async () => {
+  setLocale('en'); // seed, do not inherit
+  vi.spyOn(Date, 'now').mockReturnValue(RECENTS_NOW);
+  mockTree(oneRootTwoFolders);
+  render(Tree, { selected: null });
+
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  const indexed = (id: string) =>
+    screen.getByTestId(id).querySelector('[data-testid="recent-indexed"]')!.textContent;
+  expect(indexed('tree-recent-doc-1')).toBe('4 minutes ago');
+
+  setLocale('uk');
+  await tick();
+  expect(indexed('tree-recent-doc-1')).toBe('4 хвилини тому'); // few
+  expect(indexed('tree-recent-doc-3')).toBe('5 хвилин тому'); // many
+
+  setLocale('en'); // the switch back is part of the claim, not the cleanup
+  await tick();
+  expect(indexed('tree-recent-doc-1')).toBe('4 minutes ago');
+});
+
+// The hazard P1 and P2 were both written against, made live here rather than
+// only asserted in a comment: the row ids are a namespace, and a second id
+// inside a row would be counted as a row by anything querying `/^tree-recent-/`.
+// Nothing queried it before this test, so the rule the component's comment
+// states was true and unheld — which is how `preview-label` got in once.
+test('the recents row namespace holds one id per document and nothing else', async () => {
+  mockTree(oneRootTwoFolders);
+  render(Tree, { selected: null });
+
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  expect(screen.getAllByTestId(/^tree-recent-/).map((el) => el.dataset.testid))
+    .toEqual(['tree-recent-doc-1', 'tree-recent-doc-3']);
+});
 
 test('the recents tab marks the row the source card is showing', async () => {
   mockTree(oneRootTwoFolders); // recents: doc-1 and doc-3

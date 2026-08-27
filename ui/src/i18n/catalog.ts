@@ -13,7 +13,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'gone_no_such_chunk' | 'gone_id_reused'
   | 'source_loading' | 'source_failed' | 'source_wrong_document'
   | 'card_passages'
-  | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty';
+  | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
+  | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
@@ -75,6 +76,18 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Ruling AK: its own sentence, distinct from `tree_empty` (nothing indexed
     // at all) and from `source_failed` (a passage that could not be read).
     citations_only_empty: 'Жоден уривок не відповідає цьому запиту.',
+    // Review Minor 5: the Recents tab renders WHEN each document was indexed,
+    // and the wire carries it (`ipc.ts:65`, seconds since the epoch —
+    // `schema.sql:261`'s `unixepoch()`). Relative rather than a date, and that
+    // is a decision: a formatted date needs a time zone, which makes what a
+    // person sees depend on the machine the card runs on, while "how long ago"
+    // is the question the card's own name asks and needs no zone at all.
+    // The plural arms are the mechanism `indexed_documents` already uses;
+    // Ukrainian takes the accusative after «тому».
+    recent_now: 'щойно',
+    recent_minutes: '{count, plural, one {# хвилину} few {# хвилини} many {# хвилин} other {# хвилини}} тому',
+    recent_hours: '{count, plural, one {# годину} few {# години} many {# годин} other {# години}} тому',
+    recent_days: '{count, plural, one {# день} few {# дні} many {# днів} other {# дня}} тому',
   },
   en: {
     pin: 'Pin',
@@ -108,5 +121,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     citations_only_banner: 'Generation is unavailable. The search found {count, plural, one {# passage} other {# passages}}.',
     citations_only_banner_empty: 'Generation is unavailable.',
     citations_only_empty: 'No passages matched this query.',
+    recent_now: 'just now',
+    recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
+    recent_hours: '{count, plural, one {# hour} other {# hours}} ago',
+    recent_days: '{count, plural, one {# day} other {# days}} ago',
   },
 };
