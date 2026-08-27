@@ -69,10 +69,18 @@
   // window is hidden and it is not tied to the answer state, so the toggles,
   // which are component state, are untouched by it.
   //
-  // ⚠️ Unverified on the real window: nobody has run this application yet, so
-  // that the webview receives a DOM focus event when Tauri shows the launcher
-  // is an inference from the blur handler that is already relied on, not a
-  // measurement.
+  // And the shell really does focus this window: every path that raises the
+  // launcher calls `set_focus()` on it, explicitly and on purpose —
+  // `src-tauri/src/lib.rs:99-113` (`focus_launcher`, behind the tray item and
+  // the second-instance handler) and `src-tauri/src/lib.rs:119-131`
+  // (`toggle_launcher`, the global shortcut) both run `show()`, `move_window`,
+  // `set_focus()`. They are the only two paths that show the launcher; the
+  // third `show()` in that file belongs to the settings window.
+  //
+  // ⚠️ One link in that chain is still unmeasured, and it is narrower than the
+  // whole: whether a webview `set_focus()` produces a DOM `focus` event on
+  // `window` in the running application. Nobody has run this application yet,
+  // so that step is read from the platform, not from a live launcher.
   //
   // `loading` is a plain `let`, not `$state`: nothing renders from it. It stops
   // two listings being on the wire at once, where the loser lands last and puts
