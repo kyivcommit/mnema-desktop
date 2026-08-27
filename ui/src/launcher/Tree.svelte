@@ -53,20 +53,49 @@
   // hold the same folder path and must not share one open flag.
   let toggled = $state<Record<string, boolean>>({});
 
-  // Ruling M: on mount, and only on mount. Task 8b deliberately does not key
-  // this card — `state` changes twice per question, and a remount would
-  // refetch and snap shut every folder the person opened, in the card whose
-  // whole purpose is browsing folder neighbours.
-  onMount(() => {
+  // Ruling M holds: this card is not keyed and does not refetch on a state
+  // change — `state` changes twice per question and a remount would snap shut
+  // every folder the person opened, in the card whose whole purpose is browsing
+  // folder neighbours.
+  //
+  // 🔴 Owner review on PR #24, P3, is the thing that ruling never provided. A
+  // mount-time snapshot goes stale: §7.3 keeps the window alive across a hide,
+  // so one launcher outlives many index changes and keeps listing rows that are
+  // no longer there. The trigger below is the window regaining focus, and it is
+  // chosen rather than invented — `Launcher.svelte:65` already treats window
+  // BLUR as "the person has left" and hides the launcher on it, so focus is the
+  // same signal in reverse: the launcher is in front of the person again, which
+  // is the moment its listing is about to be read. It costs nothing while the
+  // window is hidden and it is not tied to the answer state, so the toggles,
+  // which are component state, are untouched by it.
+  //
+  // ⚠️ Unverified on the real window: nobody has run this application yet, so
+  // that the webview receives a DOM focus event when Tauri shows the launcher
+  // is an inference from the blur handler that is already relied on, not a
+  // measurement.
+  //
+  // `loading` is a plain `let`, not `$state`: nothing renders from it. It stops
+  // two listings being on the wire at once, where the loser lands last and puts
+  // an older index on screen than the one the card already had.
+  let loading = false;
+  function load() {
+    if (loading) return;
+    loading = true;
     listTree()
-      .then((l) => (listing = l))
+      .then((l) => { listing = l; failed = false; })
       .catch((e) => {
         // Non-fatal, but never silent: an unreadable listing must say so
         // rather than look like an empty index (Ruling N).
         console.error('list_tree failed', e);
-        failed = true;
-      });
-  });
+        // 🔴 What disappears: only a card with NOTHING to show says so. A
+        // refresh that fails must not take a listing that works off the screen
+        // and leave the person with a message, on an event they did not cause.
+        if (listing === null) failed = true;
+      })
+      .finally(() => { loading = false; });
+  }
+
+  onMount(load);
 
   const filesLabel = $derived.by(() => { void $locale; return t('tree_tab_files'); });
   const recentsLabel = $derived.by(() => { void $locale; return t('tree_tab_recents'); });
@@ -235,6 +264,8 @@
     {/each}
   </ul>
 {/snippet}
+
+<svelte:window onfocus={load} />
 
 <div class="tree" data-testid="tree-body">
   <div class="tabs">

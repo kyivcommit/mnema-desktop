@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import Tree, { buildFolderTree } from './Tree.svelte';
@@ -25,6 +25,23 @@ function mockTree(listing: TreeListing) {
 }
 function mockTreeFailure() {
   invoke.mockRejectedValue(new Error('list_tree failed'));
+}
+// A listing that has NOT arrived yet, so a second request can be attempted
+// while the first is still on the wire (`Cards.test.ts` keeps the same shape).
+function mockTreePending() {
+  let resolve!: (listing: TreeListing) => void;
+  invoke.mockReturnValue(new Promise<TreeListing>((r) => (resolve = r)));
+  return { resolve: (l: TreeListing) => resolve(l) };
+}
+
+// The same root as `oneRootTwoFolders` with one more file in `archive/` — what
+// an index change looks like from this card. Local, like `mockTree` (Ruling L).
+function withNewFile(): TreeListing {
+  const [root] = oneRootTwoFolders.roots;
+  return {
+    roots: [{ ...root, files: [...root.files, { relativePath: 'archive/new.md', documentId: 'doc-new' }] }],
+    recents: oneRootTwoFolders.recents,
+  };
 }
 
 // A citation is only ever read for its `documentId` here (Ruling P), but the
@@ -272,10 +289,101 @@ test('the selected citation selects its file by documentId, not by path string',
   expect(screen.getByTestId('tree-file-doc-a').getAttribute('aria-current')).toBeNull();
 });
 
+// --- P3: the listing is not a mount-time snapshot ---------------------------
+//
+// 🔴 Owner review on PR #24, P3. `listTree()` ran on mount and never again, so
+// a launcher that outlives an index change — and §7.3 keeps the window alive
+// across a hide, so one launcher outlives many — kept showing rows that are no
+// longer there and never showed the ones that are.
+//
+// The trigger is the window regaining focus, and it is chosen rather than
+// invented: `Launcher.svelte:65` already treats window BLUR as "the person has
+// left" and hides the launcher on it, so focus is the same signal in reverse —
+// the launcher is in front of the person again, which is the moment its listing
+// is about to be read and the only moment a stale row can mislead anyone. It
+// costs nothing while the window is hidden, and it is not tied to the answer
+// state, which is what Ruling M forbids for a reason that still holds.
+//
+// Ruling M is not overturned: the toggles are component state and this refresh
+// does not touch them, which is what the second half of this test measures.
+test('the tree refreshes when the launcher comes back, keeping the folders the person opened', async () => {
+  mockTree(oneRootTwoFolders);
+  render(Tree, { selected: null });
+
+  await fireEvent.click(await screen.findByTestId('tree-folder-archive')); // opened by hand
+  expect(screen.getByTestId('tree-file-doc-3')).toBeTruthy();
+
+  mockTree(withNewFile()); // the index changed while the launcher was away
+  await fireEvent.focus(window);
+
+  expect(await screen.findByTestId('tree-file-doc-new')).toBeTruthy();
+  expect(invoke).toHaveBeenCalledTimes(2);
+  // The folder is still open, and its old row is still under it: the refresh
+  // replaced the listing, not the person's place in it.
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByTestId('tree-file-doc-3')).toBeTruthy();
+});
+
+// 🔴 What disappears. A refresh is a second chance to fail, and the failure
+// branch replaces the whole card with a message (Ruling N) — so a transient
+// failure would take a listing that WORKS off the screen and leave the person
+// with nothing, on an event they did not cause. The message belongs to a card
+// that has nothing to show; a card that has something keeps showing it.
+test('a refresh that fails leaves the listing that worked on screen', async () => {
+  mockTree(oneRootTwoFolders);
+  render(Tree, { selected: null });
+  expect(await screen.findByTestId('tree-folder-notes')).toBeTruthy();
+
+  mockTreeFailure();
+  await fireEvent.focus(window);
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+
+  expect(screen.queryByTestId('tree-failed')).toBeNull();
+  expect(screen.getByTestId('tree-folder-notes')).toBeTruthy();
+  expect(screen.getByTestId('tree-folder-archive')).toBeTruthy();
+});
+
+// The mirror of the test above, and the line it defends would otherwise have
+// nothing on it: a card that failed on mount and succeeds on the refresh has to
+// stop saying it failed. Leaving the message beside a listing is the same
+// class of defect as removing a listing for a message.
+test('a refresh that succeeds after a failed mount replaces the message with the listing', async () => {
+  mockTreeFailure();
+  render(Tree, { selected: null });
+  expect(await screen.findByTestId('tree-failed')).toBeTruthy();
+
+  mockTree(oneRootTwoFolders);
+  await fireEvent.focus(window);
+
+  expect(await screen.findByTestId('tree-folder-notes')).toBeTruthy();
+  expect(screen.queryByTestId('tree-failed')).toBeNull();
+});
+
+// Two listings on the wire at once can land in either order, and the loser
+// overwrites the winner — a card showing an older index than the one it already
+// had. The second half is the control: the guard must let go, or the refresh
+// above only ever happens once.
+test('a launcher focused while the first listing is still on the wire does not ask twice', async () => {
+  const pending = mockTreePending();
+  render(Tree, { selected: null });
+
+  await fireEvent.focus(window);
+  expect(invoke).toHaveBeenCalledTimes(1);
+
+  mockTree(oneRootTwoFolders);
+  pending.resolve(oneRootTwoFolders);
+  expect(await screen.findByTestId('tree-folder-notes')).toBeTruthy();
+
+  await fireEvent.focus(window);
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+});
+
 // Ruling M: Task 8b deliberately does not key this card, because `state`
 // changes twice per question and a remounted tree would refetch and snap every
 // folder the person opened shut. A change of `selected` must not re-invoke.
-test('list_tree runs on mount and only on mount, even when the selection changes', async () => {
+// P3 gives this card a refresh trigger, and it is deliberately not this one:
+// `selected` changes twice per question and its own rule still holds.
+test('list_tree does not run again when the selection changes', async () => {
   mockTree(twoRootsSameRelativePath);
   const { rerender } = render(Tree, { selected: null });
   expect(await screen.findByTestId('tree-file-doc-a')).toBeTruthy();
