@@ -16,7 +16,8 @@ import {
   SPAN_B_TEXT,
 } from '../lib/fixtures';
 import { setLocale } from '../i18n';
-import type { SourceAround, TreeListing } from '../lib/ipc';
+import type { AskAnswer, SourceAround, TreeListing } from '../lib/ipc';
+import type { LauncherState } from './state';
 
 // The house pattern for the bridge (`lib/ipc.test.ts:14-15`, `Tree.test.ts:19-20`,
 // `Source.test.ts:26-27`): one shared spy, the module mocked once at file scope.
@@ -78,6 +79,20 @@ async function flush() {
   await tick();
 }
 
+// 🔴 C1. The ONLY transition `runSearch` can make between two answers
+// (`Launcher.svelte:39-45`): it clears the echo, goes to `inFlight`, and only
+// then does the next answer land. A `rerender` straight from one generated state
+// to the next is a sequence the product cannot perform, so a property asserted
+// across it is not a property of the product — every claim in this file about
+// "a new answer" goes through here.
+type Rerender = (props: { state: LauncherState; query: string }) => Promise<void>;
+async function askAgain(rerender: Rerender, query: string, answer: AskAnswer) {
+  await rerender({ state: { kind: 'inFlight', query }, query: '' }); // `runSearch` blanks the echo first
+  await tick();
+  await rerender({ state: stateFromAnswer(query, answer), query });
+  await tick();
+}
+
 beforeEach(() => {
   invoke.mockReset(); // drops the implementation too — reinstall it below
   tree = Promise.resolve(emptyListing);
@@ -133,9 +148,15 @@ test('refused shows no cards at all (state F)', () => {
 // `state.kind === 'generated' || state.kind === 'citationsOnly'` is the likely
 // one. All three below must independently redden under the reviewer's mutant
 // (`state.kind !== 'idle' && state.kind !== 'refused'`).
-test('inFlight shows no cards at all (state D)', () => {
+// 🔴 Controller ruling C1 (fix round 1) amends this one. The tree's content is
+// the INDEX, not the answer, so it stays on screen while the next answer is
+// fetched; §7's state D row describes the search line and never asks for the
+// cards to be torn down. Ruling A's purpose here — stopping an over-broad guard
+// from drawing the ANSWER in D/E/F — is served in full by the two negatives
+// below, which is all this test ever meant.
+test('inFlight keeps the tree and draws neither answer nor source (state D)', () => {
   render(Cards, { state: { kind: 'inFlight', query: 'q' }, query: 'q' });
-  expect(screen.queryByTestId('card-tree')).toBeNull();
+  expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
 });
@@ -173,6 +194,28 @@ test('card labels come from the catalogue, on the right section, and follow a li
   await tick();
   expect(screen.getByTestId('card-tree').getAttribute('aria-label')).toBe('Tree');
   expect(screen.getByTestId('card-centre').getAttribute('aria-label')).toBe('Answer');
+});
+
+// M1 (review round 1): `card-source` is the one section this PR creates, and it
+// was the one label no test pinned — it needs a click to exist, so it could not
+// ride along with the two above. Same claim, same live-switch shape.
+test("the source card's label comes from the catalogue and follows a live language switch", async () => {
+  setLocale('en'); // seed, do not inherit
+  mockTree(oneRootTwoFolders);
+  mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
+  render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+
+  await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
+  await settled();
+  expect(screen.getByTestId('card-source').getAttribute('aria-label')).toBe('Source');
+
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('card-source').getAttribute('aria-label')).toBe('Джерело');
+
+  setLocale('en'); // the switch back is part of the claim, not the cleanup
+  await tick();
+  expect(screen.getByTestId('card-source').getAttribute('aria-label')).toBe('Source');
 });
 
 // --- the composition (Task 8b) ----------------------------------------------
@@ -230,8 +273,7 @@ test('a new answer clears the previous selection instead of leaving a stale exce
   // ⚠️ The second state MUST be one that renders cards. Going to `inFlight`
   // proves nothing: no state renders the source card there, so the assertion
   // is satisfied without any reset at all and can never go red.
-  await rerender({ state: stateFromAnswer('q2', generatedOther), query: 'q2' });
-  await tick();
+  await askAgain(rerender, 'q2', generatedOther);
 
   expect(screen.queryByTestId('card-source')).toBeNull();
   expect(screen.queryAllByTestId('hl')).toHaveLength(0);
@@ -239,6 +281,28 @@ test('a new answer clears the previous selection instead of leaving a stale exce
   // The left card lets go too: with no selection nothing is open by default, so
   // the folder the first answer's citation had opened is shut again.
   expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('false');
+});
+
+// The test above is the PRODUCT's claim and goes through state D, where the
+// `{#if}` gate alone would already destroy the selection. This one is the
+// `{#key}`'s own claim, and its name says the sequence out loud so it can never
+// be read as a promise about the launcher: `Cards` resets on a new answer by
+// itself, without depending on the state machine above it passing through
+// `inFlight` first. Task 9 adds a second card-drawing state to that machine.
+test('Cards clears the selection on a new answer even without passing through inFlight', async () => {
+  mockTree(oneRootTwoFolders);
+  mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
+  const { rerender } = render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+
+  await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
+  await screen.findByTestId('card-source');
+  await settled();
+
+  await rerender({ state: stateFromAnswer('q2', generatedOther), query: 'q2' });
+  await tick();
+
+  expect(screen.queryByTestId('card-source')).toBeNull();
+  expect(screen.queryAllByTestId('hl')).toHaveLength(0);
 });
 
 // Fixture question, state 1 of 2: the tree answers on its own schedule, and a
@@ -279,7 +343,7 @@ test('a second answer arriving mid-fetch leaves no excerpt from the first', asyn
   expect(screen.getByTestId('source-loading')).toBeTruthy();
   expect(screen.getByTestId('source-body').dataset.pending).toBe('1'); // still on the wire
 
-  await rerender({ state: stateFromAnswer('q2', generatedOther), query: 'q2' });
+  await askAgain(rerender, 'q2', generatedOther);
   expect(screen.queryByTestId('card-source')).toBeNull();
 
   clicked.resolve(excerptSpanB); // the answer for a card that is no longer on screen
@@ -307,10 +371,11 @@ test('a new answer does not refetch the tree', async () => {
   await screen.findByTestId('tree-folder-archive'); // the first listing really arrived
   expect(listTreeCalls()).toHaveLength(1);
 
-  await rerender({ state: stateFromAnswer('q2', generatedOther), query: 'q2' });
-  await tick();
+  await askAgain(rerender, 'q2', generatedOther);
 
-  expect(listTreeCalls()).toHaveLength(1); // a keyed tree would have asked twice
+  // A keyed tree asks twice — and so does a tree drawn only for a generated
+  // answer, because state D unmounts it (C1).
+  expect(listTreeCalls()).toHaveLength(1);
 });
 
 test('a new answer does not shut a hand-opened folder', async () => {
@@ -321,8 +386,31 @@ test('a new answer does not shut a hand-opened folder', async () => {
   await fireEvent.click(await screen.findByTestId('tree-folder-archive')); // opened by hand
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
 
-  await rerender({ state: stateFromAnswer('q2', generatedOther), query: 'q2' });
-  await tick();
+  await askAgain(rerender, 'q2', generatedOther);
 
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+});
+
+// 🔴 I1 — the other half of C1, and the reason it could not be taken alone. Once
+// the tree survives state D, `Cards`'s copy of the selection outlives the answer
+// that produced it: `Selection` is unmounted by the `{#if}` and never reports
+// `null` on the way out, so a plain mirror keeps the previous answer's row
+// marked for the whole length of the next ask. The folder is opened by hand
+// first so the row is on screen either way — this is a claim about the MARK.
+test('the tree keeps its rows but lets go of the mark while the next answer is in flight', async () => {
+  mockTree(oneRootTwoFolders);
+  mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
+  const { rerender } = render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes')); // opened by hand, before any selection
+  await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
+  await settled();
+  expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true');
+
+  await rerender({ state: { kind: 'inFlight', query: 'q2' }, query: '' });
+  await tick();
+
+  expect(screen.getByTestId('card-tree')).toBeTruthy();
+  expect(screen.getByTestId('tree-file-doc-1')).toBeTruthy(); // the row is still on screen
+  expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBeNull();
 });

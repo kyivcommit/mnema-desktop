@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
 import { refusedNoCandidates, generated, oneRootTwoFolders } from '../lib/fixtures';
@@ -15,9 +15,16 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // 🔴 Ruling Y, and it is not optional: from Task 8b `Cards` mounts `Tree`, which
 // calls `list_tree` on mount. Every test that reaches state B goes through it,
 // and the bare `Promise.resolve()` this function used to give unknown commands
-// made the card read `.roots` off `undefined`. A launcher test that never clicks
-// a citation never reaches `source_around`, so that one stays unmocked on
-// purpose — the day one does, it fails loudly rather than painting nothing.
+// made the card read `.roots` off `undefined`.
+//
+// A launcher test that never clicks a citation never reaches `source_around`, so
+// that one stays unmocked on purpose — but M2 (review round 1) measured what
+// that actually looks like, and only half of it is loud: vitest reports an
+// unhandled `TypeError: Cannot read properties of undefined (reading 'kind')`,
+// so the run is not green, yet the card still PAINTS — a settled
+// `data-pending="0"` `source-failed` card under a correct header. A future test
+// that waits on `card-source` and asserts anything other than the excerpt would
+// pass against it. Mock the command rather than trusting the crash.
 const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', embeddingModel: null, searchTextArm: true, searchContentArm: false } };
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   invoke.mockImplementation((cmd: string) => {
@@ -28,6 +35,7 @@ function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   });
 }
 const askCalls = () => invoke.mock.calls.filter((c) => c[0] === 'ask');
+const listTreeCalls = () => invoke.mock.calls.filter((c) => c[0] === 'list_tree');
 
 // Default so the retained PR 2 tests (which just render) never hit an unmocked
 // command; each ask test overrides with its own reply.
@@ -95,8 +103,14 @@ test('a draft typed while an ask is in flight survives the ready-clear (Codex #3
   // Clear only when the line still holds the submitted query.
   let resolveAsk!: (v: unknown) => void;
   const pending = new Promise((r) => { resolveAsk = r; });
+  // 🔴 C1 widened Ruling Y: this test installs its own implementation instead of
+  // `mockBackend`, and it is the only launcher test that SITS in state D — where
+  // the tree card now stays up. Without `list_tree` here the tree reads `.roots`
+  // off `undefined` and vitest reports an unhandled `TypeError` while every test
+  // still passes.
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'ask') return pending;
     return Promise.resolve();
   });
@@ -129,6 +143,31 @@ test('a generated answer renders the centre card, not a refusal', async () => {
   await submit('q');
   await screen.findByTestId('card-centre');
   expect(screen.queryByRole('status')).toBeNull(); // not a refusal
+});
+
+// 🔴 C1, and the only place it can be seen. `Cards` gates its cards on the
+// launcher's state and `runSearch` sets `inFlight` before EVERY ask
+// (`Launcher.svelte:42`), so a tree drawn only for a generated answer is torn
+// down and refetched in the middle of every question — the outcome Ruling AC
+// forbids, reached with no `{#key}` anywhere. `Cards.test.ts` cannot catch it:
+// its `rerender`s can build a transition the product never performs. This test
+// drives the real `runSearch` twice and is anchored on the echo, which only a
+// RESOLVED ask can write (`Launcher.svelte:50`).
+test('a second question neither refetches the tree nor shuts a hand-opened folder', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  await submit('first question');
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('first question'));
+
+  await fireEvent.click(await screen.findByTestId('tree-folder-archive')); // opened by hand
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+  expect(listTreeCalls()).toHaveLength(1);
+
+  await submit('second question');
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('second question'));
+
+  expect(listTreeCalls()).toHaveLength(1);
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
 });
 
 test('a second submit while in flight is ignored — one ask at a time', async () => {
