@@ -58,7 +58,12 @@
           data-testid={`preview-${citation.anchor}`}
           onclick={() => onSelect(citation)}
         >
-          <span data-testid="preview-label">{label}</span>
+          <!-- `citation-label`, NOT `preview-label`: the preview testids are
+               queried as a namespace (`queryAllByTestId(/^preview-/)`,
+               `Cards.test.ts:538`) and a second id inside it would be counted
+               as a preview row. The same rule `Passages.svelte` follows for
+               `passage-label`. -->
+          <span data-testid="citation-label">{label}</span>
         </button>
       </li>
     {/each}

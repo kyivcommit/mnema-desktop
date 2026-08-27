@@ -58,16 +58,26 @@ test('the anchor resolves by value, not by position', async () => {
   expect(picked.chunkId).toBe(43); // citations[6] does not exist; citations[1] is this one
 });
 
+test('the preview namespace holds one id per citation and nothing else', () => {
+  // `Cards.test.ts:538` counts these rows with `queryAllByTestId(/^preview-/)`,
+  // so a second testid inside the namespace is counted as a row. The label
+  // used to be `preview-label` and was exactly that; it is `citation-label`
+  // now, the rule `Passages.svelte` already follows for `passage-label`.
+  render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() });
+  expect(screen.getAllByTestId(/^preview-/).map((el) => el.dataset.testid))
+    .toEqual(['preview-3', 'preview-7']);
+});
+
 test('the preview label is path · locator, and never invents a paragraph number', () => {
   render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() });
   const preview = screen.getByTestId('preview-3');
-  const label = preview.querySelector('[data-testid="preview-label"]')!.textContent!;
+  const label = preview.querySelector('[data-testid="citation-label"]')!.textContent!;
   expect(label).toContain('notes/a.md');
   expect(label).toMatch(/рядки|lines/);
   expect(label).not.toMatch(/абзац|paragraph/);
   // Review M1: the button's accessible name must be exactly its label — not
   // the label plus a bare or bracketed ordinal fused onto it. `label` is read
-  // from the `preview-label` span alone, so a sibling `{citation.anchor}`
+  // from the `citation-label` span alone, so a sibling `{citation.anchor}`
   // added anywhere else in the button grows the accessible name without
   // changing `label`, and this lookup stops finding the button.
   expect(screen.getByRole('button', { name: label })).toBe(preview);
@@ -75,13 +85,13 @@ test('the preview label is path · locator, and never invents a paragraph number
 
 test('a citation with no coordinate shows the path alone, with no dangling separator', () => {
   render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() }); // citation 7 has coordinate none
-  expect(screen.getByTestId('preview-7').querySelector('[data-testid="preview-label"]')!
+  expect(screen.getByTestId('preview-7').querySelector('[data-testid="citation-label"]')!
     .textContent!.trim()).toBe('notes/a.md');
 });
 
 test('no path on disk but a real location keeps the location', () => {
   render(Answer, { query: 'q', answer: gen(generatedArchived), onSelect: vi.fn() });
-  const label = screen.getByTestId('preview-1').querySelector('[data-testid="preview-label"]')!.textContent!;
+  const label = screen.getByTestId('preview-1').querySelector('[data-testid="citation-label"]')!.textContent!;
   expect(label).toMatch(/с\. 12|p\. 12/);
   // Both directions: the location is not replaced by the no-path string.
   expect(label).not.toMatch(/no path|нема на диску/i);
@@ -89,7 +99,7 @@ test('no path on disk but a real location keeps the location', () => {
 
 test('neither path nor location says so rather than rendering an empty label', () => {
   render(Answer, { query: 'q', answer: gen(generatedNoPath), onSelect: vi.fn() });
-  expect(screen.getByTestId('preview-1').querySelector('[data-testid="preview-label"]')!
+  expect(screen.getByTestId('preview-1').querySelector('[data-testid="citation-label"]')!
     .textContent).toMatch(/no path|нема на диску/i);
 });
 
@@ -112,21 +122,21 @@ test('clicking an anchor and clicking its preview both select the same citation'
 test('the preview label and both headings follow a live language switch', async () => {
   setLocale('en'); // seed, do not inherit: an earlier sibling switching the language must not decide this test
   render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() });
-  expect(screen.getByTestId('preview-3').querySelector('[data-testid="preview-label"]')!.textContent)
+  expect(screen.getByTestId('preview-3').querySelector('[data-testid="citation-label"]')!.textContent)
     .toMatch(/lines 5–7/);
   expect(screen.getByRole('heading', { name: 'Answer' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: 'Citations' })).toBeTruthy();
 
   setLocale('uk');
   await tick();
-  expect(screen.getByTestId('preview-3').querySelector('[data-testid="preview-label"]')!.textContent)
+  expect(screen.getByTestId('preview-3').querySelector('[data-testid="citation-label"]')!.textContent)
     .toMatch(/рядки 5–7/);
   expect(screen.getByRole('heading', { name: 'Відповідь' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: 'Цитати' })).toBeTruthy();
 
   setLocale('en'); // the switch back is part of the claim, not the cleanup — afterEach owns that
   await tick();
-  expect(screen.getByTestId('preview-3').querySelector('[data-testid="preview-label"]')!.textContent)
+  expect(screen.getByTestId('preview-3').querySelector('[data-testid="citation-label"]')!.textContent)
     .toMatch(/lines 5–7/);
   expect(screen.getByRole('heading', { name: 'Answer' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: 'Citations' })).toBeTruthy();
