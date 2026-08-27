@@ -121,9 +121,10 @@ pub fn start_embed_job(
         // Not repaired by reading the queue again from this side: that would be
         // a second measurement of a number the pass already has, taken after it
         // stopped, and it would disagree with the one the run actually used.
-        // What is repaired is the sentence — `reason` tells the two apart, and
-        // `ui/render.js` says "stopped before anything was embedded" for the
-        // cancelled one rather than claiming a total nobody measured.
+        // What is repaired is the sentence — `reason` tells the two apart, so
+        // the surface that shows this can say "stopped before anything was
+        // embedded" for the cancelled one rather than claiming a total nobody
+        // measured. That surface is PR 7's; the fact it needs is here already.
         let queue_total = AtomicU64::new(0);
         let started = Instant::now();
         // Throttling state, a plain local rather than an atomic for the reason

@@ -42,7 +42,7 @@ pub fn key_present(state: State<'_, AppState>) -> Result<bool, Error> {
 /// **An empty key is refused here and not by the provider** ([`Error::EmptyKey`],
 /// where the message this replaces is written out). The refusal is in the
 /// command rather than in the window because the window is not the only caller:
-/// a guard in `main.js` leaves this command reachable over the IPC with exactly
+/// a guard on that side leaves this command reachable over the IPC with exactly
 /// the old result, and it is this side that decides whether a request leaves the
 /// machine at all. It is also the only side that can keep the sentence single —
 /// the window renders whatever this returns, so a second refusal over there
@@ -355,7 +355,8 @@ pub fn set_embedding_model(
 /// itself is a choice made by whoever wrote the typo.
 ///
 /// `tests/commands.rs`'s `every_model_command_the_window_calls_is_registered` is
-/// what holds the spellings here and the ones `ui/main.js` sends together.
+/// what holds these spellings; the caller that has to match them does not exist
+/// yet — the settings surfaces are PR 7's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ExistingVectors {
@@ -907,8 +908,8 @@ pub struct IndexRead {
     /// space has given up on and still holds a refusal for, whatever run wrote
     /// it and whatever the document's status is now; `job::Ended::refused` is
     /// the count for *one* run and starts again at zero on the next one. The
-    /// two are different numbers about different scopes, and `ui/render.js`
-    /// words them so that neither can be read as the other.
+    /// two are different numbers about different scopes, and the surface that
+    /// shows them owes each its own words — PR 7's, and not written yet.
     ///
     /// `0` with `active_space == null` is "the question does not arise", the
     /// same way it is for `embedded_chunks` — and for the same reason, told
@@ -1387,10 +1388,12 @@ mod tests {
     /// [`Self::the_credential_store_failures_are_sorted_by_what_they_ask_of_a_person`]'s
     /// own guard was checked against `mnema_secrets::Error`. A sixth `Refusal`
     /// variant added one crate over stops **this file** compiling, which is the
-    /// defect this test exists for: `ui/render.js` looks its `kind` up in a
-    /// table and falls back to "this build did not recognise the reason", so
-    /// without this the new variant would reach a person as that sentence and
-    /// redden nothing anywhere. Precisely: the arms are inside
+    /// defect this test exists for: a window looks the `kind` up in a table and
+    /// falls back to "this build did not recognise the reason", so without this
+    /// the new variant would reach a person as that sentence and redden nothing
+    /// anywhere. No such table exists yet — the settings surfaces are PR 7's —
+    /// and this guard is what lets it be written from a list that is whole.
+    /// Precisely: the arms are inside
     /// `#[cfg(test)] mod tests`, so `cargo build` still succeeds and it is
     /// `cargo test` that stops — which is what the gate runs, and is the whole
     /// distance this guarantee travels.
@@ -1398,29 +1401,35 @@ mod tests {
     /// **It compares the whole serialised value, not the tag** (review round 1,
     /// F6). Reading `kind` alone left every payload field unpinned in the entire
     /// workspace — `Refusal`'s `limit`, `floor` and `raw`, `RecordId`'s `raw` and
-    /// `id` — while `ui/render.js` interpolates all of them: `REFUSAL_TEXT`'s
-    /// `inputTooSmall` reads `r.limit` and `r.floor`, `RECORD_ID_TEXT`'s `known`
-    /// reads `record.id.id`. A `#[serde(rename)]` on one field would have drawn
+    /// `id` — and a window renders the payload, not only the tag: an
+    /// `inputTooSmall` sentence reads `limit` and `floor`, a known `RecordId`
+    /// reads its `id`. A `#[serde(rename)]` on one field would have drawn
     /// "input limit **undefined** tokens" under a correct `kind`, with this test
     /// green. The `match` arms also **destructure** the fields rather than
     /// eliding them with `..`, so renaming one in Rust stops this file compiling
     /// for the same reason a new variant does.
     ///
-    /// **What it does not reach**, said rather than implied: the window keeps
-    /// its own lists (`ui/render.test.js`, `REFUSALS` / `BALANCES` /
-    /// `RECORD_IDS`) and asserts its tables against them. Those are a hand-made
-    /// copy of the list below, and nothing ties the two languages together —
-    /// tying them would need the cross-language artefact D39 withdrew. So a
-    /// variant added here still has to be carried across by a person; what this
-    /// buys is that the person is *told*, by a build that stops, instead of
-    /// finding out from a fallback sentence in front of a user.
+    /// **What it does not reach**, said rather than implied: a window that
+    /// renders these discriminants keeps its own hand-made copy of the list
+    /// below and asserts its tables against it, and nothing ties the two
+    /// languages together — tying them would need the cross-language artefact
+    /// D39 withdrew. **There is no such copy today**: none of the launcher
+    /// components consumes `mnema_provider::Refusal`, `Balance` or `RecordId`.
+    /// The crate is named because `ui/src/lib/ipc.ts:15` exports a `Refusal` of
+    /// its own — the *ask* refusal, `noCandidates` / `emptyCompletion`, read
+    /// through `launcher/state.ts:1` — which is a different type wearing the
+    /// same name. The mirror is booked to PR 7, which owns the settings
+    /// surfaces. So a variant added here still has to be carried across by a
+    /// person; what this buys is that the person is *told*, by a build that
+    /// stops, instead of finding out from a fallback sentence in front of a
+    /// user.
     ///
     /// `Balance::Unreadable` takes a [`mnema_provider::ProviderMessage`], whose
     /// `Text` variant is unconstructible outside `probe.rs` — `SanitisedText`
     /// has no public constructor. `Withheld` is a public unit variant and needs
     /// none, so the payload costs nothing here; `ProviderMessage` itself is
-    /// therefore not pinned by this test, and the window does not read its
-    /// `kind` (`ui/render.js` deliberately does not interpolate `raw`).
+    /// therefore not pinned by this test, and no window is to read its `kind`:
+    /// `raw` is the provider's own words and is not to be interpolated (PR 7).
     #[test]
     fn every_provider_discriminant_the_window_sees_has_its_camel_case_spelling_pinned() {
         use mnema_provider::{Balance, InputLimit, Price, ProviderMessage, RecordId, Refusal};
@@ -1471,8 +1480,8 @@ mod tests {
                 Balance::NotStated => json!({"kind": "notStated"}),
                 // `raw` is a `ProviderMessage`, itself tagged. Pinned here as
                 // the nested object the window receives rather than looked
-                // past: `ui/render.js` deliberately does not interpolate it,
-                // and this is what would show if it stopped being an object.
+                // past: nothing is to interpolate it (PR 7), and this is what
+                // would show if it stopped being an object.
                 Balance::Unreadable { raw } => json!({"kind": "unreadable", "raw": raw}),
                 Balance::EnvelopeNotUnderstood => json!({"kind": "envelopeNotUnderstood"}),
             }

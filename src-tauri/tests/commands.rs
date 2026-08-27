@@ -2300,10 +2300,13 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
     );
 }
 
-/// `JobSlot::drop` clears `AppState::running`, and `ui/main.js` re-enables
-/// Start inside the handler that receives `Ended` — so the window's own
-/// contract is that a second walk can start the instant the first says it
-/// is over. Before the slot was dropped ahead of the send, this raced: the
+/// `JobSlot::drop` clears `AppState::running`, and the contract the backend
+/// offers is that a second walk can start the instant the first says it is
+/// over — a window is free to re-enable Start inside the very handler that
+/// receives `Ended`. None does yet: the indexing surface is PR 7's, and this
+/// test holds the backend half so that surface can be written without
+/// measuring the race again. Before the slot was dropped ahead of the send,
+/// this raced: the
 /// slot was still held for however long remained of the spawned thread's
 /// body, and a second `start_walk_job` issued in that gap was refused with
 /// `a job is already running`, even though the first walk had just been
@@ -2596,12 +2599,13 @@ fn every_model_command_the_window_calls_is_registered() {
         ("key_present", json!({})),
         ("set_key", json!({ "key": "test-key-not-a-real-one" })),
         ("forget_key", json!({})),
-        // Both spellings of `existingVectors`, because the window sends both and
-        // a value this build does not recognise is rejected as `invalid args` —
-        // which is the assertion below. Two entries and not one: `keep` alone
-        // would leave the destructive spelling unpinned, and a rename of it
-        // reaches a person as a change that will not happen rather than as a
-        // build that stopped.
+        // Both spellings of `existingVectors`, because both are spellings a
+        // caller may send — there is no such caller yet, as `ExistingVectors`'s
+        // own doc comment says — and a value this build does not recognise is
+        // rejected as `invalid args`, which is the assertion below. Two entries
+        // and not one: `keep` alone would leave the destructive spelling
+        // unpinned, and a rename of it reaches a person as a change that will
+        // not happen rather than as a build that stopped.
         (
             "set_embedding_model",
             json!({ "model": "baai/bge-m3", "existingVectors": "keep" }),

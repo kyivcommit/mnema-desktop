@@ -60,12 +60,34 @@ export type AskAnswer =
 
 export type SearchAnswer = { hits: Hit[]; text: TextArmReport; content: ContentArmReport };
 
+export type TreeFile = { relativePath: string; documentId: string };
+export type TreeRoot = { rootId: number; absolutePath: string; name: string; files: TreeFile[] };
+export type RecentDoc = { documentId: string; rootId: number; relativePath: string; indexedAt: number };
+export type TreeListing = { roots: TreeRoot[]; recents: RecentDoc[] };
+
+export type Freshness =
+  | { kind: 'current' } | { kind: 'reindexed' } | { kind: 'fileChanged' }
+  | { kind: 'fileMissing' } | { kind: 'noPath' };
+export type SourceBlock = { blockId: number; kind: string; text: string; pageNo: number; readingOrder: number };
+export type WireSegment = { blockId: number; start: number; end: number; blockStart: number };
+export type SourceAround =
+  | { kind: 'excerpt'; blocks: SourceBlock[]; spans: WireSegment[]; documentId: string;
+      sectionTitle: string | null; hasMoreBefore: boolean; hasMoreAfter: boolean; freshness: Freshness }
+  | { kind: 'gone'; reason: { kind: 'noSuchChunk' } | { kind: 'idReused' } };
+
 // Typed invoke wrappers. A rejected command rejects the promise with the
 // backend `Error`'s Display string (error.rs:252-256) — callers branch on the
 // command, not on parsed error shape.
 export const ask = (query: string) => invoke<AskAnswer>('ask', { query });
 export const setSearchArms = (text: boolean, content: boolean) =>
   invoke<void>('set_search_arms', { text, content });
+export const listTree = () => invoke<TreeListing>('list_tree');
+export const sourceAround = (c: AskCitation | Hit, radius = 3) =>
+  invoke<SourceAround>('source_around', {
+    chunkId: c.chunkId, passageText: c.text,
+    citedDocumentId: c.documentId, citedOrd: c.ord, citedRootId: c.rootId,
+    citedRelativePath: c.relativePath, radius,
+  });
 
 // A NARROW read of `model_settings` (models.rs:590) — only what the arms row
 // needs: is a provider key present, and which arms are on. PR 7 replaces this

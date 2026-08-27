@@ -928,11 +928,12 @@ case_ "space: space_is_complete must not carve out chunks this space gave up on 
 # ── Task 8: the job in the shell, the command, and the third number ───────────
 #
 # ⚠️ **Nothing here can reach `ui/`.** `mutation-check.sh` runs `cargo test` and
-# nothing else, so the window's half of this task — the settings line, the
-# embedding job's own ending sentences, the two scopes those sentences keep
-# apart — is held by `ui/render.test.js` and by review. The same limit this file
-# already states twice; it is restated here because this task is the first one
-# whose load-bearing requirement is a sentence on a screen.
+# nothing else — the window's suite is Vitest (`cd ui && npm test`) — so the
+# window's half of this task (the settings line, the embedding job's own ending
+# sentences, the two scopes those sentences keep apart) is held by review alone:
+# it is not written yet, and PR 7 owns it. The same limit this file already
+# states twice; it is restated here because this task is the first one whose
+# load-bearing requirement is a sentence on a screen.
 
 # The inherited defect, reverted. `done == total` never fires for a run that
 # ends with refusals — `mnema_embed::EmbedProgress`'s own doc says so — so the
@@ -1082,15 +1083,16 @@ case_ "models: a model change must not be possible while a pass is writing (T8)"
 #     arriving an IPC round trip late may land on a line a newer run has taken.
 #
 # Every one of them is in `ui/`, and `mutation-check.sh` runs `cargo test` and
-# nothing else. A case naming a `node --test` test does not merely prove
-# nothing: it fails the baseline pass, and a non-zero `baseline_bad` exits 1 for
-# the WHOLE FILE before pass two starts — so one such case here would take every
-# case above it down with it. That is the silence this script's own header
+# nothing else. A case naming a test in the window's own suite does not merely
+# prove nothing: it fails the baseline pass, and a non-zero `baseline_bad` exits
+# 1 for the WHOLE FILE before pass two starts — so one such case here would take
+# every case above it down with it. That is the silence this script's own header
 # describes, and it is not worth re-enacting to look thorough.
 #
 # **What holds them instead**, stated as a guard rather than as an apology:
-# `ui/render.test.js`, and review. Each of that task's new assertions was seen
-# red from the thing it names, by reverting that thing and running the whole
+# review, and nothing else — the window half they describe went with the shell
+# PR 1 deleted, and PR 7 owes it again. Each of that task's new assertions was
+# seen red from the thing it names, by reverting that thing and running the whole
 # suite — the reverts are written out in this cycle's task-9 report, in the same
 # shape as the cases above, and would be cases if this harness could run them.
 # Two are worth naming here, because they are what a reviewer would otherwise

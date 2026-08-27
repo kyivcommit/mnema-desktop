@@ -6,6 +6,7 @@
   import { checkQuery, stateFromAnswer, providerReady, type LauncherState } from './state';
   import Arms from './Arms.svelte';
   import SearchLine from './SearchLine.svelte';
+  import Cards from './Cards.svelte';
 
   let query = $state('');
   let echo = $state('');
@@ -46,7 +47,10 @@
       // query. A draft typed while the ask was in flight is kept, not wiped
       // (Codex #3).
       if (query === raw) query = '';
-      echo = check.query;  // §7: query echoes as a chat bubble
+      // §7: the query echoes as a chat bubble. The bubble itself is drawn by
+      // `Answer` inside the centre card (Task 8b) — the launcher used to draw a
+      // second one of its own here, and in state B both were on screen at once.
+      echo = check.query;
     } catch (e) {
       console.error('ask failed', e); // query stays in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
@@ -54,7 +58,8 @@
   }
 
   // Hide, never close: a hidden webview keeps state, so `query` and results
-  // survive dismissal (§7.3).
+  // survive dismissal (§6, `…interface-design.md:186` — §7.3 is the dismissal
+  // gestures, and does not speak about state).
   function hide() { appWindow.hide(); }
   function onKeydown(event: KeyboardEvent) { if (event.key === 'Escape') hide(); }
   function onBlur() { if (!pinned) hide(); }
@@ -66,18 +71,17 @@
   <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
   <Arms bind:textOn bind:contentOn {provider} />
 
-  {#if echo}
-    <div class="query-echo" data-testid="query-echo">{echo}</div>
-  {/if}
+  <Cards state={launcherState} query={echo} />
 
-  {#if launcherState.kind === 'generated'}
-    <div data-testid="answer-stub">{launcherState.answer.answer}</div>
-  {:else if launcherState.kind === 'citationsOnly'}
-    <div data-testid="citations-stub">{launcherState.answer.citations.length}</div>
-  {/if}
-
+  <!-- U1: a stable hook for `i18n/wiring.test.ts`, which reads this button's
+       aria-label to prove the locale switch reached the DOM. It used to find the
+       button as "the first element with any aria-label", which was true only
+       while no labelled card rendered — and the cards are now labelled in five
+       of six states. The accessible name cannot be the selector when it is the
+       thing under test. -->
   <button
     class="pin"
+    data-testid="pin"
     class:active={pinned}
     aria-pressed={pinned}
     aria-label={pinLabel}

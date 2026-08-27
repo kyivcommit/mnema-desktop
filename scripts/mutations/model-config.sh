@@ -40,16 +40,17 @@
 #   rather than a summary or an empty state — and that is what the
 #   `model_settings` section below breaks, one way per case.
 #
-# - **The window's own lists of these discriminants** (`ui/render.test.js`,
-#   `REFUSALS` / `BALANCES` / `RECORD_IDS`) are a hand-made copy of the Rust
-#   ones. Nothing ties the two languages together, and tying them would need
-#   the cross-language artefact D39 withdrew. `mutation-check.sh` runs
-#   `cargo test` only, so a case cannot reach `node --test ui/render.test.js`
-#   either. The Rust pin below is what stops the build when a variant is added;
-#   a person still carries it across. The same sentence disposes of Task 9's
-#   fifteenth — "the window does not claim things about the provider it cannot
-#   know", whose witness is `doesNotMatch(text, /no longer lists/)` in
-#   `ui/render.test.js` and is therefore out of this harness's reach too.
+# - **The window's own lists of these discriminants** — `REFUSALS` /
+#   `BALANCES` / `RECORD_IDS` — were a hand-made copy of the Rust ones.
+#   Nothing tied the two languages together, and tying them would need the
+#   cross-language artefact D39 withdrew. The copy does not exist today: PR 1
+#   deleted the shell that held it, and PR 7 owns the settings surfaces that
+#   need it again. `mutation-check.sh` runs `cargo test` only, so a case could
+#   not reach the window's suite either way. The Rust pin below is what stops
+#   the build when a variant is added; a person still carries it across. The
+#   same sentence disposes of Task 9's fifteenth — "the window does not claim
+#   things about the provider it cannot know" — whose witness went with the
+#   same deletion and is therefore out of this harness's reach too.
 #
 # - **`Error::Transport` must not carry the request.** Measured rather than
 #   asserted (review round 1, F2): the neighbouring clause, "`to_string()`, never
@@ -501,13 +502,14 @@ case_ "an index nobody opened is classified as a read that failed" \
 # ─────────────────────────────────────────────────────────────────────────────
 # The spellings the window reads.
 #
-# `Refusal`, `Balance` and `RecordId` cross the IPC and `ui/render.js` looks each
-# one up by its `kind` in a table with a fallback sentence, so a spelling that
+# `Refusal`, `Balance` and `RecordId` cross the IPC and a window looks each one
+# up by its `kind` in a table with a fallback sentence, so a spelling that
 # drifts renders as "this build did not recognise the reason" and reddens
-# nothing. The window interpolates the payload fields as well — `inputTooSmall`
-# reads `r.limit` and `r.floor`, `known` reads `record.id.id` — which is why the
+# nothing. That window interpolates the payload fields as well — `inputTooSmall`
+# reads `limit` and `floor`, `known` reads the record's `id` — which is why the
 # pin compares the whole serialised value and why the last case below is a field
-# rather than a variant.
+# rather than a variant. The table itself is PR 7's; the pin holds the list it
+# will be written from.
 #
 # The pin's other guarantee — that a variant added one crate over stops the build
 # — is not a case here, for the reason the header gives: a mutation that does not
@@ -549,7 +551,7 @@ pub enum Balance {' \
 
 # Not the spelling but the shape. Without `tag = "kind"` the discriminant stops
 # being a field the window can read at all and becomes an outer object key, and
-# every `?.kind` lookup in `ui/render.js` quietly answers `undefined`.
+# every `?.kind` lookup on the far side quietly answers `undefined`.
 case_ "Refusal stops carrying its discriminant in a kind field" \
   crates/mnema-provider/src/catalogue.rs \
   's~#\[serde\(\n    rename_all = "camelCase",\n    rename_all_fields = "camelCase",\n    tag = "kind"\n\)\]\npub enum Refusal \{~#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]\npub enum Refusal {~' \
@@ -608,12 +610,13 @@ case_ "the shipped binary gets the credential store that keeps nothing" \
 #
 # ⚠️ The window's half of these rules is out of this harness's reach, for the
 # reason the header already gives about `REFUSALS` / `BALANCES` / `RECORD_IDS`:
-# `mutation-check.sh` runs `cargo test` and nothing else, so
-# `ui/render.test.js`'s "a stated zero is never a promise that the model is
+# `mutation-check.sh` runs `cargo test` and nothing else. And they are unheld as
+# well as unreachable: "a stated zero is never a promise that the model is
 # free", "a number that cannot be a price is never rendered as one" and
 # "nothing stated about the input limit reads differently from something
-# unreadable" are held by that file alone. What the cases below hold is the
-# Rust side: the facts reaching the window at all, and their spellings.
+# unreadable" were assertions of the shell PR 1 deleted, and PR 7 owes them
+# again. What the cases below hold is the Rust side: the facts reaching the
+# window at all, and their spellings.
 
 # The key, and the request that used to leave the machine for it. Pressing
 # "Check and save" with the box empty handed the empty string to `check_key`,
@@ -687,7 +690,7 @@ case_ "the input limit reaches the window only for the role that refuses over it
 
 # The spelling half, for the two unions the acceptance run added — the same case
 # `Refusal`, `RecordId` and `Balance` already have above, and needed for the
-# same reason: `ui/render.js` looks the `kind` up in a table and falls back to a
+# same reason: a window looks the `kind` up in a table and falls back to a
 # sentence about not knowing, so a renamed variant reaches a person as that
 # sentence and reddens nothing on its own.
 case_ "Price's variants stop being spelled the way the window reads them" \
@@ -738,13 +741,13 @@ case_ "the input limit is dropped for the one role whose refusal repeats it" \
 # ─────────────────────────────────────────────────────────────────────────────
 # The whole-branch review's own findings.
 #
-# ⚠️ Only one half of I2 can have a case at all. "Every sentence in the model
-# configuration block comes from `render.js`" is checked by a test that reads
-# `ui/main.js` as text (`every sentence in the model configuration block comes
-# from render.js`, `ui/render.test.js`), and `mutation-check.sh` runs
-# `cargo test` and nothing else — the same reach this file's header already
-# names for `REFUSALS` / `BALANCES` / `RECORD_IDS`. What is below is I1, which
-# is Rust on both of its halves.
+# ⚠️ Only one half of I2 can have a case at all. Its window half — that every
+# sentence in the model configuration block comes from one place, checked by a
+# test that read the window's own source as text — went with the shell PR 1
+# deleted, and `mutation-check.sh` runs `cargo test` and nothing else anyway,
+# the same reach this file's header already names for `REFUSALS` / `BALANCES` /
+# `RECORD_IDS`. PR 7 owes that half. What is below is I1, which is Rust on both
+# of its halves.
 
 # The button that reported an event it had not caused. `mnema_secrets::forget`
 # is idempotent by design, so the deletion's own answer is the only place the

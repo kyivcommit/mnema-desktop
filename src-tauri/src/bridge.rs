@@ -134,7 +134,8 @@ impl From<TextArm> for TextArmReport {
 ///
 /// [`Missing`]'s two values become their own variants rather than staying
 /// nested under one `NotConfigured`: each is fixed in a different place, and
-/// `render.js` names a sentence per `kind`, not per nested field.
+/// the window's mirror (`ui/src/lib/ipc.ts`, `ContentArmReport`) is a union
+/// with one member per `kind`, not one member with a nested field.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ContentArmReport {
@@ -745,8 +746,9 @@ mod tests {
 
     /// Every discriminant the window sees has its camel-case spelling pinned
     /// — the same guard `models.rs` carries, for the same reason:
-    /// `render.js` matches on these strings and a rename here becomes a
-    /// missing table key there.
+    /// `ui/src/lib/ipc.ts` spells these strings out by hand in
+    /// `TextArmReport` / `ContentArmReport`, and a rename here leaves that
+    /// union describing a `kind` the backend no longer sends.
     #[test]
     fn every_search_discriminant_the_window_sees_has_its_camel_case_spelling_pinned() {
         let spellings: Vec<String> = [
