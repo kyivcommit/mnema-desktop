@@ -79,9 +79,24 @@
       {#each ranks as { passage, rank, label } (rank)}
         <li>
           <button type="button" data-testid={`rank-${rank}`} onclick={() => onSelect(passage)}>
-            <!-- `passage-label`, NOT `rank-label`: the rank testids are queried
-                 as a namespace (`getAllByTestId(/^rank-/)`) and a second id in
-                 it would be counted as a row. -->
+            <!-- 🔴 Owner review on PR #24, P1. This row used to render the label
+                 ALONE, so state E — the state whose whole content is the
+                 passages — showed a list of file paths and discarded the only
+                 answer content it has. §7 row E asks for the passages
+                 themselves under neutral ranks. Three parts, in reading order:
+                 which passage this is, what it says, where it came from.
+
+                 The rank is TEXT here, not only a testid: a testid is not on
+                 screen, and the suite that shipped the defect asserted the
+                 `rank-` ids and their count while the ordinal itself was
+                 invisible.
+
+                 `passage-rank`/`passage-text`/`passage-label`, NOT `rank-*`:
+                 the rank testids are queried as a namespace
+                 (`getAllByTestId(/^rank-/)`) and a second id in it would be
+                 counted as a row. -->
+            <span data-testid="passage-rank">{rank}</span>
+            <span data-testid="passage-text">{passage.text}</span>
             <span data-testid="passage-label">{label}</span>
           </button>
         </li>

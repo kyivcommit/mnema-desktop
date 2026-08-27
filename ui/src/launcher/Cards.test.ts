@@ -532,13 +532,64 @@ test('state E ranks the passages as neutral ordinals, with no answer prose and n
   expect(rows.map((r) => r.getAttribute('data-testid'))).toEqual(['rank-1', 'rank-2']);
   // Labelled by the shared Decision 1 rule (`i18n/label.ts:18`), which already
   // takes a `Hit` — the second row exercises its path-plus-locator branch.
-  expect(rows.map((r) => r.textContent)).toEqual(['notes/a.md', 'notes/b.md · p. 2']);
+  // Scoped to the label span since P1: the row also holds the rank and the
+  // passage text now, and this assertion is about the LABEL rule. What the
+  // whole row shows is `state E shows the passages themselves` above — the
+  // claim this one could not make, which is how the paths-only card shipped.
+  expect(rows.map((r) => r.querySelector('[data-testid="passage-label"]')!.textContent))
+    .toEqual(['notes/a.md', 'notes/b.md · p. 2']);
   // No answer prose and no anchor buttons: state E has neither to show.
   expect(screen.queryByTestId('answer-body')).toBeNull();
   expect(screen.queryAllByTestId(/^preview-/)).toHaveLength(0);
   // Review I1's other side: the "nothing matched" sentence belongs to the empty
   // branch alone, and a card holding both would contradict itself here too.
   expect(screen.queryByTestId('citations-empty')).toBeNull();
+});
+
+// 🔴 Owner review on PR #24, P1 — and the reason it is written against the
+// card's WHOLE VISIBLE TEXT rather than against ids. The suite this branch
+// shipped with asserted the `rank-` ids, their count and their labels, and every
+// one of those assertions is satisfied by a card that shows nothing but file
+// paths: `notes/a.md`, `notes/b.md · p. 2`. §7 row E says «банер + самі уривки
+// (нейтральні ранги)» — the passages themselves — so state E's only answer
+// content was missing and no test could see it. The claim here is what a person
+// reads, top to bottom, in order: the banner, then each passage's rank, its
+// text, and where it came from.
+const rowText = (el: HTMLElement) => (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+
+test('state E shows the passages themselves, not a list of paths', () => {
+  setLocale('en'); // seed, do not inherit
+  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+
+  expect(screen.getByTestId('citations-banner').textContent)
+    .toBe('Generation is unavailable. The search found 2 passages.');
+  // The WHOLE of each row, in order — not a `toContain`, and not a count. A
+  // card that dropped the passage text, reordered the parts or invented a
+  // paragraph number all redden here; the shipped card reads `notes/a.md`.
+  expect(screen.getAllByTestId(/^rank-/).map(rowText)).toEqual([
+    '1 A bare passage. notes/a.md',
+    '2 Another file entirely. notes/b.md · p. 2',
+  ]);
+});
+
+// The same content, addressed per row, so a failure says WHICH of the three
+// parts moved and which row it moved in — the whole-card assertion above proves
+// the person sees them, this one proves each belongs to its own passage. The
+// rank is read from the row's own element, not from the testid: a testid is not
+// on screen, and the finding was precisely that.
+test('each state E row carries its own rank, passage text and label', () => {
+  setLocale('en'); // seed, do not inherit
+  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+
+  const part = (row: HTMLElement, id: string) =>
+    row.querySelector(`[data-testid="${id}"]`)!.textContent;
+  const rows = screen.getAllByTestId(/^rank-/);
+
+  expect(rows.map((r) => part(r, 'passage-rank'))).toEqual(['1', '2']);
+  expect(rows.map((r) => part(r, 'passage-text')))
+    .toEqual(['A bare passage.', 'Another file entirely.']);
+  expect(rows.map((r) => part(r, 'passage-label')))
+    .toEqual(['notes/a.md', 'notes/b.md · p. 2']);
 });
 
 // 🔴 Ruling AK, and review I1. Zero hits is an ANSWER — the search ran and
@@ -677,15 +728,22 @@ test('state E passage labels follow a live language switch', async () => {
   // The locator is the one that carries a translated part: `formatLocator`
   // renders `p. 2` in English and `с. 2` in Ukrainian, so this row moves and
   // `rank-1`'s bare path would not.
-  expect(screen.getByTestId('rank-2').textContent).toBe('notes/b.md · p. 2');
+  //
+  // Scoped to the label span, which is the smallest element this guard ALONE
+  // decides — the rule this file states above. Since P1 the row also holds the
+  // rank and the passage text, neither of which the locale touches, and a
+  // whole-row assertion would make the failure text read as though they had
+  // moved too.
+  const label = () => screen.getByTestId('rank-2').querySelector('[data-testid="passage-label"]')!.textContent;
+  expect(label()).toBe('notes/b.md · p. 2');
 
   setLocale('uk');
   await tick();
-  expect(screen.getByTestId('rank-2').textContent).toBe('notes/b.md · с. 2');
+  expect(label()).toBe('notes/b.md · с. 2');
 
   setLocale('en'); // the switch back is part of the claim, not the cleanup
   await tick();
-  expect(screen.getByTestId('rank-2').textContent).toBe('notes/b.md · p. 2');
+  expect(label()).toBe('notes/b.md · p. 2');
 });
 
 test('the state E banner follows a live language switch', async () => {
