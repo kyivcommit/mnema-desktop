@@ -45,7 +45,14 @@ function mockAsks(...replies: unknown[]) {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
-    if (cmd === 'ask') return Promise.resolve(replies[Math.min(next++, replies.length - 1)]);
+    // Loud past the end, never a silent repeat (M2). `Cards.test.ts` takes the
+    // same policy for the same reason: a test that asks once more than its
+    // author intended would get the previous answer back and attribute whatever
+    // it then asserts to the wrong cause.
+    if (cmd === 'ask') {
+      if (next >= replies.length) throw new Error(`mockAsks: no reply for ask #${next + 1}`);
+      return Promise.resolve(replies[next++]);
+    }
     return Promise.resolve();
   });
 }
@@ -64,16 +71,23 @@ function mockSettings(settings: unknown) {
   });
 }
 
-// The two product-level sequences below share this opening: one answered
-// question, a folder opened by hand, and a citation clicked — the state a person
-// is actually in when they ask the next thing.
+// The product-level sequences below share this opening: one answered question
+// and a folder opened by hand — the state a person is actually in when they type
+// the next thing.
+//
+// 🔴 M1: `expect(listTreeCalls()).toHaveLength(1)` used to live here and does
+// not any more. It is a CLAIM belonging to the two "does not refetch" tests, not
+// a precondition of the four that share this opening — and while it sat here, a
+// keyed-tree mutant killed both "does not shut a folder" tests INSIDE the helper,
+// on a count, before either reached its own assertion. That is I-A's shape one
+// level up, inside the helper built to fix I-A. What stays is a real
+// precondition: the folder actually opened.
 async function askAndOpenAFolder() {
   render(Launcher);
   await submit('first question');
   await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('first question'));
   await fireEvent.click(await screen.findByTestId('tree-folder-archive'));
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
-  expect(listTreeCalls()).toHaveLength(1);
 }
 
 // Default so the retained PR 2 tests (which just render) never hit an unmocked
@@ -200,6 +214,7 @@ test('a generated answer renders the centre card, not a refusal', async () => {
 test('a second question does not refetch the tree', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
+  expect(listTreeCalls()).toHaveLength(1); // the precondition of the claim below, and only of it
 
   await submit('second question');
   await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('second question'));
@@ -227,6 +242,7 @@ test('a second question does not shut a hand-opened folder', async () => {
 test('a refusal does not refetch the tree', async () => {
   mockAsks(generated, refusedNoCandidates);
   await askAndOpenAFolder();
+  expect(listTreeCalls()).toHaveLength(1);
 
   await submit('nothing indexed');
   await screen.findByText(/Nothing was found/i);
@@ -252,6 +268,57 @@ test('a second submit while in flight is ignored — one ask at a time', async (
   await submit('first');
   await submit('second');
   expect(askCalls()).toHaveLength(1); // the second Enter did not start a second ask
+});
+
+// 🔴 M3: the whole tree gate rests on ONE negative — every other state keeps the
+// card — and until now that negative lived only in `Cards.test.ts`, driven by
+// hand. C1 was invisible at exactly that level for 143 green tests. This puts
+// the negative where the positives already are: the first screen a person ever
+// sees, through the real component tree.
+test('a freshly mounted launcher shows no cards at all (state A)', () => {
+  render(Launcher);
+  expect(screen.queryByTestId('card-tree')).toBeNull();
+  expect(screen.queryByTestId('card-centre')).toBeNull();
+  expect(screen.queryByTestId('card-source')).toBeNull();
+});
+
+// --- ruling I-C: `error` is taken whole, and both halves are defended --------
+//
+// The gate keeps the tree for `error`, and `error` carries three reasons. The
+// `Cards`-level test pins `reason: 'blank'`; these pin the transition the ruling
+// was actually argued from — a person with three cards on screen mistyping an
+// Enter — which is the half that makes "do not narrow the gate by reason"
+// falsifiable. Anchored on the guard message, which only a completed validation
+// writes (`SearchLine.svelte:46`).
+test('a blank Enter from state B keeps the tree', async () => {
+  mockBackend(generated);
+  await askAndOpenAFolder();
+
+  await submit('   ');
+  await screen.findByRole('alert');
+
+  expect(screen.getByTestId('card-tree')).toBeTruthy();
+});
+
+test('a blank Enter from state B does not shut a hand-opened folder', async () => {
+  mockBackend(generated);
+  await askAndOpenAFolder();
+
+  await submit('   ');
+  await screen.findByRole('alert');
+
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+});
+
+test('a blank Enter from state B drops the answer and source cards', async () => {
+  mockBackend(generated);
+  await askAndOpenAFolder();
+
+  await submit('   ');
+  await screen.findByRole('alert');
+
+  expect(screen.queryByTestId('card-centre')).toBeNull();
+  expect(screen.queryByTestId('card-source')).toBeNull();
 });
 
 test('the launcher renders a search input', () => {

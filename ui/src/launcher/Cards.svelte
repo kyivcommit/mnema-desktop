@@ -40,6 +40,24 @@
   // the moment a person retries, so losing their folders on the failure they are
   // retrying would be the same defect one gate over. `citationsOnly` is Task 9's
   // and this condition already covers it — a bonus, not a decision made here.
+  //
+  // 🔴 Ruling I-C — the known cost of taking `error` whole, stated rather than
+  // discovered. `error` carries three reasons (`state.ts:25`) and only
+  // `askFailed` is an answer state: `blank` and `tooLong` come from `checkQuery`
+  // BEFORE any ask. So one Enter on an empty line, as the first thing a person
+  // does, draws this card and fires `list_tree` — and `idle` is assigned in
+  // exactly one place, the initial value at `Launcher.svelte:14`, with no path
+  // back, while §7.3 keeps state across a hide. **State A's bareness therefore
+  // ends on a stray Enter and does not come back that session.** That is the
+  // price, and it is accepted, not overlooked.
+  //
+  // Narrowing to `reason === 'askFailed'` was considered and rejected: a blank
+  // query typed from state B is ALSO `error: 'blank'`, so a gate keyed on the
+  // reason would tear the tree down when a person with three cards on screen
+  // mistypes an Enter — C1's exact defect, reintroduced through the gate that
+  // was widened to fix it. A "has ever shown cards" flag buys the bareness back
+  // at the price of another reset to get wrong, and this task has already spent
+  // two rounds on one. One condition, no state, cost declared.
   const showTree = $derived(launcherState.kind !== 'idle');
 
   // What `Selection` reports up, tagged with the state it belongs to. Read by
