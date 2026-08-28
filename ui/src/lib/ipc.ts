@@ -110,8 +110,18 @@ export type KeyState =
 
 export type UnreadableCause = 'notOpen' | 'readFailed';
 
+// `chatModel` widens the same structural subset one field: Task 5 needs the
+// index's own answer for "which chat model is chosen" to show a selection
+// that follows the backend rather than the click (§10 / the ordering hazard).
+// Optional, not required: every fixture in this module that predates Task 5
+// exercises key/index-read/arms behaviour and never renders a chat selection,
+// so making the field required would force an unrelated edit onto every one
+// of them for a value they do not use — `?? null` at the one call site that
+// reads it treats "absent" and "stated null" alike, which is the same
+// collapse this structural subset already makes for the fields it omits
+// entirely.
 export type IndexSettings =
-  | { kind: 'read'; embeddingModel: string | null; searchTextArm: boolean; searchContentArm: boolean }
+  | { kind: 'read'; embeddingModel: string | null; chatModel?: string | null; searchTextArm: boolean; searchContentArm: boolean }
   | { kind: 'unreadable'; cause: UnreadableCause; reason: string };
 
 // `Mac` | `Windows` | `Linux` (models.rs:625-629), camelCase per the wire
@@ -142,3 +152,74 @@ export type KeyRemoval = { kind: 'removed' } | { kind: 'nothingToRemove' };
 
 export const setKey = (key: string) => invoke<KeyStatus>('set_key', { key });
 export const forgetKey = () => invoke<KeyRemoval>('forget_key');
+
+// The provider's model catalogue (`crates/mnema-provider/src/catalogue.rs`),
+// mirrored field-by-field — unlike `IndexSettings.Read`, this type has no
+// narrower subset to fall back on: `refusal` and `unreadableRecords` are the
+// whole reason Task 5 exists, not fields it could leave out.
+//
+// Named `ModelRole`/`ModelRefusal` rather than `Role`/`Refusal`: this module
+// already exports a `Refusal` for `AskCitation`'s refused-answer reason
+// (`{kind:'noCandidates'}|{kind:'emptyCompletion'}`, `mnema_index`'s type) —
+// a different enum in a different crate that happens to share a name in
+// Rust, where the two never collide because they live in separate modules.
+// Reusing the bare name here would either shadow that export or silently
+// widen its union, and either failure mode is exactly the "same word, two
+// meanings" class this project has paid for before.
+export type ModelRole = 'embedding' | 'rerank' | 'chat';
+
+export type InputLimit =
+  | { kind: 'notStated' }
+  | { kind: 'known'; tokens: number }
+  | { kind: 'notUnderstood'; raw: string };
+
+export type Price =
+  | { kind: 'notStated' }
+  | { kind: 'known'; amount: number }
+  | { kind: 'notAPrice'; raw: string }
+  | { kind: 'unreadable'; raw: string };
+
+// `catalogue.rs`'s `Refusal`: five variants; one of them (`limitNotUnderstood`)
+// carries the provider's own `raw` text, and `Models.svelte`'s
+// `refusalReason` does not render it — see that function for why the
+// sentence is fixed catalogue text rather than provider text.
+export type ModelRefusal =
+  | { kind: 'inputTooSmall'; limit: number; floor: number }
+  | { kind: 'noStatedLimit' }
+  | { kind: 'limitNotUnderstood'; raw: string }
+  | { kind: 'noStatedOutputModalities' }
+  | { kind: 'noTextOutput' };
+
+export type ModelEntry = {
+  id: string;
+  name: string;
+  inputLimit: InputLimit;
+  price: Price;
+  refusal: ModelRefusal | null;
+};
+
+// `catalogue.rs:293-304`: three states on purpose, not folded together — see
+// `Models.svelte`'s `unreadableRecordLabel` for why each gets its own words.
+export type RecordId =
+  | { kind: 'absent' }
+  | { kind: 'notAString'; raw: string }
+  | { kind: 'known'; id: string };
+
+export type UnreadableRecord = { id: RecordId; index: number };
+
+export type Catalogue = {
+  entries: ModelEntry[];
+  unreadable: number;
+  unreadableRecords: UnreadableRecord[];
+};
+
+// Public — no key (models.rs:178-179) — which is what lets the choice be
+// shown before an account exists. `role` is validated on the Rust side
+// (`Error::UnknownRole`); this module only ever passes the two roles the
+// window offers (D123/D124 keep rerank and verify off screen).
+export const providerModels = (role: ModelRole) => invoke<Catalogue>('provider_models', { role });
+
+// `set_embedding_model` is deliberately absent from this module's exports —
+// it belongs to Task 6, retires vector spaces and takes the job slot; nothing
+// here may call it.
+export const setChatModel = (model: string) => invoke<void>('set_chat_model', { model });

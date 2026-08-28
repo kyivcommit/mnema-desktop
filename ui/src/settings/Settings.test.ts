@@ -8,7 +8,10 @@ import { setLocale } from '../i18n';
 // hit the real, un-mockable `invoke` (there is no global setupFiles mock; see
 // `i18n/wiring.test.ts:14-15`) and fail with an unhandled rejection. A fixed
 // Absent/Read/linux fixture is enough: nothing here exercises Models' own
-// behaviour, that lives in Models.test.ts.
+// behaviour, that lives in Models.test.ts. Task 5 adds `providerModels` on
+// the same mount, for the same reason: an empty-but-well-formed catalogue,
+// so the tabs render without pulling any of Models' own catalogue behaviour
+// into this file.
 vi.mock('../lib/ipc', () => ({
   modelSettings: () =>
     Promise.resolve({
@@ -18,6 +21,8 @@ vi.mock('../lib/ipc', () => ({
     }),
   setKey: vi.fn(),
   forgetKey: vi.fn(),
+  providerModels: () => Promise.resolve({ entries: [], unreadable: 0, unreadableRecords: [] }),
+  setChatModel: vi.fn(),
 }));
 
 afterEach(() => {
@@ -114,10 +119,18 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // pre-fetch flash. Measured, not guessed (`run-it-before-you-believe-it`):
   // the exact string below is what `Models` renders for
   // Absent/Read/linux, printed by an actual render rather than assumed.
+  //
+  // Task 5 adds the two model tabs and the status dot to the same panel —
+  // both fetch on mount too, so the string below was re-measured rather than
+  // hand-edited; this file's own mock (above) answers `provider_models` with
+  // an empty-but-well-formed catalogue, which is why the tab list itself has
+  // nothing in it here.
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy());
   expect(panel()?.textContent).toBe(
     'Models Provider OpenRouter   An OpenRouter key lets this application reach the models.'
-    + ' Create one in your OpenRouter account and paste it here. Key  Save    ',
+    + ' Create one in your OpenRouter account and paste it here. Key  Save    '
+    + ' Embedding Chat   The provider does not currently list any models for this role.'
+    + ' Not connected yet — add a key and choose an embedding model to enable content search.',
   );
 
   await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));

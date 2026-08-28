@@ -2,24 +2,43 @@ import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/sv
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Models from './Models.svelte';
 import { tick } from 'svelte';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setLocale } from '../i18n';
-import type { ModelSettings } from '../lib/ipc';
+import type {
+  ModelSettings, Catalogue, ModelEntry, ModelRefusal, RecordId, UnreadableRecord, ModelRole,
+} from '../lib/ipc';
 
 // Mocked in the shape Arms.test.ts:5-6 already uses — the typed wrappers, not
 // the raw `invoke`.
 const modelSettings = vi.fn();
 const setKey = vi.fn();
 const forgetKey = vi.fn();
+const providerModels = vi.fn();
+const setChatModel = vi.fn();
 vi.mock('../lib/ipc', () => ({
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   setKey: (...a: unknown[]) => setKey(...a),
   forgetKey: (...a: unknown[]) => forgetKey(...a),
+  providerModels: (...a: unknown[]) => providerModels(...a),
+  setChatModel: (...a: unknown[]) => setChatModel(...a),
 }));
+
+// An empty-but-well-formed catalogue — every test that does not care about
+// the model tabs gets one for free, so Task 4's fixtures do not have to learn
+// about Task 5's fetch just to keep mounting.
+function emptyCatalogue(): Catalogue {
+  return { entries: [], unreadable: 0, unreadableRecords: [] };
+}
 
 beforeEach(() => {
   modelSettings.mockReset();
   setKey.mockReset();
   forgetKey.mockReset();
+  providerModels.mockReset();
+  setChatModel.mockReset();
+  providerModels.mockResolvedValue(emptyCatalogue());
 });
 afterEach(() => {
   cleanup();
@@ -592,4 +611,560 @@ test('a rejected Save keeps no trace of the entered key either', async () => {
   await waitFor(() => expect(screen.getByTestId('model-action-error')).toBeTruthy());
   expect(container.innerHTML).not.toContain(LEAKY_KEY);
   expect((screen.getByLabelText('Key') as HTMLInputElement).value).toBe('');
+});
+
+// ---------------------------------------------------------------------------
+// Task 5 — the two model tabs, their catalogues, and the green-dot rule.
+//
+// Fixture question, answered first, per the three named traps: (1) a
+// catalogue with `unreadable: 0` — every fixture below that never sets it
+// exercises this, so a component that always shows the sentence fails
+// "unreadable: 0 renders no such sentence"; (2) a catalogue whose entries are
+// all selectable — every `entry(...)` below defaults `refusal` to `null`, so
+// the refusal-rendering path is only reached by fixtures that deliberately
+// set it (the discriminant tests further down); (3) the same model id in
+// both roles' catalogues — built once, explicitly, right after the tab
+// tests, because a per-role selection written into one shared variable is
+// invisible to every other fixture in this file.
+// ---------------------------------------------------------------------------
+
+function entry(id: string, overrides: Partial<ModelEntry> = {}): ModelEntry {
+  return {
+    id, name: id,
+    inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' },
+    refusal: null,
+    ...overrides,
+  };
+}
+
+function catalogueOf(entries: ModelEntry[], unreadable = 0, unreadableRecords: UnreadableRecord[] = []): Catalogue {
+  return { entries, unreadable, unreadableRecords };
+}
+
+function mockCatalogues(byRole: Partial<Record<ModelRole, Catalogue>>) {
+  providerModels.mockImplementation((role: ModelRole) => Promise.resolve(byRole[role] ?? emptyCatalogue()));
+}
+
+test('two named tabs; switching changes the model list and the tabs own pressed state, both asserted positively', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([entry('emb-1', { name: 'Embedding One' })]),
+    chat: catalogueOf([entry('chat-1', { name: 'Chat One' })]),
+  });
+  await renderWith(settings());
+
+  expect(screen.getByTestId('model-tab-embedding').textContent).toBe('Embedding');
+  expect(screen.getByTestId('model-tab-chat').textContent).toBe('Chat');
+  await waitFor(() => expect(screen.getByTestId('model-entry-emb-1')).toBeTruthy());
+  expect(screen.getByTestId('model-tab-embedding').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('model-tab-chat').getAttribute('aria-pressed')).toBe('false');
+  expect(screen.queryByTestId('model-entry-chat-1')).toBeNull();
+
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+
+  await waitFor(() => expect(screen.getByTestId('model-entry-chat-1')).toBeTruthy());
+  expect(screen.getByTestId('model-tab-chat').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('model-tab-embedding').getAttribute('aria-pressed')).toBe('false');
+  expect(screen.queryByTestId('model-entry-emb-1')).toBeNull();
+});
+
+test('the same model id in both catalogues does not leak a selection across tabs', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([entry('shared-model', { name: 'Shared' })]),
+    chat: catalogueOf([entry('shared-model', { name: 'Shared' }), entry('other-model', { name: 'Other' })]),
+  });
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: {
+      kind: 'read', embeddingModel: 'shared-model', chatModel: 'other-model',
+      searchTextArm: true, searchContentArm: true,
+    },
+  }));
+
+  await waitFor(() => expect(screen.getByTestId('model-entry-shared-model').getAttribute('aria-current')).toBe('true'));
+
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  await waitFor(() => expect(screen.getByTestId('model-entry-other-model')).toBeTruthy());
+  // A per-role selection kept in one shared variable would mark
+  // `shared-model` chosen on the chat tab too, because it is the same string
+  // the embedding tab just marked current. It must not.
+  expect(screen.getByTestId('model-entry-shared-model').getAttribute('aria-pressed')).toBe('false');
+  expect(screen.getByTestId('model-entry-other-model').getAttribute('aria-pressed')).toBe('true');
+});
+
+// ---------------------------------------------------------------------------
+// The green dot: provider ∧ key ∧ a chosen embedding model, fail-safe on
+// each missing in turn — three separate fixtures, because a fixture that
+// drops two at once cannot tell which one the code actually reads.
+// ---------------------------------------------------------------------------
+
+test('the status dot is ready when provider, key and a chosen embedding model are all set', async () => {
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+  }));
+  const dot = screen.getByTestId('model-status-dot');
+  expect(dot.getAttribute('data-active')).toBe('true');
+  expect(dot.textContent).toBe('Connected — OpenRouter, a key and a chosen embedding model are all set.');
+});
+
+test('the status dot is not ready when the index cannot be read', async () => {
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: { kind: 'unreadable', cause: 'notOpen', reason: 'r' },
+  }));
+  const dot = screen.getByTestId('model-status-dot');
+  expect(dot.getAttribute('data-active')).toBe('false');
+  expect(dot.textContent).toBe('Not connected yet — add a key and choose an embedding model to enable content search.');
+});
+
+test('the status dot is not ready when there is no key', async () => {
+  await renderWith(settings({
+    key: { kind: 'absent' },
+    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+  }));
+  expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('false');
+});
+
+test('the status dot is not ready when no embedding model is chosen', async () => {
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: { kind: 'read', embeddingModel: null, chatModel: null, searchTextArm: true, searchContentArm: true },
+  }));
+  expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('false');
+});
+
+// ---------------------------------------------------------------------------
+// A stated zero is never a promise the list is complete (umbrella `:529`).
+// ---------------------------------------------------------------------------
+
+test('unreadable > 0 renders a sentence naming how many entries could not be read', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('e1')], 3) });
+  await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-catalogue-unreadable')).toBeTruthy());
+  expect(screen.getByTestId('model-catalogue-unreadable').textContent).toBe('3 records could not be read.');
+});
+
+test('unreadable: 0 renders no such sentence', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('e1')], 0) });
+  await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-entry-e1')).toBeTruthy());
+  expect(screen.queryByTestId('model-catalogue-unreadable')).toBeNull();
+});
+
+test('an empty but well-formed catalogue says the provider lists none, not that something failed', async () => {
+  mockCatalogues({ embedding: catalogueOf([], 0) });
+  await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-catalogue-empty')).toBeTruthy());
+  expect(screen.getByTestId('model-catalogue-empty').textContent)
+    .toBe('The provider does not currently list any models for this role.');
+  expect(screen.queryByTestId('model-catalogue-failure')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// Choosing a model, and the ordering hazard booked to this task
+// (umbrella `:525`): a read redrawing while a write is in flight.
+// ---------------------------------------------------------------------------
+
+function deferredPromise<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+function queuedModelSettings() {
+  const queue: ReturnType<typeof deferredPromise<ModelSettings>>[] = [];
+  modelSettings.mockImplementation(() => {
+    const d = deferredPromise<ModelSettings>();
+    queue.push(d);
+    return d.promise;
+  });
+  return queue;
+}
+
+test('the shown selection does not change until set_chat_model AND its re-read both resolve — not on the click alone', async () => {
+  mockCatalogues({ chat: catalogueOf([entry('gpt-a'), entry('gpt-b')]) });
+  modelSettings.mockResolvedValueOnce(settings({
+    key: { kind: 'present' },
+    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+  }));
+  const setChatModelCall = deferredPromise<void>();
+  setChatModel.mockImplementation(() => setChatModelCall.promise);
+
+  render(Models);
+  await fireEvent.click(await screen.findByTestId('model-tab-chat'));
+  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true'));
+
+  await fireEvent.click(screen.getByTestId('model-entry-gpt-b'));
+  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b'));
+  // set_chat_model has not resolved yet — the click alone must not repaint.
+  expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('false');
+  expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true');
+
+  modelSettings.mockResolvedValueOnce(settings({
+    key: { kind: 'present' },
+    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+  }));
+  setChatModelCall.resolve();
+
+  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
+  expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('false');
+});
+
+test('an older in-flight model_settings does not repaint the model a set_chat_model round just chose', async () => {
+  mockCatalogues({ chat: catalogueOf([entry('gpt-a'), entry('gpt-b')]) });
+  setChatModel.mockResolvedValue(undefined);
+  const queue = queuedModelSettings();
+
+  render(Models); // issues the mount's own call — call #0, deferred
+  await fireEvent.click(await screen.findByTestId('model-tab-chat'));
+  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('model-entry-gpt-b'));
+  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b'));
+  await waitFor(() => expect(queue.length).toBe(2)); // mount's call, then the choice's own refresh
+
+  // The fresh call — issued by the choice — settles first, with the new model.
+  queue[1].resolve(settings({
+    key: { kind: 'present' },
+    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+  }));
+  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
+
+  // The mount's OLDER call settles late, with the old model. It must lose.
+  queue[0].resolve(settings({
+    key: { kind: 'present' },
+    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+  }));
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('false');
+});
+
+test('a model_settings reply landing while set_chat_model is still pending does not block the new choice once it resolves', async () => {
+  mockCatalogues({ chat: catalogueOf([entry('gpt-a'), entry('gpt-b')]) });
+  const queue = queuedModelSettings();
+  const setChatModelCall = deferredPromise<void>();
+  setChatModel.mockImplementation(() => setChatModelCall.promise);
+
+  render(Models); // call #0, mount
+  await fireEvent.click(await screen.findByTestId('model-tab-chat'));
+  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('model-entry-gpt-b'));
+  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b'));
+  // The choice's own refresh runs AFTER set_chat_model resolves, sequentially
+  // — it has not been issued yet, so only the mount's call exists so far.
+  expect(queue.length).toBe(1);
+
+  // model_settings resolves — with the OLD model, since nothing has actually
+  // changed yet.
+  queue[0].resolve(settings({
+    key: { kind: 'present' },
+    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+  }));
+  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true'));
+
+  // set_chat_model resolves next; its own refresh issues call #1.
+  setChatModelCall.resolve();
+  await waitFor(() => expect(queue.length).toBe(2));
+  queue[1].resolve(settings({
+    key: { kind: 'present' },
+    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+  }));
+
+  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
+  expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('false');
+});
+
+// ---------------------------------------------------------------------------
+// The discriminant mirror, homeless since `ui/render.test.js` was deleted
+// (umbrella `:526`) — built here because this is the surface that renders
+// `Refusal` and `RecordId`. Derived, not hand-copied: the variant list comes
+// from `catalogue.rs` itself, walked at test time, so a variant added there
+// and not taught to `sampleRefusal`/`sampleRecordId` fails this test with a
+// message naming exactly what to do, rather than passing silently — and a
+// variant taught here but never given a render arm in `Models.svelte` fails
+// just as loudly, because `refusalReason`/`unreadableRecordLabel` throw
+// rather than fall through.
+//
+// `Balance` (`crates/mnema-provider/src/probe.rs`) is the third discriminant
+// the umbrella plan named for this mirror, and does NOT get one here:
+// nothing in this PR renders it (see `ipc.ts`'s own comment on `Balance`), so
+// building a fixture "renderer" for it here would be exercising code this
+// component does not have. That gap is real, is the same one the original
+// `render.test.js` named for the same three types, and stays open rather than
+// acquiring a fixture that fakes a home for it.
+// ---------------------------------------------------------------------------
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const CATALOGUE_RS = readFileSync(join(HERE, '../../../crates/mnema-provider/src/catalogue.rs'), 'utf8');
+
+function rustEnumVariants(source: string, enumName: string): string[] {
+  const headerRe = new RegExp(`pub enum ${enumName}\\s*\\{`);
+  const m = headerRe.exec(source);
+  if (!m) throw new Error(`enum ${enumName} not found in catalogue.rs — has it moved or been renamed?`);
+  let depth = 1;
+  let i = m.index + m[0].length;
+  const start = i;
+  while (depth > 0) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') depth--;
+    i++;
+    if (i > source.length) throw new Error(`ran off the end of the file looking for the closing brace of ${enumName}`);
+  }
+  const body = source.slice(start, i - 1);
+  // Doc comments hold stray braces of their own (`` `{:?}` ``, `` `{}` ``) —
+  // stripped here, AFTER the depth walk above, which is why that walk is safe
+  // even though it runs on the raw text: every one of those is a
+  // self-balanced pair on its own line, so it never shifts the depth at the
+  // point the walk is deciding whether it has reached the real closing brace.
+  const noComments = body.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+  const variants: string[] = [];
+  let d = 0;
+  let cur = '';
+  for (const ch of noComments) {
+    if (ch === '{') d++;
+    if (ch === '}') d--;
+    if (ch === ',' && d === 0) {
+      if (cur.trim()) variants.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) variants.push(cur.trim());
+  return variants.map((v) => {
+    const name = /^([A-Za-z0-9_]+)/.exec(v.trim());
+    if (!name) throw new Error(`could not parse a variant name out of: ${v}`);
+    return name[1];
+  }).filter(Boolean);
+}
+
+// PascalCase → camelCase the way serde's own `RenameRule::CamelCase` does it
+// (`serde_derive::internals::case`): lowercase the first character, leave the
+// rest exactly as written — verified against this crate's own multi-word
+// variants already mirrored in `ipc.ts` (`notOpen`, `nothingToRemove`,
+// `envelopeNotUnderstood`), none of which get an interior letter touched.
+function camelOf(pascal: string): string {
+  return pascal.charAt(0).toLowerCase() + pascal.slice(1);
+}
+
+function sampleRefusal(kind: string): ModelRefusal {
+  switch (kind) {
+    case 'inputTooSmall': return { kind: 'inputTooSmall', limit: 100, floor: 2048 };
+    case 'noStatedLimit': return { kind: 'noStatedLimit' };
+    case 'limitNotUnderstood': return { kind: 'limitNotUnderstood', raw: 'sample-raw' };
+    case 'noStatedOutputModalities': return { kind: 'noStatedOutputModalities' };
+    case 'noTextOutput': return { kind: 'noTextOutput' };
+    default:
+      throw new Error(
+        `catalogue.rs now defines a Refusal variant ("${kind}") this test does not know how to ` +
+        'build a fixture for — teach sampleRefusal about it, then verify Models.svelte renders it.',
+      );
+  }
+}
+
+function sampleRecordId(kind: string, id: string): RecordId {
+  switch (kind) {
+    case 'absent': return { kind: 'absent' };
+    case 'notAString': return { kind: 'notAString', raw: 'sample-raw' };
+    case 'known': return { kind: 'known', id };
+    default:
+      throw new Error(
+        `catalogue.rs now defines a RecordId variant ("${kind}") this test does not know how to ` +
+        'build a fixture for — teach sampleRecordId about it, then verify Models.svelte renders it.',
+      );
+  }
+}
+
+async function renderInLocale(loc: 'uk' | 'en', s: ModelSettings) {
+  return loc === 'uk' ? renderInUk(s) : renderWith(s);
+}
+
+for (const loc of ['en', 'uk'] as const) {
+  test(`every Refusal variant catalogue.rs defines renders its own distinct reason (${loc})`, async () => {
+    const kinds = rustEnumVariants(CATALOGUE_RS, 'Refusal').map(camelOf);
+    expect(kinds.length).toBeGreaterThan(0); // the parse itself must have found something
+    const fixtureEntries = kinds.map((kind, i) => entry(`refusal-${i}`, { name: kind, refusal: sampleRefusal(kind) }));
+    mockCatalogues({ embedding: catalogueOf(fixtureEntries) });
+
+    await renderInLocale(loc, settings());
+    const texts: string[] = [];
+    for (let i = 0; i < kinds.length; i++) {
+      const el = await screen.findByTestId(`model-entry-reason-refusal-${i}`);
+      texts.push(el.textContent ?? '');
+    }
+    for (const text of texts) expect(text.length).toBeGreaterThan(10);
+    // Both directions: as many distinct sentences as variants, none blank,
+    // none collapsed onto a neighbour.
+    expect(texts.length).toBe(kinds.length);
+    expect(new Set(texts).size).toBe(kinds.length);
+  });
+}
+
+for (const loc of ['en', 'uk'] as const) {
+  test(`every RecordId variant catalogue.rs defines renders its own distinct line (${loc})`, async () => {
+    const kinds = rustEnumVariants(CATALOGUE_RS, 'RecordId').map(camelOf);
+    expect(kinds.length).toBeGreaterThan(0);
+    const records: UnreadableRecord[] = kinds.map((kind, i) => ({ id: sampleRecordId(kind, `model-${i}`), index: i }));
+    mockCatalogues({ embedding: catalogueOf([], records.length, records) });
+
+    await renderInLocale(loc, settings());
+    const texts: string[] = [];
+    for (let i = 0; i < kinds.length; i++) {
+      const el = await screen.findByTestId(`model-unreadable-record-${i}`);
+      texts.push(el.textContent ?? '');
+    }
+    for (const text of texts) expect(text.length).toBeGreaterThan(10);
+    expect(texts.length).toBe(kinds.length);
+    expect(new Set(texts).size).toBe(kinds.length);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Step 5 — the reading order, inherited from Task 4's review. Rendered with
+// a locked key store and a failed index read at once, the section used to
+// produce an unlabelled index sentence sandwiched between the provider row
+// and the key rows, with the one actionable line last and unmarked. Fixed by
+// naming each sentence's subject, asserted on rendered TEXT ORDER rather than
+// markup order alone — an assertion that only pins the DOM sequence would
+// pass on a screen a person still cannot parse.
+// ---------------------------------------------------------------------------
+
+test('the worst screen groups its sentences by subject, and the actionable line is not the last thing shown', async () => {
+  const { container } = await renderWith(settings({
+    key: { kind: 'unreadable', cause: 'locked', reason: 'r' },
+    index: { kind: 'unreadable', cause: 'notOpen', reason: 'r2' },
+    platform: 'mac',
+  }));
+  const text = container.textContent ?? '';
+
+  const indexLabelPos = text.indexOf('Index');
+  const indexSentencePos = text.indexOf('The index is not open yet.');
+  const keyLabelPos = text.indexOf('Key');
+  const keySentencePos = text.indexOf(KEY_FAILURE_SENTENCES.locked);
+  const tabPos = text.indexOf('Embedding');
+
+  expect(indexLabelPos).toBeGreaterThanOrEqual(0);
+  expect(keyLabelPos).toBeGreaterThanOrEqual(0);
+  // The index sentence is immediately preceded by its own subject, not left
+  // to sit unlabelled between the provider row and the key rows.
+  expect(indexLabelPos).toBeLessThan(indexSentencePos);
+  expect(indexSentencePos).toBeLessThan(keyLabelPos);
+  // The key group's own subject precedes its own sentence too.
+  expect(keyLabelPos).toBeLessThan(keySentencePos);
+  // And the actionable instruction is not the last thing on the page: the
+  // model tabs — present regardless, because `provider_models` needs neither
+  // a key nor an open index — follow it.
+  expect(keySentencePos).toBeLessThan(tabPos);
+});
+
+// ---------------------------------------------------------------------------
+// Every `void $locale` guard this task added, removed one at a time while
+// writing this file and confirmed to redden its own test alone (report §6) —
+// kept here as the tests that would catch a regression, not as the removal
+// itself.
+// ---------------------------------------------------------------------------
+
+test('a language switch after mount reaches the model tab labels', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('e1')]) });
+  const { container } = await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-entry-e1')).toBeTruthy());
+  expect((container.textContent ?? '')).toContain('Embedding');
+  expect((container.textContent ?? '')).toContain('Chat');
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Ембединг');
+  expect(after).toContain('Чат');
+  expect(after).not.toContain('Embedding');
+});
+
+test('a language switch after mount reaches the index subject label', async () => {
+  const { container } = await renderWith(settings({
+    index: { kind: 'unreadable', cause: 'notOpen', reason: 'r' },
+  }));
+  expect((container.textContent ?? '')).toContain('Index');
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Індекс');
+  expect(after).not.toContain('Index');
+});
+
+test('a language switch after mount reaches the not-ready status dot sentence', async () => {
+  const { container } = await renderWith(settings({ key: { kind: 'absent' } }));
+  expect((container.textContent ?? '')).toContain('Not connected yet');
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Ще не підключено');
+  expect(after).not.toContain('Not connected yet');
+});
+
+// The ready and not-ready sentences are two separate `$derived.by` guards
+// (`readyLabel`/`notReadyLabel`) — the test above only ever renders the
+// not-ready branch, so it cannot tell `readyLabel`'s own `void $locale` apart
+// from its absence. Measured while verifying each guard alone (report §6):
+// removing `readyLabel`'s left this test green.
+test('a language switch after mount reaches the ready status dot sentence', async () => {
+  const { container } = await renderWith(settings({
+    key: { kind: 'present' },
+    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+  }));
+  expect((container.textContent ?? '')).toContain('Connected — OpenRouter');
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Підключено — OpenRouter');
+  expect(after).not.toContain('Connected — OpenRouter, a key');
+});
+
+test('a language switch after mount reaches the empty-catalogue sentence', async () => {
+  mockCatalogues({ embedding: catalogueOf([]) });
+  const { container } = await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-catalogue-empty')).toBeTruthy());
+  expect((container.textContent ?? '')).toContain('The provider does not currently list any models');
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Постачальник наразі не пропонує');
+  expect(after).not.toContain('The provider does not currently list any models');
+});
+
+test('a language switch after mount reaches the unreadable-count sentence', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('e1')], 2) });
+  const { container } = await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-catalogue-unreadable')).toBeTruthy());
+  expect((container.textContent ?? '')).toContain('2 records could not be read');
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('2 записи не вдалося прочитати');
+  expect(after).not.toContain('records could not be read');
+});
+
+test('a language switch after mount reaches a refusal reason', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('r1', { refusal: { kind: 'noStatedLimit' } })]) });
+  const { container } = await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-entry-reason-r1')).toBeTruthy());
+  expect((container.textContent ?? '')).toContain('The provider does not state an input limit for this model.');
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Постачальник не вказує ліміт входу цієї моделі.');
+  expect(after).not.toContain('The provider does not state an input limit for this model.');
+});
+
+test('a language switch after mount reaches an unreadable-record label', async () => {
+  mockCatalogues({ embedding: catalogueOf([], 1, [{ id: { kind: 'absent' }, index: 0 }]) });
+  const { container } = await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-unreadable-record-0')).toBeTruthy());
+  expect((container.textContent ?? '')).toContain('the provider stated no model id');
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('постачальник не вказав ідентифікатор моделі');
+  expect(after).not.toContain('the provider stated no model id');
 });

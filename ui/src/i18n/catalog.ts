@@ -8,6 +8,15 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_key_locked' | 'models_key_duplicate' | 'models_key_refused' | 'models_key_defect'
   | 'models_index_not_open' | 'models_index_read_failed'
   | 'models_mac_keychain_note' | 'models_load_failed'
+  | 'models_index_label'
+  | 'models_tab_embedding' | 'models_tab_chat'
+  | 'models_status_ready' | 'models_status_not_ready'
+  | 'models_catalogue_empty' | 'models_catalogue_unreadable'
+  | 'models_refusal_input_too_small' | 'models_refusal_no_stated_limit'
+  | 'models_refusal_limit_not_understood' | 'models_refusal_no_stated_output_modalities'
+  | 'models_refusal_no_text_output'
+  | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
+  | 'models_catalogue_unreadable_record_known'
   | 'refusal_no_candidates' | 'refusal_empty_completion'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
@@ -90,6 +99,42 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // rejection arrives as text, so this names what failed and the backend says
     // why.
     models_load_failed: 'Не вдалося прочитати налаштування моделей.',
+    // Task 5 — the subject header the index sentence lacked: Task 4's review
+    // found "Провайдер / [index sentence] / [mac note] / [key sentence]"
+    // unreadable as a person, because nothing said the second line was about
+    // the index. Shown only alongside that sentence, never on its own.
+    models_index_label: 'Індекс',
+    models_tab_embedding: 'Ембединг',
+    models_tab_chat: 'Чат',
+    // The green-dot rule (§9.1 / the PR 3 ruling `providerReady` already
+    // carries): provider + key + a chosen embedding model, fail-safe on
+    // anything missing. Named sentences rather than a bare state, so a screen
+    // reader announces the same thing a sighted person reads.
+    models_status_ready: 'Підключено — OpenRouter, ключ і обрана модель embedding готові.',
+    models_status_not_ready: 'Ще не підключено — додайте ключ і оберіть модель embedding, щоб увімкнути пошук за змістом.',
+    // An empty-but-well-formed catalogue (`models.rs:186-190`) is a stated
+    // fact about the provider, not a failure of this build — said once, so a
+    // person does not read a blank tab as a bug.
+    models_catalogue_empty: 'Постачальник наразі не пропонує жодної моделі для цієї ролі.',
+    // `Catalogue.unreadable` (catalogue.rs:246-257): a stated zero is never a
+    // promise the list is complete on its own — this sentence is the promise,
+    // and it is absent exactly when the count is zero.
+    models_catalogue_unreadable: '{count, plural, one {# запис не вдалося прочитати} few {# записи не вдалося прочитати} many {# записів не вдалося прочитати} other {# записів не вдалося прочитати}}.',
+    // `Refusal`'s five variants (catalogue.rs) — one sentence each, fixed
+    // catalogue text rather than the provider's own words: see
+    // `Models.svelte`'s `refusalReason` for why `raw` is not interpolated
+    // into the three variants that carry it.
+    models_refusal_input_too_small: 'Ця модель заявляє ліміт входу {limit} токенів — менше за поріг {floor}, потрібний цій програмі.',
+    models_refusal_no_stated_limit: 'Постачальник не вказує ліміт входу цієї моделі.',
+    models_refusal_limit_not_understood: 'Постачальник вказує ліміт входу у форматі, який ця збірка не вміє прочитати.',
+    models_refusal_no_stated_output_modalities: 'Постачальник не вказує, що видає ця модель.',
+    models_refusal_no_text_output: 'Постачальник заявляє, що ця модель не видає текст.',
+    // `RecordId`'s three states (catalogue.rs:293-304) — a record that never
+    // became a model still gets one line naming its position, so "N records
+    // unreadable" points at something (Task 2 review, item 4).
+    models_catalogue_unreadable_record_absent: 'Запис на позиції {index}: постачальник не вказав ідентифікатор моделі.',
+    models_catalogue_unreadable_record_not_a_string: 'Запис на позиції {index}: ідентифікатор моделі не був текстом.',
+    models_catalogue_unreadable_record_known: 'Запис на позиції {index}, ідентифікатор «{id}»: решту запису ця збірка прочитати не змогла.',
     indexed_documents: '{count, plural, one {# документ} few {# документи} many {# документів} other {# документа}}',
     refusal_no_candidates: 'Нічого не знайдено за цим запитом.',
     refusal_empty_completion: 'Модель не повернула відповіді.',
@@ -186,6 +231,21 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_index_read_failed: 'The index could not be read — this is a defect in this build.',
     models_mac_keychain_note: 'Every update makes this application a stranger to its own key: the system will ask once for your login keychain password.',
     models_load_failed: 'The model settings could not be read.',
+    models_index_label: 'Index',
+    models_tab_embedding: 'Embedding',
+    models_tab_chat: 'Chat',
+    models_status_ready: 'Connected — OpenRouter, a key and a chosen embedding model are all set.',
+    models_status_not_ready: 'Not connected yet — add a key and choose an embedding model to enable content search.',
+    models_catalogue_empty: 'The provider does not currently list any models for this role.',
+    models_catalogue_unreadable: '{count, plural, one {# record could not be read} other {# records could not be read}}.',
+    models_refusal_input_too_small: 'This model states an input limit of {limit} tokens, under the {floor} this application requires.',
+    models_refusal_no_stated_limit: 'The provider does not state an input limit for this model.',
+    models_refusal_limit_not_understood: 'The provider states an input limit in a shape this build cannot read.',
+    models_refusal_no_stated_output_modalities: 'The provider does not state what this model outputs.',
+    models_refusal_no_text_output: 'The provider states that this model does not output text.',
+    models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
+    models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
+    models_catalogue_unreadable_record_known: 'Record at position {index}, id "{id}": this build could not read the rest of the record.',
     indexed_documents: '{count, plural, one {# document} other {# documents}}',
     refusal_no_candidates: 'Nothing was found for this query.',
     refusal_empty_completion: 'The model returned no answer.',
