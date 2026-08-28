@@ -1307,7 +1307,12 @@ for (const loc of ['en', 'uk'] as const) {
     }
     expect(texts.length).toBe(kinds.length);
     expect(new Set(texts).size).toBe(kinds.length);
-    // P1-3 again: `notAString.raw` is provider text and stays off the screen.
+    // The rule is narrower than "provider text stays off the screen", and
+    // saying it the wide way would be false of the line above: a `known` id IS
+    // provider text and IS rendered, because `RecordId` splits that variant out
+    // precisely so a person has something to go and look at. What stays off is
+    // text this build could NOT read — `raw` — which is a diagnostic, not a
+    // fact about a model. Both halves asserted, so neither can drift alone.
     expect(container.textContent ?? '').not.toContain(RAW_LEAK_TOKEN);
   });
 }
