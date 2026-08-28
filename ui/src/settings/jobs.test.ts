@@ -56,6 +56,16 @@ function ended(name: keyof typeof REAL): JobEnded {
 // truncates the enum body and the test reports green having never seen the
 // variants past it. `job.rs`'s `EndReason` doc comment is exactly that shape:
 // it names `walk_job.rs` and carries prose full of punctuation.
+//
+// ⚠️ This is HALF of the guard, and the half that cannot see its own blind
+// spot. It reads variant NAMES and applies serde's camelCase rule to them by
+// hand; it never reads the enum's `#[serde(rename_all = …)]`, so switching
+// that attribute to `snake_case` leaves every test in this file green while the
+// wire spelling changes underneath. The other half is Rust's own
+// `every_end_reason_has_its_camel_case_spelling_pinned` (`job.rs:770`), which
+// serializes each variant and pins the string. Neither closes the gap alone:
+// the pair does. A variant-level `#[serde(rename = "…")]` is refused outright
+// below, because this side could not express it either way.
 // ---------------------------------------------------------------------------
 const HERE = dirname(fileURLToPath(import.meta.url));
 const JOB_RS = readFileSync(join(HERE, '../../../src-tauri/src/job.rs'), 'utf8');
@@ -273,13 +283,31 @@ test('a progress report becomes a running state carrying every count, `secondsLe
 // A rejection is a sentence, never a kind (error.rs): nothing here reads its
 // shape, and the phase goes back to idle because no job was ever claimed.
 test('a refused walk shows the sentence the backend sent and claims no job', async () => {
-  replies({ start_walk_job: new Error('another job is already running') });
+  replies({ start_walk_job: new Error('another job is already running'), job_status: { running: false } });
   const jobs = createJobController();
 
   await jobs.scan(7);
 
   expect(get(jobs.state).note).toEqual({ kind: 'rejected', sentence: 'another job is already running' });
   expect(get(jobs.state).phase.kind).toBe('idle');
+});
+
+// 🔴 `scan` opens by writing `starting` over whatever was there, and the
+// commonest reason the command is then refused is that the job the old state
+// described still holds the slot. Nothing else ever restores it — the window
+// calls `syncFromStatus` once, at mount — so without the re-read below one
+// press costs a person the Cancel button until they reopen the window, which
+// is the one failure they cannot work around.
+test('a walk refused while an unheard job holds the slot leaves that job on screen', async () => {
+  replies({ start_walk_job: new Error('another job is already running'), job_status: { running: true } });
+  const jobs = createJobController();
+  await jobs.syncFromStatus();
+  expect(get(jobs.state).phase.kind).toBe('runningUnobserved');
+
+  await jobs.scan(7);
+
+  expect(get(jobs.state).phase).toEqual({ kind: 'runningUnobserved' });
+  expect(get(jobs.state).note).toEqual({ kind: 'rejected', sentence: 'another job is already running' });
 });
 
 test('a walk that read the folder chains the embedding pass and keeps its own ending', async () => {
@@ -415,6 +443,48 @@ test('a status re-read never overwrites a pass this window is watching', async (
   await jobs.syncFromStatus();
 
   expect(get(jobs.state).phase.kind).toBe('running');
+});
+
+// The guard BEFORE the await, and the only thing that distinguishes it from
+// the one after: a window watching a pass of its own asks nothing at all — so
+// a `job_status` that fails cannot splash a rejection over a live progress
+// line about a question this window had no business asking.
+test('a status re-read on a pass this window is watching asks nothing and says nothing', async () => {
+  replies({ model_settings: KEY_AND_MODEL, job_status: new Error('the index could not be opened') });
+  const jobs = createJobController();
+  await jobs.scan(7);
+  channelOf('start_walk_job')(REAL.progress);
+
+  await jobs.syncFromStatus();
+
+  expect(calls('job_status')).toHaveLength(0);
+  expect(get(jobs.state).note).toBeNull();
+  expect(get(jobs.state).phase.kind).toBe('running');
+});
+
+// The guard AFTER the await, and the race it is the only defence against: the
+// answer was true when it was asked and is about the wrong moment by the time
+// it lands. A scan started in that window owns the phase — writing
+// `runningUnobserved` over it would replace a pass with live counts and a
+// working Cancel by a boolean that never finishes.
+test('a scan started while a status read is in flight keeps the phase the scan set', async () => {
+  let release: (v: unknown) => void = () => {};
+  const status = new Promise((resolve) => { release = resolve; });
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'job_status') return status;
+    if (cmd === 'start_walk_job') return new Promise(() => {}); // still running when this ends
+    return Promise.resolve(undefined);
+  });
+  const jobs = createJobController();
+
+  const reading = jobs.syncFromStatus();
+  void jobs.scan(7);
+  expect(get(jobs.state).phase).toEqual({ kind: 'starting', pass: 'walk' });
+
+  release({ running: true });
+  await reading;
+
+  expect(get(jobs.state).phase).toEqual({ kind: 'starting', pass: 'walk' });
 });
 
 test('a status re-read clears a job that has since finished elsewhere', async () => {

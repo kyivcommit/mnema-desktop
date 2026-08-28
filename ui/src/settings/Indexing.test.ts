@@ -126,9 +126,58 @@ const progressEvent = (over: Partial<JobProgress> = {}): JobEvent =>
 // be read. A test covering only completed/cancelled/failed passes on a
 // component that collapses all four into one sentence.
 // ---------------------------------------------------------------------------
-type Row = { name: string; ending: Partial<JobEnded>; uk: string; en: string };
+type Row = {
+  name: string;
+  ending: Partial<JobEnded>;
+  uk: string; en: string;
+  /// The result line the SAME row puts on screen. Asserted beside the
+  /// sentence because the two are read together and can contradict each
+  /// other: nothing branches on the counts, so a row inheriting
+  /// `completed`'s numbers prints "the folder was not read at all" above
+  /// "Documents added: 5. Removed from the index: 4."
+  result: { uk: string; en: string };
+};
 
 const FAILURE_TEXT = 'the worker binary could not be started';
+
+// The counts each stop actually leaves behind, read off `walk.rs` rather than
+// inherited from `completed`'s own numbers.
+//
+// `removed` is written by phase 3 alone, and phase 3 runs only when phase 1 saw
+// the whole tree AND phase 2 ran to the end of what it handed over
+// (`walk.rs:511`) — so `removed: 4` on any row but the first states a deletion
+// this code cannot make. `rulesNotApplied` (`:384`) and `rootUnavailable`
+// (`:298`) return before phase 2 as well: nothing was read at all, which is
+// what their sentences say in words. `Ended::failed` (`job.rs:266`) zeroes
+// every count of its own accord and keeps `done`/`total`.
+const NOTHING_READ = { done: 0, total: 11, skipped: 0, refused: 0, indexed: 0, unchanged: 0, removed: 0 };
+// A root that is not a directory never reaches `enumerate`, so not even the
+// total is known (`walk.rs:289`).
+const NO_ROOT = { ...NOTHING_READ, total: 0 };
+// Stopped inside phase 2, part way through what phase 1 found.
+const STOPPED_MIDWAY = { done: 3, total: 11, skipped: 1, refused: 0, indexed: 2, unchanged: 0, removed: 0 };
+// The worker gives up only after several environmental skips in a row.
+const WORKER_GAVE_UP = { done: 5, total: 11, skipped: 3, refused: 0, indexed: 2, unchanged: 0, removed: 0 };
+// Phase 2 ran to the end; phase 3 was refused. Real work, no deletions.
+const READ_NOT_RECONCILED = { done: 11, total: 11, skipped: 5, refused: 0, indexed: 5, unchanged: 1, removed: 0 };
+const FAILED_COUNTS = { done: 7, total: 11, skipped: 0, refused: 0, indexed: 0, unchanged: 0, removed: 0 };
+
+const NOTHING_DONE_RESULT = {
+  uk: 'Додано документів: 0. Без змін: 0. Пропущено: 0. Вилучено з індексу: 0.',
+  en: 'Documents added: 0. Unchanged: 0. Skipped: 0. Removed from the index: 0.',
+};
+const MIDWAY_RESULT = {
+  uk: 'Додано документів: 2. Без змін: 0. Пропущено: 1. Вилучено з індексу: 0.',
+  en: 'Documents added: 2. Unchanged: 0. Skipped: 1. Removed from the index: 0.',
+};
+const WORKER_RESULT = {
+  uk: 'Додано документів: 2. Без змін: 0. Пропущено: 3. Вилучено з індексу: 0.',
+  en: 'Documents added: 2. Unchanged: 0. Skipped: 3. Removed from the index: 0.',
+};
+const NOT_RECONCILED_RESULT = {
+  uk: 'Додано документів: 5. Без змін: 1. Пропущено: 5. Вилучено з індексу: 0.',
+  en: 'Documents added: 5. Unchanged: 1. Skipped: 5. Removed from the index: 0.',
+};
 
 const MATRIX: Row[] = [
   {
@@ -136,54 +185,74 @@ const MATRIX: Row[] = [
     ending: { reason: 'completed', complete: true },
     uk: 'Теку прочитано повністю.',
     en: 'The folder was read in full.',
+    result: {
+      uk: 'Додано документів: 5. Без змін: 1. Пропущено: 5. Вилучено з індексу: 4.',
+      en: 'Documents added: 5. Unchanged: 1. Skipped: 5. Removed from the index: 4.',
+    },
   },
   {
+    // Phase 1 never saw the whole tree, so phase 3 was skipped: nothing was
+    // deleted, and that is precisely what the sentence warns about.
     name: 'partlyRead',
-    ending: { reason: 'completed', complete: false },
+    ending: { reason: 'completed', complete: false, ...READ_NOT_RECONCILED },
     uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Файли, які ви вилучили всередині них, досі знаходяться пошуком.',
     en: 'The folder was only partly read: some subfolders could not be entered. Files you deleted inside them are still found by search.',
+    result: NOT_RECONCILED_RESULT,
   },
   {
+    // `complete` stays TRUE: the cancel lands in phase 2 (`walk.rs:432`), and
+    // phase 1 having finished says nothing about phase 2 being allowed to.
     name: 'cancelled',
-    ending: { reason: 'cancelled' },
+    ending: { reason: 'cancelled', complete: true, ...STOPPED_MIDWAY },
     uk: 'Сканування зупинено на ваше прохання.',
     en: 'The scan was stopped at your request.',
+    result: MIDWAY_RESULT,
   },
   {
     name: 'failed without a message',
-    ending: { reason: 'failed', complete: false, message: null },
+    ending: { reason: 'failed', complete: false, message: null, ...FAILED_COUNTS },
     uk: 'Сканування обірвалося через збій.',
     en: 'The scan broke off because something went wrong.',
+    result: NOTHING_DONE_RESULT,
   },
   {
     name: 'failed carrying a message',
-    ending: { reason: 'failed', complete: false, message: FAILURE_TEXT },
+    ending: { reason: 'failed', complete: false, message: FAILURE_TEXT, ...FAILED_COUNTS },
     uk: `Сканування обірвалося через збій. Програма повідомила: ${FAILURE_TEXT}`,
     en: `The scan broke off because something went wrong. The program reported: ${FAILURE_TEXT}`,
+    result: NOTHING_DONE_RESULT,
   },
   {
     name: 'brokenWorker',
-    ending: { reason: 'brokenWorker' },
+    ending: { reason: 'brokenWorker', complete: true, ...WORKER_GAVE_UP },
     uk: 'Сканування спинилося: допоміжна програма, яка читає файли, перестала відповідати.',
     en: 'The scan stopped: the helper program that reads files stopped answering.',
+    result: WORKER_RESULT,
   },
   {
+    // The rules gate sits before phase 2, so `complete` is phase 1's own
+    // verdict and the counts are all zero — "not read at all" literally.
     name: 'rulesNotApplied',
-    ending: { reason: 'rulesNotApplied' },
+    ending: { reason: 'rulesNotApplied', complete: true, ...NOTHING_READ },
     uk: 'Сканування спинилося: правила виключення не вдалося застосувати, тож теку не читали зовсім.',
     en: 'The scan stopped: the exclusion rules could not be applied, so the folder was not read at all.',
+    result: NOTHING_DONE_RESULT,
   },
   {
     name: 'rootUnavailable',
-    ending: { reason: 'rootUnavailable' },
+    ending: { reason: 'rootUnavailable', complete: false, ...NO_ROOT },
     uk: 'Сканування спинилося: у теку не вдалося зайти. Можливо, її прибрали або диск від’єднано.',
     en: 'The scan stopped: the folder could not be entered. It may have been removed, or its drive disconnected.',
+    result: NOTHING_DONE_RESULT,
   },
   {
+    // `complete` cannot be false here: the volume check is reached only past
+    // the `!walked.complete` return at `walk.rs:511`.
     name: 'volumeMissing',
-    ending: { reason: 'volumeMissing' },
+    ending: { reason: 'volumeMissing', complete: true, ...READ_NOT_RECONCILED },
     uk: 'Сканування спинилося: тека прочиталася порожньою, хоча в індексі є файли з неї. Нічого не вилучено — можливо, диск під’єднано не повністю.',
     en: 'The scan stopped: the folder read as empty although the index still holds files from it. Nothing was deleted — the drive may not be fully attached.',
+    result: NOT_RECONCILED_RESULT,
   },
 ];
 
@@ -210,6 +279,10 @@ for (const loc of ['uk', 'en'] as const) {
       await tick();
 
       expect(visible(region), row.name).toBe(row[loc]);
+      // The line directly under it, in the same breath a person reads them:
+      // an oracle that looks only at the outcome sentence lets the screen
+      // contradict itself under its own eye.
+      expect(visible(screen.getByTestId('indexing-walk-result')), row.name).toBe(row.result[loc]);
       seen.push(visible(region));
       cleanup();
       invoke.mockClear();
@@ -271,6 +344,23 @@ test('a run with nothing counted yet says so instead of reading as nothing to do
   expect(text).toContain('Залишилось приблизно 12 с.');
 });
 
+// The third state of the same `Option<u64>`, and the one a truthiness check
+// eats: zero seconds left is a NUMBER — the run is about to finish — while
+// "not known yet" is what the window says when it has been told nothing. A
+// line written `seconds ? … : …` shows the second for the first.
+test('nought seconds left is an estimate, not an absence of one', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(progressEvent({ secondsLeft: 0 }));
+  await tick();
+
+  const text = container.textContent ?? '';
+  expect(text).toContain('Залишилось приблизно 0 с.');
+  expect(text).not.toContain('Скільки ще лишилось часу, поки не відомо.');
+});
+
 test('an ended walk reports what it did to the index, not only that it ended', async () => {
   const { container } = await openFolders();
   await fireEvent.click(scanButton(1));
@@ -296,7 +386,7 @@ test('subtrees reconciliation refused to touch are named, each with its own reas
   await fireEvent.click(scanButton(1));
   await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
 
-  channelOf('start_walk_job')(endedEvent({ complete: false, frozen: [...FROZEN] }));
+  channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0, frozen: [...FROZEN] }));
   await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
 
   const text = container.textContent ?? '';
@@ -348,7 +438,7 @@ test('a partly read folder is embedded anyway AND stays reported as partly read'
   await fireEvent.click(scanButton(1));
   await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
 
-  channelOf('start_walk_job')(endedEvent({ complete: false }));
+  channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0 }));
   await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
 
   expect(visible(screen.getByTestId('indexing-walk-outcome')))
@@ -514,6 +604,20 @@ test('with no job running there is no Cancel to press', async () => {
 
   expect(screen.queryByTestId('indexing-cancel')).toBeNull();
   expect(calls('cancel_job')).toHaveLength(0);
+  // And the strip itself is not there at all. An empty div left standing looks
+  // near-identical in a browser, which is exactly why nothing would notice it —
+  // a window somebody opened to change a model should carry no indexing strip
+  // saying nothing.
+  expect(screen.queryByTestId('indexing')).toBeNull();
+});
+
+// The other half of the same decision: once there IS something to say, the
+// strip is there to say it.
+test('the strip appears as soon as there is something to report', async () => {
+  await openFolders();
+  await fireEvent.click(scanButton(1));
+
+  await waitFor(() => expect(screen.getByTestId('indexing')).toBeTruthy());
 });
 
 // ---------------------------------------------------------------------------
@@ -551,6 +655,40 @@ test('cancelling a job we cannot hear re-reads the status instead of waiting for
   expect(screen.queryByTestId('indexing-cancel')).toBeNull();
 });
 
+// 🔴 One press, and the Cancel is gone for the life of the window. `scan` opens
+// by writing `starting` over whatever was there — destroying `runningUnobserved`
+// — and the commonest reason `start_walk_job` is then refused is that the very
+// job that state described still holds the slot. `syncFromStatus` runs once, at
+// mount, so nothing would ever put it back: the person is left watching a job
+// they can no longer stop, and reopening the window is the only way out.
+test('a scan refused because a job we cannot hear holds the slot leaves its Stop in place', async () => {
+  reply({ job_status: { running: true }, start_walk_job: new Error('a job is already running') });
+  await openFolders();
+  await waitFor(() => expect(screen.getByTestId('indexing-unobserved')).toBeTruthy());
+
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
+
+  expect(screen.queryByTestId('indexing-cancel')).not.toBeNull();
+  expect(screen.getByTestId('indexing-unobserved').textContent).toBe(
+    'Зараз виконується інше завдання. Це вікно не бачить, як далеко воно просунулося, але зупинити його можна.',
+  );
+  expect(screen.getByTestId('indexing-rejection').textContent).toBe('a job is already running');
+});
+
+// The same re-read must not invent a job either: a refusal with nothing running
+// leaves the window idle, not sitting on a Cancel that stops nothing.
+test('a scan refused with nothing running leaves no Stop behind', async () => {
+  reply({ start_walk_job: new Error('the index could not be opened') });
+  await openFolders();
+
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
+
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
+  expect(screen.queryByTestId('indexing-unobserved')).toBeNull();
+});
+
 // ---------------------------------------------------------------------------
 // Rejections and language.
 // ---------------------------------------------------------------------------
@@ -566,11 +704,18 @@ test('a refused scan shows the backend sentence and starts nothing', async () =>
   expect(screen.queryByTestId('indexing-cancel')).toBeNull();
 });
 
-test('a language switch after an ending reaches every line of the strip', async () => {
+// D130 asks every visible string to follow a live language switch, and each
+// one is a `$derived.by` reading `$locale` for itself — so each has to be
+// switched under, one at a time. A single test over one state satisfies the
+// rule for the lines that state happens to draw and no others: the six tests
+// below exist because a running strip, a job with no channel, a note, an
+// embedding result and a folder row draw disjoint sets of lines.
+
+test('a language switch after a WALK ending reaches its sentence, its counts and its frozen list', async () => {
   const { container } = await openFolders('uk');
   await fireEvent.click(scanButton(1));
   await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  channelOf('start_walk_job')(endedEvent({ complete: false, frozen: [...FROZEN] }));
+  channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0, frozen: [...FROZEN] }));
   await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
 
   setLocale('en');
@@ -581,6 +726,97 @@ test('a language switch after an ending reaches every line of the strip', async 
   expect(text).toContain('Documents added: 5.');
   expect(text).toContain('notes/link — a symbolic link, never entered');
   expect(text).not.toContain('Теку прочитано');
+});
+
+// The lines a WALK ending never draws: the pass line, the counts, the estimate
+// and the button that stops it. These are the ones a person is looking at for
+// the longest, and every one of them is a derived of its own.
+test('a language switch DURING a pass reaches its line, its counts, its estimate and its Stop', async () => {
+  const { container } = await openFolders('uk');
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  channelOf('start_walk_job')(progressEvent({ secondsLeft: 12 }));
+  await tick();
+  expect(container.textContent).toContain('Триває читання теки.');
+
+  setLocale('en');
+  await tick();
+
+  const text = container.textContent ?? '';
+  expect(screen.getByTestId('indexing-pass').textContent).toBe('The folder is being read.');
+  expect(screen.getByTestId('indexing-counts').textContent)
+    .toBe('Processed 3 of 8. Skipped: 1. Given up on: 0.');
+  expect(screen.getByTestId('indexing-eta').textContent).toBe('About 12 s left.');
+  expect(screen.getByTestId('indexing-cancel').textContent).toBe('Stop');
+  expect(text).not.toContain('Триває читання теки.');
+});
+
+// A job with no channel of ours draws neither of the two above: one sentence
+// and the button.
+test('a language switch reaches the sentence for a job we cannot hear, and its Stop', async () => {
+  reply({ job_status: { running: true } });
+  await openFolders('uk');
+  await waitFor(() => expect(screen.getByTestId('indexing-unobserved')).toBeTruthy());
+
+  setLocale('en');
+  await tick();
+
+  expect(screen.getByTestId('indexing-unobserved').textContent).toBe(
+    'Another job is running. This window cannot see how far it has got, but it can still be stopped.',
+  );
+  expect(screen.getByTestId('indexing-cancel').textContent).toBe('Stop');
+});
+
+// The note, and the sentence beside it that must NOT move: the backend's own
+// text crosses the IPC as words (`error.rs`) and belongs to no catalogue.
+test('a language switch reaches the note and leaves the backend`s own sentence verbatim', async () => {
+  reply({ start_walk_job: new Error('a job is already running') });
+  await openFolders('uk');
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(screen.getByTestId('indexing-note')).toBeTruthy());
+  expect(screen.getByTestId('indexing-note').textContent).toBe('Запит відхилено.');
+
+  setLocale('en');
+  await tick();
+
+  expect(screen.getByTestId('indexing-note').textContent).toBe('The request was refused.');
+  expect(screen.getByTestId('indexing-rejection').textContent).toBe('a job is already running');
+});
+
+// The embedding pass has its own table and its own result line — neither is
+// reached by switching under a walk.
+test('a language switch after an EMBEDDING ending reaches its sentence and its counts', async () => {
+  await openFolders('uk');
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+  channelOf('start_embed_job')(endedEvent());
+  await waitFor(() => expect(screen.getByTestId('indexing-embed-outcome')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-embed-outcome')))
+    .toBe('Вбудовування всього індексу завершено.');
+
+  setLocale('en');
+  await tick();
+
+  expect(visible(screen.getByTestId('indexing-embed-outcome')))
+    .toBe('Embedding the whole index has finished.');
+  expect(visible(screen.getByTestId('indexing-embed-result')))
+    .toBe('Chunks embedded: 11 of 11. Given up on: 0.');
+});
+
+// The control that starts all of the above. It lives on every folder row, and
+// its label is a derived of its own — the row array's `void $locale` rebuilds
+// the aria-labels, not this.
+test('a language switch reaches the scan control on every folder row', async () => {
+  await openFolders('uk');
+  expect(scanButton(1).textContent).toBe('Сканувати');
+
+  setLocale('en');
+  await tick();
+
+  expect(scanButton(1).textContent).toBe('Scan');
+  expect(scanButton(4).textContent).toBe('Scan');
 });
 
 // Every outcome kind must have a sentence in both locales, and the check is on

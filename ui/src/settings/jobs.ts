@@ -236,6 +236,15 @@ export function createJobController(): JobController {
         phase: s.phase.kind === 'starting' ? { kind: 'idle' } : s.phase,
         note: { kind: 'rejected', sentence: sentenceOf(e) },
       }));
+      // 🔴 The line above has just destroyed `runningUnobserved`, and the
+      // commonest reason this command is refused is that the very job that
+      // state described still holds the slot. Nothing else ever restores it —
+      // `syncFromStatus` is called once, at mount — so a single press would
+      // otherwise cost a person the Cancel button for the life of the window,
+      // which is the one failure they cannot work around. The re-read writes
+      // only over `idle`/`runningUnobserved`, so it cannot clobber a pass this
+      // window is actually watching.
+      await syncFromStatus();
     }
   }
 
