@@ -82,6 +82,8 @@ export const ask = (query: string) => invoke<AskAnswer>('ask', { query });
 export const setSearchArms = (text: boolean, content: boolean) =>
   invoke<void>('set_search_arms', { text, content });
 export const listTree = () => invoke<TreeListing>('list_tree');
+export const addWatchedFolder = (path: string) => invoke<number>('add_watched_folder', { path });
+export const removeWatchedFolder = (rootId: number) => invoke<number>('remove_watched_folder', { rootId });
 export const sourceAround = (c: AskCitation | Hit, radius = 3) =>
   invoke<SourceAround>('source_around', {
     chunkId: c.chunkId, passageText: c.text,

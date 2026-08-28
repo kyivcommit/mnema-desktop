@@ -1,6 +1,8 @@
 export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_indexing' | 'settings_nav_application'
   | 'settings_section_not_ready'
+  | 'settings_folders_empty' | 'settings_folders_add' | 'settings_folders_remove'
+  | 'settings_folders_load_failed'
   | 'models_provider_label' | 'models_provider_name'
   | 'models_key_label' | 'models_key_saved' | 'models_key_absent_hint'
   | 'models_key_change' | 'models_key_forget' | 'models_key_save' | 'models_key_cancel'
@@ -50,6 +52,18 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_application: 'Застосунок',
     // Shared by both unbuilt sections — one sentence, promises nothing.
     settings_section_not_ready: 'Ця секція ще не готова.',
+    // §9.2, Task 7. `TreeRoot` (ipc.ts) carries no flag for "walked and found
+    // empty" vs. "not walked yet" — a folder just added and one genuinely
+    // empty are the same value on the wire — so this sentence names only the
+    // absence of watched folders, never a folder's own content. The per-row
+    // document count (`indexed_documents`, shared with the launcher tree)
+    // carries the state a folder's own row can actually prove.
+    settings_folders_empty: 'Ще жодної теки не додано.',
+    settings_folders_add: 'Додати теку',
+    settings_folders_remove: 'Видалити',
+    // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
+    // shown verbatim beside this, never branched on).
+    settings_folders_load_failed: 'Не вдалося прочитати список тек.',
     // §9.1 / Task 4. Provider is a fixed, disabled control (v1 = OpenRouter
     // only, §4.4) — the name is a catalogue string, not a hardcoded literal,
     // because it is what a person reads there, not a testid.
@@ -236,6 +250,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_indexing: 'Indexing',
     settings_nav_application: 'Application',
     settings_section_not_ready: 'This section is not ready yet.',
+    settings_folders_empty: 'No folder has been added yet.',
+    settings_folders_add: 'Add a folder',
+    settings_folders_remove: 'Remove',
+    settings_folders_load_failed: 'The list of folders could not be read.',
     models_provider_label: 'Provider',
     models_provider_name: 'OpenRouter',
     models_key_label: 'Key',

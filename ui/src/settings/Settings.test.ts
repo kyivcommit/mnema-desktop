@@ -11,7 +11,10 @@ import { setLocale } from '../i18n';
 // behaviour, that lives in Models.test.ts. Task 5 adds `providerModels` on
 // the same mount, for the same reason: an empty-but-well-formed catalogue,
 // so the tabs render without pulling any of Models' own catalogue behaviour
-// into this file.
+// into this file. Task 7 adds `listTree` for the same reason again: `Folders`
+// now mounts into the 'folders' panel and reads it on mount too — an empty
+// listing is enough, since nothing here exercises Folders' own behaviour
+// (that lives in Folders.test.ts).
 vi.mock('../lib/ipc', () => ({
   modelSettings: () =>
     Promise.resolve({
@@ -23,6 +26,9 @@ vi.mock('../lib/ipc', () => ({
   forgetKey: vi.fn(),
   providerModels: () => Promise.resolve({ entries: [], unreadable: 0, unreadableRecords: [] }),
   setChatModel: vi.fn(),
+  listTree: () => Promise.resolve({ roots: [], recents: [] }),
+  addWatchedFolder: vi.fn(),
+  removeWatchedFolder: vi.fn(),
 }));
 
 afterEach(() => {
