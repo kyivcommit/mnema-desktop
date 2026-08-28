@@ -30,6 +30,7 @@
   async function refresh() {
     const listing = await listTree();
     roots = listing.roots;
+    loadError = null; // a successful read is proof the earlier one is stale
   }
 
   onMount(() => {
@@ -44,9 +45,17 @@
     if (selected === null) return; // cancelled dialog — calls nothing further
     try {
       await addWatchedFolder(selected);
-      await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
+      return;
+    }
+    // Outside the action's own try: a rejection here is list_tree's own
+    // sentence, about the list being unreadable, not about the add having
+    // failed — the add already succeeded by this point.
+    try {
+      await refresh();
+    } catch (e) {
+      loadError = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -54,9 +63,14 @@
     actionError = null;
     try {
       await removeWatchedFolder(rootId);
-      await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
+      return;
+    }
+    try {
+      await refresh();
+    } catch (e) {
+      loadError = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -70,11 +84,21 @@
   // and would not update on a language switch. The whole array is rebuilt
   // under `void $locale` instead, the shape `launcher/Tree.svelte`'s own
   // `recents` derived already uses for the same reason.
+  //
+  // `settings_folders_indexed`, not the shared `indexed_documents` (P2-4
+  // review): a bare "0 documents" beside a folder path reads as a claim
+  // about the FOLDER, and D-c means every newly added folder shows zero
+  // forever, not transiently — this key names the INDEX as the subject
+  // ("Indexed: 0 documents") instead. `removeAriaLabel` carries the same
+  // row's path so two "Remove" buttons in a two-folder list stay
+  // distinguishable to a screen reader (P2-5); the visible button text
+  // stays the plain `removeLabel` above.
   const rows = $derived.by(() => {
     void $locale;
     return roots.map((root) => ({
       root,
-      countLabel: t('indexed_documents', { count: root.files.length }),
+      countLabel: t('settings_folders_indexed', { count: root.files.length }),
+      removeAriaLabel: t('settings_folders_remove_named', { path: root.absolutePath }),
     }));
   });
 </script>
@@ -87,11 +111,11 @@
     <p>{emptyLabel}</p>
   {:else}
     <ul>
-      {#each rows as { root, countLabel } (root.rootId)}
+      {#each rows as { root, countLabel, removeAriaLabel } (root.rootId)}
         <li data-testid={`folder-row-${root.rootId}`}>
           <span>{root.absolutePath}</span>
           <span>{countLabel}</span>
-          <button type="button" onclick={() => removeFolder(root.rootId)}>{removeLabel}</button>
+          <button type="button" aria-label={removeAriaLabel} onclick={() => removeFolder(root.rootId)}>{removeLabel}</button>
         </li>
       {/each}
     </ul>

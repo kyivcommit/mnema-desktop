@@ -2,7 +2,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_indexing' | 'settings_nav_application'
   | 'settings_section_not_ready'
   | 'settings_folders_empty' | 'settings_folders_add' | 'settings_folders_remove'
-  | 'settings_folders_load_failed'
+  | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
   | 'models_key_label' | 'models_key_saved' | 'models_key_absent_hint'
   | 'models_key_change' | 'models_key_forget' | 'models_key_save' | 'models_key_cancel'
@@ -56,14 +56,28 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // empty" vs. "not walked yet" — a folder just added and one genuinely
     // empty are the same value on the wire — so this sentence names only the
     // absence of watched folders, never a folder's own content. The per-row
-    // document count (`indexed_documents`, shared with the launcher tree)
-    // carries the state a folder's own row can actually prove.
+    // count (`settings_folders_indexed`, below) carries the state a folder's
+    // own row can actually prove. (Not "shared with the launcher tree" —
+    // `git grep indexed_documents` shows no launcher component renders that
+    // key, before or after this commit; P3-7 review.)
     settings_folders_empty: 'Ще жодної теки не додано.',
     settings_folders_add: 'Додати теку',
     settings_folders_remove: 'Видалити',
     // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
     // shown verbatim beside this, never branched on).
     settings_folders_load_failed: 'Не вдалося прочитати список тек.',
+    // §9.2 review (P2-4): the bare count read as a claim about the FOLDER
+    // ("this folder has 0 documents"), forever, since D-c defers the walk
+    // that would ever change it. This key names the subject — the index, not
+    // the folder — reusing `indexed_documents`'s own plural arms rather than
+    // duplicating them (do not change that shared key: it is a different
+    // sentence for a different place, §7.3/launcher `Tree.svelte`).
+    settings_folders_indexed: '{count, plural, one {Проіндексовано: # документ} few {Проіндексовано: # документи} many {Проіндексовано: # документів} other {Проіндексовано: # документа}}',
+    // §9.2 review (P2-5): two "Видалити" buttons in a two-folder list share
+    // one accessible name. `aria-label` carries the folder's own path so a
+    // screen reader distinguishes them; the visible button text stays plain
+    // "Видалити" (settings_folders_remove, above).
+    settings_folders_remove_named: 'Видалити {path}',
     // §9.1 / Task 4. Provider is a fixed, disabled control (v1 = OpenRouter
     // only, §4.4) — the name is a catalogue string, not a hardcoded literal,
     // because it is what a person reads there, not a testid.
@@ -254,6 +268,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_add: 'Add a folder',
     settings_folders_remove: 'Remove',
     settings_folders_load_failed: 'The list of folders could not be read.',
+    settings_folders_indexed: '{count, plural, one {Indexed: # document} other {Indexed: # documents}}',
+    settings_folders_remove_named: 'Remove {path}',
     models_provider_label: 'Provider',
     models_provider_name: 'OpenRouter',
     models_key_label: 'Key',

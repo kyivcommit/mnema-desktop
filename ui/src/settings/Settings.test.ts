@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, afterEach, vi } from 'vitest';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
@@ -47,7 +47,8 @@ test('shows all four section names, in the spec order', () => {
 
 test('clicking Folders shows the Folders heading and removes the Models heading', async () => {
   setLocale('en'); // seed, do not inherit
-  render(Settings);
+  const { container } = render(Settings);
+  const panel = () => container.querySelector<HTMLElement>('.spane');
   expect(screen.getByRole('heading', { name: 'Models' })).toBeTruthy();
   expect(screen.queryByRole('heading', { name: 'Folders' })).toBeNull();
 
@@ -55,6 +56,15 @@ test('clicking Folders shows the Folders heading and removes the Models heading'
 
   expect(screen.getByRole('heading', { name: 'Folders' })).toBeTruthy();
   expect(screen.queryByRole('heading', { name: 'Models' })).toBeNull();
+  // The heading alone only proves the <h2> in Settings.svelte rendered — it
+  // says nothing about whether <Folders /> is mounted underneath it. This
+  // reads text only Folders.svelte itself renders (its own empty-state
+  // sentence, from its `../lib/ipc` mock's `listTree: () => ({ roots: [],
+  // recents: [] })` above), so deleting `<Folders />` and keeping the <h2>
+  // fails here.
+  await waitFor(() =>
+    expect(within(panel()!).getByText('No folder has been added yet.')).toBeTruthy(),
+  );
 });
 
 // Owner's ruling: `aria-disabled` came off these buttons. They are fully
