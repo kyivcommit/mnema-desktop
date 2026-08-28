@@ -554,6 +554,150 @@ test('an embedding pass stopping for a walk-only reason is not drawn as a finish
 });
 
 // ---------------------------------------------------------------------------
+// PR 25 review, P2-3 — an old walk's continuation writing over a newer scan.
+//
+// `chain()` resumes after `await modelSettings()`, and during that await
+// another scan can start and take the job slot. The stale continuation then
+// writes `starting`/`embed` over the live walk, is refused with "a job is
+// already running", and its own catch resets the store to `idle` — so the
+// running walk and its Stop are HIDDEN, and stay hidden until some other event
+// happens to arrive.
+//
+// Driven with a deferred promise rather than a timer: the race is about which
+// continuation resumes when, and a timer would assert a schedule instead of an
+// ordering. Nothing here waits on a clock.
+// ---------------------------------------------------------------------------
+test('a superseded walk`s continuation does not hide the scan that replaced it', async () => {
+  // `start_embed_job` is refused the way the backend really refuses it here:
+  // the newer walk holds the slot. That refusal is what the stale catch used to
+  // turn into `idle`.
+  replies.start_embed_job = new Error('a job is already running');
+  const { container } = await openFolders();
+
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  // The first walk ends, so its continuation starts — and is held inside
+  // `model_settings`, which is where the window's read of the two
+  // preconditions lives.
+  let release!: (value: unknown) => void;
+  replies.model_settings = new Promise((resolve) => { release = resolve; });
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(calls('model_settings').length).toBeGreaterThan(1));
+
+  // A second scan, on the OTHER folder, while that read is still in flight. It
+  // takes the slot and starts reporting.
+  await fireEvent.click(scanButton(4));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(2));
+  channelOf('start_walk_job')(progressEvent({ done: 2, total: 9 }));
+  await tick();
+
+  // Now let the superseded continuation resume, with everything it needs to
+  // succeed: a key, a model, and nothing in the answer to tell it that the
+  // world moved on.
+  release(READY_SETTINGS);
+  await tick();
+  await tick();
+  await tick();
+
+  // Read as a person reads it: the live walk is still on screen, with its own
+  // counts, and the control that stops it is still there.
+  const text = container.textContent ?? '';
+  expect(text).toContain('Триває читання теки.');
+  expect(text).toContain('Опрацьовано 2 з 9. Пропущено: 1. Відхилено: 0.');
+  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
+  // And the sentence the stale continuation would have put there instead is
+  // absent — both the embedding line and the refusal note it collects.
+  expect(text).not.toContain('Вбудовування всього індексу починається…');
+  expect(screen.queryByTestId('indexing-note')).toBeNull();
+  // The pass the superseded walk was going to chain was never even asked for:
+  // the guard returns before the command, so the backend is not made to refuse
+  // something this window already knows is not its turn.
+  expect(calls('start_embed_job')).toHaveLength(0);
+});
+
+// The same await, its other exit. `model_settings` can be refused, and the
+// refusal is reported as a note — so a superseded continuation whose read fails
+// would put a sentence on screen about a pass the person has already replaced.
+// One guard per exit, and each named by the test that has to fail without it.
+test('a superseded walk whose precondition read is refused says nothing about it', async () => {
+  const { container } = await openFolders();
+
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  let refuse!: (reason: unknown) => void;
+  replies.model_settings = new Promise((_resolve, reject) => { refuse = reject; });
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(calls('model_settings').length).toBeGreaterThan(1));
+
+  await fireEvent.click(scanButton(4));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(2));
+  channelOf('start_walk_job')(progressEvent({ done: 4, total: 5 }));
+  await tick();
+
+  refuse(new Error('LEAK-TOKEN-STALE-READ'));
+  await tick();
+  await tick();
+  await tick();
+
+  const text = container.textContent ?? '';
+  expect(text).toContain('Опрацьовано 4 з 5. Пропущено: 1. Відхилено: 0.');
+  expect(screen.queryByTestId('indexing-note')).toBeNull();
+  expect(text).not.toContain('LEAK-TOKEN-STALE-READ');
+});
+
+// The SECOND await in the same continuation, and it needs a case of its own:
+// with the first guard in place a superseded walk never reaches the command, so
+// nothing above can make this one die. The window a new scan fits into here is
+// `start_embed_job` itself being in flight — the refusal it collects is about
+// the newer job holding the slot, and the catch would reset that job\'s
+// `starting` to `idle`.
+test('a continuation superseded while its embed command is in flight leaves the newer scan alone', async () => {
+  let refuse!: (reason: unknown) => void;
+  replies.start_embed_job = new Promise((_resolve, reject) => { refuse = reject; });
+  const { container } = await openFolders();
+
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  // Ends, chains, passes both preconditions, and stops inside the command.
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+
+  await fireEvent.click(scanButton(4));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(2));
+  channelOf('start_walk_job')(progressEvent({ done: 6, total: 7 }));
+  await tick();
+
+  refuse(new Error('a job is already running'));
+  await tick();
+  await tick();
+  await tick();
+
+  const text = container.textContent ?? '';
+  expect(text).toContain('Триває читання теки.');
+  expect(text).toContain('Опрацьовано 6 з 7. Пропущено: 1. Відхилено: 0.');
+  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
+  // The refusal belongs to a pass nobody is watching any more, so it is not
+  // reported as though it were about the scan on screen.
+  expect(screen.queryByTestId('indexing-note')).toBeNull();
+  expect(text).not.toContain('a job is already running');
+});
+
+// The other direction, and the one a guard that simply never chains would
+// satisfy: an ordinary walk, with nothing racing it, still chains its pass.
+test('a walk that nothing supersedes still chains its embedding pass', async () => {
+  await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent());
+
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+  expect(screen.getByTestId('indexing-pass').textContent).toBe('Вбудовування всього індексу починається…');
+});
+
+// ---------------------------------------------------------------------------
 // Cancel, and where the job state lives.
 // ---------------------------------------------------------------------------
 

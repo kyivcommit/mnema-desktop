@@ -172,7 +172,28 @@ const sentenceOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export function createJobController(): JobController {
   const store = writable<JobState>({ phase: { kind: 'idle' }, walk: null, note: null });
 
-  function onEvent(pass: JobPass, event: JobEvent) {
+  // Which operation the window is on. **A continuation that resumes after an
+  // `await` is not entitled to assume it is still the current one.** `chain()`
+  // waits on `model_settings`, and a second scan can start and take the job
+  // slot inside that wait: the stale continuation then writes
+  // `starting`/`embed` over the live walk, is refused with "a job is already
+  // running", and its own catch resets the store to `idle` — so the running
+  // walk disappears from the strip along with its Stop, and stays gone until
+  // some other event happens to arrive.
+  //
+  // Nothing in the store can tell the two apart: both continuations write the
+  // same shapes for the same reasons. The number is the only thing that says
+  // WHICH operation is speaking.
+  //
+  // It guards the continuation and NOT `onEvent`. That asymmetry is the
+  // measured half: a second scan attempted while the first is still running is
+  // REFUSED, so the first job keeps running and keeps reporting — and a guard
+  // on its events would take the live pass off the screen, which is the very
+  // failure this is here to prevent, arriving through the ordinary path
+  // instead of the racing one.
+  let operation = 0;
+
+  function onEvent(pass: JobPass, event: JobEvent, gen: number) {
     if (event.event === 'progress') {
       store.update((s) => ({ ...s, phase: { kind: 'running', pass, counts: event.data } }));
       return;
@@ -183,7 +204,7 @@ export function createJobController(): JobController {
       phase: { kind: 'ended', pass, ending },
       walk: pass === 'walk' ? ending : s.walk,
     }));
-    if (pass === 'walk' && chainsEmbedPass(ending.outcome.kind)) void chain();
+    if (pass === 'walk' && chainsEmbedPass(ending.outcome.kind)) void chain(gen);
   }
 
   // The window checks BOTH preconditions itself and names the one that is
@@ -193,14 +214,20 @@ export function createJobController(): JobController {
   // an ending carrying a sentence. Those two are the second line, for the state
   // that changed between this read and the call — both still happen, and both
   // still reach the screen.
-  async function chain() {
+  async function chain(gen: number) {
     let settings;
     try {
       settings = await modelSettings();
     } catch (e) {
+      if (gen !== operation) return;
       store.update((s) => ({ ...s, note: { kind: 'rejected', sentence: sentenceOf(e) } }));
       return;
     }
+    // Checked HERE rather than on the way in: what makes this continuation
+    // stale is time passing inside the await above, so the answer before it is
+    // about the wrong moment. Everything below writes to the store, and a
+    // superseded walk may write none of it — not the note, not the phase.
+    if (gen !== operation) return;
     if (settings.key.kind !== 'present') {
       store.update((s) => ({ ...s, note: { kind: 'noKey' } }));
       return;
@@ -214,8 +241,13 @@ export function createJobController(): JobController {
     }
     store.update((s) => ({ ...s, phase: { kind: 'starting', pass: 'embed' } }));
     try {
-      await startEmbedJob((event) => onEvent('embed', event));
+      await startEmbedJob((event) => onEvent('embed', event, gen));
     } catch (e) {
+      // The same guard again, for the second await. The refusal a superseded
+      // continuation collects is "a job is already running" — and the job that
+      // is running is the newer one, whose `starting` state this catch would
+      // otherwise reset to `idle`.
+      if (gen !== operation) return;
       store.update((s) => ({
         ...s,
         phase: s.phase.kind === 'starting' ? { kind: 'idle' } : s.phase,
@@ -225,9 +257,10 @@ export function createJobController(): JobController {
   }
 
   async function scan(rootId: number) {
+    const gen = ++operation;
     store.set({ phase: { kind: 'starting', pass: 'walk' }, walk: null, note: null });
     try {
-      await startWalkJob(rootId, (event) => onEvent('walk', event));
+      await startWalkJob(rootId, (event) => onEvent('walk', event, gen));
     } catch (e) {
       // Only if nothing has reported yet: a refused command claimed no slot, but
       // a job that has already sent an event owns the phase.
