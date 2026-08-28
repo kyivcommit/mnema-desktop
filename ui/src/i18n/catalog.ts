@@ -17,6 +17,11 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_refusal_no_text_output'
   | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
   | 'models_catalogue_unreadable_record_known'
+  | 'models_embedding_confirm_title' | 'models_embedding_confirm_estimate'
+  | 'models_embedding_keep' | 'models_embedding_discard' | 'models_embedding_cancel'
+  | 'models_embedding_retired' | 'models_embedding_retired_none'
+  | 'models_embedding_degraded' | 'models_embedding_reembed' | 'models_embedding_reembed_started'
+  | 'models_embedding_change_failed' | 'models_job_running' | 'models_index_recover'
   | 'refusal_no_candidates' | 'refusal_empty_completion'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
@@ -135,6 +140,23 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_catalogue_unreadable_record_absent: 'Запис на позиції {index}: постачальник не вказав ідентифікатор моделі.',
     models_catalogue_unreadable_record_not_a_string: 'Запис на позиції {index}: ідентифікатор моделі не був текстом.',
     models_catalogue_unreadable_record_known: 'Запис на позиції {index}, ідентифікатор «{id}»: решту запису ця збірка прочитати не змогла.',
+    // §9.1 / Task 6 — обрання моделі ембедингу. Дві цифри про два різні
+    // моменти, і вікно каже, яка з них яка: оцінка ДО дії читається з
+    // `embeddedChunksEverywhere`, а скільки саме зникло — з `AdoptedModel.retired`,
+    // виміряного в мить знищення.
+    models_embedding_confirm_title: 'Змінити модель ембедингу?',
+    models_embedding_confirm_estimate: 'Зараз індекс містить {count, plural, one {# ембединг} few {# ембединги} many {# ембедингів} other {# ембедингів}} в усіх векторних просторах. Це оцінка, зроблена до зміни; скільки саме було відкинуто, буде сказано після неї.',
+    models_embedding_keep: 'Зберегти ембединги',
+    models_embedding_discard: 'Відкинути ембединги',
+    models_embedding_cancel: 'Не змінювати модель',
+    models_embedding_retired: 'Зміна відкинула {count, plural, one {# ембединг} few {# ембединги} many {# ембедингів} other {# ембедингів}} з {spaces, plural, one {# векторного простору} other {# векторних просторів}}.',
+    models_embedding_retired_none: 'Зміна нічого не відкинула: жоден векторний простір їй не заважав.',
+    models_embedding_degraded: 'Пошук за змістом недоступний, доки індекс не буде вбудовано наново. Пошук за словами працює далі.',
+    models_embedding_reembed: 'Вбудувати індекс наново',
+    models_embedding_reembed_started: 'Вбудовування почалося.',
+    models_embedding_change_failed: 'Модель ембедингу не змінено.',
+    models_job_running: 'Триває завдання індексації. Його не зупинено, воно працює далі.',
+    models_index_recover: 'Повторний вибір моделі ембедингу це виправляє: він наново записує вказівник, який індекс втратив. Нічого з уже вбудованого при цьому не відкидається.',
     indexed_documents: '{count, plural, one {# документ} few {# документи} many {# документів} other {# документа}}',
     refusal_no_candidates: 'Нічого не знайдено за цим запитом.',
     refusal_empty_completion: 'Модель не повернула відповіді.',
@@ -246,6 +268,19 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
     models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
     models_catalogue_unreadable_record_known: 'Record at position {index}, id "{id}": this build could not read the rest of the record.',
+    models_embedding_confirm_title: 'Change the embedding model?',
+    models_embedding_confirm_estimate: 'The index holds {count, plural, one {# embedding} other {# embeddings}} across all its vector spaces right now. That is an estimate read before the change; what the change actually discarded is reported after it.',
+    models_embedding_keep: 'Keep the embeddings',
+    models_embedding_discard: 'Discard the embeddings',
+    models_embedding_cancel: 'Do not change the model',
+    models_embedding_retired: 'The change discarded {count, plural, one {# embedding} other {# embeddings}} from {spaces, plural, one {# vector space} other {# vector spaces}}.',
+    models_embedding_retired_none: 'The change discarded nothing: no vector space was in its way.',
+    models_embedding_degraded: 'Search by meaning is unavailable until the index is embedded again. Search by words still answers.',
+    models_embedding_reembed: 'Embed the index again',
+    models_embedding_reembed_started: 'Embedding has started.',
+    models_embedding_change_failed: 'The embedding model was not changed.',
+    models_job_running: 'An indexing job is running. It was not stopped, and it is still going.',
+    models_index_recover: 'Choosing an embedding model again repairs this: it rewrites the pointer the index lost. Nothing already embedded is discarded by it.',
     indexed_documents: '{count, plural, one {# document} other {# documents}}',
     refusal_no_candidates: 'Nothing was found for this query.',
     refusal_empty_completion: 'The model returned no answer.',

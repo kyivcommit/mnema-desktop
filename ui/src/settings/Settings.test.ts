@@ -16,7 +16,7 @@ vi.mock('../lib/ipc', () => ({
   modelSettings: () =>
     Promise.resolve({
       key: { kind: 'absent' },
-      index: { kind: 'read', embeddingModel: null, searchTextArm: true, searchContentArm: false },
+      index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
       platform: 'linux',
     }),
   setKey: vi.fn(),
@@ -131,12 +131,23 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // and the Index group moved to the end — so this string was measured again
   // from a real render rather than hand-edited. It is the whole point of this
   // assertion that a layout change has to come through here and be read.
+  //
+  // Task 6 adds four blocks between the model list and the status dot — the
+  // confirmation, what a change discarded, the degraded notice and a rejection
+  // — and on this fixture every one of them is absent: no press has been made,
+  // so there is nothing to confirm, nothing was discarded and nothing failed.
+  // What they leave behind is the run of whitespace before the status sentence,
+  // and it is measured from a real render rather than hand-edited, the same way
+  // every earlier version of this string was. **A person reading this screen
+  // must see no new words here**, which is the claim: a confirmation that
+  // rendered itself before anybody pressed anything would arrive as text in the
+  // middle of this line.
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy());
   expect(panel()?.textContent).toBe(
     'Models Provider OpenRouter Key An OpenRouter key lets this application reach the models.'
     + ' Create one in your OpenRouter account and paste it here.   Save    '
     + ' Embedding Chat   The provider does not currently list any models for this role.'
-    + ' Not connected yet — add a key and choose an embedding model to enable content search. ',
+    + '     Not connected yet — add a key and choose an embedding model to enable content search. ',
   );
 
   await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));

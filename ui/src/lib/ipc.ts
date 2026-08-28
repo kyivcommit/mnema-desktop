@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 
 // Wire types — a hand mirror of the Rust serialization pinned in
 // `bridge.rs`/`locator.rs` (see the PR 3/6 wire-pin tests). camelCase + a
@@ -120,8 +120,26 @@ export type UnreadableCause = 'notOpen' | 'readFailed';
 // reads it treats "absent" and "stated null" alike, which is the same
 // collapse this structural subset already makes for the fields it omits
 // entirely.
+// `embeddedChunks` and `embeddedChunksEverywhere` widen the subset again for
+// Task 6, and unlike `chatModel` they are REQUIRED — the argument that made
+// that one optional is the argument that makes these two not. `?? null`
+// treats "the fixture did not state it" and "the backend said null" alike, and
+// for a chosen model those genuinely are alike. For a count they are not: the
+// only sensible substitute for a missing number is `0`, and `0` in front of a
+// person about to discard their embeddings reads as "nothing will be lost" —
+// a claim this build would be making without having measured it.
+//
+// Two counts and not one, because they answer two questions. `embeddedChunks`
+// counts the ACTIVE space, which is what says whether content search can
+// answer at all; `embeddedChunksEverywhere` counts every space, which is
+// `models.rs`'s own "the number a confirmed model change actually costs" — the
+// active count understates the bill by exactly the spaces it forgets, and
+// `the_settings_tell_the_active_space_apart_from_the_whole_index` is where the
+// two are held apart.
 export type IndexSettings =
-  | { kind: 'read'; embeddingModel: string | null; chatModel?: string | null; searchTextArm: boolean; searchContentArm: boolean }
+  | { kind: 'read'; embeddingModel: string | null; chatModel?: string | null;
+      embeddedChunks: number; embeddedChunksEverywhere: number;
+      searchTextArm: boolean; searchContentArm: boolean }
   | { kind: 'unreadable'; cause: UnreadableCause; reason: string };
 
 // `Mac` | `Windows` | `Linux` (models.rs:625-629), camelCase per the wire
@@ -219,7 +237,59 @@ export type Catalogue = {
 // window offers (D123/D124 keep rerank and verify off screen).
 export const providerModels = (role: ModelRole) => invoke<Catalogue>('provider_models', { role });
 
-// `set_embedding_model` is deliberately absent from this module's exports —
-// it belongs to Task 6, retires vector spaces and takes the job slot; nothing
-// here may call it.
 export const setChatModel = (model: string) => invoke<void>('set_chat_model', { model });
+
+// `ExistingVectors` (models.rs) — the one destructive parameter in this
+// application, and the reason it is a union of two names rather than a
+// boolean. It has no `Default` and no `#[serde(default)]` on the Rust side ON
+// PURPOSE: a call that omits the field or misspells it is rejected before the
+// command runs, rather than being handed one of the two answers by a library,
+// and only one of the two can be undone. So nothing in this module may supply
+// it — every caller states it, which means the person states it.
+//
+// The two spellings are the ones `every_model_command_the_window_calls_is_registered`
+// (src-tauri/tests/commands.rs) sends across the real IPC, both of them, for
+// exactly this mirror.
+export type ExistingVectors = 'keep' | 'discard';
+
+// `RetiredSpace` (models.rs): a space a confirmed change threw away and what it
+// held, measured by the index at the moment it was destroyed. This is the
+// number the sentence AFTER the act reports; the one the confirmation shows
+// before it is `IndexRead.embeddedChunksEverywhere`, read at a different
+// moment, and the window says which is which.
+export type RetiredSpace = { spaceId: number; embeddedChunks: number };
+
+export type AdoptedModel = {
+  model: string;
+  dim: number;
+  spaceId: number;
+  created: boolean;
+  /// Empty for every call that threw nothing away — a list, not an optional,
+  /// because more than one space can be in the way and reporting the first
+  /// would understate the bill.
+  retired: RetiredSpace[];
+  index: IndexSettings;
+};
+
+export const setEmbeddingModel = (model: string, existingVectors: ExistingVectors) =>
+  invoke<AdoptedModel>('set_embedding_model', { model, existingVectors });
+
+// `JobStatus` (bridge.rs). Read after a rejection, never parsed out of one: a
+// command rejection crosses the IPC as its `Display` string alone, so the only
+// honest way to learn whether a job is running is to ask.
+export type JobStatus = { running: boolean };
+export const jobStatus = () => invoke<JobStatus>('job_status');
+
+// The re-embedding pass, offered wherever a model change has just emptied the
+// index's vector space. It takes no root and covers the whole index
+// (embed_job.rs), so recovering from a discard needs no command of its own.
+//
+// The channel is created here rather than by the caller so that no component
+// has to import Tauri's `Channel` — and its messages are DROPPED, deliberately.
+// This module makes no claim about their shape: `JobEvent` has a tagged
+// `event`/`data` form of its own and seven end reasons, and a partial mirror
+// written here would look authoritative while being incomplete. Rendering a
+// running pass is the Indexing section's, with its own mirror; what this call
+// owes is only that the pass was started, which is what resolving says.
+export const startEmbedJob = () =>
+  invoke<void>('start_embed_job', { onProgress: new Channel<unknown>() });

@@ -3,8 +3,10 @@
   import { locale, t } from '../i18n';
   import {
     modelSettings, setKey, forgetKey, providerModels, setChatModel,
+    setEmbeddingModel, startEmbedJob, jobStatus,
     type ModelSettings, type KeyRemoval, type Catalogue,
     type ModelEntry, type ModelRefusal, type UnreadableRecord,
+    type ExistingVectors, type RetiredSpace,
   } from '../lib/ipc';
   // Reused rather than re-derived: `providerReady` is the exact PR 3 ruling
   // this section's green dot owes ("provider + key + a chosen embedding
@@ -198,6 +200,10 @@
 
   function selectTab(role: Tab) {
     activeTab = role;
+    // A confirmation is about a press on THIS tab. Left standing across a tab
+    // change it would sit under the chat list offering to discard embeddings
+    // for a model that is not on screen any more.
+    pendingEmbedding = null;
     void loadCatalogue(role);
   }
 
@@ -211,18 +217,19 @@
     }
   }
 
-  // The current embedding model is read-only here — choosing one is Task 6's
-  // `set_embedding_model`, which retires vector spaces and takes the job
-  // slot; nothing in this component calls it.
-  const currentEmbeddingModel = $derived(
-    settings && settings.index.kind === 'read' ? settings.index.embeddingModel : null,
+  // The index's own answer, or `null` when it had none to give — one binding
+  // rather than the same `kind === 'read'` test written at each field, because
+  // Task 6 reads four of them and a fifth reader spelling the test slightly
+  // differently is how two of these end up disagreeing.
+  const indexRead = $derived(settings && settings.index.kind === 'read' ? settings.index : null);
+  const indexUnreadableCause = $derived(
+    settings && settings.index.kind === 'unreadable' ? settings.index.cause : null,
   );
+  const currentEmbeddingModel = $derived(indexRead ? indexRead.embeddingModel : null);
   // `?? null`: the field is optional on the wire type (see `ipc.ts`), and
   // "not stated by this fixture" and "the index says no chat model" read the
   // same way here — neither marks anything as chosen.
-  const currentChatModel = $derived(
-    settings && settings.index.kind === 'read' ? (settings.index.chatModel ?? null) : null,
-  );
+  const currentChatModel = $derived(indexRead ? (indexRead.chatModel ?? null) : null);
 
   const ready = $derived(!!settings && providerReady(settings));
   const readyLabel = $derived.by(() => { void $locale; return t('models_status_ready'); });
@@ -310,6 +317,148 @@
     const cat = activeCatalogue;
     if (!cat) return [];
     return cat.unreadableRecords.map((rec) => ({ rec, label: unreadableRecordLabel(rec) }));
+  });
+
+  // ---------------------------------------------------------------------
+  // Task 6 — choosing an embedding model: the one act on this screen that
+  // destroys data on purpose, and the four things it owes afterwards.
+  // ---------------------------------------------------------------------
+
+  // The model a press has proposed and nobody has confirmed yet. `null` is
+  // "no question is being asked", which is also the state a cancel returns to.
+  let pendingEmbedding = $state<string | null>(null);
+  // What the change reported it actually threw away — `AdoptedModel.retired`,
+  // measured by the index at the moment of destruction. A different number
+  // from the estimate shown before the act, and never a re-rendering of it.
+  let retiredReport = $state<RetiredSpace[] | null>(null);
+  // Whether a change has landed in this session. Without it the degraded
+  // notice below would fire on every index that simply has not been embedded
+  // yet, which is not a loss and not something this screen caused.
+  let changeLanded = $state(false);
+  // The backend's own sentence for a rejected `set_embedding_model` or
+  // `start_embed_job`, shown verbatim and never branched on.
+  let changeError = $state<string | null>(null);
+  // What `job_status` answered after a rejection. Read, never inferred from
+  // the sentence: a rejection crosses the IPC as text, and `claim_job` is a
+  // compare-and-exchange that leaves the running job's owner untouched — so a
+  // refusal must not draw that job as cancelled or finished.
+  let jobRunning = $state(false);
+  let reembedStarted = $state(false);
+
+  function chooseEmbeddingModel(model: string) {
+    changeError = null;
+    retiredReport = null;
+    reembedStarted = false;
+    // The model the index is already on is not a change. It asks nothing and
+    // calls nothing: `set_embedding_model` would find the space rather than
+    // mint one and retire nothing, and a confirmation offering to discard
+    // embeddings for a press that moves nothing is a question with no honest
+    // answer.
+    if (model === currentEmbeddingModel) return;
+    // With no readable index there is no estimate to state, so there is
+    // nothing to confirm — and `Keep` is the value that refuses rather than
+    // destroys, so pressing cannot cost anything. This is the recovering act
+    // `set_embedding_model`'s own doc names for the state a failed adoption
+    // leaves behind: choosing a model again succeeds and rewrites the pointer.
+    if (!indexRead) {
+      void commitEmbedding(model, 'keep');
+      return;
+    }
+    pendingEmbedding = model;
+  }
+
+  async function commitEmbedding(model: string, existingVectors: ExistingVectors) {
+    pendingEmbedding = null;
+    changeError = null;
+    reembedStarted = false;
+    try {
+      const adopted = await setEmbeddingModel(model, existingVectors);
+      retiredReport = adopted.retired;
+      changeLanded = true;
+      jobRunning = false;
+      await refresh();
+    } catch (e) {
+      changeError = e instanceof Error ? e.message : String(e);
+      // §10: a rejection arrives as a sentence, not as a kind. What the screen
+      // says next is decided by re-reading the state — `model_settings` for
+      // what the index is in, `job_status` for whether a job is still going —
+      // and never by matching on the message text.
+      await refresh().catch(() => {});
+      jobRunning = await jobStatus()
+        .then((s) => s.running)
+        .catch(() => false);
+    }
+  }
+
+  async function reembed() {
+    changeError = null;
+    try {
+      await startEmbedJob();
+      reembedStarted = true;
+    } catch (e) {
+      changeError = e instanceof Error ? e.message : String(e);
+      jobRunning = await jobStatus()
+        .then((s) => s.running)
+        .catch(() => false);
+    }
+  }
+
+  // **The number before the act, and it is `embeddedChunksEverywhere`.** Not
+  // `embeddedChunks`, which counts the active space alone: the change retires
+  // every space in its way, and a space abandoned by an earlier change still
+  // holds whatever it held — so the active count understates the bill by
+  // exactly the spaces it forgets. `models.rs` says so on the field itself,
+  // and `the_settings_tell_the_active_space_apart_from_the_whole_index` is
+  // where the two numbers are held apart.
+  const estimatedEmbeddings = $derived(indexRead ? indexRead.embeddedChunksEverywhere : 0);
+
+  // Semantic search is dark: a change has landed and the space the index now
+  // points at holds nothing. Read from the active space's own count, because
+  // that is the space `retrieve` hands the KNN.
+  const degraded = $derived(changeLanded && !!indexRead && indexRead.embeddedChunks === 0);
+
+  const confirmLabels = $derived.by(() => {
+    void $locale;
+    return {
+      title: t('models_embedding_confirm_title'),
+      estimate: t('models_embedding_confirm_estimate', { count: estimatedEmbeddings }),
+      keep: t('models_embedding_keep'),
+      discard: t('models_embedding_discard'),
+      cancel: t('models_embedding_cancel'),
+    };
+  });
+
+  // The sentence AFTER the act, built from what the index measured as it
+  // destroyed things — never from `estimatedEmbeddings`, which was read at a
+  // different moment and about a different question.
+  const retiredLabel = $derived.by(() => {
+    void $locale;
+    if (!retiredReport) return null;
+    if (retiredReport.length === 0) return t('models_embedding_retired_none');
+    const count = retiredReport.reduce((n, r) => n + r.embeddedChunks, 0);
+    return t('models_embedding_retired', { count, spaces: retiredReport.length });
+  });
+
+  const degradedLabels = $derived.by(() => {
+    void $locale;
+    return {
+      sentence: t('models_embedding_degraded'),
+      reembed: t('models_embedding_reembed'),
+      started: t('models_embedding_reembed_started'),
+    };
+  });
+
+  const changeFailureLabel = $derived.by(() => {
+    void $locale;
+    return t('models_embedding_change_failed');
+  });
+  const jobRunningLabel = $derived.by(() => {
+    void $locale;
+    return t('models_job_running');
+  });
+  const indexRecoverLabel = $derived.by(() => {
+    void $locale;
+    return t('models_index_recover');
   });
 
   // A stated zero is never a promise the list is complete (umbrella `:529`) —
@@ -449,18 +598,73 @@
               aria-pressed={entry.id === currentChatModel}
               onclick={() => chooseChatModel(entry.id)}>{entry.name}</button>
           {:else}
-            <!-- Read-only here: choosing an embedding model is Task 6's
-                 `set_embedding_model`. A row with no action is a row, not a
-                 button with nothing to press (the same reasoning `Tree.svelte`
-                 already applies to a source-card row that opens nothing). -->
-            <span
+            <!-- `aria-current` and not `aria-pressed`, which the chat tab uses:
+                 this marks the one model the INDEX is on, a fact about a set,
+                 while the chat rows are a choice being toggled. Keeping them
+                 different is also what stops one shared "is this the chosen
+                 one" test from answering for both roles. -->
+            <button
+              type="button"
               data-testid={`model-entry-${entry.id}`}
-              aria-current={entry.id === currentEmbeddingModel ? 'true' : undefined}>{entry.name}</span>
+              aria-current={entry.id === currentEmbeddingModel ? 'true' : undefined}
+              onclick={() => chooseEmbeddingModel(entry.id)}>{entry.name}</button>
           {/if}
         </li>
       {/each}
     </ul>
   {/if}
+{/if}
+
+<!-- Task 6. The question comes before the act, the report after it, and they
+     carry two different numbers about two different moments — the estimate is
+     read from the index now, and what actually went is measured by the index
+     as it went. -->
+{#if pendingEmbedding}
+  {@const chosen = pendingEmbedding}
+  <div class="group" data-testid="model-embedding-confirm">
+    <p data-testid="model-embedding-confirm-title">{confirmLabels.title}</p>
+    <p data-testid="model-embedding-estimate">{confirmLabels.estimate}</p>
+    <div class="field">
+      <!-- Two named buttons and no default. `ExistingVectors` has no `Default`
+           and no `#[serde(default)]` on purpose: only one of the two can be
+           undone, so the person chooses and this component never chooses for
+           them. -->
+      <button
+        type="button"
+        data-testid="model-embedding-keep"
+        onclick={() => commitEmbedding(chosen, 'keep')}>{confirmLabels.keep}</button>
+      <button
+        type="button"
+        data-testid="model-embedding-discard"
+        onclick={() => commitEmbedding(chosen, 'discard')}>{confirmLabels.discard}</button>
+      <button
+        type="button"
+        data-testid="model-embedding-cancel"
+        onclick={() => (pendingEmbedding = null)}>{confirmLabels.cancel}</button>
+    </div>
+  </div>
+{/if}
+
+{#if retiredLabel}<p data-testid="model-embedding-retired">{retiredLabel}</p>{/if}
+
+{#if degraded}
+  <div class="group" data-testid="model-embedding-degraded">
+    <p data-testid="model-embedding-degraded-note">{degradedLabels.sentence}</p>
+    <button
+      type="button"
+      data-testid="model-embedding-reembed"
+      onclick={reembed}>{degradedLabels.reembed}</button>
+    {#if reembedStarted}
+      <p data-testid="model-embedding-reembed-started">{degradedLabels.started}</p>
+    {/if}
+  </div>
+{/if}
+
+{#if changeError}
+  <p data-testid="model-embedding-failed">{changeFailureLabel}</p>
+  <!-- The backend's own sentence, verbatim. Nothing on this screen reads it. -->
+  <p data-testid="model-embedding-error">{changeError}</p>
+  {#if jobRunning}<p data-testid="model-job-running">{jobRunningLabel}</p>{/if}
 {/if}
 
 <p data-testid="model-status-dot" data-active={ready ? 'true' : 'false'}>{ready ? readyLabel : notReadyLabel}</p>
@@ -475,5 +679,14 @@
   <div class="field" data-testid="model-index-group">
     <span class="fl" data-testid="model-index-label">{indexLabel}</span>
     <p data-testid="model-index-failure">{indexFailure}</p>
+    <!-- `readFailed` only. The sentence above calls this a defect worth
+         reporting, and `set_embedding_model`'s own doc says that sentence is
+         wrong about the cause in exactly one state — the one a retirement that
+         committed and an adoption that did not leaves behind. It needs no
+         repair step and recovers through the ordinary act, so the section says
+         which act. `notOpen` gets no such offer: nothing is broken there. -->
+    {#if indexUnreadableCause === 'readFailed'}
+      <p data-testid="model-index-recover">{indexRecoverLabel}</p>
+    {/if}
   </div>
 {/if}

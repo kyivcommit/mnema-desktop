@@ -46,13 +46,13 @@ test('AskAnswer maps to the right launcher state', () => {
 const presentKey: ModelSettings['key'] = { kind: 'present' };
 const absentKey: ModelSettings['key'] = { kind: 'absent' };
 const readWithModel: ModelSettings['index'] = {
-  kind: 'read',
+  kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0,
   embeddingModel: 'text-embedding-3-small',
   searchTextArm: true,
   searchContentArm: false,
 };
 const readNoModel: ModelSettings['index'] = {
-  kind: 'read',
+  kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0,
   embeddingModel: null,
   searchTextArm: true,
   searchContentArm: false,

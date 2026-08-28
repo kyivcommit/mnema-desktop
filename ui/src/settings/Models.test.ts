@@ -17,12 +17,18 @@ const setKey = vi.fn();
 const forgetKey = vi.fn();
 const providerModels = vi.fn();
 const setChatModel = vi.fn();
+const setEmbeddingModel = vi.fn();
+const startEmbedJob = vi.fn();
+const jobStatus = vi.fn();
 vi.mock('../lib/ipc', () => ({
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   setKey: (...a: unknown[]) => setKey(...a),
   forgetKey: (...a: unknown[]) => forgetKey(...a),
   providerModels: (...a: unknown[]) => providerModels(...a),
   setChatModel: (...a: unknown[]) => setChatModel(...a),
+  setEmbeddingModel: (...a: unknown[]) => setEmbeddingModel(...a),
+  startEmbedJob: (...a: unknown[]) => startEmbedJob(...a),
+  jobStatus: (...a: unknown[]) => jobStatus(...a),
 }));
 
 // An empty-but-well-formed catalogue — every test that does not care about
@@ -38,7 +44,12 @@ beforeEach(() => {
   forgetKey.mockReset();
   providerModels.mockReset();
   setChatModel.mockReset();
+  setEmbeddingModel.mockReset();
+  startEmbedJob.mockReset();
+  jobStatus.mockReset();
   providerModels.mockResolvedValue(emptyCatalogue());
+  startEmbedJob.mockResolvedValue(undefined);
+  jobStatus.mockResolvedValue({ running: false });
 });
 afterEach(() => {
   cleanup();
@@ -51,7 +62,7 @@ afterEach(() => {
 function settings(overrides: Partial<ModelSettings> = {}): ModelSettings {
   return {
     key: { kind: 'absent' },
-    index: { kind: 'read', embeddingModel: null, searchTextArm: true, searchContentArm: false },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
     platform: 'linux',
     ...overrides,
   };
@@ -94,7 +105,7 @@ test('index Unreadable/readFailed renders its own, different sentence, never the
 
 test('index Read renders no failure sentence at all', async () => {
   await renderWith(settings({
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
   }));
   expect(screen.queryByText('The index is not open yet.')).toBeNull();
   expect(screen.queryByText('The index could not be read — this is a defect in this build.')).toBeNull();
@@ -328,7 +339,7 @@ test('entering a key calls set_key, and no trace of it survives the round', asyn
 test('reads as a person: everything configured, nothing alarming shown', async () => {
   const { container } = await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
     platform: 'linux',
   }));
   const text = container.textContent ?? '';
@@ -704,7 +715,7 @@ test('the same model id in both catalogues does not leak a selection across tabs
   await renderWith(settings({
     key: { kind: 'present' },
     index: {
-      kind: 'read', embeddingModel: 'shared-model', chatModel: 'other-model',
+      kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'shared-model', chatModel: 'other-model',
       searchTextArm: true, searchContentArm: true,
     },
   }));
@@ -729,7 +740,7 @@ test('the same model id in both catalogues does not leak a selection across tabs
 test('the status dot is ready when provider, key and a chosen embedding model are all set', async () => {
   await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   const dot = screen.getByTestId('model-status-dot');
   expect(dot.getAttribute('data-active')).toBe('true');
@@ -749,7 +760,7 @@ test('the status dot is not ready when the index cannot be read', async () => {
 test('the status dot is not ready when there is no key', async () => {
   await renderWith(settings({
     key: { kind: 'absent' },
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('false');
 });
@@ -757,7 +768,7 @@ test('the status dot is not ready when there is no key', async () => {
 test('the status dot is not ready when no embedding model is chosen', async () => {
   await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddingModel: null, chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('false');
 });
@@ -815,7 +826,7 @@ test('the shown selection does not change until set_chat_model AND its re-read b
   mockCatalogues({ chat: catalogueOf([entry('gpt-a'), entry('gpt-b')]) });
   modelSettings.mockResolvedValueOnce(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
   const setChatModelCall = deferredPromise<void>();
   setChatModel.mockImplementation(() => setChatModelCall.promise);
@@ -832,7 +843,7 @@ test('the shown selection does not change until set_chat_model AND its re-read b
 
   modelSettings.mockResolvedValueOnce(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
   setChatModelCall.resolve();
 
@@ -856,14 +867,14 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
   // The fresh call — issued by the choice — settles first, with the new model.
   queue[1].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
 
   // The mount's OLDER call settles late, with the old model. It must lose.
   queue[0].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
   // Not `await Promise.resolve()` twice: that gave the mutant that deletes
   // the sequence guard enough of a head start to look passing, because two
@@ -897,7 +908,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
   // changed yet.
   queue[0].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true'));
 
@@ -906,7 +917,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
   await waitFor(() => expect(queue.length).toBe(2));
   queue[1].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
 
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
@@ -1008,7 +1019,7 @@ test('a rejected set_chat_model shows the backends sentence and leaves the selec
   await renderWith(settings({
     key: { kind: 'present' },
     index: {
-      kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a',
+      kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a',
       searchTextArm: true, searchContentArm: true,
     },
   }));
@@ -1435,7 +1446,7 @@ test('a language switch after mount reaches the not-ready status dot sentence', 
 test('a language switch after mount reaches the ready status dot sentence', async () => {
   const { container } = await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   expect((container.textContent ?? '')).toContain('Connected — OpenRouter');
 
@@ -1491,4 +1502,441 @@ test('a language switch after mount reaches an unreadable-record label', async (
   const after = container.textContent ?? '';
   expect(after).toContain('постачальник не вказав ідентифікатор моделі');
   expect(after).not.toContain('the provider stated no model id');
+});
+
+// ---------------------------------------------------------------------------
+// Task 6 — choosing an embedding model. Every claim below is about what a
+// person SEES, and each is asserted positively on visible text: "the dot is not
+// green" and "no confirmation appeared" are both satisfied by a blank panel.
+//
+// The fixture question, first: the state these tests must build and the code
+// branches on is an index that ALREADY HAS an embedding model — without it,
+// "choosing a different model asks first" is indistinguishable from "every
+// press asks", and the same-model direction cannot be expressed at all.
+// ---------------------------------------------------------------------------
+
+const CONFIRM_TITLE = 'Change the embedding model?';
+const DEGRADED =
+  'Search by meaning is unavailable until the index is embedded again. Search by words still answers.';
+const RECOVER =
+  'Choosing an embedding model again repairs this: it rewrites the pointer the index lost. ' +
+  'Nothing already embedded is discarded by it.';
+const JOB_RUNNING = 'An indexing job is running. It was not stopped, and it is still going.';
+
+/// An index on `emb-1` with `everywhere` embeddings recorded across its spaces
+/// and `active` in the one it points at — the two counts the section reads for
+/// two different questions.
+function onModel(everywhere: number, active = everywhere) {
+  return settings({
+    key: { kind: 'present' },
+    index: {
+      kind: 'read', embeddingModel: 'emb-1', chatModel: null,
+      embeddedChunks: active, embeddedChunksEverywhere: everywhere,
+      searchTextArm: true, searchContentArm: true,
+    },
+  });
+}
+
+async function renderOnModel(s = onModel(7)) {
+  mockCatalogues({
+    embedding: catalogueOf([entry('emb-1', { name: 'Embedder One' }), entry('emb-2', { name: 'Embedder Two' })]),
+  });
+  const result = await renderWith(s);
+  await waitFor(() => expect(screen.getByTestId('model-entry-emb-2')).toBeTruthy());
+  return result;
+}
+
+test('choosing a DIFFERENT embedding model asks before it calls anything', async () => {
+  await renderOnModel();
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+
+  expect(screen.getByTestId('model-embedding-confirm-title').textContent).toBe(CONFIRM_TITLE);
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+});
+
+test('choosing the model the index is ALREADY on asks nothing and calls nothing', async () => {
+  await renderOnModel();
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-1'));
+
+  expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+  // And the row still says which model the index is on, so "nothing happened"
+  // is not the same as "the press unmarked it".
+  expect(screen.getByTestId('model-entry-emb-1').getAttribute('aria-current')).toBe('true');
+});
+
+// The two counts are DIFFERENT here on purpose. `embeddedChunks` counts the
+// active space and `embeddedChunksEverywhere` counts every space, and the
+// change retires every space in its way — so a fixture that gives them the same
+// value cannot tell the honest number from the one that understates the bill.
+test('the confirmation states the number as an estimate and names what it counts', async () => {
+  await renderOnModel(onModel(7, 3));
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+
+  expect(screen.getByTestId('model-embedding-estimate').textContent).toBe(
+    'The index holds 7 embeddings across all its vector spaces right now. That is an estimate ' +
+    'read before the change; what the change actually discarded is reported after it.',
+  );
+});
+
+test('Cancel takes the question away and still calls nothing', async () => {
+  await renderOnModel();
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+
+  await fireEvent.click(screen.getByTestId('model-embedding-cancel'));
+
+  expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+  // The list is still there to press again: cancelling a question must not
+  // take the choice away with it.
+  expect(screen.getByTestId('model-entry-emb-2')).toBeTruthy();
+});
+
+test('Keep and Discard each send their own value, and neither is supplied by default', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true, retired: [],
+    index: onModel(0).index,
+  });
+  await renderOnModel();
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-keep'));
+  expect(setEmbeddingModel).toHaveBeenLastCalledWith('emb-2', 'keep');
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+  expect(setEmbeddingModel).toHaveBeenLastCalledWith('emb-2', 'discard');
+});
+
+test('the sentence after the act reports what the index destroyed, not the estimate before it', async () => {
+  // Seven before the act, four actually retired. The two numbers must not be
+  // the same number, or "the first presented as the second" is unfalsifiable.
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 4 }],
+    index: onModel(0).index,
+  });
+  await renderOnModel(onModel(7));
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+
+  await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
+  const said = screen.getByTestId('model-embedding-retired').textContent;
+  expect(said).toBe('The change discarded 4 embeddings from 1 vector space.');
+  expect(said).not.toContain('7');
+});
+
+test('a change that retired nothing says so rather than saying nothing', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true, retired: [],
+    index: onModel(0).index,
+  });
+  await renderOnModel(onModel(0));
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-keep'));
+
+  await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
+  expect(screen.getByTestId('model-embedding-retired').textContent).toBe(
+    'The change discarded nothing: no vector space was in its way.',
+  );
+});
+
+test('after a successful change the section says search by meaning is dark and offers the re-embed', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 4 }],
+    index: onModel(0).index,
+  });
+  const { container } = await renderOnModel(onModel(7));
+  // The other direction first: nothing on an untouched section claims this.
+  expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull();
+
+  // What `model_settings` answers AFTER the change: the index is on a new
+  // space and it holds nothing. The notice is read from that re-read and not
+  // from the fact that a change happened — an index whose new space is already
+  // full is not degraded, and a flag alone could not tell the two apart.
+  modelSettings.mockResolvedValue(onModel(0, 0));
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+
+  await waitFor(() => expect(screen.getByTestId('model-embedding-degraded-note')).toBeTruthy());
+  expect(screen.getByTestId('model-embedding-degraded-note').textContent).toBe(DEGRADED);
+  const reembed = screen.getByRole('button', { name: 'Embed the index again' });
+  expect(reembed.getAttribute('type')).toBe('button');
+
+  await fireEvent.click(reembed);
+  await waitFor(() => expect(startEmbedJob).toHaveBeenCalled());
+  expect(screen.getByTestId('model-embedding-reembed-started').textContent).toBe(
+    'Embedding has started.',
+  );
+  // The whole section, read as a person reads it: the two numbers stand in
+  // their own sentences and the loss is named in words, not by an absence.
+  const text = container.textContent ?? '';
+  expect(text).toContain('The change discarded 4 embeddings from 1 vector space.');
+  expect(text).toContain(DEGRADED);
+});
+
+// The other direction of the degraded notice, and it is not the untouched
+// section: a change HAS landed, and the space the index now points at is not
+// empty. Nothing is dark, so nothing may say it is — a notice conditioned on
+// "a change happened" alone would fire here.
+test('a change that leaves the new space full says nothing about a search going dark', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true, retired: [],
+    index: onModel(5, 5).index,
+  });
+  await renderOnModel(onModel(5, 5));
+  modelSettings.mockResolvedValue(onModel(5, 5));
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-keep'));
+
+  await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
+  expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull();
+  expect(screen.queryByTestId('model-embedding-reembed')).toBeNull();
+});
+
+test('a rejection shows the backend sentence verbatim and branches from a re-read of the state', async () => {
+  const SENTENCE = 'the index is not open';
+  setEmbeddingModel.mockRejectedValue(new Error(SENTENCE));
+  // The second read is what the section decides from — the message text says
+  // nothing about `readFailed`, and nothing here parses it.
+  modelSettings
+    .mockResolvedValueOnce(onModel(7))
+    .mockResolvedValue(settings({
+      key: { kind: 'present' },
+      index: { kind: 'unreadable', cause: 'readFailed', reason: 'LEAK-TOKEN-REJECTION' },
+    }));
+  mockCatalogues({
+    embedding: catalogueOf([entry('emb-1', { name: 'Embedder One' }), entry('emb-2', { name: 'Embedder Two' })]),
+  });
+  render(Models);
+  await waitFor(() => expect(screen.getByTestId('model-entry-emb-2')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+
+  await waitFor(() => expect(screen.getByTestId('model-embedding-error')).toBeTruthy());
+  expect(screen.getByTestId('model-embedding-error').textContent).toBe(SENTENCE);
+  expect(screen.getByTestId('model-embedding-failed').textContent).toBe(
+    'The embedding model was not changed.',
+  );
+  // The branch, taken from the re-read and not from the sentence.
+  await waitFor(() =>
+    expect(screen.getByTestId('model-index-failure').textContent).toBe(
+      'The index could not be read — this is a defect in this build.',
+    ),
+  );
+  // …and `reason` never reaches the screen.
+  expect(screen.queryByText(/LEAK-TOKEN-REJECTION/)).toBeNull();
+});
+
+test('a rejection because a job is running leaves that job drawn as running', async () => {
+  setEmbeddingModel.mockRejectedValue(new Error('a job is already running'));
+  jobStatus.mockResolvedValue({ running: true });
+  await renderOnModel();
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+
+  await waitFor(() => expect(screen.getByTestId('model-job-running')).toBeTruthy());
+  expect(screen.getByTestId('model-job-running').textContent).toBe(JOB_RUNNING);
+  expect(screen.getByTestId('model-embedding-error').textContent).toBe('a job is already running');
+});
+
+// 🔴 The two tests below exist because the pair above and below them, on their
+// own, were **measured green** against a component that read `changeError` for
+// the words "already running" instead of asking `job_status` — the exact
+// failure `error.rs`'s own header exists to prevent, passing every assertion
+// because the fixture let the sentence and the state agree.
+//
+// The state a fixture must build to tell the two apart is one where they
+// DISAGREE, and both directions of the disagreement are real: a change refused
+// for a reason that has nothing to do with a job, while a walk is running; and
+// a rejection whose wording mentions a job that has since ended.
+test('a job that IS running is drawn, even when the rejection never mentions one', async () => {
+  setEmbeddingModel.mockRejectedValue(new Error('no key has been entered'));
+  jobStatus.mockResolvedValue({ running: true });
+  await renderOnModel();
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+
+  await waitFor(() => expect(screen.getByTestId('model-job-running')).toBeTruthy());
+  expect(screen.getByTestId('model-job-running').textContent).toBe(JOB_RUNNING);
+  expect(jobStatus).toHaveBeenCalled();
+});
+
+test('a job that is NOT running is not drawn as one, whatever the rejection said', async () => {
+  setEmbeddingModel.mockRejectedValue(new Error('a job is already running'));
+  jobStatus.mockResolvedValue({ running: false });
+  await renderOnModel();
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+
+  await waitFor(() => expect(screen.getByTestId('model-embedding-error')).toBeTruthy());
+  expect(screen.queryByTestId('model-job-running')).toBeNull();
+  // The sentence is still shown verbatim: not drawing a job is not the same as
+  // hiding what the backend said.
+  expect(screen.getByTestId('model-embedding-error').textContent).toBe('a job is already running');
+});
+
+test('ReadFailed offers choosing a model again as the recovering act, and presses it without asking', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true, retired: [],
+    index: onModel(0).index,
+  });
+  mockCatalogues({
+    embedding: catalogueOf([entry('emb-1', { name: 'Embedder One' }), entry('emb-2', { name: 'Embedder Two' })]),
+  });
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: { kind: 'unreadable', cause: 'readFailed', reason: 'r' },
+  }));
+  await waitFor(() => expect(screen.getByTestId('model-entry-emb-2')).toBeTruthy());
+
+  expect(screen.getByTestId('model-index-recover').textContent).toBe(RECOVER);
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+
+  // No estimate can be stated about an index that will not answer, so nothing
+  // is asked — and `keep` is the value that refuses rather than destroys.
+  expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'keep'));
+});
+
+test('a healthy index is offered no recovering act, and its presses ask first', async () => {
+  await renderOnModel();
+
+  expect(screen.queryByTestId('model-index-recover')).toBeNull();
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  expect(screen.getByTestId('model-embedding-confirm-title').textContent).toBe(CONFIRM_TITLE);
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+});
+
+test('an index that was never opened is offered no recovering act either', async () => {
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: { kind: 'unreadable', cause: 'notOpen', reason: 'r' },
+  }));
+  expect(screen.getByTestId('model-index-failure').textContent).toBe('The index is not open yet.');
+  expect(screen.queryByTestId('model-index-recover')).toBeNull();
+});
+
+test('switching tabs takes a pending question with it', async () => {
+  await renderOnModel();
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  expect(screen.getByTestId('model-embedding-confirm-title')).toBeTruthy();
+
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+
+  expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+});
+
+// --- the six `void $locale` guards this task added, each reddening alone -----
+
+test('a language switch after mount reaches the confirmation', async () => {
+  const { container } = await renderOnModel(onModel(7));
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  expect((container.textContent ?? '')).toContain(CONFIRM_TITLE);
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Змінити модель ембедингу?');
+  expect(after).toContain('Зараз індекс містить 7 ембедингів');
+  expect(after).toContain('Відкинути ембединги');
+  expect(after).not.toContain(CONFIRM_TITLE);
+});
+
+test('a language switch after mount reaches the sentence about what was discarded', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 4 }],
+    index: onModel(0).index,
+  });
+  const { container } = await renderOnModel(onModel(7));
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+  await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
+  expect((container.textContent ?? '')).toContain('The change discarded 4 embeddings');
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Зміна відкинула 4 ембединги');
+  expect(after).not.toContain('The change discarded 4 embeddings');
+});
+
+test('a language switch after mount reaches the degraded notice and its button', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true, retired: [],
+    index: onModel(0).index,
+  });
+  const { container } = await renderOnModel(onModel(0));
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-keep'));
+  await waitFor(() => expect(screen.getByTestId('model-embedding-degraded-note')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
+  await waitFor(() => expect(screen.getByTestId('model-embedding-reembed-started')).toBeTruthy());
+  expect((container.textContent ?? '')).toContain(DEGRADED);
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Пошук за змістом недоступний');
+  expect(after).toContain('Вбудувати індекс наново');
+  expect(after).toContain('Вбудовування почалося.');
+  expect(after).not.toContain(DEGRADED);
+});
+
+test('a language switch after mount reaches the lead-in above a rejection', async () => {
+  setEmbeddingModel.mockRejectedValue(new Error('a job is already running'));
+  const { container } = await renderOnModel();
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+  await waitFor(() => expect(screen.getByTestId('model-embedding-failed')).toBeTruthy());
+  expect((container.textContent ?? '')).toContain('The embedding model was not changed.');
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Модель ембедингу не змінено.');
+  expect(after).not.toContain('The embedding model was not changed.');
+  // The backend's own sentence is not a catalogue string and must survive the
+  // switch unchanged — a language switch may not translate what it did not write.
+  expect(after).toContain('a job is already running');
+});
+
+test('a language switch after mount reaches the running-job line', async () => {
+  setEmbeddingModel.mockRejectedValue(new Error('a job is already running'));
+  jobStatus.mockResolvedValue({ running: true });
+  const { container } = await renderOnModel();
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+  await waitFor(() => expect(screen.getByTestId('model-job-running')).toBeTruthy());
+  expect((container.textContent ?? '')).toContain(JOB_RUNNING);
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Триває завдання індексації.');
+  expect(after).not.toContain(JOB_RUNNING);
+});
+
+test('a language switch after mount reaches the recovering-act sentence', async () => {
+  const { container } = await renderWith(settings({
+    key: { kind: 'present' },
+    index: { kind: 'unreadable', cause: 'readFailed', reason: 'r' },
+  }));
+  expect((container.textContent ?? '')).toContain(RECOVER);
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Повторний вибір моделі ембедингу це виправляє');
+  expect(after).not.toContain(RECOVER);
 });
