@@ -777,3 +777,16 @@ case_ "an excerpt of the provider's list claims to be the whole of it" \
   's~"total_count": 33~"total_count": 6~' \
   '"total_count": 6' \
   mnema-provider 'each_fixture_says_what_it_is_and_its_own_numbers_agree' --test catalogue
+
+# The parser keeps every readable record and enforces no uniqueness over `id`.
+# That is not an oversight to be tidied away: the window's model list keys off
+# this field, and a build that quietly dropped the second of two records sharing
+# an id would report a provider listing one model where it listed two — a
+# silent subtraction from what the provider actually said, in the one place a
+# person goes to choose. Deduplicating is exactly what a later reader is likeliest
+# to "fix", so it is the mutation.
+case_ "the parser drops the second of two records sharing one id" \
+  crates/mnema-provider/src/catalogue.rs \
+  's~        entries\.push\(ModelEntry \{~        if entries.iter().any(|e: &ModelEntry| e.id == raw.id) {\n            continue;\n        }\n        entries.push(ModelEntry {~' \
+  '        if entries.iter().any(|e: &ModelEntry| e.id == raw.id) {' \
+  mnema-provider 'two_records_sharing_one_id_both_reach_the_catalogue_and_neither_is_renamed' --test catalogue

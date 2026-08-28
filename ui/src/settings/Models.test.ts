@@ -731,6 +731,45 @@ test('the same model id in both catalogues does not leak a selection across tabs
   expect(screen.getByTestId('model-entry-other-model').getAttribute('aria-pressed')).toBe('true');
 });
 
+// 🔴 PR 25 review, P2-4. The list was keyed by `entry.id`, and the parser
+// enforces no uniqueness over that field: `catalogue.rs` copies it off the raw
+// record verbatim, once per record, so a provider that lists one id twice sends
+// two entries with equal ids. Svelte answers a duplicate key by THROWING
+// (`each_key_duplicate`), which does not degrade the row — it takes the whole
+// section down. Task 8 had already made the frozen list unkeyed for exactly
+// this reason and the lesson was not carried here.
+//
+// The fixture is the state the code branches on and nothing else: two entries,
+// one id, two different names. `two_records_sharing_one_id_both_reach_the_catalogue_and_neither_is_renamed`
+// (crates/mnema-provider/tests/catalogue.rs) is the other half — it pins that
+// the parser really does hand this shape over, so this fixture is a measured
+// state rather than one invented here.
+test('two provider records sharing one id render two rows and leave the section standing', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('vendor/twin', { name: 'First listing' }),
+      entry('vendor/twin', { name: 'Second listing' }),
+    ]),
+  });
+  await renderWith(settings({ key: { kind: 'present' } }));
+
+  // The list itself: two rows, and they are the two records rather than one
+  // record drawn twice — the names differ, and both are on screen.
+  await waitFor(() => expect(screen.getAllByTestId('model-entry-vendor/twin').length).toBe(2));
+  const rows = screen.getAllByTestId('model-entry-vendor/twin');
+  expect(rows.map((r) => r.textContent)).toEqual(['First listing', 'Second listing']);
+
+  // And the rest of the section is still there. This is the half the row count
+  // cannot say: `each_key_duplicate` is thrown during render, so what it costs
+  // is everything AROUND the list — read here as the visible text a person came
+  // to this window for, not as a testid that could be present on a broken page.
+  expect(screen.getByTestId('model-key-label').textContent).toBe('Key:');
+  expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
+  expect(screen.getByTestId('model-status-dot').textContent).toBe(
+    'Not connected yet — add a key and choose an embedding model to enable content search.',
+  );
+});
+
 // ---------------------------------------------------------------------------
 // The green dot: provider ∧ key ∧ a chosen embedding model, fail-safe on
 // each missing in turn — three separate fixtures, because a fixture that

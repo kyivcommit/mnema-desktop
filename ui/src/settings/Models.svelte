@@ -644,7 +644,20 @@
     <p data-testid="model-catalogue-empty">{emptyCatalogueSentence}</p>
   {:else if activeEntries.length > 0}
     <ul data-testid="model-entry-list">
-      {#each activeEntries as { entry, reason, separator } (entry.id)}
+      <!-- Unkeyed on purpose, the same ruling Task 8 made for the frozen list and
+           for the same kind of measured reason. `catalogue.rs` preserves every
+           readable record and enforces no uniqueness over `id`: it is copied off
+           the raw record verbatim, once per record, so a provider that lists one
+           id twice sends two entries carrying equal ids — pinned by
+           `two_records_sharing_one_id_both_reach_the_catalogue_and_neither_is_renamed`
+           in the provider crate's own tests rather than assumed here. Keyed by
+           that field Svelte throws `each_key_duplicate`, and it does not degrade
+           the row: it takes the WHOLE section down, so a person loses the
+           provider row, the key controls and the dot along with the list. The
+           rows carry no state of their own, so there is nothing a key would
+           keep. Nor are the duplicates rejected — a rejection this section
+           made silently would subtract from what the provider actually said. -->
+      {#each activeEntries as { entry, reason, separator }}
         <li>
           {#if entry.refusal}
             <!-- `None` means selectable; anything else is shown, greyed, with
