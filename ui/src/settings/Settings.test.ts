@@ -125,12 +125,18 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // hand-edited; this file's own mock (above) answers `provider_models` with
   // an empty-but-well-formed catalogue, which is why the tab list itself has
   // nothing in it here.
+  //
+  // Task 5's review (P1-4) settled the section's reading order — the Key group
+  // moved up under the provider row and now leads with its own subject word,
+  // and the Index group moved to the end — so this string was measured again
+  // from a real render rather than hand-edited. It is the whole point of this
+  // assertion that a layout change has to come through here and be read.
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy());
   expect(panel()?.textContent).toBe(
-    'Models Provider OpenRouter   An OpenRouter key lets this application reach the models.'
-    + ' Create one in your OpenRouter account and paste it here. Key  Save    '
+    'Models Provider OpenRouter Key An OpenRouter key lets this application reach the models.'
+    + ' Create one in your OpenRouter account and paste it here.   Save    '
     + ' Embedding Chat   The provider does not currently list any models for this role.'
-    + ' Not connected yet — add a key and choose an embedding model to enable content search.',
+    + ' Not connected yet — add a key and choose an embedding model to enable content search. ',
   );
 
   await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));

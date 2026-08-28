@@ -230,7 +230,6 @@
 
   const embeddingTabLabel = $derived.by(() => { void $locale; return t('models_tab_embedding'); });
   const chatTabLabel = $derived.by(() => { void $locale; return t('models_tab_chat'); });
-  const emptyCatalogueLabel = $derived.by(() => { void $locale; return t('models_catalogue_empty'); });
 
   const activeCatalogue = $derived(catalogues[activeTab]);
   const activeCatalogueError = $derived(catalogueErrors[activeTab]);
@@ -322,6 +321,20 @@
     if (!cat || cat.unreadable === 0) return null;
     return t('models_catalogue_unreadable', { count: cat.unreadable });
   });
+
+  // Review P2-10: this sentence used to be conditioned on `entries.length === 0`
+  // alone, so a catalogue of two records this build could not read rendered
+  // "2 records could not be read." and then "The provider does not currently
+  // list any models for this role." — untrue about the provider, who sent two,
+  // and it sends the person to look at the provider instead of at the defect.
+  // The sentence is a claim about what the provider listed, so it may only be
+  // made when nothing was dropped on the way here.
+  const emptyCatalogueSentence = $derived.by(() => {
+    void $locale;
+    const cat = activeCatalogue;
+    if (!cat || cat.entries.length !== 0 || cat.unreadable !== 0) return null;
+    return t('models_catalogue_empty');
+  });
 </script>
 
 {#if settings}
@@ -331,45 +344,58 @@
       <option selected>{providerName}</option>
     </select>
   </div>
-  {#if indexFailure}
-    <div class="field">
-      <span class="fl" data-testid="model-index-label">{indexLabel}</span>
-      <p data-testid="model-index-failure">{indexFailure}</p>
-    </div>
-  {/if}
-  <!-- Owner's ruling, 2026-08-28: the note is shown in EVERY key state, `absent`
-       included, and carries no condition on `key`. A review read it as claiming
-       a key exists ("its own key") where none has been entered; it does not —
-       it explains a system prompt the person is about to meet the first time
-       they save one, and forward-looking information is not a false claim.
-       Settled; do not add a `key` condition here. -->
-  {#if settings.platform === 'mac'}<p data-testid="model-mac-note">{macNote}</p>{/if}
-  {#if keyFailure}
-    <div class="field">
+  <!-- Step 5, and the review that followed it: the section is grouped by
+       subject, and the one sentence a person can act on comes before the ones
+       they cannot. The Key group is second, immediately under the provider it
+       belongs to; the Index group is LAST, because its only sentence is a
+       defect report nobody reading this window can act on. The previous order
+       put that defect report between the provider row and the key rows, and
+       left the single actionable instruction at the bottom, unlabelled. -->
+  <div class="group" data-testid="model-key-group">
+    <!-- One occurrence of the word, not two: when the editable field is on
+         screen the group's subject heading IS that field's label, so
+         `getByLabelText('Key')` still resolves to exactly one control. -->
+    {#if showInput}
+      <label class="fl" for="model-key-input" data-testid="model-key-label">{keyLabel}</label>
+    {:else}
       <span class="fl" data-testid="model-key-label">{keyLabel}</span>
-      <p data-testid="model-key-failure">{keyFailure}</p>
-    </div>
-  {:else if showInput}
-    {#if settings.key.kind === 'absent'}
-      <p data-testid="model-key-absent-hint">{absentHint}</p>
     {/if}
-    <div class="field">
-      <label for="model-key-input">{keyLabel}</label>
-      <input id="model-key-input" type="password" bind:value={draftKey} />
-      <button type="button" onclick={saveKey}>{saveLabel}</button>
-      {#if settings.key.kind === 'present'}
-        <button type="button" onclick={cancelEditing}>{cancelLabel}</button>
-      {/if}
-    </div>
-  {:else}
-    <div class="field">
-      <span class="fl">{keyLabel}</span>
+    <!-- The sentence about the key's state, directly under its own subject. -->
+    {#if keyFailure}
+      <p data-testid="model-key-failure">{keyFailure}</p>
+    {:else if settings.key.kind === 'absent'}
+      <p data-testid="model-key-absent-hint">{absentHint}</p>
+    {:else if settings.key.kind === 'present' && !editingKey}
       <span data-testid="model-key-saved">{savedLabel}</span>
-      <button type="button" onclick={startEditing}>{changeLabel}</button>
-      <button type="button" onclick={doForget}>{forgetLabel}</button>
-    </div>
-  {/if}
-  {#if removalLabel}<p data-testid="model-key-removal">{removalLabel}</p>{/if}
+    {/if}
+    <!-- Owner's ruling, 2026-08-28: the note is shown in EVERY key state, `absent`
+         included, and carries no condition on `key`. A review read it as claiming
+         a key exists ("its own key") where none has been entered; it does not —
+         it explains a system prompt the person is about to meet the first time
+         they save one, and forward-looking information is not a false claim.
+         Settled; do not add a `key` condition here. It sits inside this group
+         because it is a sentence ABOUT the key, and a sentence loose between two
+         subjects is the fault Step 5 was opened to fix. -->
+    {#if settings.platform === 'mac'}<p data-testid="model-mac-note">{macNote}</p>{/if}
+    {#if showInput}
+      <div class="field">
+        <input id="model-key-input" type="password" bind:value={draftKey} />
+        <button type="button" onclick={saveKey}>{saveLabel}</button>
+        {#if settings.key.kind === 'present'}
+          <button type="button" onclick={cancelEditing}>{cancelLabel}</button>
+        {/if}
+      </div>
+    {:else if !keyFailure}
+      <!-- Unreadable offers nothing to press: the store would not say whether a
+           key exists at all, so add/change/forget would be a claim this build
+           cannot back. -->
+      <div class="field">
+        <button type="button" onclick={startEditing}>{changeLabel}</button>
+        <button type="button" onclick={doForget}>{forgetLabel}</button>
+      </div>
+    {/if}
+    {#if removalLabel}<p data-testid="model-key-removal">{removalLabel}</p>{/if}
+  </div>
 {/if}
 <!-- Outside `{#if settings}` on purpose: a mount that rejects never sets
      `settings`, and an error paragraph inside that block could not be shown in
@@ -403,9 +429,9 @@
   {#each activeUnreadableRecords as { rec, label } (rec.index)}
     <p data-testid={`model-unreadable-record-${rec.index}`}>{label}</p>
   {/each}
-  {#if activeEntries.length === 0}
-    <p data-testid="model-catalogue-empty">{emptyCatalogueLabel}</p>
-  {:else}
+  {#if emptyCatalogueSentence}
+    <p data-testid="model-catalogue-empty">{emptyCatalogueSentence}</p>
+  {:else if activeEntries.length > 0}
     <ul data-testid="model-entry-list">
       {#each activeEntries as { entry, reason } (entry.id)}
         <li>
@@ -438,3 +464,16 @@
 {/if}
 
 <p data-testid="model-status-dot" data-active={ready ? 'true' : 'false'}>{ready ? readyLabel : notReadyLabel}</p>
+
+<!-- Last, and outside `{#if settings}` only because `indexFailure` already
+     answers `null` without settings: the index sentence is a defect report a
+     person reading this window cannot act on, so it follows every sentence
+     they can. Its subject label sits immediately above it — the fault Step 5
+     inherited was this sentence sitting unlabelled between two other
+     subjects. -->
+{#if indexFailure}
+  <div class="field" data-testid="model-index-group">
+    <span class="fl" data-testid="model-index-label">{indexLabel}</span>
+    <p data-testid="model-index-failure">{indexFailure}</p>
+  </div>
+{/if}

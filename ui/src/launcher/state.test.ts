@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, providerReady } from './state';
 import { generated, citationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
-import type { ModelSettings } from '../lib/ipc';
+import type { ModelSettings, IndexSettings } from '../lib/ipc';
 
 test('a blank query is rejected', () => {
   expect(checkQuery('')).toEqual({ ok: false, reason: 'blank' });
@@ -77,4 +77,21 @@ test('providerReady: a present key with an unreadable index → false', () => {
 
 test('providerReady: an absent key, even with a chosen model → false', () => {
   expect(providerReady({ key: absentKey, index: readWithModel, platform })).toBe(false);
+});
+
+// Review P2-8: `index.kind === 'read'` was defended by nothing. Replacing it
+// with `true &&` left all 284 tests passing, because the fixture above that was
+// meant to cover it — `unreadableIndex` — drops TWO conditions at once: an
+// `Unreadable` index carries no `embeddingModel`, so the third conjunct is
+// already false and the second is never the reason the answer is `false`. The
+// fixture below discriminates this conjunct alone: an index that is not `read`
+// yet does carry a model name, which only a cast can build because the wire
+// type does not admit it — and that is the point. The rule is about the index
+// being READ, not merely about a model string being present somewhere.
+const unreadableIndexCarryingAModel = {
+  kind: 'unreadable', cause: 'notOpen', reason: 'r', embeddingModel: 'text-embedding-3-small',
+} as unknown as IndexSettings;
+
+test('providerReady: a present key and a model name on an index that is not read → false', () => {
+  expect(providerReady({ key: presentKey, index: unreadableIndexCarryingAModel, platform })).toBe(false);
 });

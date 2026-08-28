@@ -637,7 +637,27 @@ function entry(id: string, overrides: Partial<ModelEntry> = {}): ModelEntry {
   };
 }
 
-function catalogueOf(entries: ModelEntry[], unreadable = 0, unreadableRecords: UnreadableRecord[] = []): Catalogue {
+// Review P3-12: `unreadable: 3` beside an empty `unreadableRecords` is a state
+// the Rust side cannot produce — `catalogue.rs:251-256` documents the vector as
+// "one entry per record counted in `unreadable`", and `:581-582` pushes to both
+// in the same step. A fixture that builds it tests a screen no provider can
+// cause. Omitting the records now synthesises the right number of them; giving
+// them explicitly and disagreeing with the count is refused outright.
+function catalogueOf(entries: ModelEntry[], unreadable = 0, unreadableRecords?: UnreadableRecord[]): Catalogue {
+  if (unreadableRecords === undefined) {
+    const synthesised: UnreadableRecord[] = Array.from(
+      { length: unreadable },
+      (_, index) => ({ id: { kind: 'absent' }, index }),
+    );
+    return { entries, unreadable, unreadableRecords: synthesised };
+  }
+  if (unreadableRecords.length !== unreadable) {
+    throw new Error(
+      `catalogueOf: unreadable=${unreadable} with ${unreadableRecords.length} unreadableRecords — ` +
+      'the backend keeps them equal (catalogue.rs:251-256), so this fixture builds a state no ' +
+      'provider can cause.',
+    );
+  }
   return { entries, unreadable, unreadableRecords };
 }
 
@@ -658,6 +678,12 @@ test('two named tabs; switching changes the model list and the tabs own pressed 
   expect(screen.getByTestId('model-tab-embedding').getAttribute('aria-pressed')).toBe('true');
   expect(screen.getByTestId('model-tab-chat').getAttribute('aria-pressed')).toBe('false');
   expect(screen.queryByTestId('model-entry-chat-1')).toBeNull();
+  // Review P2-11: the fixture gives every entry a name that differs from its
+  // id and then the old test threw that away, asserting only testids and
+  // `aria-pressed`. `{entry.name}` → `{entry.id}` survived the whole suite —
+  // the named class from the last PR, a card showing an identifier where a
+  // person came for content. The row reads as the model's name.
+  expect(screen.getByTestId('model-entry-emb-1').textContent).toBe('Embedding One');
 
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
 
@@ -665,6 +691,9 @@ test('two named tabs; switching changes the model list and the tabs own pressed 
   expect(screen.getByTestId('model-tab-chat').getAttribute('aria-pressed')).toBe('true');
   expect(screen.getByTestId('model-tab-embedding').getAttribute('aria-pressed')).toBe('false');
   expect(screen.queryByTestId('model-entry-emb-1')).toBeNull();
+  // The chat arm is a different branch of the same `{#each}` — a button, not a
+  // span — so it needs its own assertion.
+  expect(screen.getByTestId('model-entry-chat-1').textContent).toBe('Chat One');
 });
 
 test('the same model id in both catalogues does not leak a selection across tabs', async () => {
@@ -767,8 +796,9 @@ test('an empty but well-formed catalogue says the provider lists none, not that 
 
 function deferredPromise<T>() {
   let resolve!: (v: T) => void;
-  const promise = new Promise<T>((res) => { resolve = res; });
-  return { promise, resolve };
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 function queuedModelSettings() {
@@ -884,6 +914,155 @@ test('a model_settings reply landing while set_chat_model is still pending does 
 });
 
 // ---------------------------------------------------------------------------
+// Review P2-5/P2-6/P2-7 — three branches this file built no fixture for, each
+// proved undefended by a surviving mutant: the two `catalogueSeq` ordering
+// guards, `provider_models`' rejection, and `set_chat_model`'s rejection.
+// ---------------------------------------------------------------------------
+
+// The `providerModels` twin of `queuedModelSettings`, kept per role because
+// the guard it exists to exercise is per role.
+function queuedProviderModels() {
+  const queue: Record<ModelRole, ReturnType<typeof deferredPromise<Catalogue>>[]> =
+    { embedding: [], rerank: [], chat: [] };
+  providerModels.mockImplementation((role: ModelRole) => {
+    const d = deferredPromise<Catalogue>();
+    queue[role].push(d);
+    return d.promise;
+  });
+  return queue;
+}
+
+// Two in-flight reads of the SAME role: leaving the embedding tab and coming
+// back issues a second one while the first is still out. No fixture in this
+// file used to defer `provider_models` at all, so deleting both
+// `if (seq !== catalogueSeq[role]) return;` guards left 62 tests passing.
+test('an older in-flight provider_models does not overwrite the catalogue a later one already showed', async () => {
+  const queue = queuedProviderModels();
+  await renderWith(settings());
+  await waitFor(() => expect(queue.embedding.length).toBe(1)); // the mount's own read
+
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  await fireEvent.click(screen.getByTestId('model-tab-embedding'));
+  await waitFor(() => expect(queue.embedding.length).toBe(2));
+
+  // The newer read settles first.
+  queue.embedding[1].resolve(catalogueOf([entry('fresh-model', { name: 'Fresh' })]));
+  await waitFor(() => expect(screen.getByTestId('model-entry-fresh-model')).toBeTruthy());
+
+  // The mount's OLDER read settles late, with a different list. It must lose.
+  queue.embedding[0].resolve(catalogueOf([entry('stale-model', { name: 'Stale' })]));
+  await tick();
+  await tick();
+  await tick();
+  expect(screen.getByTestId('model-entry-fresh-model')).toBeTruthy();
+  expect(screen.queryByTestId('model-entry-stale-model')).toBeNull();
+});
+
+// The same guard on the rejection path — a separate `if` on a separate line,
+// so it needs its own fixture. An older read that fails after a newer one has
+// already painted a list must not replace that list with a failure sentence.
+test('an older in-flight provider_models that fails late does not replace the catalogue a later one already showed', async () => {
+  const queue = queuedProviderModels();
+  await renderWith(settings());
+  await waitFor(() => expect(queue.embedding.length).toBe(1));
+
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  await fireEvent.click(screen.getByTestId('model-tab-embedding'));
+  await waitFor(() => expect(queue.embedding.length).toBe(2));
+
+  queue.embedding[1].resolve(catalogueOf([entry('fresh-model', { name: 'Fresh' })]));
+  await waitFor(() => expect(screen.getByTestId('model-entry-fresh-model')).toBeTruthy());
+
+  queue.embedding[0].reject(new Error('a read nobody is waiting for any more'));
+  await tick();
+  await tick();
+  await tick();
+  expect(screen.queryByTestId('model-catalogue-failure')).toBeNull();
+  expect(screen.getByTestId('model-entry-fresh-model')).toBeTruthy();
+});
+
+// P2-6: the rejection branch itself. The only mention of this testid was a
+// one-sided `queryByTestId(...).toBeNull()`, which zero satisfies — a mutant
+// that swallowed the error survived. Asserted in the direction that says the
+// paragraph is there, carrying the backend's own sentence verbatim (§10: a
+// rejection arrives as a sentence, never as a kind).
+test('a rejected provider_models says so in the backends own words, and claims nothing about the provider', async () => {
+  providerModels.mockRejectedValue(new Error('the provider did not answer'));
+  const { container } = await renderWith(settings());
+
+  await waitFor(() => expect(screen.getByTestId('model-catalogue-failure')).toBeTruthy());
+  expect(screen.getByTestId('model-catalogue-failure').textContent).toBe('the provider did not answer');
+  // Both directions: no list, and — the claim that matters — NOT the sentence
+  // saying the provider lists no models, which this build has no grounds for.
+  expect(screen.queryByTestId('model-entry-list')).toBeNull();
+  expect(screen.queryByTestId('model-catalogue-empty')).toBeNull();
+  expect(container.textContent ?? '').not.toContain('The provider does not currently list any models');
+});
+
+// P2-7: `set_chat_model`'s rejection path. No `mockRejected` on `setChatModel`
+// existed anywhere, so removing the whole `try/catch` from `chooseChatModel`
+// survived the suite.
+test('a rejected set_chat_model shows the backends sentence and leaves the selection where it was', async () => {
+  mockCatalogues({ chat: catalogueOf([entry('gpt-a', { name: 'Model A' }), entry('gpt-b', { name: 'Model B' })]) });
+  setChatModel.mockRejectedValue(new Error('the provider will not serve this model to this key'));
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: {
+      kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a',
+      searchTextArm: true, searchContentArm: true,
+    },
+  }));
+
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('model-entry-gpt-b'));
+
+  await waitFor(() => expect(screen.getByTestId('model-action-error')).toBeTruthy());
+  expect(screen.getByTestId('model-action-error').textContent)
+    .toBe('the provider will not serve this model to this key');
+  // The refused choice is not shown as taken: the selection still follows the
+  // backend's state, which never changed.
+  expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('false');
+});
+
+// P2-9: the dot's fail-safe on a state this window does not know. On a
+// rejected mount `settings` stays null forever — nothing on this screen can
+// retry it — and the mutant `!settings || providerReady(settings)` makes the
+// dot claim everything is connected for as long as that window stays open. A
+// green dot that means less than provider ∧ key ∧ model is a promise the
+// product cannot keep.
+test('a mount whose model_settings rejects leaves the dot NOT connected, not connected by default', async () => {
+  setLocale('en');
+  modelSettings.mockRejectedValue(new Error('the settings window could not reach the core'));
+  render(Models);
+
+  await waitFor(() => expect(screen.getByTestId('model-load-failure')).toBeTruthy());
+  const dot = screen.getByTestId('model-status-dot');
+  expect(dot.getAttribute('data-active')).toBe('false');
+  expect(dot.textContent)
+    .toBe('Not connected yet — add a key and choose an embedding model to enable content search.');
+});
+
+// P2-10: zero entries beside `unreadable > 0`. The screen said "2 records
+// could not be read." and then "The provider does not currently list any
+// models for this role." — untrue, since the provider sent two, and it sends
+// the person to look at the provider instead of at the defect.
+test('a catalogue of nothing but unreadable records does not also claim the provider listed none', async () => {
+  mockCatalogues({ embedding: catalogueOf([], 2) });
+  const { container } = await renderWith(settings());
+
+  await waitFor(() => expect(screen.getByTestId('model-catalogue-unreadable')).toBeTruthy());
+  const text = container.textContent ?? '';
+  expect(text).toContain('2 records could not be read.');
+  expect(text).not.toContain('The provider does not currently list any models for this role.');
+  expect(screen.queryByTestId('model-catalogue-empty')).toBeNull();
+  // And the records themselves are still named, one per counted record.
+  expect(screen.getByTestId('model-unreadable-record-0')).toBeTruthy();
+  expect(screen.getByTestId('model-unreadable-record-1')).toBeTruthy();
+});
+
+// ---------------------------------------------------------------------------
 // The discriminant mirror, homeless since `ui/render.test.js` was deleted
 // (umbrella `:526`) — built here because this is the surface that renders
 // `Refusal` and `RecordId`. Derived, not hand-copied: the variant list comes
@@ -906,7 +1085,15 @@ test('a model_settings reply landing while set_chat_model is still pending does 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CATALOGUE_RS = readFileSync(join(HERE, '../../../crates/mnema-provider/src/catalogue.rs'), 'utf8');
 
-function rustEnumVariants(source: string, enumName: string): string[] {
+function rustEnumVariants(rawSource: string, enumName: string): string[] {
+  // Review P1-2: comments are stripped BEFORE the depth walk, not after it.
+  // The old form walked the raw text and justified itself with "every doc
+  // comment brace is a self-balanced pair on its own line" — a description of
+  // today's comments, not an invariant of Rust. The reviewer added a sixth
+  // `Refusal` variant behind a doc comment carrying a lone `}`; the walk
+  // stopped there, the body was truncated, and this file reported
+  // `2 passed | 60 skipped` — green, having never seen the new variant.
+  const source = rawSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
   const headerRe = new RegExp(`pub enum ${enumName}\\s*\\{`);
   const m = headerRe.exec(source);
   if (!m) throw new Error(`enum ${enumName} not found in catalogue.rs — has it moved or been renamed?`);
@@ -919,13 +1106,20 @@ function rustEnumVariants(source: string, enumName: string): string[] {
     i++;
     if (i > source.length) throw new Error(`ran off the end of the file looking for the closing brace of ${enumName}`);
   }
-  const body = source.slice(start, i - 1);
-  // Doc comments hold stray braces of their own (`` `{:?}` ``, `` `{}` ``) —
-  // stripped here, AFTER the depth walk above, which is why that walk is safe
-  // even though it runs on the raw text: every one of those is a
-  // self-balanced pair on its own line, so it never shifts the depth at the
-  // point the walk is deciding whether it has reached the real closing brace.
-  const noComments = body.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+  const noComments = source.slice(start, i - 1);
+  // P3-13: the mirror maps a Rust variant name to its wire name with serde's
+  // own `RenameRule::CamelCase` (`camelOf` below) and has no way to express an
+  // explicit `#[serde(rename = "…")]` on a variant. It cannot be made to guess
+  // one, so it says so here rather than deriving a wire name that is silently
+  // wrong. `rename_all` is the enum-level rule this mirror already assumes and
+  // is deliberately not matched.
+  if (/#\[serde\([^)]*\brename\s*=/.test(noComments)) {
+    throw new Error(
+      `${enumName} now carries an explicit #[serde(rename = "…")] on a variant. This mirror derives ` +
+      'wire names with serde\'s CamelCase rule alone and cannot express a rename — teach camelOf ' +
+      'about it, or pin that variant\'s wire name here, before trusting this test again.',
+    );
+  }
   const variants: string[] = [];
   let d = 0;
   let cur = '';
@@ -956,11 +1150,18 @@ function camelOf(pascal: string): string {
   return pascal.charAt(0).toLowerCase() + pascal.slice(1);
 }
 
+// Review P1-3: `raw` is provider text under exactly the rule `reason` is under
+// — it does not reach the screen. The old fixture said `'sample-raw'`, ten
+// characters, and the only thing standing between a leak and a green suite was
+// `expect(text.length).toBeGreaterThan(10)`: a fixture string's length, not an
+// assertion. This token is long, distinctive, and asserted absent below.
+const RAW_LEAK_TOKEN = 'PROVIDER-RAW-DO-NOT-RENDER-4c1f88e2';
+
 function sampleRefusal(kind: string): ModelRefusal {
   switch (kind) {
     case 'inputTooSmall': return { kind: 'inputTooSmall', limit: 100, floor: 2048 };
     case 'noStatedLimit': return { kind: 'noStatedLimit' };
-    case 'limitNotUnderstood': return { kind: 'limitNotUnderstood', raw: 'sample-raw' };
+    case 'limitNotUnderstood': return { kind: 'limitNotUnderstood', raw: RAW_LEAK_TOKEN };
     case 'noStatedOutputModalities': return { kind: 'noStatedOutputModalities' };
     case 'noTextOutput': return { kind: 'noTextOutput' };
     default:
@@ -974,7 +1175,7 @@ function sampleRefusal(kind: string): ModelRefusal {
 function sampleRecordId(kind: string, id: string): RecordId {
   switch (kind) {
     case 'absent': return { kind: 'absent' };
-    case 'notAString': return { kind: 'notAString', raw: 'sample-raw' };
+    case 'notAString': return { kind: 'notAString', raw: RAW_LEAK_TOKEN };
     case 'known': return { kind: 'known', id };
     default:
       throw new Error(
@@ -988,43 +1189,126 @@ async function renderInLocale(loc: 'uk' | 'en', s: ModelSettings) {
   return loc === 'uk' ? renderInUk(s) : renderWith(s);
 }
 
+// Review P1-1: distinctness is not correspondence. The old form asserted only
+// `new Set(texts).size === kinds.length`, so swapping two arms of
+// `refusalReason` — `noStatedOutputModalities` ↔ `noTextOutput` — left the
+// suite at 62 passed: the sentences were still distinct, merely attached to
+// the wrong variants. `catalogue.rs:228-236` keeps those two apart precisely
+// "so a provider who renames or drops either field cannot make this code
+// state, as a fact about the model, something the provider never said", and
+// after the swap a model the provider said NOTHING about renders as "The
+// provider states that this model does not output text" — the exact false
+// claim the split exists to prevent. Exactly one variant was pinned to its
+// sentence; the other four permuted freely.
+//
+// So: a kind → sentence table, per locale, asserted with `toBe`. The variant
+// LIST still comes from Rust, so a new variant fails the lookup loudly rather
+// than being quietly excused from the table.
+const REFUSAL_SENTENCES: Record<'en' | 'uk', Record<string, string>> = {
+  en: {
+    inputTooSmall: 'This model states an input limit of 100 tokens, under the 2048 this application requires.',
+    noStatedLimit: 'The provider does not state an input limit for this model.',
+    limitNotUnderstood: 'The provider states an input limit in a shape this build cannot read.',
+    noStatedOutputModalities: 'The provider does not state what this model outputs.',
+    noTextOutput: 'The provider states that this model does not output text.',
+  },
+  uk: {
+    inputTooSmall: 'Ця модель заявляє ліміт входу 100 токенів — менше за поріг 2048, потрібний цій програмі.',
+    noStatedLimit: 'Постачальник не вказує ліміт входу цієї моделі.',
+    limitNotUnderstood: 'Постачальник вказує ліміт входу у форматі, який ця збірка не вміє прочитати.',
+    noStatedOutputModalities: 'Постачальник не вказує, що видає ця модель.',
+    noTextOutput: 'Постачальник заявляє, що ця модель не видає текст.',
+  },
+};
+
+// Same table for `RecordId`, taking the record's own position and id — the
+// only parts of these sentences the fixture, not the code, decides. The
+// mapping kind → sentence is still stated here in full and never computed
+// from the component.
+const RECORD_ID_SENTENCES: Record<'en' | 'uk', Record<string, (i: number, id: string) => string>> = {
+  en: {
+    absent: (i) => `Record at position ${i}: the provider stated no model id.`,
+    notAString: (i) => `Record at position ${i}: the model id was not text.`,
+    known: (i, id) => `Record at position ${i}, id "${id}": this build could not read the rest of the record.`,
+  },
+  uk: {
+    absent: (i) => `Запис на позиції ${i}: постачальник не вказав ідентифікатор моделі.`,
+    notAString: (i) => `Запис на позиції ${i}: ідентифікатор моделі не був текстом.`,
+    known: (i, id) => `Запис на позиції ${i}, ідентифікатор «${id}»: решту запису ця збірка прочитати не змогла.`,
+  },
+};
+
+// Both directions. `expected()` below catches a variant Rust defines and the
+// table does not; on its own that is one-sided, and a table entry for a variant
+// Rust no longer defines would sit here forever describing a screen that cannot
+// happen. The key sets must match exactly.
+function expectTableCoversExactly(table: Record<string, unknown>, kinds: string[]) {
+  expect(kinds.length).toBeGreaterThan(0); // the parse itself must have found something
+  expect([...Object.keys(table)].sort()).toEqual([...kinds].sort());
+}
+
+// The tables are keyed by wire kind; a variant Rust defines and a table does
+// not is a missing expectation, and saying so beats `toBe(undefined)`.
+function expected<T>(table: Record<string, T>, kind: string, what: string): T {
+  const value = table[kind];
+  if (value === undefined) {
+    throw new Error(
+      `catalogue.rs defines a ${what} variant ("${kind}") this test states no expected sentence for — ` +
+      'add the sentence Models.svelte must render for it, in both locales.',
+    );
+  }
+  return value;
+}
+
 for (const loc of ['en', 'uk'] as const) {
-  test(`every Refusal variant catalogue.rs defines renders its own distinct reason (${loc})`, async () => {
+  test(`every Refusal variant catalogue.rs defines renders its own, correct reason (${loc})`, async () => {
     const kinds = rustEnumVariants(CATALOGUE_RS, 'Refusal').map(camelOf);
-    expect(kinds.length).toBeGreaterThan(0); // the parse itself must have found something
-    const fixtureEntries = kinds.map((kind, i) => entry(`refusal-${i}`, { name: kind, refusal: sampleRefusal(kind) }));
+    expectTableCoversExactly(REFUSAL_SENTENCES[loc], kinds);
+    const fixtureEntries = kinds.map((kind, i) => entry(`refusal-${i}`, { name: `Named ${kind}`, refusal: sampleRefusal(kind) }));
     mockCatalogues({ embedding: catalogueOf(fixtureEntries) });
 
-    await renderInLocale(loc, settings());
+    const { container } = await renderInLocale(loc, settings());
     const texts: string[] = [];
     for (let i = 0; i < kinds.length; i++) {
       const el = await screen.findByTestId(`model-entry-reason-refusal-${i}`);
       texts.push(el.textContent ?? '');
+      // P1-1: each variant pinned to ITS OWN sentence, not merely to a
+      // sentence no other variant happens to use.
+      expect(texts[i]).toBe(expected(REFUSAL_SENTENCES[loc], kinds[i], 'Refusal'));
+      // P2-11: a refused row still shows the model's NAME, not its id.
+      expect(screen.getByTestId(`model-entry-refusal-${i}`).textContent).toBe(`Named ${kinds[i]}`);
     }
-    for (const text of texts) expect(text.length).toBeGreaterThan(10);
-    // Both directions: as many distinct sentences as variants, none blank,
-    // none collapsed onto a neighbour.
+    // Both directions: as many sentences as variants, none collapsed onto a
+    // neighbour — kept alongside the table, because the table alone would
+    // still be satisfied if two variants were given the same sentence in the
+    // catalogue itself.
     expect(texts.length).toBe(kinds.length);
     expect(new Set(texts).size).toBe(kinds.length);
+    // P1-3: `limitNotUnderstood` carries provider text. It does not reach the
+    // screen — the same rule `reason` is under, asserted rather than left to a
+    // fixture string being shorter than a length check.
+    expect(container.textContent ?? '').not.toContain(RAW_LEAK_TOKEN);
   });
 }
 
 for (const loc of ['en', 'uk'] as const) {
-  test(`every RecordId variant catalogue.rs defines renders its own distinct line (${loc})`, async () => {
+  test(`every RecordId variant catalogue.rs defines renders its own, correct line (${loc})`, async () => {
     const kinds = rustEnumVariants(CATALOGUE_RS, 'RecordId').map(camelOf);
-    expect(kinds.length).toBeGreaterThan(0);
+    expectTableCoversExactly(RECORD_ID_SENTENCES[loc], kinds);
     const records: UnreadableRecord[] = kinds.map((kind, i) => ({ id: sampleRecordId(kind, `model-${i}`), index: i }));
     mockCatalogues({ embedding: catalogueOf([], records.length, records) });
 
-    await renderInLocale(loc, settings());
+    const { container } = await renderInLocale(loc, settings());
     const texts: string[] = [];
     for (let i = 0; i < kinds.length; i++) {
       const el = await screen.findByTestId(`model-unreadable-record-${i}`);
       texts.push(el.textContent ?? '');
+      expect(texts[i]).toBe(expected(RECORD_ID_SENTENCES[loc], kinds[i], 'RecordId')(i, `model-${i}`));
     }
-    for (const text of texts) expect(text.length).toBeGreaterThan(10);
     expect(texts.length).toBe(kinds.length);
     expect(new Set(texts).size).toBe(kinds.length);
+    // P1-3 again: `notAString.raw` is provider text and stays off the screen.
+    expect(container.textContent ?? '').not.toContain(RAW_LEAK_TOKEN);
   });
 }
 
@@ -1038,7 +1322,22 @@ for (const loc of ['en', 'uk'] as const) {
 // pass on a screen a person still cannot parse.
 // ---------------------------------------------------------------------------
 
-test('the worst screen groups its sentences by subject, and the actionable line is not the last thing shown', async () => {
+// Review P1-4: the old oracle's last condition was `keySentencePos < tabPos`
+// — "the tabs follow the key sentence" — which is not the requirement, and the
+// reviewer proved the oracle was pointed at the wrong proposition: a layout
+// that SATISFIES the requirement (Key group lifted above Index, mac note moved
+// down) made it FAIL, and a worse one (the mac note above the provider,
+// belonging to no subject at all) made it PASS. An oracle that rejects the
+// compliant layout and accepts the worse one is not measuring the requirement.
+//
+// Owner's ruling on the layout itself, so it is not guessed: provider row,
+// then the Key group (its label, the key-state sentence, the macOS keychain
+// note — a sentence about the key — and the key controls), then the tabs and
+// the connected summary, then the Index group last. The one sentence a person
+// can act on comes before the ones they cannot; every sentence sits under the
+// subject it is about; the index failure is a defect report they cannot act
+// on, so it goes last.
+test('the worst screen groups every sentence under its own subject, and nothing a person cannot act on comes first', async () => {
   const { container } = await renderWith(settings({
     key: { kind: 'unreadable', cause: 'locked', reason: 'r' },
     index: { kind: 'unreadable', cause: 'notOpen', reason: 'r2' },
@@ -1046,24 +1345,38 @@ test('the worst screen groups its sentences by subject, and the actionable line 
   }));
   const text = container.textContent ?? '';
 
-  const indexLabelPos = text.indexOf('Index');
-  const indexSentencePos = text.indexOf('The index is not open yet.');
+  const providerPos = text.indexOf('OpenRouter');
   const keyLabelPos = text.indexOf('Key');
   const keySentencePos = text.indexOf(KEY_FAILURE_SENTENCES.locked);
-  const tabPos = text.indexOf('Embedding');
+  const macNotePos = text.indexOf(MAC_NOTE);
+  const indexLabelPos = text.indexOf('Index');
+  const indexSentencePos = text.indexOf('The index is not open yet.');
 
-  expect(indexLabelPos).toBeGreaterThanOrEqual(0);
-  expect(keyLabelPos).toBeGreaterThanOrEqual(0);
-  // The index sentence is immediately preceded by its own subject, not left
-  // to sit unlabelled between the provider row and the key rows.
-  expect(indexLabelPos).toBeLessThan(indexSentencePos);
-  expect(indexSentencePos).toBeLessThan(keyLabelPos);
-  // The key group's own subject precedes its own sentence too.
+  for (const pos of [providerPos, keyLabelPos, keySentencePos, macNotePos, indexLabelPos, indexSentencePos]) {
+    expect(pos).toBeGreaterThanOrEqual(0);
+  }
+
+  // Grouped by subject: the key group follows the provider it belongs to, and
+  // BOTH of its sentences — the key state and the keychain note, which is a
+  // sentence about the key — sit under the Key label and before the next
+  // subject starts.
+  expect(providerPos).toBeLessThan(keyLabelPos);
   expect(keyLabelPos).toBeLessThan(keySentencePos);
-  // And the actionable instruction is not the last thing on the page: the
-  // model tabs — present regardless, because `provider_models` needs neither
-  // a key nor an open index — follow it.
-  expect(keySentencePos).toBeLessThan(tabPos);
+  expect(keySentencePos).toBeLessThan(macNotePos);
+  expect(macNotePos).toBeLessThan(indexLabelPos);
+  expect(indexLabelPos).toBeLessThan(indexSentencePos);
+
+  // The requirement itself, stated directly rather than inferred from the
+  // chain above: the one line a person can act on precedes the one they
+  // cannot. This is the condition the old `keySentencePos < tabPos` replaced.
+  expect(keySentencePos).toBeLessThan(indexSentencePos);
+
+  // And its general form: NOTHING a person cannot act on is placed ahead of
+  // the instruction that is theirs to follow. Named as a list, so a fourth
+  // sentence added above the key group fails here rather than slipping
+  // between two pairwise comparisons.
+  const nothingToActOn = [MAC_NOTE, 'The index is not open yet.'];
+  expect(nothingToActOn.filter((s) => text.indexOf(s) < keySentencePos)).toEqual([]);
 });
 
 // ---------------------------------------------------------------------------
