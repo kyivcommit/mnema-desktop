@@ -1,9 +1,9 @@
 <script lang="ts">
   import { locale, t } from '../i18n';
 
-  // D-b, settled: all four sections render; hiding the two not yet built
-  // would make the window claim the product has two sections when the spec
-  // says four. Order matches the spec and the mockup's `snav` column.
+  // All four sections render; hiding the two not yet built would make the
+  // window claim the product has two sections when the spec says four.
+  // Order matches the spec and the mockup's `snav` column.
   type SectionId = 'models' | 'folders' | 'indexing' | 'application';
   const SECTIONS: { id: SectionId; disabled: boolean }[] = [
     { id: 'models', disabled: false },
@@ -18,7 +18,7 @@
   const foldersLabel = $derived.by(() => { void $locale; return t('settings_nav_folders'); });
   const indexingLabel = $derived.by(() => { void $locale; return t('settings_nav_indexing'); });
   const applicationLabel = $derived.by(() => { void $locale; return t('settings_nav_application'); });
-  // D-b: one catalogue sentence, shared by both unbuilt sections.
+  // One catalogue sentence, shared by both unbuilt sections.
   const notReadyLabel = $derived.by(() => { void $locale; return t('settings_section_not_ready'); });
 
   function labelFor(id: SectionId): string {

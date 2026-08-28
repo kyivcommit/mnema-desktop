@@ -22,9 +22,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
     pin: 'Пін',
     settings_title: 'Налаштування',
-    settings_nav_models: 'Моделі', settings_nav_folders: 'Теки',
-    settings_nav_indexing: 'Індексація', settings_nav_application: 'Застосунок',
-    // D-b: shared by both unbuilt sections — one sentence, promises nothing.
+    settings_nav_models: 'Моделі',
+    settings_nav_folders: 'Теки',
+    settings_nav_indexing: 'Індексація',
+    settings_nav_application: 'Застосунок',
+    // Shared by both unbuilt sections — one sentence, promises nothing.
     settings_section_not_ready: 'Ця секція ще не готова.',
     indexed_documents: '{count, plural, one {# документ} few {# документи} many {# документів} other {# документа}}',
     refusal_no_candidates: 'Нічого не знайдено за цим запитом.',
@@ -98,8 +100,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   en: {
     pin: 'Pin',
     settings_title: 'Settings',
-    settings_nav_models: 'Models', settings_nav_folders: 'Folders',
-    settings_nav_indexing: 'Indexing', settings_nav_application: 'Application',
+    settings_nav_models: 'Models',
+    settings_nav_folders: 'Folders',
+    settings_nav_indexing: 'Indexing',
+    settings_nav_application: 'Application',
     settings_section_not_ready: 'This section is not ready yet.',
     indexed_documents: '{count, plural, one {# document} other {# documents}}',
     refusal_no_candidates: 'Nothing was found for this query.',
