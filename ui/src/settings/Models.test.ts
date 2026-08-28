@@ -835,8 +835,14 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
     key: { kind: 'present' },
     index: { kind: 'read', embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
-  await Promise.resolve();
-  await Promise.resolve();
+  // Not `await Promise.resolve()` twice: that gave the mutant that deletes
+  // the sequence guard enough of a head start to look passing, because two
+  // bare microtask turns were not enough for its (wrong) DOM update to land
+  // before the assertions ran — the test was green whether the guard did its
+  // job or not. `tick()` waits for Svelte's own pending update instead.
+  await tick();
+  await tick();
+  await tick();
   expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true');
   expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('false');
 });
