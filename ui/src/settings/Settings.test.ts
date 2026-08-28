@@ -29,14 +29,43 @@ test('clicking Folders shows the Folders heading and removes the Models heading'
   expect(screen.queryByRole('heading', { name: 'Models' })).toBeNull();
 });
 
-test('the two unbuilt sections carry aria-disabled=true, the built two carry aria-disabled=false', () => {
-  setLocale('en'); // seed, do not inherit
-  render(Settings);
-  expect(screen.getByRole('button', { name: 'Models' }).getAttribute('aria-disabled')).toBe('false');
-  expect(screen.getByRole('button', { name: 'Folders' }).getAttribute('aria-disabled')).toBe('false');
-  expect(screen.getByRole('button', { name: 'Indexing' }).getAttribute('aria-disabled')).toBe('true');
-  expect(screen.getByRole('button', { name: 'Application' }).getAttribute('aria-disabled')).toBe('true');
-});
+// Owner's ruling: `aria-disabled` came off these buttons. They are fully
+// operable — a click does switch the panel — so announcing them as disabled
+// was a claim the window could not back, and its cost fell on exactly the
+// people who would then never press them and never hear why the section is
+// empty. What replaces it is a description that RESOLVES: asserting the
+// attribute's presence would pass on a reference pointing at nothing, so the
+// test reads the referenced node's own text.
+test.each(['Indexing', 'Application'])(
+  '%s describes itself with the not-ready sentence, and no section claims to be disabled',
+  async (name) => {
+    setLocale('en'); // seed, do not inherit
+    const { container } = render(Settings);
+
+    // A built section must carry no description WHILE IT IS SELECTED — that is
+    // the state the condition branches on, and asserting it on a deselected
+    // button instead passes even when the `disabled` half of the condition is
+    // gone and every selected section points at the sentence.
+    expect(screen.getByRole('button', { name: 'Models' }).getAttribute('aria-describedby')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+    expect(screen.getByRole('button', { name: 'Folders' }).getAttribute('aria-describedby')).toBeNull();
+
+    // Before it is selected the sentence is not on the page, so nothing may
+    // point at it — a reference to a missing id is worse than none.
+    expect(screen.getByRole('button', { name }).getAttribute('aria-describedby')).toBeNull();
+
+    await fireEvent.click(screen.getByRole('button', { name }));
+
+    const id = screen.getByRole('button', { name }).getAttribute('aria-describedby');
+    expect(id).toBe('section-not-ready');
+    expect(container.querySelector(`#${id}`)?.textContent).toBe('This section is not ready yet.');
+
+    // And no section claims to be disabled any more — all four, positively.
+    for (const other of ['Models', 'Folders', 'Indexing', 'Application']) {
+      expect(screen.getByRole('button', { name: other }).getAttribute('aria-disabled')).toBeNull();
+    }
+  },
+);
 
 // M3 (review): aria-pressed is the only signal of which section is selected —
 // there is no CSS anywhere in this project. Both directions, before and after

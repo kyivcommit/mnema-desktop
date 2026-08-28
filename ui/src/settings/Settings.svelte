@@ -18,7 +18,15 @@
   const foldersLabel = $derived.by(() => { void $locale; return t('settings_nav_folders'); });
   const indexingLabel = $derived.by(() => { void $locale; return t('settings_nav_indexing'); });
   const applicationLabel = $derived.by(() => { void $locale; return t('settings_nav_application'); });
-  // One catalogue sentence, shared by both unbuilt sections.
+  // One catalogue sentence, shared by both unbuilt sections. An unbuilt
+  // section's button is `aria-describedby` this sentence, so the reason its
+  // panel is empty reaches a screen reader as the button's own description.
+  // The condition is the same one that renders the sentence: the reference is
+  // set only while the element it names exists, never dangling.
+  // `aria-disabled` was removed here on the owner's ruling — these buttons are
+  // fully operable, and telling assistive technology they are disabled meant
+  // its users would never press them and so never hear the sentence at all.
+  const NOT_READY_ID = 'section-not-ready';
   const notReadyLabel = $derived.by(() => { void $locale; return t('settings_section_not_ready'); });
 
   function labelFor(id: SectionId): string {
@@ -39,7 +47,7 @@
         class="item"
         data-testid={`settings-nav-${item.id}`}
         aria-pressed={section === item.id}
-        aria-disabled={item.disabled}
+        aria-describedby={section === item.id && item.disabled ? NOT_READY_ID : undefined}
         onclick={() => (section = item.id)}
       >{labelFor(item.id)}</button>
     {/each}
@@ -54,10 +62,10 @@
       <h2>{foldersLabel}</h2>
     {:else if section === 'indexing'}
       <h2>{indexingLabel}</h2>
-      <p>{notReadyLabel}</p>
+      <p id={NOT_READY_ID}>{notReadyLabel}</p>
     {:else if section === 'application'}
       <h2>{applicationLabel}</h2>
-      <p>{notReadyLabel}</p>
+      <p id={NOT_READY_ID}>{notReadyLabel}</p>
     {/if}
   </div>
 </main>
