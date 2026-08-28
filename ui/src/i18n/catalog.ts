@@ -16,7 +16,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
   | 'models_refusal_input_too_small' | 'models_refusal_no_stated_limit'
   | 'models_refusal_limit_not_understood' | 'models_refusal_no_stated_output_modalities'
-  | 'models_refusal_no_text_output'
+  | 'models_refusal_no_text_output' | 'models_entry_reason_separator'
   | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
   | 'models_catalogue_unreadable_record_known'
   | 'models_embedding_confirm_title' | 'models_embedding_confirm_estimate'
@@ -98,9 +98,19 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // §9.1 / Task 4. Provider is a fixed, disabled control (v1 = OpenRouter
     // only, §4.4) — the name is a catalogue string, not a hardcoded literal,
     // because it is what a person reads there, not a testid.
-    models_provider_label: 'Провайдер',
+    // 🔴 Live run, finding 1: a label and its value are two things, and this
+    // window has no CSS to say so — it is not written yet, and it lands in a
+    // later PR. Without a separator IN THE TEXT the screen read
+    // «Провайдер OpenRouter» and «Ключ Ключ збережено.»: one broken phrase, and
+    // it would stay one in every text-only rendering of this window — a screen
+    // reader, a copy-paste, a plain-text export — long after styling arrives.
+    // The colon lives inside each label rather than in a shared separator
+    // string because punctuation after a label is a per-locale decision (French
+    // puts a space before it) and because this catalogue already writes it that
+    // way in `settings_folders_indexed`.
+    models_provider_label: 'Провайдер:',
     models_provider_name: 'OpenRouter',
-    models_key_label: 'Ключ',
+    models_key_label: 'Ключ:',
     // Not a mask. models.rs:150-162 makes the key pub(crate) and never a
     // command, so the reply carries none and nothing here knows how long the
     // stored key is — a fixed run of dots would state a length this window
@@ -154,7 +164,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // found "Провайдер / [index sentence] / [mac note] / [key sentence]"
     // unreadable as a person, because nothing said the second line was about
     // the index. Shown only alongside that sentence, never on its own.
-    models_index_label: 'Індекс',
+    models_index_label: 'Індекс:',
     models_tab_embedding: 'Ембединг',
     models_tab_chat: 'Чат',
     // The green-dot rule (§9.1 / the PR 3 ruling `providerReady` already
@@ -180,6 +190,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_refusal_limit_not_understood: 'Постачальник вказує ліміт входу у форматі, який ця збірка не вміє прочитати.',
     models_refusal_no_stated_output_modalities: 'Постачальник не вказує, що видає ця модель.',
     models_refusal_no_text_output: 'Постачальник заявляє, що ця модель не видає текст.',
+    // The same seam as the labels above, one row lower and never reached by the
+    // live run: a greyed model's name and the sentence saying why it cannot be
+    // chosen are two inline spans, so they read as «Назва моделі Постачальник не
+    // вказує ліміт входу…» — one phrase. The dash belongs to neither of them, so
+    // it is its own string rather than a prefix inside five reason sentences.
+    models_entry_reason_separator: '—',
     // `RecordId`'s three states (catalogue.rs:293-304) — a record that never
     // became a model still gets one line naming its position, so "N records
     // unreadable" points at something (Task 2 review, item 4).
@@ -349,9 +365,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_load_failed: 'The list of folders could not be read.',
     settings_folders_indexed: '{count, plural, one {Indexed: # document} other {Indexed: # documents}}',
     settings_folders_remove_named: 'Remove {path}',
-    models_provider_label: 'Provider',
+    models_provider_label: 'Provider:',
     models_provider_name: 'OpenRouter',
-    models_key_label: 'Key',
+    models_key_label: 'Key:',
     models_key_saved: 'A key is saved.',
     models_key_absent_hint: 'An OpenRouter key lets this application reach the models. Create one in your OpenRouter account and paste it here.',
     models_key_change: 'Change',
@@ -368,7 +384,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_index_read_failed: 'The index could not be read — this is a defect in this build.',
     models_mac_keychain_note: 'Every update makes this application a stranger to its own key: the system will ask once for your login keychain password.',
     models_load_failed: 'The model settings could not be read.',
-    models_index_label: 'Index',
+    models_index_label: 'Index:',
     models_tab_embedding: 'Embedding',
     models_tab_chat: 'Chat',
     models_status_ready: 'Connected — OpenRouter, a key and a chosen embedding model are all set.',
@@ -380,6 +396,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_refusal_limit_not_understood: 'The provider states an input limit in a shape this build cannot read.',
     models_refusal_no_stated_output_modalities: 'The provider does not state what this model outputs.',
     models_refusal_no_text_output: 'The provider states that this model does not output text.',
+    models_entry_reason_separator: '—',
     models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
     models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
     models_catalogue_unreadable_record_known: 'Record at position {index}, id "{id}": this build could not read the rest of the record.',

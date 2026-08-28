@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { open } from '@tauri-apps/plugin-dialog';
   import { locale, t } from '../i18n';
   import { listTree, addWatchedFolder, removeWatchedFolder, type TreeRoot } from '../lib/ipc';
-  import type { JobController } from './jobs';
+  import type { JobController, JobPhase } from './jobs';
 
   // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove, and scan.
   //
@@ -41,9 +42,39 @@
     loadError = null; // a successful read is proof the earlier one is stale
   }
 
-  onMount(() => {
+  function reread() {
     refresh().catch((e) => {
       loadError = e instanceof Error ? e.message : String(e);
+    });
+  }
+
+  onMount(() => {
+    reread();
+    // Live run, finding 2. Task 7 re-reads after an add and after a remove;
+    // the event nobody wired is the one that changes the NUMBER this list shows
+    // — a job ending. The row went on stating zero indexed documents while the
+    // report under it said four had been added, and the index agreed with the
+    // report, not with the row.
+    //
+    // EVERY ending, not only a walk's, and the reason is asymmetry rather than
+    // caution: a re-read that finds the same numbers rewrites them invisibly,
+    // while a missed one leaves a falsehood a person can act on. "Which pass
+    // writes documents" is also a fact about today's two passes, not about this
+    // row — and this window does not always know what is running at all
+    // (`runningUnobserved` is the state where it has no channel), so keying off
+    // the pass would be keying off something it cannot always see. Endings are
+    // rare: at most a handful per run, never one per progress report.
+    //
+    // Compared by phase IDENTITY, not by kind: the controller writes a fresh
+    // phase object per event, so a progress report changes the object without
+    // ever being an ending, and an ending is written exactly once. Seeded with
+    // what the store already holds so a section switch back to this list does
+    // not read it twice on the same mount.
+    let seen: JobPhase = get(jobs.state).phase;
+    return jobs.state.subscribe(({ phase }) => {
+      if (phase === seen) return;
+      seen = phase;
+      if (phase.kind === 'ended') reread();
     });
   });
 

@@ -315,9 +315,20 @@
     void $locale;
     const cat = activeCatalogue;
     if (!cat) return [];
+    // Live run, finding 1, one row lower than the two the run hit: a greyed
+    // model's name and the sentence saying why it cannot be chosen are two
+    // inline spans, so with no CSS they read as one phrase — "Tiny One The
+    // provider does not state an input limit for this model." The dash belongs
+    // to neither of them, so it is a catalogue string of its own rather than a
+    // prefix baked into five reason sentences (which would each then be untrue
+    // read anywhere else) — and it is built HERE, inside the `void $locale`
+    // this list already needs, rather than in a `$derived` of its own: an em
+    // dash is the same character in both locales, so a guard written for it
+    // could not be told from its absence by any test.
     return cat.entries.map((entry: ModelEntry) => ({
       entry,
       reason: entry.refusal ? refusalReason(entry.refusal) : null,
+      separator: entry.refusal ? t('models_entry_reason_separator') : null,
     }));
   });
 
@@ -633,7 +644,7 @@
     <p data-testid="model-catalogue-empty">{emptyCatalogueSentence}</p>
   {:else if activeEntries.length > 0}
     <ul data-testid="model-entry-list">
-      {#each activeEntries as { entry, reason } (entry.id)}
+      {#each activeEntries as { entry, reason, separator } (entry.id)}
         <li>
           {#if entry.refusal}
             <!-- `None` means selectable; anything else is shown, greyed, with
@@ -641,6 +652,7 @@
                  and this build hides sends a person looking for a fault here
                  instead. Not a button: there is nothing this click could do. -->
             <span data-testid={`model-entry-${entry.id}`} class="unavailable">{entry.name}</span>
+            <span data-testid={`model-entry-separator-${entry.id}`}>{separator}</span>
             <span data-testid={`model-entry-reason-${entry.id}`}>{reason}</span>
           {:else if activeTab === 'chat'}
             <button

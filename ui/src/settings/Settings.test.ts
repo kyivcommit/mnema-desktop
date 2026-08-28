@@ -162,8 +162,12 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // string is where that shows: the dot used to be the last thing on the screen,
   // under a degraded notice it contradicted. The whitespace moved with it.
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy());
+  //
+  // Live run finding 1 is what the two colons below are: this line is exactly
+  // where a person reads «Provider OpenRouter» and «Key An OpenRouter key…» as
+  // one phrase each, and it was green on both.
   expect(panel()?.textContent).toBe(
-    'Models Provider OpenRouter Key An OpenRouter key lets this application reach the models.'
+    'Models Provider: OpenRouter Key: An OpenRouter key lets this application reach the models.'
     + ' Create one in your OpenRouter account and paste it here.   Save    '
     + ' Embedding Chat   The provider does not currently list any models for this role.'
     + ' Not connected yet — add a key and choose an embedding model to enable content search.'

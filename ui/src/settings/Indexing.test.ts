@@ -828,3 +828,171 @@ test('nothing in the outcome vocabulary is left without words', () => {
   )));
   for (const kind of OUTCOME_KINDS) expect(named.has(kind), kind).toBe(true);
 });
+
+// ---------------------------------------------------------------------------
+// Live run, finding 2 — the folder row states a falsehood after its own scan.
+//
+// On a real screen the row read «Проіндексовано: 0 документів» while the report
+// directly beneath it said four documents had been added, and the index agreed
+// with the report: `SELECT COUNT(*) … WHERE watched_root_id = 4` → 4. Task 7
+// re-reads the list after an add and after a remove; the one event nobody
+// wired is the one that changes the number the row shows.
+// ---------------------------------------------------------------------------
+
+const FOUR_FILES = [
+  { relativePath: '01-vulpine-notes.md', documentId: 'd1' },
+  { relativePath: '02-survey.md', documentId: 'd2' },
+  { relativePath: '03-method.md', documentId: 'd3' },
+  { relativePath: '04-appendix.md', documentId: 'd4' },
+];
+
+const treeReads = () => calls('list_tree').length;
+
+test('the folder row re-reads when the job that changed it ends, and not before', async () => {
+  await openFolders();
+  // Both directions start here: the row states zero, which is TRUE until the
+  // walk lands. A test that only asserts the four would pass on a row that had
+  // said four all along.
+  expect(visible(screen.getByTestId('folder-row-4'))).toContain('Проіндексовано: 0 документів');
+
+  await fireEvent.click(scanButton(4));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  // The index now holds the four documents the walk wrote. Swapped mid-run, so
+  // the number on screen can only become four by the list being READ again —
+  // never by anything this component could have kept from the ending itself.
+  reply({
+    list_tree: { roots: [ROOTS.roots[0], { ...ROOTS.roots[1], files: FOUR_FILES }], recents: [] },
+  });
+
+  // A progress report is not an ending and changes no folder's count: the list
+  // must not be re-read once per tick for the length of a run.
+  const beforeProgress = treeReads();
+  channelOf('start_walk_job')(progressEvent());
+  await tick();
+  expect(treeReads()).toBe(beforeProgress);
+  expect(visible(screen.getByTestId('folder-row-4'))).toContain('Проіндексовано: 0 документів');
+
+  channelOf('start_walk_job')(endedEvent());
+
+  // What a person reads on the row after their own scan finishes.
+  await waitFor(() =>
+    expect(visible(screen.getByTestId('folder-row-4'))).toContain('Проіндексовано: 4 документи'),
+  );
+  expect(visible(screen.getByTestId('folder-row-4'))).not.toContain('Проіндексовано: 0 документів');
+  // The other row was not touched by this walk and still reads its own count —
+  // a re-read, not a number written onto whichever row was pressed.
+  expect(visible(screen.getByTestId('folder-row-1'))).toContain('Проіндексовано: 0 документів');
+});
+
+// The second half of "every ending, not only a walk's". The walk chains the
+// embedding pass, so an ENDING arrives that carries no root at all; the list is
+// read again on that one too. This is the assertion that dies if the re-read is
+// narrowed to `pass === 'walk'`.
+test('an embedding pass ending re-reads the list as well', async () => {
+  await openFolders();
+  await fireEvent.click(scanButton(4));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+  const afterWalk = treeReads();
+
+  channelOf('start_embed_job')(endedEvent());
+  await waitFor(() => expect(treeReads()).toBe(afterWalk + 1));
+});
+
+// ---------------------------------------------------------------------------
+// Live run, finding 3 — a section says it is not built, and shows the thing it
+// is for.
+//
+// Standing on Індексація with a finished scan on screen, a person read «Ця
+// секція ще не готова.» and, directly under it, the folder read in full, four
+// documents added, embedding finished. Both halves were true; together they
+// were a contradiction. Every test in this file was green, because none of them
+// had ever rendered the strip while standing on an unbuilt section, and none
+// read the window's text IN ORDER.
+// ---------------------------------------------------------------------------
+
+async function reportOnScreen() {
+  const rendered = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
+  return rendered;
+}
+
+test.each(['indexing', 'application'])(
+  'standing on the unbuilt %s section, the report is not read as that section`s content',
+  async (id) => {
+    const { container } = await reportOnScreen();
+    await fireEvent.click(screen.getByTestId(`settings-nav-${id}`));
+    await tick();
+
+    const text = visible(container);
+    // Not vacuous: the report is still on the window. A fix that hid the strip
+    // on an unbuilt section would satisfy the ordering below and lose the
+    // counters and the Cancel button the ruling exists to keep.
+    expect(text).toContain('Теку прочитано повністю.');
+    expect(text).toContain('Додано документів: 5. Без змін: 1. Пропущено: 5. Вилучено з індексу: 4.');
+    // The sentence a person reads LAST. On the screen the live run found, the
+    // whole report followed it; here nothing does, so the sentence is about the
+    // panel it sits in and nothing else.
+    // Compared as the tail STRING rather than `endsWith(...) === true`: a
+    // boolean fails as "expected false to be true" and hides what a person is
+    // actually reading after the sentence, which is the whole finding.
+    const notReady = 'Ця секція ще не готова.';
+    expect(text.slice(-notReady.length)).toBe(notReady);
+    // Stated positively as well as by position: the report is above the
+    // sentence, not under it.
+    expect(text.indexOf('Теку прочитано повністю.'))
+      .toBeLessThan(text.indexOf('Ця секція ще не готова.'));
+  },
+);
+
+// The ruling the fix above must not break, on the path that now runs THROUGH an
+// unbuilt section: the strip is outside every section, so the job it is
+// reporting on survives being navigated away from — counters and all — and
+// `cancel_job` needs no channel, so Cancel works from a section that has none.
+test('Cancel survives a switch through an unbuilt section, in both directions', async () => {
+  await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  channelOf('start_walk_job')(progressEvent());
+  await tick();
+
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await tick();
+  // Still running, still counted, still stoppable — from a section that has no
+  // channel of its own and no content at all.
+  expect(screen.getByTestId('indexing-counts').textContent)
+    .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
+  await fireEvent.click(screen.getByTestId('indexing-cancel'));
+  expect(calls('cancel_job')).toHaveLength(1);
+
+  // And back again: the job is not lost by the return trip either.
+  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
+  await screen.findByTestId('folder-row-4');
+  expect(screen.getByTestId('indexing-counts').textContent)
+    .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
+  await fireEvent.click(screen.getByTestId('indexing-cancel'));
+  expect(calls('cancel_job')).toHaveLength(2);
+
+  channelOf('start_walk_job')(endedEvent({ reason: 'cancelled' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-walk-outcome')))
+    .toBe('Сканування зупинено на ваше прохання.');
+});
+
+// The other direction of the same control, on the same path: with nothing
+// running, an unbuilt section offers no Cancel and calls nothing.
+test('on an unbuilt section with no job running there is no Cancel and no strip', async () => {
+  render(Settings);
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await tick();
+
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
+  expect(screen.queryByTestId('indexing')).toBeNull();
+  expect(calls('cancel_job')).toHaveLength(0);
+  expect(screen.getByText('Ця секція ще не готова.')).toBeTruthy();
+});

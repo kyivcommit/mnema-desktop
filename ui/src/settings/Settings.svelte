@@ -25,8 +25,9 @@
   // (`bridge.rs`): a controller living in `Folders.svelte` would be destroyed
   // by the first of those clicks, taking the counters AND the Cancel button
   // with it. `cancel_job` needs no channel at all, so that Cancel would be lost
-  // for nothing. The strip renders below the panel for the same reason — a
-  // running job stays visible and stoppable from every section.
+  // for nothing. The strip renders outside the panel for the same reason — a
+  // running job stays visible and stoppable from every section. WHERE outside
+  // is the live run's finding 3; see the markup below.
   const jobs = createJobController();
 
   // The settings window can be opened in the middle of a run it never started,
@@ -62,34 +63,51 @@
 </script>
 
 <main>
-  <nav class="snav">
-    {#each SECTIONS as item (item.id)}
-      <button
-        type="button"
-        class="item"
-        data-testid={`settings-nav-${item.id}`}
-        aria-pressed={section === item.id}
-        aria-describedby={section === item.id && item.disabled ? NOT_READY_ID : undefined}
-        onclick={() => (section = item.id)}
-      >{labelFor(item.id)}</button>
-    {/each}
-  </nav>
-
-  <div class="spane">
-    {#if section === 'models'}
-      <h2>{modelsLabel}</h2>
-      <Models />
-    {:else if section === 'folders'}
-      <h2>{foldersLabel}</h2>
-      <Folders {jobs} />
-    {:else if section === 'indexing'}
-      <h2>{indexingLabel}</h2>
-      <p id={NOT_READY_ID}>{notReadyLabel}</p>
-    {:else if section === 'application'}
-      <h2>{applicationLabel}</h2>
-      <p id={NOT_READY_ID}>{notReadyLabel}</p>
-    {/if}
-  </div>
-
+  <!-- Live run, finding 3, and it is a correction to this plan's own ruling.
+       Task 8 put the strip OUTSIDE the section conditional so a job survives
+       Folders -> Models -> Folders with its counters and its Cancel; that half
+       is right and is untouched here. What it did not weigh is that two of the
+       four sections are placeholders: rendered last, the strip landed directly
+       under the not-ready sentence, so a person standing on the Indexing
+       section read a section declaring itself unbuilt and, immediately below
+       it, the full indexing report.
+       The strip is the WINDOW's status line, not a section's content, so it is
+       drawn before the nav and the panel both — and the placeholder sentence is
+       then the last thing inside the panel it is about. Nothing about the
+       controller moved: it is still created above every section, `<Indexing>`
+       is still outside every `{#if}`, and `cancel_job` still needs no channel.
+       `.scols` exists so the CSS that lands later cannot make this a THIRD
+       column beside the nav and the panel: the pair is the row, the status line
+       is not part of it. -->
   <Indexing {jobs} />
+  <div class="scols">
+    <nav class="snav">
+      {#each SECTIONS as item (item.id)}
+        <button
+          type="button"
+          class="item"
+          data-testid={`settings-nav-${item.id}`}
+          aria-pressed={section === item.id}
+          aria-describedby={section === item.id && item.disabled ? NOT_READY_ID : undefined}
+          onclick={() => (section = item.id)}
+        >{labelFor(item.id)}</button>
+      {/each}
+    </nav>
+
+    <div class="spane">
+      {#if section === 'models'}
+        <h2>{modelsLabel}</h2>
+        <Models />
+      {:else if section === 'folders'}
+        <h2>{foldersLabel}</h2>
+        <Folders {jobs} />
+      {:else if section === 'indexing'}
+        <h2>{indexingLabel}</h2>
+        <p id={NOT_READY_ID}>{notReadyLabel}</p>
+      {:else if section === 'application'}
+        <h2>{applicationLabel}</h2>
+        <p id={NOT_READY_ID}>{notReadyLabel}</p>
+      {/if}
+    </div>
+  </div>
 </main>

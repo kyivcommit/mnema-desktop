@@ -120,14 +120,14 @@ test('index Read renders no failure sentence at all', async () => {
 
 test('key Absent: an empty field to add a key, no Change/Forget', async () => {
   await renderWith(settings({ key: { kind: 'absent' } }));
-  const input = screen.getByLabelText('Key') as HTMLInputElement;
+  const input = screen.getByLabelText('Key:') as HTMLInputElement;
   expect(input.value).toBe('');
   expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Forget' })).toBeNull();
 });
 
-// Review P2-4: `getByLabelText('Key')` LOCATES the field and asserts nothing
+// Review P2-4: `getByLabelText('Key:')` LOCATES the field and asserts nothing
 // about it — a locator is not an assertion. `type="password"` → `type="text"`
 // left the whole suite green while the one field in this product that holds a
 // secret rendered its characters on screen. Asserted here in both states that
@@ -135,13 +135,13 @@ test('key Absent: an empty field to add a key, no Change/Forget', async () => {
 // text".
 test('the key field is a password field when adding a key', async () => {
   await renderWith(settings({ key: { kind: 'absent' } }));
-  expect(screen.getByLabelText('Key').getAttribute('type')).toBe('password');
+  expect(screen.getByLabelText('Key:').getAttribute('type')).toBe('password');
 });
 
 test('the key field is a password field when changing an existing key', async () => {
   await renderWith(settings({ key: { kind: 'present' } }));
   await fireEvent.click(screen.getByRole('button', { name: 'Change' }));
-  expect(screen.getByLabelText('Key').getAttribute('type')).toBe('password');
+  expect(screen.getByLabelText('Key:').getAttribute('type')).toBe('password');
 });
 
 // Review P3-10: Absent used to render `Provider OpenRouter Key [field] Save` —
@@ -161,7 +161,7 @@ test('key Present: a saved-key statement, Change and Forget, no editable field',
   expect(screen.getByTestId('model-key-saved').textContent).toBe('A key is saved.');
   expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy();
-  expect(screen.queryByLabelText('Key')).toBeNull();
+  expect(screen.queryByLabelText('Key:')).toBeNull();
 });
 
 // Review P3-9: the provider is fixed by design (§4.4) and nothing pinned it —
@@ -169,7 +169,7 @@ test('key Present: a saved-key statement, Change and Forget, no editable field',
 // the name a person actually reads.
 test('the provider control is fixed: disabled, and reading as a provider name', async () => {
   await renderWith(settings());
-  const provider = screen.getByLabelText('Provider') as HTMLSelectElement;
+  const provider = screen.getByLabelText('Provider:') as HTMLSelectElement;
   expect(provider.disabled).toBe(true);
   expect(provider.textContent).toContain('OpenRouter');
 });
@@ -313,9 +313,9 @@ test('entering a key calls set_key, and no trace of it survives the round', asyn
   setKey.mockResolvedValue({ balance: { kind: 'notStated' } });
 
   const { container } = render(Models);
-  await waitFor(() => expect(screen.getByLabelText('Key')).toBeTruthy());
+  await waitFor(() => expect(screen.getByLabelText('Key:')).toBeTruthy());
 
-  await fireEvent.input(screen.getByLabelText('Key'), { target: { value: LEAKY_KEY } });
+  await fireEvent.input(screen.getByLabelText('Key:'), { target: { value: LEAKY_KEY } });
   await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
   await waitFor(() => expect(setKey).toHaveBeenCalledWith(LEAKY_KEY));
@@ -327,7 +327,7 @@ test('entering a key calls set_key, and no trace of it survives the round', asyn
   // … and no component state does either: reopening the editor must show an
   // empty field, not the value that was just sent.
   await fireEvent.click(screen.getByRole('button', { name: 'Change' }));
-  const reopened = screen.getByLabelText('Key') as HTMLInputElement;
+  const reopened = screen.getByLabelText('Key:') as HTMLInputElement;
   expect(reopened.value).toBe('');
 });
 
@@ -379,8 +379,8 @@ test('reads as a person: a locked keychain names the situation, not a status cod
 // ---------------------------------------------------------------------------
 
 const UK = {
-  provider: 'Провайдер',
-  keyLabel: 'Ключ',
+  provider: 'Провайдер:',
+  keyLabel: 'Ключ:',
   saved: 'Ключ збережено.',
   absentHint: 'Ключ OpenRouter потрібен, щоб застосунок міг звертатися до моделей. Створіть його в обліковому записі OpenRouter і вставте сюди.',
   change: 'Змінити',
@@ -488,7 +488,7 @@ test('a language switch after mount reaches the add-a-key hint and the Save cont
   // also opens the saved-key line and the hint, so a text search would be
   // satisfied by a label that stayed English.
   expect(screen.getByLabelText(UK.keyLabel)).toBeTruthy();
-  expect(screen.queryByLabelText('Key')).toBeNull();
+  expect(screen.queryByLabelText('Key:')).toBeNull();
   expect(after).toContain(UK.save);
   expect(after).toContain(UK.absentHint);
   expect(after).not.toContain('An OpenRouter key lets this application reach the models.');
@@ -595,7 +595,7 @@ test('Cancel clears the sentence a failed Save left behind', async () => {
   render(Models);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Change' }));
-  await fireEvent.input(screen.getByLabelText('Key'), { target: { value: LEAKY_KEY } });
+  await fireEvent.input(screen.getByLabelText('Key:'), { target: { value: LEAKY_KEY } });
   await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
   await waitFor(() => expect(screen.getByTestId('model-action-error')).toBeTruthy());
@@ -615,13 +615,13 @@ test('a rejected Save keeps no trace of the entered key either', async () => {
   setKey.mockRejectedValue(new Error('the credential store would not keep the key'));
 
   const { container } = render(Models);
-  await waitFor(() => expect(screen.getByLabelText('Key')).toBeTruthy());
-  await fireEvent.input(screen.getByLabelText('Key'), { target: { value: LEAKY_KEY } });
+  await waitFor(() => expect(screen.getByLabelText('Key:')).toBeTruthy());
+  await fireEvent.input(screen.getByLabelText('Key:'), { target: { value: LEAKY_KEY } });
   await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
   await waitFor(() => expect(screen.getByTestId('model-action-error')).toBeTruthy());
   expect(container.innerHTML).not.toContain(LEAKY_KEY);
-  expect((screen.getByLabelText('Key') as HTMLInputElement).value).toBe('');
+  expect((screen.getByLabelText('Key:') as HTMLInputElement).value).toBe('');
 });
 
 // ---------------------------------------------------------------------------
@@ -2164,4 +2164,74 @@ test('a language switch after mount reaches the recovering-act sentence', async 
   const after = container.textContent ?? '';
   expect(after).toContain('Повторний вибір моделі ембедингу це виправляє');
   expect(after).not.toContain(RECOVER);
+});
+
+// ---------------------------------------------------------------------------
+// Live run, finding 1 — a label and its value read as one broken phrase.
+//
+// `Key A key is saved.` and `Provider OpenRouter` were on a real screen while
+// this file was green, because every assertion above reads a testid, an
+// attribute or one element's own text. Nothing had ever read the two ELEMENTS
+// TOGETHER, which is the only way the seam between them is visible — and there
+// is no CSS in this project to put anything in that seam.
+//
+// What a person reads, with the markup's own indentation collapsed the way a
+// browser collapses it (Indexing.test.ts:79 uses the same normaliser, and for
+// the same reason: nobody sees the newline between two <span>s).
+// ---------------------------------------------------------------------------
+const visible = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
+
+for (const [loc, provider, keyRow] of [
+  ['en', 'Provider: OpenRouter', 'Key: A key is saved.'],
+  ['uk', 'Провайдер: OpenRouter', 'Ключ: Ключ збережено.'],
+] as const) {
+  test(`the label and its value read as two things, not one phrase (${loc})`, async () => {
+    const { container } = await renderInLocale(loc, settings({ key: { kind: 'present' } }));
+    const text = visible(container);
+
+    // Positive: the separator is on the screen, in this locale, between each
+    // label and the value it introduces.
+    expect(text).toContain(provider);
+    expect(text).toContain(keyRow);
+    // And the other direction, which is the defect stated literally: the label
+    // and its value with nothing but a space between them. This is the half
+    // that dies when the colon is taken back out of the catalogue — the
+    // positive half above would survive a separator moved anywhere else on the
+    // line.
+    expect(text).not.toContain(provider.replace(': ', ' '));
+    expect(text).not.toContain(keyRow.replace(': ', ' '));
+  });
+}
+
+// The same seam one group lower, on a branch the live run never reached: the
+// index subject label and the sentence under it. `Unreadable` is the only state
+// that renders either.
+test('the index label and its sentence read as two things too', async () => {
+  const { container } = await renderWith(settings({
+    index: { kind: 'unreadable', cause: 'notOpen', reason: 'r' },
+  }));
+  const text = visible(container);
+  expect(text).toContain('Index: The index is not open yet.');
+  expect(text).not.toContain('Index The index is not open yet.');
+});
+
+// And one row lower again, on the branch a provider listing a model this build
+// refuses would reach: the model's name and the sentence saying why it cannot
+// be chosen are two inline spans of their own.
+test('a refused model`s name and its reason read as two things', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([entry('r1', { name: 'Tiny One', refusal: { kind: 'noStatedLimit' } })]),
+  });
+  const { container } = await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-entry-reason-r1')).toBeTruthy());
+  const text = visible(container);
+
+  expect(text).toContain('Tiny One — The provider does not state an input limit for this model.');
+  expect(text).not.toContain('Tiny One The provider does not state an input limit for this model.');
+
+  // The separator is a catalogue string like every other word on this screen,
+  // so it survives a language switch rather than being a literal in the markup
+  // that only happens to look right in one locale.
+  await switchTo('uk');
+  expect(visible(container)).toContain('Tiny One — Постачальник не вказує ліміт входу цієї моделі.');
 });
