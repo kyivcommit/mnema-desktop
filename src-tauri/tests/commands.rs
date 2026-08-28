@@ -1172,8 +1172,16 @@ fn an_index_failure_inside_the_content_arm_stays_local_to_it() {
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
 
-    state.open_index().expect("the index opens");
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).expect("the key is accepted");
+    state.open_index().expect("the index opens");
     let adopted = state
         .with_index(|db| db.adopt_embedding_model(MODEL, DIM, "credential-ref", "chunker-v1"))
         .expect("the default model is adopted");
@@ -1250,8 +1258,16 @@ fn the_content_arm_embeds_the_query_before_it_locks_the_index() {
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
 
-    state.open_index().expect("the index opens");
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).expect("the key is accepted");
+    state.open_index().expect("the index opens");
     state
         .with_index(|db| {
             db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
@@ -1357,8 +1373,16 @@ fn search_reports_the_inspected_pool_not_the_embedded_count() {
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
 
-    state.open_index().expect("the index opens");
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).expect("the key is accepted");
+    state.open_index().expect("the index opens");
 
     state
         .with_index(|db| {
@@ -1646,8 +1670,16 @@ fn ask_without_a_chat_model_returns_citations_only_and_makes_no_chat_call() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     state
         .with_index(|db| {
             db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
@@ -1729,8 +1761,16 @@ fn ask_with_a_model_but_no_candidates_refuses_without_calling_chat() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     set_chat_model_via(&state, "openai/gpt-4o-mini");
 
     let webview = main_webview(&app);
@@ -1785,8 +1825,16 @@ fn ask_maps_each_anchor_to_the_right_citation_and_generates() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     set_chat_model_via(&state, "openai/gpt-4o-mini");
 
     let webview = main_webview(&app);
@@ -1891,8 +1939,16 @@ fn ask_with_an_empty_completion_refuses_as_empty_completion() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     set_chat_model_via(&state, "openai/gpt-4o-mini");
 
     let webview = main_webview(&app);
@@ -1977,8 +2033,16 @@ fn ask_rejects_a_blank_query_before_any_retrieval() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     state
         .with_index(|db| {
             db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
@@ -2034,8 +2098,16 @@ fn search_rejects_a_blank_query_before_any_retrieval() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     state
         .with_index(|db| {
             db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")

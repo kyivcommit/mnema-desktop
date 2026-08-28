@@ -61,9 +61,104 @@ pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Err
     }
     let check = mnema_provider::check_key(state.provider_base(), &key)?;
     mnema_secrets::store(state.credential_ref(), &key)?;
+    choose_the_default_models_for_roles_with_none(&state, &key);
     Ok(KeyStatus {
         balance: check.balance,
     })
+}
+
+/// The models this product starts with, one constant for both roles.
+///
+/// **One constant and not two, and spelled nowhere else.** A second literal at
+/// a call site is a second opinion about what this product ships with, and the
+/// two would be equal for exactly as long as nobody changed one of them.
+///
+/// ⚠️ **A stated model id is a claim about somebody else's catalogue**, and no
+/// test in this workspace can check it: every one of them talks to
+/// `mnema_mock_provider`, which answers whatever its fixture says, so an id the
+/// provider retired yesterday leaves the suite green while nothing works. That
+/// is what `tests/live_provider.rs`'s `both_default_models_are_still_in_the_
+/// providers_catalogue` is for — `#[ignore]`d, needing the network and no key,
+/// because the catalogue endpoint is public (see [`provider_models`]).
+pub const DEFAULT_MODELS: DefaultModels = DefaultModels {
+    embedding: "openai/text-embedding-3-small",
+    chat: "openai/gpt-5.6-luna",
+};
+
+/// The type behind [`DEFAULT_MODELS`]. A struct rather than two loose consts so
+/// that "the default set" is one thing a caller can pass around and one thing a
+/// live check can iterate — and so that adding a third role names the role it
+/// belongs to instead of a third bare string.
+pub struct DefaultModels {
+    pub embedding: &'static str,
+    pub chat: &'static str,
+}
+
+/// Applies [`DEFAULT_MODELS`] to the roles this index has no answer for, so that
+/// entering a key is enough to make the product work.
+///
+/// **Only where the role is unset**, and the direction that matters is the
+/// second: a key entered over a configuration somebody already made must leave
+/// it exactly where it was. `a_key_entered_over_models_that_are_already_chosen_replaces_neither`
+/// is the test, and its fixture builds the state — an index with both roles
+/// answered — that the happy-path test cannot.
+///
+/// **It cannot fail [`set_key`]**, which is why it returns nothing. The key has
+/// been checked and stored by the time this runs, and a default that could not
+/// be applied — no index open yet, a provider that would not answer this second
+/// question, a job holding the slot — must not turn a key that works into a
+/// rejected command. It is the same argument [`set_embedding_model`]'s own doc
+/// makes about reading the settings back: the window could not tell "the key
+/// was not stored" from "stored, and something after it did not finish", and no
+/// wording could tell them apart because the fact would not be in the message.
+///
+/// **The embedding role is not a `meta` row.** A chat model is a string; an
+/// embedding model is a vector space with a width, and the width comes from the
+/// provider's own answer and never from anything this build assumed (see
+/// [`set_embedding_model`]). So this role costs a second network call — made
+/// only when the index has no active space at all, which is once in an
+/// installation's life.
+///
+/// **The job slot is claimed for the embedding half**, for the reason written
+/// out inside [`set_embedding_model`]: adoption repoints `meta.active_space`,
+/// and a pass that read that pointer at its start goes on writing into the space
+/// it started with. A slot that is already taken means the default is simply not
+/// applied — it is a default, and the next key or the next explicit choice will
+/// apply it.
+fn choose_the_default_models_for_roles_with_none(state: &AppState, key: &str) {
+    // Two `let _`, not one: the roles fail separately and neither failing is a
+    // reason to leave the other unset.
+    let _ = state.with_index(|db| {
+        if db.meta_get(mnema_index::META_CHAT_MODEL)?.is_none() {
+            db.meta_set(mnema_index::META_CHAT_MODEL, DEFAULT_MODELS.chat)?;
+        }
+        Ok(())
+    });
+    // `active_space` and not the model name: the name is read *from* the space
+    // (`read_settings`), so "no space" is what "no embedding model" means here,
+    // and asking the question the other way round would read `None` out of an
+    // index that does have one and mint a second space beside it.
+    let unset = matches!(state.with_index(|db| db.active_space()), Ok(None));
+    if !unset {
+        return;
+    }
+    let Ok(_slot) = state.claim_job() else {
+        return;
+    };
+    let Ok(check) =
+        mnema_provider::check_embedding_model(state.provider_base(), key, DEFAULT_MODELS.embedding)
+    else {
+        return;
+    };
+    let _ = state.with_index(|db| {
+        db.adopt_embedding_model(
+            DEFAULT_MODELS.embedding,
+            check.dim as i64,
+            state.credential_ref(),
+            &mnema_chunk::chunker_hash(),
+        )?;
+        Ok(())
+    });
 }
 
 /// Removes the key. What was embedded stays embedded; what stops is embedding

@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
-use mnema_desktop::models::ExistingVectors;
 use mnema_desktop::state::AppState;
 use mnema_index::DocumentStatus;
 use mnema_mock_provider::{MockServer, Reply};
@@ -27,7 +26,14 @@ use crate::support::worker;
 /// Named here rather than inside one test because more than one of them needs
 /// an index that has been configured at all, and "configured" is not a state a
 /// test should spell differently each time it wants one.
-const DEFAULT_MODEL: &str = "baai/bge-m3";
+///
+/// **Taken from the product's own constant, never spelled again.** It was a
+/// literal of its own until `set_key` started applying `DEFAULT_MODELS`, and a
+/// second spelling of the same intention would have been equal to the product's
+/// for exactly as long as nobody changed one of them — while every fixture that
+/// says "an index that is configured" would quietly have meant a *different*
+/// model from the one an installation actually gets.
+const DEFAULT_MODEL: &str = mnema_desktop::models::DEFAULT_MODELS.embedding;
 const DEFAULT_DIM: i64 = 1024;
 
 /// A credits body a key check can read: ten bought, one spent.
@@ -75,8 +81,9 @@ impl Fixture {
     }
 
     /// A provider that answers a credit check and then an embedding check —
-    /// the order `set_key` and then `set_embedding_model` ask them in, which is
-    /// the sequence [`Fixture::adopt_default_model`] makes.
+    /// the two questions `set_key` alone asks now: the credit check that decides
+    /// whether the key is stored, and the embedding check its `DEFAULT_MODELS`
+    /// adoption takes a width from.
     ///
     /// `MockServer` answers its replies strictly in order, one per connection,
     /// and pays no attention to which path was asked for. So this is a
@@ -109,8 +116,9 @@ impl Fixture {
     }
 
     /// A credit check, one embedding check at [`DEFAULT_DIM`], and then
-    /// whatever `run` says — the sequence a test that sets the key, adopts the
-    /// default model and *then* starts an embedding job makes.
+    /// whatever `run` says — the sequence a test that sets the key (which
+    /// adopts the default model as it goes) and *then* starts an embedding job
+    /// makes.
     ///
     /// The replies for the run are the caller's because there is no one shape:
     /// how many calls a pass makes depends on how many chunks are queued, how
@@ -238,46 +246,51 @@ impl Fixture {
         self.state().open_index().expect("the index opens");
     }
 
-    /// Records this installation's model configuration in the index, through
-    /// the command the application uses.
+    /// Says that this installation's model configuration is recorded, and calls
+    /// nothing to make it so.
+    ///
+    /// **It adopted the model itself until `set_key` started applying
+    /// `DEFAULT_MODELS`** — and it must not any more, in both directions. It
+    /// would spend a second embedding check every fixture would then have to
+    /// queue, and, now that the product's own default is what it names, it would
+    /// re-adopt the model the index is already on: a call that finds the space
+    /// rather than minting one, and quietly turns `created` into `false` for the
+    /// tests that assert on it. What it verifies is what it always really stood
+    /// for — that the index is configured before whatever the caller does next.
     ///
     /// That row is the one thing the design deliberately does put in the
     /// database in the key's place: `model_config.credential_ref` holds the
     /// NAME the credential is filed under, never the secret. A test scanning
     /// the database for the key needs it there, or the scan proves only that it
-    /// was reading an empty file.
+    /// was reading an empty file. `set_key`'s own default adoption takes that
+    /// reference from `AppState::credential_ref`, which is what this fixture put
+    /// there — so there is still no second value for it to disagree with.
     ///
-    /// It called `Db::adopt_embedding_model` directly until `set_embedding_model`
-    /// existed, and the part of the two that could have diverged in silence was
-    /// exactly `credential_ref`: a width that disagreed raises
-    /// `SpaceDimMismatch`, a model name that disagreed mints a second space, and
-    /// a reference that disagreed writes the wrong name and fails nothing. What
-    /// stops it now is not that they agree — it is that there is no second value
-    /// to disagree with. The command takes the reference from
-    /// `AppState::credential_ref`, this fixture put it there, and this function
-    /// passes none.
-    ///
-    /// It needs a key in the store and a provider answering an embedding check
-    /// with `DEFAULT_DIM`-wide vectors, which is
+    /// It needs a key in the store and a provider that answered an embedding
+    /// check with `DEFAULT_DIM`-wide vectors, which is
     /// [`Fixture::with_provider_accepting_everything`] with `set_key` called
-    /// first.
-    /// It adopts with [`ExistingVectors::Keep`], the value that changes nothing
-    /// about a fresh index and would refuse rather than destroy on one that is
-    /// not — so a test reaching this helper for "an index that is configured"
-    /// cannot lose vectors to it by accident.
+    /// first. `ExistingVectors` no longer appears here at all: nothing this
+    /// helper does can retire a space.
     pub fn adopt_default_model(&self) {
-        let adopted = mnema_desktop::models::set_embedding_model(
-            self.state(),
-            DEFAULT_MODEL.into(),
-            ExistingVectors::Keep,
-        )
-        .expect("the default model is adopted");
-        // Not a restatement of the command's own test. It says the provider
-        // this fixture built answered the width this fixture names, so that a
-        // caller relying on `DEFAULT_DIM` is relying on something checked
-        // rather than on two constants that happen to match.
+        let settings = mnema_desktop::models::model_settings(self.state());
+        let read = match &settings.index {
+            mnema_desktop::models::IndexSettings::Read(read) => read,
+            other => panic!("the index was expected to be readable here; it said {other:?}"),
+        };
+        // Both facts, and separately. The name says `set_key` chose a model at
+        // all; the width says the provider this fixture built answered the one
+        // this fixture names, so that a caller relying on `DEFAULT_DIM` is
+        // relying on something measured rather than on two constants that
+        // happen to match.
         assert_eq!(
-            adopted.dim, DEFAULT_DIM,
+            read.embedding_model.as_deref(),
+            Some(DEFAULT_MODEL),
+            "the index is not on this product's default model, so nothing after this call is \
+             about a configured index"
+        );
+        assert_eq!(
+            read.embedding_dim,
+            Some(DEFAULT_DIM),
             "the fixture's provider answered a width other than the one this fixture names"
         );
     }
