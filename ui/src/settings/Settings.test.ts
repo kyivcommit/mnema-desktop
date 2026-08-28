@@ -115,7 +115,10 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // the exact string below is what `Models` renders for
   // Absent/Read/linux, printed by an actual render rather than assumed.
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy());
-  expect(panel()?.textContent).toBe('Models Provider OpenRouter   Key  Save   ');
+  expect(panel()?.textContent).toBe(
+    'Models Provider OpenRouter   An OpenRouter key lets this application reach the models.'
+    + ' Create one in your OpenRouter account and paste it here. Key  Save    ',
+  );
 
   await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));
   expect(panel()?.textContent).toBe('Indexing This section is not ready yet.');
