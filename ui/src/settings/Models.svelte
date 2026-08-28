@@ -421,7 +421,12 @@
       // nothing did: the pass reported to a channel whose messages were
       // dropped. A pass that ENDS is the one moment that count can have
       // changed, so it is the one moment worth re-reading it.
-      await startEmbedJob(() => void passEnded());
+      // `startEmbedJob` forwards the whole `JobEvent` (Task 8): only an
+      // ENDING may re-read the index — a re-read per progress report is one
+      // command every 250 ms for the length of the run.
+      await startEmbedJob((event) => {
+        if (event.event === 'ended') void passEnded();
+      });
       reembedPhase = 'started';
     } catch (e) {
       changeError = e instanceof Error ? e.message : String(e);

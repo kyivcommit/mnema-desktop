@@ -282,33 +282,114 @@ export const setEmbeddingModel = (model: string, existingVectors: ExistingVector
 export type JobStatus = { running: boolean };
 export const jobStatus = () => invoke<JobStatus>('job_status');
 
-// The re-embedding pass, offered wherever a model change has just emptied the
-// index's vector space. It takes no root and covers the whole index
-// (embed_job.rs), so recovering from a discard needs no command of its own.
+// ---------------------------------------------------------------------------
+// Job events (`src-tauri/src/job.rs`) — the wire this window watches a walk and
+// an embedding pass on.
 //
-// The channel is created here rather than by the caller so that no component
-// has to import Tauri's `Channel`. Exactly ONE field of what comes back is
-// read — `event`, the tag `JobEvent` carries (job.rs:309-313) — and only to
-// tell an ending from a progress report. The spelling is pinned on the Rust
-// side, against the real serialization, by `commands.rs:826-828`. The ending's own contents are still
-// dropped: seven end reasons, the counts, the frozen-file list, none of them
-// mirrored here, because a partial mirror of those would look authoritative
-// while being incomplete. Rendering a running pass, with that mirror, is the
-// Indexing section's work and is NOT booked to this line — the disclosure that
-// used to sit here booked the ending to that section too, which is one of the
-// two sections this PR does not build, so the one caller who needed to know a
-// pass had ended learned it from nobody.
+// EVERY shape below was taken from a real serialized payload, not written from
+// a document: a temporary test built each `Ended` through `walk_job.rs`'s own
+// `ended_from_report` (one per `StopReason`, plus `Ended::failed`) and printed
+// `serde_json::to_string(&JobEvent::Ended(..))`. A hand-written type and a
+// hand-written fixture can carry the SAME mistake and pass together while the
+// real event lands in a branch neither describes.
 //
-// `onEnded` is what that caller gets: the pass is over, and nothing about how.
-// A section that has just told somebody their semantic search is dark has one
-// question to ask when it ends — the index's own count, read again — and that
-// question does not need the ending's shape to be mirrored to be asked.
-export const startEmbedJob = (onEnded?: () => void) => {
-  const onProgress = new Channel<{ event?: string }>();
-  if (onEnded) {
-    onProgress.onmessage = (message) => {
-      if (message?.event === 'ended') onEnded();
-    };
-  }
+// `JobEvent` is the one exception to this module's `kind`-tagged convention:
+// `#[serde(tag = "event", content = "data")]` (job.rs:309), so what arrives is
+// `{"event":"progress","data":{…}}` / `{"event":"ended","data":{…}}`. A page
+// inferring which it got from the presence of a field infers wrong, and the
+// Rust type says so in its own doc comment.
+
+// `EndReason` (job.rs) — seven variants. The four after `failed` are NOT
+// malfunctions: `walk_job.rs` carries `StopReason`'s own decisions across by
+// name precisely so a window can tell "a folder is unreadable" from "something
+// broke". The camelCase spellings are pinned on the Rust side by
+// `every_end_reason_has_its_camel_case_spelling_pinned`; `settings/jobs.test.ts`
+// pins this union against that enum's source text, so neither side can gain a
+// variant the other has never heard of.
+//
+// A runtime array, with the type derived from it rather than written twice: a
+// union and a list that have to be kept in step by hand are two places for the
+// same fact, and `settings/jobs.test.ts` needs the values at run time to compare
+// them against `job.rs` at all. Order follows the Rust declaration.
+export const END_REASONS = [
+  'completed',
+  'cancelled',
+  'failed',
+  'brokenWorker',
+  'rulesNotApplied',
+  'rootUnavailable',
+  'volumeMissing',
+] as const;
+export type EndReason = (typeof END_REASONS)[number];
+
+// `FrozenReason` (job.rs) — why reconciliation refused to delete anything under
+// a prefix. Always a statement that the walk has no evidence OF deletion, never
+// that the file is confirmed still there (`mnema_ingest::walk::FrozenReason`).
+export const FROZEN_REASONS = ['symlinkedSubtree', 'emptyDirectory', 'unreadableDirectory'] as const;
+export type FrozenReason = (typeof FROZEN_REASONS)[number];
+
+// `Frozen` (job.rs): one prefix left alone, and why. `prefix` is relative to the
+// watched root, `/`-separated.
+export type Frozen = { prefix: string; reason: FrozenReason };
+
+// `Progress` (job.rs). `secondsLeft` is `Option<u64>` on the Rust side and so
+// arrives as `null` for the whole of an ordinary run's beginning — "not known
+// yet" is a real state and must not render as `0`.
+export type JobProgress = {
+  done: number;
+  total: number;
+  skipped: number;
+  refused: number;
+  secondsLeft: number | null;
+};
+
+// `Ended` (job.rs) — eleven fields, mirrored in full rather than in the subset
+// this window happens to render today. `complete` is the one that does not fall
+// out of `reason`: `completed` with `complete: false` means phase 1 never saw
+// the whole tree, and whatever the person deleted under an unreadable subfolder
+// is still searchable.
+export type JobEnded = {
+  reason: EndReason;
+  done: number;
+  total: number;
+  skipped: number;
+  complete: boolean;
+  frozen: Frozen[];
+  indexed: number;
+  unchanged: number;
+  refused: number;
+  removed: number;
+  message: string | null;
+};
+
+export type JobEvent =
+  | { event: 'progress'; data: JobProgress }
+  | { event: 'ended'; data: JobEnded };
+
+// The channel is created here so that no component has to import Tauri's
+// `Channel`, and the WHOLE event is forwarded — the ending's reason, its counts
+// and its frozen list included. An earlier form of this module read one field
+// (`event`) and dropped the rest, which was honest while nothing rendered a
+// job; a partial mirror in front of a screen that draws endings would look
+// authoritative while being incomplete.
+export const startWalkJob = (rootId: number, onEvent: (event: JobEvent) => void) => {
+  const onProgress = new Channel<JobEvent>();
+  onProgress.onmessage = onEvent;
+  return invoke<void>('start_walk_job', { rootId, onProgress });
+};
+
+// The re-embedding pass. It takes NO root and covers the whole index
+// (embed_job.rs), so nothing that calls it may promise it embedded only the
+// folder that was pressed. It reads the key first and rejects before claiming
+// the job slot when there is none; a missing *model* is not checked there and
+// arrives instead as `Ended { reason: 'failed', message }`.
+export const startEmbedJob = (onEvent: (event: JobEvent) => void) => {
+  const onProgress = new Channel<JobEvent>();
+  onProgress.onmessage = onEvent;
   return invoke<void>('start_embed_job', { onProgress });
 };
+
+// Takes no channel at all (bridge.rs): stopping a job never depends on owning
+// the channel it reports on, which is why a page that has lost the channel must
+// still offer this.
+export const cancelJob = () => invoke<void>('cancel_job');

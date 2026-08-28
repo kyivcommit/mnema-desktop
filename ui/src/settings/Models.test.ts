@@ -1780,11 +1780,25 @@ async function reembedding(after: ModelSettings) {
   // The section must have handed the pass somewhere to report to. A build that
   // starts the job and listens for nothing passes every assertion about the
   // press itself.
-  const ended = startEmbedJob.mock.calls[0][0];
-  expect(typeof ended).toBe('function');
+  const onEvent = startEmbedJob.mock.calls[0][0];
+  expect(typeof onEvent).toBe('function');
 
   modelSettings.mockResolvedValue(after);
-  return { ...rendered, ended: ended as () => void };
+  // Task 8 gave `startEmbedJob` the whole `JobEvent`, so the pass is ended here
+  // with a real ending envelope rather than a bare call: a build that re-read
+  // the index on EVERY message would pass a helper that only ever sends one.
+  const send = onEvent as (event: unknown) => void;
+  const ended = () => send({
+    event: 'ended',
+    data: {
+      reason: 'completed', done: 4, total: 4, skipped: 0, complete: true, frozen: [],
+      indexed: 0, unchanged: 0, refused: 0, removed: 0, message: null,
+    },
+  });
+  return { ...rendered, ended, progress: () => send({
+    event: 'progress',
+    data: { done: 1, total: 4, skipped: 0, refused: 0, secondsLeft: null },
+  }) };
 }
 
 // 🔴 The pass used to report to nobody: `reembed()` set a flag and stopped,
@@ -1800,6 +1814,22 @@ test('an ended pass that filled the index takes the degraded notice away with it
   // Positively, and from the index rather than from the ending: the section now
   // draws a connected installation with a model chosen.
   expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('true');
+});
+
+// Task 8: the callback now receives every `JobEvent`, so the guard that keeps
+// the re-read to an ENDING is a live branch rather than a promise `startEmbedJob`
+// used to keep for this caller. Kills `if (event.event === 'ended')` deleted.
+test('a progress report from the pass does not end it and does not re-read the index', async () => {
+  const { progress } = await reembedding(onModel(5, 5));
+  const readsBefore = modelSettings.mock.calls.length;
+
+  progress();
+  await tick();
+
+  expect(screen.getByTestId('model-embedding-reembed-started')).toBeTruthy();
+  expect(screen.queryByTestId('model-embedding-reembed-ended')).toBeNull();
+  expect(screen.getByTestId('model-embedding-degraded-note').textContent).toBe(DEGRADED);
+  expect(modelSettings.mock.calls.length).toBe(readsBefore);
 });
 
 // The other direction, and the one the flag could never express: a pass that

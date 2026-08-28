@@ -39,30 +39,60 @@ test('setKey invokes set_key with the typed key', async () => {
   expect(invoke).toHaveBeenCalledWith('set_key', { key: 'a-key-value' });
 });
 
-// PR 7 Task 6, review: the pass used to report to nobody. Both directions, in
-// one test — a callback that fires on every message would pass a test that only
-// sent an ending, and that is the mutation that matters here: the section
-// re-reads the index when this fires, and re-reading it on every progress
-// report is a call per 250 ms for the length of a run.
-test('startEmbedJob calls back when the pass ENDS, and not when it reports progress', async () => {
-  invoke.mockResolvedValue(undefined);
-  const ended = vi.fn();
+// PR 7 Task 8: the whole event crosses, not one field of it. The mutation this
+// kills is the shape the module used to have — an `onmessage` that read `event`
+// and threw the ending's contents away, which left every reason, count and
+// frozen prefix unavailable to whatever drew the screen.
+const ENDED_PAYLOAD = {
+  reason: 'volumeMissing', done: 11, total: 11, skipped: 5, complete: true, frozen: [],
+  indexed: 5, unchanged: 1, refused: 0, removed: 4, message: null,
+} as const;
+const PROGRESS_PAYLOAD = { done: 3, total: 8, skipped: 1, refused: 0, secondsLeft: null } as const;
 
-  await ipc.startEmbedJob(ended);
+test('startEmbedJob forwards every job event, whole, and takes no root', async () => {
+  invoke.mockResolvedValue(undefined);
+  const seen: unknown[] = [];
+
+  await ipc.startEmbedJob((e) => seen.push(e));
 
   const call = invoke.mock.calls.at(-1) as [string, { onProgress: { onmessage: (m: unknown) => void } }];
   expect(call[0]).toBe('start_embed_job');
+  // The pass covers the whole index: a root id here would be a promise it
+  // cannot keep (embed_job.rs).
+  expect(Object.keys(call[1])).toEqual(['onProgress']);
   const channel = call[1].onProgress;
   expect(typeof channel.onmessage).toBe('function');
 
-  channel.onmessage({ event: 'progress', data: { done: 1, total: 9 } });
-  expect(ended).not.toHaveBeenCalled();
+  channel.onmessage({ event: 'progress', data: PROGRESS_PAYLOAD });
+  channel.onmessage({ event: 'ended', data: ENDED_PAYLOAD });
 
-  // The tag `JobEvent` carries, spelled as the Rust side serializes it
-  // (`job.rs:309-313`, pinned against the real serialization by
-  // `src-tauri/tests/commands.rs:826-828`).
-  channel.onmessage({ event: 'ended', data: { reason: 'finished' } });
-  expect(ended).toHaveBeenCalledTimes(1);
+  expect(seen).toEqual([
+    { event: 'progress', data: PROGRESS_PAYLOAD },
+    { event: 'ended', data: ENDED_PAYLOAD },
+  ]);
+});
+
+test('startWalkJob sends the root id it was given and forwards the whole event', async () => {
+  invoke.mockResolvedValue(undefined);
+  const seen: unknown[] = [];
+
+  await ipc.startWalkJob(42, (e) => seen.push(e));
+
+  const call = invoke.mock.calls.at(-1) as [string, { rootId: number; onProgress: { onmessage: (m: unknown) => void } }];
+  expect(call[0]).toBe('start_walk_job');
+  expect(call[1].rootId).toBe(42);
+  call[1].onProgress.onmessage({ event: 'ended', data: ENDED_PAYLOAD });
+  expect(seen).toEqual([{ event: 'ended', data: ENDED_PAYLOAD }]);
+});
+
+// Both directions on the one thing this command must not need: a channel.
+test('cancelJob invokes cancel_job with no arguments and no channel', async () => {
+  invoke.mockResolvedValue(undefined);
+
+  await ipc.cancelJob();
+
+  expect(invoke).toHaveBeenCalledWith('cancel_job');
+  expect(invoke.mock.calls.at(-1)).toHaveLength(1);
 });
 
 test('forgetKey invokes forget_key with no arguments', async () => {
