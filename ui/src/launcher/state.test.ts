@@ -58,19 +58,23 @@ const readNoModel: ModelSettings['index'] = {
   searchContentArm: false,
 };
 const unreadableIndex: ModelSettings['index'] = { kind: 'unreadable', cause: 'notOpen', reason: '' };
+// `providerReady` reads only `key` and `index` — `platform` is irrelevant to
+// it, so one fixed value stands for all four cases here (PR 7 Task 4 widened
+// `ModelSettings` with this field).
+const platform: ModelSettings['platform'] = 'linux';
 
 test('providerReady: a present key and a chosen model → true', () => {
-  expect(providerReady({ key: presentKey, index: readWithModel })).toBe(true);
+  expect(providerReady({ key: presentKey, index: readWithModel, platform })).toBe(true);
 });
 
 test('providerReady: a present key with no chosen model → false (the live-smoke config)', () => {
-  expect(providerReady({ key: presentKey, index: readNoModel })).toBe(false);
+  expect(providerReady({ key: presentKey, index: readNoModel, platform })).toBe(false);
 });
 
 test('providerReady: a present key with an unreadable index → false', () => {
-  expect(providerReady({ key: presentKey, index: unreadableIndex })).toBe(false);
+  expect(providerReady({ key: presentKey, index: unreadableIndex, platform })).toBe(false);
 });
 
 test('providerReady: an absent key, even with a chosen model → false', () => {
-  expect(providerReady({ key: absentKey, index: readWithModel })).toBe(false);
+  expect(providerReady({ key: absentKey, index: readWithModel, platform })).toBe(false);
 });

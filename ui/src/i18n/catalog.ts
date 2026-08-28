@@ -1,6 +1,13 @@
 export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_indexing' | 'settings_nav_application'
   | 'settings_section_not_ready'
+  | 'models_provider_label' | 'models_provider_name'
+  | 'models_key_label' | 'models_key_masked_value'
+  | 'models_key_change' | 'models_key_forget' | 'models_key_save' | 'models_key_cancel'
+  | 'models_key_removed' | 'models_key_nothing_to_remove'
+  | 'models_key_locked' | 'models_key_duplicate' | 'models_key_refused' | 'models_key_defect'
+  | 'models_index_not_open' | 'models_index_read_failed'
+  | 'models_mac_keychain_note'
   | 'refusal_no_candidates' | 'refusal_empty_completion'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
@@ -28,6 +35,40 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_application: 'Застосунок',
     // Shared by both unbuilt sections — one sentence, promises nothing.
     settings_section_not_ready: 'Ця секція ще не готова.',
+    // §9.1 / Task 4. Provider is a fixed, disabled control (v1 = OpenRouter
+    // only, §4.4) — the name is a catalogue string, not a hardcoded literal,
+    // because it is what a person reads there, not a testid.
+    models_provider_label: 'Провайдер',
+    models_provider_name: 'OpenRouter',
+    models_key_label: 'Ключ',
+    // Never derived from an actual key — models.rs:150-162 makes the key
+    // pub(crate) and never a command, so there is nothing to mask BUT a fixed
+    // placeholder. See models.rs:676-679 on KeyState::Present.
+    models_key_masked_value: '••••••••',
+    models_key_change: 'Змінити',
+    models_key_forget: 'Забути',
+    models_key_save: 'Зберегти',
+    models_key_cancel: 'Скасувати',
+    // KeyRemoval's two answers (models.rs:101-108) — not the same sentence:
+    // NothingToRemove is not a failure and is not "the key was removed" either.
+    models_key_removed: 'Ключ видалено.',
+    models_key_nothing_to_remove: 'Ключа й так не було.',
+    // KeyStoreFailure's four causes (models.rs:718-746), each naming the one
+    // action its own doc comment names — never `reason`, which stays out of
+    // this screen entirely. Locked stands for two situations and claims
+    // neither; Refused is the one value with no action to name.
+    models_key_locked: 'Сховище ключів не відповідає: воно заблоковане, або запит на дозвіл було відхилено.',
+    models_key_duplicate: 'Під іменем цієї інсталяції збережено кілька ключів. Видаліть зайвий у системному сховищі.',
+    models_key_refused: 'Сховище ключів відповіло відмовою. Ця збірка не може визначити, що робити далі.',
+    models_key_defect: 'Це вада цієї збірки, а не стан вашої системи. Повідомте про неї розробникам.',
+    // UnreadableCause's two values (models.rs:826-843) — NotOpen and
+    // ReadFailed both leave `IndexSettings::Unreadable` with no `IndexRead` to
+    // show, so this is the one sentence the section renders on that branch.
+    models_index_not_open: 'Індекс ще не відкрито.',
+    models_index_read_failed: 'Не вдалося прочитати індекс — це вада цієї збірки.',
+    // Platform note (models.rs:606-627) — macOS only; Windows and Linux show
+    // nothing here, because the same sentence would be noise on them.
+    models_mac_keychain_note: 'Кожне оновлення застосунку робить його чужим для збереженого ключа: система один раз попросить пароль від зв’язки ключів для входу.',
     indexed_documents: '{count, plural, one {# документ} few {# документи} many {# документів} other {# документа}}',
     refusal_no_candidates: 'Нічого не знайдено за цим запитом.',
     refusal_empty_completion: 'Модель не повернула відповіді.',
@@ -105,6 +146,23 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_indexing: 'Indexing',
     settings_nav_application: 'Application',
     settings_section_not_ready: 'This section is not ready yet.',
+    models_provider_label: 'Provider',
+    models_provider_name: 'OpenRouter',
+    models_key_label: 'Key',
+    models_key_masked_value: '••••••••',
+    models_key_change: 'Change',
+    models_key_forget: 'Forget',
+    models_key_save: 'Save',
+    models_key_cancel: 'Cancel',
+    models_key_removed: 'The key was removed.',
+    models_key_nothing_to_remove: 'There was no key to remove.',
+    models_key_locked: 'The credential store did not answer: it may be locked, or a permission prompt was declined.',
+    models_key_duplicate: 'More than one credential is filed under this installation. Remove the duplicate in the system credential store.',
+    models_key_refused: 'The credential store refused to answer. This build cannot tell what to do next.',
+    models_key_defect: 'This is a defect in this build, not a state of your system. Please report it to the developers.',
+    models_index_not_open: 'The index is not open yet.',
+    models_index_read_failed: 'The index could not be read — this is a defect in this build.',
+    models_mac_keychain_note: 'Every update makes this application a stranger to its own key: the system will ask once for your login keychain password.',
     indexed_documents: '{count, plural, one {# document} other {# documents}}',
     refusal_no_candidates: 'Nothing was found for this query.',
     refusal_empty_completion: 'The model returned no answer.',

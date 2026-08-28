@@ -22,6 +22,23 @@ test('listTree invokes list_tree', async () => {
   expect(invoke).toHaveBeenCalledWith('list_tree');
 });
 
+// PR 7 Task 4: the two model-settings commands `Models.svelte` calls.
+test('setKey invokes set_key with the typed key', async () => {
+  invoke.mockResolvedValue({ balance: { kind: 'notStated' } });
+
+  await ipc.setKey('a-key-value');
+
+  expect(invoke).toHaveBeenCalledWith('set_key', { key: 'a-key-value' });
+});
+
+test('forgetKey invokes forget_key with no arguments', async () => {
+  invoke.mockResolvedValue({ kind: 'removed' });
+
+  await ipc.forgetKey();
+
+  expect(invoke).toHaveBeenCalledWith('forget_key');
+});
+
 test('sourceAround echoes the whole identity, not just the id', async () => {
   if (generated.kind !== 'generated') throw new Error('fixture drifted');
   invoke.mockResolvedValue({ kind: 'gone', reason: { kind: 'noSuchChunk' } });

@@ -1,7 +1,24 @@
-import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
-import { expect, test, afterEach } from 'vitest';
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
+import { expect, test, afterEach, vi } from 'vitest';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
+
+// Task 4 mounts the real `Models` into the 'models' panel, and it calls
+// `model_settings` on mount — without this mock every test in this file would
+// hit the real, un-mockable `invoke` (there is no global setupFiles mock; see
+// `i18n/wiring.test.ts:14-15`) and fail with an unhandled rejection. A fixed
+// Absent/Read/linux fixture is enough: nothing here exercises Models' own
+// behaviour, that lives in Models.test.ts.
+vi.mock('../lib/ipc', () => ({
+  modelSettings: () =>
+    Promise.resolve({
+      key: { kind: 'absent' },
+      index: { kind: 'read', embeddingModel: null, searchTextArm: true, searchContentArm: false },
+      platform: 'linux',
+    }),
+  setKey: vi.fn(),
+  forgetKey: vi.fn(),
+}));
 
 afterEach(() => {
   cleanup();
@@ -90,7 +107,15 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // toContain over the whole page is satisfied by the nav alone and never
   // notices an empty or replaced panel. Equality forces the panel itself to
   // carry the heading — on the default section and on an unbuilt one.
-  expect(panel()?.textContent).toBe('Models');
+  //
+  // Task 4: the placeholder `<h2>` this assertion used to pin is now real
+  // content — `Models` mounts here and fetches on mount, so this waits for
+  // that fetch to settle before reading the panel, rather than pinning the
+  // pre-fetch flash. Measured, not guessed (`run-it-before-you-believe-it`):
+  // the exact string below is what `Models` renders for
+  // Absent/Read/linux, printed by an actual render rather than assumed.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy());
+  expect(panel()?.textContent).toBe('Models Provider OpenRouter   Key  Save   ');
 
   await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));
   expect(panel()?.textContent).toBe('Indexing This section is not ready yet.');

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { locale, t } from '../i18n';
+  import Models from './Models.svelte';
 
   // All four sections render; hiding the two not yet built would make the
   // window claim the product has two sections when the spec says four.
@@ -54,10 +55,11 @@
   </nav>
 
   <div class="spane">
-    <!-- Models and Folders: a heading and nothing else — Models.svelte and
-         Folders.svelte mount here in later tasks (4-8). -->
+    <!-- Folders: a heading and nothing else — Folders.svelte mounts here in a
+         later task (7/8). Models is real content as of Task 4. -->
     {#if section === 'models'}
       <h2>{modelsLabel}</h2>
+      <Models />
     {:else if section === 'folders'}
       <h2>{foldersLabel}</h2>
     {:else if section === 'indexing'}

@@ -89,19 +89,56 @@ export const sourceAround = (c: AskCitation | Hit, radius = 3) =>
     citedRelativePath: c.relativePath, radius,
   });
 
-// A NARROW read of `model_settings` (models.rs:590) — only what the arms row
-// needs: is a provider key present, and which arms are on. PR 7 replaces this
-// with the full ModelSettings / IndexRead. Structural typing lets `invoke`
-// return the wider object; we read only the fields declared here.
+// A NARROW read of `model_settings` (models.rs:590) — the arms row (PR 6) only
+// ever needed presence and the two arm flags, so `index`'s `Read` arm carried
+// only those. PR 7's Models section (Task 4) widens the two `cause` fields
+// from bare `string` to the real unions below — `KeyStoreFailure` and
+// `UnreadableCause` each name a closed, small set of values (models.rs:707-719,
+// models.rs:809-826) and a caller matching on a bare string cannot be told
+// apart from one matching on message text, the failure mode `error.rs`'s own
+// header exists to avoid. `ModelSettings.platform` is added for the same
+// reason `IndexRead`'s numeric fields are still left out: Task 4 renders the
+// `Unreadable` branch of `index` and nothing from `Read` beyond what the arms
+// row already used, so this stays a structural subset rather than a mirror of
+// every field `models.rs` sends — the full `IndexRead` card is §9.3, PR 9.
+export type KeyStoreFailureCause = 'locked' | 'duplicate' | 'refused' | 'defect';
+
 export type KeyState =
   | { kind: 'present' }
   | { kind: 'absent' }
-  | { kind: 'unreadable'; cause: string; reason: string };
+  | { kind: 'unreadable'; cause: KeyStoreFailureCause; reason: string };
+
+export type UnreadableCause = 'notOpen' | 'readFailed';
 
 export type IndexSettings =
   | { kind: 'read'; embeddingModel: string | null; searchTextArm: boolean; searchContentArm: boolean }
-  | { kind: 'unreadable'; cause: string; reason: string };
+  | { kind: 'unreadable'; cause: UnreadableCause; reason: string };
 
-export type ModelSettings = { key: KeyState; index: IndexSettings };
+// `Mac` | `Windows` | `Linux` (models.rs:625-629), camelCase per the wire
+// convention every union in this module already follows.
+export type Platform = 'mac' | 'windows' | 'linux';
+
+export type ModelSettings = { key: KeyState; index: IndexSettings; platform: Platform };
 
 export const modelSettings = () => invoke<ModelSettings>('model_settings');
+
+// `Balance` (crates/mnema-provider/src/probe.rs:53-77): four states over the
+// provider's account balance. Nothing in this PR renders it — a stated zero
+// is the collapse the type was split in four to prevent, and rendering the
+// other three arms correctly is not this task's — so `raw`/`Unreadable`'s
+// payload is left as `unknown` rather than mirrored field-by-field for a
+// value nothing here reads.
+export type Balance =
+  | { kind: 'known'; amount: number }
+  | { kind: 'notStated' }
+  | { kind: 'unreadable'; raw: unknown }
+  | { kind: 'envelopeNotUnderstood' };
+
+export type KeyStatus = { balance: Balance };
+
+// `KeyRemoval` (models.rs:101-108): what `forget_key` answers, tagged `kind`
+// like every other union in this module.
+export type KeyRemoval = { kind: 'removed' } | { kind: 'nothingToRemove' };
+
+export const setKey = (key: string) => invoke<KeyStatus>('set_key', { key });
+export const forgetKey = () => invoke<KeyRemoval>('forget_key');
