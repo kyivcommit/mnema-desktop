@@ -350,7 +350,7 @@ test('a walk that stopped for any other reason embeds nothing', async () => {
   }
 });
 
-// D-c's own rule: the window checks BOTH preconditions itself, from
+// that ruling’s own rule: the window checks BOTH preconditions itself, from
 // `model_settings`, and says which one is absent — so on the ordinary path
 // neither of the backend's two refusal routes is reached at all.
 test('no provider key: the pass is not started, and the window says which is missing', async () => {

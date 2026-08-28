@@ -8,7 +8,7 @@
 
   // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove, and scan.
   //
-  // D-c: the scan starts on a button of its own and NEVER on adding a folder,
+  // The scan starts on a button of its own and NEVER on adding a folder,
   // because excluding subfolders (PR 8) is a configuration move a person still
   // has to make in between — a walk started by `add_watched_folder` would run
   // before that chance exists. This component still never calls the walk
@@ -127,7 +127,7 @@
   //
   // `settings_folders_indexed`, not the shared `indexed_documents` (P2-4
   // review): a bare "0 documents" beside a folder path reads as a claim
-  // about the FOLDER, and D-c means every newly added folder shows zero
+  // about the FOLDER, and the ruling means every newly added folder shows zero
   // forever, not transiently — this key names the INDEX as the subject
   // ("Indexed: 0 documents") instead. `removeAriaLabel` carries the same
   // row's path so two "Remove" buttons in a two-folder list stay

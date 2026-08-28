@@ -141,7 +141,7 @@ export type JobPhase =
   | { kind: 'ended'; pass: JobPass; ending: Ending };
 
 /// Something the window has to say beside the phase. `noKey`/`noModel` are the
-/// window's own pre-check, read from `model_settings` (D-c): the walk still ran
+/// window's own pre-check, read from `model_settings`: the walk still ran
 /// — text search needs neither — and the section says in words which one is
 /// absent. `rejected` carries a backend sentence VERBATIM: a rejection crosses
 /// the IPC as text (`error.rs`), so nothing here branches on a kind or matches
@@ -186,7 +186,7 @@ export function createJobController(): JobController {
     if (pass === 'walk' && chainsEmbedPass(ending.outcome.kind)) void chain();
   }
 
-  // D-c: the window checks BOTH preconditions itself and names the one that is
+  // The window checks BOTH preconditions itself and names the one that is
   // absent, so on the ordinary path neither of the backend's own refusals is
   // reached. `start_embed_job` rejects on a missing key before it claims the
   // slot; a missing MODEL it does not check at all, and that refusal arrives as

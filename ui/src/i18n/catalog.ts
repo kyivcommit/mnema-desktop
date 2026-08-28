@@ -84,7 +84,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // shown verbatim beside this, never branched on).
     settings_folders_load_failed: 'Не вдалося прочитати список тек.',
     // §9.2 review (P2-4): the bare count read as a claim about the FOLDER
-    // ("this folder has 0 documents"), forever, since D-c defers the walk
+    // ("this folder has 0 documents"), forever, since the ruling defers the walk
     // that would ever change it. This key names the subject — the index, not
     // the folder — reusing `indexed_documents`'s own plural arms rather than
     // duplicating them (do not change that shared key: it is a different
@@ -288,7 +288,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# хвилину} few {# хвилини} many {# хвилин} other {# хвилини}} тому',
     recent_hours: '{count, plural, one {# годину} few {# години} many {# годин} other {# години}} тому',
     recent_days: '{count, plural, one {# день} few {# дні} many {# днів} other {# дня}} тому',
-    // §9.2 / Task 8 — running the index, showing it, stopping it. D-c: the scan
+    // §9.2 / Task 8 — running the index, showing it, stopping it. The scan
     // starts on this control and never on adding a folder, because excluding
     // subfolders (PR 8) is a move a person still has to make in between.
     settings_folders_scan: 'Сканувати',
@@ -342,7 +342,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_frozen_symlinked_subtree: 'символьне посилання, сюди не заходили',
     indexing_frozen_empty_directory: 'прочиталася порожньою',
     indexing_frozen_unreadable_directory: 'не вдалося прочитати',
-    // D-c: the walk runs regardless, because word search needs neither a key
+    // The walk runs regardless, because word search needs neither a key
     // nor a model — so each sentence names what is absent and what already
     // works.
     indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',

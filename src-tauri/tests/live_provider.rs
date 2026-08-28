@@ -125,7 +125,7 @@ fn the_averaging_family_is_still_what_the_measurement_said_it_was() {
 /// `AppState` pointed at the real provider would measure Tauri's managed state,
 /// not the catalogue.
 ///
-/// **Both directions, per role.** Present is the claim D-a makes; selectable is
+/// **Both directions, per role.** Present is the claim this build’s owner ruling makes; selectable is
 /// the claim the window makes when it offers the id as a default — a model this
 /// build's own rules refuse is listed, greyed, and cannot be chosen, which is a
 /// default nobody can use. Asserted separately so a failure says which of the

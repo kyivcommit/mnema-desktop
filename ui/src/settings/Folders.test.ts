@@ -26,7 +26,7 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: (...a: unknown[]) => open(...a),
 }));
 
-// D-c's own guard (P3-6 review), and it is a live one now: Task 8 gave this
+// this ruling’s own guard (P3-6 review), and it is a live one now: Task 8 gave this
 // component a controller that CAN start a walk, and `ipc.ts` exports
 // `startWalkJob`. The assertion still sits at the one boundary every command
 // crosses regardless of what the wrapper is called — the raw `invoke` and the
@@ -93,7 +93,7 @@ test('adding a folder saves the picked path, the list re-reads, and no job start
   // Re-read, not a locally patched list: the second listTree call is what the
   // fixture above returns, and its shape (rootId 7) is what the row must show.
   expect(listTree).toHaveBeenCalledTimes(2);
-  // D-c: adding a folder starts nothing. No assertion about the list would
+  // Adding a folder starts nothing. No assertion about the list would
   // notice a stray scan — this checks the wire protocol string directly
   // (matched by first argument alone, so it does not depend on a second
   // argument's shape), which stays armed no matter what a future wrapper

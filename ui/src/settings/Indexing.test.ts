@@ -460,7 +460,7 @@ test('the embedding pass says it covers the whole index, never the folder that w
   expect(text).not.toContain('Триває читання теки.');
 });
 
-// D-c: the window checks both preconditions ITSELF and names the one that is
+// The window checks both preconditions ITSELF and names the one that is
 // absent. The walk still ran — text search needs neither.
 test('with no provider key the pass is not started and the section says which is missing', async () => {
   reply({ model_settings: { ...READY_SETTINGS, key: { kind: 'absent' } } });
