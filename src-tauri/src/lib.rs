@@ -158,7 +158,22 @@ pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Resu
 ///
 /// So opening at boot is safe to keep as a write, and does not, on its own,
 /// owe this task a new index-writing command or a wider pass than this one.
-pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+///
+/// **It also applies the default models, and on a thread of its own.** An index
+/// that opens here is the second half of
+/// [`models::choose_the_default_models_for_a_stored_key`]'s rule — a key stored
+/// while no index was open leaves an installation with a key and no models, and
+/// nothing else ever comes back to fix it. Two reasons it is not run inline:
+/// this closure is Tauri's `Ready` handler, so blocking it is the frozen window
+/// [`bridge::open_index`]'s own doc is about, and the work reads the credential
+/// store (on macOS, possibly a dialog) and then asks the provider a question
+/// with a thirty-second timeout behind it. Neither belongs on the boot path.
+///
+/// **The handle is returned rather than dropped**, and only for that reason: a
+/// test that asserts about what the thread did has to be able to wait for it,
+/// and a test that polls for a background write is a test that reports timing.
+/// The caller in `.setup` drops it, which detaches the thread.
+pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> std::thread::JoinHandle<()> {
     let state = app.state::<state::AppState>();
     let outcome = state.open_index();
     if let Err(e) = &outcome {
@@ -167,6 +182,15 @@ pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         eprintln!("mnema: the index could not be opened at start-up: {e}");
     }
     state.set_boot_open_error(outcome.err().map(|e| e.to_string()));
+
+    // Spawned unconditionally, including after a failed open: every step of what
+    // it runs is already silent against an index that will not answer, so the
+    // thread costs one spawn and does nothing. A condition here would be a
+    // second spelling of a rule that is written once, over there.
+    let app = app.clone();
+    std::thread::spawn(move || {
+        models::choose_the_default_models_for_a_stored_key(&app.state::<state::AppState>());
+    })
 }
 
 /// Shows the launcher and focuses it, returning whether the launcher window was
@@ -461,7 +485,11 @@ pub fn run() -> anyhow::Result<()> {
             // already open, and so does every command arriving after start-up —
             // which is as early as a boot can make it, not a promise about a
             // webview that is already invoking while `.setup` runs.
-            boot_index(app.handle());
+            // The handle is dropped, which detaches the thread it carries: the
+            // boot does not wait on a credential store or a provider, and the
+            // defaults it applies are wanted by the next command, not by the
+            // next line of this closure. See `boot_index`'s own doc.
+            drop(boot_index(app.handle()));
             // §D129: resolve the interface language once at start-up (prefs → OS
             // → EN) and seed it into `AppState` BEFORE the tray is built, which
             // reads it back to label its menu (`tray::build_tray`).

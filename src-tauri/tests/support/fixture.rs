@@ -226,6 +226,13 @@ impl Fixture {
         self.app.state::<AppState>()
     }
 
+    /// The application handle, for the one thing that takes an `AppHandle`
+    /// rather than an `AppState`: `boot_index`, which is the start-up path
+    /// itself and not a command.
+    pub fn handle(&self) -> &tauri::AppHandle<MockRuntime> {
+        self.app.handle()
+    }
+
     /// A request the mock provider has already received, or `None` — for a
     /// test whose claim is that a command never called out at all. See
     /// [`MockServer::request_if_any`] for why it does not wait and what makes

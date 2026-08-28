@@ -2139,9 +2139,20 @@ fn a_change_that_retires_nothing_is_the_same_fixture_taking_the_other_path() {
 /// `model_settings` reports `Unreadable { cause: ReadFailed }` — because the
 /// error itself reaches the webview as a bare sentence and cannot be branched
 /// on.
+///
+/// **And a third, added by review: the way out is run, not described.** The
+/// window renders `models_index_recover` in this state — "choosing an embedding
+/// model again repairs this" — and until now that sentence was a claim made only
+/// by [`set_embedding_model`]'s own doc and by a component test against a mock.
+/// Neither could tell whether the real index honours it, and the window sends
+/// `Keep`, which is the value that refuses whenever another space is not empty.
+/// The last block below performs the recovering act against this index, in the
+/// state the wreck actually left.
 #[test]
 fn an_adoption_that_fails_after_the_retirement_says_what_was_already_destroyed() {
-    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    // Three embedding checks: `set_key`'s default adoption, the change that is
+    // supposed to fail, and the recovering act at the end.
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 3);
     fx.open_index();
     set_key(fx.state(), KEY.into()).expect("the key is accepted");
     let doomed_space = fx.active_space().expect("`set_key` chose a model");
@@ -2223,7 +2234,46 @@ fn an_adoption_that_fails_after_the_retirement_says_what_was_already_destroyed()
         matches!(settings.key, KeyState::Present),
         "the key half was taken down with the index half"
     );
-    let _ = next_id;
+
+    // --- and out of it again, by the act the window offers -------------------
+    //
+    // The obstacle removed is the squatting table and nothing else: the pointer
+    // is still naming a space that is gone, and the refusal `Keep` would
+    // otherwise raise is not disarmed here — it enumerates `embedding_space`,
+    // and the retired space's row went with the `DROP` that committed.
+    fx.state()
+        .with_index(|db| {
+            db.conn()
+                .execute(&format!("DROP TABLE vec_emb_{next_id}"), [])?;
+            Ok(())
+        })
+        .expect("the squatting table is removed");
+
+    // `Keep`, because `Keep` is what the window sends in this state — an index
+    // that will not answer states no estimate, so it asks nothing and sends the
+    // value that refuses rather than destroys.
+    let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect("the recovering act the window offers was refused by the index");
+
+    assert!(
+        adopted.created,
+        "the recovery found a space instead of minting one, so the pointer it wrote is the old one"
+    );
+    assert_eq!(
+        fx.state()
+            .with_index(|db| db.active_space())
+            .expect("the index answers"),
+        Some(adopted.space_id),
+        "the pointer the index lost was not rewritten to the space just adopted"
+    );
+    // And the window's own reading of it: the defect sentence is gone, and the
+    // model named is the one that was just chosen.
+    let recovered = model_settings(fx.state());
+    assert_eq!(
+        read_index(&recovered.index).embedding_model.as_deref(),
+        Some(OTHER_MODEL),
+        "the settings screen does not name the model the recovery adopted"
+    );
 }
 
 /// The default set is applied inside the job slot, and a slot that is taken
@@ -2272,4 +2322,85 @@ fn a_key_entered_while_a_job_runs_stores_the_key_and_moves_no_pointer() {
 
     bridge::cancel_job(fx.state());
     wait_for_the_slot(&fx);
+}
+
+/// The other end of the same rule, and the state `set_key` alone cannot reach:
+/// a key stored while no index was open leaves an installation with a key and
+/// no models, and nothing ever comes back for it.
+///
+/// **The fixture is the point.** `set_key` is called against a CLOSED index, so
+/// every step of its default pass is silent: `with_index` fails for the chat
+/// half, `active_space()` fails for the embedding half. That is exactly what a
+/// boot whose open failed leaves behind — the settings screen is reachable, the
+/// key is checked, accepted and stored, and nothing else happens. On the next
+/// launch there is nothing left to press: the key is already there, so `set_key`
+/// will not run again, and the product can neither embed nor answer.
+///
+/// The boot is run for real rather than the inner function being called, and its
+/// thread is joined rather than polled: the claim is that **start-up** applies
+/// them, and a test that waited on a timer would report timing.
+#[test]
+fn a_key_stored_while_the_index_was_shut_gets_its_models_at_the_next_boot() {
+    let fx = Fixture::with_provider_accepting_everything();
+
+    set_key(fx.state(), KEY.into()).expect("a closed index must not stop a key being entered");
+
+    // The premise, asserted rather than assumed: nothing was configured, and the
+    // window has nothing to show for the key it just accepted.
+    assert!(
+        matches!(
+            model_settings(fx.state()).index,
+            IndexSettings::Unreadable {
+                cause: UnreadableCause::NotOpen,
+                ..
+            }
+        ),
+        "this test's premise is a key entered while no index was open"
+    );
+
+    mnema_desktop::boot_index(fx.handle())
+        .join()
+        .expect("the boot's default pass panicked");
+
+    let settings = model_settings(fx.state());
+    let index = read_index(&settings.index);
+    assert_eq!(
+        index.embedding_model.as_deref(),
+        Some(DEFAULT_MODELS.embedding),
+        "the boot opened an index with no embedding model, and nothing will ever ask again"
+    );
+    assert_eq!(
+        index.chat_model.as_deref(),
+        Some(DEFAULT_MODELS.chat),
+        "the boot opened an index with no chat model, and nothing will ever ask again"
+    );
+}
+
+/// And the direction that costs something if it is wrong: a boot with no key
+/// stored asks the provider nothing and chooses nothing. Every launch takes this
+/// path until somebody enters a key, so a build that called out here would call
+/// out on every start-up of an installation that has never been signed in.
+#[test]
+fn a_boot_with_no_key_stored_calls_nobody_and_chooses_nothing() {
+    let fx = Fixture::with_provider_accepting_everything();
+
+    mnema_desktop::boot_index(fx.handle())
+        .join()
+        .expect("the boot's default pass panicked");
+
+    assert_eq!(
+        fx.provider_request(),
+        None,
+        "a boot with no key still sent a request to the provider"
+    );
+    let settings = model_settings(fx.state());
+    let index = read_index(&settings.index);
+    assert_eq!(
+        index.embedding_model, None,
+        "a boot with no key chose an embedding model anyway"
+    );
+    assert_eq!(
+        index.chat_model, None,
+        "a boot with no key chose a chat model anyway"
+    );
 }

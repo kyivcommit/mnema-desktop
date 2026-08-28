@@ -125,6 +125,20 @@ pub struct DefaultModels {
 /// it started with. A slot that is already taken means the default is simply not
 /// applied — it is a default, and the next key or the next explicit choice will
 /// apply it.
+///
+/// ⚠️ **The slot is held across the provider call, so `job_status` reports a job
+/// nobody started for as long as that call takes** — up to the thirty seconds
+/// `mnema_provider`'s global timeout allows. It is reachable: press Save and
+/// then press a model, and the change is refused with a sentence about a running
+/// job, which the window draws as one because it asks `job_status` rather than
+/// reading the sentence. It stands, for two reasons. It is
+/// [`set_embedding_model`]'s existing shape rather than a new one, so closing it
+/// in this copy alone would leave the same window open one function over while
+/// making this side look as though the rule were kept. And the obvious close —
+/// check first, claim second, which is `start_embed_job`'s own stated ordering —
+/// is paid for by sending a request that can never be used whenever the slot is
+/// taken: that rule's fallible step is a local read, and this one is a network
+/// round trip.
 fn choose_the_default_models_for_roles_with_none(state: &AppState, key: &str) {
     // Two `let _`, not one: the roles fail separately and neither failing is a
     // reason to leave the other unset.
@@ -159,6 +173,32 @@ fn choose_the_default_models_for_roles_with_none(state: &AppState, key: &str) {
         )?;
         Ok(())
     });
+}
+
+/// The same defaults, for a key that was already in the store before this index
+/// was open — the one state [`set_key`] could not cover.
+///
+/// **The hole it closes.** Everything above only runs inside `set_key`, and
+/// every step of it is silent when the index is shut: `with_index` fails, so the
+/// chat half writes nothing, and `active_space()` fails, so `unset` is false and
+/// the embedding half returns before it asks the provider anything. That is
+/// exactly the state a boot whose open failed leaves a person in — the settings
+/// screen is reachable, the key is accepted and stored, and nothing else
+/// happens. On the next launch the index opens perfectly and has no models at
+/// all, and there is nothing left for them to press: the key is already there,
+/// so `set_key` will not be called again, and the product cannot embed, cannot
+/// search by meaning and cannot answer. Applying the defaults when an index
+/// *opens* is the other end of the same rule, and it is the end that recovers.
+///
+/// **No key, nothing to do.** The store is asked once, and a store that will not
+/// answer is not a reason to do anything else — this is a default being applied,
+/// not a command being served, and it returns nothing for the reason
+/// [`choose_the_default_models_for_roles_with_none`] returns nothing.
+pub fn choose_the_default_models_for_a_stored_key(state: &AppState) {
+    let Ok(Some(key)) = mnema_secrets::load(state.credential_ref()) else {
+        return;
+    };
+    choose_the_default_models_for_roles_with_none(state, &key);
 }
 
 /// Removes the key. What was embedded stays embedded; what stops is embedding
