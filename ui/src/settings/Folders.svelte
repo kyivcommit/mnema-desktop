@@ -3,13 +3,16 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { locale, t } from '../i18n';
   import { listTree, addWatchedFolder, removeWatchedFolder, type TreeRoot } from '../lib/ipc';
+  import type { JobController } from './jobs';
 
-  // §9.2, Task 7 — the minimum folder surface: add, list, remove. Running a
-  // scan (`start_walk_job`) is Task 8's own control, deliberately absent from
-  // this file: D-c reserves the scan for a button pressed once a folder's own
-  // configuration (subfolder exclusion, PR 8) is finished, and a walk that
-  // starts on `add_watched_folder` would run before that chance exists. This
-  // component simply never imports the command that would let it happen.
+  // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove, and scan.
+  //
+  // D-c: the scan starts on a button of its own and NEVER on adding a folder,
+  // because excluding subfolders (PR 8) is a configuration move a person still
+  // has to make in between — a walk started by `add_watched_folder` would run
+  // before that chance exists. This component still never calls the walk
+  // itself: it asks the controller `Settings.svelte` owns, so the job outlives
+  // a click on another section.
   //
   // Fixture question: `TreeRoot` (`ipc.ts`) carries `files: TreeFile[]` and no
   // flag for whether a walk has ever run. A folder just added and a folder
@@ -17,6 +20,11 @@
   // this wire — so this screen never says a folder is "empty"; it states the
   // count `indexed_documents` gives, which is true of both states, and stops
   // there. Telling the two apart belongs to the task that runs the walk.
+
+  // Required, not optional: a folder list that quietly drops its scan control
+  // when nobody passes one is the shape a person opens to find nothing happens.
+  let { jobs }: { jobs: JobController } = $props();
+
   let roots = $state<TreeRoot[]>([]);
   // Set on a rejected `list_tree`, at mount or on a later re-read. Held apart
   // from `actionError` (Models.svelte's own precedent) because this one means
@@ -77,6 +85,7 @@
   const emptyLabel = $derived.by(() => { void $locale; return t('settings_folders_empty'); });
   const addLabel = $derived.by(() => { void $locale; return t('settings_folders_add'); });
   const removeLabel = $derived.by(() => { void $locale; return t('settings_folders_remove'); });
+  const scanLabel = $derived.by(() => { void $locale; return t('settings_folders_scan'); });
   const loadFailedLabel = $derived.by(() => { void $locale; return t('settings_folders_load_failed'); });
 
   // Rows carry their own count label, not a bare `t()` call in the markup —
@@ -99,6 +108,7 @@
       root,
       countLabel: t('settings_folders_indexed', { count: root.files.length }),
       removeAriaLabel: t('settings_folders_remove_named', { path: root.absolutePath }),
+      scanAriaLabel: t('settings_folders_scan_named', { path: root.absolutePath }),
     }));
   });
 </script>
@@ -111,10 +121,15 @@
     <p>{emptyLabel}</p>
   {:else}
     <ul>
-      {#each rows as { root, countLabel, removeAriaLabel } (root.rootId)}
+      {#each rows as { root, countLabel, removeAriaLabel, scanAriaLabel } (root.rootId)}
         <li data-testid={`folder-row-${root.rootId}`}>
           <span>{root.absolutePath}</span>
           <span>{countLabel}</span>
+          <button
+            type="button"
+            data-testid={`folder-scan-${root.rootId}`}
+            aria-label={scanAriaLabel}
+            onclick={() => jobs.scan(root.rootId)}>{scanLabel}</button>
           <button type="button" aria-label={removeAriaLabel} onclick={() => removeFolder(root.rootId)}>{removeLabel}</button>
         </li>
       {/each}

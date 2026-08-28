@@ -1,0 +1,594 @@
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
+import { expect, test, vi, beforeEach, afterEach } from 'vitest';
+import { tick } from 'svelte';
+import Settings from './Settings.svelte';
+import { setLocale, type Loc } from '../i18n';
+import { OUTCOME_KINDS, type OutcomeKind } from './jobs';
+import type { JobEnded, JobEvent, JobProgress } from '../lib/ipc';
+
+// Only Tauri's own modules are faked. The whole settings window renders — the
+// nav, the sections and the indexing strip — because the claim this file makes
+// is about what a person READS on that window, and every previous round of this
+// project that pinned a testid or a count instead shipped a defect a screenshot
+// found in a minute.
+const invoke = vi.fn();
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...a: unknown[]) => invoke(...a),
+  Channel: class {
+    onmessage: ((message: unknown) => void) | null = null;
+  },
+}));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
+
+// Two roots, and their ids are NOT their positions: a component that sends the
+// index of the row it drew, or always the first id, cannot pass.
+const ROOTS = {
+  roots: [
+    { rootId: 1, absolutePath: '/home/a/notes', name: 'notes', files: [] },
+    { rootId: 4, absolutePath: '/home/a/papers', name: 'papers', files: [] },
+  ],
+  recents: [],
+};
+
+const READY_SETTINGS = {
+  key: { kind: 'present' },
+  index: {
+    kind: 'read', embeddingModel: 'openai/text-embedding-3-small', chatModel: null,
+    embeddedChunks: 12, embeddedChunksEverywhere: 12, searchTextArm: true, searchContentArm: true,
+  },
+  platform: 'linux',
+};
+
+const EMPTY_CATALOGUE = { entries: [], unreadable: 0, unreadableRecords: [] };
+
+type Replies = Record<string, unknown>;
+let replies: Replies = {};
+
+function reply(extra: Replies = {}) {
+  replies = {
+    list_tree: ROOTS,
+    model_settings: READY_SETTINGS,
+    provider_models: EMPTY_CATALOGUE,
+    job_status: { running: false },
+    start_walk_job: undefined,
+    start_embed_job: undefined,
+    cancel_job: undefined,
+    ...extra,
+  };
+}
+
+beforeEach(() => {
+  invoke.mockReset();
+  reply();
+  invoke.mockImplementation((cmd: string) => {
+    const r = replies[cmd];
+    if (r instanceof Error) return Promise.reject(r);
+    return Promise.resolve(r);
+  });
+  setLocale('uk');
+});
+
+afterEach(() => {
+  cleanup();
+  setLocale('en');
+});
+
+const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd);
+
+// What a person reads, with the markup's own indentation collapsed the way a
+// browser collapses it. Nobody sees the newline between two <span>s.
+const visible = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
+
+function channelOf(cmd: string): (event: JobEvent) => void {
+  const call = [...invoke.mock.calls].reverse().find((c) => c[0] === cmd);
+  if (!call) throw new Error(`${cmd} was never invoked`);
+  const channel = (call[1] as { onProgress: { onmessage: (e: JobEvent) => void } }).onProgress;
+  return (event) => channel.onmessage(event);
+}
+
+async function openFolders(loc: Loc = 'uk') {
+  setLocale(loc);
+  const rendered = render(Settings);
+  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
+  await screen.findByTestId('folder-row-4');
+  return rendered;
+}
+
+const scanButton = (rootId: number) =>
+  screen.getByTestId(`folder-scan-${rootId}`);
+
+// ---------------------------------------------------------------------------
+// Real endings, printed by a temporary Rust test from `walk_job.rs`'s own
+// `ended_from_report` and `job::Ended::failed` — not written from a document.
+// ---------------------------------------------------------------------------
+const WALK: JobEnded = {
+  reason: 'completed', done: 11, total: 11, skipped: 5, complete: true, frozen: [],
+  indexed: 5, unchanged: 1, refused: 0, removed: 4, message: null,
+};
+const FROZEN = [
+  { prefix: 'notes/archive', reason: 'unreadableDirectory' },
+  { prefix: 'notes/link', reason: 'symlinkedSubtree' },
+  { prefix: 'notes/void', reason: 'emptyDirectory' },
+] as const;
+
+const endedEvent = (over: Partial<JobEnded> = {}): JobEvent =>
+  ({ event: 'ended', data: { ...WALK, ...over } });
+const progressEvent = (over: Partial<JobProgress> = {}): JobEvent =>
+  ({ event: 'progress', data: { done: 3, total: 8, skipped: 1, refused: 0, secondsLeft: null, ...over } });
+
+// ---------------------------------------------------------------------------
+// The exhaustive visible-state matrix. Nine rows, no wildcard, both locales.
+//
+// The four rows after `failed` are the ones a table of three would lose. They
+// are NOT malfunctions — a broken helper, rules that did not take, an
+// unreadable folder, a volume that may be gone — and `job.rs` says reporting
+// them as `failed` tells a person something broke when instead a folder cannot
+// be read. A test covering only completed/cancelled/failed passes on a
+// component that collapses all four into one sentence.
+// ---------------------------------------------------------------------------
+type Row = { name: string; ending: Partial<JobEnded>; uk: string; en: string };
+
+const FAILURE_TEXT = 'the worker binary could not be started';
+
+const MATRIX: Row[] = [
+  {
+    name: 'completed',
+    ending: { reason: 'completed', complete: true },
+    uk: 'Теку прочитано повністю.',
+    en: 'The folder was read in full.',
+  },
+  {
+    name: 'partlyRead',
+    ending: { reason: 'completed', complete: false },
+    uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Файли, які ви вилучили всередині них, досі знаходяться пошуком.',
+    en: 'The folder was only partly read: some subfolders could not be entered. Files you deleted inside them are still found by search.',
+  },
+  {
+    name: 'cancelled',
+    ending: { reason: 'cancelled' },
+    uk: 'Сканування зупинено на ваше прохання.',
+    en: 'The scan was stopped at your request.',
+  },
+  {
+    name: 'failed without a message',
+    ending: { reason: 'failed', complete: false, message: null },
+    uk: 'Сканування обірвалося через збій.',
+    en: 'The scan broke off because something went wrong.',
+  },
+  {
+    name: 'failed carrying a message',
+    ending: { reason: 'failed', complete: false, message: FAILURE_TEXT },
+    uk: `Сканування обірвалося через збій. Програма повідомила: ${FAILURE_TEXT}`,
+    en: `The scan broke off because something went wrong. The program reported: ${FAILURE_TEXT}`,
+  },
+  {
+    name: 'brokenWorker',
+    ending: { reason: 'brokenWorker' },
+    uk: 'Сканування спинилося: допоміжна програма, яка читає файли, перестала відповідати.',
+    en: 'The scan stopped: the helper program that reads files stopped answering.',
+  },
+  {
+    name: 'rulesNotApplied',
+    ending: { reason: 'rulesNotApplied' },
+    uk: 'Сканування спинилося: правила виключення не вдалося застосувати, тож теку не читали зовсім.',
+    en: 'The scan stopped: the exclusion rules could not be applied, so the folder was not read at all.',
+  },
+  {
+    name: 'rootUnavailable',
+    ending: { reason: 'rootUnavailable' },
+    uk: 'Сканування спинилося: у теку не вдалося зайти. Можливо, її прибрали або диск від’єднано.',
+    en: 'The scan stopped: the folder could not be entered. It may have been removed, or its drive disconnected.',
+  },
+  {
+    name: 'volumeMissing',
+    ending: { reason: 'volumeMissing' },
+    uk: 'Сканування спинилося: тека прочиталася порожньою, хоча в індексі є файли з неї. Нічого не вилучено — можливо, диск під’єднано не повністю.',
+    en: 'The scan stopped: the folder read as empty although the index still holds files from it. Nothing was deleted — the drive may not be fully attached.',
+  },
+];
+
+// Both directions on the table itself: a wire reason the matrix says nothing
+// about, and a matrix row for a state that cannot happen, are both defects.
+test('the matrix names one row for every state a walk can end in, and no others', () => {
+  const covered = new Set(MATRIX.map((r) => (
+    r.ending.reason === 'completed' && r.ending.complete === false ? 'partlyRead' : r.ending.reason
+  )));
+  expect([...covered].sort()).toEqual([...OUTCOME_KINDS].sort());
+  expect(MATRIX).toHaveLength(OUTCOME_KINDS.length + 1); // + the `failed` row that carries a message
+});
+
+for (const loc of ['uk', 'en'] as const) {
+  test(`every way a walk can end shows its own sentence, and no two share one (${loc})`, async () => {
+    const seen: string[] = [];
+    for (const row of MATRIX) {
+      await openFolders(loc);
+      await fireEvent.click(scanButton(4));
+      await waitFor(() => expect(calls('start_walk_job')).not.toHaveLength(0));
+
+      channelOf('start_walk_job')(endedEvent(row.ending));
+      const region = await screen.findByTestId('indexing-walk-outcome');
+      await tick();
+
+      expect(visible(region), row.name).toBe(row[loc]);
+      seen.push(visible(region));
+      cleanup();
+      invoke.mockClear();
+    }
+    // A component that drew one sentence for the four variants after `failed`
+    // produces nine distinct rows in the reducer and this many collisions here.
+    expect(new Set(seen).size).toBe(MATRIX.length);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Pressing the control, and what the counts read as.
+// ---------------------------------------------------------------------------
+
+test('pressing a folder`s scan control starts the walk for THAT folder', async () => {
+  await openFolders();
+
+  await fireEvent.click(scanButton(4));
+
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  expect((calls('start_walk_job')[0][1] as { rootId: number }).rootId).toBe(4);
+  // The visible label is the plain word, not the per-row aria-label: an
+  // `aria-label` overrides the accessible name, so `getByRole(..., { name })`
+  // would go on passing after the visible text went stale.
+  expect(scanButton(4).textContent).toBe('Сканувати');
+  expect(scanButton(4).getAttribute('aria-label')).toBe('Сканувати /home/a/papers');
+});
+
+test('the running line reads as words, with the counts in them', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(progressEvent());
+  await tick();
+
+  const text = container.textContent ?? '';
+  expect(text).toContain('Триває читання теки.');
+  expect(text).toContain('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
+  // `secondsLeft` is `Option<u64>` and arrives as `null` for the whole of an
+  // ordinary run's beginning. A line that formats it unconditionally prints
+  // "залишилось null" here.
+  expect(text).toContain('Скільки ще лишилось часу, поки не відомо.');
+  expect(text).not.toContain('null');
+});
+
+test('a run with nothing counted yet says so instead of reading as nothing to do', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(progressEvent({ done: 0, total: 0, secondsLeft: 12 }));
+  await tick();
+
+  const text = container.textContent ?? '';
+  expect(text).toContain('Опрацьовано 0. Скільки їх усього, поки не відомо.');
+  expect(text).not.toContain('0 з 0');
+  // The other direction of the same field: an estimate that IS known is shown.
+  expect(text).toContain('Залишилось приблизно 12 с.');
+});
+
+test('an ended walk reports what it did to the index, not only that it ended', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(screen.getByTestId('indexing-walk-result')).toBeTruthy());
+
+  expect(container.textContent).toContain(
+    'Додано документів: 5. Без змін: 1. Пропущено: 5. Вилучено з індексу: 4.',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// `frozen`: the decision is to SHOW it.
+// ---------------------------------------------------------------------------
+
+// `removed == 0` alone cannot say whether anything was silently left untouched
+// (job.rs). Dropping this field would leave a person reading "removed: 4" with
+// no way to learn that three subtrees were never reconciled at all.
+test('subtrees reconciliation refused to touch are named, each with its own reason', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent({ complete: false, frozen: [...FROZEN] }));
+  await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
+
+  const text = container.textContent ?? '';
+  expect(text).toContain('Ці підтеки не звіряли, тож вилучені з них файли досі знаходяться пошуком:');
+  expect(text).toContain('notes/archive — не вдалося прочитати');
+  expect(text).toContain('notes/link — символьне посилання, сюди не заходили');
+  expect(text).toContain('notes/void — прочиталася порожньою');
+});
+
+// Two entries in one report can carry the SAME prefix: `walk.rs` decides
+// whether to climb by testing `parent`, then pushes `resolve_ancestor`'s
+// answer, which is a different string whenever `parent` is not itself on disk.
+// A list keyed by that prefix throws and takes the whole section with it.
+test('two frozen entries sharing a prefix are both shown, not a crash', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent({
+    complete: false,
+    frozen: [
+      { prefix: 'notes/archive', reason: 'unreadableDirectory' },
+      { prefix: 'notes/archive', reason: 'emptyDirectory' },
+    ],
+  }));
+  await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
+
+  expect(screen.getByTestId('indexing-frozen').querySelectorAll('li')).toHaveLength(2);
+  expect(container.textContent).toContain('notes/archive — прочиталася порожньою');
+});
+
+test('a walk that froze nothing shows no such list', async () => {
+  await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
+
+  expect(screen.queryByTestId('indexing-frozen')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// The chained embedding pass.
+// ---------------------------------------------------------------------------
+
+test('a partly read folder is embedded anyway AND stays reported as partly read', async () => {
+  await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent({ complete: false }));
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome')))
+    .toBe(MATRIX.find((r) => r.name === 'partlyRead')!.uk);
+});
+
+test('the embedding pass says it covers the whole index, never the folder that was pressed', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(4));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+  channelOf('start_embed_job')(progressEvent({ done: 2, total: 40 }));
+  await tick();
+
+  const text = container.textContent ?? '';
+  expect(text).toContain('Триває вбудовування всього індексу.');
+  expect(text).not.toContain('Триває читання теки.');
+});
+
+// D-c: the window checks both preconditions ITSELF and names the one that is
+// absent. The walk still ran — text search needs neither.
+test('with no provider key the pass is not started and the section says which is missing', async () => {
+  reply({ model_settings: { ...READY_SETTINGS, key: { kind: 'absent' } } });
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(screen.getByTestId('indexing-note')).toBeTruthy());
+
+  expect(screen.getByTestId('indexing-note').textContent).toBe(
+    'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',
+  );
+  expect(calls('start_embed_job')).toHaveLength(0);
+  expect(container.textContent).toContain('Теку прочитано повністю.');
+});
+
+test('with no embedding model chosen the missing one is named apart from the key', async () => {
+  reply({
+    model_settings: { ...READY_SETTINGS, index: { ...READY_SETTINGS.index, embeddingModel: null } },
+  });
+  await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(screen.getByTestId('indexing-note')).toBeTruthy());
+
+  expect(screen.getByTestId('indexing-note').textContent).toBe(
+    'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах у цій теці вже працює.',
+  );
+  expect(calls('start_embed_job')).toHaveLength(0);
+});
+
+// The second line, route one: the key went missing between the window's read
+// and the call, so the command rejects before claiming the slot. A rejection
+// crosses as a sentence — shown verbatim, never matched on.
+test('a pass refused by the backend shows the backend`s own sentence', async () => {
+  reply({ start_embed_job: new Error('no provider key is stored') });
+  await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
+
+  expect(screen.getByTestId('indexing-rejection').textContent).toBe('no provider key is stored');
+  expect(screen.getByTestId('indexing-note').textContent).toBe('Запит відхилено.');
+});
+
+// The second line, route two, and it is a different shape entirely: a missing
+// model is not checked by `start_embed_job` at all (embed_job.rs), so the
+// command is ACCEPTED and the refusal arrives as an ending carrying a sentence.
+test('a model that vanished after the check arrives as an ending, and its text is shown', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+
+  channelOf('start_embed_job')(endedEvent({
+    reason: 'failed', complete: false, message: 'the index has no active vector space',
+  }));
+  await waitFor(() => expect(screen.getByTestId('indexing-embed-outcome')).toBeTruthy());
+
+  const text = container.textContent ?? '';
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Вбудовування обірвалося через збій. Програма повідомила: the index has no active vector space',
+  );
+  // The walk's own ending is still beside it: two passes, two results.
+  expect(text).toContain('Теку прочитано повністю.');
+});
+
+test('an embedding pass stopping for a walk-only reason is not drawn as a finished one', async () => {
+  await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  channelOf('start_walk_job')(endedEvent());
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+
+  channelOf('start_embed_job')(endedEvent({ reason: 'volumeMissing' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-embed-outcome')).toBeTruthy());
+
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Вбудовування спинилося з причини, якої тут не очікували (volumeMissing).',
+  );
+  // The pass reports its own counts too, and they are the embedding pass's —
+  // chunks over the whole index, not documents in the folder that was pressed.
+  expect(visible(screen.getByTestId('indexing-embed-result')))
+    .toBe('Вбудовано фрагментів: 11 з 11. Відхилено: 0.');
+});
+
+// ---------------------------------------------------------------------------
+// Cancel, and where the job state lives.
+// ---------------------------------------------------------------------------
+
+test('cancelling asks the backend to stop, and the line then says it stopped', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  channelOf('start_walk_job')(progressEvent());
+  await tick();
+  expect(container.textContent).toContain('Триває читання теки.');
+
+  await fireEvent.click(screen.getByTestId('indexing-cancel'));
+  expect(calls('cancel_job')).toHaveLength(1);
+
+  channelOf('start_walk_job')(endedEvent({ reason: 'cancelled' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
+  const text = container.textContent ?? '';
+  expect(text).toContain('Сканування зупинено на ваше прохання.');
+  expect(text).not.toContain('Триває читання теки.');
+});
+
+// 🔴 The main path, not an edge case: four nav items mean «Теки → Моделі →
+// Теки» is two clicks. The channel belongs to whoever started the job, so a
+// component that keeps the job inside the section takes the counters AND the
+// Cancel button with it when it unmounts — and `cancel_job` needs no channel,
+// so that Cancel is lost for nothing.
+test('a job survives switching sections, and Cancel still stops it afterwards', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  channelOf('start_walk_job')(progressEvent());
+  await tick();
+
+  await fireEvent.click(screen.getByTestId('settings-nav-models'));
+  await tick();
+  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
+  await screen.findByTestId('folder-row-4');
+
+  expect(container.textContent).toContain('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
+  await fireEvent.click(screen.getByTestId('indexing-cancel'));
+  expect(calls('cancel_job')).toHaveLength(1);
+});
+
+// The other direction, and the half a Cancel rendered unconditionally would
+// satisfy on its own.
+test('with no job running there is no Cancel to press', async () => {
+  await openFolders();
+
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
+  expect(calls('cancel_job')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+// A job this window has no channel for.
+// ---------------------------------------------------------------------------
+
+// `job_status` carries a boolean and nothing else, and `set_embedding_model`
+// holds the same slot without ever sending an ending — so a component drawing
+// "indexing" from that boolean can sit on a progress line nothing will finish.
+test('a job with no channel of ours is said in words, with no counts invented for it', async () => {
+  reply({ job_status: { running: true } });
+  const { container } = await openFolders();
+
+  await waitFor(() => expect(screen.getByTestId('indexing-unobserved')).toBeTruthy());
+  const text = container.textContent ?? '';
+  expect(screen.getByTestId('indexing-unobserved').textContent).toBe(
+    'Зараз виконується інше завдання. Це вікно не бачить, як далеко воно просунулося, але зупинити його можна.',
+  );
+  expect(text).not.toContain('Опрацьовано');
+  expect(text).not.toContain('Триває читання теки.');
+  // Cancel is still offered: `cancel_job` needs no channel, and losing the
+  // ability to stop a job is the one failure a person cannot work around.
+  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
+});
+
+test('cancelling a job we cannot hear re-reads the status instead of waiting for an ending', async () => {
+  reply({ job_status: { running: true } });
+  await openFolders();
+  await waitFor(() => expect(screen.getByTestId('indexing-unobserved')).toBeTruthy());
+
+  reply({ job_status: { running: false } });
+  await fireEvent.click(screen.getByTestId('indexing-cancel'));
+
+  await waitFor(() => expect(screen.queryByTestId('indexing-unobserved')).toBeNull());
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// Rejections and language.
+// ---------------------------------------------------------------------------
+
+test('a refused scan shows the backend sentence and starts nothing', async () => {
+  reply({ start_walk_job: new Error('a job is already running') });
+  await openFolders();
+
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
+
+  expect(screen.getByTestId('indexing-rejection').textContent).toBe('a job is already running');
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
+});
+
+test('a language switch after an ending reaches every line of the strip', async () => {
+  const { container } = await openFolders('uk');
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  channelOf('start_walk_job')(endedEvent({ complete: false, frozen: [...FROZEN] }));
+  await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
+
+  setLocale('en');
+  await tick();
+
+  const text = container.textContent ?? '';
+  expect(text).toContain(MATRIX.find((r) => r.name === 'partlyRead')!.en);
+  expect(text).toContain('Documents added: 5.');
+  expect(text).toContain('notes/link — a symbolic link, never entered');
+  expect(text).not.toContain('Теку прочитано');
+});
+
+// Every outcome kind must have a sentence in both locales, and the check is on
+// the table rather than on a count: a number is a definition too, and it has
+// been the wrong one here before.
+test('nothing in the outcome vocabulary is left without words', () => {
+  const named = new Set<OutcomeKind>(MATRIX.map((r) => (
+    r.ending.reason === 'completed' && r.ending.complete === false ? 'partlyRead' : r.ending.reason as OutcomeKind
+  )));
+  for (const kind of OUTCOME_KINDS) expect(named.has(kind), kind).toBe(true);
+});

@@ -40,6 +40,23 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'source_loading' | 'source_failed' | 'source_wrong_document'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
+  | 'settings_folders_scan' | 'settings_folders_scan_named'
+  | 'indexing_walk_starting' | 'indexing_walk_running'
+  | 'indexing_embed_starting' | 'indexing_embed_running'
+  | 'indexing_counts_ratio' | 'indexing_counts_counting'
+  | 'indexing_eta' | 'indexing_eta_unknown'
+  | 'indexing_walk_ended_completed' | 'indexing_walk_ended_partly_read'
+  | 'indexing_walk_ended_cancelled' | 'indexing_walk_ended_failed'
+  | 'indexing_walk_ended_broken_worker' | 'indexing_walk_ended_rules_not_applied'
+  | 'indexing_walk_ended_root_unavailable' | 'indexing_walk_ended_volume_missing'
+  | 'indexing_embed_ended_completed' | 'indexing_embed_ended_cancelled'
+  | 'indexing_embed_ended_failed' | 'indexing_embed_ended_unexpected'
+  | 'indexing_failure_message' | 'indexing_walk_result' | 'indexing_embed_result'
+  | 'indexing_frozen_heading' | 'indexing_frozen_row'
+  | 'indexing_frozen_symlinked_subtree' | 'indexing_frozen_empty_directory'
+  | 'indexing_frozen_unreadable_directory'
+  | 'indexing_note_no_key' | 'indexing_note_no_model' | 'indexing_note_rejected'
+  | 'indexing_unobserved' | 'indexing_cancel'
   | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
@@ -255,6 +272,68 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# хвилину} few {# хвилини} many {# хвилин} other {# хвилини}} тому',
     recent_hours: '{count, plural, one {# годину} few {# години} many {# годин} other {# години}} тому',
     recent_days: '{count, plural, one {# день} few {# дні} many {# днів} other {# дня}} тому',
+    // §9.2 / Task 8 — running the index, showing it, stopping it. D-c: the scan
+    // starts on this control and never on adding a folder, because excluding
+    // subfolders (PR 8) is a move a person still has to make in between.
+    settings_folders_scan: 'Сканувати',
+    // Carries the path so two "Сканувати" buttons in a list stay apart for a
+    // screen reader; the VISIBLE label stays the plain word above.
+    settings_folders_scan_named: 'Сканувати {path}',
+    indexing_walk_starting: 'Читання теки починається…',
+    indexing_walk_running: 'Триває читання теки.',
+    // The embedding pass takes no root and covers the whole index
+    // (embed_job.rs), so neither of these two may name the folder that was
+    // pressed.
+    indexing_embed_starting: 'Вбудовування всього індексу починається…',
+    indexing_embed_running: 'Триває вбудовування всього індексу.',
+    indexing_counts_ratio: 'Опрацьовано {done} з {total}. Пропущено: {skipped}. Відхилено: {refused}.',
+    // `total: 0` is not an edge case: a walk reports it before phase 1 has
+    // counted anything. "0 з 0" would read as "нема чого робити".
+    indexing_counts_counting: 'Опрацьовано {done}. Скільки їх усього, поки не відомо. Пропущено: {skipped}. Відхилено: {refused}.',
+    indexing_eta: 'Залишилось приблизно {seconds} с.',
+    // `secondsLeft` is `Option<u64>`: "ще не відомо" is a real state, and it is
+    // the ordinary one at the start of every run.
+    indexing_eta_unknown: 'Скільки ще лишилось часу, поки не відомо.',
+    indexing_walk_ended_completed: 'Теку прочитано повністю.',
+    // `reason: completed` with `complete: false` (job.rs): phase 1 never saw
+    // the whole tree, so what was deleted under an unreadable subfolder is
+    // still searchable. That is why the word "done" cannot appear here.
+    indexing_walk_ended_partly_read: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Файли, які ви вилучили всередині них, досі знаходяться пошуком.',
+    indexing_walk_ended_cancelled: 'Сканування зупинено на ваше прохання.',
+    indexing_walk_ended_failed: 'Сканування обірвалося через збій.',
+    // The four sentences below are not about a malfunction: they are decisions
+    // the walk itself made (job.rs), and calling them a failure would tell a
+    // person the program broke when instead a folder cannot be read.
+    indexing_walk_ended_broken_worker: 'Сканування спинилося: допоміжна програма, яка читає файли, перестала відповідати.',
+    indexing_walk_ended_rules_not_applied: 'Сканування спинилося: правила виключення не вдалося застосувати, тож теку не читали зовсім.',
+    indexing_walk_ended_root_unavailable: 'Сканування спинилося: у теку не вдалося зайти. Можливо, її прибрали або диск від’єднано.',
+    indexing_walk_ended_volume_missing: 'Сканування спинилося: тека прочиталася порожньою, хоча в індексі є файли з неї. Нічого не вилучено — можливо, диск під’єднано не повністю.',
+    indexing_embed_ended_completed: 'Вбудовування всього індексу завершено.',
+    indexing_embed_ended_cancelled: 'Вбудовування зупинено на ваше прохання.',
+    indexing_embed_ended_failed: 'Вбудовування обірвалося через збій.',
+    // The walk is the only writer of the four `StopReason` reasons (job.rs), so
+    // they cannot reach the embedding pass. A sentence exists for them anyway,
+    // carrying the state's own name: a default branch that draws "finished" is
+    // exactly how a failed pass reads as a successful one.
+    indexing_embed_ended_unexpected: 'Вбудовування спинилося з причини, якої тут не очікували ({reason}).',
+    indexing_failure_message: 'Програма повідомила: {message}',
+    indexing_walk_result: 'Додано документів: {indexed}. Без змін: {unchanged}. Пропущено: {skipped}. Вилучено з індексу: {removed}.',
+    indexing_embed_result: 'Вбудовано фрагментів: {done} з {total}. Відхилено: {refused}.',
+    // `frozen` is shown, not dropped: `removed: 0` alone cannot say whether
+    // anything was silently left untouched (job.rs).
+    indexing_frozen_heading: 'Ці підтеки не звіряли, тож вилучені з них файли досі знаходяться пошуком:',
+    indexing_frozen_row: '{prefix} — {why}',
+    indexing_frozen_symlinked_subtree: 'символьне посилання, сюди не заходили',
+    indexing_frozen_empty_directory: 'прочиталася порожньою',
+    indexing_frozen_unreadable_directory: 'не вдалося прочитати',
+    // D-c: the walk runs regardless, because word search needs neither a key
+    // nor a model — so each sentence names what is absent and what already
+    // works.
+    indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',
+    indexing_note_no_model: 'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах у цій теці вже працює.',
+    indexing_note_rejected: 'Запит відхилено.',
+    indexing_unobserved: 'Зараз виконується інше завдання. Це вікно не бачить, як далеко воно просунулося, але зупинити його можна.',
+    indexing_cancel: 'Зупинити',
   },
   en: {
     pin: 'Pin',
@@ -351,5 +430,40 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',
     recent_days: '{count, plural, one {# day} other {# days}} ago',
+    settings_folders_scan: 'Scan',
+    settings_folders_scan_named: 'Scan {path}',
+    indexing_walk_starting: 'Reading the folder is starting…',
+    indexing_walk_running: 'The folder is being read.',
+    indexing_embed_starting: 'Embedding the whole index is starting…',
+    indexing_embed_running: 'The whole index is being embedded.',
+    indexing_counts_ratio: 'Processed {done} of {total}. Skipped: {skipped}. Given up on: {refused}.',
+    indexing_counts_counting: 'Processed {done}. How many there are in total is not known yet. Skipped: {skipped}. Given up on: {refused}.',
+    indexing_eta: 'About {seconds} s left.',
+    indexing_eta_unknown: 'How much time is left is not known yet.',
+    indexing_walk_ended_completed: 'The folder was read in full.',
+    indexing_walk_ended_partly_read: 'The folder was only partly read: some subfolders could not be entered. Files you deleted inside them are still found by search.',
+    indexing_walk_ended_cancelled: 'The scan was stopped at your request.',
+    indexing_walk_ended_failed: 'The scan broke off because something went wrong.',
+    indexing_walk_ended_broken_worker: 'The scan stopped: the helper program that reads files stopped answering.',
+    indexing_walk_ended_rules_not_applied: 'The scan stopped: the exclusion rules could not be applied, so the folder was not read at all.',
+    indexing_walk_ended_root_unavailable: 'The scan stopped: the folder could not be entered. It may have been removed, or its drive disconnected.',
+    indexing_walk_ended_volume_missing: 'The scan stopped: the folder read as empty although the index still holds files from it. Nothing was deleted — the drive may not be fully attached.',
+    indexing_embed_ended_completed: 'Embedding the whole index has finished.',
+    indexing_embed_ended_cancelled: 'The embedding pass was stopped at your request.',
+    indexing_embed_ended_failed: 'The embedding pass broke off because something went wrong.',
+    indexing_embed_ended_unexpected: 'The embedding pass stopped for a reason not expected here ({reason}).',
+    indexing_failure_message: 'The program reported: {message}',
+    indexing_walk_result: 'Documents added: {indexed}. Unchanged: {unchanged}. Skipped: {skipped}. Removed from the index: {removed}.',
+    indexing_embed_result: 'Chunks embedded: {done} of {total}. Given up on: {refused}.',
+    indexing_frozen_heading: 'These subfolders were not reconciled, so files deleted inside them are still found by search:',
+    indexing_frozen_row: '{prefix} — {why}',
+    indexing_frozen_symlinked_subtree: 'a symbolic link, never entered',
+    indexing_frozen_empty_directory: 'read as empty',
+    indexing_frozen_unreadable_directory: 'could not be read',
+    indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search over this folder already works.',
+    indexing_note_no_model: 'Search by meaning was not started: no embedding model has been chosen. Word search over this folder already works.',
+    indexing_note_rejected: 'The request was refused.',
+    indexing_unobserved: 'Another job is running. This window cannot see how far it has got, but it can still be stopped.',
+    indexing_cancel: 'Stop',
   },
 };

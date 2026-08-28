@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { locale, t } from '../i18n';
   import Models from './Models.svelte';
   import Folders from './Folders.svelte';
+  import Indexing from './Indexing.svelte';
+  import { createJobController } from './jobs';
 
   // All four sections render; hiding the two not yet built would make the
   // window claim the product has two sections when the spec says four.
@@ -15,6 +18,23 @@
   ];
 
   let section = $state<SectionId>('models');
+
+  // 🔴 ONE controller, here, above every section — not inside the one that
+  // starts the job. Four nav items make Folders -> Models -> Folders two
+  // clicks, and the channel a job reports on belongs to whoever started it
+  // (`bridge.rs`): a controller living in `Folders.svelte` would be destroyed
+  // by the first of those clicks, taking the counters AND the Cancel button
+  // with it. `cancel_job` needs no channel at all, so that Cancel would be lost
+  // for nothing. The strip renders below the panel for the same reason — a
+  // running job stays visible and stoppable from every section.
+  const jobs = createJobController();
+
+  // The settings window can be opened in the middle of a run it never started,
+  // and `set_embedding_model` takes the same slot without ever sending an
+  // ending. `job_status` is the only honest answer to "is something running",
+  // and the controller is careful to write only where it cannot destroy
+  // something better.
+  onMount(() => { void jobs.syncFromStatus(); });
 
   const modelsLabel = $derived.by(() => { void $locale; return t('settings_nav_models'); });
   const foldersLabel = $derived.by(() => { void $locale; return t('settings_nav_folders'); });
@@ -61,7 +81,7 @@
       <Models />
     {:else if section === 'folders'}
       <h2>{foldersLabel}</h2>
-      <Folders />
+      <Folders {jobs} />
     {:else if section === 'indexing'}
       <h2>{indexingLabel}</h2>
       <p id={NOT_READY_ID}>{notReadyLabel}</p>
@@ -70,4 +90,6 @@
       <p id={NOT_READY_ID}>{notReadyLabel}</p>
     {/if}
   </div>
+
+  <Indexing {jobs} />
 </main>
