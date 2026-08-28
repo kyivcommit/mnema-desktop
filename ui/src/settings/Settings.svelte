@@ -97,7 +97,7 @@
     <div class="spane">
       {#if section === 'models'}
         <h2>{modelsLabel}</h2>
-        <Models />
+        <Models {jobs} />
       {:else if section === 'folders'}
         <h2>{foldersLabel}</h2>
         <Folders {jobs} />

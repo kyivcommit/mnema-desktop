@@ -138,9 +138,25 @@ export type UnreadableCause = 'notOpen' | 'readFailed';
 // active count understates the bill by exactly the spaces it forgets, and
 // `the_settings_tell_the_active_space_apart_from_the_whole_index` is where the
 // two are held apart.
+//
+// `totalChunks` joins them for PR 25's P1-1, required for the same reason and
+// carrying its own: it is the half of "semantic search has gone dark" that says
+// there was something to embed at all. Missing, `?? 0` would read as "this
+// index holds nothing", and an index holding nothing is exactly the state in
+// which the section must NOT report a loss — so the fail-quiet direction of an
+// optional field is a warning that silently never appears.
+//
+// ⚠️ **`activeSpace` is deliberately NOT mirrored here**, even though the wire
+// carries it and the obvious reading of "the active space holds nothing" wants
+// it. `read_settings` (`models.rs`) derives BOTH from one `db.active_space()`:
+// `embedding_model` is `Some` exactly when `active_space` is, because the model
+// is read out of the space. Mirroring it would be one truth written twice — the
+// class this file already refuses elsewhere — and the two copies would
+// eventually be read as though they could disagree. `embeddingModel !== null`
+// is how "there is an active space" is spelled on this side.
 export type IndexSettings =
   | { kind: 'read'; embeddingModel: string | null; chatModel?: string | null;
-      embeddedChunks: number; embeddedChunksEverywhere: number;
+      embeddedChunks: number; embeddedChunksEverywhere: number; totalChunks: number;
       searchTextArm: boolean; searchContentArm: boolean }
   | { kind: 'unreadable'; cause: UnreadableCause; reason: string };
 

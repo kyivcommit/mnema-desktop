@@ -218,7 +218,7 @@ test('a run with nothing counted yet states no ratio, and one with a total does'
 
 const KEY_AND_MODEL = {
   key: { kind: 'present' },
-  index: { kind: 'read', embeddingModel: 'openai/text-embedding-3-small', embeddedChunks: 4, embeddedChunksEverywhere: 4, searchTextArm: true, searchContentArm: true },
+  index: { kind: 'read', embeddingModel: 'openai/text-embedding-3-small', embeddedChunks: 4, embeddedChunksEverywhere: 4, totalChunks: 4, searchTextArm: true, searchContentArm: true },
   platform: 'mac',
 };
 
@@ -527,4 +527,155 @@ test('cancelling a job the window cannot hear re-reads the status afterwards', a
 
   expect(calls('cancel_job')).toHaveLength(1);
   expect(get(jobs.state).phase.kind).toBe('idle');
+});
+
+// ---------------------------------------------------------------------------
+// PR 25 review, P1-2 — the embedding pass asked for on its own.
+//
+// The Models section offers it as the repair for an index whose active space is
+// empty. It used to call `start_embed_job` itself, with a listener of its own,
+// so the pass reported to nobody the moment somebody clicked another section.
+// Here it is the controller's, like every other job, and what that owes is
+// below.
+// ---------------------------------------------------------------------------
+
+test('a recovery pass starts the embedding job and says so as an embed pass', async () => {
+  const jobs = createJobController();
+
+  await jobs.embed();
+
+  expect(calls('start_embed_job')).toHaveLength(1);
+  expect(get(jobs.state).phase).toEqual({ kind: 'starting', pass: 'embed' });
+  // It reads no root and starts no walk: the pass covers the whole index
+  // (`embed_job.rs`), and a walk started here would be a folder's work done
+  // under a button that promises the index's.
+  expect(calls('start_walk_job')).toHaveLength(0);
+});
+
+// The report of the act that came before is not the report of this one. A walk
+// finished half an hour ago, left on screen beside a pass somebody has just
+// asked for by hand, reads as this pass's own result.
+test('a recovery pass clears the report of the walk that came before it', async () => {
+  const jobs = createJobController();
+  await jobs.scan(7);
+  // `cancelled` does not chain, so this leaves a walk report standing and
+  // nothing else in flight.
+  channelOf('start_walk_job')(REAL.cancelled);
+  expect(get(jobs.state).walk).not.toBeNull();
+
+  await jobs.embed();
+
+  expect(get(jobs.state).walk).toBeNull();
+  expect(get(jobs.state).phase).toEqual({ kind: 'starting', pass: 'embed' });
+});
+
+test('a recovery pass clears the refusal the previous command left behind', async () => {
+  replies({ start_walk_job: new Error('LEAK-TOKEN-OLD-REFUSAL'), job_status: { running: false } });
+  const jobs = createJobController();
+  await jobs.scan(7);
+  expect(get(jobs.state).note).toEqual({ kind: 'rejected', sentence: 'LEAK-TOKEN-OLD-REFUSAL' });
+
+  replies({ model_settings: KEY_AND_MODEL, start_embed_job: undefined });
+  await jobs.embed();
+
+  expect(get(jobs.state).note).toBeNull();
+});
+
+// 🔴 `embed` writes `starting` before it reads the two preconditions, so the
+// press has a visible answer while they are being read — the same opening
+// `scan` makes. A precondition that then fails leaves nothing running, so that
+// phase has to come back off: a strip saying a pass is starting, when none is,
+// offers a Cancel for a job that does not exist.
+//
+// One test per way of not starting, because each is a separate branch and a
+// reset written into one of them is not written into the others.
+test.each([
+  ['no key', { ...KEY_AND_MODEL, key: { kind: 'absent' } }, { kind: 'noKey' }],
+  ['no model chosen', { ...KEY_AND_MODEL, index: { kind: 'read', embeddingModel: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, searchTextArm: true, searchContentArm: true } }, { kind: 'noModel' }],
+])('a recovery pass refused for %s names it and leaves nothing saying a pass is starting', async (_name, settings, note) => {
+  replies({ model_settings: settings, job_status: { running: false } });
+  const jobs = createJobController();
+
+  await jobs.embed();
+
+  expect(get(jobs.state).note).toEqual(note);
+  expect(get(jobs.state).phase).toEqual({ kind: 'idle' });
+  expect(calls('start_embed_job')).toHaveLength(0);
+});
+
+test('a recovery pass whose precondition read is refused leaves nothing saying a pass is starting', async () => {
+  replies({ model_settings: new Error('the index is not open'), job_status: { running: false } });
+  const jobs = createJobController();
+
+  await jobs.embed();
+
+  expect(get(jobs.state).note).toEqual({ kind: 'rejected', sentence: 'the index is not open' });
+  expect(get(jobs.state).phase).toEqual({ kind: 'idle' });
+});
+
+// The state the two tests above can only see by NOT waiting for the call to
+// finish. `embed` writes `starting` before it reads the preconditions, so the
+// press has a visible answer — the pass line and the Stop — while two IPC round
+// trips are in flight. Asserted with the read held open, because a version that
+// wrote nothing until the end passes every assertion made after it.
+test('a recovery pass says a pass is starting while its preconditions are still being read', async () => {
+  let release!: (value: unknown) => void;
+  replies({ model_settings: new Promise((resolve) => { release = resolve; }), job_status: { running: false } });
+  const jobs = createJobController();
+
+  const running = jobs.embed();
+  await Promise.resolve();
+
+  expect(get(jobs.state).phase).toEqual({ kind: 'starting', pass: 'embed' });
+  // Nothing has been asked for yet — the phase is this window's own promise
+  // that it heard the press, not a report that a job exists.
+  expect(calls('start_embed_job')).toHaveLength(0);
+
+  release(KEY_AND_MODEL);
+  await running;
+  expect(calls('start_embed_job')).toHaveLength(1);
+});
+
+// The chained pass must NOT be given the same treatment, and this is the other
+// direction of the reset above: there the phase is the walk's own ending, and
+// the walk really did run whatever the pass after it did.
+test('a chained pass refused for a missing key leaves the walk`s own report standing', async () => {
+  replies({ model_settings: { ...KEY_AND_MODEL, key: { kind: 'absent' } }, job_status: { running: false } });
+  const jobs = createJobController();
+  await jobs.scan(7);
+
+  channelOf('start_walk_job')(REAL.completed);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(get(jobs.state).note).toEqual({ kind: 'noKey' });
+  const phase = get(jobs.state).phase;
+  expect(phase.kind === 'ended' && phase.pass).toBe('walk');
+  expect(get(jobs.state).walk).not.toBeNull();
+});
+
+// A recovery pass is a new operation, so a continuation still in flight from
+// the walk before it is superseded by it. Without that, both reach
+// `start_embed_job` and the window asks for two passes on one press.
+test('a recovery pass supersedes a chain still waiting on its preconditions', async () => {
+  let release!: (value: unknown) => void;
+  const held = new Promise((resolve) => { release = resolve; });
+  replies({ model_settings: held, job_status: { running: false } });
+  const jobs = createJobController();
+  await jobs.scan(7);
+  // Ends, chains, and stops inside the precondition read.
+  channelOf('start_walk_job')(REAL.completed);
+  await Promise.resolve();
+
+  const recovery = jobs.embed();
+  release(KEY_AND_MODEL);
+  await recovery;
+  // A macrotask boundary, not a fixed number of microtask ticks: the
+  // superseded continuation is what has to be given every chance to run, and
+  // counting ticks until the assertion happens to pass is how a test comes to
+  // depend on an ordering rather than on the guard.
+  await new Promise((resolve) => { setTimeout(resolve, 0); });
+
+  expect(calls('start_embed_job')).toHaveLength(1);
+  expect(get(jobs.state).phase).toEqual({ kind: 'starting', pass: 'embed' });
 });

@@ -1,7 +1,9 @@
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Models from './Models.svelte';
+import { createJobController } from './jobs';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +21,8 @@ const providerModels = vi.fn();
 const setChatModel = vi.fn();
 const setEmbeddingModel = vi.fn();
 const startEmbedJob = vi.fn();
+const startWalkJob = vi.fn();
+const cancelJob = vi.fn();
 const jobStatus = vi.fn();
 vi.mock('../lib/ipc', () => ({
   modelSettings: (...a: unknown[]) => modelSettings(...a),
@@ -28,6 +32,12 @@ vi.mock('../lib/ipc', () => ({
   setChatModel: (...a: unknown[]) => setChatModel(...a),
   setEmbeddingModel: (...a: unknown[]) => setEmbeddingModel(...a),
   startEmbedJob: (...a: unknown[]) => startEmbedJob(...a),
+  // The section now starts its recovery pass through the shared controller
+  // (`jobs.ts`), which imports these from the same module — a mock that leaves
+  // them out hands the controller `undefined` and every call becomes a
+  // TypeError swallowed by a catch.
+  startWalkJob: (...a: unknown[]) => startWalkJob(...a),
+  cancelJob: (...a: unknown[]) => cancelJob(...a),
   jobStatus: (...a: unknown[]) => jobStatus(...a),
 }));
 
@@ -46,9 +56,13 @@ beforeEach(() => {
   setChatModel.mockReset();
   setEmbeddingModel.mockReset();
   startEmbedJob.mockReset();
+  startWalkJob.mockReset();
+  cancelJob.mockReset();
   jobStatus.mockReset();
   providerModels.mockResolvedValue(emptyCatalogue());
   startEmbedJob.mockResolvedValue(undefined);
+  startWalkJob.mockResolvedValue(undefined);
+  cancelJob.mockResolvedValue(undefined);
   jobStatus.mockResolvedValue({ running: false });
 });
 afterEach(() => {
@@ -62,16 +76,26 @@ afterEach(() => {
 function settings(overrides: Partial<ModelSettings> = {}): ModelSettings {
   return {
     key: { kind: 'absent' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
+    // `totalChunks: 6` and no model chosen: this index HOLDS documents. The two
+    // conjuncts of the degraded rule are then distinguishable on the base
+    // fixture — an index with nothing in it would satisfy the rule's absence
+    // for the wrong reason, and no test could tell which half was read.
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 6, embeddingModel: null, searchTextArm: true, searchContentArm: false },
     platform: 'linux',
     ...overrides,
   };
 }
 
+// `Models` takes the window's job controller as a prop now, so every render in
+// this file has to hand it one. A fresh controller per render, deliberately:
+// these tests are about the section, and one shared across them would carry a
+// finished pass from a previous test into the next one's first assertion.
+const renderModels = () => render(Models, { props: { jobs: createJobController() } });
+
 async function renderWith(s: ModelSettings) {
   setLocale('en'); // seed, do not inherit — the shape every Settings.test.ts test already uses
   modelSettings.mockResolvedValue(s);
-  const result = render(Models);
+  const result = renderModels();
   // The section fetches on mount; every test needs the settled DOM before
   // asserting on it.
   await waitFor(() => expect(modelSettings).toHaveBeenCalled());
@@ -105,7 +129,7 @@ test('index Unreadable/readFailed renders its own, different sentence, never the
 
 test('index Read renders no failure sentence at all', async () => {
   await renderWith(settings({
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
   }));
   expect(screen.queryByText('The index is not open yet.')).toBeNull();
   expect(screen.queryByText('The index could not be read — this is a defect in this build.')).toBeNull();
@@ -216,7 +240,7 @@ async function renderedKeyFailure(cause: KeyCause, loc: 'uk' | 'en'): Promise<st
   modelSettings.mockResolvedValue(settings({
     key: { kind: 'unreadable', cause, reason: `LEAK-TOKEN-${cause.toUpperCase()}` },
   }));
-  render(Models);
+  renderModels();
   const sentence = await screen.findByTestId('model-key-failure');
   const text = sentence.textContent ?? '';
   cleanup();
@@ -269,7 +293,7 @@ test('Forget calls forget_key, re-reads model_settings, and Removed says so', as
     .mockResolvedValueOnce(settings({ key: { kind: 'absent' } }));
   forgetKey.mockResolvedValue({ kind: 'removed' });
 
-  render(Models);
+  renderModels();
   await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
@@ -286,7 +310,7 @@ test('Forget calls forget_key, re-reads model_settings, and NothingToRemove says
     .mockResolvedValueOnce(settings({ key: { kind: 'absent' } }));
   forgetKey.mockResolvedValue({ kind: 'nothingToRemove' });
 
-  render(Models);
+  renderModels();
   await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
@@ -312,7 +336,7 @@ test('entering a key calls set_key, and no trace of it survives the round', asyn
     .mockResolvedValueOnce(settings({ key: { kind: 'present' } }));
   setKey.mockResolvedValue({ balance: { kind: 'notStated' } });
 
-  const { container } = render(Models);
+  const { container } = renderModels();
   await waitFor(() => expect(screen.getByLabelText('Key:')).toBeTruthy());
 
   await fireEvent.input(screen.getByLabelText('Key:'), { target: { value: LEAKY_KEY } });
@@ -339,7 +363,7 @@ test('entering a key calls set_key, and no trace of it survives the round', asyn
 test('reads as a person: everything configured, nothing alarming shown', async () => {
   const { container } = await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
     platform: 'linux',
   }));
   const text = container.textContent ?? '';
@@ -403,7 +427,7 @@ const UK_KEY_FAILURE_SENTENCES: Record<KeyCause, string> = {
 async function renderInUk(s: ModelSettings) {
   setLocale('uk');
   modelSettings.mockResolvedValue(s);
-  const result = render(Models);
+  const result = renderModels();
   await waitFor(() => expect(modelSettings).toHaveBeenCalled());
   await Promise.resolve();
   await Promise.resolve();
@@ -527,7 +551,7 @@ test('a language switch after mount reaches the removal sentence', async () => {
     .mockResolvedValueOnce(settings({ key: { kind: 'absent' } }));
   forgetKey.mockResolvedValue({ kind: 'removed' });
 
-  const { container } = render(Models);
+  const { container } = renderModels();
   await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
   await waitFor(() => expect(screen.getByText('The key was removed.')).toBeTruthy());
@@ -553,7 +577,7 @@ test('a rejected mount fetch leaves a sentence on screen, not an empty panel', a
   setLocale('en');
   modelSettings.mockRejectedValue(new Error('the settings window could not reach the core'));
 
-  const { container } = render(Models);
+  const { container } = renderModels();
 
   await waitFor(() => expect(screen.getByTestId('model-load-failure')).toBeTruthy());
   const text = container.textContent ?? '';
@@ -568,7 +592,7 @@ test('the mount failure sentence follows a language switch too', async () => {
   setLocale('en');
   modelSettings.mockRejectedValue(new Error('the settings window could not reach the core'));
 
-  const { container } = render(Models);
+  const { container } = renderModels();
   await waitFor(() => expect(screen.getByTestId('model-load-failure')).toBeTruthy());
   expect((container.textContent ?? '')).toContain('The model settings could not be read.');
 
@@ -592,7 +616,7 @@ test('Cancel clears the sentence a failed Save left behind', async () => {
   modelSettings.mockResolvedValue(settings({ key: { kind: 'present' } }));
   setKey.mockRejectedValue(new Error('the credential store would not keep the key'));
 
-  render(Models);
+  renderModels();
   await waitFor(() => expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Change' }));
   await fireEvent.input(screen.getByLabelText('Key:'), { target: { value: LEAKY_KEY } });
@@ -614,7 +638,7 @@ test('a rejected Save keeps no trace of the entered key either', async () => {
   modelSettings.mockResolvedValue(settings({ key: { kind: 'absent' } }));
   setKey.mockRejectedValue(new Error('the credential store would not keep the key'));
 
-  const { container } = render(Models);
+  const { container } = renderModels();
   await waitFor(() => expect(screen.getByLabelText('Key:')).toBeTruthy());
   await fireEvent.input(screen.getByLabelText('Key:'), { target: { value: LEAKY_KEY } });
   await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -715,7 +739,7 @@ test('the same model id in both catalogues does not leak a selection across tabs
   await renderWith(settings({
     key: { kind: 'present' },
     index: {
-      kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'shared-model', chatModel: 'other-model',
+      kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'shared-model', chatModel: 'other-model',
       searchTextArm: true, searchContentArm: true,
     },
   }));
@@ -779,7 +803,7 @@ test('two provider records sharing one id render two rows and leave the section 
 test('the status dot is ready when provider, key and a chosen embedding model are all set', async () => {
   await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   const dot = screen.getByTestId('model-status-dot');
   expect(dot.getAttribute('data-active')).toBe('true');
@@ -799,7 +823,7 @@ test('the status dot is not ready when the index cannot be read', async () => {
 test('the status dot is not ready when there is no key', async () => {
   await renderWith(settings({
     key: { kind: 'absent' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('false');
 });
@@ -807,7 +831,7 @@ test('the status dot is not ready when there is no key', async () => {
 test('the status dot is not ready when no embedding model is chosen', async () => {
   await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: null, chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('false');
 });
@@ -865,12 +889,12 @@ test('the shown selection does not change until set_chat_model AND its re-read b
   mockCatalogues({ chat: catalogueOf([entry('gpt-a'), entry('gpt-b')]) });
   modelSettings.mockResolvedValueOnce(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
   const setChatModelCall = deferredPromise<void>();
   setChatModel.mockImplementation(() => setChatModelCall.promise);
 
-  render(Models);
+  renderModels();
   await fireEvent.click(await screen.findByTestId('model-tab-chat'));
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true'));
 
@@ -882,7 +906,7 @@ test('the shown selection does not change until set_chat_model AND its re-read b
 
   modelSettings.mockResolvedValueOnce(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
   setChatModelCall.resolve();
 
@@ -895,7 +919,7 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
   setChatModel.mockResolvedValue(undefined);
   const queue = queuedModelSettings();
 
-  render(Models); // issues the mount's own call — call #0, deferred
+  renderModels(); // issues the mount's own call — call #0, deferred
   await fireEvent.click(await screen.findByTestId('model-tab-chat'));
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b')).toBeTruthy());
 
@@ -906,14 +930,14 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
   // The fresh call — issued by the choice — settles first, with the new model.
   queue[1].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
 
   // The mount's OLDER call settles late, with the old model. It must lose.
   queue[0].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
   // Not `await Promise.resolve()` twice: that gave the mutant that deletes
   // the sequence guard enough of a head start to look passing, because two
@@ -933,7 +957,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
   const setChatModelCall = deferredPromise<void>();
   setChatModel.mockImplementation(() => setChatModelCall.promise);
 
-  render(Models); // call #0, mount
+  renderModels(); // call #0, mount
   await fireEvent.click(await screen.findByTestId('model-tab-chat'));
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b')).toBeTruthy());
 
@@ -947,7 +971,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
   // changed yet.
   queue[0].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true'));
 
@@ -956,7 +980,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
   await waitFor(() => expect(queue.length).toBe(2));
   queue[1].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
 
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
@@ -1058,7 +1082,7 @@ test('a rejected set_chat_model shows the backends sentence and leaves the selec
   await renderWith(settings({
     key: { kind: 'present' },
     index: {
-      kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a',
+      kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a',
       searchTextArm: true, searchContentArm: true,
     },
   }));
@@ -1085,7 +1109,7 @@ test('a rejected set_chat_model shows the backends sentence and leaves the selec
 test('a mount whose model_settings rejects leaves the dot NOT connected, not connected by default', async () => {
   setLocale('en');
   modelSettings.mockRejectedValue(new Error('the settings window could not reach the core'));
-  render(Models);
+  renderModels();
 
   await waitFor(() => expect(screen.getByTestId('model-load-failure')).toBeTruthy());
   const dot = screen.getByTestId('model-status-dot');
@@ -1485,7 +1509,7 @@ test('a language switch after mount reaches the not-ready status dot sentence', 
 test('a language switch after mount reaches the ready status dot sentence', async () => {
   const { container } = await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   expect((container.textContent ?? '')).toContain('Connected — OpenRouter');
 
@@ -1573,13 +1597,19 @@ const JOB_RUNNING = 'An indexing job is running. It was not stopped, and it is s
 
 /// An index on `emb-1` with `everywhere` embeddings recorded across its spaces
 /// and `active` in the one it points at — the two counts the section reads for
-/// two different questions.
-function onModel(everywhere: number, active = everywhere) {
+/// two different questions — over `total` chunks of document text.
+///
+/// `total` defaults to a NON-ZERO number because that is the ordinary index:
+/// one with folders in it. It is the third number the degraded rule reads, and
+/// it says whether there was anything to embed at all — an index holding no
+/// text has an empty active space for a reason that is not a loss. Passing `0`
+/// builds that other index deliberately.
+function onModel(everywhere: number, active = everywhere, total = 12) {
   return settings({
     key: { kind: 'present' },
     index: {
       kind: 'read', embeddingModel: 'emb-1', chatModel: null,
-      embeddedChunks: active, embeddedChunksEverywhere: everywhere,
+      embeddedChunks: active, embeddedChunksEverywhere: everywhere, totalChunks: total,
       searchTextArm: true, searchContentArm: true,
     },
   });
@@ -1921,6 +1951,83 @@ test('a change that leaves the new space full says nothing about a search going 
   expect(screen.queryByTestId('model-embedding-reembed')).toBeNull();
 });
 
+// ---------------------------------------------------------------------------
+// PR 25 review, P1-1 — the degraded state is a FACT about the index, not a
+// memory of what this component did.
+//
+// It used to open with `changeLanded`, set when a change landed in this
+// component — and this component is destroyed by every section switch. A person
+// who discarded their vectors, went to Folders and came back met a fresh
+// instance with the flag at false and an index the backend still reported as
+// empty: the warning and the button that repairs it were gone, and the
+// connected dot was left as the last word on a search that had gone dark.
+//
+// The three conjuncts get a fixture each, because a fixture that moves two axes
+// at once cannot say which one the code read.
+// ---------------------------------------------------------------------------
+
+test('an index whose active space is empty says so on a section that has just been mounted', async () => {
+  // No press, no change, no history — this section has done nothing at all.
+  // `onModel(0, 0)` is an index on a model, holding 12 chunks of document text,
+  // with nothing embedded in the space it points at.
+  await renderOnModel(onModel(0, 0));
+
+  expect(screen.getByTestId('model-embedding-degraded-note').textContent).toBe(DEGRADED);
+  expect(screen.getByRole('button', { name: 'Embed the index again' })).toBeTruthy();
+  // And the report of a change is NOT invented alongside it: nothing was
+  // discarded here, so nothing may say anything was.
+  expect(screen.queryByTestId('model-embedding-retired')).toBeNull();
+});
+
+test('an index that holds no documents at all is not reported as a search gone dark', async () => {
+  // The other direction of `totalChunks`, and the one an unconditional notice
+  // satisfies: a model is chosen and the active space is empty, exactly as
+  // above — but there is nothing to embed, so the empty space is not a loss and
+  // there is nothing for the button to repair.
+  await renderOnModel(onModel(0, 0, 0));
+
+  expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull();
+  expect(screen.queryByTestId('model-embedding-reembed')).toBeNull();
+});
+
+test('an index with documents and no model chosen says it is not connected, not that a search went dark', async () => {
+  // The direction of the model conjunct. The base fixture holds six chunks and
+  // has adopted nothing, so the active space does not exist rather than being
+  // empty — `models.rs` says on the count itself that this is "the question
+  // does not arise". The screen answers it with the dot, in words a person can
+  // act on, and says nothing about a loss.
+  await renderWith(settings());
+
+  expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull();
+  expect(screen.getByTestId('model-status-dot').textContent).toBe(
+    'Not connected yet — add a key and choose an embedding model to enable content search.',
+  );
+});
+
+// PR 25 review, P1-2. The pass this section starts belongs to the window, not
+// to this component: started with a listener of its own it reported to nobody
+// the moment somebody clicked another section, and the strip stayed idle while
+// the backend job ran on. Asserted here on the controller's own state — the
+// value the strip is drawn from — rather than on the mock alone, which a
+// component calling `startEmbedJob` directly would satisfy just as well.
+test('the recovery pass is started through the window`s controller, not privately', async () => {
+  const jobs = createJobController();
+  mockCatalogues({
+    embedding: catalogueOf([entry('emb-1', { name: 'Embedder One' })]),
+  });
+  setLocale('en');
+  modelSettings.mockResolvedValue(onModel(0, 0));
+  render(Models, { props: { jobs } });
+  await waitFor(() => expect(screen.getByTestId('model-embedding-reembed')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
+
+  await waitFor(() => expect(startEmbedJob).toHaveBeenCalled());
+  // The controller is watching it: this is the state `Indexing.svelte` draws
+  // the pass line and the Stop from.
+  expect(get(jobs.state).phase).toEqual({ kind: 'starting', pass: 'embed' });
+});
+
 test('a rejection shows the backend sentence verbatim and branches from a re-read of the state', async () => {
   const SENTENCE = 'the index is not open';
   setEmbeddingModel.mockRejectedValue(new Error(SENTENCE));
@@ -1935,7 +2042,7 @@ test('a rejection shows the backend sentence verbatim and branches from a re-rea
   mockCatalogues({
     embedding: catalogueOf([entry('emb-1', { name: 'Embedder One' }), entry('emb-2', { name: 'Embedder Two' })]),
   });
-  render(Models);
+  renderModels();
   await waitFor(() => expect(screen.getByTestId('model-entry-emb-2')).toBeTruthy());
 
   await fireEvent.click(screen.getByTestId('model-entry-emb-2'));

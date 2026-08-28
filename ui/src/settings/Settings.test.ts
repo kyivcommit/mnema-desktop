@@ -19,7 +19,7 @@ vi.mock('../lib/ipc', () => ({
   modelSettings: () =>
     Promise.resolve({
       key: { kind: 'absent' },
-      index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
+      index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
       platform: 'linux',
     }),
   setKey: vi.fn(),
@@ -29,6 +29,17 @@ vi.mock('../lib/ipc', () => ({
   listTree: () => Promise.resolve({ roots: [], recents: [] }),
   addWatchedFolder: vi.fn(),
   removeWatchedFolder: vi.fn(),
+  // The window creates the job controller on mount and asks `job_status`
+  // straight away. Left out of this mock the wrapper is `undefined`, the call
+  // throws, and the controller records a REJECTION — so every test in this file
+  // ran with a refused status quietly on screen outside the panel, and the
+  // section Models now reads the job state from would have been mounted beside
+  // one. Answering honestly costs nothing and states what these tests assume:
+  // nothing is running.
+  jobStatus: () => Promise.resolve({ running: false }),
+  startWalkJob: vi.fn(),
+  startEmbedJob: vi.fn(),
+  cancelJob: vi.fn(),
 }));
 
 afterEach(() => {

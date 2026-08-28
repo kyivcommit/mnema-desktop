@@ -1,13 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import {
     modelSettings, setKey, forgetKey, providerModels, setChatModel,
-    setEmbeddingModel, startEmbedJob, jobStatus,
+    setEmbeddingModel, jobStatus,
     type ModelSettings, type KeyRemoval, type Catalogue,
     type ModelEntry, type ModelRefusal, type UnreadableRecord,
     type ExistingVectors, type RetiredSpace,
   } from '../lib/ipc';
+  import type { JobController, JobPhase } from './jobs';
   // Reused rather than re-derived: `providerReady` is the exact PR 3 ruling
   // this section's green dot owes ("provider + key + a chosen embedding
   // model, fail-safe on null/undefined"), already written and tested for the
@@ -15,6 +17,23 @@
   // one message" class this project has paid for 22 times in one cycle — one
   // of the two would eventually read a fixed set of fields differently.
   import { providerReady } from '../launcher/state';
+
+  // The controller, as a PROP — the same rule `Folders` and `Indexing` already
+  // follow, and this section was the one left out. It matters here for two
+  // separate things this component used to keep to itself: the pass it starts
+  // reports on a channel that belongs to whoever started it (`bridge.rs`), so a
+  // listener living in this component is destroyed by the next click on another
+  // section while the backend job runs on — the window-level strip stayed idle,
+  // and the progress and the Cancel went with the listener.
+  //
+  // Required, not optional: a section that quietly starts a pass nothing is
+  // watching is exactly the shape this is here to remove.
+  let { jobs }: { jobs: JobController } = $props();
+  // Read once. The controller is created above this component and its identity
+  // never changes for the life of the window, which is the whole point of it
+  // living there; `$jobState` below is then ordinary auto-subscription.
+  // svelte-ignore state_referenced_locally
+  const jobState = jobs.state;
 
   // §9.1, Task 4 — the provider/key row and the platform-dependent note.
   // Task 5 adds the two model tabs, their lists, and the green-dot rule; the
@@ -69,6 +88,27 @@
       loadError = e instanceof Error ? e.message : String(e);
     });
     void loadCatalogue('embedding');
+    // The index is asked again whenever a pass ends, because an ending is the
+    // one moment the counts `degraded` is read from can have changed. The
+    // listener that used to do this was handed to `startEmbedJob` by this
+    // component, so it only ever heard a pass THIS section started, and only
+    // while this section was mounted. Through the controller it hears every
+    // ending — a walk started from Folders adds chunks to `totalChunks`, and a
+    // chained pass fills the space — which is the same asymmetry argument
+    // `Folders.svelte` makes for its own row: a re-read that finds the same
+    // numbers rewrites them invisibly, a missed one leaves a falsehood on
+    // screen.
+    //
+    // Compared by phase IDENTITY, not by kind: the controller writes a fresh
+    // phase object per event, so a progress report changes the object without
+    // ever being an ending. Seeded with what the store already holds, so a
+    // section switch back does not re-read on the same mount.
+    let seen: JobPhase = get(jobs.state).phase;
+    return jobs.state.subscribe(({ phase }) => {
+      if (phase === seen) return;
+      seen = phase;
+      if (phase.kind === 'ended') void refresh().catch(() => {});
+    });
   });
 
   function startEditing() {
@@ -213,6 +253,9 @@
     retiredReport = null;
     changeError = null;
     jobRunning = false;
+    // Nothing to reset for the re-embedding pass any more: it is read from the
+    // controller, and a tab click does not end a job. A local flag cleared here
+    // said "no pass is running" about a pass that was.
     void loadCatalogue(role);
   }
 
@@ -351,10 +394,6 @@
   // measured by the index at the moment of destruction. A different number
   // from the estimate shown before the act, and never a re-rendering of it.
   let retiredReport = $state<RetiredSpace[] | null>(null);
-  // Whether a change has landed in this session. Without it the degraded
-  // notice below would fire on every index that simply has not been embedded
-  // yet, which is not a loss and not something this screen caused.
-  let changeLanded = $state(false);
   // The backend's own sentence for a rejected `set_embedding_model` or
   // `start_embed_job`, shown verbatim and never branched on.
   let changeError = $state<string | null>(null);
@@ -363,17 +402,22 @@
   // compare-and-exchange that leaves the running job's owner untouched — so a
   // refusal must not draw that job as cancelled or finished.
   let jobRunning = $state(false);
-  // Where the re-embedding pass this section started has got to. `ended` is the
-  // pass's own message and not a timer: the section used to set `started` and
-  // stop, with no listener and no poll, so a pass that finished left the
-  // degraded sentence standing for the rest of the session and a pass that
-  // failed said nothing at all.
-  let reembedPhase = $state<'idle' | 'started' | 'ended'>('idle');
+  // Where the re-embedding pass has got to, read off the CONTROLLER rather than
+  // held here. Two things follow, and both are the point. It survives a section
+  // switch, because the controller does — the pass and the sentence about it no
+  // longer disappear from a window whose backend is still running the job. And
+  // it is true of a pass this section did not start: the sentences below are
+  // about the state of the index, not about who pressed what, so a pass chained
+  // off a walk in Folders is the same news to a person standing here.
+  const phase = $derived($jobState.phase);
+  const embedPassUnderWay = $derived(
+    (phase.kind === 'starting' || phase.kind === 'running') && phase.pass === 'embed',
+  );
+  const embedPassEnded = $derived(phase.kind === 'ended' && phase.pass === 'embed');
 
   function chooseEmbeddingModel(model: string) {
     changeError = null;
     retiredReport = null;
-    reembedPhase = 'idle';
     // The model the index is already on is not a change. It asks nothing and
     // calls nothing: `set_embedding_model` would find the space rather than
     // mint one and retire nothing, and a confirmation offering to discard
@@ -403,11 +447,9 @@
   async function commitEmbedding(model: string, existingVectors: ExistingVectors) {
     pendingEmbedding = null;
     changeError = null;
-    reembedPhase = 'idle';
     try {
       const adopted = await setEmbeddingModel(model, existingVectors);
       retiredReport = adopted.retired;
-      changeLanded = true;
       jobRunning = false;
       await refresh();
     } catch (e) {
@@ -423,37 +465,22 @@
     }
   }
 
+  // 🔴 Through the controller, not through `startEmbedJob` directly. The pass
+  // this section starts is a job like any other: it belongs on the window's
+  // strip, where its progress and its Cancel stay reachable from every section.
+  // Started here with a listener of this component's own, it reported to
+  // nobody the moment somebody clicked another section — the strip stayed idle
+  // while the backend job ran on, and there was no way to stop it.
+  //
+  // Nothing is caught here. A refusal is the controller's to report, in the
+  // same words and the same place as every other refused command; a second
+  // sentence about it beside the button would be the same truth written twice,
+  // and the `job_status` re-read this used to do is the controller's job too.
   async function reembed() {
+    // The report of the change that CAUSED this state is about the previous
+    // act; once a repair has been asked for, its failure sentence is stale.
     changeError = null;
-    try {
-      // The ending is listened for, not assumed. `degraded` is read from the
-      // index's own count, so the sentence clears itself once the pass has
-      // refilled the space — but only if something asks the index again, and
-      // nothing did: the pass reported to a channel whose messages were
-      // dropped. A pass that ENDS is the one moment that count can have
-      // changed, so it is the one moment worth re-reading it.
-      // `startEmbedJob` forwards the whole `JobEvent` (Task 8): only an
-      // ENDING may re-read the index — a re-read per progress report is one
-      // command every 250 ms for the length of the run.
-      await startEmbedJob((event) => {
-        if (event.event === 'ended') void passEnded();
-      });
-      reembedPhase = 'started';
-    } catch (e) {
-      changeError = e instanceof Error ? e.message : String(e);
-      jobRunning = await jobStatus()
-        .then((s) => s.running)
-        .catch(() => false);
-    }
-  }
-
-  // What an ended pass changes on this screen, and it is one thing: the index
-  // is asked again. A pass that filled the space clears `degraded` and takes
-  // this whole block with it; a pass that did not leaves the block standing and
-  // says so, which is more than the nothing it used to say.
-  async function passEnded() {
-    reembedPhase = 'ended';
-    await refresh().catch(() => {});
+    await jobs.embed();
   }
 
   // **The number before the act, and it is `embeddedChunksEverywhere`.** Not
@@ -465,10 +492,35 @@
   // where the two numbers are held apart.
   const estimatedEmbeddings = $derived(indexRead ? indexRead.embeddedChunksEverywhere : 0);
 
-  // Semantic search is dark: a change has landed and the space the index now
-  // points at holds nothing. Read from the active space's own count, because
-  // that is the space `retrieve` hands the KNN.
-  const degraded = $derived(changeLanded && !!indexRead && indexRead.embeddedChunks === 0);
+  // Semantic search is dark: the index points at a vector space, it holds
+  // documents, and that space holds nothing for them.
+  //
+  // 🔴 **Every conjunct is read from the backend, and that is the fix.** This
+  // used to open with `changeLanded`, a flag set when a change landed IN THIS
+  // COMPONENT — and this component is destroyed by every section switch. A
+  // person who discarded their vectors, went to Folders and came back met a
+  // fresh instance with the flag at false and an index the backend still
+  // reported as empty: the warning and the button that repairs it were gone,
+  // and the connected dot was left as the last word on a search that had gone
+  // dark. Derived from durable state instead, the window can re-read the fact
+  // rather than having to remember it — through a remount, through a reopened
+  // window, through a change made in an earlier session.
+  //
+  // `currentEmbeddingModel !== null` is "an active space exists": `models.rs`
+  // warns on `embedded_chunks` itself that zero with no active space means the
+  // question does not arise rather than that nothing is embedded, and
+  // `read_settings` derives the model and the space from one call, so this
+  // field is that test. `totalChunks > 0` is the other half — an index holding
+  // nothing has nothing to embed, and its empty space is not a loss.
+  //
+  // It is WIDER than the flag was, deliberately: an index with a model, with
+  // documents, and with no vectors is dark whether this session made it so or
+  // not, and the sentence and the repair are right in every one of those
+  // states. The flag was narrower only by being forgetful.
+  const degraded = $derived(
+    !!indexRead && currentEmbeddingModel !== null
+    && indexRead.totalChunks > 0 && indexRead.embeddedChunks === 0,
+  );
 
   const confirmLabels = $derived.by(() => {
     void $locale;
@@ -745,9 +797,9 @@
       type="button"
       data-testid="model-embedding-reembed"
       onclick={reembed}>{degradedLabels.reembed}</button>
-    {#if reembedPhase === 'started'}
+    {#if embedPassUnderWay}
       <p data-testid="model-embedding-reembed-started">{degradedLabels.started}</p>
-    {:else if reembedPhase === 'ended'}
+    {:else if embedPassEnded}
       <p data-testid="model-embedding-reembed-ended">{degradedLabels.ended}</p>
     {/if}
   </div>

@@ -34,7 +34,8 @@ const READY_SETTINGS = {
   key: { kind: 'present' },
   index: {
     kind: 'read', embeddingModel: 'openai/text-embedding-3-small', chatModel: null,
-    embeddedChunks: 12, embeddedChunksEverywhere: 12, searchTextArm: true, searchContentArm: true,
+    embeddedChunks: 12, embeddedChunksEverywhere: 12, totalChunks: 12,
+    searchTextArm: true, searchContentArm: true,
   },
   platform: 'linux',
 };
@@ -551,6 +552,182 @@ test('an embedding pass stopping for a walk-only reason is not drawn as a finish
   // chunks over the whole index, not documents in the folder that was pressed.
   expect(visible(screen.getByTestId('indexing-embed-result')))
     .toBe('Вбудовано фрагментів: 11 з 11. Відхилено: 0.');
+});
+
+// ---------------------------------------------------------------------------
+// PR 25 review, P1-1 and P1-2 — state that must outlive a section used to live
+// inside it.
+//
+// `Models` was the one section rendered without the controller, and inside the
+// section conditional, so every click on another nav item destroyed it. Two
+// things died with it: the flag the degraded warning was conditioned on, and
+// the listener the recovery pass reported to.
+//
+// These are read on the WINDOW, along the path a person actually walks —
+// discard, leave, come back — because both defects are invisible to anything
+// that renders the section on its own and never unmounts it.
+// ---------------------------------------------------------------------------
+
+const DEGRADED_UK =
+  'Пошук за змістом недоступний, доки індекс не буде вбудовано наново. Пошук за словами працює далі.';
+const READY_UK = 'Підключено — OpenRouter, ключ і обрана модель embedding готові.';
+
+/// The window's settings as `model_settings` answers them: an index on `emb-1`
+/// holding `total` chunks of document text, with `active` of them embedded in
+/// the space it points at.
+const onModel = (active: number, everywhere = active, total = 12) => ({
+  key: { kind: 'present' },
+  index: {
+    kind: 'read', embeddingModel: 'emb-1', chatModel: null,
+    embeddedChunks: active, embeddedChunksEverywhere: everywhere, totalChunks: total,
+    searchTextArm: true, searchContentArm: true,
+  },
+  platform: 'linux',
+});
+
+const model = (id: string, name: string) => ({
+  id, name, inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, refusal: null,
+});
+
+/// Opens the window on Models with two models to choose between, and drives the
+/// change that takes semantic search away: press the other model, confirm, and
+/// let `model_settings` answer with the index the change leaves behind.
+async function discardOnModels() {
+  replies.model_settings = onModel(7);
+  replies.provider_models = {
+    entries: [model('emb-1', 'Embedder One'), model('emb-2', 'Embedder Two')],
+    unreadable: 0, unreadableRecords: [],
+  };
+  replies.set_embedding_model = {
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 4 }], index: onModel(0).index,
+  };
+  setLocale('uk');
+  const rendered = render(Settings);
+  await screen.findByTestId('model-entry-emb-2');
+
+  // What the index says once the change has landed: a new space, and nothing
+  // in it. Twelve chunks of text are still there, waiting to be embedded.
+  replies.model_settings = onModel(0);
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+  await waitFor(() => expect(screen.getByTestId('model-embedding-degraded-note')).toBeTruthy());
+  return rendered;
+}
+
+const toModels = async () => {
+  await fireEvent.click(screen.getByTestId('settings-nav-models'));
+  await screen.findByTestId('model-status-dot');
+};
+const toFolders = async () => {
+  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
+  await screen.findByTestId('folder-row-4');
+};
+
+// 🔴 The whole finding, read as a person reads it. Before the fix this window
+// came back showing a green dot and nothing else: the warning and the button
+// that repairs the loss were both gone, while the backend went on reporting an
+// empty active space.
+test('the warning about a search gone dark survives leaving the section and coming back', async () => {
+  const { container } = await discardOnModels();
+  expect(container.textContent).toContain(DEGRADED_UK);
+
+  await toFolders();
+  await toModels();
+
+  // Every line of it, in the order the section draws them.
+  expect(screen.getByTestId('model-embedding-degraded-note').textContent).toBe(DEGRADED_UK);
+  expect(screen.getByRole('button', { name: 'Вбудувати індекс наново' })).toBeTruthy();
+  const text = container.textContent ?? '';
+  // The dot still says what it has always said — provider, key and a chosen
+  // model — and it no longer has the last word: the loss is stated after it,
+  // which is the ruling Task 6's review settled and the vanishing warning had
+  // silently undone.
+  expect(text).toContain(READY_UK);
+  expect(text.indexOf(READY_UK)).toBeLessThan(text.indexOf(DEGRADED_UK));
+});
+
+// The other direction of the same re-read, and the one a warning that never
+// goes away would satisfy: the index refilled, so there is nothing left to say.
+test('a section coming back to a refilled index says nothing about a search gone dark', async () => {
+  const { container } = await discardOnModels();
+
+  replies.model_settings = onModel(12);
+  await toFolders();
+  await toModels();
+
+  expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull();
+  expect(screen.queryByTestId('model-embedding-reembed')).toBeNull();
+  expect(container.textContent).toContain(READY_UK);
+});
+
+// 🔴 P1-2. The pass reported to a listener inside the section, so switching
+// away unmounted the only observer while the backend job ran on: the strip
+// stayed idle, and the progress and the Cancel were gone.
+test('the recovery pass keeps reporting, and stays stoppable, after a section switch', async () => {
+  await discardOnModels();
+
+  await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+  channelOf('start_embed_job')(progressEvent({ done: 3, total: 12 }));
+  await tick();
+
+  // On the section it was started from, first.
+  expect(screen.getByTestId('indexing-pass').textContent).toBe('Триває вбудовування всього індексу.');
+  expect(screen.getByTestId('indexing-counts').textContent).toBe('Опрацьовано 3 з 12. Пропущено: 1. Відхилено: 0.');
+
+  await toFolders();
+
+  // And from a section that knows nothing about models: the strip is the
+  // window's status line, and the pass is the window's.
+  expect(screen.getByTestId('indexing-pass').textContent).toBe('Триває вбудовування всього індексу.');
+  expect(screen.getByTestId('indexing-counts').textContent).toBe('Опрацьовано 3 з 12. Пропущено: 1. Відхилено: 0.');
+  await fireEvent.click(screen.getByTestId('indexing-cancel'));
+  expect(calls('cancel_job')).toHaveLength(1);
+
+  // And the ending reaches the window wherever the person is standing.
+  channelOf('start_embed_job')(endedEvent({ reason: 'cancelled' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-embed-outcome')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-embed-outcome')))
+    .toBe('Вбудовування зупинено на ваше прохання.');
+});
+
+// The pass ending is what asks the index again, and the section is watching the
+// controller for it: the warning clears itself, with the person standing on the
+// section and pressing nothing. Written against the WINDOW because the listener
+// this replaced was handed to `startEmbedJob` by the section — it heard a pass
+// this section started, and only that one.
+test('a pass that repairs the index clears the warning while the section is on screen', async () => {
+  const { container } = await discardOnModels();
+  await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+  expect(screen.getByTestId('model-embedding-reembed-started').textContent).toBe('Вбудовування почалося.');
+
+  // What the index says once the pass has filled the space.
+  replies.model_settings = onModel(12);
+  channelOf('start_embed_job')(endedEvent());
+
+  await waitFor(() => expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull());
+  expect(screen.queryByTestId('model-embedding-reembed')).toBeNull();
+  expect(container.textContent).toContain(READY_UK);
+});
+
+// The same ending with the person standing somewhere else. Models is unmounted
+// then, so its own listener is not what answers here — the mount's read is, on
+// the way back. Both paths lead to the same screen, and this is the one the
+// section's subscription CANNOT cover, so it is asserted rather than assumed.
+test('a pass that ends while another section is on screen leaves nothing stale to come back to', async () => {
+  await discardOnModels();
+  await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
+  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+
+  await toFolders();
+  replies.model_settings = onModel(12);
+  channelOf('start_embed_job')(endedEvent());
+  await waitFor(() => expect(screen.getByTestId('indexing-embed-outcome')).toBeTruthy());
+
+  await toModels();
+  expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull();
 });
 
 // ---------------------------------------------------------------------------

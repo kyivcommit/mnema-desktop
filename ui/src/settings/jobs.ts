@@ -161,6 +161,12 @@ export type JobController = {
   /// Runs the walk for ONE watched root, then chains the embedding pass if the
   /// folder was read and both preconditions hold.
   scan(rootId: number): Promise<void>;
+  /// Runs the embedding pass on its own, with the same two preconditions the
+  /// chained one checks. This is the recovery act the Models section offers
+  /// when the active space is empty — it goes through the controller so the
+  /// pass reports to the window's own strip rather than to a listener inside a
+  /// section, which the next click destroys.
+  embed(): Promise<void>;
   cancel(): Promise<void>;
   /// Asks the backend whether a job is running. Only ever writes over `idle` or
   /// `runningUnobserved` — see the guard's own comment.
@@ -168,6 +174,16 @@ export type JobController = {
 };
 
 const sentenceOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/// A phase this window wrote in anticipation of a pass that then never
+/// started, taken back off. `scan`'s catch makes the same move for the same
+/// reason: a strip left saying something is starting, when nothing is, offers a
+/// Cancel for a job that does not exist.
+///
+/// Only `starting` is touched. In the CHAINED case the phase at this point is
+/// the walk's own ending, and that report must stay on screen — the walk really
+/// did run, whatever the pass after it did.
+const notStarted = (phase: JobPhase): JobPhase => (phase.kind === 'starting' ? { kind: 'idle' } : phase);
 
 export function createJobController(): JobController {
   const store = writable<JobState>({ phase: { kind: 'idle' }, walk: null, note: null });
@@ -220,7 +236,9 @@ export function createJobController(): JobController {
       settings = await modelSettings();
     } catch (e) {
       if (gen !== operation) return;
-      store.update((s) => ({ ...s, note: { kind: 'rejected', sentence: sentenceOf(e) } }));
+      store.update((s) => ({
+        ...s, phase: notStarted(s.phase), note: { kind: 'rejected', sentence: sentenceOf(e) },
+      }));
       return;
     }
     // Checked HERE rather than on the way in: what makes this continuation
@@ -229,14 +247,14 @@ export function createJobController(): JobController {
     // superseded walk may write none of it — not the note, not the phase.
     if (gen !== operation) return;
     if (settings.key.kind !== 'present') {
-      store.update((s) => ({ ...s, note: { kind: 'noKey' } }));
+      store.update((s) => ({ ...s, phase: notStarted(s.phase), note: { kind: 'noKey' } }));
       return;
     }
     // `typeof === 'string'` rather than a truthiness or null check: a field
     // renamed away on the wire reads as `undefined`, and the safe side of that
     // mistake is "no model chosen", never "chosen".
     if (settings.index.kind !== 'read' || typeof settings.index.embeddingModel !== 'string') {
-      store.update((s) => ({ ...s, note: { kind: 'noModel' } }));
+      store.update((s) => ({ ...s, phase: notStarted(s.phase), note: { kind: 'noModel' } }));
       return;
     }
     store.update((s) => ({ ...s, phase: { kind: 'starting', pass: 'embed' } }));
@@ -281,6 +299,24 @@ export function createJobController(): JobController {
     }
   }
 
+  // The recovery pass, asked for by a person rather than chained off a walk.
+  // Two things differ from the chained call and both follow from that.
+  //
+  // It clears what came before. A walk's report and its note are about the act
+  // that produced them; left standing beside a pass somebody has just asked for
+  // by hand, they read as this pass's own report. The chained call must NOT do
+  // this — there the walk's ending is exactly what has to stay.
+  //
+  // And it writes `starting` before the awaits, so the press has a visible
+  // answer while the two preconditions are being read — the same opening
+  // `scan` makes, and `notStarted` above is what takes it back off if the
+  // pass turns out not to start.
+  async function embed() {
+    const gen = ++operation;
+    store.set({ phase: { kind: 'starting', pass: 'embed' }, walk: null, note: null });
+    await chain(gen);
+  }
+
   async function cancel() {
     try {
       await cancelJob();
@@ -315,5 +351,5 @@ export function createJobController(): JobController {
       : s));
   }
 
-  return { state: { subscribe: store.subscribe }, scan, cancel, syncFromStatus };
+  return { state: { subscribe: store.subscribe }, scan, embed, cancel, syncFromStatus };
 }
