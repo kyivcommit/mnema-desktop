@@ -74,12 +74,18 @@ case_ "the embedding role must get the embedding model, not the chat one" \
             DEFAULT_MODELS.chat,' \
   mnema-desktop 'the_first_key_chooses_this_products_model_for_every_role_the_index_has_none_for' --test model_commands
 
-# The job slot, taken and dropped in the same statement — the `let _` that
-# `set_embedding_model`'s own comment warns about, one function over. The claim
-# still succeeds or fails exactly as before; what changes is that nothing is held
-# while the adoption repoints `meta.active_space` under a pass that is reading it.
-case_ "the slot must be held while the default is adopted, not merely claimed" \
+# The job slot, not taken at all: the default is adopted while a pass is
+# reading `meta.active_space`, and the index is repointed under it.
+#
+# ⚠️ **The narrower mutant is deliberately NOT here, and it is a real gap.**
+# `let _slot` written as `let _` claims the slot and drops it in the same
+# statement — the mistake `set_embedding_model`'s own comment warns about one
+# function over. It was written as a case, run, and **survived**: with the slot
+# already taken the claim fails either way, and what the binding protects is the
+# window between the claim and the adoption, which needs a job to start inside
+# one call. No test in this suite can build that, and none here pretends to.
+case_ "the slot must be taken before the default is adopted" \
   src-tauri/src/models.rs \
-  's{    let Ok\(_slot\) = state\.claim_job\(\) else \{}{    let Ok(_) = state.claim_job() else \{}' \
-  '    let Ok(_) = state.claim_job() else {' \
+  's{    let Ok\(_slot\) = state\.claim_job\(\) else \{\n        return;\n    \};}{    let _slot = ();}' \
+  '    let _slot = ();' \
   mnema-desktop 'a_key_entered_while_a_job_runs_stores_the_key_and_moves_no_pointer' --test model_commands
