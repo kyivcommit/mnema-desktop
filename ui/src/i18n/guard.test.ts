@@ -9,22 +9,65 @@ const CYRILLIC = /[Ѐ-ӿ]/;
 // entry written for the first one silently forgave its unrelated neighbour.
 const LATIN_RUN = /[A-Za-z]{2,}/g;
 
-// Attributes whose quoted value a person reads on screen. Everything else
-// (`class`, `data-testid`, `role`, `type`, `id`, `src`, …) is machine-facing and
-// stays hidden — as does every attribute whose value is a `{expression}`,
-// because a catalogue call is exactly what this guard wants written there.
-const VISIBLE_ATTRS = new Set([
-  'aria-label',
-  'aria-placeholder',
-  'aria-roledescription',
-  'aria-valuetext',
-  'aria-description',
-  'aria-keyshortcuts',
-  'title',
-  'placeholder',
-  'alt',
-  'label',
+// Attribute names whose value is never prose. Every attribute NOT named here
+// has its string value scanned, which is the point: naming the readable ones
+// instead would be a closed list over an open set, and every component prop a
+// later screen invents (`<Models heading="Providers" />`) would join that set
+// unguarded. A wrong entry below costs one false positive — loud, and one line
+// to fix. A name missing from an inclusion list ships English to a person in
+// silence. The guard has to fail in the loud direction.
+//
+// Values that are `{expressions}` are never scanned whatever the name, because
+// a catalogue call is exactly what this guard wants written there.
+const MACHINE_ATTRS = new Set([
+  // Selector hooks and slots: names the stylesheet and the tests reach for.
+  'class', 'id', 'style', 'slot', 'part', 'exportparts', 'key',
+  // URLs, paths and MIME types: addresses, not sentences.
+  'href', 'src', 'srcset', 'imagesrcset', 'sizes', 'action', 'formaction',
+  'poster', 'cite', 'ping', 'manifest', 'integrity', 'xmlns', 'accept', 'media',
+  // Wiring: one element naming another, or naming itself to a form.
+  'name', 'for', 'form', 'list', 'headers', 'itemprop', 'itemtype', 'itemid',
+  // Values drawn from a grammar the HTML spec fixes, not from the catalogue.
+  'role', 'type', 'method', 'enctype', 'rel', 'target', 'kind', 'scope',
+  'shape', 'preload', 'sandbox', 'as', 'blocking', 'capture', 'decoding',
+  'loading', 'fetchpriority', 'referrerpolicy', 'crossorigin', 'wrap',
+  'autocomplete', 'inputmode', 'enterkeyhint', 'autocapitalize', 'spellcheck',
+  'translate', 'contenteditable', 'draggable', 'popover', 'popovertargetaction',
+  'formmethod', 'formtarget', 'formenctype', 'dir', 'lang', 'hreflang',
+  // Numbers and machine-readable dates: no prose can hide in them.
+  'width', 'height', 'size', 'rows', 'cols', 'span', 'colspan', 'rowspan',
+  'start', 'min', 'max', 'step', 'maxlength', 'minlength', 'tabindex', 'datetime',
+  // ARIA attributes that hold an id reference — the id, never its text.
+  'aria-controls', 'aria-labelledby', 'aria-describedby', 'aria-details',
+  'aria-owns', 'aria-flowto', 'aria-activedescendant', 'aria-errormessage',
+  // ARIA attributes whose value is a token, a boolean or a number fixed by the
+  // ARIA spec. `aria-hidden="true"` reads as English but nobody reads it.
+  'aria-live', 'aria-haspopup', 'aria-current', 'aria-sort', 'aria-orientation',
+  'aria-autocomplete', 'aria-relevant', 'aria-dropeffect', 'aria-hidden',
+  'aria-expanded', 'aria-selected', 'aria-checked', 'aria-pressed',
+  'aria-disabled', 'aria-readonly', 'aria-required', 'aria-invalid',
+  'aria-modal', 'aria-atomic', 'aria-busy', 'aria-multiline',
+  'aria-multiselectable', 'aria-level', 'aria-posinset', 'aria-setsize',
+  'aria-colcount', 'aria-colindex', 'aria-colspan', 'aria-rowcount',
+  'aria-rowindex', 'aria-rowspan', 'aria-valuemax', 'aria-valuemin',
+  'aria-valuenow',
+  // SVG geometry and paint: coordinates and colour keywords.
+  'd', 'points', 'viewbox', 'transform', 'fill', 'stroke', 'stroke-width',
+  'stroke-linecap', 'stroke-linejoin', 'stroke-dasharray', 'fill-rule',
+  'clip-rule', 'vector-effect', 'preserveaspectratio', 'gradientunits',
+  'patternunits', 'pathlength', 'text-anchor', 'dominant-baseline',
+  'font-family', 'font-size', 'font-weight', 'opacity', 'stop-color',
+  'stop-opacity', 'offset', 'cx', 'cy', 'rx', 'ry', 'x1', 'y1', 'x2', 'y2',
 ]);
+
+function isMachineAttr(attr: string): boolean {
+  // `data-*` is an author-defined hook for scripts and tests by definition.
+  if (attr.startsWith('data-')) return true;
+  // A colon means a Svelte directive (`bind:`, `use:`, `class:`, `transition:`)
+  // or an XML namespace (`xlink:href`): the value is code or a machine name.
+  if (attr.includes(':')) return true;
+  return MACHINE_ATTRS.has(attr);
+}
 
 // Tags whose body is raw text rather than markup: nothing inside them is read.
 const RAW_BLOCKS = new Set(['script', 'style']);
@@ -149,6 +192,8 @@ function scanTag(src: string, start: number): Tag | null {
     // out on zero progress is also what keeps this loop guaranteed to advance.
     if (i === attrStart) return null;
     const attr = src.slice(attrStart, i).toLowerCase();
+    // Inverted rule: an attribute nobody thought to classify is scanned.
+    const prose = !isMachineAttr(attr);
     let j = i;
     while (j < src.length && /\s/.test(src[j])) j++;
     if (src[j] !== '=') continue; // valueless attribute (`disabled`, `hidden`)
@@ -162,15 +207,18 @@ function scanTag(src: string, start: number): Tag | null {
       // Windows path in a `title` — `C:\path` — behave differently by accident.
       const close = src.indexOf(q, j + 1);
       if (close === -1) return null;
-      if (VISIBLE_ATTRS.has(attr)) visible.push([j + 1, close]);
+      if (prose) visible.push([j + 1, close]);
       i = close + 1;
     } else if (q === '{') {
       const end = exprEnd(src, j);
       if (end === -1) return null;
       i = end;
     } else {
+      // An unquoted value (`title=Hello`) is still a value a person reads, and
+      // leaving it out would be a hole in the very rule above.
       i = j;
       while (i < src.length && !/[\s>]/.test(src[i])) i++;
+      if (prose) visible.push([j, i]);
     }
   }
 }
@@ -428,7 +476,8 @@ describe('Svelte hardcode guard', () => {
       .toEqual(['2: Sections', '2: Not', '2: ready', '2: Filter', '3: Model', '3: diagram']);
 
     const machine = `<main>
-  <div class="snav wide" data-testid="section-models" role="navigation">{x}</div>
+  <div class="snav wide" data-testid="section-models" role="navigation" type="button">{x}</div>
+  <p aria-labelledby="not-ready-note" aria-hidden="true" lang="en">{y}</p>
 </main>
 `;
     expect(latinOffenses('f.svelte', machine)).toEqual([]);
@@ -438,6 +487,35 @@ describe('Svelte hardcode guard', () => {
     // `aria-pressed="files"` and invents an offender that does not exist.
     const expressions = "<main>\n  <button title={t('x')} aria-pressed={tab === 'files'}>{y}</button>\n</main>\n";
     expect(latinOffenses('f.svelte', expressions)).toEqual([]);
+  });
+
+  // Kills: the rule inverted back to an inclusion list of readable attribute
+  // names. `heading` is on nobody's list — that is the whole point. Every screen
+  // this PR series still has to write mounts components with props like it, and
+  // an inclusion list would pass each one in silence until someone remembered
+  // to add the name. The exclusion list gets a loud false positive instead.
+  it('an attribute nobody classified is scanned, not ignored', () => {
+    expect(latinOffenses('f.svelte', '<main>\n  <Models heading="Recent files" />\n</main>\n'))
+      .toEqual(['2: Recent', '2: files']);
+    expect(latinOffenses('f.svelte', '<main>\n  <Folders caption="Watched folders" summary="None yet" />\n</main>\n'))
+      .toEqual(['2: Watched', '2: folders', '2: None', '2: yet']);
+    // …while the machine vocabulary stays excluded, by name and by prefix.
+    // Each excluded value here carries a Latin run of its own, or the branch
+    // that excludes it is never reached and the assertion proves nothing.
+    expect(latinOffenses('f.svelte', '<main>\n  <Models class="side pane" data-testid="models-pane" />\n</main>\n'))
+      .toEqual([]);
+    expect(latinOffenses('f.svelte', '<main>\n  <svg><use xlink:href="#tree-icon" /></svg>\n  <p xml:lang="en" on:click="reset()">{x}</p>\n</main>\n'))
+      .toEqual([]);
+  });
+
+  // Kills: unquoted attribute values left unscanned. HTML allows `title=Hello`
+  // and it renders exactly like the quoted form, so skipping it would be a hole
+  // in the rule directly above.
+  it('an unquoted attribute value is read too', () => {
+    expect(latinOffenses('f.svelte', '<main>\n  <button title=Hello>{x}</button>\n</main>\n'))
+      .toEqual(['2: Hello']);
+    expect(latinOffenses('f.svelte', '<main>\n  <div class=snav data-testid=pane>{x}</div>\n</main>\n'))
+      .toEqual([]);
   });
 
   // Kills: one `exec` per line; and `<` in a text node swallowing up to the
