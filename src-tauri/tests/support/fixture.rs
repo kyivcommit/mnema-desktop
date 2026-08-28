@@ -93,6 +93,15 @@ impl Fixture {
         Self::with_provider_answering_with_dimension(DEFAULT_DIM as usize)
     }
 
+    /// The default width, and `checks` embedding checks rather than one.
+    ///
+    /// A test that sets the key and *then* chooses a model itself needs two:
+    /// `set_key` spends the first adopting the default, and the test spends the
+    /// second. One short and the mock answers its `599` sentinel.
+    pub fn with_provider_accepting_everything_for(checks: usize) -> Self {
+        Self::with_provider_answering_embedding_checks(DEFAULT_DIM as usize, checks)
+    }
+
     /// The same two answers, with the embedding check answering vectors `width`
     /// components wide.
     ///

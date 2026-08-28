@@ -229,11 +229,25 @@ fn an_absent_key_is_an_answer_rather_than_a_failure() {
 
 #[test]
 fn the_key_never_reaches_the_database_file() {
-    let fx = Fixture::with_provider_accepting_everything();
+    // Two embedding checks, not the usual one: `set_key` spends the first
+    // adopting the default model, and this test spends the second on the write
+    // it is here to watch. One short and the mock answers its `599` sentinel.
+    let fx = Fixture::with_provider_accepting_everything_for(2);
     fx.open_index();
 
     set_key(fx.state(), KEY.into()).expect("accepted");
     fx.adopt_default_model();
+
+    // Adopted here rather than left to the fixture, and that is the whole
+    // repair. `adopt_default_model` used to call `set_embedding_model`; once
+    // `set_key` began choosing the defaults itself, the helper became a read
+    // and an assertion — correct for what it now says, and it took this test's
+    // only pass through the write with it. The mutation this test exists to
+    // catch replaces the model name with the key in exactly that write, so a
+    // test that never reaches the write cannot see it, and did not: the case
+    // stood green while the guard it names had stopped running.
+    set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect("nothing is embedded yet, so keeping the vectors cannot refuse");
 
     // Half one of the positive control. Every assertion below is an assertion
     // of absence, and absence is what a key that was never stored anywhere
