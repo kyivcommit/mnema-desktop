@@ -2359,6 +2359,14 @@ test('the index label and its sentence read as two things too', async () => {
   const text = visible(container);
   expect(text).toContain('Index: The index is not open yet.');
   expect(text).not.toContain('Index The index is not open yet.');
+
+  // Both locales, because the separator is a per-locale decision written into
+  // each string: the English half alone left the Ukrainian label's colon
+  // defended by nothing, and removing it was green across the whole suite.
+  await switchTo('uk');
+  const uk = visible(container);
+  expect(uk).toContain('Індекс: Індекс ще не відкрито.');
+  expect(uk).not.toContain('Індекс Індекс ще не відкрито.');
 });
 
 // And one row lower again, on the branch a provider listing a model this build

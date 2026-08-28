@@ -161,6 +161,14 @@ test('each row shows its document count, and a zero-file root says zero rather t
   // index, not the folder — see the comment on that key in catalog.ts.
   expect(screen.getByText(t('settings_folders_indexed', { count: 3 }))).toBeTruthy();
   expect(screen.getByText(t('settings_folders_indexed', { count: 0 }))).toBeTruthy();
+  // And the literal beside it, for the half `t()` cannot see. A message read
+  // through the same catalogue the component reads changes with it: strip the
+  // colon from the English string and both sides of the assertion above move
+  // together, still equal, still green — the symmetric weakening this project
+  // has already paid for. The Ukrainian row states its literal for this reason
+  // (below); the English one did not, and its separator was undefended.
+  expect(screen.getByText('Indexed: 3 documents')).toBeTruthy();
+  expect(screen.getByText('Indexed: 0 documents')).toBeTruthy();
 });
 
 test('a rejected add shows the backend sentence verbatim, and the list keeps its prior state', async () => {
