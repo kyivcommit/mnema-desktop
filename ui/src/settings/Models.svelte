@@ -204,6 +204,15 @@
     // change it would sit under the chat list offering to discard embeddings
     // for a model that is not on screen any more.
     pendingEmbedding = null;
+    // And so are the two sentences a press leaves behind. "The change discarded
+    // 4 embeddings…" and a rejection are reports on an act performed from the
+    // embedding list; under the chat list they are a report about nothing the
+    // person can see. The degraded notice deliberately stays: it is a fact about
+    // the product's state rather than about a press, and it carries the one
+    // control that repairs it.
+    retiredReport = null;
+    changeError = null;
+    jobRunning = false;
     void loadCatalogue(role);
   }
 
@@ -343,12 +352,17 @@
   // compare-and-exchange that leaves the running job's owner untouched — so a
   // refusal must not draw that job as cancelled or finished.
   let jobRunning = $state(false);
-  let reembedStarted = $state(false);
+  // Where the re-embedding pass this section started has got to. `ended` is the
+  // pass's own message and not a timer: the section used to set `started` and
+  // stop, with no listener and no poll, so a pass that finished left the
+  // degraded sentence standing for the rest of the session and a pass that
+  // failed said nothing at all.
+  let reembedPhase = $state<'idle' | 'started' | 'ended'>('idle');
 
   function chooseEmbeddingModel(model: string) {
     changeError = null;
     retiredReport = null;
-    reembedStarted = false;
+    reembedPhase = 'idle';
     // The model the index is already on is not a change. It asks nothing and
     // calls nothing: `set_embedding_model` would find the space rather than
     // mint one and retire nothing, and a confirmation offering to discard
@@ -360,7 +374,15 @@
     // destroys, so pressing cannot cost anything. This is the recovering act
     // `set_embedding_model`'s own doc names for the state a failed adoption
     // leaves behind: choosing a model again succeeds and rewrites the pointer.
-    if (!indexRead) {
+    //
+    // An index that holds no embeddings ANYWHERE takes the same path, and for
+    // the same reason: there is nothing to lose, so there is nothing to ask
+    // about. `Keep` is what goes on the wire —
+    // `Db::refuse_unless_every_other_space_is_empty` refuses it exactly when
+    // some other space is non-empty, which is the count this branch has just
+    // read as zero, so the value that would refuse is the value that cannot
+    // refuse here.
+    if (!indexRead || estimatedEmbeddings === 0) {
       void commitEmbedding(model, 'keep');
       return;
     }
@@ -370,7 +392,7 @@
   async function commitEmbedding(model: string, existingVectors: ExistingVectors) {
     pendingEmbedding = null;
     changeError = null;
-    reembedStarted = false;
+    reembedPhase = 'idle';
     try {
       const adopted = await setEmbeddingModel(model, existingVectors);
       retiredReport = adopted.retired;
@@ -393,14 +415,29 @@
   async function reembed() {
     changeError = null;
     try {
-      await startEmbedJob();
-      reembedStarted = true;
+      // The ending is listened for, not assumed. `degraded` is read from the
+      // index's own count, so the sentence clears itself once the pass has
+      // refilled the space — but only if something asks the index again, and
+      // nothing did: the pass reported to a channel whose messages were
+      // dropped. A pass that ENDS is the one moment that count can have
+      // changed, so it is the one moment worth re-reading it.
+      await startEmbedJob(() => void passEnded());
+      reembedPhase = 'started';
     } catch (e) {
       changeError = e instanceof Error ? e.message : String(e);
       jobRunning = await jobStatus()
         .then((s) => s.running)
         .catch(() => false);
     }
+  }
+
+  // What an ended pass changes on this screen, and it is one thing: the index
+  // is asked again. A pass that filled the space clears `degraded` and takes
+  // this whole block with it; a pass that did not leaves the block standing and
+  // says so, which is more than the nothing it used to say.
+  async function passEnded() {
+    reembedPhase = 'ended';
+    await refresh().catch(() => {});
   }
 
   // **The number before the act, and it is `embeddedChunksEverywhere`.** Not
@@ -422,7 +459,11 @@
     return {
       title: t('models_embedding_confirm_title'),
       estimate: t('models_embedding_confirm_estimate', { count: estimatedEmbeddings }),
-      keep: t('models_embedding_keep'),
+      // The loss, named BEFORE it happens, which is the whole question this
+      // window is here to answer honestly. The same fact used to be stated only
+      // by `models_embedding_degraded`, rendered after the irreversible act —
+      // a report, not a warning.
+      loss: t('models_embedding_confirm_loss'),
       discard: t('models_embedding_discard'),
       cancel: t('models_embedding_cancel'),
     };
@@ -445,6 +486,11 @@
       sentence: t('models_embedding_degraded'),
       reembed: t('models_embedding_reembed'),
       started: t('models_embedding_reembed_started'),
+      // Only ever rendered inside the degraded block, which is what makes the
+      // second half of this sentence true whenever it is on screen: a pass that
+      // had filled the space would have cleared `degraded` and taken the
+      // sentence with it.
+      ended: t('models_embedding_reembed_ended'),
     };
   });
 
@@ -615,6 +661,16 @@
   {/if}
 {/if}
 
+<!-- ABOVE everything Task 6 renders, and that is a correction rather than a
+     layout preference. The dot answers "provider, key and a chosen embedding
+     model are all set" — which stays true through a change that has just taken
+     semantic search away — so drawn last it had the final word, and the section
+     ended "Search by meaning is unavailable…" followed by "Connected". A change
+     that returns to a green dot and says nothing is a promise the product
+     cannot keep; the sentences about what just happened come after it now, and
+     the last word on the screen is the loss rather than the reassurance. -->
+<p data-testid="model-status-dot" data-active={ready ? 'true' : 'false'}>{ready ? readyLabel : notReadyLabel}</p>
+
 <!-- Task 6. The question comes before the act, the report after it, and they
      carry two different numbers about two different moments — the estimate is
      read from the index now, and what actually went is measured by the index
@@ -624,15 +680,20 @@
   <div class="group" data-testid="model-embedding-confirm">
     <p data-testid="model-embedding-confirm-title">{confirmLabels.title}</p>
     <p data-testid="model-embedding-estimate">{confirmLabels.estimate}</p>
+    <!-- The consequence, in the window that can still be cancelled. It is the
+         Global Constraint this task is measured against: what a person loses by
+         picking a different embedding model, said BEFORE it happens. -->
+    <p data-testid="model-embedding-confirm-loss">{confirmLabels.loss}</p>
     <div class="field">
-      <!-- Two named buttons and no default. `ExistingVectors` has no `Default`
-           and no `#[serde(default)]` on purpose: only one of the two can be
-           undone, so the person chooses and this component never chooses for
-           them. -->
-      <button
-        type="button"
-        data-testid="model-embedding-keep"
-        onclick={() => commitEmbedding(chosen, 'keep')}>{confirmLabels.keep}</button>
+      <!-- One act and one refusal, and no `Keep` between them. The index will
+           not honour `Keep` here: `refuse_unless_every_other_space_is_empty`
+           enumerates every space but the requested one — which is `None` for a
+           model that has no space yet — so any non-empty space anywhere refuses,
+           and that set is exactly the estimate above being above zero. Offering
+           it handed the cautious person a rejection and a raw backend sentence
+           instead of the safety they reached for. `ExistingVectors` still has no
+           `Default` and no `#[serde(default)]`: the value is named at each call
+           site, and this component never lets a library choose it. -->
       <button
         type="button"
         data-testid="model-embedding-discard"
@@ -654,8 +715,10 @@
       type="button"
       data-testid="model-embedding-reembed"
       onclick={reembed}>{degradedLabels.reembed}</button>
-    {#if reembedStarted}
+    {#if reembedPhase === 'started'}
       <p data-testid="model-embedding-reembed-started">{degradedLabels.started}</p>
+    {:else if reembedPhase === 'ended'}
+      <p data-testid="model-embedding-reembed-ended">{degradedLabels.ended}</p>
     {/if}
   </div>
 {/if}
@@ -666,8 +729,6 @@
   <p data-testid="model-embedding-error">{changeError}</p>
   {#if jobRunning}<p data-testid="model-job-running">{jobRunningLabel}</p>{/if}
 {/if}
-
-<p data-testid="model-status-dot" data-active={ready ? 'true' : 'false'}>{ready ? readyLabel : notReadyLabel}</p>
 
 <!-- Last, and outside `{#if settings}` only because `indexFailure` already
      answers `null` without settings: the index sentence is a defect report a

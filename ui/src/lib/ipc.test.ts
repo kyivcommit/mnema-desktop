@@ -12,7 +12,15 @@ import {
 } from './fixtures';
 
 const invoke = vi.fn();
-vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...a: unknown[]) => invoke(...a),
+  // Tauri's `Channel` as far as this module uses it: something with an
+  // `onmessage` the runtime calls. Declared inside the factory because
+  // `vi.mock` is hoisted above every binding in this file.
+  Channel: class {
+    onmessage: ((message: unknown) => void) | null = null;
+  },
+}));
 
 test('listTree invokes list_tree', async () => {
   invoke.mockResolvedValue({ roots: [], recents: [] });
@@ -29,6 +37,32 @@ test('setKey invokes set_key with the typed key', async () => {
   await ipc.setKey('a-key-value');
 
   expect(invoke).toHaveBeenCalledWith('set_key', { key: 'a-key-value' });
+});
+
+// PR 7 Task 6, review: the pass used to report to nobody. Both directions, in
+// one test — a callback that fires on every message would pass a test that only
+// sent an ending, and that is the mutation that matters here: the section
+// re-reads the index when this fires, and re-reading it on every progress
+// report is a call per 250 ms for the length of a run.
+test('startEmbedJob calls back when the pass ENDS, and not when it reports progress', async () => {
+  invoke.mockResolvedValue(undefined);
+  const ended = vi.fn();
+
+  await ipc.startEmbedJob(ended);
+
+  const call = invoke.mock.calls.at(-1) as [string, { onProgress: { onmessage: (m: unknown) => void } }];
+  expect(call[0]).toBe('start_embed_job');
+  const channel = call[1].onProgress;
+  expect(typeof channel.onmessage).toBe('function');
+
+  channel.onmessage({ event: 'progress', data: { done: 1, total: 9 } });
+  expect(ended).not.toHaveBeenCalled();
+
+  // The tag `JobEvent` carries, spelled as the Rust side serializes it
+  // (`job.rs:309-313`, pinned against the real serialization by
+  // `src-tauri/tests/commands.rs:826-828`).
+  channel.onmessage({ event: 'ended', data: { reason: 'finished' } });
+  expect(ended).toHaveBeenCalledTimes(1);
 });
 
 test('forgetKey invokes forget_key with no arguments', async () => {

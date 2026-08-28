@@ -132,22 +132,26 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // from a real render rather than hand-edited. It is the whole point of this
   // assertion that a layout change has to come through here and be read.
   //
-  // Task 6 adds four blocks between the model list and the status dot — the
-  // confirmation, what a change discarded, the degraded notice and a rejection
-  // — and on this fixture every one of them is absent: no press has been made,
-  // so there is nothing to confirm, nothing was discarded and nothing failed.
-  // What they leave behind is the run of whitespace before the status sentence,
-  // and it is measured from a real render rather than hand-edited, the same way
-  // every earlier version of this string was. **A person reading this screen
-  // must see no new words here**, which is the claim: a confirmation that
-  // rendered itself before anybody pressed anything would arrive as text in the
-  // middle of this line.
+  // Task 6 adds four blocks around the status dot — the confirmation, what a
+  // change discarded, the degraded notice and a rejection — and on this fixture
+  // every one of them is absent: no press has been made, so there is nothing to
+  // confirm, nothing was discarded and nothing failed. What they leave behind is
+  // a run of whitespace, and it is measured from a real render rather than
+  // hand-edited, the same way every earlier version of this string was. **A
+  // person reading this screen must see no new words here**, which is the claim:
+  // a confirmation that rendered itself before anybody pressed anything would
+  // arrive as text in the middle of this line.
+  //
+  // Task 6's review moved the status sentence ABOVE those four blocks, and this
+  // string is where that shows: the dot used to be the last thing on the screen,
+  // under a degraded notice it contradicted. The whitespace moved with it.
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy());
   expect(panel()?.textContent).toBe(
     'Models Provider OpenRouter Key An OpenRouter key lets this application reach the models.'
     + ' Create one in your OpenRouter account and paste it here.   Save    '
     + ' Embedding Chat   The provider does not currently list any models for this role.'
-    + '     Not connected yet — add a key and choose an embedding model to enable content search. ',
+    + ' Not connected yet — add a key and choose an embedding model to enable content search.'
+    + '     ',
   );
 
   await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));

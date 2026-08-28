@@ -18,9 +18,10 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
   | 'models_catalogue_unreadable_record_known'
   | 'models_embedding_confirm_title' | 'models_embedding_confirm_estimate'
-  | 'models_embedding_keep' | 'models_embedding_discard' | 'models_embedding_cancel'
+  | 'models_embedding_confirm_loss' | 'models_embedding_discard' | 'models_embedding_cancel'
   | 'models_embedding_retired' | 'models_embedding_retired_none'
   | 'models_embedding_degraded' | 'models_embedding_reembed' | 'models_embedding_reembed_started'
+  | 'models_embedding_reembed_ended'
   | 'models_embedding_change_failed' | 'models_job_running' | 'models_index_recover'
   | 'refusal_no_candidates' | 'refusal_empty_completion'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
@@ -146,7 +147,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // виміряного в мить знищення.
     models_embedding_confirm_title: 'Змінити модель ембедингу?',
     models_embedding_confirm_estimate: 'Зараз індекс містить {count, plural, one {# ембединг} few {# ембединги} many {# ембедингів} other {# ембедингів}} в усіх векторних просторах. Це оцінка, зроблена до зміни; скільки саме було відкинуто, буде сказано після неї.',
-    models_embedding_keep: 'Зберегти ембединги',
+    models_embedding_confirm_loss: 'Ці ембединги неможливо перенести: зміна їх відкидає. Пошук за змістом буде недоступний, доки індекс не буде вбудовано наново; пошук за словами працюватиме далі.',
     models_embedding_discard: 'Відкинути ембединги',
     models_embedding_cancel: 'Не змінювати модель',
     models_embedding_retired: 'Зміна відкинула {count, plural, one {# ембединг} few {# ембединги} many {# ембедингів} other {# ембедингів}} з {spaces, plural, one {# векторного простору} other {# векторних просторів}}.',
@@ -154,7 +155,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_embedding_degraded: 'Пошук за змістом недоступний, доки індекс не буде вбудовано наново. Пошук за словами працює далі.',
     models_embedding_reembed: 'Вбудувати індекс наново',
     models_embedding_reembed_started: 'Вбудовування почалося.',
-    models_embedding_change_failed: 'Модель ембедингу не змінено.',
+    models_embedding_reembed_ended: 'Вбудовування завершилося, а пошук за змістом досі недоступний. Його можна запустити ще раз.',
+    models_embedding_change_failed: 'Модель ембедингу не прийнято. Прочитайте повідомлення нижче: зміна, яка не завершилася, все одно могла відкинути ембединги.',
     models_job_running: 'Триває завдання індексації. Його не зупинено, воно працює далі.',
     models_index_recover: 'Повторний вибір моделі ембедингу це виправляє: він наново записує вказівник, який індекс втратив. Нічого з уже вбудованого при цьому не відкидається.',
     indexed_documents: '{count, plural, one {# документ} few {# документи} many {# документів} other {# документа}}',
@@ -270,7 +272,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_catalogue_unreadable_record_known: 'Record at position {index}, id "{id}": this build could not read the rest of the record.',
     models_embedding_confirm_title: 'Change the embedding model?',
     models_embedding_confirm_estimate: 'The index holds {count, plural, one {# embedding} other {# embeddings}} across all its vector spaces right now. That is an estimate read before the change; what the change actually discarded is reported after it.',
-    models_embedding_keep: 'Keep the embeddings',
+    models_embedding_confirm_loss: 'These embeddings cannot be carried over: the change discards them. Search by meaning will be unavailable until the index is embedded again; search by words will still answer.',
     models_embedding_discard: 'Discard the embeddings',
     models_embedding_cancel: 'Do not change the model',
     models_embedding_retired: 'The change discarded {count, plural, one {# embedding} other {# embeddings}} from {spaces, plural, one {# vector space} other {# vector spaces}}.',
@@ -278,7 +280,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_embedding_degraded: 'Search by meaning is unavailable until the index is embedded again. Search by words still answers.',
     models_embedding_reembed: 'Embed the index again',
     models_embedding_reembed_started: 'Embedding has started.',
-    models_embedding_change_failed: 'The embedding model was not changed.',
+    models_embedding_reembed_ended: 'The embedding pass has ended, and search by meaning is still unavailable. It can be started again.',
+    models_embedding_change_failed: 'The embedding model was not adopted. Read the message below — a change that fails partway can still have discarded embeddings.',
     models_job_running: 'An indexing job is running. It was not stopped, and it is still going.',
     models_index_recover: 'Choosing an embedding model again repairs this: it rewrites the pointer the index lost. Nothing already embedded is discarded by it.',
     indexed_documents: '{count, plural, one {# document} other {# documents}}',

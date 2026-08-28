@@ -285,11 +285,28 @@ export const jobStatus = () => invoke<JobStatus>('job_status');
 // (embed_job.rs), so recovering from a discard needs no command of its own.
 //
 // The channel is created here rather than by the caller so that no component
-// has to import Tauri's `Channel` — and its messages are DROPPED, deliberately.
-// This module makes no claim about their shape: `JobEvent` has a tagged
-// `event`/`data` form of its own and seven end reasons, and a partial mirror
-// written here would look authoritative while being incomplete. Rendering a
-// running pass is the Indexing section's, with its own mirror; what this call
-// owes is only that the pass was started, which is what resolving says.
-export const startEmbedJob = () =>
-  invoke<void>('start_embed_job', { onProgress: new Channel<unknown>() });
+// has to import Tauri's `Channel`. Exactly ONE field of what comes back is
+// read — `event`, the tag `JobEvent` carries (job.rs:309-313) — and only to
+// tell an ending from a progress report. The spelling is pinned on the Rust
+// side, against the real serialization, by `commands.rs:826-828`. The ending's own contents are still
+// dropped: seven end reasons, the counts, the frozen-file list, none of them
+// mirrored here, because a partial mirror of those would look authoritative
+// while being incomplete. Rendering a running pass, with that mirror, is the
+// Indexing section's work and is NOT booked to this line — the disclosure that
+// used to sit here booked the ending to that section too, which is one of the
+// two sections this PR does not build, so the one caller who needed to know a
+// pass had ended learned it from nobody.
+//
+// `onEnded` is what that caller gets: the pass is over, and nothing about how.
+// A section that has just told somebody their semantic search is dark has one
+// question to ask when it ends — the index's own count, read again — and that
+// question does not need the ending's shape to be mirrored to be asked.
+export const startEmbedJob = (onEnded?: () => void) => {
+  const onProgress = new Channel<{ event?: string }>();
+  if (onEnded) {
+    onProgress.onmessage = (message) => {
+      if (message?.event === 'ended') onEnded();
+    };
+  }
+  return invoke<void>('start_embed_job', { onProgress });
+};

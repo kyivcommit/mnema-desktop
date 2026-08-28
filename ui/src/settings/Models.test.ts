@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Models from './Models.svelte';
 import { tick } from 'svelte';
@@ -1516,6 +1516,15 @@ test('a language switch after mount reaches an unreadable-record label', async (
 // ---------------------------------------------------------------------------
 
 const CONFIRM_TITLE = 'Change the embedding model?';
+const CONFIRM_LOSS =
+  'These embeddings cannot be carried over: the change discards them. Search by meaning will be ' +
+  'unavailable until the index is embedded again; search by words will still answer.';
+const READY = 'Connected — OpenRouter, a key and a chosen embedding model are all set.';
+const REEMBED_ENDED =
+  'The embedding pass has ended, and search by meaning is still unavailable. It can be started again.';
+const CHANGE_FAILED =
+  'The embedding model was not adopted. Read the message below — a change that fails partway can ' +
+  'still have discarded embeddings.';
 const DEGRADED =
   'Search by meaning is unavailable until the index is embedded again. Search by words still answers.';
 const RECOVER =
@@ -1595,7 +1604,30 @@ test('Cancel takes the question away and still calls nothing', async () => {
   expect(screen.getByTestId('model-entry-emb-2')).toBeTruthy();
 });
 
-test('Keep and Discard each send their own value, and neither is supplied by default', async () => {
+// 🔴 The confirmation used to offer three answers and one of them was never an
+// answer. `Db::refuse_unless_every_other_space_is_empty` enumerates every space
+// but the requested one — `None` for a model with no space yet — so ANY
+// non-empty space refuses `Keep`, and that set is exactly "the estimate above is
+// above zero". The button existed only to hand a cautious person a rejection
+// and a raw backend sentence. `model_commands.rs`'s
+// `changing_the_model_without_confirmation_leaves_the_space_alone` is the
+// committed proof against the real index.
+test('the confirmation offers no Keep, because the index would refuse it in exactly this state', async () => {
+  await renderOnModel(onModel(7));
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+
+  // Positively, on visible text: these two answers, in this order, and no
+  // third. A `queryByTestId(...)` alone would pass against a button whose
+  // testid was merely renamed.
+  const answers = within(screen.getByTestId('model-embedding-confirm'))
+    .getAllByRole('button')
+    .map((b) => b.textContent);
+  expect(answers).toEqual(['Discard the embeddings', 'Do not change the model']);
+  expect(screen.queryByText('Keep the embeddings')).toBeNull();
+});
+
+test('Discard sends its own value, and nothing supplies one by default', async () => {
   setEmbeddingModel.mockResolvedValue({
     model: 'emb-2', dim: 1024, spaceId: 2, created: true, retired: [],
     index: onModel(0).index,
@@ -1603,12 +1635,56 @@ test('Keep and Discard each send their own value, and neither is supplied by def
   await renderOnModel();
 
   await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
-  await fireEvent.click(screen.getByTestId('model-embedding-keep'));
-  expect(setEmbeddingModel).toHaveBeenLastCalledWith('emb-2', 'keep');
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+
+  expect(setEmbeddingModel).toHaveBeenLastCalledWith('emb-2', 'discard');
+});
+
+// The other side of Ruling A: with nothing to lose there is nothing to ask
+// about, and the value that goes on the wire is the one that REFUSES rather
+// than destroys — it cannot refuse here, because what it refuses on is the
+// count this branch has just read as zero.
+test('an index holding nothing anywhere asks nothing and sends the value that refuses', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true, retired: [],
+    index: onModel(0).index,
+  });
+  await renderOnModel(onModel(0, 0));
 
   await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
-  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
-  expect(setEmbeddingModel).toHaveBeenLastCalledWith('emb-2', 'discard');
+
+  expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'keep'));
+});
+
+// The two counts differ here on purpose, the other way round from the estimate
+// test: the ACTIVE space is empty and the index still holds seven embeddings
+// elsewhere. A build that decided whether to ask from `embeddedChunks` would
+// destroy those seven without asking anybody.
+test('the question is asked from what the whole index holds, not from the active space alone', async () => {
+  await renderOnModel(onModel(7, 0));
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+
+  expect(screen.getByTestId('model-embedding-confirm-title').textContent).toBe(CONFIRM_TITLE);
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+});
+
+// 🔴 The Global Constraint, verbatim: "what can a person lose by picking a
+// different embedding model, and does the window say so BEFORE it happens?"
+// The sentence naming the loss existed in both locales and was rendered only
+// after the irreversible act — a report, never a warning.
+test('the confirmation names the loss before it happens, above the button that causes it', async () => {
+  await renderOnModel(onModel(7));
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+
+  expect(screen.getByTestId('model-embedding-confirm-loss').textContent).toBe(CONFIRM_LOSS);
+  const said = screen.getByTestId('model-embedding-confirm').textContent ?? '';
+  expect(said.indexOf(CONFIRM_LOSS)).toBeGreaterThanOrEqual(0);
+  expect(said.indexOf(CONFIRM_LOSS)).toBeLessThan(said.indexOf('Discard the embeddings'));
+  // Still nothing called: the sentence is in the window that can be cancelled.
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
 });
 
 test('the sentence after the act reports what the index destroyed, not the estimate before it', async () => {
@@ -1637,8 +1713,8 @@ test('a change that retired nothing says so rather than saying nothing', async (
   });
   await renderOnModel(onModel(0));
 
+  // Nothing to lose, so nothing is asked — the press goes straight through.
   await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
-  await fireEvent.click(screen.getByTestId('model-embedding-keep'));
 
   await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
   expect(screen.getByTestId('model-embedding-retired').textContent).toBe(
@@ -1682,6 +1758,80 @@ test('after a successful change the section says search by meaning is dark and o
   expect(text).toContain(DEGRADED);
 });
 
+/// Drives a section into the degraded state and presses the re-embed, and hands
+/// back the callback the pass will report its ending to. `after` is what
+/// `model_settings` answers from that point on — the index as the pass leaves
+/// it, which is the whole question the ending is worth re-reading for.
+async function reembedding(after: ModelSettings) {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 4 }],
+    index: onModel(0).index,
+  });
+  const rendered = await renderOnModel(onModel(7));
+  modelSettings.mockResolvedValue(onModel(0, 0));
+
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+  await waitFor(() => expect(screen.getByTestId('model-embedding-degraded-note')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
+  await waitFor(() => expect(startEmbedJob).toHaveBeenCalled());
+  // The section must have handed the pass somewhere to report to. A build that
+  // starts the job and listens for nothing passes every assertion about the
+  // press itself.
+  const ended = startEmbedJob.mock.calls[0][0];
+  expect(typeof ended).toBe('function');
+
+  modelSettings.mockResolvedValue(after);
+  return { ...rendered, ended: ended as () => void };
+}
+
+// 🔴 The pass used to report to nobody: `reembed()` set a flag and stopped,
+// with no listener and no poll, so a pass that SUCCEEDED left "search by
+// meaning is unavailable" on screen for the rest of the session.
+test('an ended pass that filled the index takes the degraded notice away with it', async () => {
+  const { ended } = await reembedding(onModel(5, 5));
+
+  ended();
+
+  await waitFor(() => expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull());
+  expect(screen.queryByTestId('model-embedding-reembed')).toBeNull();
+  // Positively, and from the index rather than from the ending: the section now
+  // draws a connected installation with a model chosen.
+  expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('true');
+});
+
+// The other direction, and the one the flag could never express: a pass that
+// ended having filled nothing. The person used to be told nothing at all.
+test('an ended pass that filled nothing says the search is still dark, rather than nothing', async () => {
+  const { ended } = await reembedding(onModel(0, 0));
+
+  ended();
+
+  await waitFor(() => expect(screen.getByTestId('model-embedding-reembed-ended')).toBeTruthy());
+  expect(screen.getByTestId('model-embedding-reembed-ended').textContent).toBe(REEMBED_ENDED);
+  // The claim that sentence makes about the state is still true beside it.
+  expect(screen.getByTestId('model-embedding-degraded-note').textContent).toBe(DEGRADED);
+  // And the sentence it replaces is gone: a pass cannot be starting and over.
+  expect(screen.queryByTestId('model-embedding-reembed-started')).toBeNull();
+});
+
+// 🔴 Rendered below the degraded block, the dot had the last word — the section
+// ended "Search by meaning is unavailable…" and then "Connected — …a chosen
+// embedding model are all set." Both sentences are true; read in that order the
+// second is a promise the product cannot keep.
+test('the connected dot does not have the last word over a search that has gone dark', async () => {
+  const { container } = await reembedding(onModel(0, 0));
+
+  const text = container.textContent ?? '';
+  // Both are on screen — the dot is not hidden, and the ruling on `providerReady`
+  // is untouched.
+  expect(text).toContain(READY);
+  expect(text).toContain(DEGRADED);
+  expect(text.indexOf(READY)).toBeLessThan(text.indexOf(DEGRADED));
+});
+
 // The other direction of the degraded notice, and it is not the untouched
 // section: a change HAS landed, and the space the index now points at is not
 // empty. Nothing is dark, so nothing may say it is — a notice conditioned on
@@ -1695,7 +1845,7 @@ test('a change that leaves the new space full says nothing about a search going 
   modelSettings.mockResolvedValue(onModel(5, 5));
 
   await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
-  await fireEvent.click(screen.getByTestId('model-embedding-keep'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
 
   await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
   expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull();
@@ -1724,9 +1874,7 @@ test('a rejection shows the backend sentence verbatim and branches from a re-rea
 
   await waitFor(() => expect(screen.getByTestId('model-embedding-error')).toBeTruthy());
   expect(screen.getByTestId('model-embedding-error').textContent).toBe(SENTENCE);
-  expect(screen.getByTestId('model-embedding-failed').textContent).toBe(
-    'The embedding model was not changed.',
-  );
+  expect(screen.getByTestId('model-embedding-failed').textContent).toBe(CHANGE_FAILED);
   // The branch, taken from the re-read and not from the sentence.
   await waitFor(() =>
     expect(screen.getByTestId('model-index-failure').textContent).toBe(
@@ -1842,6 +1990,40 @@ test('switching tabs takes a pending question with it', async () => {
   expect(setEmbeddingModel).not.toHaveBeenCalled();
 });
 
+// The same argument as the line above it, applied to the two sentences a press
+// leaves BEHIND. "The change discarded 4 embeddings…" under the chat list is a
+// report about an act on a list that is not on screen any more.
+test('switching tabs takes the report of what was discarded with it', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 4 }],
+    index: onModel(0).index,
+  });
+  await renderOnModel(onModel(7, 7));
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+  await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+
+  expect(screen.queryByTestId('model-embedding-retired')).toBeNull();
+});
+
+test('switching tabs takes a rejection with it', async () => {
+  setEmbeddingModel.mockRejectedValue(new Error('a job is already running'));
+  jobStatus.mockResolvedValue({ running: true });
+  await renderOnModel(onModel(7, 7));
+  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+  await waitFor(() => expect(screen.getByTestId('model-job-running')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+
+  expect(screen.queryByTestId('model-embedding-failed')).toBeNull();
+  expect(screen.queryByTestId('model-embedding-error')).toBeNull();
+  expect(screen.queryByTestId('model-job-running')).toBeNull();
+});
+
 // --- the six `void $locale` guards this task added, each reddening alone -----
 
 test('a language switch after mount reaches the confirmation', async () => {
@@ -1853,8 +2035,10 @@ test('a language switch after mount reaches the confirmation', async () => {
   const after = container.textContent ?? '';
   expect(after).toContain('Змінити модель ембедингу?');
   expect(after).toContain('Зараз індекс містить 7 ембедингів');
+  expect(after).toContain('Ці ембединги неможливо перенести');
   expect(after).toContain('Відкинути ембединги');
   expect(after).not.toContain(CONFIRM_TITLE);
+  expect(after).not.toContain(CONFIRM_LOSS);
 });
 
 test('a language switch after mount reaches the sentence about what was discarded', async () => {
@@ -1882,7 +2066,6 @@ test('a language switch after mount reaches the degraded notice and its button',
   });
   const { container } = await renderOnModel(onModel(0));
   await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
-  await fireEvent.click(screen.getByTestId('model-embedding-keep'));
   await waitFor(() => expect(screen.getByTestId('model-embedding-degraded-note')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
   await waitFor(() => expect(screen.getByTestId('model-embedding-reembed-started')).toBeTruthy());
@@ -1896,18 +2079,30 @@ test('a language switch after mount reaches the degraded notice and its button',
   expect(after).not.toContain(DEGRADED);
 });
 
+test('a language switch after mount reaches the ended-pass sentence', async () => {
+  const { container, ended } = await reembedding(onModel(0, 0));
+  ended();
+  await waitFor(() => expect(screen.getByTestId('model-embedding-reembed-ended')).toBeTruthy());
+  expect((container.textContent ?? '')).toContain(REEMBED_ENDED);
+
+  await switchTo('uk');
+  const after = container.textContent ?? '';
+  expect(after).toContain('Вбудовування завершилося');
+  expect(after).not.toContain(REEMBED_ENDED);
+});
+
 test('a language switch after mount reaches the lead-in above a rejection', async () => {
   setEmbeddingModel.mockRejectedValue(new Error('a job is already running'));
   const { container } = await renderOnModel();
   await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
   await waitFor(() => expect(screen.getByTestId('model-embedding-failed')).toBeTruthy());
-  expect((container.textContent ?? '')).toContain('The embedding model was not changed.');
+  expect((container.textContent ?? '')).toContain(CHANGE_FAILED);
 
   await switchTo('uk');
   const after = container.textContent ?? '';
-  expect(after).toContain('Модель ембедингу не змінено.');
-  expect(after).not.toContain('The embedding model was not changed.');
+  expect(after).toContain('Модель ембедингу не прийнято.');
+  expect(after).not.toContain(CHANGE_FAILED);
   // The backend's own sentence is not a catalogue string and must survive the
   // switch unchanged — a language switch may not translate what it did not write.
   expect(after).toContain('a job is already running');
