@@ -23,11 +23,12 @@
 # No count of those cases here, deliberately (review round 4). The number
 # that stood in this sentence — "seven portable cases" — was written against
 # an earlier state of that file and was wrong by one before round 4 added a
-# case: ten cases, four of them naming `#[cfg(unix)]` tests, is six. A count
-# maintained in a DIFFERENT file from the thing it counts drifts silently,
-# and this project's own rule is that a number is a definition. The count
-# that has to be right lives in `pr8-exclusions.sh`'s own header, where the
-# cases are.
+# case: that file held ten cases at the time, four of them naming
+# `#[cfg(unix)]` tests, so the portable count was six. It has grown twice
+# since, which is the point — a count maintained in a DIFFERENT file from the
+# thing it counts drifts silently, and this project's own rule is that a
+# number is a definition. The count that has to be right lives in
+# `pr8-exclusions.sh`'s own header, where the cases are.
 
 case_ "existsOnDisk must resolve each component with byte-exact equality, not the filesystem's own case-insensitive lookup" \
   src-tauri/src/bridge.rs \

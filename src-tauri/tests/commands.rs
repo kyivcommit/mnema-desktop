@@ -114,6 +114,44 @@ fn exclusion_fixture_dir() -> tempfile::TempDir {
     dir
 }
 
+/// A watched folder holding two subfolders with one indexable file each.
+///
+/// Two folders of the same shape, not one folder and one top-level file: the
+/// claim the exclusion tests make is "the excluded one went and the other
+/// stayed", and that is only a claim about the exclusion if the half that
+/// stays is the same kind of thing as the half that goes. A top-level file
+/// would also survive a rule that had silently excluded everything under
+/// every subfolder.
+fn keep_and_drop_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the keep/drop fixture");
+    std::fs::create_dir(dir.path().join("keep")).expect("creating keep/");
+    std::fs::create_dir(dir.path().join("drop")).expect("creating drop/");
+    std::fs::write(
+        dir.path().join("keep/kept.txt"),
+        "the kept file mentions herons",
+    )
+    .expect("writing keep/kept.txt");
+    std::fs::write(
+        dir.path().join("drop/dropped.txt"),
+        "the dropped file mentions herons",
+    )
+    .expect("writing drop/dropped.txt");
+    dir
+}
+
+/// What the index actually holds under one root, sorted — the same list
+/// reconciliation itself compares a walk against (`Db::paths_under_root`).
+///
+/// `Ended::removed` is a number and this is the fact behind it: a walk that
+/// reported `removed: 1` and a walk that reported `removed: 1` while deleting
+/// the wrong row are the same number. Every exclusion test below asserts on
+/// both.
+fn indexed_paths(app: &tauri::App<MockRuntime>, root_id: i64) -> Vec<String> {
+    app.state::<AppState>()
+        .with_index(|db| db.paths_under_root(root_id))
+        .expect("reading the paths the index holds under the root")
+}
+
 /// Starts a real walk over `root_id` and blocks until the window would have
 /// heard `Ended`, returning its payload for the caller to inspect.
 ///
@@ -3115,6 +3153,274 @@ fn an_unreadable_subdirectory_tells_the_window_reconciliation_did_not_run() {
         ending["complete"],
         json!(false),
         "an unreadable subdirectory must not report as a walk that saw everything: {ending}"
+    );
+}
+
+/// The whole point of the three exclusion commands: a rule the person saved
+/// is applied by the next walk, and "applied" means the file is no longer in
+/// the index — not merely that the walk declined to look at it again.
+/// `WalkRules`'s own doc comment states that contract ("a rule that newly
+/// excludes an already-indexed file removes it on the next walk, which is
+/// what makes 'I excluded that folder' mean 'it is no longer findable'"), and
+/// until this test nothing on this side of the seam checked it: `start_walk_
+/// job` built its rules from `Vec::new()` and read no stored prefix at all.
+///
+/// The first walk is not setup, it is the control: without it, "the index
+/// does not hold `drop/dropped.txt`" is satisfied by a walk that never
+/// indexed anything, which is a different green.
+#[test]
+fn a_walk_applies_a_stored_exclusion_and_removes_what_it_now_covers() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = keep_and_drop_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["drop/dropped.txt".to_string(), "keep/kept.txt".to_string()],
+        "the first walk did not index both files, so nothing below is about exclusion"
+    );
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "drop" }),
+    )
+    .expect("exclude_subfolder was rejected");
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(1),
+        "the walk did not reconcile away the newly excluded file: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["keep/kept.txt".to_string()],
+        "the excluded file is still findable, or the walk took the wrong one with it"
+    );
+}
+
+/// The mirror of the test above, and it is not optional. Every assertion
+/// there is one-sided: `removed == 1` and "only `keep/kept.txt` is left" are
+/// both satisfied by a walk that deletes on some other grounds entirely — a
+/// rules layer that failed to compile, a reconciliation that fired on the
+/// wrong list. This is the control that says the deletion came from the rule
+/// and not from walking at all: the same fixture, the same two walks, one
+/// difference — no exclusion is stored — and nothing goes.
+#[test]
+fn a_walk_with_no_exclusion_stored_removes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = keep_and_drop_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([]),
+        "this control is only a control if the root really has no rule on it"
+    );
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(0),
+        "a second walk over an unchanged folder with no rule deleted something: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["drop/dropped.txt".to_string(), "keep/kept.txt".to_string()],
+        "a walk with no exclusion stored must leave the index exactly as it found it"
+    );
+}
+
+/// A stored prefix that `WalkRules::new` refuses makes the job REFUSE TO
+/// START, with the sentence, rather than walking with the rule silently
+/// absent.
+///
+/// The state is reachable, and only one way: `Db::add_path_exclusion`
+/// deliberately does not validate — validation lives at
+/// `bridge::exclude_subfolder`, the one place a person is standing there to
+/// fix it — so this writes the bad prefix through the `Db` method and never
+/// through the command. That is also how a real one arrives: a rule stored
+/// by an older build, whose validator was narrower than today's (the
+/// whitelist in `rules.rs` grew across three review rounds, each one turning
+/// prefixes that used to be accepted into prefixes that are not).
+///
+/// Refusing is the conservative direction under D29 and it is asserted in
+/// both halves: the walk must not run, AND the index must still hold
+/// everything it held before — a refusal that also emptied the index would
+/// satisfy "the walk did not run" just as well.
+#[test]
+fn a_stored_exclusion_that_no_longer_validates_refuses_the_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = keep_and_drop_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    let before = indexed_paths(&app, root);
+    assert_eq!(
+        before.len(),
+        2,
+        "the first walk did not index the fixture, so the refusal below proves nothing"
+    );
+
+    let state = app.state::<AppState>();
+    state
+        .with_index(|db| db.add_path_exclusion(root, ".."))
+        .expect("writing an unvalidated prefix straight to the index");
+
+    let (channel, _events) = job_channel();
+    let refusal = walk_job::start_walk_job(state.clone(), root, channel)
+        .expect_err("a walk started even though a stored prefix cannot become a rule");
+    let sentence = refusal.to_string();
+    assert!(
+        sentence.contains(r#"exclusion rule "..""#),
+        "the refusal does not name the rule that cannot be compiled: {sentence}"
+    );
+
+    assert!(
+        !state.job_is_running(),
+        "the refused walk took the job slot on its way out"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        before,
+        "the refused walk changed the index, so something ran before it refused"
+    );
+}
+
+/// The boundary this whole feature stands on, and it belongs to somebody
+/// else's code: phase 3 FREEZES a subtree it cannot account for instead of
+/// deleting it (`resolve_ancestor`, `mnema-ingest/src/walk.rs:852-873`), and
+/// a folder the rules excluded is absent from `found` in a way that looks
+/// identical from there. What tells them apart is the disk —
+/// `resolve_ancestor` answers `None` for a directory that still HAS entries,
+/// so an excluded folder still full of files reconciles rather than freezing.
+///
+/// Nothing in this file would notice if that changed. A freezing rule that
+/// also covered a non-empty directory would turn every exclusion into a
+/// silent no-op — `removed: 0`, the rows still searchable, `reason:
+/// "completed"` — and the only visible difference would be a `frozen` entry
+/// nobody asserts on. So this asserts on it: a NESTED excluded folder, two
+/// files under it, all of them still on disk, and `frozen` empty.
+#[test]
+fn an_excluded_subfolder_that_still_holds_its_files_is_reconciled_not_frozen() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("Archive/2023")).expect("creating Archive/2023");
+    std::fs::write(
+        fixture.path().join("Archive/2023/one.txt"),
+        "the first archived note",
+    )
+    .expect("writing Archive/2023/one.txt");
+    std::fs::write(
+        fixture.path().join("Archive/2023/two.txt"),
+        "the second archived note",
+    )
+    .expect("writing Archive/2023/two.txt");
+    std::fs::create_dir(fixture.path().join("keep")).expect("creating keep/");
+    std::fs::write(fixture.path().join("keep/kept.txt"), "the kept note")
+        .expect("writing keep/kept.txt");
+
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec![
+            "Archive/2023/one.txt".to_string(),
+            "Archive/2023/two.txt".to_string(),
+            "keep/kept.txt".to_string()
+        ],
+        "the first walk did not index the fixture, so nothing below is about freezing"
+    );
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Archive" }),
+    )
+    .expect("exclude_subfolder was rejected");
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["frozen"],
+        json!([]),
+        "the excluded folder is still on disk with both its files in it, so nothing about it \
+         is ambiguous — freezing it would make the exclusion a no-op: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(2),
+        "both files under the excluded folder should have been reconciled away: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["keep/kept.txt".to_string()],
+        "the excluded files are still findable, or the walk took the kept one with them"
     );
 }
 

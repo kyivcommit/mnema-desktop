@@ -1,19 +1,23 @@
-# The three commands that read and write a folder exclusion — the cases
-# runnable on any UNIX CI leg (review round 3, Minor N2: "any CI leg" was one
-# word too strong — see below). Run with:
+# The three commands that read and write a folder exclusion, and the walk
+# that applies what they wrote — the cases runnable on any UNIX CI leg
+# (review round 3, Minor N2: "any CI leg" was one word too strong — see
+# below). Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
 #
-# Eleven cases against `list_exclusions`, `exclude_subfolder` or
+# Thirteen cases. Eleven against `list_exclusions`, `exclude_subfolder` or
 # `include_subfolder` (`src-tauri/src/bridge.rs`) and the tests written for
-# task-2 of PR 8a: ten in `tests/commands.rs` (`--test commands`) and one in
-# `bridge.rs`'s own `mod tests` (`--lib`) — the last because the site it
-# names, a per-entry `io::Error` from a directory listing, cannot be forced
-# out of a real filesystem and so is reached through `entry_named`'s
-# iterator parameter rather than through the IPC (review round 4, N3).
+# task-2 of PR 8a; two against `start_walk_job` (`src-tauri/src/walk_job.rs`)
+# and the tests written for task-3, which is where a stored rule stops being
+# a row and starts removing files. Twelve run in `tests/commands.rs`
+# (`--test commands`) and one in `bridge.rs`'s own `mod tests` (`--lib`) —
+# the last because the site it names, a per-entry `io::Error` from a
+# directory listing, cannot be forced out of a real filesystem and so is
+# reached through `entry_named`'s iterator parameter rather than through the
+# IPC (review round 4, N3).
 #
 # ⚠️ **"Any unix leg", not "any CI leg" (review round 3, Minor N2).** Four of
-# these eleven cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
+# these thirteen cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
 # three of the `prefix_exists_on_disk` permission/kind cases) — harmless on
 # this repository's two CI legs (`ubuntu-24.04`, `macos-14`, both unix), but
 # a claim of "any CI leg" is false the moment a Windows leg exists, and would
@@ -180,3 +184,31 @@ case_ "include_subfolder must report false when there was nothing to remove" \
   's{    state\.with_index\(\|db\| db\.remove_path_exclusion\(root_id, &relative_path\)\)}{    state.with_index(|db| db.remove_path_exclusion(root_id, \&relative_path).map(|_| true))}' \
   'state.with_index(|db| db.remove_path_exclusion(root_id, &relative_path).map(|_| true))' \
   mnema-desktop 'including_a_subfolder_removes_the_rule_and_reports_whether_a_row_went' --test commands
+
+# Task 3. The rules the walk runs with, reverted to exactly what stood in
+# `walk_job.rs` until this task: the built-in list and `.gitignore`, and no
+# user prefixes at all. Everything else still works — the commands still
+# store the rule, `list_exclusions` still reports it, the walk still
+# completes — and the rule does nothing. That is the shape this whole task
+# exists to close, and it is invisible to every case above, all of which stop
+# at the row in the database.
+case_ "the walk must build its rules from the stored prefixes, not from an empty list" \
+  src-tauri/src/walk_job.rs \
+  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?;}{    let rules = WalkRules::new(true, true, Vec::new())?;}' \
+  'let rules = WalkRules::new(true, true, Vec::new())?;' \
+  mnema-desktop 'a_walk_applies_a_stored_exclusion_and_removes_what_it_now_covers' --test commands
+
+# Task 3, and the risk the brief names as the whole risk of the task. The
+# `RulesError` path, swallowed: `unwrap_or_default()` walks on with
+# `WalkRules::default()` instead of refusing. A prefix stored by an older
+# build, or written straight through `Db::add_path_exclusion` (which does not
+# validate — that is the command's job), would then be silently absent from a
+# walk that reports `completed`, and under D29 every file it should have
+# covered goes to a third-party provider. `Vec::new()` above is the same
+# failure by omission; this is it by exception handling, and no test above
+# can tell either from a working walk.
+case_ "a stored prefix that cannot become a rule must refuse the job, not be walked around" \
+  src-tauri/src/walk_job.rs \
+  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?;}{    let rules = WalkRules::new(true, true, user_prefixes).unwrap_or_default();}' \
+  'let rules = WalkRules::new(true, true, user_prefixes).unwrap_or_default();' \
+  mnema-desktop 'a_stored_exclusion_that_no_longer_validates_refuses_the_walk' --test commands
