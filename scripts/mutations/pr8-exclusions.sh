@@ -2,9 +2,11 @@
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
 #
-# Five cases, each against one of `list_exclusions`, `exclude_subfolder` or
+# Seven cases, each against one of `list_exclusions`, `exclude_subfolder` or
 # `include_subfolder` (`src-tauri/src/bridge.rs`) and the `tests/commands.rs`
-# tests written for task-2 of PR 8a.
+# tests written for task-2 of PR 8a. Two of the seven (the root-unavailable
+# refusal and the byte-exact directory resolution) were added in fix round 1,
+# against Important findings 1 and 2 of the task review.
 #
 # ⚠️ **The narrower mutant round 1 asked for — narrowing the probe from the
 # whole exclusion set back to the candidate alone — is deliberately NOT a
@@ -44,16 +46,40 @@ case_ "excluding an already-excluded folder a second time must not become an err
   'VALUES (?1, ?2, NULL)",' \
   mnema-desktop 'excluding_the_same_subfolder_twice_is_idempotent' --test commands
 
-# `exists_on_disk` collapsed to a constant. Kills on either half of the
-# fixture: a prefix naming a FILE (`solo.txt`) and a prefix whose folder was
-# renamed away both must read false, and a mutant that hands back `true`
-# unconditionally — skipping the `symlink_metadata` call and its `unwrap_or`
-# fallback both — gets both wrong.
-case_ "existsOnDisk must come from a real symlink_metadata call, not a constant" \
+# `prefix_exists_on_disk` collapsed to a constant. Kills on the fixture's
+# rename half: a prefix whose folder was renamed away must read false, and a
+# mutant that hands back `true` unconditionally gets it wrong regardless of
+# what the byte-exact resolution below would have found.
+case_ "existsOnDisk must come from a real filesystem lookup, not a constant" \
   src-tauri/src/bridge.rs \
-  's{            let exists_on_disk = std::fs::symlink_metadata\(&full\)\n                \.map\(\|meta\| meta\.is_dir\(\)\)\n                \.unwrap_or\(false\);}{            let exists_on_disk = true;}' \
-  'let exists_on_disk = true;' \
-  mnema-desktop 'list_exclusions_reports_whether_each_stored_prefix_still_names_a_directory' --test commands
+  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        let found = std::fs::read_dir\(&current\)\.ok\(\)\.and_then\(\|entries\| \{\n            entries\n                \.flatten\(\)\n                \.find\(\|entry\| entry\.file_name\(\) == std::ffi::OsStr::new\(component\)\)\n        \}\);\n        match found \{\n            Some\(entry\) => current = entry\.path\(\),\n            None => return false,\n        \}\n    \}\n    std::fs::symlink_metadata\(&current\)\.is_ok\(\)~    /* mutant: always true */\n    true~' \
+  '/* mutant: always true */' \
+  mnema-desktop 'list_exclusions_reports_whether_each_stored_prefix_is_still_on_disk' --test commands
+
+# Review round 1, Important 2. `prefix_exists_on_disk` resolves each path
+# component against real `read_dir` entries with byte equality specifically
+# because the filesystem's own lookup (what a bare `symlink_metadata` on the
+# joined path uses) is case-INSENSITIVE on APFS and Windows, while `ignore`'s
+# override matcher — what the walk itself applies — is case-sensitive. This
+# mutant reverts to that naive, case-insensitive check: a stored prefix
+# `private` against a real folder `Private` would then report
+# `existsOnDisk: true` while the rule excludes nothing.
+case_ "existsOnDisk must resolve each component with byte-exact equality, not the filesystem's own case-insensitive lookup" \
+  src-tauri/src/bridge.rs \
+  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        let found = std::fs::read_dir\(&current\)\.ok\(\)\.and_then\(\|entries\| \{\n            entries\n                \.flatten\(\)\n                \.find\(\|entry\| entry\.file_name\(\) == std::ffi::OsStr::new\(component\)\)\n        \}\);\n        match found \{\n            Some\(entry\) => current = entry\.path\(\),\n            None => return false,\n        \}\n    \}\n    std::fs::symlink_metadata\(&current\)\.is_ok\(\)~    /* mutant: naive case-insensitive stat */\n    std::fs::symlink_metadata(root.join(prefix)).is_ok()~' \
+  '/* mutant: naive case-insensitive stat */' \
+  mnema-desktop 'a_prefix_that_only_matches_the_folders_name_by_case_reports_not_on_disk' --test commands
+
+# Review round 1, Important 1. The root-unavailable guard, disarmed. Without
+# it, an unmounted drive or a moved folder makes every stored prefix answer
+# `existsOnDisk: false` instead of refusing the whole call — the same field
+# lying that a per-prefix `.unwrap_or(false)` produced before this fix round,
+# now for the entire list at once.
+case_ "an unreachable watched root must refuse the whole list_exclusions call" \
+  src-tauri/src/bridge.rs \
+  's{    if std::fs::symlink_metadata\(root_path\)\.is_err\(\) \{}{    if false \{}' \
+  'if false {' \
+  mnema-desktop 'list_exclusions_refuses_when_the_root_itself_is_unreachable' --test commands
 
 # `include_subfolder`'s answer, forced to `true` regardless of what
 # `Db::remove_path_exclusion` actually found. Task 5's stale-rule control

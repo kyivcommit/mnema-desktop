@@ -68,6 +68,16 @@ pub enum Error {
     /// can produce and this case never reaches.
     #[error("an exclusion rule cannot be empty")]
     BlankExclusionRule,
+    /// `list_exclusions` stat'd the watched root itself and it was not
+    /// there — an unmounted external drive, a network volume down, the
+    /// folder moved. Refusing the whole call is the conservative direction:
+    /// answering per prefix with `existsOnDisk: false` would read as "every
+    /// rule's folder is gone" (review round 1, Important 1).
+    #[error(
+        "the folder for watched root {0} is not available right now, so its exclusion rules \
+         cannot be checked"
+    )]
+    RootUnavailable(i64),
     /// Indexing could not continue at all — the extraction pool is broken, or
     /// the database is.
     ///

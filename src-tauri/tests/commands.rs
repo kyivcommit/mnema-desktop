@@ -2319,10 +2319,14 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
 /// is wrong at its root: a stored prefix may name a NESTED folder). Three
 /// fixture states in one test, each a shape the wrong design gets wrong or
 /// cannot answer at all: a nested prefix whose folder is present, the same
-/// prefix after the folder is renamed away, and a prefix naming a FILE
-/// rather than a directory.
+/// prefix after the folder is renamed away, and a prefix naming a FILE.
+///
+/// The FILE case reports `true`, not `false` (review round 1, Minor 1): a
+/// prefix naming a file excludes that file just fine, so `existsOnDisk`
+/// promises "this path is still there," not "this path is a directory" —
+/// gating on `is_dir()` would label a working rule stale.
 #[test]
-fn list_exclusions_reports_whether_each_stored_prefix_still_names_a_directory() {
+fn list_exclusions_reports_whether_each_stored_prefix_is_still_on_disk() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let webview = main_webview(&app);
@@ -2376,8 +2380,9 @@ fn list_exclusions_reports_whether_each_stored_prefix_still_names_a_directory() 
     );
     assert_eq!(
         by_prefix("solo.txt")["existsOnDisk"],
-        json!(false),
-        "a prefix naming a FILE excludes no subtree and must report existsOnDisk false"
+        json!(true),
+        "a prefix naming a FILE excludes that file just fine and must report existsOnDisk \
+         true — is_dir() would wrongly label a working rule stale"
     );
 
     std::fs::rename(
@@ -2399,6 +2404,119 @@ fn list_exclusions_reports_whether_each_stored_prefix_still_names_a_directory() 
         after_private["existsOnDisk"],
         json!(false),
         "a prefix whose folder was renamed away must report existsOnDisk false"
+    );
+}
+
+/// `symlink_metadata` on a joined path goes through the filesystem's own
+/// name lookup, which is case-INSENSITIVE on APFS (macOS, this test's
+/// platform among others) and on Windows — while `ignore`'s override
+/// matcher, what the walk itself uses, is case-sensitive. A prefix stored as
+/// `private` against a folder actually spelled `Private` must therefore
+/// report `existsOnDisk: false`: the rule excludes nothing (a case-sensitive
+/// match never fires), so a case-insensitive stat that answered `true` would
+/// read a dead rule as live (review round 1, Important 2).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_prefix_that_only_matches_the_folders_name_by_case_reports_not_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("Private")).expect("creating Private");
+    std::fs::write(fixture.path().join("Private/secret.txt"), "secret")
+        .expect("writing Private/secret.txt");
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "private" }),
+    )
+    .expect("excluding private was rejected");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([{ "prefix": "private", "existsOnDisk": false }]),
+        "a prefix that only matches the folder's real name by case must report existsOnDisk \
+         false — the filesystem's own lookup would say true, and the rule excludes nothing"
+    );
+}
+
+/// `list_exclusions` must refuse the whole call when the watched root
+/// itself is unreachable, rather than answering per prefix with
+/// `existsOnDisk: false` for every stored rule — the same field lying that
+/// a per-prefix `.unwrap_or(false)` would produce, but for the entire list
+/// at once (review round 1, Important 1).
+#[test]
+fn list_exclusions_refuses_when_the_root_itself_is_unreachable() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs was rejected");
+
+    // The root folder itself goes away — an unmounted drive, a moved
+    // folder — while the watched_root row and its exclusion rule remain.
+    std::fs::remove_dir_all(fixture.path()).expect("removing the fixture root");
+
+    let rejected = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect_err("list_exclusions should refuse an unreachable root");
+    assert_eq!(
+        error_text(&rejected),
+        format!(
+            "the folder for watched root {root} is not available right now, so its exclusion \
+             rules cannot be checked"
+        ),
+        "the refusal should be Error::RootUnavailable's own sentence"
+    );
+}
+
+/// `list_exclusions`'s own `UnknownWatchedRoot` refusal (added beyond the
+/// brief, for the same reason `exclude_subfolder` checks it) needs its own
+/// test — otherwise `.ok_or(Error::UnknownWatchedRoot(root_id))` could
+/// become `unwrap_or_default()` with the whole suite still green (review
+/// round 1, Minor 3).
+#[test]
+fn listing_exclusions_under_an_unknown_root_id_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let rejected = call(&webview, "list_exclusions", json!({ "rootId": 999_999 }))
+        .expect_err("an unknown root id should have been refused");
+    assert_eq!(
+        error_text(&rejected),
+        "no watched folder with id 999999",
+        "the refusal should be UnknownWatchedRoot's own sentence"
     );
 }
 
@@ -2472,10 +2590,17 @@ fn excluding_dotdot_is_refused_and_stores_nothing() {
         json!({ "rootId": root, "relativePath": ".." }),
     )
     .expect_err("excluding .. should have been refused");
-    assert!(
-        error_text(&rejected).contains(".."),
-        "the refusal should name the rule that was refused; it was {}",
-        error_text(&rejected)
+    // The whole message, not a substring of it (review round 1, Minor 4): the
+    // input sent WAS "..", so `.contains("..")` is satisfied by any refusal
+    // that merely echoes the input, including a future refusal for an
+    // unrelated reason. `RulesError::DotComponent`'s own sentence
+    // (`rules.rs:68-71`), unchanged across the `Error::InvalidExclusionRule`
+    // seam (`#[error("{0}")]`).
+    assert_eq!(
+        error_text(&rejected),
+        "exclusion rule \"..\" has a `..` path component — name the folder directly, not `.` \
+         or `..`",
+        "the refusal should be RulesError::DotComponent's own sentence, whole"
     );
 
     let list = call(&webview, "list_exclusions", json!({ "rootId": root }))

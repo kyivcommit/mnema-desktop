@@ -86,8 +86,16 @@ pub fn remove_watched_folder(state: State<'_, AppState>, root_id: i64) -> Result
     state.with_index(|db| db.delete_watched_root(root_id))
 }
 
-/// One stored exclusion rule, plus whether the folder it names is still on
+/// One stored exclusion rule, plus whether the path it names is still on
 /// disk.
+///
+/// **`exists_on_disk` promises "this path is still there", not "this path is
+/// a directory".** A prefix naming a FILE excludes that file — there is no
+/// is-a-directory check at write time (see [`exclude_subfolder`]) — so
+/// gating this field on `is_dir()` would label a working rule stale and a
+/// stale-rule control would offer to remove it (review round 1, Minor 1: the
+/// brief's original `is_dir()` mandate was right about subtrees and wrong
+/// about the effect — a file prefix excludes the named file just fine).
 ///
 /// **`exists_on_disk` is answered here, by the backend, and this is not a
 /// convenience (task-2 brief, review round 2, P1).** The window cannot
@@ -99,8 +107,9 @@ pub fn remove_watched_folder(state: State<'_, AppState>, root_id: i64) -> Result
 /// find no match among `["Work", "Photos"]` there, read as a rule whose
 /// folder is gone, and be offered for removal — un-excluding a folder that
 /// is still full and, under D29, still headed to a third-party provider on
-/// the next scan. One `symlink_metadata` per stored prefix, on the side that
-/// has the filesystem, is the whole fix.
+/// the next scan. One filesystem lookup per stored prefix, on the side that
+/// has the filesystem, is the whole fix — see [`prefix_exists_on_disk`] for
+/// why that lookup is not a bare `symlink_metadata` on the joined path.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredExclusion {
@@ -108,13 +117,55 @@ pub struct StoredExclusion {
     pub exists_on_disk: bool,
 }
 
+/// Resolves `prefix` against real directory entries under `root`, one
+/// component at a time, comparing names with byte equality — not by handing
+/// the joined path to the filesystem's own lookup, which is case-INSENSITIVE
+/// on APFS (macOS, the default) and on Windows, while `ignore`'s override
+/// matcher is case-sensitive (`WalkRules::builder` never calls
+/// `case_insensitive`, `mnema-walk/src/rules.rs:224-300`). A stored prefix
+/// `private` against a folder actually spelled `Private` would otherwise
+/// report `existsOnDisk: true` while excluding nothing — a dead rule reading
+/// as live (review round 1, Important 2, measured: `WalkRules::new(true,
+/// true, vec!["private"])` over a fixture holding `Private/secret.txt`
+/// leaves `Private/secret.txt` in the walk's own `found`, i.e. the rule
+/// excludes nothing, while the naive `symlink_metadata` check answered
+/// `true`).
+///
+/// `symlink_metadata`, not `metadata`, at the last step: a symlink is not
+/// followed to decide existence, matching `WalkRules::builder`'s own
+/// `follow_links(false)`. Existence alone, not `is_dir()` — see
+/// [`StoredExclusion`]'s own doc comment for why the directory check was
+/// dropped.
+fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
+    let mut current = root.to_path_buf();
+    for component in prefix.split('/') {
+        let found = std::fs::read_dir(&current).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .find(|entry| entry.file_name() == std::ffi::OsStr::new(component))
+        });
+        match found {
+            Some(entry) => current = entry.path(),
+            None => return false,
+        }
+    }
+    std::fs::symlink_metadata(&current).is_ok()
+}
+
 /// Off the main thread for the reason given on [`open_index`].
 ///
-/// `symlink_metadata`, not `metadata`: a symlink is not followed to decide
-/// existence, matching `WalkRules::builder`'s own `follow_links(false)`. A
-/// prefix naming a FILE rather than a directory reports `false` — a rule
-/// that names a file excludes no subtree, so it is not "on disk" in the
-/// sense this field promises.
+/// **The root itself is stat'd once, before the loop, and an unreachable
+/// root refuses the whole call rather than answering per prefix (review
+/// round 1, Important 1).** An external drive unmounted, a network volume
+/// down, or the folder moved all make `prefix_exists_on_disk` fail for
+/// every candidate — the same way `std::fs::read_dir` fails for a root that
+/// is not there. Left unguarded, that reads as "every rule's folder is
+/// gone", and a stale-rule control would offer to remove all of a root's
+/// exclusions in one screen; accepting that offer sends every previously
+/// protected folder's contents to the provider on the next scan under D29.
+/// Refusing is the conservative direction — the product already renders a
+/// job refusal this way (`EndReason::RootUnavailable`, `job.rs:79-87`), so
+/// this is the same shape applied one command earlier.
 #[tauri::command(async)]
 pub fn list_exclusions(
     state: State<'_, AppState>,
@@ -123,14 +174,15 @@ pub fn list_exclusions(
     let root = state
         .with_index(|db| db.watched_root_path(root_id))?
         .ok_or(Error::UnknownWatchedRoot(root_id))?;
+    let root_path = std::path::Path::new(&root);
+    if std::fs::symlink_metadata(root_path).is_err() {
+        return Err(Error::RootUnavailable(root_id));
+    }
     let prefixes = state.with_index(|db| db.list_path_exclusions(root_id))?;
     Ok(prefixes
         .into_iter()
         .map(|prefix| {
-            let full = std::path::Path::new(&root).join(&prefix);
-            let exists_on_disk = std::fs::symlink_metadata(&full)
-                .map(|meta| meta.is_dir())
-                .unwrap_or(false);
+            let exists_on_disk = prefix_exists_on_disk(root_path, &prefix);
             StoredExclusion {
                 prefix,
                 exists_on_disk,
