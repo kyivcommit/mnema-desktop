@@ -3441,14 +3441,18 @@ fn a_stored_exclusion_that_no_longer_validates_refuses_the_walk() {
     let (channel, _events) = job_channel();
     let refusal = walk_job::start_walk_job(state.clone(), root, channel)
         .expect_err("a walk started even though a stored prefix cannot become a rule");
-    // The whole sentence, not a substring of it (review round 1, M3). Every
-    // `RulesError` variant opens with `exclusion rule {prefix:?}`
-    // (`rules.rs:52-80`), so a substring proves "some `RulesError` about
-    // `..`" rather than which one — the same weakening
-    // `excluding_dotdot_is_refused_and_stores_nothing` already carries a
-    // round-1 note about. The sentence crosses the `Error::
-    // InvalidExclusionRule` seam unchanged (`#[error("{0}")]`,
-    // `error.rs:60`), so equality costs nothing here either.
+    // The whole sentence, not a substring of it (review round 1, M3). All
+    // eight `RulesError` variants open with `exclusion rule {prefix:?}` —
+    // the whole enum, `rules.rs:50-129`, not the `52-80` first written here,
+    // which stopped after four of them and so certified half of what the
+    // word "every" was doing (review round 2, N3). A substring therefore
+    // proves "some `RulesError` about `..`" rather than which one — the same
+    // weakening `excluding_dotdot_is_refused_and_stores_nothing` already
+    // carries a round-1 note about. The sentence crosses the
+    // `Error::InvalidExclusionRule` seam unchanged (`#[error("{0}")]`,
+    // `error.rs:74` — it was cited as `:60` by the same commit that pushed
+    // it down fourteen lines, review round 2, N2), so equality costs nothing
+    // here either.
     assert_eq!(
         refusal.to_string(),
         "exclusion rule \"..\" has a `..` path component — name the folder directly, not `.` \

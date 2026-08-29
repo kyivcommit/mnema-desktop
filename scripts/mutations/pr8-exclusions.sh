@@ -5,11 +5,15 @@
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
 #
-# Fourteen cases. Eleven against `list_exclusions`, `exclude_subfolder` or
+# Fifteen cases. Eleven against `list_exclusions`, `exclude_subfolder` or
 # `include_subfolder` (`src-tauri/src/bridge.rs`) and the tests written for
 # task-2 of PR 8a; three against `start_walk_job` (`src-tauri/src/walk_job.rs`)
 # and the tests written for task-3, which is where a stored rule stops being
-# a row and starts removing files. Thirteen run in `tests/commands.rs`
+# a row and starts removing files; and one against `validate_prefix` in
+# `crates/mnema-walk/src/rules.rs`, the only case here that mutates a file
+# outside `src-tauri` — it is here rather than in a `mnema-walk` file because
+# the test that kills it is a `mnema-desktop` one, and this harness selects a
+# test by package. Fourteen run in `tests/commands.rs`
 # (`--test commands`) and one in `bridge.rs`'s own `mod tests` (`--lib`) —
 # the last because the site it names, a per-entry `io::Error` from a
 # directory listing, cannot be forced out of a real filesystem and so is
@@ -17,7 +21,7 @@
 # IPC (review round 4, N3).
 #
 # ⚠️ **"Any unix leg", not "any CI leg" (review round 3, Minor N2).** Four of
-# these fourteen cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
+# these fifteen cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
 # three of the `prefix_exists_on_disk` permission/kind cases) — harmless on
 # this repository's two CI legs (`ubuntu-24.04`, `macos-14`, both unix), but
 # a claim of "any CI leg" is false the moment a Windows leg exists, and would
@@ -227,3 +231,19 @@ case_ "every stored prefix must reach WalkRules::new, not only the first" \
   's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?;}{    let rules = WalkRules::new(true, true, user_prefixes.into_iter().take(1).collect())?;}' \
   'let rules = WalkRules::new(true, true, user_prefixes.into_iter().take(1).collect())?;' \
   mnema-desktop 'a_walk_applies_every_stored_exclusion_not_only_the_first' --test commands
+
+# Review round 2, N5. The one behaviour this feature turns on whose guard
+# nothing else keeps alive: `validate_prefix` answering `Ok(None)` for the
+# empty string, so a blank stored row is dropped and the walk runs. Measured
+# in review round 2 -- with that `Ok(None)` replaced by an `Err`, the test
+# named below is the ONLY failure across `mnema-desktop` AND `mnema-walk`;
+# `mnema-walk`'s own tests do not pin the empty string at all. So the call
+# site's promise that "a later change to that `Ok(None)` cannot quietly turn
+# this line into a refusal" rested on one test continuing to exist, and this
+# is what would notice if it stopped. The only case in this file that mutates
+# a file outside `src-tauri`.
+case_ "a blank stored prefix must stay a non-error" \
+  crates/mnema-walk/src/rules.rs \
+  's{    if prefix\.is_empty\(\) \{\n        return Ok\(None\);\n    \}}{    if prefix.is_empty() \{\n        return Err(RulesError::EmptyComponent \{ prefix: prefix.to_string() \});\n    \}}' \
+  'return Err(RulesError::EmptyComponent { prefix: prefix.to_string() });' \
+  mnema-desktop 'a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_anything' --test commands

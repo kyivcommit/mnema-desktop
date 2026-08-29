@@ -32,17 +32,23 @@ use crate::state::AppState;
 /// spawning the walk's own OS thread are cheap either way; what moved this
 /// off `start_probe_job`'s blocking shape is the lookup in front of them.
 ///
-/// Every fallible step below runs **before** [`AppState::claim_job`], not
-/// after, and that is a claim about all of them rather than about a list —
-/// no count here, because the previous rewrite of this sentence said "all
-/// three" and there were four (review round 1, M2). Named rather than
-/// counted: the index read itself, which fails as [`Error::IndexNotOpen`],
-/// [`Error::StatePoisoned`] or [`Error::Index`]; an unknown `root_id` (a
-/// folder removed by a second window, a stale id a reloaded page still
-/// has); a stored exclusion prefix that `WalkRules::new` refuses; and a
-/// `Pool` that refuses its own config. Each must be refused without ever
-/// taking the slot. Claiming it first and
-/// releasing it on the first `?` gives the same end state one command later,
+/// Every fallible step **that must not take the slot** runs before
+/// [`AppState::claim_job`]. The qualifier is the whole claim, and the two
+/// previous rewrites of this sentence got it wrong in opposite directions:
+/// a count ("all three of them") that was short by one, then a universal
+/// ("every fallible step below") that was simply false —
+/// `state.open_job_index()?` is a fallible step below and it runs AFTER the
+/// claim, deliberately, for the reason its own comment gives down there
+/// (review round 1 M2, review round 2 N1). What this paragraph is about is
+/// a property, not a tally.
+///
+/// The steps it holds for, named rather than counted: the index read
+/// itself, which fails as [`Error::IndexNotOpen`], [`Error::StatePoisoned`]
+/// or [`Error::Index`]; an unknown `root_id` (a folder removed by a second
+/// window, a stale id a reloaded page still has); a stored exclusion prefix
+/// that `WalkRules::new` refuses; and a `Pool` that refuses its own config.
+/// Claiming the slot first and releasing it on the first `?` would give the
+/// same end state one command later,
 /// but for as long as this call runs `job_status` would report a job
 /// running for a call that was always going to fail — a page polling it at
 /// the wrong moment sees a lie, however short-lived.
@@ -106,10 +112,19 @@ pub fn start_walk_job(
     // (`rules.rs:363-366`), so a blank stored row is dropped and the walk
     // runs with the rules it does have. A blank names no folder, so nothing
     // is believed excluded and then indexed anyway, and `exclude_subfolder`
-    // refuses blanks before they can be stored at all. Pinned by
-    // `a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_
-    // anything` (review round 1, M5), so a later change to that `Ok(None)`
-    // cannot quietly turn this line into a refusal.
+    // refuses blanks before they can be stored at all. Pinned by one test,
+    // and beneath it by the `scripts/mutations/pr8-exclusions.sh` case named
+    // "a blank stored prefix must stay a non-error" — named, not numbered,
+    // because a position in that file is one more count that drifts:
+    //
+    // `a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_anything`
+    //
+    // on its own line, unwrapped, because a wrapped identifier answers to no
+    // search: broken across two comment lines, as it was, `grep` for that
+    // name across the repository returned only the definition, so a rename
+    // would have left this comment claiming a pin that was gone (review
+    // round 2, N4). A later change to that `Ok(None)` cannot now quietly
+    // turn this line into a refusal.
     let rules = WalkRules::new(true, true, user_prefixes)?;
 
     // `Pool::new` never touches the worker path — it opens the diagnostics
