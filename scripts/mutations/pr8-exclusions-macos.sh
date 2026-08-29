@@ -17,11 +17,20 @@
 # `--exact` selects zero tests, the baseline reads `0 passed`, and the whole
 # FILE would exit 1 before any mutation ran — for every case in it, not only
 # this one (review round 2, Important A). Splitting the file is what keeps
-# that failure from taking `pr8-exclusions.sh`'s other seven portable cases
-# down with it on a non-macOS CI leg.
+# that failure from taking every other case in `pr8-exclusions.sh` down with
+# it on a non-macOS CI leg.
+#
+# No count of those cases here, deliberately (review round 4). The number
+# that stood in this sentence — "seven portable cases" — was written against
+# an earlier state of that file and was wrong by one before round 4 added a
+# case: ten cases, four of them naming `#[cfg(unix)]` tests, is six. A count
+# maintained in a DIFFERENT file from the thing it counts drifts silently,
+# and this project's own rule is that a number is a definition. The count
+# that has to be right lives in `pr8-exclusions.sh`'s own header, where the
+# cases are.
 
 case_ "existsOnDisk must resolve each component with byte-exact equality, not the filesystem's own case-insensitive lookup" \
   src-tauri/src/bridge.rs \
-  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        let entries = match std::fs::read_dir\(&current\) \{\n            Ok\(entries\) => entries,\n            Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => return false,\n            Err\(_\) => return true,\n        \};\n        match entries\n            \.flatten\(\)\n            \.find\(\|entry\| entry\.file_name\(\) == std::ffi::OsStr::new\(component\)\)\n        \{\n            Some\(entry\) => current = entry\.path\(\),\n            None => return false,\n        \}\n    \}\n    match std::fs::symlink_metadata\(&current\) \{\n        Ok\(_\) => true,\n        Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => false,\n        Err\(_\) => true,\n    \}~    /* mutant: naive case-insensitive stat */\n    std::fs::symlink_metadata(root.join(prefix)).is_ok()~' \
+  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        match std::fs::read_dir\(&current\)\.and_then\(\|entries\| entry_named\(entries, component\)\) \{\n            Ok\(Some\(path\)\) => current = path,\n            Ok\(None\) => return false,\n            Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => return false,\n            Err\(_\) => return true,\n        \}\n    \}\n    match std::fs::symlink_metadata\(&current\) \{\n        Ok\(_\) => true,\n        Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => false,\n        Err\(_\) => true,\n    \}~    /* mutant: naive case-insensitive stat */\n    std::fs::symlink_metadata(root.join(prefix)).is_ok()~' \
   '/* mutant: naive case-insensitive stat */' \
   mnema-desktop 'a_prefix_that_only_matches_the_folders_name_by_case_reports_not_on_disk' --test commands

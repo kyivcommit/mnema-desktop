@@ -4,12 +4,16 @@
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
 #
-# Ten cases against `list_exclusions`, `exclude_subfolder` or
-# `include_subfolder` (`src-tauri/src/bridge.rs`) and the `tests/commands.rs`
-# tests written for task-2 of PR 8a.
+# Eleven cases against `list_exclusions`, `exclude_subfolder` or
+# `include_subfolder` (`src-tauri/src/bridge.rs`) and the tests written for
+# task-2 of PR 8a: ten in `tests/commands.rs` (`--test commands`) and one in
+# `bridge.rs`'s own `mod tests` (`--lib`) — the last because the site it
+# names, a per-entry `io::Error` from a directory listing, cannot be forced
+# out of a real filesystem and so is reached through `entry_named`'s
+# iterator parameter rather than through the IPC (review round 4, N3).
 #
 # ⚠️ **"Any unix leg", not "any CI leg" (review round 3, Minor N2).** Four of
-# these ten cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
+# these eleven cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
 # three of the `prefix_exists_on_disk` permission/kind cases) — harmless on
 # this repository's two CI legs (`ubuntu-24.04`, `macos-14`, both unix), but
 # a claim of "any CI leg" is false the moment a Windows leg exists, and would
@@ -40,13 +44,19 @@
 #
 # ⚠️ **Review round 3's ruling: one classifier (`path_error_is_an_answer`),
 # used at every site that turns a filesystem lookup into `exists_on_disk`,
-# rather than another one-off patch at another site.** `prefix_exists_on_disk`
-# has two such sites — the per-component `read_dir` in its loop, and the
-# final `symlink_metadata` — enumerated in that function's own doc comment.
-# `list_exclusions`'s root guard (`!root.is_dir()`) is a deliberate third
-# site that does NOT call the classifier, because its job is to match the
-# walk's own predicate exactly, not to answer the question a second way; see
-# that command's own doc comment for why.
+# rather than another one-off patch at another site.** Round 3's own
+# enumeration of those sites then missed one (review round 4, N3: the
+# per-entry `io::Result<DirEntry>` that `.flatten()` discarded), so round 4
+# re-derived the set from the file rather than extending the list. It is
+# enumerated in `prefix_exists_on_disk`'s doc comment and has FOUR entries
+# there — `read_dir` failing, a single entry failing mid-iteration, a clean
+# listing holding no such name, and the final `symlink_metadata` — plus a
+# fifth in this file, `list_exclusions`'s root guard (`!root.is_dir()`),
+# which deliberately does NOT call the classifier: its output is a refusal
+# of the whole call rather than a boolean about a rule, so the harm the
+# classifier prevents cannot arise there. Cases below cover entries 1, 2 and
+# 4 individually; entry 3 needs no classifier and is covered by the
+# whole-function case.
 
 # The refusal itself, deleted. `if let Ok(_) = ... {}` still compiles and the
 # `?` that used to propagate `RulesError` is gone, so a prefix `WalkRules`
@@ -85,7 +95,7 @@ case_ "excluding an already-excluded folder a second time must not become an err
 # have found.
 case_ "existsOnDisk must come from a real filesystem lookup, not a constant" \
   src-tauri/src/bridge.rs \
-  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        let entries = match std::fs::read_dir\(&current\) \{\n            Ok\(entries\) => entries,\n            Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => return false,\n            Err\(_\) => return true,\n        \};\n        match entries\n            \.flatten\(\)\n            \.find\(\|entry\| entry\.file_name\(\) == std::ffi::OsStr::new\(component\)\)\n        \{\n            Some\(entry\) => current = entry\.path\(\),\n            None => return false,\n        \}\n    \}\n    match std::fs::symlink_metadata\(&current\) \{\n        Ok\(_\) => true,\n        Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => false,\n        Err\(_\) => true,\n    \}~    /* mutant: always true */\n    true~' \
+  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        match std::fs::read_dir\(&current\)\.and_then\(\|entries\| entry_named\(entries, component\)\) \{\n            Ok\(Some\(path\)\) => current = path,\n            Ok\(None\) => return false,\n            Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => return false,\n            Err\(_\) => return true,\n        \}\n    \}\n    match std::fs::symlink_metadata\(&current\) \{\n        Ok\(_\) => true,\n        Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => false,\n        Err\(_\) => true,\n    \}~    /* mutant: always true */\n    true~' \
   '/* mutant: always true */' \
   mnema-desktop 'list_exclusions_reports_whether_each_stored_prefix_is_still_on_disk' --test commands
 
@@ -143,6 +153,23 @@ case_ "a rule under an unreadable ancestor must not read stale" \
   's{            Err\(_\) => return true,}{            Err(_) => return false,}' \
   'Err(_) => return false,' \
   mnema-desktop 'a_rule_under_an_unreadable_ancestor_reports_present_not_stale' --test commands
+
+# Review round 4, N3. The fourth site of `prefix_exists_on_disk`'s
+# enumeration — the per-entry `io::Result<DirEntry>` — reverted to exactly
+# what stood there through fix rounds 1, 2 and 3: `.flatten()`'s behaviour,
+# an `Err` silently dropped. A directory entry that could not be read then
+# becomes indistinguishable from a name that is not there, the loop falls to
+# `Ok(None) => return false`, and a live rule reads as stale — the same
+# under-exclusion direction as the three sites the earlier rounds fixed, one
+# call deeper. `--lib`, not `--test commands`: a per-entry error cannot be
+# forced out of a real filesystem deterministically, so the site is reached
+# through `entry_named`'s iterator parameter, which is what that parameter
+# is for.
+case_ "a directory entry that could not be read must not answer as an absent name" \
+  src-tauri/src/bridge.rs \
+  's{        let entry = entry\?;}{        let Ok(entry) = entry else \{ continue \};}' \
+  'let Ok(entry) = entry else { continue };' \
+  mnema-desktop 'bridge::tests::a_directory_entry_that_cannot_be_read_is_an_error_not_an_absence' --lib
 
 # `include_subfolder`'s answer, forced to `true` regardless of what
 # `Db::remove_path_exclusion` actually found. Task 5's stale-rule control
