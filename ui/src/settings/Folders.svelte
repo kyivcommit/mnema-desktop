@@ -324,12 +324,29 @@
   // contents ARE walked, and its name is one no rule can carry — which is why
   // its sentence says something different rather than something similar.
   //
-  // **Only `open` can be expanded, and `symlink` is the load-bearing case.**
-  // `subfolder_state` asks `is_symlink` about the entry itself, so a directory
-  // INSIDE a symlinked one comes back `open` — offering "exclude" there would
-  // write a rule that excludes nothing, over a subtree the walk never enters.
-  // The two rule states are shut for a weaker reason: everything under them is
-  // already held by a rule, so there is nothing there to decide.
+  // **`open` and `excluded` can be expanded; the other four cannot, and
+  // `symlink` is the load-bearing case.** `subfolder_state` asks `is_symlink`
+  // about the entry itself, so a directory INSIDE a symlinked one comes back
+  // `open` — offering "exclude" there would write a rule that excludes
+  // nothing, over a subtree the walk never enters. `builtIn` and
+  // `unusableName` are shut because there is nothing below them to decide
+  // either: both questions are asked about the WHOLE relative path
+  // (`layers.prunes` and `check_prefix`, `tree.rs:823` and `:844`), so every
+  // child of such a folder comes back in the same state its parent is in.
+  //
+  // 🔴 `excluded` opens, `excludedByAncestor` stays shut, and the pair is one
+  // decision rather than two. The first pass shut both, which cost two things:
+  // a person who protected `Work` could never look inside to check what they
+  // had protected, and — the reason it was a review finding — every path to an
+  // `excludedByAncestor` row runs through an ancestor that is `Excluded`
+  // (`subfolder_state` asks about an ancestor before asking about the folder
+  // itself, `tree.rs:829-838`), so shutting `excluded` made
+  // `excludedByAncestor` a state the running application could not reach at
+  // all: tested, and unreachable. Opening `excluded` breaks nothing, because
+  // that same precedence is what its children come back as —
+  // `ExcludedByAncestor`, which offers no control and does not open in turn.
+  // The subtree under a rule is therefore readable exactly one level deep, and
+  // no toggle appears over anything the walk has already pruned.
   function describe(state: SubfolderState): {
     sentence: string;
     control: 'exclude' | 'include' | 'none';
@@ -339,7 +356,7 @@
       case 'open':
         return { sentence: t('settings_subfolder_open'), control: 'exclude', expandable: true };
       case 'excluded':
-        return { sentence: t('settings_subfolder_excluded'), control: 'include', expandable: false };
+        return { sentence: t('settings_subfolder_excluded'), control: 'include', expandable: true };
       case 'excludedByAncestor':
         return {
           // The prefix the STATE carries, not this row's own path: they differ,
@@ -354,6 +371,28 @@
         return { sentence: t('settings_subfolder_symlink'), control: 'none', expandable: false };
       case 'unusableName':
         return { sentence: t('settings_subfolder_unusable_name'), control: 'none', expandable: false };
+      // 🔴 A compile-time arm with a run-time consequence, and the two are
+      // answered in different places on purpose.
+      //
+      // Compile time: the `never` binding is what makes a seventh variant
+      // mirrored into `ipc.ts` and left undescribed fail `npm run check`.
+      //
+      // Run time: a variant added to `tree.rs` and NOT mirrored arrives here
+      // anyway — Rust and TypeScript share no compiler — and this arm then
+      // returns the state object itself, so `control` is `undefined`. The
+      // markup used to ask `row.control !== 'none'`, which `undefined`
+      // satisfies, and the row grew a button with no text and no `aria-label`
+      // whose click routed to `include`: an unlabelled control that removed
+      // the person's exclusion rule, and under D29 sent that folder's text to
+      // the provider on the next scan. The markup now names the two controls
+      // it draws, so an undescribed state offers none.
+      //
+      // This arm deliberately does NOT also return `control: 'none'`. Two
+      // guards for one fact is the shape this branch has paid for repeatedly —
+      // each kills the other's mutant, and neither can be shown to work. The
+      // run-time answer lives in the markup, alone, where one revert kills it.
+      // The pin that stops the state arriving at all is
+      // `ipc.test.ts`'s `SubfolderState is exactly what tree.rs defines`.
       default: {
         const unreachable: never = state;
         return unreachable;
@@ -473,7 +512,8 @@
         <span>{row.entry.name}</span>
         <span>{row.sentence}</span>
         {#if row.costLabel}<span>{row.costLabel}</span>{/if}
-        {#if row.control !== 'none'}
+        <!-- Named, never `!== 'none'` — see `describe`'s default arm. -->
+        {#if row.control === 'exclude' || row.control === 'include'}
           <button
             type="button"
             aria-label={row.controlAriaLabel}

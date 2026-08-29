@@ -331,7 +331,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_subfolder_excluded: 'Виключено вашим правилом.',
     // Називає предка: рядок «утримується правилом» без назви правила не
     // лишає людині нічого, що можна піти й прибрати.
-    settings_subfolder_excluded_by_ancestor: 'Утримується вашим правилом на {prefix}. Приберіть те правило, щоб змінити цю теку.',
+    //
+    // «Спершу», а не «щоб змінити»: стан несе НАЙЗОВНІШНІШЕ правило-предка
+    // (`tree.rs:755-759`). Якщо правила стоять і на `Archive`, і на
+    // `Archive/sub`, прибирання `Archive` не звільняє `Archive/sub/x` — тож
+    // речення називає перший крок, а не обіцяє результат.
+    settings_subfolder_excluded_by_ancestor: 'Утримується вашим правилом на {prefix}. Спершу приберіть те правило — теку може утримувати ще одне.',
     // `built_in` і `unusable_name` — протилежні факти, і речення НЕ мають
     // читатись однаково: вміст першої не потрапляє до провайдера ніколи,
     // вміст другої потрапляє, і людина не може захистити її звідси.
@@ -519,7 +524,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_subfolders_failed: 'The subfolders of this folder could not be read.',
     settings_subfolder_open: 'No rule excludes this folder.',
     settings_subfolder_excluded: 'Excluded by your rule.',
-    settings_subfolder_excluded_by_ancestor: 'Held by your rule on {prefix}. Remove that rule to change this folder.',
+    settings_subfolder_excluded_by_ancestor: 'Held by your rule on {prefix}. Remove that rule first — another rule may still hold this folder.',
     settings_subfolder_built_in: 'The application never indexes this folder, so there is no rule to add or remove.',
     settings_subfolder_symlink: 'A link to another folder. The scan never follows links, so nothing inside it is indexed.',
     settings_subfolder_unusable_name: 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',

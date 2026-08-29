@@ -493,13 +493,70 @@ test('an excluded subfolder offers to include it and says what that costs first'
   expect(row.queryByRole('button', { name: 'Exclude Archive' })).toBeNull();
 });
 
+// 🔴 Review finding I1. An excluded folder opens, and the reason is not
+// symmetry: every path to an `excludedByAncestor` row runs through a folder
+// that is itself `Excluded` (`subfolder_state` asks about an ancestor before
+// asking about the folder itself, `tree.rs:829-838`), so while `excluded` was
+// shut that state was tested and unreachable — and a person who had protected
+// a folder could never look inside to see what they had protected.
+test('an excluded folder opens, and what is inside it names the rule and offers nothing', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockImplementation((_rootId: number, path: string) =>
+    Promise.resolve(path === ''
+      ? subfolders([sub('Archive', { kind: 'excluded' })])
+      : subfolders([sub('tax', { kind: 'excludedByAncestor', prefix: 'Archive' }, 'Archive')])));
+  listExclusions.mockResolvedValue([{ prefix: 'Archive', existsOnDisk: true }]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  // By test id, not by text: `Archive` is on screen twice — the subfolder row
+  // and the stored rule that names it — and a text query would be ambiguous.
+  await waitFor(() => expect(screen.getByTestId('subfolder-1-Archive')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-Archive'));
+
+  await waitFor(() => expect(screen.getByText('tax')).toBeTruthy());
+  expect(screen.getByTestId('subfolder-expand-1-Archive').getAttribute('aria-expanded')).toBe('true');
+  const held = within(screen.getByTestId('subfolder-1-Archive/tax'));
+  expect(held.getByText('Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.')).toBeTruthy();
+  // Nothing under a rule is toggleable and nothing under it opens further, so
+  // opening the rule's own folder adds a level to read and no control to press.
+  expect(held.queryAllByRole('button')).toHaveLength(0);
+  expect(screen.queryByTestId('subfolder-expand-1-Archive/tax')).toBeNull();
+});
+
+// The pin in `ipc.test.ts` is what stops this state arriving; this is what the
+// screen does if it arrives anyway. Before the fix the row drew a button with
+// no text and no `aria-label` whose click called `include_subfolder` — an
+// unlabelled control that removed the person's exclusion rule.
+test('a state this build has never heard of offers no control, and the rule stays reachable', async () => {
+  // The shell is not bound by this window's union, which is the whole finding:
+  // a variant added to `tree.rs` and not mirrored here arrives all the same.
+  const unknown = { kind: 'quarantined' } as unknown as SubfolderState;
+  await expand([sub('Vault', unknown)], [{ prefix: 'Vault', existsOnDisk: true }]);
+
+  const row = within(screen.getByTestId('subfolder-1-Vault'));
+  expect(row.getByText('Vault')).toBeTruthy(); // still listed, never silently dropped
+  expect(row.queryAllByRole('button')).toHaveLength(0);
+  expect(includeSubfolder).not.toHaveBeenCalled();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+  // And the protection is still reachable, by the control that names it.
+  expect(screen.getByRole('button', { name: 'Remove the rule on Vault' })).toBeTruthy();
+});
+
 test('an ancestor-held subfolder names the rule holding it and offers no control at all', async () => {
   await expand([sub('secret', { kind: 'excludedByAncestor', prefix: 'Work' }, 'Work')]);
 
   const row = within(screen.getByTestId('subfolder-1-Work/secret'));
   // The prefix the state CARRIES, not the row's own path: a row that says
   // "held by a rule" without naming it leaves nothing to go and remove.
-  expect(row.getByText('Held by your rule on Work. Remove that rule to change this folder.')).toBeTruthy();
+  // "first", not "to change this folder": the state names the OUTERMOST
+  // ancestor rule (`tree.rs:755-759`), so with rules on both `Archive` and
+  // `Archive/sub` removing `Archive` does not free `Archive/sub/x`. The
+  // sentence names the first step and promises no result.
+  expect(row.getByText('Held by your rule on Work. Remove that rule first — another rule may still hold this folder.')).toBeTruthy();
   expect(row.queryAllByRole('button')).toHaveLength(0);
 });
 
@@ -779,7 +836,62 @@ test('a root that disappears from the list takes its expansion with it', async (
   expect(screen.getByTestId('folder-expand-3').getAttribute('aria-expanded')).toBe('false');
 });
 
-test('a listing that arrives after the row was shut is discarded, not drawn', async () => {
+// 🔴 Review finding I2. This case is `patch`'s early return
+// (`Folders.svelte:86`) and nothing else. The reviewer measured the gap: with
+// the early return dropped and every other guard intact, the whole file was
+// green, so the guard had no mutant anywhere in the suite.
+//
+// With the row shut there is no panel entry left. Written without the early
+// return the function BUILDS one — `{ ...panels[rootId] ?? fresh, ...fields }`
+// puts the rejection into a panel of its own, which re-opens the row the
+// person closed and then fills itself in from the unconditional re-read. That
+// is the form measured red here. The blunter form — deleting the line and
+// spreading `undefined` — is red too, but as a thrown render rather than as a
+// failed assertion, which is not a kill worth resting on.
+//
+// The generation counter cannot stand in for it. The counter is checked inside
+// `read`, and the two writes here are outside it: the `catch`'s own `patch`,
+// and — even when the call succeeds — `read`'s success patch, which passes its
+// own generation check because `read` raises the generation itself.
+test('a row shut while an exclude is in flight stays shut when the call rejects', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Work')]));
+  listExclusions.mockResolvedValue([]);
+  let refuse: (e: unknown) => void = () => {};
+  excludeSubfolder.mockReturnValueOnce(new Promise((_resolve, reject) => { refuse = reject; }));
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByText('Work')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' })); // in flight
+  await fireEvent.click(screen.getByTestId('folder-expand-1')); // the person shuts the row
+  expect(screen.queryByTestId('folder-panel-1')).toBeNull(); // and it is shut
+
+  refuse(new Error('that folder could not be read'));
+  // Two turns: the rejection's own patch, then the unconditional re-read behind
+  // it — a test that stopped after one would report "stays shut" about a write
+  // that had not been attempted yet.
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByTestId('folder-panel-1')).toBeNull();
+  expect(screen.queryByText('that folder could not be read')).toBeNull();
+  expect(screen.queryByText('Work')).toBeNull();
+});
+
+// Renamed after review I2: this case cannot claim a late listing was DISCARDED,
+// because two independent guards each satisfy it alone — the generation counter
+// and `patch`'s early return — so neither has a mutant here. What it does check
+// is stated in its name and both halves are real: collapsing issues no read,
+// and a listing still on the wire puts nothing on screen. Each guard's own
+// case is elsewhere: the counter's is `an older listing that lands after a
+// newer one`, and the early return's is `a row shut while an exclude is in
+// flight`.
+test('collapsing a row reads nothing, and a listing still on the wire draws nothing', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
   let settle: (l: SubfolderListing) => void = () => {};
@@ -800,12 +912,13 @@ test('a listing that arrives after the row was shut is discarded, not drawn', as
   expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('false');
 });
 
-// 🔴 The collapse case above is held by a NEIGHBOURING defence, not by the
-// generation counter: a shut row has no panel entry left to write into, so
-// dropping the counter entirely leaves that test green (measured). The case the
-// counter is actually for is this one — a row shut and opened again while the
-// first read is still on the wire, where the panel entry EXISTS when the older
-// answer lands and nothing else would stop it being drawn over the newer one.
+// 🔴 The collapse case above is held by TWO neighbouring defences and not by
+// the generation counter: a shut row has no panel entry left to write into, so
+// dropping the counter entirely leaves that test green, and so does dropping
+// `patch`'s early return (both measured). The case the counter is actually for
+// is this one — a row shut and opened again while the first read is still on
+// the wire, where the panel entry EXISTS when the older answer lands and
+// nothing else would stop it being drawn over the newer one.
 test('an older listing that lands after a newer one is discarded, not drawn over it', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
@@ -835,18 +948,31 @@ test('an older listing that lands after a newer one is discarded, not drawn over
   expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('true');
 });
 
-// What disappears when a rule appears: an open subtree under a folder that has
-// just become excluded. The row loses its expand control on the re-read, and a
-// subtree left hanging under it would be a list of folders a person can no
-// longer collapse, under a folder whose contents are no longer read at all.
-test('excluding a folder that was open takes its subtree off the screen with it', async () => {
+// What disappears when a rule appears. `Work` itself stays open — a rule's own
+// folder is readable (I1) — but the level under `Work/notes` does not: the
+// re-read gives `notes` the ancestor state, which offers no way to open it, and
+// a subtree left hanging under it would be a list of folders a person can no
+// longer collapse, under a row whose contents are no longer read at all.
+//
+// Two mock levels below the root on purpose: with one, `notes` would be the
+// deepest thing on screen and its own children would never have existed, so
+// nothing would be left to disappear. Measured with two: dropping
+// `describe(...).expandable` from `fetchTree` fails this case and no other.
+test('excluding an open folder keeps that folder open and takes the level under its new ancestor rule away', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
   let excluded = false;
-  listSubfolders.mockImplementation((_rootId: number, path: string) =>
-    Promise.resolve(path === ''
-      ? subfolders([sub('Work', excluded ? { kind: 'excluded' } : { kind: 'open' })])
-      : subfolders([sub('notes', { kind: 'open' }, 'Work')])));
+  listSubfolders.mockImplementation((_rootId: number, path: string) => {
+    if (path === '') {
+      return Promise.resolve(subfolders([sub('Work', excluded ? { kind: 'excluded' } : { kind: 'open' })]));
+    }
+    if (path === 'Work') {
+      return Promise.resolve(subfolders([
+        sub('notes', excluded ? { kind: 'excludedByAncestor', prefix: 'Work' } : { kind: 'open' }, 'Work'),
+      ]));
+    }
+    return Promise.resolve(subfolders([sub('drafts', { kind: 'open' }, 'Work/notes')]));
+  });
   listExclusions.mockImplementation(() =>
     Promise.resolve(excluded ? [{ prefix: 'Work', existsOnDisk: true }] : []));
   excludeSubfolder.mockImplementation(() => { excluded = true; return Promise.resolve(undefined); });
@@ -857,17 +983,29 @@ test('excluding a folder that was open takes its subtree off the screen with it'
   await waitFor(() => expect(screen.getByText('Work')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('subfolder-expand-1-Work'));
   await waitFor(() => expect(screen.getByText('notes')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-Work/notes'));
+  await waitFor(() => expect(screen.getByText('drafts')).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
 
   await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Work' })).toBeTruthy());
-  expect(screen.queryByText('notes')).toBeNull();
-  expect(screen.queryByTestId('subfolder-expand-1-Work')).toBeNull();
+  // The folder the person just protected is still open, and still openable.
+  expect(screen.getByText('notes')).toBeTruthy();
+  expect(screen.getByTestId('subfolder-expand-1-Work').getAttribute('aria-expanded')).toBe('true');
+  // The level under the new ancestor rule is gone, and so is the control that
+  // opened it.
+  expect(screen.queryByText('drafts')).toBeNull();
+  expect(screen.queryByTestId('subfolder-expand-1-Work/notes')).toBeNull();
 });
 
 test('the expanded panel switches language with everything else on screen', async () => {
   await expand(
-    [sub('Work'), sub('node_modules', { kind: 'builtIn' })],
+    [
+      sub('Work'),
+      sub('Archive', { kind: 'excluded' }),
+      sub('secret', { kind: 'excludedByAncestor', prefix: 'Archive' }, 'Archive'),
+      sub('node_modules', { kind: 'builtIn' }),
+    ],
     [{ prefix: 'Old notes', existsOnDisk: false }],
     1,
   );
@@ -883,7 +1021,15 @@ test('the expanded panel switches language with everything else on screen', asyn
   expect(screen.getByText('Застосунок ніколи не індексує цю теку, тож тут немає правила, яке можна додати чи прибрати.')).toBeTruthy();
   expect(screen.getByText('Наразі за цим шляхом теки немає.')).toBeTruthy();
   expect(screen.getByText('1 підтеку не показано: її назву не вдалося прочитати як текст.')).toBeTruthy();
+  // The sentence that names the outermost rule, in the language it is read in:
+  // "спершу", not a promise that removing that rule changes this folder.
+  expect(screen.getByText('Утримується вашим правилом на Archive. Спершу приберіть те правило — теку може утримувати ще одне.')).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Виключити Work' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Не виключати Archive' })).toBeTruthy();
+  // An excluded folder opens here too — the control exists in both locales, and
+  // the row held by the rule below it still offers none.
+  expect(screen.getByRole('button', { name: 'Підтеки теки Archive' })).toBeTruthy();
+  expect(within(screen.getByTestId('subfolder-1-Archive/secret')).queryAllByRole('button')).toHaveLength(0);
   expect(screen.getByRole('button', { name: 'Прибрати правило на Old notes' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Підтеки теки /synthetic/root' })).toBeTruthy();
 });
@@ -920,8 +1066,8 @@ test('the whole expanded row reads as one screen, in order, with every sentence 
     'Indexed: 2 documents',
     'Subfolders', 'Scan', 'Remove',
     '1 subfolder is not listed: its name could not be read as text.',
-    'Archive', 'Excluded by your rule.', cost, 'Do not exclude',
-    'Held', 'Held by your rule on Archive. Remove that rule to change this folder.',
+    'Archive', 'Excluded by your rule.', cost, 'Do not exclude', 'Subfolders',
+    'Held', 'Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.',
     'Link', 'A link to another folder. The scan never follows links, so nothing inside it is indexed.',
     'Trailing', 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
     'Work', 'No rule excludes this folder.', 'Exclude', 'Subfolders',

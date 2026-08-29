@@ -1,5 +1,9 @@
 import { expect, test, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as ipc from './ipc';
+import { camelOf, rustEnumVariants } from './rust-enum';
 import type { SourceAround, StoredExclusion, SubfolderListing, SubfolderState } from './ipc';
 import {
   generated,
@@ -280,16 +284,23 @@ test('includeSubfolder sends the pair and returns whether a rule was removed', a
 // `npm run check` on the missing key; one mirrored under a wrong tag fails the
 // list below. The tags are `tree.rs`'s own
 // (`the_subfolder_wire_shape_is_camel_case`), not this file's invention.
-test('SubfolderState carries every state the shell can send, and exactly those six', () => {
-  const byTag: Record<SubfolderState['kind'], SubfolderState> = {
-    open: { kind: 'open' },
-    excluded: { kind: 'excluded' },
-    excludedByAncestor: { kind: 'excludedByAncestor', prefix: 'Work' },
-    builtIn: { kind: 'builtIn' },
-    symlink: { kind: 'symlink' },
-    unusableName: { kind: 'unusableName' },
-  };
+//
+// ⚠️ It says nothing at all about a variant added to `tree.rs` and NOT
+// mirrored here — the direction that actually happens. That is the next test.
+// One sample per variant, and the annotation is the point: TypeScript accepts
+// this object only when it has an entry for every member of the union and no
+// entry for anything else, so `Object.keys` below is the union enumerated at
+// run time rather than a list written beside it.
+const byTag: Record<SubfolderState['kind'], SubfolderState> = {
+  open: { kind: 'open' },
+  excluded: { kind: 'excluded' },
+  excludedByAncestor: { kind: 'excludedByAncestor', prefix: 'Work' },
+  builtIn: { kind: 'builtIn' },
+  symlink: { kind: 'symlink' },
+  unusableName: { kind: 'unusableName' },
+};
 
+test('SubfolderState carries every state the shell can send, and exactly those six', () => {
   expect(Object.keys(byTag).sort()).toEqual(
     ['builtIn', 'excluded', 'excludedByAncestor', 'open', 'symlink', 'unusableName'],
   );
@@ -297,6 +308,32 @@ test('SubfolderState carries every state the shell can send, and exactly those s
   // name the rule holding it.
   const held = byTag.excludedByAncestor;
   expect(held.kind === 'excludedByAncestor' && held.prefix).toBe('Work');
+});
+
+// 🔴 The direction the test above cannot see, and the one that actually
+// happens. `Record<SubfolderState['kind'], …>` checks the union against
+// ITSELF, so it is satisfied by any union — including one that is a variant
+// behind `tree.rs`. Rust and TypeScript share no compiler: a variant added to
+// the enum that OWNS this wire shape, and not mirrored here, fails nothing.
+// It reaches `Folders.svelte`'s classifier as a state that file has never
+// heard of, and the review that found this rendered the result — a folder
+// name, an empty sentence, and an unlabelled button that removed the person's
+// exclusion rule.
+//
+// Both directions in one comparison: a variant Rust gains and this file has
+// never heard of fails here, and so does one this file still lists after Rust
+// has dropped it. The spelling half is Rust's own
+// `the_subfolder_wire_shape_is_camel_case` (`tree.rs:1254`), which serializes
+// each state and pins the tag string — this half derives the wire name with
+// serde's camelCase rule and would not notice `rename_all` changing. Neither
+// closes the gap alone.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TREE_RS = readFileSync(join(HERE, '../../../src-tauri/src/tree.rs'), 'utf8');
+
+test('SubfolderState is exactly what tree.rs defines, in the spelling serde sends', () => {
+  expect(Object.keys(byTag).sort()).toEqual(
+    rustEnumVariants(TREE_RS, 'SubfolderState').map(camelOf).sort(),
+  );
 });
 
 test('the subfolder wire types reject Rust snake_case spellings', () => {
