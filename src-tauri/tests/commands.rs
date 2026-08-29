@@ -2498,6 +2498,163 @@ fn list_exclusions_refuses_when_the_root_itself_is_unreachable() {
     );
 }
 
+/// Review round 2, Minor B: a dangling symlink root passes a bare
+/// `symlink_metadata(..).is_err()` guard (a symlink's own metadata resolves
+/// fine even when its target is gone), so the old guard let this case
+/// through into Important 1's own failure mode — every prefix answering
+/// `existsOnDisk: false`. `!root.is_dir()` — the walk's own predicate
+/// (`crates/mnema-ingest/src/walk.rs:288`) follows the symlink and correctly
+/// answers "not a directory" for a dangling one.
+#[cfg(unix)]
+#[test]
+fn list_exclusions_refuses_when_the_root_is_a_dangling_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let target = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(target.path().join("Docs")).expect("creating Docs");
+    let link_parent = tempfile::tempdir().unwrap();
+    let link_path = link_parent.path().join("root_link");
+    std::os::unix::fs::symlink(target.path(), &link_path).expect("creating the root symlink");
+
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": link_path.display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs was rejected");
+
+    // The symlink's TARGET goes away; the symlink itself (the watched
+    // root's stored path) still resolves as a path, just to nothing.
+    drop(target);
+
+    let rejected = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect_err("list_exclusions should refuse a root that is a dangling symlink");
+    assert_eq!(
+        error_text(&rejected),
+        format!(
+            "the folder for watched root {root} is not available right now, so its exclusion \
+             rules cannot be checked"
+        ),
+        "a dangling symlink root must be refused the same way a plainly missing one is"
+    );
+}
+
+/// Review round 2, Minor B/C: an unreadable ROOT (mode `000`) still passes
+/// `!root.is_dir()` — `is_dir()` only needs the PARENT directory's execute
+/// bit, not read access to the root itself, the same weakness the walk's
+/// own predicate has (`walk.rs:288`) and this command deliberately matches
+/// rather than improves on. So the guard does not refuse here; what must
+/// not happen is `prefix_exists_on_disk`'s own `read_dir(root)` call
+/// collapsing "I could not list it" into "it is gone" — a live rule must
+/// still read `existsOnDisk: true`, not `false`.
+#[cfg(unix)]
+#[test]
+fn a_rule_under_an_unreadable_root_reports_present_not_stale() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs was rejected");
+
+    let original_mode = std::fs::metadata(fixture.path()).unwrap().permissions();
+    std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o000))
+        .expect("chmod 000 on the fixture root");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }));
+
+    // Restored before any assertion can panic and before the TempDir's own
+    // Drop runs — an unreadable directory would otherwise survive the test.
+    std::fs::set_permissions(fixture.path(), original_mode)
+        .expect("restoring the fixture root's permissions");
+
+    assert_eq!(
+        list.expect("list_exclusions was rejected"),
+        json!([{ "prefix": "Docs", "existsOnDisk": true }]),
+        "a rule under a root that cannot be read must not be reported stale"
+    );
+}
+
+/// Review round 2, Minor C, the measured case: `Work` at `--x--x--x` (mode
+/// `0o111`) is TRAVERSABLE but not LISTABLE — `read_dir(Work)` needs read
+/// permission, which the old `.ok()` handling folded into "not found" the
+/// same way a genuinely absent folder would be. A nested prefix under such
+/// an ancestor must still read `existsOnDisk: true`.
+#[cfg(unix)]
+#[test]
+fn a_rule_under_an_unreadable_ancestor_reports_present_not_stale() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = exclusion_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Work/private" }),
+    )
+    .expect("excluding Work/private was rejected");
+
+    let work_path = fixture.path().join("Work");
+    let original_mode = std::fs::metadata(&work_path).unwrap().permissions();
+    std::fs::set_permissions(&work_path, std::fs::Permissions::from_mode(0o111))
+        .expect("chmod --x--x--x on Work");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }));
+
+    // Restored before any assertion can panic and before TempDir's own Drop
+    // runs — recursive removal needs Work to be listable again.
+    std::fs::set_permissions(&work_path, original_mode).expect("restoring Work's permissions");
+
+    assert_eq!(
+        list.expect("list_exclusions was rejected"),
+        json!([{ "prefix": "Work/private", "existsOnDisk": true }]),
+        "a rule under an unreadable (but traversable) ancestor must not be reported stale"
+    );
+}
+
 /// `list_exclusions`'s own `UnknownWatchedRoot` refusal (added beyond the
 /// brief, for the same reason `exclude_subfolder` checks it) needs its own
 /// test — otherwise `.ok_or(Error::UnknownWatchedRoot(root_id))` could

@@ -1,12 +1,23 @@
-# The three commands that read and write a folder exclusion. Run with:
+# The three commands that read and write a folder exclusion — the portable
+# cases, runnable on any CI leg. Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
 #
-# Seven cases, each against one of `list_exclusions`, `exclude_subfolder` or
+# Eight cases against `list_exclusions`, `exclude_subfolder` or
 # `include_subfolder` (`src-tauri/src/bridge.rs`) and the `tests/commands.rs`
-# tests written for task-2 of PR 8a. Two of the seven (the root-unavailable
-# refusal and the byte-exact directory resolution) were added in fix round 1,
-# against Important findings 1 and 2 of the task review.
+# tests written for task-2 of PR 8a.
+#
+# ⚠️ **This file's sibling, `pr8-exclusions-macos.sh`, must be run too and is
+# NOT a case here.** Its one case names a `#[cfg(target_os = "macos")]` test
+# — review round 2, Important A: a case naming a test that does not exist on
+# a platform makes the harness's baseline pass read `0 passed` for it and
+# exit 1 for the WHOLE FILE before any mutation runs, so keeping that case
+# here would silently drop every other case in this file on a non-macOS CI
+# leg. Splitting is the fix, not a `#[cfg]`-agnostic rewrite of the test:
+# ungating it would make the mutant it names equivalent on a case-sensitive
+# filesystem (a naive `symlink_metadata` on a mismatched-case path is already
+# `Err` there), so the case would report STILL GREEN on Linux instead of a
+# clean baseline failure — the property really is macOS/Windows-only.
 #
 # ⚠️ **The narrower mutant round 1 asked for — narrowing the probe from the
 # whole exclusion set back to the candidate alone — is deliberately NOT a
@@ -49,37 +60,45 @@ case_ "excluding an already-excluded folder a second time must not become an err
 # `prefix_exists_on_disk` collapsed to a constant. Kills on the fixture's
 # rename half: a prefix whose folder was renamed away must read false, and a
 # mutant that hands back `true` unconditionally gets it wrong regardless of
-# what the byte-exact resolution below would have found.
+# what the byte-exact resolution or the permission-aware fallback below would
+# have found.
 case_ "existsOnDisk must come from a real filesystem lookup, not a constant" \
   src-tauri/src/bridge.rs \
-  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        let found = std::fs::read_dir\(&current\)\.ok\(\)\.and_then\(\|entries\| \{\n            entries\n                \.flatten\(\)\n                \.find\(\|entry\| entry\.file_name\(\) == std::ffi::OsStr::new\(component\)\)\n        \}\);\n        match found \{\n            Some\(entry\) => current = entry\.path\(\),\n            None => return false,\n        \}\n    \}\n    std::fs::symlink_metadata\(&current\)\.is_ok\(\)~    /* mutant: always true */\n    true~' \
+  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        let entries = match std::fs::read_dir\(&current\) \{\n            Ok\(entries\) => entries,\n            Err\(e\) if e\.kind\(\) == std::io::ErrorKind::NotFound => return false,\n            Err\(_\) => return true,\n        \};\n        match entries\n            \.flatten\(\)\n            \.find\(\|entry\| entry\.file_name\(\) == std::ffi::OsStr::new\(component\)\)\n        \{\n            Some\(entry\) => current = entry\.path\(\),\n            None => return false,\n        \}\n    \}\n    std::fs::symlink_metadata\(&current\)\.is_ok\(\)~    /* mutant: always true */\n    true~' \
   '/* mutant: always true */' \
   mnema-desktop 'list_exclusions_reports_whether_each_stored_prefix_is_still_on_disk' --test commands
 
-# Review round 1, Important 2. `prefix_exists_on_disk` resolves each path
-# component against real `read_dir` entries with byte equality specifically
-# because the filesystem's own lookup (what a bare `symlink_metadata` on the
-# joined path uses) is case-INSENSITIVE on APFS and Windows, while `ignore`'s
-# override matcher — what the walk itself applies — is case-sensitive. This
-# mutant reverts to that naive, case-insensitive check: a stored prefix
-# `private` against a real folder `Private` would then report
-# `existsOnDisk: true` while the rule excludes nothing.
-case_ "existsOnDisk must resolve each component with byte-exact equality, not the filesystem's own case-insensitive lookup" \
-  src-tauri/src/bridge.rs \
-  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        let found = std::fs::read_dir\(&current\)\.ok\(\)\.and_then\(\|entries\| \{\n            entries\n                \.flatten\(\)\n                \.find\(\|entry\| entry\.file_name\(\) == std::ffi::OsStr::new\(component\)\)\n        \}\);\n        match found \{\n            Some\(entry\) => current = entry\.path\(\),\n            None => return false,\n        \}\n    \}\n    std::fs::symlink_metadata\(&current\)\.is_ok\(\)~    /* mutant: naive case-insensitive stat */\n    std::fs::symlink_metadata(root.join(prefix)).is_ok()~' \
-  '/* mutant: naive case-insensitive stat */' \
-  mnema-desktop 'a_prefix_that_only_matches_the_folders_name_by_case_reports_not_on_disk' --test commands
-
-# Review round 1, Important 1. The root-unavailable guard, disarmed. Without
-# it, an unmounted drive or a moved folder makes every stored prefix answer
-# `existsOnDisk: false` instead of refusing the whole call — the same field
-# lying that a per-prefix `.unwrap_or(false)` produced before this fix round,
-# now for the entire list at once.
+# Review round 1, Important 1. The root-unavailable guard, disarmed
+# entirely. Without it, an unmounted drive or a moved folder makes every
+# stored prefix answer `existsOnDisk: false` instead of refusing the whole
+# call — the same field lying that a per-prefix `.unwrap_or(false)` produced
+# before fix round 1, now for the entire list at once.
 case_ "an unreachable watched root must refuse the whole list_exclusions call" \
   src-tauri/src/bridge.rs \
-  's{    if std::fs::symlink_metadata\(root_path\)\.is_err\(\) \{}{    if false \{}' \
+  's{    if !root_path\.is_dir\(\) \{}{    if false \{}' \
   'if false {' \
   mnema-desktop 'list_exclusions_refuses_when_the_root_itself_is_unreachable' --test commands
+
+# Review round 2, Minor B. The guard is present but weakened back to what
+# fix round 1 shipped: `symlink_metadata(..).is_err()` instead of
+# `!root.is_dir()`. `symlink_metadata` resolves fine for a symlink whose
+# TARGET is gone, so a dangling-symlink root would pass this weaker guard
+# and land in Important 1's own failure mode one line later.
+case_ "a dangling symlink root must be caught by is_dir(), not the weaker symlink_metadata check" \
+  src-tauri/src/bridge.rs \
+  's~    if !root_path\.is_dir\(\) \{~    if std::fs::symlink_metadata(root_path).is_err() {~' \
+  'std::fs::symlink_metadata(root_path).is_err()' \
+  mnema-desktop 'list_exclusions_refuses_when_the_root_is_a_dangling_symlink' --test commands
+
+# Review round 2, Minor C. `read_dir`'s "I could not look" branch, reverted
+# to the pre-fix "I could not look" == "it is not there" collapse: a rule
+# under a listable-but-unreadable ancestor (`Work` at `--x--x--x`) would
+# report `existsOnDisk: false` again, a live rule read as stale.
+case_ "a rule under an unreadable ancestor must not read stale" \
+  src-tauri/src/bridge.rs \
+  's{            Err\(_\) => return true,}{            Err(_) => return false,}' \
+  'Err(_) => return false,' \
+  mnema-desktop 'a_rule_under_an_unreadable_ancestor_reports_present_not_stale' --test commands
 
 # `include_subfolder`'s answer, forced to `true` regardless of what
 # `Db::remove_path_exclusion` actually found. Task 5's stale-rule control

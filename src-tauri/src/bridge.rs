@@ -136,15 +136,33 @@ pub struct StoredExclusion {
 /// `follow_links(false)`. Existence alone, not `is_dir()` — see
 /// [`StoredExclusion`]'s own doc comment for why the directory check was
 /// dropped.
+///
+/// **"I looked and it is not there" is told apart from "I could not look"
+/// (review round 2, Minor C).** `read_dir(&current)` needs the directory to
+/// be *listable*, one permission stricter than `symlink_metadata`'s own
+/// *traversable* — a directory with mode `--x--x--x` can be walked into but
+/// not listed. Folding that `Err` into "not found" the way `.ok()` used to
+/// (round 1's own shape) reads a rule under an unreadable ancestor as dead:
+/// measured, `Work` at `--x--x--x` flips `prefix_exists_on_disk("Work/private")`
+/// from `true` to `false` even though nothing about the rule changed. A
+/// `NotFound` error — the component really is absent — still answers
+/// `false`; every other error answers `true`, the same direction
+/// [`list_exclusions`] refuses in rather than lies in for the root itself:
+/// under-exclusion (a live rule read as stale, offered for removal, its
+/// folder then reaching the provider under D29) is the failure this project
+/// pays for, not over-caution.
 fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
     let mut current = root.to_path_buf();
     for component in prefix.split('/') {
-        let found = std::fs::read_dir(&current).ok().and_then(|entries| {
-            entries
-                .flatten()
-                .find(|entry| entry.file_name() == std::ffi::OsStr::new(component))
-        });
-        match found {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        };
+        match entries
+            .flatten()
+            .find(|entry| entry.file_name() == std::ffi::OsStr::new(component))
+        {
             Some(entry) => current = entry.path(),
             None => return false,
         }
@@ -166,6 +184,17 @@ fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
 /// Refusing is the conservative direction — the product already renders a
 /// job refusal this way (`EndReason::RootUnavailable`, `job.rs:79-87`), so
 /// this is the same shape applied one command earlier.
+///
+/// **`!root.is_dir()`, not `symlink_metadata(..).is_err()` (review round 2,
+/// Minor B).** The walk itself decides "is this root usable" with exactly
+/// this predicate (`crates/mnema-ingest/src/walk.rs:288`,
+/// `StopReason::RootUnavailable`), and `symlink_metadata` is strictly
+/// weaker: it succeeds for a root that is a DANGLING symlink and for a root
+/// that exists but cannot be read, both measured to pass the old guard and
+/// then land in Important 1's own failure mode one line later — every
+/// prefix answering `false`. Matching the walk's own predicate is matching
+/// the answer this product already trusts to decide a root is unusable,
+/// not inventing a second one that can disagree with it.
 #[tauri::command(async)]
 pub fn list_exclusions(
     state: State<'_, AppState>,
@@ -175,7 +204,7 @@ pub fn list_exclusions(
         .with_index(|db| db.watched_root_path(root_id))?
         .ok_or(Error::UnknownWatchedRoot(root_id))?;
     let root_path = std::path::Path::new(&root);
-    if std::fs::symlink_metadata(root_path).is_err() {
+    if !root_path.is_dir() {
         return Err(Error::RootUnavailable(root_id));
     }
     let prefixes = state.with_index(|db| db.list_path_exclusions(root_id))?;
