@@ -205,7 +205,7 @@ test('a generated answer renders the centre card, not a refusal', async () => {
 // tree drawn only for a generated answer is torn down and refetched in the
 // middle of every question — the outcome Ruling AC forbids, reached with no
 // `{#key}` anywhere. Both are anchored on the echo, which only a RESOLVED ask
-// can write (`Launcher.svelte:50`).
+// can write (`Launcher.svelte:53`).
 //
 // 🔴 I-A: two tests, not one with two assertions. Against the only mutant that
 // exists for them — the pre-fix gate — a single test fails on the `list_tree`

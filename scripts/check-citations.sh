@@ -20,6 +20,7 @@
 # Usage:
 #   scripts/check-citations.sh              # every tracked file
 #   scripts/check-citations.sh <path>...    # only these citing files
+#   scripts/check-citations.sh --strict     # also fail on the two shapes below
 #
 # Output, one block per citation:
 #
@@ -39,31 +40,86 @@
 # citations from a hand-written sweep. Those bind to the last file named in the
 # nearest preceding lines, and the binding is printed as `(bare, bound to …)` so
 # a reader can check the binding itself and not only the line.
+#
+# **Which targets it can check.** The extensions it recognises are DERIVED from
+# the tracked files themselves, never listed here. A hand-written list is what
+# a checker's own blind spot looks like: the first one here allowed eight
+# extensions, and every citation into `.svelte`, `.md` and `.html` produced no
+# line at all — not counted, not listed, not failed. Widening it to the tracked
+# set brought 26 into the sweep and three of them were wrong, one of them carrying
+# the line numbers the cited file had in an EARLIER pull request — already stale
+# in the commit that introduced it. Anything citation-shaped whose extension no
+# tracked file carries is now listed rather than passed over, because a checker
+# that goes quiet about what it cannot parse is the exact class it exists to
+# catch.
+#
+# **What fails the run, and what is only printed.** A citation that names a real
+# path and overshoots that file fails. Two shapes deliberately do not:
+#
+#   - **an overshoot written as a bare basename.** A bare `lib.rs` overshoot
+#     inside a paragraph about `calamine` names a file this repository does not
+#     have, and failing on it would teach a reader to switch the check off. The
+#     cost is real and belongs in writing: the whole `tree.rs` → `bridge.rs`
+#     family here is written as bare basenames rather than full paths, so the
+#     citation shape this script exists for sits outside the exit code.
+#   - **a target nothing here answers for.** A typo (`rulez.rs` for `rules.rs`),
+#     a renamed file and a deliberate reference to `tauri-2.11.5/…` are the same
+#     evidence to a script. They are printed in two lists, split by whether any
+#     tracked file carries that basename, and neither fails.
+#
+# `--strict` promotes both to failures. It is a sweep by hand, not the CI form:
+# run today it is red, and most of what it lists is deliberate — citations into
+# the server repository (`app/…`) and into vendored crates, which nothing here
+# can check. Whether any one of them is a defect is a reader's call, which is
+# why the default prints them instead.
 
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 1
 
-if [ "$#" -gt 0 ]; then
-  printf '%s\n' "$@" > /tmp/.citation-files.$$
-else
-  git ls-files > /tmp/.citation-files.$$
+STRICT=0
+NAMED=0
+LIST="/tmp/.citation-files.$$"
+: > "$LIST"
+for arg in "$@"; do
+  case "$arg" in
+    --strict) STRICT=1 ;;
+    -*) echo "unknown option: $arg" >&2; rm -f "$LIST"; exit 2 ;;
+    *) printf '%s\n' "$arg" >> "$LIST"; NAMED=1 ;;
+  esac
+done
+if [ "$NAMED" -eq 0 ]; then
+  git ls-files > "$LIST"
 fi
 
-python3 - "$REPO" "/tmp/.citation-files.$$" <<'PY'
+python3 - "$REPO" "$LIST" "$STRICT" "$NAMED" <<'PY'
 import os, re, sys
 
 repo, listing = sys.argv[1], sys.argv[2]
+strict, named = sys.argv[3] == "1", sys.argv[4] == "1"
 files = [f.strip() for f in open(listing) if f.strip()]
 os.unlink(listing)
 
 # Every tracked path, for resolving a cited basename to a real file.
 tracked = [f for f in os.popen("git ls-files").read().split("\n") if f]
 
-# `name.ext:120` or `name.ext:120-140`, optionally a comma list of either.
+# The extensions a citation can name and still be checkable: exactly the ones
+# this repository's own files carry. Longest first, so `.jsonl` is not read as
+# `.json` followed by a stray `l`.
+EXTS = sorted({e for e in (t.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+                          for t in tracked if "." in t.rsplit("/", 1)[-1])
+               if e},
+              key=lambda e: (-len(e), e))
+EXT_ALT = "|".join(re.escape(e) for e in EXTS)
+
+# A path, then one line or a span of lines, optionally a comma list of either.
 SPAN = r"\d+(?:-\d+)?"
-CITED = re.compile(rf"([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:rs|sql|ts|tsx|py|toml|yml|sh)):({SPAN}(?:,{SPAN})*)")
+STEM = r"[A-Za-z0-9_][A-Za-z0-9_./-]*"
+CITED = re.compile(rf"({STEM}\.(?:{EXT_ALT})):({SPAN}(?:,{SPAN})*)")
+# The same shape with ANY extension, so a target this repository has no file
+# type for is reported instead of skipped in silence.
+ANY_EXT = re.compile(rf"({STEM}\.([A-Za-z][A-Za-z0-9]{{0,9}})):({SPAN}(?:,{SPAN})*)")
 # The bare form, always inside backticks so prose like "see 12:30" is not one.
 BARE = re.compile(rf"`:({SPAN}(?:,{SPAN})*)`")
 
@@ -87,14 +143,13 @@ def resolve(cited, citing):
     against a file it never named."""
     if cited in tracked:
         return cited, None, False
+    # Matching is by full path SUFFIX only, never a fallback to the basename,
+    # and that is the whole guard against the defect measured while writing
+    # this: `tauri-2.11.5/src/manager/mod.rs:339` falling back to `mod.rs` and
+    # being reported as an out-of-range line in `src-tauri/tests/support/mod.rs`
+    # — a file that citation never mentioned. Relaxing this line to a basename
+    # match brings it back.
     hits = [t for t in tracked if t.endswith("/" + cited)]
-    # A cited token that carries directories names a PATH, and if no tracked
-    # file ends with it the path is not in this repository — falling back to
-    # its basename is how `tauri-2.11.5/src/manager/mod.rs:339` gets reported
-    # as an out-of-range line in `src-tauri/tests/support/mod.rs`, which is a
-    # file that citation never mentioned. Measured while writing this.
-    if not hits and "/" not in cited:
-        hits = [t for t in tracked if t.endswith("/" + cited)]
     if not hits:
         return None, None, False
     by_basename = "/" not in cited
@@ -109,12 +164,21 @@ cache = {}
 def lines_of(path):
     if path not in cache:
         try:
-            cache[path] = open(path, encoding="utf-8", errors="replace").read().split("\n")
+            body = open(path, encoding="utf-8", errors="replace").read().split("\n")
         except OSError:
             cache[path] = None
+            return None
+        # A file ending in a newline splits into a trailing empty element, and
+        # counting it made the line after the last one read as in range: a
+        # 20-line file reported 21 lines, and the line after its end printed a
+        # blank and passed.
+        if body and body[-1] == "":
+            body.pop()
+        cache[path] = body
     return cache[path]
 
-def show(citing, lineno, claim, target, span, note, problems, by_basename=False):
+def show(citing, lineno, claim, target, span, note, problems, outside,
+         by_basename=False):
     body = lines_of(target)
     if body is None:
         problems.append(f"{citing}:{lineno}: cannot read {target}")
@@ -142,11 +206,18 @@ def show(citing, lineno, claim, target, span, note, problems, by_basename=False)
             print(f"  :{n:<4} | {body[n - 1][:110]}")
     print()
 
-problems, outside, unbound, count = [], [], [], 0
-show.__globals__["outside"] = outside
+problems, outside, absent, unchecked, unbound, unreadable = [], [], [], [], [], []
+count = 0
 for f in files:
     body = lines_of(f)
     if body is None:
+        # A path named on the command line that cannot be read is a typo in the
+        # caller, and letting it pass is how a step reports success over a
+        # subject it never opened. A tracked file that cannot be read is not the
+        # caller's doing, so it is listed rather than failed.
+        (problems if named else unreadable).append(
+            f"{f}: named on the command line but cannot be read" if named
+            else f"{f}: tracked but cannot be read, so it was not scanned")
         continue
     # `None` means "nothing has been named"; `False` means "the last thing
     # named is not in this repository". The difference matters: without it a
@@ -156,16 +227,32 @@ for f in files:
     # `src-tauri/src/lib.rs:146`, where it named `state.rs`.
     last_file, last_seen = None, -99
     for i, line in enumerate(body, start=1):
+        checkable = []
         for m in CITED.finditer(line):
+            checkable.append(m.span())
             target, note, by_basename = resolve(m.group(1), f)
             last_seen = i
             if target is None:
                 last_file = False
-                outside.append(f"{f}:{i}: {m.group(1)}:{m.group(2)} — not in this repository")
+                bucket = outside if "/" in m.group(1) else absent
+                why = ("names a path this repository does not have"
+                       if "/" in m.group(1) else
+                       "no tracked file carries that basename")
+                bucket.append(f"{f}:{i}: {m.group(1)}:{m.group(2)} — {why}")
                 continue
             last_file = target
             for span in m.group(2).split(","):
-                show(f, i, line, target, span, note, problems, by_basename); count += 1
+                show(f, i, line, target, span, note, problems, outside,
+                     by_basename)
+                count += 1
+        for m in ANY_EXT.finditer(line):
+            # Citation-shaped, but naming a file type no tracked file carries.
+            # It cannot be checked; the one thing it must not do is vanish.
+            if any(s < m.end() and m.start() < e for s, e in checkable):
+                continue
+            unchecked.append(f"{f}:{i}: {m.group(1)}:{m.group(3)} — no tracked file "
+                             f"has the extension `.{m.group(2)}`, so nothing here "
+                             f"can check it")
         for m in BARE.finditer(line):
             # Bound to the last file named within a few lines — one comment
             # block. Printed, so the binding is checkable and not assumed.
@@ -179,17 +266,29 @@ for f in files:
                 continue
             for span in m.group(1).split(","):
                 show(f, i, line, last_file, span,
-                     f"bare, bound to {last_file} named at :{last_seen}", problems)
+                     f"bare, bound to {last_file} named at :{last_seen}",
+                     problems, outside)
                 count += 1
 
 print(f"--- {count} citations printed ---")
-for label, rows in (("outside this repository, nothing here can check them", outside),
-                    ("bare `:NNN` with no file nearby, so read as prose rather than a citation",
-                     unbound)):
+for label, rows in (
+        ("outside this repository, nothing here can check them", outside),
+        ("naming a basename no tracked file carries — a typo, a rename, or a "
+         "file outside this repository", absent),
+        ("citation-shaped but of a file type this repository does not hold",
+         unchecked),
+        ("bare `:NNN` with no file nearby, so read as prose rather than a citation",
+         unbound),
+        ("tracked but unreadable, so nothing in them was scanned", unreadable)):
     if rows:
         print(f"--- {len(rows)} {label} ---")
         for r in rows:
             print(f"  {r}")
+if strict:
+    # `--strict` is the sweep form: the two shapes the default prints for a
+    # reader become failures, and the reader is the exit code.
+    problems.extend(outside)
+    problems.extend(absent)
 if problems:
     print(f"--- {len(problems)} mechanical problem(s) ---")
     for p in problems:

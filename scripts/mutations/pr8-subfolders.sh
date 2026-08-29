@@ -288,7 +288,7 @@ case_ "an anchored name is only pruned beside its marker file" \
 # rule can express, when it is in fact a rule `exclude_subfolder` accepts. The
 # mirror of the case below — one says the state must appear, this says it must
 # not appear where the validator would not.
-case_ "the drive-letter and `~` rules apply to the first component only" \
+case_ "the drive-letter and \`~\` rules apply to the first component only" \
   crates/mnema-walk/src/rules.rs \
   's~        validate_component\(prefix, component, index == 0\)\?;~        validate_component(prefix, component, index >= 0)?; /* mutant: first-component rules everywhere */~' \
   '/* mutant: first-component rules everywhere */' \
