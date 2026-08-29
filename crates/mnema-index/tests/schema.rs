@@ -225,6 +225,70 @@ fn an_ignore_rule_is_rooted_and_names_exactly_one_thing() {
         .expect("a tag rule needs no root");
 }
 
+/// One exclusion per (root, prefix). Without this, "exclude this folder"
+/// pressed twice leaves two rows saying the same thing, and every later count
+/// of a root's rules is wrong by however many times a person clicked. The
+/// index is PARTIAL — `WHERE path_prefix IS NOT NULL` — because a tag rule
+/// carries no prefix at all, and SQLite treats NULLs as distinct inside a
+/// UNIQUE index, so without the predicate the index would be a promise about
+/// rows it cannot keep.
+#[test]
+fn a_root_cannot_hold_the_same_path_exclusion_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/Volumes/Archive").unwrap();
+    let other = db.insert_watched_root("/Volumes/Second").unwrap();
+    db.conn()
+        .execute("INSERT INTO tag (id, name) VALUES (1, 'secret')", [])
+        .unwrap();
+
+    db.conn()
+        .execute(
+            "INSERT INTO ignore_rule (watched_root_id, path_prefix, tag_id)
+             VALUES (?1, 'Work/private', NULL)",
+            params![root],
+        )
+        .expect("the first exclusion");
+
+    assert_rejected(
+        db.conn().execute(
+            "INSERT INTO ignore_rule (watched_root_id, path_prefix, tag_id)
+             VALUES (?1, 'Work/private', NULL)",
+            params![root],
+        ),
+        "UNIQUE constraint failed",
+        "the same prefix excluded twice under one root",
+    );
+
+    // The other direction, and it is not decoration: an index over
+    // `path_prefix` alone would reject this, and a per-root rule that leaks
+    // across roots is a folder excluded somewhere the person never asked.
+    db.conn()
+        .execute(
+            "INSERT INTO ignore_rule (watched_root_id, path_prefix, tag_id)
+             VALUES (?1, 'Work/private', NULL)",
+            params![other],
+        )
+        .expect("the same prefix under a different root is a different rule");
+
+    // Tag rules carry no prefix and must be untouched by the partial index —
+    // two of them would collide on (NULL, NULL) under a non-partial one.
+    db.conn()
+        .execute(
+            "INSERT INTO ignore_rule (watched_root_id, path_prefix, tag_id)
+             VALUES (NULL, NULL, 1)",
+            [],
+        )
+        .expect("a tag rule");
+    db.conn()
+        .execute(
+            "INSERT INTO ignore_rule (watched_root_id, path_prefix, tag_id)
+             VALUES (NULL, NULL, 1)",
+            [],
+        )
+        .expect("a second tag rule is not this index's business");
+}
+
 /// Reading order is what reconstructs a page; two blocks in one slot make the
 /// reconstruction arbitrary.
 #[test]

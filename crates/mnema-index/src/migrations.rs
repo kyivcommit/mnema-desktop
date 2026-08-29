@@ -4,7 +4,7 @@ use rusqlite_migration::{M, Migrations};
 use crate::Error;
 
 /// Bumped whenever the DDL changes. Stored in PRAGMA user_version.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Which reader made the document at each path, and which version of it.
 ///
@@ -66,6 +66,31 @@ const ADD_PATH_READER: &str = "\
 ALTER TABLE path ADD COLUMN reader TEXT NOT NULL DEFAULT 'text';
 ALTER TABLE path ADD COLUMN reader_version INTEGER NOT NULL DEFAULT 1;";
 
+/// One exclusion per (watched root, path prefix).
+///
+/// `ignore_rule` shipped in `schema.sql` with both CHECKs and no UNIQUE, so
+/// nothing stopped the same folder being excluded twice — and the table had no
+/// reader and no writer at all until the exclusion commands arrived, which is
+/// why the gap survived this long. Adding the constraint now costs nothing:
+/// there are no rows anywhere to conflict with it.
+///
+/// **Partial, and the predicate is load-bearing.** A tag rule carries
+/// `path_prefix IS NULL` (§14.5's `ignore_rule` CHECK allows exactly one of the
+/// two), and SQLite treats NULLs as DISTINCT inside a UNIQUE index — so a
+/// non-partial index would neither dedup tag rules nor stop them, it would just
+/// be a claim about rows it never actually constrains. `WHERE path_prefix IS
+/// NOT NULL` says what the index is for.
+///
+/// ⚠️ A targeted `ON CONFLICT` against this index must repeat the predicate —
+/// `ON CONFLICT (watched_root_id, path_prefix) WHERE path_prefix IS NOT NULL` —
+/// or SQLite refuses the statement outright with "ON CONFLICT clause does not
+/// match any PRIMARY KEY or UNIQUE constraint". `schema.sql:306-311` records
+/// the same trap for `ux_skipped_current`.
+const ADD_IGNORE_RULE_UNIQUE: &str = "\
+CREATE UNIQUE INDEX ux_ignore_rule_path
+    ON ignore_rule(watched_root_id, path_prefix)
+ WHERE path_prefix IS NOT NULL;";
+
 /// The migrations in order; the index of each is the `user_version` it produces.
 ///
 /// **`schema.sql` is migration 1 and is now frozen.** It is not a description of
@@ -79,6 +104,7 @@ fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(include_str!("schema.sql")),
         M::up(ADD_PATH_READER),
+        M::up(ADD_IGNORE_RULE_UNIQUE),
     ])
 }
 

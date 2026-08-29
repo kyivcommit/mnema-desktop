@@ -565,6 +565,65 @@ impl Db {
             .optional()?)
     }
 
+    /// The user's own exclusion rules for one watched root, sorted so a window
+    /// renders the same list twice running.
+    ///
+    /// `path_prefix IS NOT NULL` filters out tag rules, which share this table
+    /// and carry no prefix (`schema.sql:50-57`). They are not this product's
+    /// business yet — nothing writes one — but the CHECK allows them, so the
+    /// query says which shape it wants rather than assuming the table holds
+    /// only one.
+    pub fn list_path_exclusions(&self, root_id: i64) -> Result<Vec<String>, Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT path_prefix FROM ignore_rule
+              WHERE watched_root_id = ?1 AND path_prefix IS NOT NULL
+              ORDER BY path_prefix",
+        )?;
+        let rows = stmt
+            .query_map(params![root_id], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Excludes `prefix` under `root_id`. `Ok(true)` when a row was written,
+    /// `Ok(false)` when the rule was already there — pressing "exclude" twice
+    /// is one rule, and the second press is not an error.
+    ///
+    /// **Does not validate `prefix`.** `WalkRules::new` owns that (its
+    /// `validate_prefix` is a whitelist with eight named refusals), and a
+    /// second validator here is a second place that can disagree with the one
+    /// the walk actually applies. The command layer probes through
+    /// `WalkRules::new` before calling this.
+    ///
+    /// Bare `ON CONFLICT DO NOTHING`, with no target, deliberately: the unique
+    /// index this leans on is PARTIAL (`ux_ignore_rule_path`, migration 3), and
+    /// a targeted clause would have to repeat its `WHERE path_prefix IS NOT
+    /// NULL` predicate exactly or SQLite refuses the statement outright — the
+    /// same trap `schema.sql:306-311` records for `ux_skipped_current`. The
+    /// untargeted form cannot drift out of step with the index's predicate.
+    pub fn add_path_exclusion(&self, root_id: i64, prefix: &str) -> Result<bool, Error> {
+        let changed = self.conn().execute(
+            "INSERT INTO ignore_rule (watched_root_id, path_prefix, tag_id)
+             VALUES (?1, ?2, NULL)
+             ON CONFLICT DO NOTHING",
+            params![root_id, prefix],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Removes the rule, reporting whether one was there. The window needs the
+    /// two apart: after a folder is renamed it offers to delete a rule whose
+    /// folder is gone, and "there was nothing there" is a different sentence
+    /// from "removed".
+    pub fn remove_path_exclusion(&self, root_id: i64, prefix: &str) -> Result<bool, Error> {
+        let changed = self.conn().execute(
+            "DELETE FROM ignore_rule
+              WHERE watched_root_id = ?1 AND path_prefix = ?2",
+            params![root_id, prefix],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn insert_document(
         &self,
         content_hash: &str,
