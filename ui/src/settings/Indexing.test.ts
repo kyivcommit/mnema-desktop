@@ -196,8 +196,8 @@ const MATRIX: Row[] = [
     // deleted, and that is precisely what the sentence warns about.
     name: 'partlyRead',
     ending: { reason: 'completed', complete: false, ...READ_NOT_RECONCILED },
-    uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Файли, які ви вилучили всередині них, досі знаходяться пошуком.',
-    en: 'The folder was only partly read: some subfolders could not be entered. Files you deleted inside them are still found by search.',
+    uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Усередині них і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком.',
+    en: 'The folder was only partly read: some subfolders could not be entered. Inside them, both deleted files and files your exclusion rules now cover are still found by search.',
     result: NOT_RECONCILED_RESULT,
   },
   {
@@ -391,7 +391,7 @@ test('subtrees reconciliation refused to touch are named, each with its own reas
   await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
 
   const text = container.textContent ?? '';
-  expect(text).toContain('Ці підтеки не звіряли, тож вилучені з них файли досі знаходяться пошуком:');
+  expect(text).toContain('Ці підтеки не звіряли, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком:');
   expect(text).toContain('notes/archive — не вдалося прочитати');
   expect(text).toContain('notes/link — символьне посилання, сюди не заходили');
   expect(text).toContain('notes/void — прочиталася порожньою');
@@ -1317,3 +1317,53 @@ test('on an unbuilt section with no job running there is no Cancel and no strip'
   expect(calls('cancel_job')).toHaveLength(0);
   expect(screen.getByText('Ця секція ще не готова.')).toBeTruthy();
 });
+
+// ---------------------------------------------------------------------------
+// PR 8a, Task 6 — the two sentences that enumerate what an incomplete walk
+// leaves behind, and the case both of them used to omit.
+//
+// 🔴 A path under a frozen prefix is never deleted (`should_delete`,
+// `walk.rs:767`), and that rule does not ask WHY the path stopped being seen.
+// A file the person deleted and a file a rule now excludes are the same
+// absence to phase 3 — so both survive, both stay searchable, and both go to
+// the provider on a later pass. Naming only deletion is an enumeration that
+// leaves out the one case PR 8 is entirely about.
+//
+// Asserted through the rendered screen in BOTH locales, not by reading the
+// catalog: a key changed in one locale and left behind in the other is exactly
+// what a catalog-reading test cannot see.
+// ---------------------------------------------------------------------------
+
+const PARTLY_READ_NAMES_EXCLUSIONS = {
+  uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Усередині них і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком.',
+  en: 'The folder was only partly read: some subfolders could not be entered. Inside them, both deleted files and files your exclusion rules now cover are still found by search.',
+} as const;
+
+const FROZEN_NAMES_EXCLUSIONS = {
+  uk: 'Ці підтеки не звіряли, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком:',
+  en: 'These subfolders were not reconciled, so both deleted files and files your exclusion rules now cover are still found by search inside them:',
+} as const;
+
+for (const loc of ['uk', 'en'] as const) {
+  test(`a partly read folder names exclusions, not deletions alone (${loc})`, async () => {
+    await openFolders(loc);
+    await fireEvent.click(scanButton(1));
+    await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+    channelOf('start_walk_job')(endedEvent({ reason: 'completed', complete: false, ...READ_NOT_RECONCILED }));
+    await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
+
+    expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(PARTLY_READ_NAMES_EXCLUSIONS[loc]);
+  });
+
+  test(`the frozen-subtree heading names exclusions, not deletions alone (${loc})`, async () => {
+    const { container } = await openFolders(loc);
+    await fireEvent.click(scanButton(1));
+    await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+    channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0, frozen: [...FROZEN] }));
+    await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
+
+    expect(container.textContent ?? '').toContain(FROZEN_NAMES_EXCLUSIONS[loc]);
+  });
+}

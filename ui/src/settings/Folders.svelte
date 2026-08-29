@@ -7,7 +7,7 @@
     listTree, addWatchedFolder, removeWatchedFolder,
     listSubfolders, listExclusions, excludeSubfolder, includeSubfolder,
     type StoredExclusion, type Subfolder, type SubfolderListing, type SubfolderState,
-    type TreeRoot,
+    type TreeListing, type TreeRoot,
   } from '../lib/ipc';
   import type { JobController, JobPhase } from './jobs';
 
@@ -68,7 +68,22 @@
     // A fact, not an error, and stored as the fact rather than as its sentence
     // so a language switch re-renders it.
     alreadyGone: boolean;
+    // PR 8a, Task 6: the question now in front of the person for this row, or
+    // `null`. At most one per row — a second press replaces the first, so no
+    // two questions about the same folder can be on screen disagreeing.
+    pending: Pending | null;
   };
+
+  // 🔴 Numbers, not a sentence, for the same reason `alreadyGone` is a boolean:
+  // a sentence frozen at the moment of the click keeps its language through a
+  // switch. And numbers READ ONCE, from one reply — re-deriving them per render
+  // would let the question a person is answering renumber itself underneath
+  // them.
+  type Pending =
+    | { kind: 'checking'; path: string }
+    | { kind: 'exclude'; path: string; paths: number; documents: number }
+    | { kind: 'include'; path: string };
+
   let panels = $state<Record<number, Panel>>({});
 
   // Not `$state`: nothing renders from it. One counter per root, bumped by
@@ -76,6 +91,21 @@
   // row is shut — or when a newer read has started — is dropped instead of
   // being drawn over whatever the person is looking at now.
   const generations: Record<number, number> = {};
+
+  // Task 6's own counter, and NOT `generations`. The rule, stated once rather
+  // than as a list of sites that would drift from the code under it: it is
+  // bumped wherever the answer to a question already in flight stops being
+  // wanted, so a `list_tree` reply landing after that raises nothing. Held
+  // apart from `generations` because that one is ALSO bumped by an ordinary
+  // re-read, and a re-read finishing is not a reason to discard a question the
+  // person is in the middle of reading.
+  const asks: Record<number, number> = {};
+
+  function ask(rootId: number): number {
+    const n = (asks[rootId] ?? 0) + 1;
+    asks[rootId] = n;
+    return n;
+  }
 
   function message(e: unknown) {
     return e instanceof Error ? e.message : String(e);
@@ -137,14 +167,19 @@
   function toggleRoot(rootId: number) {
     if (panels[rootId] !== undefined) {
       generations[rootId] = (generations[rootId] ?? 0) + 1;
+      ask(rootId); // a question the person shut the row on is not asked again
       const next = { ...panels };
       delete next[rootId];
       panels = next;
       return;
     }
+    ask(rootId);
     panels = {
       ...panels,
-      [rootId]: { tree: null, rules: null, loadError: null, actionError: null, alreadyGone: false },
+      [rootId]: {
+        tree: null, rules: null, loadError: null, actionError: null,
+        alreadyGone: false, pending: null,
+      },
     };
     void read(rootId, new Set());
   }
@@ -171,6 +206,131 @@
       children[key] = prune(child, path);
     }
     return { listing: node.listing, children };
+  }
+
+  // ── PR 8a, Task 6: what an exclusion costs, said before it is stored ──────
+  //
+  // 🔴 Mirrored from `walk.rs`'s own `under`: a path lies under a prefix only
+  // across a separator. `drop2/y.md` is a SIBLING of `drop`, not a child —
+  // `anchored_pattern` produces `!/drop`, which does not match it — so a count
+  // written with `startsWith(prefix)` alone would tell a person that `drop2`
+  // disappears too. It is the one state in the fixture list that separates the
+  // two forms.
+  function under(relativePath: string, prefix: string): boolean {
+    return relativePath.startsWith(`${prefix}/`);
+  }
+
+  // The two numbers, from ONE `list_tree` reply, and they are about different
+  // things.
+  //
+  // `paths` is this root's own: a relative path means nothing outside the root
+  // it belongs to.
+  //
+  // `documents` is over EVERY root in the reply, and reading the whole reply is
+  // the entire reason it is re-read rather than sampled. A document survives
+  // while any path still names it — `forget_if_unnamed` deletes it only when
+  // its last path goes, and `deleting_one_copy_keeps_the_document` pins that —
+  // so a second copy keeps it findable whether that copy sits in another folder
+  // of this root or under a different watched folder altogether. Counting paths
+  // and calling them documents overstates the loss; counting within one root
+  // overstates it in the same direction.
+  function costOf(listing: TreeListing, rootId: number, prefix: string) {
+    const doomed = new Set<string>();
+    const elsewhere = new Set<string>();
+    let paths = 0;
+    for (const root of listing.roots) {
+      for (const treeFile of root.files) {
+        if (root.rootId === rootId && under(treeFile.relativePath, prefix)) {
+          paths += 1;
+          doomed.add(treeFile.documentId);
+        } else {
+          elsewhere.add(treeFile.documentId);
+        }
+      }
+    }
+    let documents = 0;
+    for (const documentId of doomed) if (!elsewhere.has(documentId)) documents += 1;
+    return { paths, documents };
+  }
+
+  // 🔴 The re-read is not a nicety: a count taken from the listing this window
+  // already holds is a number about a moment that has passed — a job may have
+  // added or removed paths since the row was drawn.
+  async function askExclude(rootId: number, path: string) {
+    if (panels[rootId] === undefined) return;
+    const generation = ask(rootId);
+    patch(rootId, { actionError: null, alreadyGone: false, pending: { kind: 'checking', path } });
+    let listing: TreeListing;
+    try {
+      listing = await listTree();
+    } catch (e) {
+      if (asks[rootId] !== generation) return;
+      // The rule is NOT stored, and no loss sentence is shown: this window
+      // could not find out what the loss is, and a confirmation over a number
+      // it could not read would be worse than none. §10 — what crossed is a
+      // sentence, so the sentence is what appears.
+      patch(rootId, { pending: null, actionError: message(e) });
+      return;
+    }
+    if (asks[rootId] !== generation) return;
+    const cost = costOf(listing, rootId, path);
+    // No question over nothing: a confirmation a person can always click
+    // through is training for the one that matters.
+    if (cost.paths === 0) {
+      patch(rootId, { pending: null });
+      await exclude(rootId, path);
+      return;
+    }
+    patch(rootId, { pending: { kind: 'exclude', path, ...cost } });
+  }
+
+  // No re-read, and deliberately no count. This window does not know what is on
+  // disk under a folder the walk has been pruning, so a number here would be
+  // invented; what IS known is the consequence, and that is what the sentence
+  // states.
+  function askInclude(rootId: number, path: string) {
+    if (panels[rootId] === undefined) return;
+    ask(rootId);
+    patch(rootId, { actionError: null, alreadyGone: false, pending: { kind: 'include', path } });
+  }
+
+  // What is stored is the path the QUESTION carries, and it is read from the
+  // question rather than from anything on screen: the listing under an open
+  // question can be redrawn by a re-read, and the sentence the person read
+  // named one folder.
+  //
+  // 🔴 Exhaustive over the three kinds with no default arm, and `checking` is
+  // why. This is NOT a second guard over the markup's decision not to draw a
+  // control in that state — an `if (kind === 'exclude') … else …` would route
+  // `checking` into `include`, which under D29 takes a person's exclusion rule
+  // away and sends that folder's text to the provider. The two answers differ,
+  // so both are written; `describe`'s default arm explains the case where they
+  // do not.
+  async function answer(rootId: number) {
+    const panel = panels[rootId];
+    if (panel === undefined) return;
+    const pending = panel.pending;
+    if (pending === null) return;
+    switch (pending.kind) {
+      case 'checking':
+        return; // no answer has been offered yet; there is nothing to store
+      case 'exclude':
+        ask(rootId);
+        patch(rootId, { pending: null });
+        await exclude(rootId, pending.path);
+        return;
+      case 'include':
+        ask(rootId);
+        patch(rootId, { pending: null });
+        await include(rootId, pending.path);
+        return;
+    }
+  }
+
+  function dismiss(rootId: number) {
+    if (panels[rootId] === undefined) return;
+    ask(rootId);
+    patch(rootId, { pending: null });
   }
 
   async function exclude(rootId: number, path: string) {
@@ -454,6 +614,45 @@
     };
   }
 
+  // 🔴 The question is built here, inside the `void $locale` rebuild, and not
+  // at the moment of the click, for the reason written at the top of this
+  // block: a `t()` call frozen into `panels` would keep its language through a
+  // switch. The NUMBERS come from `Pending`; only the words come from here.
+  type ConfirmView =
+    | { kind: 'checking'; checkingLabel: string }
+    | {
+        kind: 'question';
+        heading: string;
+        cost: string;
+        confirmLabel: string; confirmAriaLabel: string;
+        cancelLabel: string; cancelAriaLabel: string;
+      };
+
+  function confirmView(pending: Pending): ConfirmView {
+    if (pending.kind === 'checking') {
+      return { kind: 'checking', checkingLabel: t('settings_folders_exclude_checking') };
+    }
+    const path = pending.path;
+    return {
+      kind: 'question',
+      heading:
+        pending.kind === 'exclude'
+          ? t('settings_folders_confirm_exclude_heading', { path })
+          : t('settings_folders_confirm_include_heading', { path }),
+      cost:
+        pending.kind === 'exclude'
+          ? t('settings_folders_exclude_cost', { paths: pending.paths, documents: pending.documents })
+          : t('settings_folders_include_cost'),
+      confirmLabel: t('settings_folders_confirm'),
+      confirmAriaLabel:
+        pending.kind === 'exclude'
+          ? t('settings_folders_confirm_exclude_named', { path })
+          : t('settings_folders_confirm_include_named', { path }),
+      cancelLabel: t('settings_folders_confirm_cancel'),
+      cancelAriaLabel: t('settings_folders_confirm_cancel_named', { path }),
+    };
+  }
+
   const rows = $derived.by(() => {
     void $locale;
     return roots.map((root) => {
@@ -478,6 +677,7 @@
                 failedLabel: t('settings_subfolders_failed'),
                 actionError: panel.actionError,
                 note: panel.alreadyGone ? t('settings_folders_rule_already_gone') : null,
+                confirm: panel.pending === null ? null : confirmView(panel.pending),
                 // 🔴 A rule is "the folder is gone" when and only when its own
                 // `existsOnDisk` says so. Comparing this list against the
                 // one-level listing above would mark every nested rule
@@ -518,8 +718,8 @@
             type="button"
             aria-label={row.controlAriaLabel}
             onclick={() => (row.control === 'exclude'
-              ? exclude(rootId, row.entry.relativePath)
-              : include(rootId, row.entry.relativePath))}>{row.controlLabel}</button>
+              ? askExclude(rootId, row.entry.relativePath)
+              : askInclude(rootId, row.entry.relativePath))}>{row.controlLabel}</button>
         {/if}
         {#if row.expandable}
           <button
@@ -569,6 +769,30 @@
                 <p data-testid={`folder-subfolder-error-${root.rootId}`}>{panel.actionError}</p>
               {/if}
               {#if panel.note}<p data-testid={`folder-rule-note-${root.rootId}`}>{panel.note}</p>{/if}
+              <!-- The question, and nothing stored until it is answered. Placed
+                   above the listing rather than inside the row that was
+                   pressed: the re-read behind it can redraw that row, and a
+                   question drawn inside a row that has moved is a question
+                   about an unclear subject. The heading names the path. -->
+              {#if panel.confirm}
+                {@const confirm = panel.confirm}
+                <div data-testid={`folder-confirm-${root.rootId}`}>
+                  {#if confirm.kind === 'checking'}
+                    <p>{confirm.checkingLabel}</p>
+                  {:else}
+                    <p>{confirm.heading}</p>
+                    <p data-testid={`folder-confirm-cost-${root.rootId}`}>{confirm.cost}</p>
+                    <button
+                      type="button"
+                      aria-label={confirm.confirmAriaLabel}
+                      onclick={() => answer(root.rootId)}>{confirm.confirmLabel}</button>
+                    <button
+                      type="button"
+                      aria-label={confirm.cancelAriaLabel}
+                      onclick={() => dismiss(root.rootId)}>{confirm.cancelLabel}</button>
+                  {/if}
+                </div>
+              {/if}
               {#if panel.loadingLabel}<p>{panel.loadingLabel}</p>{/if}
               {#if panel.level}{@render subfolders(panel.level, root.rootId)}{/if}
               {#if panel.rules}
@@ -586,7 +810,7 @@
                           <button
                             type="button"
                             aria-label={ruleAria}
-                            onclick={() => include(root.rootId, rule.prefix)}>{removeRuleLabel}</button>
+                            onclick={() => askInclude(root.rootId, rule.prefix)}>{removeRuleLabel}</button>
                         </li>
                       {/each}
                     </ul>

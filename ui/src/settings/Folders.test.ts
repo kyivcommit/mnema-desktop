@@ -3,8 +3,9 @@ import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Folders from './Folders.svelte';
 import { setLocale, t } from '../i18n';
 import { createJobController } from './jobs';
+import { tick } from 'svelte';
 import type {
-  StoredExclusion, Subfolder, SubfolderListing, SubfolderState, TreeListing, TreeRoot,
+  StoredExclusion, Subfolder, SubfolderListing, SubfolderState, TreeFile, TreeListing, TreeRoot,
 } from '../lib/ipc';
 
 // Mocked in the shape Arms.test.ts:5-6 / Models.test.ts:13-30 already use —
@@ -715,6 +716,10 @@ test('removing a rule sends its own prefix and re-reads', async () => {
   // The SECOND rule is removed, not the first: a positional implementation
   // would send `Work/private` here.
   await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Old notes' }));
+  // Task 6 put a question in between: the press asks, the confirmation stores.
+  // The prefix this test is about is carried by the QUESTION, so a component
+  // that answered with the row under the cursor would still send the wrong one.
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Old notes' }));
 
   expect(includeSubfolder).toHaveBeenCalledWith(1, 'Old notes');
   await waitFor(() => expect(screen.queryByTestId('folder-rule-1-Old notes')).toBeNull());
@@ -738,6 +743,7 @@ test('a rule that was already gone says so rather than reporting success in sile
   await waitFor(() => expect(screen.getByTestId('folder-rule-1-Old notes')).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Old notes' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Old notes' }));
 
   await waitFor(() => expect(screen.getByText('There was no such rule left to remove. The list has been re-read.')).toBeTruthy());
 });
@@ -756,6 +762,7 @@ test('a rule removal that answers true says nothing about a missing rule', async
   await waitFor(() => expect(screen.getByTestId('folder-rule-1-Old notes')).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Old notes' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Old notes' }));
 
   await waitFor(() => expect(screen.queryByTestId('folder-rule-1-Old notes')).toBeNull());
   expect(screen.queryByText('There was no such rule left to remove. The list has been re-read.')).toBeNull();
@@ -1101,4 +1108,332 @@ test('the whole expanded row reads as one screen, in order, with every sentence 
     'Work/private', cost, 'Remove the rule',
     'Old notes', 'There is no folder at this path right now.', cost, 'Remove the rule',
   ].join(' '));
+});
+
+// ---------------------------------------------------------------------------
+// PR 8a, Task 6 — what an exclusion costs, said before it is stored.
+//
+// 🔴 Every fixture below states BOTH numbers in the sentence it asserts. They
+// are two different facts about the same reply — indexed PATHS under the
+// prefix, and DOCUMENTS for which no path outside it survives — and an
+// implementation that counts paths and calls them documents satisfies any
+// assertion that reads only one of them. `deleting_one_copy_keeps_the_document`
+// (`crates/mnema-ingest/tests/walk.rs:1168`) is the behaviour they mirror:
+// `forget_if_unnamed` drops a document when its LAST path goes, never before.
+// ---------------------------------------------------------------------------
+
+function file(relativePath: string, documentId: string): TreeFile {
+  return { relativePath, documentId };
+}
+
+// `before` is what `list_tree` answered at mount; `after` is what it answers on
+// the re-read the click makes. They are DIFFERENT on purpose in every count
+// test — `before` carries no files at all, so a component that counted from the
+// mount snapshot would store without ceremony and every count assertion here
+// would fail on a missing element rather than on a wrong number.
+async function askExclude(name: string, before: TreeRoot[], after: TreeRoot[] | Error) {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing(before));
+  if (after instanceof Error) listTree.mockRejectedValueOnce(after);
+  else listTree.mockResolvedValueOnce(listing(after));
+  listSubfolders.mockResolvedValue(subfolders([sub(name)]));
+  listExclusions.mockResolvedValue([]);
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: `Exclude ${name}` })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: `Exclude ${name}` }));
+}
+
+const EMPTY_ROOTS = [
+  root({ rootId: 1, absolutePath: '/synthetic/root', files: [] }),
+  root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+];
+
+test('excluding a folder that holds two documents names two paths AND two documents', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-x'), file('drop/y.md', 'doc-y')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Exclude drop?',
+    'As of now: on the next scan the index loses 2 files from this folder,',
+    'and 2 documents stop being findable: no other path names them.',
+    'Confirm Cancel',
+  ].join(' '));
+  // The question is a question: nothing is stored while it is on screen.
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// 🔴 The state that tells the two numbers apart. One `documentId`, two paths,
+// one of them outside the prefix: the index loses a path and loses no document.
+test('a second copy inside the same root keeps the document, so the count is one path and zero documents', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-1'), file('keep/copy.md', 'doc-1')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Exclude drop?',
+    'As of now: on the next scan the index loses 1 file from this folder,',
+    'and no document stops being findable — each is also indexed under another path.',
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// 🔴 The same fact across a root boundary. A count taken per root sees only
+// `/synthetic/root`, finds the document's last path there, and overstates.
+test('a second copy under a DIFFERENT watched folder keeps the document too', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [file('other/x.md', 'doc-1')] }),
+  ]);
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Exclude drop?',
+    'As of now: on the next scan the index loses 1 file from this folder,',
+    'and no document stops being findable — each is also indexed under another path.',
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// 🔴 `drop2` is a SIBLING of `drop`, not a child: `anchored_pattern` produces
+// `!/drop`, and `walk.rs:878`'s `under` requires a separator after the prefix.
+// A count written with `startsWith(prefix)` alone passes every other state in
+// this file and fails only here — it would promise a person that `drop2/y.md`
+// disappears as well.
+test('a sibling whose name merely starts with the prefix is not counted', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-1'), file('drop2/y.md', 'doc-2')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Exclude drop?',
+    'As of now: on the next scan the index loses 1 file from this folder,',
+    'and 1 document stops being findable: no other path names it.',
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// A confirmation over nothing trains a person to click through the one that
+// matters, so there is none: the rule is stored on the press. `keep/x.md` is
+// indexed and `empty/` holds nothing, so the reply is not empty — a component
+// that skipped the question by failing to read the reply at all would pass an
+// assertion made against a reply with no files in it.
+test('excluding a folder holding no indexed path stores it with no question and no loss sentence', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing(EMPTY_ROOTS));
+  listTree.mockResolvedValueOnce(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('keep/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]));
+  listSubfolders.mockResolvedValueOnce(subfolders([sub('empty')]));
+  listSubfolders.mockResolvedValue(subfolders([sub('empty', { kind: 'excluded' })]));
+  listExclusions.mockResolvedValueOnce([]);
+  listExclusions.mockResolvedValue([{ prefix: 'empty', existsOnDisk: true }]);
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude empty' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude empty' }));
+
+  await waitFor(() => expect(excludeSubfolder).toHaveBeenCalledWith(1, 'empty'));
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  // "Says so plainly" is the row itself, after the re-read: no loss sentence,
+  // and the state a person came to set.
+  await waitFor(() => expect(visibleText(screen.getByTestId('subfolder-1-empty'))).toBe(
+    'empty Excluded by your rule.'
+    + ' Without this rule, anything at this path is indexed again from the next scan on.'
+    + ' Do not exclude Subfolders',
+  ));
+});
+
+test('cancelling stores nothing and leaves the row saying the folder is not excluded', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-x'), file('drop/y.md', 'doc-y')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+  await screen.findByTestId('folder-confirm-1');
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Leave drop as it is' }));
+
+  await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+  // Not only "nothing was sent": the row still SAYS the folder is open, and
+  // still offers the control that would exclude it.
+  const row = within(screen.getByTestId('subfolder-1-drop'));
+  expect(row.getByText('No rule excludes this folder.')).toBeTruthy();
+  expect(row.getByRole('button', { name: 'Exclude drop' })).toBeTruthy();
+});
+
+test('confirming stores the rule that was asked about, and the question goes', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-x'), file('drop/y.md', 'doc-y')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+  await screen.findByTestId('folder-confirm-1');
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm excluding drop' }));
+
+  await waitFor(() => expect(excludeSubfolder).toHaveBeenCalledWith(1, 'drop'));
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+});
+
+// 🔴 The inverse, and deliberately NOT a count: this window does not know what
+// is on disk under a folder it has been ignoring, and inventing a number there
+// would be the overstatement the count above was amended to remove.
+test('taking a rule away asks first, and names the provider rather than a number', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Archive', { kind: 'excluded' })]));
+  listExclusions.mockResolvedValue([{ prefix: 'Archive', existsOnDisk: true }]);
+  includeSubfolder.mockResolvedValue(true);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Archive' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again,',
+    'and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '));
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Archive' }));
+  await waitFor(() => expect(includeSubfolder).toHaveBeenCalledWith(1, 'Archive'));
+});
+
+// The `list_tree` the count is read from can be refused like any other call.
+// §10: what crosses is a sentence, so the sentence is what is shown.
+test('a rejected re-read stores nothing, shows no loss sentence, and prints the backend sentence', async () => {
+  await askExclude('drop', EMPTY_ROOTS, new Error('the index is not open'));
+
+  await waitFor(() =>
+    expect(screen.getByTestId('folder-subfolder-error-1').textContent).toBe('the index is not open'));
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// D130. The question is a reactive string like everything else on this screen:
+// a `t()` call frozen at the moment of the click would keep the English
+// sentence in front of a person who has since switched language.
+test('a question already on screen switches language with everything else', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-x'), file('drop/y.md', 'doc-y')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+  await screen.findByTestId('folder-confirm-1');
+
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
+    'Виключити drop?',
+    'Станом на зараз: при наступному скануванні індекс втратить 2 файли із цієї теки,',
+    'а 2 документи більше не знайдуться: інші шляхи на них не ведуть.',
+    'Підтвердити Скасувати',
+  ].join(' '));
+});
+
+// The gap between the press and the answer is a state a person sits in, and a
+// press that draws nothing reads as a press that did nothing.
+test('the wait for the fresh reply says what is being checked', async () => {
+  setLocale('en'); // seed, do not inherit
+  let release: (v: TreeListing) => void = () => {};
+  listTree.mockResolvedValueOnce(listing(EMPTY_ROOTS));
+  listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => { release = r; }));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1')))
+    .toBe('Checking what this exclusion removes…');
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+
+  release(listing([root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] })]));
+  await waitFor(() => expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
+    'Exclude drop?',
+    'As of now: on the next scan the index loses 1 file from this folder,',
+    'and 1 document stops being findable: no other path names it.',
+    'Confirm Cancel',
+  ].join(' ')));
+});
+
+// Task 6 opened an async gap of its own — the `list_tree` between the press and
+// the question — and this is that gap's own "what appears wrongly" case. The
+// row is shut while the reply is on the wire; the reply must raise nothing,
+// because the panel it would raise a question in is not the one that was
+// pressed. `panels[rootId]` alone does NOT decide this: a row shut and reopened
+// is a fresh panel under the same key, and `patch` writes to it happily.
+test('a row shut while the check is in flight raises no question when the reply lands', async () => {
+  setLocale('en'); // seed, do not inherit
+  let release: (v: TreeListing) => void = () => {};
+  listTree.mockResolvedValueOnce(listing(EMPTY_ROOTS));
+  listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => { release = r; }));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+
+  // Shut, then open again: the panel under key 1 is a new one.
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+
+  release(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]));
+  await tick();
+  await tick();
+
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
 });
