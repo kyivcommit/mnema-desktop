@@ -1,11 +1,22 @@
-# The three commands that read and write a folder exclusion — the portable
-# cases, runnable on any CI leg. Run with:
+# The three commands that read and write a folder exclusion — the cases
+# runnable on any UNIX CI leg (review round 3, Minor N2: "any CI leg" was one
+# word too strong — see below). Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
 #
-# Eight cases against `list_exclusions`, `exclude_subfolder` or
+# Ten cases against `list_exclusions`, `exclude_subfolder` or
 # `include_subfolder` (`src-tauri/src/bridge.rs`) and the `tests/commands.rs`
 # tests written for task-2 of PR 8a.
+#
+# ⚠️ **"Any unix leg", not "any CI leg" (review round 3, Minor N2).** Four of
+# these ten cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
+# three of the `prefix_exists_on_disk` permission/kind cases) — harmless on
+# this repository's two CI legs (`ubuntu-24.04`, `macos-14`, both unix), but
+# a claim of "any CI leg" is false the moment a Windows leg exists, and would
+# fail every case in this file the same way Important A did, for the same
+# mechanism: the harness's baseline `--exact` selects nothing for a test that
+# does not exist under that `#[cfg]`, reads as a `BASELINE FAILURE`, and
+# exits 1 for the whole file before any mutation runs.
 #
 # ⚠️ **This file's sibling, `pr8-exclusions-macos.sh`, must be run too and is
 # NOT a case here.** Its one case names a `#[cfg(target_os = "macos")]` test
@@ -26,6 +37,16 @@
 # "narrow the probe" and "the probe as written" are the same code today; a
 # case built from that description would be born alive and killed by
 # nothing. See `bridge::exclude_subfolder`'s own doc comment.
+#
+# ⚠️ **Review round 3's ruling: one classifier (`path_error_is_an_answer`),
+# used at every site that turns a filesystem lookup into `exists_on_disk`,
+# rather than another one-off patch at another site.** `prefix_exists_on_disk`
+# has two such sites — the per-component `read_dir` in its loop, and the
+# final `symlink_metadata` — enumerated in that function's own doc comment.
+# `list_exclusions`'s root guard (`!root.is_dir()`) is a deliberate third
+# site that does NOT call the classifier, because its job is to match the
+# walk's own predicate exactly, not to answer the question a second way; see
+# that command's own doc comment for why.
 
 # The refusal itself, deleted. `if let Ok(_) = ... {}` still compiles and the
 # `?` that used to propagate `RulesError` is gone, so a prefix `WalkRules`
@@ -64,9 +85,32 @@ case_ "excluding an already-excluded folder a second time must not become an err
 # have found.
 case_ "existsOnDisk must come from a real filesystem lookup, not a constant" \
   src-tauri/src/bridge.rs \
-  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        let entries = match std::fs::read_dir\(&current\) \{\n            Ok\(entries\) => entries,\n            Err\(e\) if e\.kind\(\) == std::io::ErrorKind::NotFound => return false,\n            Err\(_\) => return true,\n        \};\n        match entries\n            \.flatten\(\)\n            \.find\(\|entry\| entry\.file_name\(\) == std::ffi::OsStr::new\(component\)\)\n        \{\n            Some\(entry\) => current = entry\.path\(\),\n            None => return false,\n        \}\n    \}\n    std::fs::symlink_metadata\(&current\)\.is_ok\(\)~    /* mutant: always true */\n    true~' \
+  's~    let mut current = root\.to_path_buf\(\);\n    for component in prefix\.split\('"'"'/'"'"'\) \{\n        let entries = match std::fs::read_dir\(&current\) \{\n            Ok\(entries\) => entries,\n            Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => return false,\n            Err\(_\) => return true,\n        \};\n        match entries\n            \.flatten\(\)\n            \.find\(\|entry\| entry\.file_name\(\) == std::ffi::OsStr::new\(component\)\)\n        \{\n            Some\(entry\) => current = entry\.path\(\),\n            None => return false,\n        \}\n    \}\n    match std::fs::symlink_metadata\(&current\) \{\n        Ok\(_\) => true,\n        Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => false,\n        Err\(_\) => true,\n    \}~    /* mutant: always true */\n    true~' \
   '/* mutant: always true */' \
   mnema-desktop 'list_exclusions_reports_whether_each_stored_prefix_is_still_on_disk' --test commands
+
+# Review round 3, N1. `path_error_is_an_answer`'s own classification, the
+# ONE seam every site in this file now shares, mutated at its centre:
+# `NotADirectory` moved back off the "answer" side. An ancestor replaced by
+# a file of the same name (`ENOTDIR`) would then read `existsOnDisk: true`
+# again — the state that does not lift on its own, unlike the observer
+# conditions this split exists to protect.
+case_ "NotADirectory must classify as an answer about the path, not an observer condition" \
+  src-tauri/src/bridge.rs \
+  's{        std::io::ErrorKind::NotFound \| std::io::ErrorKind::NotADirectory}{        std::io::ErrorKind::NotFound}' \
+  '        std::io::ErrorKind::NotFound' \
+  mnema-desktop 'a_rule_under_an_ancestor_that_became_a_file_reports_not_on_disk' --test commands
+
+# Review round 3, "not introduced by this diff but the lead should see it".
+# `prefix_exists_on_disk`'s FINAL `symlink_metadata` call, reverted to the
+# bare `.is_ok()` every site used to share before this round's classifier —
+# folding a `PermissionDenied` reached only at this last step (an ancestor
+# that is listable but not traversable, mode `0o444`) back into `false`.
+case_ "the final stat must classify its own errors too, not fold every one into false" \
+  src-tauri/src/bridge.rs \
+  's{    match std::fs::symlink_metadata\(&current\) \{\n        Ok\(_\) => true,\n        Err\(e\) if path_error_is_an_answer\(e\.kind\(\)\) => false,\n        Err\(_\) => true,\n    \}}{    std::fs::symlink_metadata(&current).is_ok()}' \
+  'std::fs::symlink_metadata(&current).is_ok()' \
+  mnema-desktop 'a_rule_whose_final_stat_needs_a_non_traversable_ancestor_reports_present_not_stale' --test commands
 
 # Review round 1, Important 1. The root-unavailable guard, disarmed
 # entirely. Without it, an unmounted drive or a moved folder makes every

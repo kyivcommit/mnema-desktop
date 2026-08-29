@@ -2655,6 +2655,111 @@ fn a_rule_under_an_unreadable_ancestor_reports_present_not_stale() {
     );
 }
 
+/// Review round 3, Minor N1: `NotADirectory` (`ENOTDIR`) is an ANSWER about
+/// the path, not an observer condition — an ancestor replaced by a file of
+/// the same name cannot come back on its own the way a permission problem
+/// can, so it belongs with `NotFound` on the "not there" side. This is the
+/// site `prefix_exists_on_disk`'s per-component `read_dir` classifies
+/// through `path_error_is_an_answer`.
+#[cfg(unix)]
+#[test]
+fn a_rule_under_an_ancestor_that_became_a_file_reports_not_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = exclusion_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Work/private" }),
+    )
+    .expect("excluding Work/private was rejected");
+
+    // `Work` stops being a directory at all — the shape a folder replaced by
+    // a same-named file produces. `read_dir("Work/private"'s parent lookup)`
+    // now fails with ENOTDIR, not ENOENT.
+    let work_path = fixture.path().join("Work");
+    std::fs::remove_dir_all(&work_path).expect("removing Work");
+    std::fs::write(&work_path, "Work is now a file").expect("writing a file named Work");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([{ "prefix": "Work/private", "existsOnDisk": false }]),
+        "an ancestor that is now a FILE must report existsOnDisk false — ENOTDIR does not lift \
+         on its own the way a permission problem does"
+    );
+}
+
+/// The item review round 3 recorded as "not introduced by this diff, but the
+/// lead should see it": the final `symlink_metadata` in
+/// `prefix_exists_on_disk` used to be a bare `.is_ok()`, folding a
+/// `PermissionDenied` at the LAST step into `false` the same way `.ok()` did
+/// in the loop before round 2. Mode `0o444` (listable — `read_dir` needs
+/// read — but not traversable — resolving a name inside it needs execute)
+/// is the shape that reaches this exact call rather than the loop's own
+/// `read_dir`.
+#[cfg(unix)]
+#[test]
+fn a_rule_whose_final_stat_needs_a_non_traversable_ancestor_reports_present_not_stale() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = exclusion_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Work/private" }),
+    )
+    .expect("excluding Work/private was rejected");
+
+    let work_path = fixture.path().join("Work");
+    let original_mode = std::fs::metadata(&work_path).unwrap().permissions();
+    // r--r--r--: read_dir(Work) still lists "private" (readdir needs only
+    // read), but resolving "Work/private" by name at the final stat needs
+    // execute on Work, which this mode does not grant.
+    std::fs::set_permissions(&work_path, std::fs::Permissions::from_mode(0o444))
+        .expect("chmod r--r--r-- on Work");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }));
+
+    // Restored before any assertion can panic and before TempDir's own Drop
+    // runs — recursive removal needs Work to be traversable again.
+    std::fs::set_permissions(&work_path, original_mode).expect("restoring Work's permissions");
+
+    assert_eq!(
+        list.expect("list_exclusions was rejected"),
+        json!([{ "prefix": "Work/private", "existsOnDisk": true }]),
+        "a rule whose final stat cannot be reached because an ancestor is not traversable must \
+         not be reported stale"
+    );
+}
+
 /// `list_exclusions`'s own `UnknownWatchedRoot` refusal (added beyond the
 /// brief, for the same reason `exclude_subfolder` checks it) needs its own
 /// test — otherwise `.ok_or(Error::UnknownWatchedRoot(root_id))` could

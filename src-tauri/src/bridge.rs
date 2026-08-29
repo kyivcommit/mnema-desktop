@@ -137,26 +137,32 @@ pub struct StoredExclusion {
 /// [`StoredExclusion`]'s own doc comment for why the directory check was
 /// dropped.
 ///
-/// **"I looked and it is not there" is told apart from "I could not look"
-/// (review round 2, Minor C).** `read_dir(&current)` needs the directory to
-/// be *listable*, one permission stricter than `symlink_metadata`'s own
-/// *traversable* — a directory with mode `--x--x--x` can be walked into but
-/// not listed. Folding that `Err` into "not found" the way `.ok()` used to
-/// (round 1's own shape) reads a rule under an unreadable ancestor as dead:
-/// measured, `Work` at `--x--x--x` flips `prefix_exists_on_disk("Work/private")`
-/// from `true` to `false` even though nothing about the rule changed. A
-/// `NotFound` error — the component really is absent — still answers
-/// `false`; every other error answers `true`, the same direction
-/// [`list_exclusions`] refuses in rather than lies in for the root itself:
-/// under-exclusion (a live rule read as stale, offered for removal, its
-/// folder then reaching the provider under D29) is the failure this project
-/// pays for, not over-caution.
+/// **Every filesystem lookup in this function is classified through
+/// [`path_error_is_an_answer`] before it becomes part of the return value —
+/// review round 3's ruling on the *shape* of the fix, after rounds 1 and 2
+/// each closed one instance of the same defect (`.unwrap_or(false)`,
+/// `.ok()`) and left another standing.** Two sites, enumerated so the next
+/// reader can check the set rather than trust it:
+///
+/// 1. The per-component `read_dir(&current)` in the loop below.
+/// 2. The final `symlink_metadata(&current)`, which used to be a bare
+///    `.is_ok()` — folding a `PermissionDenied` on a *listable but not
+///    traversable* ancestor (mode `0o444`: `read_dir` needs read, resolving
+///    a name inside it needs execute) into `false` exactly the way `.ok()`
+///    did in the loop before round 2 (review round 3, "not introduced by
+///    this diff" §4: measured, `Work` at `0o444` flips this exact call from
+///    `Ok` to `Err(PermissionDenied)` while nothing about the rule changed).
+///
+/// [`list_exclusions`]'s own root guard (`!root.is_dir()`) is deliberately
+/// **not** one of these two: its job is to match the walk's own predicate
+/// for "is this root usable" exactly (see that function's doc comment), not
+/// to answer the same question a second, possibly-disagreeing way.
 fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
     let mut current = root.to_path_buf();
     for component in prefix.split('/') {
         let entries = match std::fs::read_dir(&current) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(e) if path_error_is_an_answer(e.kind()) => return false,
             Err(_) => return true,
         };
         match entries
@@ -167,7 +173,59 @@ fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
             None => return false,
         }
     }
-    std::fs::symlink_metadata(&current).is_ok()
+    match std::fs::symlink_metadata(&current) {
+        Ok(_) => true,
+        Err(e) if path_error_is_an_answer(e.kind()) => false,
+        Err(_) => true,
+    }
+}
+
+/// The classifier review round 3 asked for: whether an `io::Error` from a
+/// filesystem lookup is **an answer about the path** — the path, however
+/// spelled, cannot exist in the shape asked, and that fact does not lift on
+/// its own — or **a report about the observer** — this process could not
+/// tell right now, and the condition is transient: a permission gets fixed,
+/// a volume comes back, and the truth returns with it when it does.
+///
+/// **The split:**
+/// - [`std::io::ErrorKind::NotFound`] — the named component is not there.
+///   An answer.
+/// - [`std::io::ErrorKind::NotADirectory`] — an ancestor component exists
+///   but is not a directory (a folder replaced by a file of the same name,
+///   `ENOTDIR`). Also an answer, and the reason it is its own arm rather
+///   than falling into the `NotFound`-shaped bucket by resemblance: unlike a
+///   permission problem this does not lift by itself — the path cannot come
+///   back until someone recreates it as a directory — so treating it as
+///   observer-side (review round 2's shipped code) answered `true` for a
+///   rule that is permanently, not transiently, gone (review round 3,
+///   Minor N1, measured: an ancestor replaced by a file flips this from the
+///   `false` round 1 gave it to `true`).
+/// - Everything else — `PermissionDenied`, and the network-mount kinds a
+///   watched folder on a share can produce — is an observer condition and
+///   answers `true`, i.e. is **not** "an answer" here.
+///
+/// **Why the wrong side costs what it costs, and why it is chosen anyway.**
+/// A live rule misread as stale (an observer condition wrongly on the
+/// answer side) offers removal in Task 5's UI, and accepting that offer
+/// sends the folder's contents to the provider under D29 — a privacy cost.
+/// A dead rule misread as live (an answer wrongly on the observer side)
+/// only produces a list entry with no stale-rule control and no ordinary
+/// folder-tree toggle either, since the path is in neither
+/// `list_path_exclusions` nor `list_subfolders`'s intersection — clutter and
+/// a false sense of protection, not a leak, since there is nothing under a
+/// gone path left to index. The second cost is the one this split accepts
+/// in exchange for never paying the first — both directions checked, not
+/// only the one this round's finding named.
+///
+/// Used at every site in this file that turns a filesystem lookup's outcome
+/// into `exists_on_disk`'s boolean — see [`prefix_exists_on_disk`]'s own doc
+/// comment for the enumerated two, and for why the root guard in
+/// [`list_exclusions`] is deliberately a third site that does not call this.
+fn path_error_is_an_answer(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
 }
 
 /// Off the main thread for the reason given on [`open_index`].
@@ -195,6 +253,14 @@ fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
 /// prefix answering `false`. Matching the walk's own predicate is matching
 /// the answer this product already trusts to decide a root is unusable,
 /// not inventing a second one that can disagree with it.
+///
+/// **This is the one filesystem-outcome-to-boolean site in this file that
+/// does not go through [`path_error_is_an_answer`] (review round 3's
+/// enumeration).** `Path::is_dir()` already collapses every failure —
+/// answer or observer alike — into `false`/"refuse", the same shape the
+/// classifier exists to avoid elsewhere; kept here anyway, deliberately,
+/// because the point of this line is byte-for-byte agreement with
+/// `walk.rs:288`, not a more finely reasoned answer of its own.
 #[tauri::command(async)]
 pub fn list_exclusions(
     state: State<'_, AppState>,

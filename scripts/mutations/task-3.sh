@@ -32,10 +32,16 @@ case_ "schema.sql is frozen at migration 1 and must not grow these columns" \
 # C2. The migration has to be in the list at all. Without it `apply` leaves a
 # database at version 1 and the columns simply never arrive — the shape a
 # session that edits `SCHEMA_VERSION` and forgets the `M::up` produces.
+# Marker updated for PR 8a task 1 (`8f13e5f`), which appended
+# `M::up(ADD_IGNORE_RULE_UNIQUE)` after this migration — so deleting this
+# line no longer collapses the list down to the bare schema entry, it now
+# leaves that third migration immediately behind it. Staleness debt from
+# that commit, not from this case's own subject.
 case_ "the migration is registered, not merely written" \
   crates/mnema-index/src/migrations.rs \
   's~        M::up\(ADD_PATH_READER\),\n~~' \
   '        M::up(include_str!("schema.sql")),
+        M::up(ADD_IGNORE_RULE_UNIQUE),
     ])' \
   mnema-index \
   'migrations::tests::an_existing_database_keeps_its_rows_and_the_migration_credits_them_all_to_text' --lib
