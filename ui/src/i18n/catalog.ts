@@ -41,6 +41,18 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'settings_folders_scan' | 'settings_folders_scan_named'
+  | 'settings_folders_expand' | 'settings_folders_expand_named'
+  | 'settings_subfolders_loading' | 'settings_subfolders_none'
+  | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
+  | 'settings_subfolder_open' | 'settings_subfolder_excluded'
+  | 'settings_subfolder_excluded_by_ancestor' | 'settings_subfolder_built_in'
+  | 'settings_subfolder_symlink' | 'settings_subfolder_unusable_name'
+  | 'settings_subfolder_exclude' | 'settings_subfolder_exclude_named'
+  | 'settings_subfolder_include' | 'settings_subfolder_include_named'
+  | 'settings_folders_rules_heading' | 'settings_folders_rules_none'
+  | 'settings_folders_rule_gone' | 'settings_folders_rule_cost'
+  | 'settings_folders_rule_remove' | 'settings_folders_rule_remove_named'
+  | 'settings_folders_rule_already_gone'
   | 'indexing_walk_starting' | 'indexing_walk_running'
   | 'indexing_embed_starting' | 'indexing_embed_running'
   | 'indexing_counts_ratio' | 'indexing_counts_counting'
@@ -295,6 +307,56 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Carries the path so two "Сканувати" buttons in a list stay apart for a
     // screen reader; the VISIBLE label stays the plain word above.
     settings_folders_scan_named: 'Сканувати {path}',
+    // PR 8a, Task 5 — the folder row expands into what is on disk.
+    //
+    // The control keeps ONE name in both states: `aria-expanded` carries open
+    // and shut, and a button whose label flips is a second place for the same
+    // fact — the two can disagree, and only one of them is what a screen
+    // reader announces.
+    settings_folders_expand: 'Підтеки',
+    settings_folders_expand_named: 'Підтеки теки {path}',
+    settings_subfolders_loading: 'Читаємо підтеки…',
+    settings_subfolders_none: 'У цій теці немає підтек.',
+    // `unnameable` (tree.rs): записи, чиї назви не є коректним UTF-8, лічать і
+    // не показують — назва, зіпсована при показі, більше не відкриває ту теку,
+    // з якої походить, і правило з неї не виключило б нічого. Речення існує,
+    // щоб тека з такими записами не читалась як порожніша, ніж вона є.
+    settings_subfolders_unnameable: '{count, plural, one {# підтеку не показано: її назву не вдалося прочитати як текст.} few {# підтеки не показано: їхні назви не вдалося прочитати як текст.} many {# підтек не показано: їхні назви не вдалося прочитати як текст.} other {# підтеки не показано: їхні назви не вдалося прочитати як текст.}}',
+    // Вступ до відмови `list_subfolders`; саме речення бекенда показують
+    // дослівно поруч (§10).
+    settings_subfolders_failed: 'Не вдалося прочитати підтеки цієї теки.',
+    // Шість станів, шість речень. `open` не обіцяє індексування — команда знає
+    // лише про правила, тож речення говорить саме про правила.
+    settings_subfolder_open: 'Жодне правило не виключає цю теку.',
+    settings_subfolder_excluded: 'Виключено вашим правилом.',
+    // Називає предка: рядок «утримується правилом» без назви правила не
+    // лишає людині нічого, що можна піти й прибрати.
+    settings_subfolder_excluded_by_ancestor: 'Утримується вашим правилом на {prefix}. Приберіть те правило, щоб змінити цю теку.',
+    // `built_in` і `unusable_name` — протилежні факти, і речення НЕ мають
+    // читатись однаково: вміст першої не потрапляє до провайдера ніколи,
+    // вміст другої потрапляє, і людина не може захистити її звідси.
+    settings_subfolder_built_in: 'Застосунок ніколи не індексує цю теку, тож тут немає правила, яке можна додати чи прибрати.',
+    settings_subfolder_symlink: 'Посилання на іншу теку. Сканування ніколи не переходить за посиланнями, тож усередині нічого не індексується.',
+    settings_subfolder_unusable_name: 'Ця тека індексується, а її назву не можна записати як правило — перейменуйте теку, якщо хочете її виключити.',
+    settings_subfolder_exclude: 'Виключити',
+    settings_subfolder_exclude_named: 'Виключити {path}',
+    settings_subfolder_include: 'Не виключати',
+    settings_subfolder_include_named: 'Не виключати {path}',
+    settings_folders_rules_heading: 'Ваші правила виключення для цієї теки:',
+    settings_folders_rules_none: 'Ви нічого не виключили в цій теці.',
+    // Єдине джерело відповіді «чи тека ще на диску» — `existsOnDisk` самого
+    // правила (bridge.rs). Порівняння списку правил зі списком підтек одного
+    // рівня помилково назве застарілим кожне вкладене правило.
+    settings_folders_rule_gone: 'Наразі за цим шляхом теки немає.',
+    // Прибрати правило — це розкриття, а не прибирання: речення стоїть поруч
+    // із кнопкою ДО натискання й каже, що станеться далі. Одне речення для
+    // обох місць — і для правила у списку, і для перемикача «не виключати».
+    settings_folders_rule_cost: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування.',
+    settings_folders_rule_remove: 'Прибрати правило',
+    settings_folders_rule_remove_named: 'Прибрати правило на {prefix}',
+    // `include_subfolder` відповідає, чи справді щось прибрали (bridge.rs).
+    // «Правила вже не було» — не помилка, а факт про екран, який застарів.
+    settings_folders_rule_already_gone: 'Такого правила вже не було. Список перечитано.',
     indexing_walk_starting: 'Читання теки починається…',
     indexing_walk_running: 'Триває читання теки.',
     // The embedding pass takes no root and covers the whole index
@@ -449,6 +511,29 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_days: '{count, plural, one {# day} other {# days}} ago',
     settings_folders_scan: 'Scan',
     settings_folders_scan_named: 'Scan {path}',
+    settings_folders_expand: 'Subfolders',
+    settings_folders_expand_named: 'Subfolders of {path}',
+    settings_subfolders_loading: 'Reading the subfolders…',
+    settings_subfolders_none: 'This folder has no subfolders.',
+    settings_subfolders_unnameable: '{count, plural, one {# subfolder is not listed: its name could not be read as text.} other {# subfolders are not listed: their names could not be read as text.}}',
+    settings_subfolders_failed: 'The subfolders of this folder could not be read.',
+    settings_subfolder_open: 'No rule excludes this folder.',
+    settings_subfolder_excluded: 'Excluded by your rule.',
+    settings_subfolder_excluded_by_ancestor: 'Held by your rule on {prefix}. Remove that rule to change this folder.',
+    settings_subfolder_built_in: 'The application never indexes this folder, so there is no rule to add or remove.',
+    settings_subfolder_symlink: 'A link to another folder. The scan never follows links, so nothing inside it is indexed.',
+    settings_subfolder_unusable_name: 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
+    settings_subfolder_exclude: 'Exclude',
+    settings_subfolder_exclude_named: 'Exclude {path}',
+    settings_subfolder_include: 'Do not exclude',
+    settings_subfolder_include_named: 'Do not exclude {path}',
+    settings_folders_rules_heading: 'Your exclusion rules for this folder:',
+    settings_folders_rules_none: 'You have not excluded anything in this folder.',
+    settings_folders_rule_gone: 'There is no folder at this path right now.',
+    settings_folders_rule_cost: 'Without this rule, anything at this path is indexed again from the next scan on.',
+    settings_folders_rule_remove: 'Remove the rule',
+    settings_folders_rule_remove_named: 'Remove the rule on {prefix}',
+    settings_folders_rule_already_gone: 'There was no such rule left to remove. The list has been re-read.',
     indexing_walk_starting: 'Reading the folder is starting…',
     indexing_walk_running: 'The folder is being read.',
     indexing_embed_starting: 'Embedding the whole index is starting…',

@@ -65,6 +65,75 @@ export type TreeRoot = { rootId: number; absolutePath: string; name: string; fil
 export type RecentDoc = { documentId: string; rootId: number; relativePath: string; indexedAt: number };
 export type TreeListing = { roots: TreeRoot[]; recents: RecentDoc[] };
 
+// PR 8a. The subfolder listing the folder row expands into (`src-tauri/src/tree.rs`),
+// mirrored IN FULL rather than in the subset the row draws today — `JobEnded`'s
+// eleven fields are the precedent, and the reason is the same: a partial mirror
+// in front of a screen that draws states looks authoritative while being
+// incomplete.
+//
+// 🔴 Six variants, and the window must stay exhaustive over them with no
+// fallthrough branch. A default arm is how a seventh state — one this build has
+// never heard of, added to `tree.rs` later — gets drawn as an ordinary
+// excludable folder, which is the exact thing `SubfolderState` was split into
+// six to prevent. `ipc.test.ts`'s `Record<SubfolderState['kind'], …>` fails to
+// compile when a variant is added here and left unmapped, and
+// `Folders.svelte`'s classifier fails to compile when one is added and left
+// undescribed.
+//
+// What each one means for a person, since the words on screen come from it:
+//   - `open` — no rule this command can see. NOT a promise the folder is
+//     indexed; only that no rule excludes it.
+//   - `excluded` — a stored rule names this folder itself.
+//   - `excludedByAncestor` — a stored rule names an ancestor, and carries
+//     WHICH one: a row that says "held by a rule" without naming it leaves the
+//     person nothing to go and remove.
+//   - `builtIn` — the walk prunes it unconditionally. Its contents never reach
+//     a provider, and there is no rule to add or remove.
+//   - `symlink` — a symlinked directory. The walk runs `follow_links(false)`,
+//     so nothing under it is ever indexed and a rule naming it would exclude
+//     nothing.
+//   - `unusableName` — the OPPOSITE fact from `builtIn`, and the two sentences
+//     must not read alike: this folder IS walked, and its name is one no
+//     exclusion rule can carry, so the person cannot protect it from here.
+export type SubfolderState =
+  | { kind: 'open' }
+  | { kind: 'excluded' }
+  | { kind: 'excludedByAncestor'; prefix: string }
+  | { kind: 'builtIn' }
+  | { kind: 'symlink' }
+  | { kind: 'unusableName' };
+
+// `relativePath` is what goes back to `exclude_subfolder`, never `name`: the
+// two differ at every level below the root, and a rule built from the name
+// would name a folder at the top of the tree instead of the one that was
+// pressed.
+export type Subfolder = { name: string; relativePath: string; state: SubfolderState };
+
+// A struct rather than a bare array because of `unnameable`: directory entries
+// whose names are not valid UTF-8 are counted and dropped, never rendered
+// lossily, so a folder holding them must not read as emptier than it is.
+export type SubfolderListing = { entries: Subfolder[]; unnameable: number };
+
+// One stored rule, with the ONLY answer about whether its folder is still
+// there. `existsOnDisk` is resolved component-by-component against real
+// directory entries on the Rust side (`bridge.rs`), which is why nothing on
+// this side may re-derive it: comparing the rule list against a one-level
+// listing marks every nested rule (`Work/private`) as gone and invites a
+// person to delete a rule that is still doing its job.
+export type StoredExclusion = { prefix: string; existsOnDisk: boolean };
+
+export const listSubfolders = (rootId: number, relativePath: string) =>
+  invoke<SubfolderListing>('list_subfolders', { rootId, relativePath });
+export const listExclusions = (rootId: number) =>
+  invoke<StoredExclusion[]>('list_exclusions', { rootId });
+export const excludeSubfolder = (rootId: number, relativePath: string) =>
+  invoke<void>('exclude_subfolder', { rootId, relativePath });
+// Answers whether a row actually went, and the caller has to carry that
+// through: "the rule is gone now" and "there was no rule left to remove" are
+// different things to say to a person.
+export const includeSubfolder = (rootId: number, relativePath: string) =>
+  invoke<boolean>('include_subfolder', { rootId, relativePath });
+
 export type Freshness =
   | { kind: 'current' } | { kind: 'reindexed' } | { kind: 'fileChanged' }
   | { kind: 'fileMissing' } | { kind: 'noPath' };
