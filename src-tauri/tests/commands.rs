@@ -6878,3 +6878,728 @@ fn a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragra
         refusals - reused
     );
 }
+
+// ---------------------------------------------------------------------------
+// `list_subfolders` — the exclusion screen's folder tree, read off the disk.
+// ---------------------------------------------------------------------------
+
+/// The three calls every `list_subfolders` test below opens with, and the
+/// root id they produce. Written once because none of the assertions in this
+/// section are about `open_index` or `add_watched_folder`.
+fn root_for(webview: &WebviewWindow<MockRuntime>, path: &std::path::Path) -> i64 {
+    call(webview, "open_index", json!({})).expect("open_index was rejected");
+    call(
+        webview,
+        "add_watched_folder",
+        json!({ "path": path.display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id")
+}
+
+/// One listing as `(name, relativePath, state kind)` triples, in the order it
+/// came back.
+///
+/// A triple rather than a name: a listing that got every name right and every
+/// state wrong satisfies any assertion about names alone, and the two fields
+/// that a caller acts on are the path it would send back to
+/// `exclude_subfolder` and the state that decides whether it may.
+fn subfolder_rows(listing: &Value) -> Vec<(String, String, String)> {
+    listing["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("list_subfolders answered no entries array: {listing}"))
+        .iter()
+        .map(|e| {
+            (
+                e["name"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("an entry carries no name: {e}"))
+                    .to_string(),
+                e["relativePath"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("an entry carries no relativePath: {e}"))
+                    .to_string(),
+                e["state"]["kind"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("an entry carries no state kind: {e}"))
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Directories come back, files do not, and the order is by name rather than
+/// whatever the filesystem happened to hand out.
+///
+/// **Five folders created in an order that is not their sorted order**, not
+/// the brief's minimum of two: with two entries a listing that never sorts
+/// has an even chance of looking sorted, and the claim here is about an order
+/// the window relies on being the same on every machine (`rules.rs:228` makes
+/// the same choice for the walk). The file is the other direction — a
+/// listing that returned every directory entry would pass the order
+/// assertion and put `c.txt` in a folder tree.
+#[test]
+fn list_subfolders_answers_the_directories_sorted_and_not_the_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for name in ["m", "a", "z", "b", "k"] {
+        std::fs::create_dir(fixture.path().join(name)).expect("creating a fixture folder");
+    }
+    std::fs::write(fixture.path().join("c.txt"), "a file, not a folder").expect("writing c.txt");
+    let root = root_for(&webview, fixture.path());
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![
+            ("a".to_string(), "a".to_string(), "open".to_string()),
+            ("b".to_string(), "b".to_string(), "open".to_string()),
+            ("k".to_string(), "k".to_string(), "open".to_string()),
+            ("m".to_string(), "m".to_string(), "open".to_string()),
+            ("z".to_string(), "z".to_string(), "open".to_string()),
+        ],
+        "the five folders must come back sorted by name, and the file must not come back at \
+         all: {listing}"
+    );
+    assert_eq!(
+        listing["unnameable"],
+        json!(0),
+        "every name in this fixture is valid UTF-8, so nothing was omitted: {listing}"
+    );
+}
+
+/// A stored rule naming a folder marks that folder, and only that folder.
+///
+/// Both directions in one assertion: a listing that marked everything
+/// `excluded` would satisfy the half about `a`.
+///
+/// **`ab` is the third folder and it is not decoration.** Its name *starts
+/// with* the stored rule `a` without being under it, which is what makes this
+/// a test of path components rather than of string prefixes. Without it,
+/// dropping the `/` boundary check in `is_ancestor_of` leaves every assertion
+/// in this file green — measured: that mutant is a case in
+/// scripts/mutations/pr8-subfolders.sh and it is this fixture that kills it.
+#[test]
+fn an_excluded_subfolder_is_marked_and_its_sibling_stays_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("a")).expect("creating a/");
+    std::fs::create_dir(fixture.path().join("ab")).expect("creating ab/");
+    std::fs::create_dir(fixture.path().join("b")).expect("creating b/");
+    let root = root_for(&webview, fixture.path());
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "a" }),
+    )
+    .expect("excluding a was rejected");
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![
+            ("a".to_string(), "a".to_string(), "excluded".to_string()),
+            ("ab".to_string(), "ab".to_string(), "open".to_string()),
+            ("b".to_string(), "b".to_string(), "open".to_string()),
+        ],
+        "the rule names a and nothing else — ab merely starts with it: {listing}"
+    );
+}
+
+/// A folder no rule names, under a folder a rule does, says **which** rule
+/// holds it — the value, not merely the variant.
+///
+/// The brief's minimum state, kept as its own test: one rule, one level down.
+/// The plural case (several rules holding one folder) is the test below.
+#[test]
+fn a_subfolder_under_an_excluded_ancestor_names_the_rule_that_holds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("a/deep")).expect("creating a/deep");
+    std::fs::create_dir(fixture.path().join("b")).expect("creating b/");
+    let root = root_for(&webview, fixture.path());
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "a" }),
+    )
+    .expect("excluding a was rejected");
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![(
+            "deep".to_string(),
+            "a/deep".to_string(),
+            "excludedByAncestor".to_string()
+        )],
+        "a/deep is held by an ancestor's rule, not by one of its own: {listing}"
+    );
+    assert_eq!(
+        listing["entries"][0]["state"]["prefix"],
+        json!("a"),
+        "the row has to name the rule that holds it, or a person cannot find the rule to \
+         remove: {listing}"
+    );
+}
+
+/// Several stored rules can hold one folder at once, and the row names the
+/// **outermost** of them — the one whose removal has to come first.
+///
+/// Two fixture states the single-rule test above cannot reach:
+///
+/// - `a/deep` has a rule of its own (`a/deep`) **and** an excluded ancestor
+///   (`a`). It reports `excludedByAncestor`, not `excluded`: removing its own
+///   rule would leave the ancestor's, so a row offering that control would
+///   offer one that changes nothing a person can see — the class this whole
+///   PR refuses (`BuiltIn` exists for the same reason).
+/// - `a/deep/deeper` has two ancestors holding it. `Db::list_path_exclusions`
+///   sorts, and the ancestors of one path form a chain in which each is a
+///   string prefix of the next, so the first match in that sorted list is the
+///   outermost one. The assertion is on the value `"a"`, which is what makes
+///   this a test of that choice rather than of the variant.
+#[test]
+fn the_outermost_rule_is_the_one_a_held_subfolder_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("a/deep/deeper")).expect("creating a/deep/deeper");
+    let root = root_for(&webview, fixture.path());
+
+    for prefix in ["a", "a/deep"] {
+        call(
+            &webview,
+            "exclude_subfolder",
+            json!({ "rootId": root, "relativePath": prefix }),
+        )
+        .unwrap_or_else(|e| panic!("excluding {prefix} was rejected: {e}"));
+    }
+
+    let held = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a" }),
+    )
+    .expect("list_subfolders was rejected");
+    assert_eq!(
+        subfolder_rows(&held),
+        vec![(
+            "deep".to_string(),
+            "a/deep".to_string(),
+            "excludedByAncestor".to_string()
+        )],
+        "a/deep has a rule of its own AND an excluded ancestor; the ancestor is what a person \
+         has to remove first: {held}"
+    );
+    assert_eq!(
+        held["entries"][0]["state"]["prefix"],
+        json!("a"),
+        "the row must name the ancestor's rule, not its own: {held}"
+    );
+
+    let deeper = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a/deep" }),
+    )
+    .expect("list_subfolders was rejected");
+    assert_eq!(
+        subfolder_rows(&deeper),
+        vec![(
+            "deeper".to_string(),
+            "a/deep/deeper".to_string(),
+            "excludedByAncestor".to_string()
+        )],
+        "two rules hold a/deep/deeper: {deeper}"
+    );
+    assert_eq!(
+        deeper["entries"][0]["state"]["prefix"],
+        json!("a"),
+        "with two ancestors holding it, the row names the outermost: {deeper}"
+    );
+}
+
+/// The built-in list is visible as its own state, and a dot-directory the
+/// list does not name is not.
+///
+/// Both directions, because a rule that marked every dotfile would satisfy
+/// the `.git` half alone — and `node_modules` is the other half of that: a
+/// built-in name that is not a dot-directory at all. Four entries, so
+/// neither classifier ("starts with a dot" or "is on the list") can pass by
+/// coincidence.
+#[test]
+fn a_built_in_directory_is_marked_and_an_ordinary_dot_directory_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for name in [".git", ".config", "node_modules", "notes"] {
+        std::fs::create_dir(fixture.path().join(name)).expect("creating a fixture folder");
+    }
+    let root = root_for(&webview, fixture.path());
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![
+            (
+                ".config".to_string(),
+                ".config".to_string(),
+                "open".to_string()
+            ),
+            (
+                ".git".to_string(),
+                ".git".to_string(),
+                "builtIn".to_string()
+            ),
+            (
+                "node_modules".to_string(),
+                "node_modules".to_string(),
+                "builtIn".to_string()
+            ),
+            ("notes".to_string(), "notes".to_string(), "open".to_string()),
+        ],
+        "the two names WalkRules::BUILTIN_DIRS holds are builtIn and the other two are not: \
+         {listing}"
+    );
+}
+
+/// A `relative_path` naming a folder that is not there is **refused with a
+/// sentence**. An empty list would be a claim that the folder holds no
+/// subfolders, which is a different thing and the dangerous one: it is the
+/// answer a window would draw as "nothing here to exclude".
+#[test]
+fn listing_a_folder_that_is_not_there_is_refused_rather_than_answered_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("a")).expect("creating a/");
+    let root = root_for(&webview, fixture.path());
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "nope" }),
+    )
+    .expect_err("a folder that is not there must be refused, not answered with an empty list");
+    assert_eq!(
+        rejected,
+        json!(format!(
+            "there is no folder \"nope\" in watched folder {root}"
+        )),
+        "the refusal has to be a sentence a person can read"
+    );
+}
+
+/// `..` resolves out of the watched folder, and the listing refuses it.
+///
+/// The parent of a temporary directory exists, so this is not the
+/// "no such folder" case in disguise: the path resolves perfectly well, and
+/// to somewhere this command has no business reading.
+#[test]
+fn listing_a_path_that_climbs_out_of_the_root_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("a")).expect("creating a/");
+    let root = root_for(&webview, fixture.path());
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": ".." }),
+    )
+    .expect_err("a path climbing out of the root must be refused");
+    assert_eq!(
+        rejected,
+        json!(format!(
+            "\"..\" does not name a folder inside watched folder {root}: it resolves somewhere \
+             else"
+        )),
+        "the refusal has to be a sentence a person can read"
+    );
+}
+
+/// An absolute `relative_path` is refused.
+///
+/// **This is the case only the containment half of the check catches.**
+/// `Path::join` given an absolute path throws the root away and answers the
+/// absolute path itself, so the "resolves where its spelling says" half is
+/// satisfied — the spelling says `/…` and it resolves to `/…`. The other
+/// directory is canonicalised first so that nothing here depends on the
+/// platform's own symlinks (`/var` is a symlink to `/private/var` on macOS,
+/// which would make this test pass through the wrong half of the check).
+#[test]
+fn listing_an_absolute_path_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("a")).expect("creating a/");
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outside.path().join("secrets")).expect("creating secrets/");
+    let outside_canonical = outside
+        .path()
+        .canonicalize()
+        .expect("canonicalising the outside directory");
+    let root = root_for(&webview, fixture.path());
+
+    let asked = outside_canonical.join("secrets").display().to_string();
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": asked.clone() }),
+    )
+    .expect_err("an absolute path must be refused");
+    assert_eq!(
+        rejected,
+        json!(format!(
+            "{asked:?} does not name a folder inside watched folder {root}: it resolves \
+             somewhere else"
+        )),
+        "the refusal has to be a sentence a person can read"
+    );
+}
+
+/// A `relative_path` that reaches its target through a **real symlink** is
+/// refused, whether the target is outside the watched folder or inside it.
+///
+/// Both, because they fail for different reasons and a check that caught only
+/// the first would look right: the outside one escapes the root, and the
+/// inside one does not escape anything — it is refused because the walk runs
+/// `follow_links(false)` (`rules.rs:229`), so nothing under that name is ever
+/// enumerated and every exclusion rule this listing would offer under it
+/// excludes nothing.
+///
+/// The link is built, not asserted about: a containment check written against
+/// the string alone passes every lexical test and still follows this one.
+#[cfg(unix)]
+#[test]
+fn listing_through_a_symlink_is_refused_in_or_out_of_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("real/inner")).expect("creating real/inner");
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outside.path().join("secrets")).expect("creating secrets/");
+    std::os::unix::fs::symlink(outside.path(), fixture.path().join("out"))
+        .expect("linking out of the root");
+    std::os::unix::fs::symlink(fixture.path().join("real"), fixture.path().join("in"))
+        .expect("linking inside the root");
+    let root = root_for(&webview, fixture.path());
+
+    for asked in ["out/secrets", "in", "in/inner"] {
+        let rejected = match call(
+            &webview,
+            "list_subfolders",
+            json!({ "rootId": root, "relativePath": asked }),
+        ) {
+            Ok(answered) => {
+                panic!(
+                    "{asked} reached through a symlink must be refused, not answered with \
+                        {answered}"
+                )
+            }
+            Err(rejected) => rejected,
+        };
+        assert_eq!(
+            rejected,
+            json!(format!(
+                "{asked:?} does not name a folder inside watched folder {root}: it resolves \
+                 somewhere else"
+            )),
+            "{asked} was refused with the wrong sentence"
+        );
+    }
+}
+
+/// A directory whose name is not valid UTF-8 is **omitted and counted**,
+/// never rendered lossily: `to_string_lossy` would put a name on screen that
+/// no longer opens the folder, and a rule saved from it would exclude
+/// nothing.
+///
+/// **Two of them, not one.** `unnameable` is a count, and a field that
+/// answered `1` unconditionally — or `true` widened into a number — passes
+/// every assertion a single unnameable entry can make.
+///
+/// ⚠️ **`target_os = "linux"`, not `unix`, and the gate is a fact about the
+/// filesystem rather than about the code.** APFS refuses to create a name that
+/// is not valid UTF-8 at all — measured on macOS 26.6.2 while writing this very
+/// test: `create_dir` fails with `EILSEQ`, "Illegal byte sequence", so the
+/// fixture cannot be built and the property cannot be observed through a real
+/// directory there. It is observed instead by this test's unit-level twin in
+/// `tree.rs`, which reaches `read_subfolders` through the `Entry` seam and runs
+/// on every unix; its name is
+/// a_directory_whose_name_is_not_utf8_is_counted_and_never_named, on one line so
+/// that a grep for it finds this reference. That twin, not this test, is what
+/// the mutation cases name, so this gate cannot take a case file's baseline down
+/// with it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_directory_whose_name_is_not_utf8_is_counted_and_never_named_lossily() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for bytes in [b"bad\xffone".as_slice(), b"bad\xfetwo".as_slice()] {
+        std::fs::create_dir(fixture.path().join(std::ffi::OsStr::from_bytes(bytes)))
+            .expect("creating a folder whose name is not UTF-8");
+    }
+    for name in ["alpha", "beta"] {
+        std::fs::create_dir(fixture.path().join(name)).expect("creating a nameable folder");
+    }
+    let root = root_for(&webview, fixture.path());
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    let names: Vec<String> = subfolder_rows(&listing)
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "only the two nameable folders may be listed: {listing}"
+    );
+    assert!(
+        !names.iter().any(|name| name.contains('\u{FFFD}')),
+        "a name was rendered lossily instead of being omitted: {listing}"
+    );
+    assert_eq!(
+        listing["unnameable"],
+        json!(2),
+        "both unnameable folders have to be counted, or the folder looks emptier than it is: \
+         {listing}"
+    );
+}
+
+/// A symlink to a directory inside the root is answered as its own state, so
+/// no window can draw it as an ordinary folder with a working exclusion
+/// toggle: the walk runs `follow_links(false)` (`rules.rs:229`), so nothing
+/// under it is ever indexed and a rule naming it excludes nothing.
+///
+/// Three directions, and the fixture holds more objects than the listing
+/// returns, which is the point of it:
+///
+/// - the symlinked directory is `symlink`, not `open`;
+/// - an ordinary directory beside it is still `open`, so the state is not
+///   simply painted over everything;
+/// - a **dangling** link and a link to a **file** are not folders at all and
+///   are not listed — the two shapes that reach the same follow as the first
+///   one and must not come back as entries.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_directory_is_its_own_state_and_a_link_to_no_directory_is_not_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("real")).expect("creating real/");
+    std::fs::create_dir(fixture.path().join("plain")).expect("creating plain/");
+    std::fs::write(fixture.path().join("file.txt"), "a file").expect("writing file.txt");
+    std::os::unix::fs::symlink(fixture.path().join("real"), fixture.path().join("link"))
+        .expect("linking to a directory");
+    std::os::unix::fs::symlink(fixture.path().join("gone"), fixture.path().join("dangling"))
+        .expect("linking to nothing");
+    std::os::unix::fs::symlink(
+        fixture.path().join("file.txt"),
+        fixture.path().join("filelink"),
+    )
+    .expect("linking to a file");
+    let root = root_for(&webview, fixture.path());
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![
+            (
+                "link".to_string(),
+                "link".to_string(),
+                "symlink".to_string()
+            ),
+            ("plain".to_string(), "plain".to_string(), "open".to_string()),
+            ("real".to_string(), "real".to_string(), "open".to_string()),
+        ],
+        "the link to a directory is its own state, the ordinary folders stay open, and the \
+         dangling link and the link to a file are not folders: {listing}"
+    );
+}
+
+/// A `root_id` no `watched_root` row carries is refused before anything
+/// touches the filesystem — the same guard `list_exclusions` and
+/// `exclude_subfolder` already carry.
+#[test]
+fn listing_subfolders_under_an_unknown_root_id_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": 999_999, "relativePath": "" }),
+    )
+    .expect_err("an unknown root id must be refused");
+    assert_eq!(rejected, json!("no watched folder with id 999999"));
+}
+
+/// A watched folder that is not there refuses the whole call, rather than
+/// answering "this folder has no subfolders" — which is what a window would
+/// draw as a tree with nothing in it to exclude, for a folder whose contents
+/// are still being indexed the moment the drive comes back.
+#[test]
+fn listing_subfolders_of_an_unreachable_root_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("a")).expect("creating a/");
+    let root = root_for(&webview, fixture.path());
+    let moved = fixture.path().with_extension("moved");
+    std::fs::rename(fixture.path(), &moved).expect("moving the watched folder away");
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    );
+    // Put back before any assertion can panic, so the TempDir's own Drop still
+    // has something to remove.
+    std::fs::rename(&moved, fixture.path()).expect("moving the watched folder back");
+
+    assert_eq!(
+        rejected.expect_err("an unreachable root must be refused"),
+        json!(format!(
+            "the folder for watched root {root} is not available right now, so its exclusion \
+             rules cannot be checked"
+        )),
+    );
+}
+
+/// A `relative_path` whose spelling differs from the folder's only by case is
+/// refused, even where the filesystem itself would open it.
+///
+/// **`target_os = "macos"`, because the property does not exist on a
+/// case-sensitive filesystem.** There `PRIVATE` simply is not there and the
+/// refusal is the ordinary "no such folder" one, which proves nothing about
+/// this check. Here the folder *is* found — APFS's own lookup is
+/// case-insensitive — and `std::fs::canonicalize` corrects the spelling back to
+/// `Private` (measured on macOS 26.6.2), so the containment check's first half
+/// sees a resolved path that is not the one it was asked for and refuses.
+///
+/// It has to refuse. `ignore`'s override matcher, which is what the walk
+/// applies, is case-sensitive, so every `relativePath` this command would build
+/// under a wrong-case ancestor names a rule that excludes nothing — the same
+/// dead-rule class `list_exclusions` reports as `existsOnDisk: false`, one
+/// command over.
+///
+/// Named by no mutation case, deliberately: a `#[cfg(target_os = "macos")]`
+/// test in a case file makes the harness's baseline read `0 passed` on Linux
+/// and takes that whole file's cases down with it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_wrong_case_relative_path_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("Private/inner")).expect("creating Private/inner");
+    let root = root_for(&webview, fixture.path());
+
+    // The precondition, asserted rather than assumed: with the right spelling
+    // the same call answers, so what the next one refuses is the spelling and
+    // not the folder.
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "Private" }),
+    )
+    .expect("list_subfolders was rejected for the folder's real name");
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![(
+            "inner".to_string(),
+            "Private/inner".to_string(),
+            "open".to_string()
+        )],
+        "the correctly spelled path must answer, or this test is about nothing: {listing}"
+    );
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "PRIVATE" }),
+    )
+    .expect_err("a path whose case does not match the folder's must be refused");
+    assert_eq!(
+        rejected,
+        json!(format!(
+            "\"PRIVATE\" does not name a folder inside watched folder {root}: it resolves \
+             somewhere else"
+        )),
+    );
+}

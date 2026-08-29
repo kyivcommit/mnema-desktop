@@ -4,12 +4,19 @@
 //! [`source_around`]). Read-only, so neither command adds a data-loss surface
 //! (spec §12) — they only reflect the index at query time, and `source_around`
 //! refuses rather than answer with text a rebuild has since replaced.
+//!
+//! And, since PR 8a, the exclusion screen's own folder tree
+//! ([`list_subfolders`]) — the one read in this file that goes to the **disk**
+//! rather than to the index, for the reason its own doc comment gives. Still
+//! read-only: it writes nothing and refuses rather than answer short.
 
 use crate::error::Error;
 use crate::state::AppState;
 use mnema_core::Segment;
 use mnema_index::{Db, PathOccupant};
+use mnema_walk::WalkRules;
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use tauri::State;
 
 /// The "Recent" tab cap. Tunable; the launcher shows a bounded list, not the
@@ -602,9 +609,527 @@ pub fn source_around(
     })
 }
 
+/// One level of a watched folder's tree as the exclusion screen needs it.
+///
+/// **A struct rather than a bare `Vec`, because of `unnameable`.** Entries
+/// whose names are not valid UTF-8 are omitted rather than rendered lossily
+/// (see [`read_subfolders`]), and dropping them silently would make a folder
+/// look emptier than it is — so the count travels with the list, where the
+/// window can say the folder holds entries it cannot name.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubfolderListing {
+    pub entries: Vec<Subfolder>,
+    /// How many directory entries were omitted because their names are not
+    /// valid UTF-8. Counted, never named.
+    pub unnameable: u64,
+}
+
+/// One subfolder, and what holds it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Subfolder {
+    /// The final component, exactly as the filesystem spells it.
+    pub name: String,
+    /// What to send back to `exclude_subfolder` — the path relative to the
+    /// watched root, built by joining the caller's own `relative_path` with
+    /// [`Subfolder::name`]. Never normalised: a prefix is a path the user
+    /// chose from disk, not a pattern (`rules.rs:315-332`).
+    pub relative_path: String,
+    pub state: SubfolderState,
+}
+
+/// What holds a subfolder, as one tagged state rather than three booleans.
+///
+/// ⚠️ **`Open` does not mean "will be indexed".** It means *no rule this
+/// command can see* holds the folder. The third rule layer is the in-tree
+/// `.gitignore` stack (§5), and deciding it means compiling the same ignore
+/// stack the walk builds, per directory — which this read-only listing does
+/// not do. A folder shown as `Open` may still be skipped by a `.gitignore`
+/// inside the tree, so a window's wording here must be about the rules this
+/// screen can see, not about what the walk will do.
+///
+/// **Precedence, in the order [`subfolder_state`] applies it**, and every
+/// step of it is the same rule: *never show a control that does nothing.*
+///
+/// 1. `BuiltIn` — the name is on `WalkRules::BUILTIN_DIRS`. Pruned by the
+///    built-in layer whatever any user rule says (`rules.rs:283-290`), so an
+///    `Excluded` badge with a working "include" toggle would announce one
+///    thing and do another.
+/// 2. `Symlink` — the walk runs `follow_links(false)` (`rules.rs:229`), so
+///    nothing under this name is ever enumerated; a rule naming it excludes
+///    nothing.
+/// 3. `ExcludedByAncestor` — a stored rule names an ancestor. Checked
+///    **before** `Excluded`, so a folder that has both its own rule and an
+///    excluded ancestor names the ancestor: removing its own rule would leave
+///    the ancestor's, and the row would not open. Its own rule is not hidden
+///    from the person — `list_exclusions` lists every stored prefix.
+/// 4. `Excluded` — a stored rule names this folder itself, and nothing above
+///    it. The one state whose control does what it says.
+/// 5. `Open` — none of the above.
+///
+/// ⚠️ `rename_all_fields`, for the reason [`SourceAround`] measured: on an
+/// *enum*, `rename_all` renames the variants only, and the fields inside a
+/// struct variant keep their snake_case names without this second attribute.
+/// `prefix` is one word, so today it changes nothing — which is exactly how a
+/// two-word field added later would ship snake_case inside a camelCase
+/// payload with every test still green.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum SubfolderState {
+    /// No rule this command can see. **Not** a promise that the folder will
+    /// be indexed — see this type's own doc comment.
+    Open,
+    /// A stored prefix names this folder itself, and no ancestor of it.
+    Excluded,
+    /// A stored prefix names an ancestor. Carries **which** one, because a
+    /// row that says "held by a rule" without naming it leaves the person
+    /// nothing to go and remove.
+    ///
+    /// The **outermost** ancestor when several hold it. `list_path_exclusions`
+    /// sorts (`write.rs:576`), and the ancestors of one path form a chain in
+    /// which each is a string prefix of the next, so the first match in that
+    /// sorted list is the shallowest one — the rule whose removal has to come
+    /// first.
+    ExcludedByAncestor { prefix: String },
+    /// `WalkRules::BUILTIN_DIRS` names it (`rules.rs:134-147`), so the walk
+    /// prunes it regardless of any user rule.
+    BuiltIn,
+    /// A symlink to a directory. Listed, so the folder does not look emptier
+    /// than it is, but never as an ordinary excludable folder: the walk runs
+    /// `follow_links(false)` (`rules.rs:229`), so nothing under it is indexed
+    /// and an exclusion rule naming it would exclude nothing.
+    Symlink,
+}
+
+/// Whether `prefix` is a **strict ancestor** of `path`.
+///
+/// Byte-exact and boundary-aware in one condition, and both halves are
+/// load-bearing: `path.starts_with(prefix)` alone makes `ab` an ancestor of
+/// `abc/d`, and the `/` test alone would need the length check anyway. Strict,
+/// so a prefix equal to the path is not its own ancestor — that is
+/// [`SubfolderState::Excluded`], one state down.
+///
+/// No normalisation of either side, deliberately: a prefix is a path the user
+/// chose from disk (`rules.rs:315-332`), and the walk's own matcher compares
+/// it byte for byte.
+fn is_ancestor_of(prefix: &str, path: &str) -> bool {
+    path.len() > prefix.len() && path.as_bytes()[prefix.len()] == b'/' && path.starts_with(prefix)
+}
+
+/// What holds one entry. The precedence is [`SubfolderState`]'s own, and the
+/// argument for each step is there rather than repeated here.
+fn subfolder_state(
+    name: &str,
+    relative_path: &str,
+    is_symlink: bool,
+    prefixes: &[String],
+) -> SubfolderState {
+    if WalkRules::BUILTIN_DIRS.contains(&name) {
+        return SubfolderState::BuiltIn;
+    }
+    if is_symlink {
+        return SubfolderState::Symlink;
+    }
+    if let Some(prefix) = prefixes
+        .iter()
+        .find(|prefix| is_ancestor_of(prefix, relative_path))
+    {
+        return SubfolderState::ExcludedByAncestor {
+            prefix: prefix.clone(),
+        };
+    }
+    if prefixes.iter().any(|prefix| prefix == relative_path) {
+        return SubfolderState::Excluded;
+    }
+    SubfolderState::Open
+}
+
+/// One filesystem error about a **path**, split by
+/// [`crate::bridge::path_error_is_an_answer`]: an error that says the path is
+/// not there in the shape asked for becomes [`Error::NoSuchSubfolder`], and
+/// everything else — a permission this process lacks, a share that dropped —
+/// becomes [`Error::SubfolderUnreadable`], because it says something about the
+/// observer and nothing about the folder.
+///
+/// Both sides refuse the call. The classifier is still what decides between
+/// them, because the two sentences are different claims and a window will act
+/// on them differently: "there is no such folder" invites removing a stale
+/// rule, and under D29 acting on that when the folder is merely unreachable
+/// sends its contents to the provider on the next scan.
+fn refusal(root_id: i64, relative_path: &str, source: std::io::Error) -> Error {
+    if crate::bridge::path_error_is_an_answer(source.kind()) {
+        Error::NoSuchSubfolder {
+            root_id,
+            relative_path: relative_path.to_string(),
+        }
+    } else {
+        Error::SubfolderUnreadable {
+            root_id,
+            relative_path: relative_path.to_string(),
+            source,
+        }
+    }
+}
+
+/// The directory `relative_path` names under the watched root, or a refusal.
+///
+/// **Containment is decided on the canonicalised path, and it is two
+/// conditions, neither of which the other covers.** Each catches a shape the
+/// other lets straight through, which is why they are two tests and two tests:
+///
+/// - `resolved != expected` — the path must resolve to exactly where its own
+///   spelling says it is. This is what catches `..` (which canonicalises to
+///   somewhere the literal join does not name) and every path reaching its
+///   target **through a symlink**, in or out of the root. A lexical check
+///   cannot see a symlink at all: the string `in/inner` looks like an ordinary
+///   relative path and resolves wherever the link points.
+/// - `resolved.starts_with(root_canonical)` — the path must be under the root.
+///   This is what catches an **absolute** `relative_path`, which the first
+///   condition cannot: `Path::join` given an absolute path throws the root
+///   away and answers the absolute path itself, so `expected` and `resolved`
+///   agree perfectly and both are outside the watched folder.
+///
+/// The root is canonicalised by the caller, once, so that a watched folder
+/// reached through a symlink (`/var` → `/private/var` on macOS, where every
+/// temporary directory lives) is compared against its own real path rather
+/// than refusing everything.
+///
+/// 🔴 **The spelling half decides the CASE of the path too, and that is the
+/// reason to prefer it over `starts_with` alone.** `std::fs::canonicalize`
+/// corrects case on a case-insensitive filesystem — measured on macOS 26.6.2 /
+/// APFS: `canonicalize(root/"PRIVATE")` answers `…/Private` for a folder
+/// actually named `Private` — so `resolved != expected` refuses a wrong-case
+/// spelling that `stat` would happily have opened. It has to be refused:
+/// `ignore`'s override matcher, which is what the walk applies, is
+/// case-sensitive, so every `relativePath` this command built under a wrong-case
+/// ancestor would save a rule that excludes nothing. That is the same defect
+/// `bridge::prefix_exists_on_disk` (`bridge.rs:186`) resolves components
+/// byte-exactly to avoid, one command over, and the reason
+/// `a_wrong_case_relative_path_is_refused` is a test rather than a note.
+///
+/// ⚠️ The bound on that: it is `canonicalize`'s behaviour, not this function's.
+/// A case-insensitive volume whose `realpath` did **not** correct case would let
+/// the spelling through — and even then nothing silently over-shares, because
+/// the rule such a path saves is dead, and a dead rule is exactly what
+/// `list_exclusions` reports as `existsOnDisk: false` for the person to remove.
+fn subfolder_dir(
+    root_canonical: &Path,
+    root_id: i64,
+    relative_path: &str,
+) -> Result<PathBuf, Error> {
+    if relative_path.is_empty() {
+        return Ok(root_canonical.to_path_buf());
+    }
+    let expected = root_canonical.join(relative_path);
+    let resolved =
+        std::fs::canonicalize(&expected).map_err(|e| refusal(root_id, relative_path, e))?;
+    if resolved != expected || !resolved.starts_with(root_canonical) {
+        return Err(Error::SubfolderNotUnderRoot {
+            root_id,
+            relative_path: relative_path.to_string(),
+        });
+    }
+    Ok(resolved)
+}
+
+/// One directory entry, reduced to the three things the listing decides on.
+///
+/// **The reduction is what makes [`read_subfolders`] testable at all**, and
+/// that is its whole purpose. A `std::fs::DirEntry` cannot be constructed by
+/// hand, so a listing written directly against `ReadDir` can only be exercised
+/// through a real directory — and the state that matters most here, a name
+/// that is not valid UTF-8, **cannot be put on a real directory on APFS**:
+/// `create_dir` refuses it outright with `EILSEQ`, "Illegal byte sequence"
+/// (measured on macOS 26.6.2 / APFS, first on the fixture the brief asked for
+/// and again on a standalone probe). A guard whose only test needs a filesystem
+/// that cannot host it is a guard half this project's machines never check.
+struct Entry {
+    name: std::ffi::OsString,
+    /// Whether the entry is a directory **after following**, which a
+    /// `DirEntry`'s own `file_type` does not say for a symlink.
+    is_dir: bool,
+    /// Whether the entry itself is a symlink, which the follow above erases.
+    is_symlink: bool,
+}
+
+/// One directory's entries, reduced to [`Entry`], or the first filesystem
+/// error that stopped the reading.
+///
+/// **It takes the iterator rather than the directory path**, the same seam
+/// `bridge::entry_named` takes and for the same reason: `ReadDir` yields
+/// `io::Result<DirEntry>`, a per-entry error cannot be forced deterministically
+/// out of a real filesystem, and `.flatten()` on it would drop every `Err`
+/// silently — leaving a folder that looks like it holds fewer subfolders than
+/// it does.
+///
+/// **Two of the three filesystem outcomes below are `?`, and those two are the
+/// sites in this crate that deliberately do NOT consult
+/// [`crate::bridge::path_error_is_an_answer`]** — the per-entry `io::Result` and
+/// the per-entry `file_type`. The classifier exists to keep an error about the
+/// observer from being read as an answer about a path, and there is no answer to
+/// be read at either: the alternative to refusing is not a boolean but a shorter
+/// list, which is a claim about the folder's contents that no error kind
+/// supports. The same argument `list_exclusions`'s root guard makes one command
+/// over.
+///
+/// **The third does consult it**, because there it really is a boolean: a
+/// symlink's own `file_type` says `symlink` and nothing about what it points at,
+/// so a `metadata` through it decides "is this a directory". A dangling link and
+/// a link to a file are answers — not a directory, not listed. Anything else is
+/// the observer's condition and refuses.
+fn directory_entries(
+    entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
+) -> std::io::Result<Vec<Entry>> {
+    let mut reduced = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let is_symlink = file_type.is_symlink();
+        let is_dir = if is_symlink {
+            match std::fs::metadata(entry.path()) {
+                Ok(metadata) => metadata.is_dir(),
+                Err(e) if crate::bridge::path_error_is_an_answer(e.kind()) => false,
+                Err(e) => return Err(e),
+            }
+        } else {
+            file_type.is_dir()
+        };
+        reduced.push(Entry {
+            name: entry.file_name(),
+            is_dir,
+            is_symlink,
+        });
+    }
+    Ok(reduced)
+}
+
+/// The directories among `entries`, sorted by name, plus how many of them had
+/// no name this wire type can carry.
+///
+/// Sorted by name for the reason the walk sorts (`rules.rs:228`): `read_dir`
+/// order is the filesystem's, and a window that redraws in a different order on
+/// another machine is a window nobody can point at over the phone.
+///
+/// Only directories are counted in `unnameable`, because only directories would
+/// have been listed: an unnameable *file* is no more missing from this answer
+/// than a nameable one.
+fn read_subfolders(entries: &[Entry], parent: &str, prefixes: &[String]) -> SubfolderListing {
+    let mut listed: Vec<Subfolder> = Vec::new();
+    let mut unnameable: u64 = 0;
+    for entry in entries {
+        if !entry.is_dir {
+            continue;
+        }
+        // Omitted and counted, never `to_string_lossy`: a lossy name no longer
+        // opens the folder it came from, and a rule saved from one would
+        // exclude nothing. The walk refuses such entries for the same reason
+        // (`PreSkipRule::UnrepresentableName`, `mnema-walk/src/lib.rs:52-54`).
+        let Some(name) = entry.name.to_str() else {
+            unnameable += 1;
+            continue;
+        };
+        let relative_path = if parent.is_empty() {
+            name.to_string()
+        } else {
+            format!("{parent}/{name}")
+        };
+        let state = subfolder_state(name, &relative_path, entry.is_symlink, prefixes);
+        listed.push(Subfolder {
+            name: name.to_string(),
+            relative_path,
+            state,
+        });
+    }
+    listed.sort_by(|a, b| a.name.cmp(&b.name));
+    SubfolderListing {
+        entries: listed,
+        unnameable,
+    }
+}
+
+/// One level of a watched folder's own tree, read off the **disk**.
+///
+/// Off the main thread for the reason given on [`crate::bridge::open_index`].
+///
+/// **Why not [`list_tree`].** That command reports indexed *documents*
+/// (`d.status = 'indexed'`, `write.rs:242-249`), so a folder just added and
+/// never scanned lists nothing — and the exclusion step comes *before* the
+/// first scan (D136). The tree the person excludes from therefore has to come
+/// from the directory itself. Read-only, one level per call, so an expand
+/// costs one `read_dir`.
+///
+/// **Nothing here answers short.** Every failure is a refusal with a sentence:
+/// an unknown id, a root that is not there, a path that leaves the root, a
+/// folder that is not there, a folder that cannot be read. `entries: []` is
+/// reserved for its one true meaning — this folder really holds no subfolders
+/// — because a window draws anything else as a tree with nothing left to
+/// exclude, and under D29 a folder nobody excludes is a folder whose text goes
+/// to a third-party provider.
+#[tauri::command(async)]
+pub fn list_subfolders(
+    state: State<'_, AppState>,
+    root_id: i64,
+    relative_path: String,
+) -> Result<SubfolderListing, Error> {
+    let root = state
+        .with_index(|db| db.watched_root_path(root_id))?
+        .ok_or(Error::UnknownWatchedRoot(root_id))?;
+    let root_path = Path::new(&root);
+    // The walk's own predicate for "is this root usable"
+    // (`mnema-ingest/src/walk.rs:288`), matched here for the reason
+    // `bridge::list_exclusions` gives at length: an unmounted drive would
+    // otherwise answer "this folder has no subfolders" for every level of it.
+    if !root_path.is_dir() {
+        return Err(Error::RootUnavailable(root_id));
+    }
+    let root_canonical = root_path
+        .canonicalize()
+        .map_err(|_| Error::RootUnavailable(root_id))?;
+    let dir = subfolder_dir(&root_canonical, root_id, &relative_path)?;
+    let prefixes = state.with_index(|db| db.list_path_exclusions(root_id))?;
+    let read = std::fs::read_dir(&dir).map_err(|e| refusal(root_id, &relative_path, e))?;
+    let entries = directory_entries(read).map_err(|source| Error::SubfolderUnreadable {
+        root_id,
+        relative_path: relative_path.clone(),
+        source,
+    })?;
+    Ok(read_subfolders(&entries, &relative_path, &prefixes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One [`Entry`] as `read_dir` would have produced it, from raw bytes.
+    ///
+    /// `#[cfg(unix)]` because it is the byte-level `OsString` construction that
+    /// is platform-specific, not the property: `read_subfolders` decides on
+    /// `OsStr::to_str` on every platform, and Windows reaches the same branch
+    /// through an unpaired surrogate. This is the seam that lets the
+    /// unnameable-name branch be tested on a machine whose own filesystem
+    /// refuses to hold such a name — see [`Entry`].
+    #[cfg(unix)]
+    fn entry(name: &[u8], is_dir: bool, is_symlink: bool) -> Entry {
+        use std::os::unix::ffi::OsStrExt;
+        Entry {
+            name: std::ffi::OsStr::from_bytes(name).to_os_string(),
+            is_dir,
+            is_symlink,
+        }
+    }
+
+    /// A directory whose name is not valid UTF-8 is omitted from the entries
+    /// and counted in `unnameable` — never rendered lossily, which would put a
+    /// name on screen that no longer opens the folder and would save a rule
+    /// that excludes nothing.
+    ///
+    /// **Two of them, and one unnameable FILE beside them.** `unnameable` is a
+    /// count: a field answering `1` unconditionally passes any assertion a
+    /// single bad entry can make, and a count that included files would answer
+    /// `3` for a listing that is missing only two folders.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_whose_name_is_not_utf8_is_counted_and_never_named() {
+        let entries = vec![
+            entry(b"beta", true, false),
+            entry(b"bad\xffone", true, false),
+            entry(b"alpha", true, false),
+            entry(b"bad\xfetwo", true, false),
+            entry(b"bad\xfdfile.txt", false, false),
+        ];
+
+        let listing = read_subfolders(&entries, "", &[]);
+
+        let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["alpha", "beta"],
+            "only the two nameable folders may be listed, sorted: {listing:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name.contains('\u{FFFD}')),
+            "a name was rendered lossily instead of being omitted: {listing:?}"
+        );
+        assert_eq!(
+            listing.unnameable, 2,
+            "both unnameable FOLDERS are counted and the unnameable file is not: {listing:?}"
+        );
+    }
+
+    /// One listing carrying every state this PR puts on the wire.
+    fn sample_subfolders() -> SubfolderListing {
+        let row = |name: &str, state| Subfolder {
+            name: name.to_string(),
+            relative_path: format!("Work/{name}"),
+            state,
+        };
+        SubfolderListing {
+            entries: vec![
+                row("open", SubfolderState::Open),
+                row("excluded", SubfolderState::Excluded),
+                row(
+                    "held",
+                    SubfolderState::ExcludedByAncestor {
+                        prefix: "Work".to_string(),
+                    },
+                ),
+                row("node_modules", SubfolderState::BuiltIn),
+                row("link", SubfolderState::Symlink),
+            ],
+            unnameable: 2,
+        }
+    }
+
+    /// The wire contract task 5's UI matches on, both directions.
+    ///
+    /// `SubfolderState` is an **enum**, so `rename_all` renames its variants
+    /// and `rename_all_fields` is what would rename a struct variant's fields —
+    /// the trap `SourceAround` measured one type up. `prefix` is one word, so
+    /// the second attribute changes nothing today; the tags are what a caller
+    /// switches on, and every one of the five is asserted because a card with a
+    /// default branch is how an unrecognised state gets drawn as an ordinary
+    /// excludable folder.
+    #[test]
+    fn the_subfolder_wire_shape_is_camel_case() {
+        let v = serde_json::to_value(sample_subfolders()).unwrap();
+
+        assert_eq!(v["unnameable"], 2, "{v}");
+        let rows = v["entries"].as_array().expect("entries is an array");
+
+        // Present, camelCase — and absent in snake_case, which is the direction
+        // that catches a payload carrying both spellings.
+        assert!(rows[0]["relativePath"].is_string(), "{v}");
+        assert!(rows[0]["name"].is_string(), "{v}");
+        assert!(rows[0].get("relative_path").is_none(), "{v}");
+
+        for (row, tag) in rows.iter().zip([
+            "open",
+            "excluded",
+            "excludedByAncestor",
+            "builtIn",
+            "symlink",
+        ]) {
+            assert_eq!(row["state"]["kind"], tag, "{row}");
+        }
+
+        // The prefix the row promises to name, and the value of it.
+        assert_eq!(rows[2]["state"]["prefix"], "Work", "{v}");
+        // A unit variant carries its tag and nothing else: a state that grew a
+        // field nobody meant to ship would show up here.
+        assert_eq!(
+            rows[0]["state"]
+                .as_object()
+                .expect("a state is an object")
+                .len(),
+            1,
+            "{v}"
+        );
+    }
 
     fn sample() -> TreeListing {
         TreeListing {

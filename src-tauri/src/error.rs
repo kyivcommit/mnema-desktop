@@ -92,6 +92,57 @@ pub enum Error {
          cannot be checked"
     )]
     RootUnavailable(i64),
+    /// `list_subfolders` was asked for a folder that resolves outside the
+    /// watched root, or that does not resolve to where its own spelling says
+    /// it is. Four shapes reach it, and the set is open rather than a list to
+    /// be kept in step: `..`, an absolute path, a path reaching its target
+    /// through a symlink, and — on a case-insensitive filesystem — a spelling
+    /// whose case is not the folder's own.
+    ///
+    /// One sentence for all of them, because they are one refusal: the
+    /// containment rule is "the canonicalised path is exactly the watched
+    /// root's canonical path joined with what was asked for", and each breaks
+    /// it in its own way. Naming them apart would mean telling a caller which
+    /// shape its escape took, which is a detail no window needs and one an
+    /// attacker would.
+    ///
+    /// **A symlink INSIDE the root is refused too, and that is not
+    /// over-reach.** The walk runs `follow_links(false)`
+    /// (`crates/mnema-walk/src/rules.rs:229`), so nothing under a symlinked
+    /// name is ever enumerated or indexed; a listing that answered through one
+    /// would offer exclusion controls for paths the walk never visits.
+    #[error(
+        "{relative_path:?} does not name a folder inside watched folder {root_id}: it resolves \
+         somewhere else"
+    )]
+    SubfolderNotUnderRoot { root_id: i64, relative_path: String },
+    /// `list_subfolders` was asked for a folder that is not there, or for a
+    /// path naming a file.
+    ///
+    /// **A refusal rather than an empty listing**, which is the whole reason
+    /// this variant exists: `entries: []` is a claim that the folder holds no
+    /// subfolders, and a window draws that as a tree with nothing in it left
+    /// to exclude. Reached only through
+    /// [`crate::bridge::path_error_is_an_answer`] — an error that says
+    /// something about the path, never one that says something about this
+    /// process's ability to look.
+    #[error("there is no folder {relative_path:?} in watched folder {root_id}")]
+    NoSuchSubfolder { root_id: i64, relative_path: String },
+    /// `list_subfolders` could not read a folder that is there: a permission
+    /// this process does not have, a share that dropped, an entry that failed
+    /// mid-listing.
+    ///
+    /// The observer side of [`crate::bridge::path_error_is_an_answer`]'s
+    /// split, and it refuses the whole call rather than answering with the
+    /// entries it managed to read. A short listing is indistinguishable from a
+    /// folder with fewer subfolders in it, and under D29 the folders that went
+    /// missing from it are exactly the ones nobody would then exclude.
+    #[error("the folder {relative_path:?} in watched folder {root_id} could not be read: {source}")]
+    SubfolderUnreadable {
+        root_id: i64,
+        relative_path: String,
+        source: std::io::Error,
+    },
     /// Indexing could not continue at all — the extraction pool is broken, or
     /// the database is.
     ///

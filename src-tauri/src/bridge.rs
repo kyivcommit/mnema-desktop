@@ -308,7 +308,7 @@ fn entry_named(
 /// [`prefix_exists_on_disk`], whose doc comment carries the re-derived
 /// enumeration and says why the root guard in [`list_exclusions`] is
 /// deliberately outside it.
-fn path_error_is_an_answer(kind: std::io::ErrorKind) -> bool {
+pub(crate) fn path_error_is_an_answer(kind: std::io::ErrorKind) -> bool {
     matches!(
         kind,
         std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory

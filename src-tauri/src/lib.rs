@@ -42,6 +42,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::start_probe_job,
         bridge::cancel_job,
         bridge::job_status,
+        tree::list_subfolders,
         tree::list_tree,
         tree::source_around,
         models::provider_models,
