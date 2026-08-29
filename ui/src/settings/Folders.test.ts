@@ -859,6 +859,16 @@ test('a root that disappears from the list takes its expansion with it', async (
 // passes. A resolved exclude patches `{ tree, rules, loadError }`, which is a
 // panel that renders, and the re-opened row is then visible to an assertion.
 //
+// ⚠️ Read the whole summary, not the pass count: that run prints
+// `Tests 44 passed (44)` **and** `Errors 1 error`, and it **exits 1**. CI runs
+// `npm --prefix ui run test` (`.github/workflows/ci.yml:189`) and would have
+// failed on it, so a crashed oracle is not a false green in CI. What it defeats
+// is the INSTRUMENT: `ui/` has no mutation harness, so a guard here is checked
+// by deleting it and reading the output — and three readers in a row took
+// `44 passed, 0 failed` for a passing run and concluded this guard had no
+// mutant. **Record a hand revert by its exit code and `Errors` count, never by
+// its pass count.**
+//
 // The `listSubfolders` count is the positive control: without it this case
 // would also be green if the re-read never happened at all, which is a
 // different component from the one being tested.

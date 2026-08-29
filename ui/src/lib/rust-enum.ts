@@ -11,7 +11,15 @@
 // chance to not carry it.
 //
 // ⚠️ **This is HALF of any wire guard built on it, and the half that cannot
-// see its own blind spot.** It reads variant NAMES and a caller applies
+// see its own blind spot.** The `rename_all` gap below is the one that matters
+// because it fails SILENTLY; it is not the only shape this reader gets wrong.
+// Two others are known and both fail LOUDLY at every current caller, which is
+// why they are recorded rather than fixed: a tuple variant with more than one
+// field yields a phantom entry (`Pair(String, usize)` reads as
+// `["Plain", "Pair", "usize", "Last"]`), and a block comment carrying a brace
+// throws with a message that does not name the cause. Neither can produce a
+// false green here; a third shape that failed silently would be a defect.
+// It reads variant NAMES and a caller applies
 // serde's `RenameRule::CamelCase` to them; it never reads the enum's
 // `#[serde(rename_all = …)]`, so switching that attribute to `snake_case`
 // leaves every caller green while the wire spelling changes underneath. The
