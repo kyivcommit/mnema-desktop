@@ -837,49 +837,62 @@ test('a root that disappears from the list takes its expansion with it', async (
 });
 
 // 🔴 Review finding I2. This case is `patch`'s early return
-// (`Folders.svelte:86`) and nothing else. The reviewer measured the gap: with
-// the early return dropped and every other guard intact, the whole file was
-// green, so the guard had no mutant anywhere in the suite.
+// (`Folders.svelte:86`) and nothing else, and the shape of it was measured
+// three times before it held.
 //
-// With the row shut there is no panel entry left. Written without the early
-// return the function BUILDS one — `{ ...panels[rootId] ?? fresh, ...fields }`
-// puts the rejection into a panel of its own, which re-opens the row the
-// person closed and then fills itself in from the unconditional re-read. That
-// is the form measured red here. The blunter form — deleting the line and
-// spreading `undefined` — is red too, but as a thrown render rather than as a
-// failed assertion, which is not a kill worth resting on.
+// The write it pins is the one `exclude` makes AFTER the person has shut the
+// row: `await read(rootId, want)` on line `Folders.svelte:190` runs behind the
+// action, raises the generation itself, and so passes `read`'s own check
+// (`:127`) — the counter cannot stand in for the early return here, because
+// the counter is not what says no. With the early return dropped, `patch`
+// spreads a missing panel and BUILDS one out of the re-read's own fields, and
+// the row the person closed comes back open with the listing from before the
+// action in it.
 //
-// The generation counter cannot stand in for it. The counter is checked inside
-// `read`, and the two writes here are outside it: the `catch`'s own `patch`,
-// and — even when the call succeeds — `read`'s success patch, which passes its
-// own generation check because `read` raises the generation itself.
-test('a row shut while an exclude is in flight stays shut when the call rejects', async () => {
+// 🔴 The exclude here RESOLVES, and that is the whole reason this case can
+// fail. The first two attempts used a rejected exclude, and a rejection cannot
+// be the oracle: `exclude`'s `catch` patches `{ actionError }` alone, so the
+// panel the mutant builds has no `tree` — `undefined`, not `null` — and
+// `buildLevel` throws inside the `rows` derived before anything reaches the
+// DOM. Vitest reports that as an unhandled error beside 44 passing tests, and
+// Svelte draws nothing further, so every assertion about the screen still
+// passes. A resolved exclude patches `{ tree, rules, loadError }`, which is a
+// panel that renders, and the re-opened row is then visible to an assertion.
+//
+// The `listSubfolders` count is the positive control: without it this case
+// would also be green if the re-read never happened at all, which is a
+// different component from the one being tested.
+test('a row shut while an exclude is in flight is not re-opened by the re-read behind it', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
   listSubfolders.mockResolvedValue(subfolders([sub('Work')]));
   listExclusions.mockResolvedValue([]);
-  let refuse: (e: unknown) => void = () => {};
-  excludeSubfolder.mockReturnValueOnce(new Promise((_resolve, reject) => { refuse = reject; }));
+  let accept: () => void = () => {};
+  excludeSubfolder.mockReturnValueOnce(new Promise<void>((resolve) => { accept = () => resolve(); }));
 
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByText('Work')).toBeTruthy());
+  expect(listSubfolders).toHaveBeenCalledTimes(1);
 
   await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' })); // in flight
   await fireEvent.click(screen.getByTestId('folder-expand-1')); // the person shuts the row
   expect(screen.queryByTestId('folder-panel-1')).toBeNull(); // and it is shut
 
-  refuse(new Error('that folder could not be read'));
-  // Two turns: the rejection's own patch, then the unconditional re-read behind
-  // it — a test that stopped after one would report "stays shut" about a write
-  // that had not been attempted yet.
+  accept();
+  // Real turns of the event loop, not microtasks: the re-read behind the
+  // action is an awaited `Promise.all` and a Svelte render, and a chain of
+  // `await Promise.resolve()` stops short of both — measured, and it is what
+  // made the first attempt at this case unfalsifiable.
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
 
+  // The re-read DID run and DID try to write: the guard is what refused it,
+  // not an absent call.
+  expect(listSubfolders).toHaveBeenCalledTimes(2);
   expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('false');
   expect(screen.queryByTestId('folder-panel-1')).toBeNull();
-  expect(screen.queryByText('that folder could not be read')).toBeNull();
   expect(screen.queryByText('Work')).toBeNull();
 });
 
@@ -888,9 +901,10 @@ test('a row shut while an exclude is in flight stays shut when the call rejects'
 // and `patch`'s early return — so neither has a mutant here. What it does check
 // is stated in its name and both halves are real: collapsing issues no read,
 // and a listing still on the wire puts nothing on screen. Each guard's own
-// case is elsewhere: the counter's is `an older listing that lands after a
-// newer one`, and the early return's is `a row shut while an exclude is in
-// flight`.
+// case is elsewhere, and each of those two now fails alone when its own guard
+// is dropped and stays green when the other's is: the counter's is `an older
+// listing that lands after a newer one`, and the early return's is `a row shut
+// while an exclude is in flight is not re-opened by the re-read behind it`.
 test('collapsing a row reads nothing, and a listing still on the wire draws nothing', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
