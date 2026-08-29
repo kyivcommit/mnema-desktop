@@ -43,7 +43,7 @@
 # nothing. See `bridge::exclude_subfolder`'s own doc comment.
 #
 # ⚠️ **Review round 3's ruling: one classifier (`path_error_is_an_answer`),
-# used at every site that turns a filesystem lookup into `exists_on_disk`,
+# used at every site where a filesystem ERROR becomes `exists_on_disk`,
 # rather than another one-off patch at another site.** Round 3's own
 # enumeration of those sites then missed one (review round 4, N3: the
 # per-entry `io::Result<DirEntry>` that `.flatten()` discarded), so round 4
@@ -100,7 +100,7 @@ case_ "existsOnDisk must come from a real filesystem lookup, not a constant" \
   mnema-desktop 'list_exclusions_reports_whether_each_stored_prefix_is_still_on_disk' --test commands
 
 # Review round 3, N1. `path_error_is_an_answer`'s own classification, the
-# ONE seam every site in this file now shares, mutated at its centre:
+# ONE seam every error site in this file now shares, mutated at its centre:
 # `NotADirectory` moved back off the "answer" side. An ancestor replaced by
 # a file of the same name (`ENOTDIR`) would then read `existsOnDisk: true`
 # again — the state that does not lift on its own, unlike the observer
@@ -113,7 +113,7 @@ case_ "NotADirectory must classify as an answer about the path, not an observer 
 
 # Review round 3, "not introduced by this diff but the lead should see it".
 # `prefix_exists_on_disk`'s FINAL `symlink_metadata` call, reverted to the
-# bare `.is_ok()` every site used to share before this round's classifier —
+# bare `.is_ok()` every error site used to share before this round's classifier —
 # folding a `PermissionDenied` reached only at this last step (an ancestor
 # that is listable but not traversable, mode `0o444`) back into `false`.
 case_ "the final stat must classify its own errors too, not fold every one into false" \

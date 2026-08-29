@@ -137,15 +137,20 @@ pub struct StoredExclusion {
 /// [`StoredExclusion`]'s own doc comment for why the directory check was
 /// dropped.
 ///
-/// **Every filesystem outcome in this function reaches the return value
+/// **Every filesystem *error* in this function reaches the return value
 /// through [`path_error_is_an_answer`] — review round 3's ruling on the
 /// *shape* of the fix, after rounds 1 and 2 each closed one instance of the
 /// same defect (`.unwrap_or(false)`, `.ok()`) and left another standing.**
+/// Error, not outcome (review round 5, N5): row 3 below reaches the return
+/// value without the classifier and is right to, because it carries no
+/// error to classify. The wider word was the same sentence pattern that hid
+/// the fourth site for three rounds.
+///
 /// Round 3's own enumeration then missed one (review round 4, N3), so this
 /// set was **re-derived from the file** rather than extended: every point
 /// where a call, an iterator item, a `Result` or an `Option` becomes a
-/// branch here, listed so the next reader can check the set rather than
-/// trust it.
+/// branch here — outcomes, which is wider than errors on purpose — listed
+/// so the next reader can check the set rather than trust it.
 ///
 /// 1. `read_dir(&current)` failing outright — the directory cannot be
 ///    listed at all.
@@ -209,6 +214,25 @@ fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
 /// N3) — and a guard whose only test would need an injected filesystem is a
 /// guard nobody checks. Rounds 1, 2 and 3 each left the next instance of
 /// this defect standing; this seam is what lets round 4's mutant die.
+///
+/// **What the seam does not buy, measured (review round 5, N5).** This
+/// function's body is pinned. Its **use**, the `and_then` line in
+/// [`prefix_exists_on_disk`], is not — and no test can pin it. The
+/// re-review reverted that call site to `.flatten()`'s behaviour while
+/// leaving this function present and correct, and ran the mutant against
+/// both the whole-function IPC test and the `--lib` guard test
+/// `a_directory_entry_that_cannot_be_read_is_an_error_not_an_absence`:
+/// `red: 0   still green: 2   broken cases: 0` — the last number is what
+/// says the mutant really compiled and applied. So the defect that took
+/// four rounds to close can be reintroduced one line above this function
+/// with the whole suite green.
+///
+/// That is inherent rather than a missing case: moving the untestable part
+/// out of the loop is exactly what made the guard testable, and no test can
+/// observe a per-entry error through a real filesystem, so no mutation case
+/// could kill a call-site mutant either. **If you are editing that
+/// `and_then` line, nothing is standing under you — the tests below cover
+/// this function's body, not the wiring that reaches it.**
 fn entry_named(
     entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
     component: &str,
@@ -279,10 +303,11 @@ fn entry_named(
 /// in exchange for never paying the first — both directions checked, not
 /// only the one this round's finding named.
 ///
-/// Used at every site in this file that turns a filesystem lookup's outcome
-/// into `exists_on_disk`'s boolean — see [`prefix_exists_on_disk`]'s own doc
-/// comment for the re-derived enumeration of them, and for why the root
-/// guard in [`list_exclusions`] is deliberately outside it.
+/// Used at every site in this file where a filesystem *error* becomes
+/// `exists_on_disk`'s boolean — error, not outcome, for the reason given on
+/// [`prefix_exists_on_disk`], whose doc comment carries the re-derived
+/// enumeration and says why the root guard in [`list_exclusions`] is
+/// deliberately outside it.
 fn path_error_is_an_answer(kind: std::io::ErrorKind) -> bool {
     matches!(
         kind,
@@ -316,9 +341,10 @@ fn path_error_is_an_answer(kind: std::io::ErrorKind) -> bool {
 /// the answer this product already trusts to decide a root is unusable,
 /// not inventing a second one that can disagree with it.
 ///
-/// **This is the one filesystem outcome in this file that does not go
+/// **This is the one filesystem *error* in this file that does not go
 /// through [`path_error_is_an_answer`] (review round 4's re-derived
-/// enumeration, where it is the fifth and only exempt entry).**
+/// enumeration, where it is the fifth entry; row 3 there also skips the
+/// classifier, but row 3 is an `Ok` with no error in it to classify).**
 /// `Path::is_dir()` already collapses every failure — answer or observer
 /// alike — into `false`/"refuse", the same shape the classifier exists to
 /// avoid elsewhere; kept here anyway, deliberately, for two reasons. The
