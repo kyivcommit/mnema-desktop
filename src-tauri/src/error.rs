@@ -51,6 +51,23 @@ pub enum Error {
     /// the path it names.
     #[error("no watched folder with id {0}")]
     UnknownWatchedRoot(i64),
+    /// `exclude_subfolder` was handed a prefix `WalkRules::new` refuses —
+    /// the same validator the walk itself applies (`rules.rs:28-49`), run
+    /// before the row is written so a stored rule can never be one the walk
+    /// would later skip silently. `#[from]` carries `RulesError`'s own
+    /// sentence unchanged, which is already safe to show: every variant
+    /// names the rule the person typed and nothing else.
+    #[error("{0}")]
+    InvalidExclusionRule(#[from] mnema_walk::RulesError),
+    /// `exclude_subfolder` was handed the empty string. `validate_prefix`
+    /// answers `Ok(None)` for it — deliberately not a `RulesError`, since a
+    /// blank row is not a malformed one (`rules.rs:356-365`) — but storing it
+    /// would add a rule that excludes nothing and sits in the list looking
+    /// like protection (review round 1, P2). Kept apart from
+    /// [`Error::InvalidExclusionRule`], which is what `WalkRules::new` itself
+    /// can produce and this case never reaches.
+    #[error("an exclusion rule cannot be empty")]
+    BlankExclusionRule,
     /// Indexing could not continue at all — the extraction pool is broken, or
     /// the database is.
     ///

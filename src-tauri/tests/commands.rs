@@ -101,6 +101,19 @@ fn fixture_dir() -> tempfile::TempDir {
     dir
 }
 
+/// A fixture for the exclusion commands: a NESTED folder (`Work/private`) and
+/// a bare FILE (`solo.txt`) at the root — the two shapes `list_exclusions`
+/// must tell apart when it answers `existsOnDisk` per stored prefix (task-2
+/// brief, "Required fixture states for `exists_on_disk`").
+fn exclusion_fixture_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the exclusion fixture");
+    std::fs::create_dir_all(dir.path().join("Work/private")).expect("creating Work/private");
+    std::fs::write(dir.path().join("Work/private/note.txt"), "private note")
+        .expect("writing Work/private/note.txt");
+    std::fs::write(dir.path().join("solo.txt"), "a lone file").expect("writing solo.txt");
+    dir
+}
+
 /// Starts a real walk over `root_id` and blocks until the window would have
 /// heard `Ended`, returning its payload for the caller to inspect.
 ///
@@ -2297,6 +2310,315 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
         after["hits"],
         json!([]),
         "a document survived the folder that owned it being removed"
+    );
+}
+
+/// `list_exclusions` answers `existsOnDisk` PER STORED PREFIX, not by
+/// comparing against a one-level folder listing (review round 2, P1 —
+/// `bridge::list_exclusions`'s own doc explains why the per-level comparison
+/// is wrong at its root: a stored prefix may name a NESTED folder). Three
+/// fixture states in one test, each a shape the wrong design gets wrong or
+/// cannot answer at all: a nested prefix whose folder is present, the same
+/// prefix after the folder is renamed away, and a prefix naming a FILE
+/// rather than a directory.
+#[test]
+fn list_exclusions_reports_whether_each_stored_prefix_still_names_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = exclusion_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Work/private" }),
+    )
+    .expect("excluding Work/private was rejected");
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "solo.txt" }),
+    )
+    .expect("excluding solo.txt was rejected");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    let entries = list
+        .as_array()
+        .expect("list_exclusions did not return an array");
+    assert_eq!(
+        entries.len(),
+        2,
+        "both stored prefixes should be listed: {entries:?}"
+    );
+
+    let by_prefix = |p: &str| {
+        entries
+            .iter()
+            .find(|e| e["prefix"] == json!(p))
+            .unwrap_or_else(|| panic!("{p} missing from {entries:?}"))
+    };
+    assert_eq!(
+        by_prefix("Work/private")["existsOnDisk"],
+        json!(true),
+        "a NESTED prefix whose folder is present must report existsOnDisk true — the state a \
+         per-level comparison against list_subfolders would get wrong"
+    );
+    assert_eq!(
+        by_prefix("solo.txt")["existsOnDisk"],
+        json!(false),
+        "a prefix naming a FILE excludes no subtree and must report existsOnDisk false"
+    );
+
+    std::fs::rename(
+        fixture.path().join("Work/private"),
+        fixture.path().join("Work/renamed"),
+    )
+    .expect("renaming Work/private away");
+
+    let after = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    let after_entries = after
+        .as_array()
+        .expect("list_exclusions did not return an array");
+    let after_private = after_entries
+        .iter()
+        .find(|e| e["prefix"] == json!("Work/private"))
+        .unwrap_or_else(|| panic!("Work/private missing from {after_entries:?}"));
+    assert_eq!(
+        after_private["existsOnDisk"],
+        json!(false),
+        "a prefix whose folder was renamed away must report existsOnDisk false"
+    );
+}
+
+/// `Db::add_path_exclusion`'s own doc says pressing "exclude" twice is one
+/// rule, not an error — the bare `ON CONFLICT DO NOTHING` its query relies
+/// on. This is what proves the command layer does not get in the way of
+/// that: excluding an already-excluded folder a second time must still
+/// succeed, and the list must not grow a second row for it.
+#[test]
+fn excluding_the_same_subfolder_twice_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs the first time was rejected");
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs a second time must not be an error");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([{ "prefix": "Docs", "existsOnDisk": false }]),
+        "excluding the same folder twice must still be exactly one rule"
+    );
+}
+
+/// `WalkRules::new` is the one validator, and it refuses `..` the same way it
+/// refuses it during a real walk (`RulesError::DotComponent`). The refusal
+/// must both reach the window as readable text and leave nothing stored.
+#[test]
+fn excluding_dotdot_is_refused_and_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let rejected = call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": ".." }),
+    )
+    .expect_err("excluding .. should have been refused");
+    assert!(
+        error_text(&rejected).contains(".."),
+        "the refusal should name the rule that was refused; it was {}",
+        error_text(&rejected)
+    );
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(list, json!([]), "a refused rule must not be stored");
+}
+
+/// `validate_prefix` answers `Ok(None)` for the empty string — deliberately
+/// not a `RulesError` (`rules.rs:356-365`) — so the command itself has to
+/// refuse it before `Db::add_path_exclusion` ever runs (review round 1, P2).
+/// Asserted on the ROW COUNT, not merely that a value came back: a mutant
+/// that stores the blank row anyway would still return `Ok(())` from a
+/// weaker assertion.
+#[test]
+fn excluding_the_empty_string_is_refused_and_does_not_change_the_row_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs was rejected");
+    let before = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected")
+        .as_array()
+        .expect("list_exclusions did not return an array")
+        .len();
+    assert_eq!(before, 1);
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect_err("excluding the empty string should have been refused");
+
+    let after = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected")
+        .as_array()
+        .expect("list_exclusions did not return an array")
+        .len();
+    assert_eq!(
+        after, before,
+        "an Ok(None) prefix must not become a stored row (review round 1, P2)"
+    );
+}
+
+/// A `rootId` `watched_root` has no row for — the same refusal
+/// `start_walk_job` already gives, reused here rather than surfacing the
+/// foreign-key violation `Db::add_path_exclusion` would otherwise hit.
+#[test]
+fn excluding_under_an_unknown_root_id_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let rejected = call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": 999_999, "relativePath": "Docs" }),
+    )
+    .expect_err("an unknown root id should have been refused");
+    assert_eq!(
+        error_text(&rejected),
+        "no watched folder with id 999999",
+        "the refusal should be UnknownWatchedRoot's own sentence"
+    );
+}
+
+/// `Db::remove_path_exclusion` already tells apart "removed" from "there was
+/// nothing there"; the command must not throw that answer away — Task 5's
+/// stale-rule control needs it. Both directions asserted, not only the first.
+#[test]
+fn including_a_subfolder_removes_the_rule_and_reports_whether_a_row_went() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs was rejected");
+
+    let removed = call(
+        &webview,
+        "include_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("include_subfolder was rejected");
+    assert_eq!(
+        removed,
+        json!(true),
+        "a row was there and should have been reported removed"
+    );
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([]),
+        "the list must shrink once the rule is removed"
+    );
+
+    let removed_again = call(
+        &webview,
+        "include_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("include_subfolder was rejected");
+    assert_eq!(
+        removed_again,
+        json!(false),
+        "removing an absent rule must report false, not true — Task 5's stale-rule control \
+         needs the two told apart"
     );
 }
 

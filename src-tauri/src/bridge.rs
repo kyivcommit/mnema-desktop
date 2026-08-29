@@ -86,6 +86,114 @@ pub fn remove_watched_folder(state: State<'_, AppState>, root_id: i64) -> Result
     state.with_index(|db| db.delete_watched_root(root_id))
 }
 
+/// One stored exclusion rule, plus whether the folder it names is still on
+/// disk.
+///
+/// **`exists_on_disk` is answered here, by the backend, and this is not a
+/// convenience (task-2 brief, review round 2, P1).** The window cannot
+/// answer it by comparing this list against a one-level folder listing
+/// (`list_tree`'s subfolders): a stored prefix may name a NESTED folder —
+/// `validate_prefix` accepts a `/`-joined sequence of one or more components
+/// (`mnema-walk/src/rules.rs:336-360`) — while a one-level listing only ever
+/// answers for the folders directly under the root. `Work/private` would
+/// find no match among `["Work", "Photos"]` there, read as a rule whose
+/// folder is gone, and be offered for removal — un-excluding a folder that
+/// is still full and, under D29, still headed to a third-party provider on
+/// the next scan. One `symlink_metadata` per stored prefix, on the side that
+/// has the filesystem, is the whole fix.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredExclusion {
+    pub prefix: String,
+    pub exists_on_disk: bool,
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// `symlink_metadata`, not `metadata`: a symlink is not followed to decide
+/// existence, matching `WalkRules::builder`'s own `follow_links(false)`. A
+/// prefix naming a FILE rather than a directory reports `false` — a rule
+/// that names a file excludes no subtree, so it is not "on disk" in the
+/// sense this field promises.
+#[tauri::command(async)]
+pub fn list_exclusions(
+    state: State<'_, AppState>,
+    root_id: i64,
+) -> Result<Vec<StoredExclusion>, Error> {
+    let root = state
+        .with_index(|db| db.watched_root_path(root_id))?
+        .ok_or(Error::UnknownWatchedRoot(root_id))?;
+    let prefixes = state.with_index(|db| db.list_path_exclusions(root_id))?;
+    Ok(prefixes
+        .into_iter()
+        .map(|prefix| {
+            let full = std::path::Path::new(&root).join(&prefix);
+            let exists_on_disk = std::fs::symlink_metadata(&full)
+                .map(|meta| meta.is_dir())
+                .unwrap_or(false);
+            StoredExclusion {
+                prefix,
+                exists_on_disk,
+            }
+        })
+        .collect())
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// **The rule this command exists to enforce: a prefix is validated by
+/// `WalkRules::new` before it is stored**, and a refusal reaches the person
+/// as `RulesError`'s own sentence. Storing a prefix the walk will later
+/// refuse is the failure mode the whole validator was written against
+/// (`rules.rs:28-49`): the rule would silently match nothing, and under D29
+/// the folder it named would keep going to the provider.
+///
+/// **The candidate alone, not the stored set plus the candidate.**
+/// `WalkRules::new` does not build an aggregate pattern set at all — it
+/// validates one prefix at a time, each in its own throwaway builder
+/// (`rules.rs:200-205,380-386`) — so probing the whole set here would answer
+/// `Ok` for combinations that, measured directly against this repository's
+/// pinned `ignore`/`globset`, do not actually compile as one pattern set
+/// (task-2 brief). The aggregate case is caught at walk time instead:
+/// `walk_root` turns a failed combined compile into
+/// `StopReason::RulesNotApplied` before phase 2 ever runs, and nothing is
+/// sent to a provider on that path.
+///
+/// The empty string is refused before `WalkRules::new` even runs:
+/// `validate_prefix` answers `Ok(None)` for it, which is not an error, and a
+/// command that treated "no error" as "store it" would write a rule that
+/// excludes nothing (review round 1, P2).
+#[tauri::command(async)]
+pub fn exclude_subfolder(
+    state: State<'_, AppState>,
+    root_id: i64,
+    relative_path: String,
+) -> Result<(), Error> {
+    state
+        .with_index(|db| db.watched_root_path(root_id))?
+        .ok_or(Error::UnknownWatchedRoot(root_id))?;
+    if relative_path.is_empty() {
+        return Err(Error::BlankExclusionRule);
+    }
+    mnema_walk::WalkRules::new(true, true, vec![relative_path.clone()])?;
+    state.with_index(|db| db.add_path_exclusion(root_id, &relative_path))?;
+    Ok(())
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// `Db::remove_path_exclusion` already answers whether a row went; this is a
+/// thin pass-through, not a rewrap into `()` — Task 5's stale-rule control
+/// needs "removed" told apart from "there was nothing there".
+#[tauri::command(async)]
+pub fn include_subfolder(
+    state: State<'_, AppState>,
+    root_id: i64,
+    relative_path: String,
+) -> Result<bool, Error> {
+    state.with_index(|db| db.remove_path_exclusion(root_id, &relative_path))
+}
+
 /// The window needs a citation, not a chunk id. `mnema-index` already
 /// re-exports `Citation` and it is `Serialize` (its derive in `write.rs`), so this
 /// crosses the seam without touching the dependency graph — the seam was
