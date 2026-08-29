@@ -82,7 +82,12 @@
   type Pending =
     | { kind: 'checking'; path: string }
     | { kind: 'exclude'; path: string; paths: number; documents: number }
-    | { kind: 'include'; path: string };
+    // `existsOnDisk` is carried, not looked up when the question is drawn, for
+    // the same reason `paths`/`documents` are: the question states what was
+    // true when it was asked, and a re-read landing underneath it must not
+    // silently change the sentence a person is in the middle of reading. It is
+    // the RULE's own field, never re-derived here (`ipc.ts:118`).
+    | { kind: 'include'; path: string; existsOnDisk: boolean };
 
   let panels = $state<Record<number, Panel>>({});
 
@@ -210,12 +215,37 @@
 
   // ── PR 8a, Task 6: what an exclusion costs, said before it is stored ──────
   //
-  // 🔴 Mirrored from `walk.rs`'s own `under`: a path lies under a prefix only
-  // across a separator. `drop2/y.md` is a SIBLING of `drop`, not a child —
-  // `anchored_pattern` produces `!/drop`, which does not match it — so a count
-  // written with `startsWith(prefix)` alone would tell a person that `drop2`
-  // disappears too. It is the one state in the fixture list that separates the
-  // two forms.
+  // 🔴 Mirrored from what an exclusion rule actually covers: a path lies under
+  // a prefix only across a separator. `drop2/y.md` is a SIBLING of `drop`, not
+  // a child — `anchored_pattern` produces `!/drop`, which does not match it —
+  // so a count written with `startsWith(prefix)` alone would tell a person that
+  // `drop2` disappears too. It is the one state in the fixture list that
+  // separates the two forms.
+  //
+  // 🔴 Review round 1, M2. The sentence above used to say "mirrored from
+  // `walk.rs`'s own `under`", and that was the wrong Rust function: it is
+  // called from two places (`walk.rs:696`, `walk.rs:768`) and both pass a
+  // FROZEN prefix; it never sees an exclusion rule. What decides whether a
+  // RULE covers a path is
+  // `mnema-walk/src/rules.rs:522`'s `anchored_pattern` — `!/{escaped}` — read
+  // by `ignore`'s gitignore line parser. This function mirrors THAT, and the
+  // two Rust functions agree today because both are right, not because one
+  // derives from the other.
+  //
+  // What makes it drift: a change to `anchored_pattern` or to how that pattern
+  // is matched changes what actually disappears, while this count keeps
+  // answering by the old rule — so a person is told a number for a deletion
+  // that will not happen, or is told nothing about one that will. Under D29 the
+  // second direction leaves text in the index and sends it to a third-party
+  // provider.
+  //
+  // What would catch it is a PAIR, neither half sufficient alone:
+  // `Folders.test.ts`'s `a sibling whose name merely starts with the prefix is
+  // not counted` on this side, and
+  // `a_user_prefix_does_not_remove_a_sibling_whose_name_starts_with_it`
+  // (`crates/mnema-walk/tests/rules.rs`) on Rust's — which review round 1 had
+  // to write, because no Rust fixture paired a prefix with such a sibling. The real fix, still open, is
+  // `list_tree` carrying the count so there is one rule and no copy.
   function under(relativePath: string, prefix: string): boolean {
     return relativePath.startsWith(`${prefix}/`);
   }
@@ -288,10 +318,31 @@
   // disk under a folder the walk has been pruning, so a number here would be
   // invented; what IS known is the consequence, and that is what the sentence
   // states.
-  function askInclude(rootId: number, path: string) {
+  //
+  // 🔴 One fact is not invented either, because the window already has it:
+  // whether there is a folder at this path at all. The panel prints
+  // `settings_folders_rule_gone` from the backend's own `existsOnDisk`
+  // (`bridge.rs:117`) in the rule list further down the same panel, so a
+  // question promising the provider will get this folder's text contradicted
+  // the same panel's own data (review round 1, I1).
+  //
+  // 🔴 It is an ARGUMENT, not a lookup, and the two callers answer it from
+  // different evidence — which is why neither can be written as a search
+  // through `panel.rules` with a default. The rules list hands over the rule's
+  // own field, never re-derived here (`ipc.ts:118`). A subfolder row hands over
+  // `true` because the row IS a directory entry `list_subfolders` read off the
+  // disk when the panel was drawn — the same kind of snapshot `existsOnDisk`
+  // itself is. A `find` over `panel.rules` would collapse both into one answer
+  // plus a fallback for a state that cannot happen — `read` fills `tree` and
+  // `rules` from one `Promise.all`, so a rendered row and a null rule list do
+  // not coexist, and a default no test can reach is a guard that cannot fail.
+  function askInclude(rootId: number, path: string, existsOnDisk: boolean) {
     if (panels[rootId] === undefined) return;
     ask(rootId);
-    patch(rootId, { actionError: null, alreadyGone: false, pending: { kind: 'include', path } });
+    patch(rootId, {
+      actionError: null, alreadyGone: false,
+      pending: { kind: 'include', path, existsOnDisk },
+    });
   }
 
   // What is stored is the path the QUESTION carries, and it is read from the
@@ -642,7 +693,9 @@
       cost:
         pending.kind === 'exclude'
           ? t('settings_folders_exclude_cost', { paths: pending.paths, documents: pending.documents })
-          : t('settings_folders_include_cost'),
+          : pending.existsOnDisk
+            ? t('settings_folders_include_cost')
+            : t('settings_folders_include_cost_gone'),
       confirmLabel: t('settings_folders_confirm'),
       confirmAriaLabel:
         pending.kind === 'exclude'
@@ -719,7 +772,9 @@
             aria-label={row.controlAriaLabel}
             onclick={() => (row.control === 'exclude'
               ? askExclude(rootId, row.entry.relativePath)
-              : askInclude(rootId, row.entry.relativePath))}>{row.controlLabel}</button>
+              // `true`: this row is a directory entry `list_subfolders` read off
+              // the disk, so the folder is there. See `askInclude`.
+              : askInclude(rootId, row.entry.relativePath, true))}>{row.controlLabel}</button>
         {/if}
         {#if row.expandable}
           <button
@@ -802,6 +857,9 @@
                   {:else}
                     <p>{panel.rulesHeading}</p>
                     <ul>
+                      <!-- `rule.existsOnDisk` goes to the question the same way
+                           `goneLabel` is drawn from it, so the two sentences in
+                           this panel cannot disagree about one folder. -->
                       {#each panel.rules as { rule, goneLabel, costLabel, removeAriaLabel: ruleAria } (rule.prefix)}
                         <li data-testid={`folder-rule-${root.rootId}-${rule.prefix}`}>
                           <span>{rule.prefix}</span>
@@ -810,7 +868,7 @@
                           <button
                             type="button"
                             aria-label={ruleAria}
-                            onclick={() => askInclude(root.rootId, rule.prefix)}>{removeRuleLabel}</button>
+                            onclick={() => askInclude(root.rootId, rule.prefix, rule.existsOnDisk)}>{removeRuleLabel}</button>
                         </li>
                       {/each}
                     </ul>

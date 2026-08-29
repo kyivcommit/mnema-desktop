@@ -130,6 +130,52 @@ fn a_user_prefix_removes_its_subtree() {
     assert_eq!(names, ["public/b.txt"]);
 }
 
+/// 🔴 The sibling half of the rule above, and PR 8a Task 6 review round 1 found
+/// nothing asserting it. `a_user_prefix_removes_its_subtree` fixes `private`
+/// and `public`, two names sharing no prefix, so a matcher comparing bare
+/// string prefixes instead of whole path components passes it. `private2/` is
+/// the name that separates the two forms: it starts with `private` and is not
+/// under it.
+///
+/// Measured, not assumed: `grep` for a sibling-prefix fixture across every
+/// `.rs` under `crates/` and `src-tauri/` found none, and mutating
+/// `anchored_pattern` to `!/{escaped}*` — a rule that swallows siblings — killed
+/// this test **alone** among the 22 in this file, leaving
+/// `a_user_prefix_removes_its_subtree` green.
+///
+/// The direction that costs: a rule that over-matches DELETES from the index
+/// what the person never excluded — the same `should_delete` pass that
+/// `walk.rs` runs after a completed walk. The other direction is worse under
+/// D29: a rule that stops matching leaves the text in the index and sends it
+/// to a third-party provider on the next pass.
+///
+/// This is also the Rust half of the pair holding `Folders.svelte`'s own
+/// `under`, which counts what a person is about to lose before the rule is
+/// stored. That copy is pinned by `Folders.test.ts`'s `a sibling whose name
+/// merely starts with the prefix is not counted`; Rust and TypeScript share no
+/// compiler, and neither half closes the gap alone.
+#[test]
+fn a_user_prefix_does_not_remove_a_sibling_whose_name_starts_with_it() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["private/a.txt", "private2/b.txt", "privateer.txt"] {
+        let path = root.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"x").unwrap();
+    }
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["private".to_string()]).unwrap(),
+    );
+    let mut names: Vec<&str> = walked.found.iter().map(|f| f.relative.as_str()).collect();
+    names.sort_unstable();
+
+    // Both directions: the sibling folder and the sibling FILE survive, and
+    // `private/a.txt` is genuinely gone — without that last clause the
+    // assertion is satisfied by a rule that excludes nothing at all.
+    assert_eq!(names, ["private2/b.txt", "privateer.txt"]);
+}
+
 /// A prefix is a path the user typed, not a glob pattern. Before review fix
 /// round 1, an unescaped prefix read `[2023]` as a character class rather
 /// than four literal characters, so a folder literally named `Photos

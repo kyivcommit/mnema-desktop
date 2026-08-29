@@ -54,7 +54,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_folders_rule_remove' | 'settings_folders_rule_remove_named'
   | 'settings_folders_rule_already_gone'
   | 'settings_folders_exclude_checking' | 'settings_folders_exclude_cost'
-  | 'settings_folders_include_cost'
+  | 'settings_folders_include_cost' | 'settings_folders_include_cost_gone'
   | 'settings_folders_confirm_exclude_heading' | 'settings_folders_confirm_include_heading'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
   | 'settings_folders_confirm_exclude_named' | 'settings_folders_confirm_include_named'
@@ -386,6 +386,16 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // завищенням, тільки в інший бік. Зате наслідок відомий точно (D29): текст
     // піде провайдеру.
     settings_folders_include_cost: 'Від наступного сканування все всередині цієї теки індексується знову, а її текст надсилається провайдеру моделі.',
+    // 🔴 Рев'ю раунду 1 (I1): те саме вікно вже знає, що теки за цим шляхом
+    // немає — `existsOnDisk` приходить із бекенда (`bridge.rs:117`) і саме з
+    // нього намальовано `settings_folders_rule_gone` у переліку правил тієї ж
+    // панелі. Поки питання казало «її текст надсилається провайдеру» над
+    // правилом, чия тека зникла, дві фрази однієї панелі суперечили одна одній
+    // про ту саму теку.
+    // Це не вигадування числа — числа тут як не було, так і немає; це той самий
+    // факт, уже прочитаний, сказаний у питанні. Наслідок лишається названим, бо
+    // тека може повернутися, а правила вже не буде.
+    settings_folders_include_cost_gone: 'Наразі за цим шляхом теки немає, тож зараз нічого не індексується. Якщо тека там з’явиться згодом, вона індексується, а її текст надсилається провайдеру моделі.',
     settings_folders_confirm_exclude_heading: 'Виключити {path}?',
     settings_folders_confirm_include_heading: 'Більше не виключати {path}?',
     settings_folders_confirm: 'Підтвердити',
@@ -413,8 +423,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_eta_unknown: 'Скільки ще лишилось часу, поки не відомо.',
     indexing_walk_ended_completed: 'Теку прочитано повністю.',
     // `reason: completed` with `complete: false` (job.rs): phase 1 never saw
-    // the whole tree, so what stopped being seen under an unreadable subfolder
-    // is still searchable. That is why the word "done" cannot appear here.
+    // the whole tree, so what stopped being seen is still searchable. That is
+    // why the word "done" cannot appear here.
     //
     // 🔴 PR 8a, Task 6 — TWO cases, not one. `should_delete` (walk.rs) keeps
     // every `known` path a frozen prefix covers, and it never asks WHY the path
@@ -423,7 +433,27 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // deletion enumerated what survives and left out the one case PR 8 exists
     // for — the person excludes a folder, the scan says it finished, and the
     // text they meant to withhold is still in the index.
-    indexing_walk_ended_partly_read: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Усередині них і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком.',
+    //
+    // 🔴 PR 8a, Task 6 review round 1 (B1) — and TWO axes, not one. The
+    // sentence above enumerated WHICH KIND of file survives and then said it
+    // happened "усередині них", inside the subfolders that could not be
+    // entered. That scope is measurably false: `walk.rs:511` —
+    // `if !walked.complete || !stopped_cleanly { return Ok(report); }` — returns
+    // before `known` is read, before `frozen` is built and before any
+    // `delete_path`, so a partly-read walk reconciles NOTHING under the root.
+    // Measured in review round 1, against the real worker and the real
+    // database: a rule newly covering a top-level `private/`, a sibling of the
+    // unreadable folder and nowhere near it, gave `removed=0`, the path row
+    // survived, and the text was still found by search. Under D29 that is the direction that tells a person
+    // their text is withheld while it is on its way to the provider.
+    //
+    // `indexing_frozen_heading` below keeps its "усередині них": it renders
+    // only off a non-empty `frozen`, `report.frozen` is assigned at
+    // `walk.rs:747` — past the gate — so `complete: false` always carries
+    // `frozen: []`, and on the completed walk that does show it reconciliation
+    // ran everywhere except the prefixes it goes on to name. Same class, two
+    // different true scopes; each decided on its own evidence.
+    indexing_walk_ended_partly_read: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
     indexing_walk_ended_cancelled: 'Сканування зупинено на ваше прохання.',
     indexing_walk_ended_failed: 'Сканування обірвалося через збій.',
     // The four sentences below are not about a malfunction: they are decisions
@@ -448,6 +478,16 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // anything was silently left untouched (job.rs).
     // The same two cases as `indexing_walk_ended_partly_read` above, for the
     // same reason, one level more specific: this list NAMES the subtrees.
+    //
+    // 🔴 And it is the one place "усередині них" is TRUE — see the B1 note on
+    // that key. This heading only ever renders on a walk that reconciled the
+    // rest of the root, and only for prefixes that are in fact frozen. It is
+    // not, and does not claim to be, a complete account of which exclusions
+    // failed to take effect: a rule naming a frozen prefix ITSELF produces no
+    // `Frozen` entry at all (measured in review round 1: the walker emits no
+    // `NotAFileSubtree` pre-skip for it, the ancestor climb resolves, and the
+    // path is deleted normally), so that rule works and is rightly absent from
+    // this list.
     indexing_frozen_heading: 'Ці підтеки не звіряли, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком:',
     indexing_frozen_row: '{prefix} — {why}',
     indexing_frozen_symlinked_subtree: 'символьне посилання, сюди не заходили',
@@ -586,6 +626,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_exclude_checking: 'Checking what this exclusion removes…',
     settings_folders_exclude_cost: 'As of now: on the next scan the index loses {paths, plural, one {# file} other {# files}} from this folder, and {documents, plural, =0 {no document stops being findable — each is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}.',
     settings_folders_include_cost: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider.',
+    settings_folders_include_cost_gone: 'There is no folder at this path right now, so nothing is being indexed today. If a folder appears there later, it is indexed and its text is sent to the model provider.',
     settings_folders_confirm_exclude_heading: 'Exclude {path}?',
     settings_folders_confirm_include_heading: 'Stop excluding {path}?',
     settings_folders_confirm: 'Confirm',
@@ -602,7 +643,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_eta: 'About {seconds} s left.',
     indexing_eta_unknown: 'How much time is left is not known yet.',
     indexing_walk_ended_completed: 'The folder was read in full.',
-    indexing_walk_ended_partly_read: 'The folder was only partly read: some subfolders could not be entered. Inside them, both deleted files and files your exclusion rules now cover are still found by search.',
+    indexing_walk_ended_partly_read: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
     indexing_walk_ended_cancelled: 'The scan was stopped at your request.',
     indexing_walk_ended_failed: 'The scan broke off because something went wrong.',
     indexing_walk_ended_broken_worker: 'The scan stopped: the helper program that reads files stopped answering.',

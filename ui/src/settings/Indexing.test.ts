@@ -194,10 +194,16 @@ const MATRIX: Row[] = [
   {
     // Phase 1 never saw the whole tree, so phase 3 was skipped: nothing was
     // deleted, and that is precisely what the sentence warns about.
+    //
+    // 🔴 "nothing" is the whole root, not the unreadable subfolders (review
+    // round 1, B1). `walk.rs:511` returns before `known` is read and before any
+    // `delete_path`, so a rule newly covering a top-level folder nowhere near
+    // the unreadable one survives too — measured `removed=0`, row kept, still
+    // findable. The sentence below says so; it used to say "inside them".
     name: 'partlyRead',
     ending: { reason: 'completed', complete: false, ...READ_NOT_RECONCILED },
-    uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Усередині них і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком.',
-    en: 'The folder was only partly read: some subfolders could not be entered. Inside them, both deleted files and files your exclusion rules now cover are still found by search.',
+    uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+    en: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
     result: NOT_RECONCILED_RESULT,
   },
   {
@@ -1335,8 +1341,8 @@ test('on an unbuilt section with no job running there is no Cancel and no strip'
 // ---------------------------------------------------------------------------
 
 const PARTLY_READ_NAMES_EXCLUSIONS = {
-  uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Усередині них і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком.',
-  en: 'The folder was only partly read: some subfolders could not be entered. Inside them, both deleted files and files your exclusion rules now cover are still found by search.',
+  uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+  en: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
 } as const;
 
 const FROZEN_NAMES_EXCLUSIONS = {
@@ -1361,7 +1367,15 @@ for (const loc of ['uk', 'en'] as const) {
     await fireEvent.click(scanButton(1));
     await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
 
-    channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0, frozen: [...FROZEN] }));
+    // 🔴 `complete: true`, and it is not cosmetic (review round 1, M3).
+    // `report.frozen` is assigned at `walk.rs:747`, past the
+    // `if !walked.complete || !stopped_cleanly { return }` gate at
+    // `walk.rs:511`, so `complete: false` ALWAYS carries `frozen: []` and the
+    // pair this fixture used to send is a screen the backend cannot draw. The
+    // heading renders off `frozen.length > 0` alone, so the assertion is the
+    // same one — now made about a state that happens. Measured shape:
+    // `complete=true removed=0 frozen=[Frozen{prefix:"linked",…}]`.
+    channelOf('start_walk_job')(endedEvent({ complete: true, removed: 0, frozen: [...FROZEN] }));
     await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
 
     expect(container.textContent ?? '').toContain(FROZEN_NAMES_EXCLUSIONS[loc]);

@@ -1208,11 +1208,38 @@ test('a second copy under a DIFFERENT watched folder keeps the document too', as
   ].join(' '));
 });
 
+// ---------------------------------------------------------------------------
+// Review round 1, M2 — what `Folders.svelte`'s `under` is a copy OF, and what
+// holds the other end of it.
+//
+// 🔴 The review, quoting this file's own older comment, said `under` is a hand
+// copy of `crates/mnema-ingest/src/walk.rs:878`. It is not, and the difference
+// decides where a pin belongs. That Rust function is called from exactly two
+// places — `walk.rs:696`, the ancestor climb, and `walk.rs:768`, inside
+// `should_delete` — and both pass a FROZEN prefix. It never sees an exclusion
+// rule. What decides whether an exclusion rule covers a path is
+// `crates/mnema-walk/src/rules.rs:522`'s `anchored_pattern` — `!/{escaped}` —
+// compiled by `ignore`'s gitignore line parser, whose directory patterns match
+// across a separator and not into a sibling. A tripwire on `walk.rs`'s `under`
+// would have pinned a neighbour: the two encode the same separator rule today
+// by coincidence of correctness, not because one is derived from the other.
+//
+// So the tie is a PAIR, the shape `rust-enum.ts` already argues for. This side
+// is `a sibling whose name merely starts with the prefix is not counted`,
+// directly below. The Rust side is, in `crates/mnema-walk/tests/rules.rs`,
+// `a_user_prefix_does_not_remove_a_sibling_whose_name_starts_with_it`, which
+// this round had to WRITE: `a_user_prefix_removes_its_subtree` fixes `private`
+// and `public`, names sharing no prefix, and no Rust fixture anywhere under
+// `crates/` or `src-tauri/` paired a prefix with a sibling starting with it, so
+// nothing said `private2/` survives a rule on `private`. Neither half closes the gap alone, and the real fix — one rule,
+// no copy — is `list_tree` carrying the count.
+// ---------------------------------------------------------------------------
+
 // 🔴 `drop2` is a SIBLING of `drop`, not a child: `anchored_pattern` produces
-// `!/drop`, and `walk.rs:878`'s `under` requires a separator after the prefix.
-// A count written with `startsWith(prefix)` alone passes every other state in
-// this file and fails only here — it would promise a person that `drop2/y.md`
-// disappears as well.
+// `!/drop`, which the gitignore parser matches across a separator and not into
+// a sibling. A count written with `startsWith(prefix)` alone passes every other
+// state in this file and fails only here — it would promise a person that
+// `drop2/y.md` disappears as well.
 test('a sibling whose name merely starts with the prefix is not counted', async () => {
   await askExclude('drop', EMPTY_ROOTS, [
     root({
@@ -1333,6 +1360,109 @@ test('taking a rule away asks first, and names the provider rather than a number
 
   await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Archive' }));
   await waitFor(() => expect(includeSubfolder).toHaveBeenCalledWith(1, 'Archive'));
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1, I1 — the panel used to disagree with itself about one folder.
+//
+// The question said "its text is sent to the model provider" while the rule row
+// further down the same panel said "There is no folder at this path right now",
+// both drawn from the same `panel.rules` in the same render. `existsOnDisk` is
+// the backend's own answer (`bridge.rs:117`), already on screen; the question
+// now reads it rather than promising a cost the same panel denies.
+//
+// Both directions, in both locales, and both against the WHOLE confirmation
+// text: an assertion that only checks the new sentence is present passes on a
+// box that prints both.
+// ---------------------------------------------------------------------------
+
+const GONE_COST = {
+  en: [
+    'Stop excluding Old notes?',
+    'There is no folder at this path right now, so nothing is being indexed today.',
+    'If a folder appears there later, it is indexed and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '),
+  uk: [
+    'Більше не виключати Old notes?',
+    'Наразі за цим шляхом теки немає, тож зараз нічого не індексується.',
+    'Якщо тека там з’явиться згодом, вона індексується, а її текст надсилається провайдеру моделі.',
+    'Підтвердити Скасувати',
+  ].join(' '),
+} as const;
+
+const REMOVE_RULE_LABEL = { en: 'Remove the rule on Old notes', uk: 'Прибрати правило на Old notes' } as const;
+
+async function openWithRule(loc: 'en' | 'uk', rules: StoredExclusion[]) {
+  setLocale(loc); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Work')]));
+  listExclusions.mockResolvedValue(rules);
+  includeSubfolder.mockResolvedValue(true);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('folder-rules-1')).toBeTruthy());
+}
+
+for (const loc of ['en', 'uk'] as const) {
+  test(`removing a rule whose folder is gone is not promised to the provider (${loc})`, async () => {
+    await openWithRule(loc, [{ prefix: 'Old notes', existsOnDisk: false }]);
+
+    await fireEvent.click(screen.getByRole('button', { name: REMOVE_RULE_LABEL[loc] }));
+
+    expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe(GONE_COST[loc]);
+    // The other half of the contradiction, still on screen, still saying the
+    // same thing as the question above it.
+    expect(visibleText(screen.getByTestId('folder-rule-1-Old notes')))
+      .toContain(loc === 'en' ? 'There is no folder at this path right now.' : 'Наразі за цим шляхом теки немає.');
+    expect(includeSubfolder).not.toHaveBeenCalled();
+  });
+}
+
+// The direction the test above cannot see on its own: a rule whose folder IS
+// there must keep the unconditional sentence. Without this, the gone sentence
+// could be returned for every rule and every assertion above would still pass.
+test('a rule whose folder is still there keeps the unconditional provider sentence', async () => {
+  await openWithRule('en', [{ prefix: 'Old notes', existsOnDisk: true }]);
+
+  await fireEvent.click(screen.getByRole('button', { name: REMOVE_RULE_LABEL.en }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Old notes?',
+    'From the next scan on, everything inside this folder is indexed again,',
+    'and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// 🔴 The OTHER caller, and it answers `existsOnDisk` from different evidence:
+// the row is a directory entry `list_subfolders` read off the disk, so the
+// folder is there whatever a stale rule list says. This pins that the row site
+// still passes `true` — the rule below it says the folder is gone, and if the
+// row went looking through `panel.rules` instead of standing on its own
+// listing, this question would turn into the conditional sentence for a folder
+// that is demonstrably on screen.
+test('a subfolder row asks about the folder it is a listing of, not about the rule list', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Archive', { kind: 'excluded' })]));
+  listExclusions.mockResolvedValue([{ prefix: 'Archive', existsOnDisk: false }]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Archive' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again,',
+    'and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '));
 });
 
 // The `list_tree` the count is read from can be refused like any other call.
