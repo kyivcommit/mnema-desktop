@@ -5,11 +5,11 @@
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
 #
-# Thirteen cases. Eleven against `list_exclusions`, `exclude_subfolder` or
+# Fourteen cases. Eleven against `list_exclusions`, `exclude_subfolder` or
 # `include_subfolder` (`src-tauri/src/bridge.rs`) and the tests written for
-# task-2 of PR 8a; two against `start_walk_job` (`src-tauri/src/walk_job.rs`)
+# task-2 of PR 8a; three against `start_walk_job` (`src-tauri/src/walk_job.rs`)
 # and the tests written for task-3, which is where a stored rule stops being
-# a row and starts removing files. Twelve run in `tests/commands.rs`
+# a row and starts removing files. Thirteen run in `tests/commands.rs`
 # (`--test commands`) and one in `bridge.rs`'s own `mod tests` (`--lib`) —
 # the last because the site it names, a per-entry `io::Error` from a
 # directory listing, cannot be forced out of a real filesystem and so is
@@ -17,7 +17,7 @@
 # IPC (review round 4, N3).
 #
 # ⚠️ **"Any unix leg", not "any CI leg" (review round 3, Minor N2).** Four of
-# these thirteen cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
+# these fourteen cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
 # three of the `prefix_exists_on_disk` permission/kind cases) — harmless on
 # this repository's two CI legs (`ubuntu-24.04`, `macos-14`, both unix), but
 # a claim of "any CI leg" is false the moment a Windows leg exists, and would
@@ -212,3 +212,18 @@ case_ "a stored prefix that cannot become a rule must refuse the job, not be wal
   's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?;}{    let rules = WalkRules::new(true, true, user_prefixes).unwrap_or_default();}' \
   'let rules = WalkRules::new(true, true, user_prefixes).unwrap_or_default();' \
   mnema-desktop 'a_stored_exclusion_that_no_longer_validates_refuses_the_walk' --test commands
+
+# Review round 1, B1, and it is the case the set was missing: the vector
+# truncated to its first entry. Everything still compiles, the walk still
+# reports `completed`, `list_exclusions` still shows every stored rule with
+# `existsOnDisk: true` -- and every folder excluded after the first stays
+# indexed and searchable, which under D29 is a file whose text goes to a
+# third-party provider after the person was shown that it would not.
+# Measured in review round 1, before the test it names existed: this exact
+# mutant left `cargo test -p mnema-desktop` at 233 passed, 0 failed. The two cases above
+# cannot see it: one prefix is enough to kill both of them.
+case_ "every stored prefix must reach WalkRules::new, not only the first" \
+  src-tauri/src/walk_job.rs \
+  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?;}{    let rules = WalkRules::new(true, true, user_prefixes.into_iter().take(1).collect())?;}' \
+  'let rules = WalkRules::new(true, true, user_prefixes.into_iter().take(1).collect())?;' \
+  mnema-desktop 'a_walk_applies_every_stored_exclusion_not_only_the_first' --test commands

@@ -51,12 +51,26 @@ pub enum Error {
     /// the path it names.
     #[error("no watched folder with id {0}")]
     UnknownWatchedRoot(i64),
-    /// `exclude_subfolder` was handed a prefix `WalkRules::new` refuses —
-    /// the same validator the walk itself applies (`rules.rs:28-49`), run
-    /// before the row is written so a stored rule can never be one the walk
-    /// would later skip silently. `#[from]` carries `RulesError`'s own
-    /// sentence unchanged, which is already safe to show: every variant
-    /// names the rule the person typed and nothing else.
+    /// A prefix `WalkRules::new` refuses. **Two producers**, and the second
+    /// is why the first's guarantee is not one:
+    ///
+    /// - `exclude_subfolder` runs the validator before the row is written,
+    ///   so nothing the commands store is ever a prefix the walk would then
+    ///   skip silently. That is a claim about rules written by THIS build
+    ///   through THAT command, and it was once written here as though it
+    ///   were a claim about every stored rule (review round 1, M1).
+    /// - `start_walk_job` runs the same validator over what the database
+    ///   actually holds, because a stored prefix can fail it anyway: written
+    ///   by an older build whose whitelist was narrower (`rules.rs:28-49`
+    ///   describes it growing across three rounds), or written straight
+    ///   through `Db::add_path_exclusion`, which deliberately does not
+    ///   validate. There the refusal stops the whole job rather than one
+    ///   save, which is the conservative direction under D29 — see that call
+    ///   site's own comment.
+    ///
+    /// `#[from]` carries `RulesError`'s own sentence unchanged, which is
+    /// already safe to show: every variant names the rule the person typed
+    /// and nothing else.
     #[error("{0}")]
     InvalidExclusionRule(#[from] mnema_walk::RulesError),
     /// `exclude_subfolder` was handed the empty string. `validate_prefix`

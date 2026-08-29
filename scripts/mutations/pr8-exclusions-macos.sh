@@ -24,9 +24,10 @@
 # that stood in this sentence — "seven portable cases" — was written against
 # an earlier state of that file and was wrong by one before round 4 added a
 # case: that file held ten cases at the time, four of them naming
-# `#[cfg(unix)]` tests, so the portable count was six. It has grown twice
-# since, which is the point — a count maintained in a DIFFERENT file from the
-# thing it counts drifts silently, and this project's own rule is that a
+# `#[cfg(unix)]` tests, so the portable count was six. It has grown since —
+# how often is itself not worth writing down here, which is the point: a
+# count maintained in a DIFFERENT file from the thing it counts drifts
+# silently, and this project's own rule is that a
 # number is a definition. The count that has to be right lives in
 # `pr8-exclusions.sh`'s own header, where the cases are.
 

@@ -33,11 +33,15 @@ use crate::state::AppState;
 /// off `start_probe_job`'s blocking shape is the lookup in front of them.
 ///
 /// Every fallible step below runs **before** [`AppState::claim_job`], not
-/// after — all three of them, the middle one new since the exclusion
-/// commands: an unknown `root_id` (a folder removed by a second window, a
-/// stale id a reloaded page still has), a stored exclusion prefix that
-/// `WalkRules::new` refuses, and a `Pool` that refuses its own config must
-/// each be refused without ever taking the slot. Claiming it first and
+/// after, and that is a claim about all of them rather than about a list —
+/// no count here, because the previous rewrite of this sentence said "all
+/// three" and there were four (review round 1, M2). Named rather than
+/// counted: the index read itself, which fails as [`Error::IndexNotOpen`],
+/// [`Error::StatePoisoned`] or [`Error::Index`]; an unknown `root_id` (a
+/// folder removed by a second window, a stale id a reloaded page still
+/// has); a stored exclusion prefix that `WalkRules::new` refuses; and a
+/// `Pool` that refuses its own config. Each must be refused without ever
+/// taking the slot. Claiming it first and
 /// releasing it on the first `?` gives the same end state one command later,
 /// but for as long as this call runs `job_status` would report a job
 /// running for a call that was always going to fail — a page polling it at
@@ -96,6 +100,16 @@ pub fn start_walk_job(
     // refuse to combine — there the whole override layer stops applying and
     // `walk_root` stops before phase 2 rather than indexing what the rules
     // no longer cover.
+    //
+    // There is a third outcome besides "a rule" and "a refusal", and it is
+    // deliberate: `validate_prefix` answers `Ok(None)` for the empty string
+    // (`rules.rs:363-366`), so a blank stored row is dropped and the walk
+    // runs with the rules it does have. A blank names no folder, so nothing
+    // is believed excluded and then indexed anyway, and `exclude_subfolder`
+    // refuses blanks before they can be stored at all. Pinned by
+    // `a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_
+    // anything` (review round 1, M5), so a later change to that `Ok(None)`
+    // cannot quietly turn this line into a refusal.
     let rules = WalkRules::new(true, true, user_prefixes)?;
 
     // `Pool::new` never touches the worker path — it opens the diagnostics

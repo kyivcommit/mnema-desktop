@@ -139,6 +139,32 @@ fn keep_and_drop_dir() -> tempfile::TempDir {
     dir
 }
 
+/// The state the feature is in as soon as a person excludes a SECOND folder,
+/// which no fixture in this workspace built before review round 1 (B1): two
+/// excluded folders and one kept, one indexable file in each.
+///
+/// Two of them, not one, is the whole point. `keep_and_drop_dir` above pins
+/// that a stored prefix is applied; nothing pinned that every stored prefix
+/// is. Measured in review round 1, against the shipped code, which passes
+/// the whole `Vec` correctly: truncating it to its first entry
+/// (`user_prefixes.into_iter().take(1).collect()`) left `cargo test -p
+/// mnema-desktop` at 233 passed, 0 failed. `drop_a`/`drop_b` rather than two
+/// unrelated names so the sort `Db::list_path_exclusions` applies is
+/// predictable, and so the surviving half of any truncation is a file this
+/// test names.
+fn two_dropped_and_one_kept_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the two-exclusion fixture");
+    for (folder, file, text) in [
+        ("drop_a", "a.txt", "the first dropped file mentions herons"),
+        ("drop_b", "b.txt", "the second dropped file mentions herons"),
+        ("keep", "kept.txt", "the kept file mentions herons"),
+    ] {
+        std::fs::create_dir(dir.path().join(folder)).expect("creating a fixture folder");
+        std::fs::write(dir.path().join(folder).join(file), text).expect("writing a fixture file");
+    }
+    dir
+}
+
 /// What the index actually holds under one root, sorted — the same list
 /// reconciliation itself compares a walk against (`Db::paths_under_root`).
 ///
@@ -3217,6 +3243,89 @@ fn a_walk_applies_a_stored_exclusion_and_removes_what_it_now_covers() {
     );
 }
 
+/// Review round 1, B1. Everything above pins that *a* stored prefix is
+/// applied; nothing pinned that *every* stored prefix is, and the state
+/// where that matters is the ordinary one — a person excludes a folder, and
+/// then excludes another.
+///
+/// The failure it exists to catch runs in the direction this feature makes
+/// expensive. Under a defect that applies only the first rule, the walk
+/// reports `reason: "completed"`, `list_exclusions` still shows both rules
+/// with `existsOnDisk: true`, and every file under the second one stays
+/// indexed and searchable — which under D29 is a file whose text goes to a
+/// third-party provider after the person was shown that it would not.
+/// Measured in review round 1, before this test existed: truncating the
+/// vector to its first entry left the whole package green at 233 passed, 0
+/// failed. It fails here now, at `removed`.
+///
+/// `removed == 2` and the index contents are both asserted, because they are
+/// two different facts: a walk that removed the right number of rows and a
+/// walk that removed the wrong two produce the same count.
+#[test]
+fn a_walk_applies_every_stored_exclusion_not_only_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = two_dropped_and_one_kept_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec![
+            "drop_a/a.txt".to_string(),
+            "drop_b/b.txt".to_string(),
+            "keep/kept.txt".to_string()
+        ],
+        "the first walk did not index all three files, so nothing below is about exclusion"
+    );
+
+    for folder in ["drop_a", "drop_b"] {
+        call(
+            &webview,
+            "exclude_subfolder",
+            json!({ "rootId": root, "relativePath": folder }),
+        )
+        .expect("exclude_subfolder was rejected");
+    }
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([
+            { "prefix": "drop_a", "existsOnDisk": true },
+            { "prefix": "drop_b", "existsOnDisk": true }
+        ]),
+        "both rules must actually be stored, or this test is about one rule again"
+    );
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(2),
+        "the walk applied fewer rules than were stored, or more: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["keep/kept.txt".to_string()],
+        "a file under a stored exclusion is still findable, or the kept one went with them"
+    );
+}
+
 /// The mirror of the test above, and it is not optional. Every assertion
 /// there is one-sided: `removed == 1` and "only `keep/kept.txt` is left" are
 /// both satisfied by a walk that deletes on some other grounds entirely — a
@@ -3242,6 +3351,19 @@ fn a_walk_with_no_exclusion_stored_removes_nothing() {
     .expect("add_watched_folder did not return an id");
 
     run_walk_to_completion(&app, root);
+    // The precondition, asserted rather than assumed (review round 1, I1).
+    // `run_walk_to_completion` promises only `reason == "completed"`, which a
+    // walk that indexed nothing satisfies — and with nothing in the index,
+    // `removed == 0` below holds trivially and the final contents assertion
+    // is satisfied by the SECOND walk's own indexing. Measured in review
+    // round 1: with the walk above deleted and this assertion not yet
+    // written, every other assertion in this test still passed. A control
+    // that survives the removal of the state it controls for is not one.
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["drop/dropped.txt".to_string(), "keep/kept.txt".to_string()],
+        "the first walk did not index both files, so `removed == 0` below would mean nothing"
+    );
 
     let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
         .expect("list_exclusions was rejected");
@@ -3319,10 +3441,19 @@ fn a_stored_exclusion_that_no_longer_validates_refuses_the_walk() {
     let (channel, _events) = job_channel();
     let refusal = walk_job::start_walk_job(state.clone(), root, channel)
         .expect_err("a walk started even though a stored prefix cannot become a rule");
-    let sentence = refusal.to_string();
-    assert!(
-        sentence.contains(r#"exclusion rule "..""#),
-        "the refusal does not name the rule that cannot be compiled: {sentence}"
+    // The whole sentence, not a substring of it (review round 1, M3). Every
+    // `RulesError` variant opens with `exclusion rule {prefix:?}`
+    // (`rules.rs:52-80`), so a substring proves "some `RulesError` about
+    // `..`" rather than which one — the same weakening
+    // `excluding_dotdot_is_refused_and_stores_nothing` already carries a
+    // round-1 note about. The sentence crosses the `Error::
+    // InvalidExclusionRule` seam unchanged (`#[error("{0}")]`,
+    // `error.rs:60`), so equality costs nothing here either.
+    assert_eq!(
+        refusal.to_string(),
+        "exclusion rule \"..\" has a `..` path component — name the folder directly, not `.` \
+         or `..`",
+        "the refusal should be RulesError::DotComponent's own sentence, whole"
     );
 
     assert!(
@@ -3333,6 +3464,73 @@ fn a_stored_exclusion_that_no_longer_validates_refuses_the_walk() {
         indexed_paths(&app, root),
         before,
         "the refused walk changed the index, so something ran before it refused"
+    );
+}
+
+/// Review round 1, M5. The blank prefix is the THIRD outcome at
+/// `walk_job.rs`'s `WalkRules::new` call, and until this test nothing
+/// anywhere pinned it: a stored prefix either becomes a rule or refuses the
+/// job — except the empty string, which does neither. `validate_prefix`
+/// answers `Ok(None)` for it, deliberately not a `RulesError`
+/// (`rules.rs:356-365`), so `WalkRules::new` returns `Ok` with that entry
+/// simply dropped and the walk runs with the rules it does have.
+///
+/// That is the right behaviour and this test does not argue with it: a blank
+/// row names no folder, so no named file is believed excluded and then
+/// indexed anyway, and refusing every future walk over the root on the
+/// strength of a row that excludes nothing would cost the feature for no
+/// protection gained. The row is also unreachable through the commands —
+/// `exclude_subfolder` refuses it with `Error::BlankExclusionRule` — which
+/// is why it is written here through `Db::add_path_exclusion`, the same way
+/// the invalid prefix above is.
+///
+/// What this pins is the choice, so that a later change to `validate_prefix`'s
+/// `Ok(None)` cannot turn this call site into a refusal, or into a rule that
+/// matches something, without one test saying so.
+#[test]
+fn a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = keep_and_drop_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    let before = indexed_paths(&app, root);
+    assert_eq!(
+        before,
+        vec!["drop/dropped.txt".to_string(), "keep/kept.txt".to_string()],
+        "the first walk did not index the fixture, so nothing below is about the blank row"
+    );
+
+    app.state::<AppState>()
+        .with_index(|db| db.add_path_exclusion(root, ""))
+        .expect("writing a blank prefix straight to the index");
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "a blank stored row must not stop the walk — it names no folder to protect: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(0),
+        "a rule that names no folder must not remove anything: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        before,
+        "a blank stored row changed what the index holds"
     );
 }
 
