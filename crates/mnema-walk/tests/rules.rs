@@ -558,9 +558,17 @@ fn rules_applied_is_false_at_a_realistic_prefix_count() {
 /// **What generation costs, and what is added back by hand.** A fixture
 /// derived from a constant cannot notice that constant shrinking: delete
 /// `.git` from `BUILTIN_DIRS` and both the fixture and the expectation lose it
-/// together. So three names are pinned by hand below — one dot-directory, one
-/// ordinary directory, one from the FILES list — which is the membership half
-/// the generated half cannot hold.
+/// together. So the built-in names are **written out by hand below, all of
+/// them**, and checked against the constants as a set.
+///
+/// Fix round 3 measured what "three names, one of each shape" was actually
+/// worth: deleting `.hg` from `BUILTIN_DIRS` left the whole workspace green —
+/// three of thirteen is not "the membership half", it is three names, and the
+/// sentence that stood here said otherwise. Writing all thirteen out closes it
+/// in both directions: **deleting** a name leaves the hand list demanding a
+/// folder nothing prunes, and **adding** one fails the set comparison until
+/// somebody puts it here deliberately, which is the point — a name joining the
+/// list that the walk prunes should be a decision, not a diff nobody read.
 ///
 /// **What it still cannot see**, and it is the third derivation of this set
 /// saying so: a new layer in `builder()` that is neither an override nor
@@ -592,6 +600,12 @@ fn builtin_layers_agree_with_what_the_walk_enumerates() {
             "house/target",
             "Projects/House/build",
             "notes/2019",
+            // On neither list, and the walk keeps it because `builder()` sets
+            // `hidden(false)`. It is here so that a change to that SETTING —
+            // the shape of layer no grep over `filter_entry|over.add` finds,
+            // and the one fix round 3 measured slipping past everything —
+            // turns this guard red instead of nothing at all.
+            ".config/2019",
         ]
         .map(str::to_string),
     );
@@ -631,7 +645,12 @@ fn builtin_layers_agree_with_what_the_walk_enumerates() {
     // because "everything is pruned" would satisfy the loop above.
     assert_eq!(
         kept,
-        vec!["house/target", "Projects/House/build", "notes/2019"],
+        vec![
+            "house/target",
+            "Projects/House/build",
+            "notes/2019",
+            ".config/2019"
+        ],
         "the folders the walk keeps: {kept:?}"
     );
     assert_eq!(
@@ -640,16 +659,50 @@ fn builtin_layers_agree_with_what_the_walk_enumerates() {
         "every built-in name plus crate/target/debug, code/build and code/dist: {pruned:?}"
     );
 
-    // The membership the generated half cannot hold: three names that must
-    // stay on the lists, one of each shape. Deleting any of them from its
+    // The membership the generated half cannot hold, written out rather than
+    // derived — every name on both lists. Deleting any of them from its
     // constant would otherwise remove it from the fixture and the expectation
-    // together, and this test would still pass.
-    for name in [".git", "node_modules", ".DS_Store"] {
+    // together, and this test would still pass (measured on `.hg`, fix round
+    // 3: the whole workspace stayed green).
+    let pinned = [
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".gradle",
+        ".idea",
+        ".vscode",
+        ".venv",
+        "venv",
+        ".DS_Store",
+    ];
+    for name in pinned {
         assert!(
             pruned.contains(&format!("{name}/inner").as_str()),
             "{name} is no longer pruned by the built-in layers: {pruned:?}"
         );
     }
+    // The other direction, and the reason the list above may be written by
+    // hand at all: it must be exactly the two constants. A name ADDED to
+    // either one fails here until somebody adds it here too — which is a
+    // deliberate act rather than a diff that slid past, and it is what keeps
+    // this hand-written half from decaying into a sample of the generated one.
+    let mut from_constants: Vec<&str> = WalkRules::BUILTIN_DIRS
+        .iter()
+        .chain(WalkRules::BUILTIN_FILES)
+        .copied()
+        .collect();
+    from_constants.sort_unstable();
+    let mut written_out = pinned.to_vec();
+    written_out.sort_unstable();
+    assert_eq!(
+        written_out, from_constants,
+        "the hand-pinned names have drifted from BUILTIN_DIRS/BUILTIN_FILES — add or remove the \
+         name here on purpose"
+    );
 }
 
 /// `WalkRules::check_prefix` must answer exactly what `WalkRules::new` answers

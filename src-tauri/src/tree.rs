@@ -142,8 +142,8 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
 /// *enum* renames the variants only; the fields inside a struct variant keep
 /// their snake_case names without this second attribute. Measured, not
 /// reasoned: without it `Excerpt` ships `document_id` and `has_more_before`
-/// inside a camelCase payload. The `AskAnswer` precedent (`bridge.rs:448-451`)
-/// does not warn (its variants are at `bridge.rs:455-475`), because every
+/// inside a camelCase payload. The `AskAnswer` precedent (`bridge.rs:849-854`)
+/// does not warn (its variants are at `bridge.rs:855-876`), because every
 /// field of its struct variants is one word.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
@@ -169,7 +169,7 @@ pub enum SourceAround {
         /// `PathOccupant::relative_path` is the *cited* path — the query key —
         /// so the field could only ever echo the caller's own input back and
         /// disagree with nothing. The card's header uses the citation's
-        /// `relativePath` (`bridge.rs:433`); the provenance check is
+        /// `relativePath` (`bridge.rs:828`); the provenance check is
         /// `documentId`.
         document_id: String,
         section_title: Option<String>,
@@ -183,7 +183,7 @@ pub enum SourceAround {
 }
 
 /// Why the passage is not at that id any more. Two causes, split for the same
-/// reason `RefusalKind` splits `ask`'s (`bridge.rs:439-446`): a caller may
+/// reason `RefusalKind` splits `ask`'s (`bridge.rs:838-847`): a caller may
 /// render one sentence for both, and the split is what makes both directions
 /// assertable here.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -268,7 +268,7 @@ pub struct SourceBlock {
 /// — the `CHECK` extracts `$[0].block_id` and the `chunk_span_blocks_bi`
 /// trigger extracts `$.block_id`. Renaming the field would make every stored
 /// row unreadable and both guards blind. The same "local mirror at the seam"
-/// move `Hit` already makes for `Citation` (`bridge.rs:93-101`).
+/// move `Hit` already makes for `Citation` (`bridge.rs:479-492`).
 /// 🔴 **How to paint from this, because the payload alone does not say.**
 ///
 /// - `blockStart` is the offset **into the text of the block `blockId` names**,
@@ -634,7 +634,7 @@ pub struct Subfolder {
     /// What to send back to `exclude_subfolder` — the path relative to the
     /// watched root, built by joining the caller's own `relative_path` with
     /// [`Subfolder::name`]. Never normalised: a prefix is a path the user
-    /// chose from disk, not a pattern (`rules.rs:481-498`).
+    /// chose from disk, not a pattern (`rules.rs:505-522`).
     pub relative_path: String,
     pub state: SubfolderState,
 }
@@ -698,9 +698,9 @@ pub struct Subfolder {
 /// rule holds it" and "you may add one".
 ///
 /// 1. `BuiltIn` — rows 1 and 2 above. Pruned whatever any user rule says
-///    (`builder()` adds the overrides at `rules.rs:422-423`, `builtin_layers`
-///    compiles the same patterns at `:336-339`, and the anchored layer is
-///    `filter_entry` at `:387-414`), so an
+///    (`builder()` adds the overrides at `rules.rs:446-447`, `builtin_layers`
+///    compiles the same patterns at `:361-362`, and the anchored layer is
+///    `filter_entry` at `:411-438`), so an
 ///    `Excluded` badge with a working "include" toggle would announce one
 ///    thing and do another.
 ///
@@ -712,7 +712,7 @@ pub struct Subfolder {
 ///    are non-toggleable, so the precedence is left as it is rather than
 ///    reordered for a case where both answers are correct.
 /// 2. `Symlink` — row 3. The walk runs `follow_links(false)`
-///    (`rules.rs:364`), so nothing under this name is ever enumerated.
+///    (`rules.rs:388`), so nothing under this name is ever enumerated.
 /// 3. `ExcludedByAncestor` — a stored rule names an ancestor. Checked
 ///    **before** `Excluded`, so a folder that has both its own rule and an
 ///    excluded ancestor names the ancestor: removing its own rule would leave
@@ -773,7 +773,7 @@ pub enum SubfolderState {
     BuiltIn,
     /// A symlink to a directory. Listed, so the folder does not look emptier
     /// than it is, but never as an ordinary excludable folder: the walk runs
-    /// `follow_links(false)` (`rules.rs:364`), so nothing under it is indexed
+    /// `follow_links(false)` (`rules.rs:388`), so nothing under it is indexed
     /// and an exclusion rule naming it would exclude nothing.
     Symlink,
     /// The folder **is** walked, and its path is not one an exclusion rule can
@@ -799,7 +799,7 @@ pub enum SubfolderState {
 /// [`SubfolderState::Excluded`], one state down.
 ///
 /// No normalisation of either side, deliberately: a prefix is a path the user
-/// chose from disk (`rules.rs:481-498`), and the walk's own matcher compares
+/// chose from disk (`rules.rs:505-522`), and the walk's own matcher compares
 /// it byte for byte.
 fn is_ancestor_of(prefix: &str, path: &str) -> bool {
     path.len() > prefix.len() && path.as_bytes()[prefix.len()] == b'/' && path.starts_with(prefix)
@@ -1009,7 +1009,7 @@ fn directory_entries(
 /// The directories among `entries`, sorted by name, plus how many of them had
 /// no name this wire type can carry.
 ///
-/// Sorted by name for the reason the walk sorts (`rules.rs:363`): `read_dir`
+/// Sorted by name for the reason the walk sorts (`rules.rs:387`): `read_dir`
 /// order is the filesystem's, and a window that redraws in a different order on
 /// another machine is a window nobody can point at over the phone.
 ///

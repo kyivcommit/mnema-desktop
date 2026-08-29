@@ -115,7 +115,7 @@ case_ "with several rules holding a folder, the outermost is the one named" \
 
 # The built-in list goes invisible: `.git` and `node_modules` render as
 # ordinary folders with a working toggle that changes nothing about the walk,
-# because the built-in layer prunes them regardless (`rules.rs:422-423`).
+# because the built-in layer prunes them regardless (`rules.rs:446-447`).
 case_ "a name on WalkRules::BUILTIN_DIRS must not report as an ordinary folder" \
   src-tauri/src/tree.rs \
   's~        return SubfolderState::BuiltIn;~        return SubfolderState::Open; /* mutant: built-in invisible */~' \
@@ -123,7 +123,7 @@ case_ "a name on WalkRules::BUILTIN_DIRS must not report as an ordinary folder" 
   mnema-desktop 'a_built_in_directory_is_marked_and_an_ordinary_dot_directory_is_not' --test commands
 
 # The same defect one state over: a symlinked directory as an ordinary
-# excludable folder. The walk runs `follow_links(false)` (`rules.rs:364`), so a
+# excludable folder. The walk runs `follow_links(false)` (`rules.rs:388`), so a
 # rule naming it excludes nothing at all.
 case_ "a symlinked directory must not report as an ordinary folder" \
   src-tauri/src/tree.rs \
@@ -355,3 +355,27 @@ case_ "the refusal is about the built-in layers, not about every path" \
   's~    if mnema_walk::WalkRules::builtin_layers\(std::path::Path::new\(&root\)\)\.prunes\(&relative_path\) \{~    if true { /* mutant: every exclusion is refused */~' \
   'if true { /* mutant: every exclusion is refused */' \
   mnema-desktop 'excluding_a_folder_the_walk_already_prunes_is_refused_and_stores_nothing' --test commands
+
+# A pruning layer that is neither an override nor `ANCHORED_DIRS`, added by
+# changing one word of a `WalkBuilder` SETTING: `hidden(true)` prunes every
+# dot-directory in the walk while `BuiltinLayers` keeps answering `false` for
+# them. Fix round 3 measured this slipping past the whole workspace, and past
+# the grep the predicate's doc used to call complete. Killed by the drift
+# guard, which is the only test that runs both sides — and only because its
+# fixture now holds a dot-directory on neither built-in list.
+case_ "a pruning layer added by a builder setting is caught by the drift guard" \
+  crates/mnema-walk/src/rules.rs \
+  's~            \.hidden\(false\)~            .hidden(true) /* mutant: dotfiles pruned by a setting */~' \
+  '.hidden(true) /* mutant: dotfiles pruned by a setting */' \
+  mnema-walk 'builtin_layers_agree_with_what_the_walk_enumerates' --test rules
+
+# The membership half, from the other side: a name deleted from `BUILTIN_DIRS`
+# takes the generated fixture and its expectation with it, so both derived
+# halves of the guard still agree. Fix round 3 measured `.hg` doing exactly
+# that with the whole workspace green; the hand-written list is what catches it
+# now.
+case_ "a name deleted from BUILTIN_DIRS is caught by the hand-pinned list" \
+  crates/mnema-walk/src/rules.rs \
+  's~        "\.hg",\n~        /* mutant: .hg dropped from the built-in list */\n~' \
+  '/* mutant: .hg dropped from the built-in list */' \
+  mnema-walk 'builtin_layers_agree_with_what_the_walk_enumerates' --test rules

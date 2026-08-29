@@ -45,7 +45,7 @@
 # ⚠️ **The narrower mutant round 1 asked for — narrowing the probe from the
 # whole exclusion set back to the candidate alone — is deliberately NOT a
 # case here.** `WalkRules::new` never builds an aggregate pattern set in the
-# first place (it validates one prefix at a time, `rules.rs:214-219`), so
+# first place (it validates one prefix at a time, `rules.rs:219-224`), so
 # "narrow the probe" and "the probe as written" are the same code today; a
 # case built from that description would be born alive and killed by
 # nothing. See `bridge::exclude_subfolder`'s own doc comment.

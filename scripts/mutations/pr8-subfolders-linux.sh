@@ -26,10 +26,17 @@
 # `*** STILL GREEN ***`, because on macOS no IPC test can produce a non-zero
 # count and on Linux the test that would catch it was named by no case. This is
 # the seam limit `bridge::entry_named`'s doc records in the same words — the
-# function is pinned, its call site is not — **named here rather than only
-# disclosed, and measured on the Linux leg rather than on the machine that
-# wrote it** (fix round 2, N3: the sentence that stood here said "closed", and
-# nothing had ever observed the case kill).
+# function is pinned, its call site is not — **named here, and it is the Linux
+# leg that will measure it, not the machine that wrote it.**
+#
+# ⚠️ **Nothing has yet observed this case kill**, and that has now been written
+# wrongly twice: fix round 1 said the seam was "closed here rather than
+# disclosed", fix round 2 replaced that with "measured on the Linux leg" while
+# the branch was unpushed and the `mutations` job had never run this file. What
+# is true today: the case applies (`mutation-staleness.sh`), it is named by a
+# CI step, the harness refuses cleanly rather than reporting a false pass on a
+# machine that cannot run it, and whether it kills will be known from the first
+# ubuntu run of this branch and not before.
 #
 # ⚠️ **CI runs this file, and that is the whole point of it.** The `mutations`
 # job is `runs-on: ubuntu-24.04`, so this is the one leg where the case can

@@ -307,8 +307,13 @@ impl WalkRules {
     /// 2. **`ANCHORED_DIRS`**, which is the one built-in layer that is *not*
     ///    an override: `filter_entry` prunes those names only when one of the
     ///    marker files sits in the directory's own parent, which no glob can
-    ///    express. Looked up here the same way `filter_entry` looks it up,
-    ///    `parent.join(marker).is_file()`.
+    ///    express. The marker itself is looked up the same way `filter_entry`
+    ///    looks it up, `parent.join(marker).is_file()` — but **not the entry**:
+    ///    `filter_entry` also requires `entry.file_type().is_dir()` and this
+    ///    does not, because it is given a path rather than a directory entry.
+    ///    The difference is visible exactly once, on a symlink named like an
+    ///    anchored directory beside that name's marker, and it is disclosed
+    ///    where it shows: `src-tauri/src/tree.rs`'s precedence doc.
     ///
     /// **What it deliberately does NOT cover, and must never be read as
     /// covering:**
@@ -324,17 +329,31 @@ impl WalkRules {
     /// - **Symlinks.** `follow_links(false)` is a property of the walker, not
     ///   of a path, and the caller that needs it can see the link itself.
     ///
-    /// ⚠️ **The one way this can go stale again**, written down because fix
-    /// round 2 is the third derivation of this set and each of the first two
-    /// missed a layer: a NEW layer added to `builder()` that is neither an
-    /// override nor `ANCHORED_DIRS` — a second `filter_entry`, say. Point 1
-    /// covers every future override for free; point 2 is a hand-written
-    /// mirror and is the part to check. `rg -n "filter_entry|over\.add" ` over
-    /// this file lists every candidate.
+    /// ⚠️ **How this can still go stale, stated as what is true rather than as
+    /// a complete list** — fix round 2 wrote "the one way" here and named a
+    /// grep that "lists every candidate", and fix round 3 measured that false.
+    /// Point 1 covers every future *override* for free. Everything else in
+    /// `builder()` that can remove a directory from the walk is a hand-written
+    /// mirror or nothing at all, and it arrives in **at least two** shapes:
+    ///
+    /// - another `filter_entry`, like `ANCHORED_DIRS` — which
+    ///   `rg -n "filter_entry|over\.add"` over this file does find;
+    /// - a `WalkBuilder` **setting** that starts pruning, which that grep does
+    ///   **not** find. Measured: flipping `hidden(false)` to `hidden(true)`
+    ///   prunes every dot-directory in the walk while this function keeps
+    ///   answering `false` for them — the exact defect this predicate exists to
+    ///   prevent, reachable by changing one word.
+    ///
+    /// So the check is **read `builder()`**, not run a grep. What backs that
+    /// up rather than replacing it: `builtin_layers_agree_with_what_the_walk_enumerates`
+    /// compares this against a real walk, and its fixture now holds an ordinary
+    /// dot-directory on neither list, so the `hidden` instance above goes red
+    /// there. A setting whose effect no directory in that fixture shows is
+    /// still invisible, and no test here can fix that.
     ///
     /// ⚠️ **Both layers are gated on `builtin` inside `builder()`, and this
     /// assumes it is on.** Both production call sites pass `true` —
-    /// `src-tauri/src/walk_job.rs:128` and `src-tauri/src/bridge.rs:419`; only
+    /// `src-tauri/src/walk_job.rs:128` and `src-tauri/src/bridge.rs:439`; only
     /// tests pass `false`. A caller that built rules with `builtin: false`
     /// must not use this.
     pub fn builtin_layers(root: &Path) -> BuiltinLayers {

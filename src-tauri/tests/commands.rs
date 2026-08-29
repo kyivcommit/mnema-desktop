@@ -2935,7 +2935,7 @@ fn excluding_dotdot_is_refused_and_stores_nothing() {
 }
 
 /// `validate_prefix` answers `Ok(None)` for the empty string — deliberately
-/// not a `RulesError` (`rules.rs:522-531`) — so the command itself has to
+/// not a `RulesError` (`rules.rs:546-555`) — so the command itself has to
 /// refuse it before `Db::add_path_exclusion` ever runs (review round 1, P2).
 /// Asserted on the ROW COUNT, not merely that a value came back: a mutant
 /// that stores the blank row anyway would still return `Ok(())` from a
@@ -3476,7 +3476,7 @@ fn a_stored_exclusion_that_no_longer_validates_refuses_the_walk() {
 /// anywhere pinned it: a stored prefix either becomes a rule or refuses the
 /// job — except the empty string, which does neither. `validate_prefix`
 /// answers `Ok(None)` for it, deliberately not a `RulesError`
-/// (`rules.rs:522-531`), so `WalkRules::new` returns `Ok` with that entry
+/// (`rules.rs:546-555`), so `WalkRules::new` returns `Ok` with that entry
 /// simply dropped and the walk runs with the rules it does have.
 ///
 /// That is the right behaviour and this test does not argue with it: a blank
@@ -6935,7 +6935,7 @@ fn subfolder_rows(listing: &Value) -> Vec<(String, String, String)> {
 /// **Five folders created in an order that is not their sorted order**, not
 /// the brief's minimum of two: with two entries a listing that never sorts
 /// has an even chance of looking sorted, and the claim here is about an order
-/// the window relies on being the same on every machine (`rules.rs:363` makes
+/// the window relies on being the same on every machine (`rules.rs:387` makes
 /// the same choice for the walk). The file is the other direction — a
 /// listing that returned every directory entry would pass the order
 /// assertion and put `c.txt` in a folder tree.
@@ -7311,7 +7311,7 @@ fn listing_an_absolute_path_is_refused() {
 /// Both, because they fail for different reasons and a check that caught only
 /// the first would look right: the outside one escapes the root, and the
 /// inside one does not escape anything — it is refused because the walk runs
-/// `follow_links(false)` (`rules.rs:364`), so nothing under that name is ever
+/// `follow_links(false)` (`rules.rs:388`), so nothing under that name is ever
 /// enumerated and every exclusion rule this listing would offer under it
 /// excludes nothing.
 ///
@@ -7429,7 +7429,7 @@ fn a_directory_whose_name_is_not_utf8_is_counted_and_never_named_lossily() {
 
 /// A symlink to a directory inside the root is answered as its own state, so
 /// no window can draw it as an ordinary folder with a working exclusion
-/// toggle: the walk runs `follow_links(false)` (`rules.rs:364`), so nothing
+/// toggle: the walk runs `follow_links(false)` (`rules.rs:388`), so nothing
 /// under it is ever indexed and a rule naming it excludes nothing.
 ///
 /// Three directions, and the fixture holds more objects than the listing
@@ -7617,7 +7617,7 @@ fn a_wrong_case_relative_path_is_refused() {
 // ---------------------------------------------------------------------------
 
 /// Row 1 of the enumeration, the **ancestry** half: `BUILTIN_DIRS` turns into
-/// `!**/{dir}` overrides (`rules.rs:422-423`), which prune the whole subtree —
+/// `!**/{dir}` overrides (`rules.rs:446-447`), which prune the whole subtree —
 /// so everything under `.git` is pruned too, and offering it as an ordinary
 /// excludable folder is a control that does nothing.
 ///
@@ -7667,7 +7667,7 @@ fn everything_under_a_built_in_directory_is_built_in_too() {
 
 /// Row 2 of the enumeration: `ANCHORED_DIRS` prunes `target`, `build` and
 /// `dist` — but **only** when one of that name's marker files sits in its own
-/// parent (`rules.rs:387-414`), because `build` is also an ordinary English
+/// parent (`rules.rs:411-438`), because `build` is also an ordinary English
 /// word and `Projects/House/build/permits.pdf` is a document.
 ///
 /// Both directions of that condition, which is the whole of this layer: the

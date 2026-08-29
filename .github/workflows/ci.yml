@@ -328,11 +328,23 @@ jobs:
     # save nothing is how a slow gate becomes one people work around.
     runs-on: ubuntu-24.04
     # Thirty was a guess when this leg was written, and it stayed one until the
-    # leg first executed: pull request #7, **6m17s, green**. So the limit is
-    # roughly five times the only run there has ever been — the same margin
-    # `check` argues for itself above, and now for the same reason: a measured
-    # slowest run rather than a number nobody had a basis for. Raise it from a
-    # measurement if the case file grows enough to want it, not from a feeling.
+    # leg first executed: pull request #7, **6m17s, green** — five times the
+    # margin, on the 119 cases this step ran then.
+    #
+    # ⚠️ **That margin is no longer five times and is not currently measured.**
+    # The step below now names 161 cases, and the new 42 are not like the old
+    # 119: they mutate `src-tauri` and `mnema-walk` and re-run `--test
+    # commands`, the slowest target in the workspace, while `source.sh` and
+    # `embedding.sh` mutate leaf crates. Scaling 6m17s by case count is
+    # therefore wrong in both directions at once — it also scales a fixed
+    # setup (checkout, toolchain, apt, sidecar, Pdfium, the first build) that
+    # does not grow with cases. The only number anybody has for the new half is
+    # **5m21s for those 42 cases on a warm developer machine**, which is not
+    # this runner and bounds nothing here; it does say the per-case model
+    # under-counts by roughly 2.4x. So: this limit is expected to hold with
+    # room, and the first run after this change is what turns that into a
+    # measurement. Raise it from that run if it wants raising, not from a
+    # feeling and not from the arithmetic above.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
