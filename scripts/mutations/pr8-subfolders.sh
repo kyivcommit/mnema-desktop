@@ -1,15 +1,26 @@
 # `list_subfolders` — the exclusion screen's folder tree, read off the disk
-# (task 4 of PR 8a, plus fix round 1). Run with:
+# (task 4 of PR 8a, plus fix rounds 1 and 2). Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-subfolders.sh
 #
-# Most cases mutate `src-tauri/src/tree.rs`; a few mutate
-# `crates/mnema-walk/src/rules.rs`, and those are here rather than in a
-# `mnema-walk` case file because the tests that kill them are `mnema-desktop`
-# ones and this harness selects a test by package — the same reason
-# `pr8-exclusions.sh` keeps its own `validate_prefix` case. Most run in
-# `tests/commands.rs` (`--test commands`); the rest in `tree.rs`'s own
-# `mod tests` (`--lib`), for the reason two notes down.
+# Run by CI as well, since fix round 2: the `mutations` job names this file,
+# `pr8-exclusions.sh` and `pr8-subfolders-linux.sh`. Before that every case in
+# PR 8a was local evidence only.
+#
+# Cases mutate `src-tauri/src/tree.rs`, `src-tauri/src/bridge.rs` and
+# `crates/mnema-walk/src/rules.rs`. The `mnema-walk` ones are here rather than
+# in a `mnema-walk` case file because almost all of them are killed by
+# `mnema-desktop` tests and this harness selects a test by package — the same
+# reason `pr8-exclusions.sh` keeps its own `validate_prefix` case. **One is
+# not**: "the walker compiles the same built-in patterns the predicate does"
+# runs `-p mnema-walk --test rules`, because the property it breaks is a
+# disagreement between the predicate and the walk, and the drift guard is the
+# only test that runs both. A case file is not one package here; the `case_`
+# line names its own.
+#
+# Most cases run in `tests/commands.rs` (`--test commands`); the rest in
+# `tree.rs`'s own `mod tests` (`--lib`), for the reason two notes down, or in
+# `mnema-walk`'s `tests/rules.rs`.
 #
 # ⚠️ **No count of the cases here, deliberately.** A number maintained in the
 # header of the file it counts still drifts — fix round 1 found the previous
@@ -104,7 +115,7 @@ case_ "with several rules holding a folder, the outermost is the one named" \
 
 # The built-in list goes invisible: `.git` and `node_modules` render as
 # ordinary folders with a working toggle that changes nothing about the walk,
-# because the built-in layer prunes them regardless (`rules.rs:363-370`).
+# because the built-in layer prunes them regardless (`rules.rs:422-423`).
 case_ "a name on WalkRules::BUILTIN_DIRS must not report as an ordinary folder" \
   src-tauri/src/tree.rs \
   's~        return SubfolderState::BuiltIn;~        return SubfolderState::Open; /* mutant: built-in invisible */~' \
@@ -112,7 +123,7 @@ case_ "a name on WalkRules::BUILTIN_DIRS must not report as an ordinary folder" 
   mnema-desktop 'a_built_in_directory_is_marked_and_an_ordinary_dot_directory_is_not' --test commands
 
 # The same defect one state over: a symlinked directory as an ordinary
-# excludable folder. The walk runs `follow_links(false)` (`rules.rs:309`), so a
+# excludable folder. The walk runs `follow_links(false)` (`rules.rs:364`), so a
 # rule naming it excludes nothing at all.
 case_ "a symlinked directory must not report as an ordinary folder" \
   src-tauri/src/tree.rs \
@@ -229,16 +240,37 @@ case_ "Subfolder crosses the wire in camelCase" \
 # `exclude_subfolder` writes a rule the walk ignores.
 case_ "the built-in question is asked of every component, not the last one" \
   crates/mnema-walk/src/rules.rs \
-  's~            if Self::BUILTIN_DIRS\.contains\(&component\) \{~            if Self::BUILTIN_DIRS.contains(\&component)\n                \&\& parent.join(component) == root.join(relative_path)\n            { /* mutant: last component only */~' \
+  's~            if self\.over\.matched\(&path, true\)\.is_ignore\(\) \{~            if self.over.matched(\&path, true).is_ignore()\n                \&\& path == self.root.join(relative_path)\n            { /* mutant: last component only */~' \
   '{ /* mutant: last component only */' \
   mnema-desktop 'everything_under_a_built_in_directory_is_built_in_too' --test commands
+
+# The drift fix round 2 exists to make impossible, reintroduced from the
+# PREDICATE's side: `builtin_layers` compiles only `BUILTIN_DIRS` while
+# `builder()` still adds both lists. That is exactly the state that shipped a
+# folder named `.DS_Store` as ordinary and excludable.
+case_ "the predicate compiles the same built-in patterns the walker does" \
+  crates/mnema-walk/src/rules.rs \
+  's~        for pattern in Self::builtin_override_patterns\(\) \{\n            let _ = builder\.add\(&pattern\);\n        \}~        /* mutant: predicate reads BUILTIN_DIRS only */\n        for name in Self::BUILTIN_DIRS {\n            let _ = builder.add(\&format!("!**/{name}"));\n        }~' \
+  '/* mutant: predicate reads BUILTIN_DIRS only */' \
+  mnema-desktop 'a_directory_named_like_a_built_in_file_is_built_in_too' --test commands
+
+# The same drift from the WALKER's side: `builder()` stops adding
+# `BUILTIN_FILES` while the predicate still claims it prunes them. Killed by
+# the drift guard rather than by a desktop test, because this half is a
+# disagreement between the predicate and the walk and that guard is the only
+# thing that runs both.
+case_ "the walker compiles the same built-in patterns the predicate does" \
+  crates/mnema-walk/src/rules.rs \
+  's~            for pattern in Self::builtin_override_patterns\(\) \{\n                let _ = over\.add\(&pattern\);\n            \}~            /* mutant: walker reads BUILTIN_DIRS only */\n            for name in Self::BUILTIN_DIRS {\n                let _ = over.add(\&format!("!**/{name}"));\n            }~' \
+  '/* mutant: walker reads BUILTIN_DIRS only */' \
+  mnema-walk 'builtin_layers_agree_with_what_the_walk_enumerates' --test rules
 
 # The anchored layer goes invisible: `target` beside its `Cargo.toml` lists as
 # an ordinary folder, the exclusion succeeds, and the walk had already pruned
 # it.
 case_ "the anchored build-output layer is visible in the listing" \
   crates/mnema-walk/src/rules.rs \
-  's~            let anchored = Self::ANCHORED_DIRS\.iter\(\)\.any\(\|\(dir, markers\)\| \{\n                \*dir == component && markers\.iter\(\)\.any\(\|marker\| parent\.join\(marker\)\.is_file\(\)\)\n            \}\);~            let anchored = false; /* mutant: anchored layer invisible */~' \
+  's~            let anchored = WalkRules::ANCHORED_DIRS\.iter\(\)\.any\(\|\(dir, markers\)\| \{\n                \*dir == component && markers\.iter\(\)\.any\(\|marker\| parent\.join\(marker\)\.is_file\(\)\)\n            \}\);~            let anchored = false; /* mutant: anchored layer invisible */~' \
   'let anchored = false; /* mutant: anchored layer invisible */' \
   mnema-desktop 'an_anchored_build_directory_is_built_in_only_beside_its_marker' --test commands
 
@@ -289,3 +321,37 @@ case_ "an error about the observer is never answered as an absence" \
   's~    if crate::bridge::path_error_is_an_answer\(source\.kind\(\)\) \{~    if true { /* mutant: every error is an absence */~' \
   'if true { /* mutant: every error is an absence */' \
   mnema-desktop 'a_folder_that_cannot_be_read_is_refused_as_unreadable_not_as_absent' --test commands
+
+# The same classifier collapsed the other way: no error is ever an answer, so a
+# folder that genuinely is not there is reported as one this process could not
+# read. Killed by the second half of the same test, which is what makes that
+# test a claim about the SPLIT rather than about one string (fix round 2, N5:
+# it used to end with an `assert_ne!` that could not fail).
+case_ "a folder that is not there is never answered as unreadable" \
+  src-tauri/src/tree.rs \
+  's~    if crate::bridge::path_error_is_an_answer\(source\.kind\(\)\) \{~    if false { /* mutant: no error is ever an answer */~' \
+  'if false { /* mutant: no error is ever an answer */' \
+  mnema-desktop 'a_folder_that_cannot_be_read_is_refused_as_unreadable_not_as_absent' --test commands
+
+# ---------------------------------------------------------------------------
+# The listing's claim, asked of the command that has to honour it
+# ---------------------------------------------------------------------------
+
+# The guard removed: `exclude_subfolder` accepts a path the walk already
+# prunes, writes a row, and `list_exclusions` renders it live. That is the
+# state fix round 2 found — the listing said `builtIn` and the command
+# disagreed.
+case_ "excluding a folder the walk already prunes is refused" \
+  src-tauri/src/bridge.rs \
+  's~    if mnema_walk::WalkRules::builtin_layers\(std::path::Path::new\(&root\)\)\.prunes\(&relative_path\) \{~    if false { /* mutant: the built-in layers do not refuse */~' \
+  'if false { /* mutant: the built-in layers do not refuse */' \
+  mnema-desktop 'excluding_a_folder_the_walk_already_prunes_is_refused_and_stores_nothing' --test commands
+
+# The other direction, which is what stops the guard from being "refuse
+# everything": a folder carrying a pruned NAME with no marker beside it, and an
+# ordinary folder, must both still store.
+case_ "the refusal is about the built-in layers, not about every path" \
+  src-tauri/src/bridge.rs \
+  's~    if mnema_walk::WalkRules::builtin_layers\(std::path::Path::new\(&root\)\)\.prunes\(&relative_path\) \{~    if true { /* mutant: every exclusion is refused */~' \
+  'if true { /* mutant: every exclusion is refused */' \
+  mnema-desktop 'excluding_a_folder_the_walk_already_prunes_is_refused_and_stores_nothing' --test commands

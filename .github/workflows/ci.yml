@@ -376,10 +376,29 @@ jobs:
         run: scripts/stage-sidecar.sh debug
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
-      - name: Run this cycle's mutation cases
+      # ⚠️ **This list is not every case file, and the omission is a decision
+      # rather than an oversight.** `scripts/mutation-staleness.sh` above
+      # sweeps all of them and proves each case still APPLIES; this step proves
+      # a case still KILLS, and only for what is named here. A file left out is
+      # local evidence and nothing more — which is what PR 8a's four files were
+      # until now, and what `source.sh`/`embedding.sh` alone made this step's
+      # old name ("this cycle's mutation cases") untrue two cycles ago.
+      #
+      # ⚠️ **`pr8-exclusions-macos.sh` is deliberately absent and cannot be
+      # added here.** This job is `runs-on: ubuntu-24.04` with no matrix, and
+      # that file's one case names a `#[cfg(target_os = "macos")]` test; off
+      # macOS the harness's baseline `--exact` selects nothing, reads
+      # `0 passed`, and exits 1 for the whole file. Running it needs a macOS
+      # mutations leg, which is a separate decision about runner minutes — see
+      # that file's own header. `pr8-subfolders-linux.sh` is the mirror case
+      # and belongs HERE for the same reason it cannot run on macOS.
+      - name: Run the mutation cases named below
         run: |
           scripts/mutation-check.sh scripts/mutations/source.sh
           scripts/mutation-check.sh scripts/mutations/embedding.sh
+          scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
+          scripts/mutation-check.sh scripts/mutations/pr8-subfolders.sh
+          scripts/mutation-check.sh scripts/mutations/pr8-subfolders-linux.sh
 
   bundle:
     # One architecture per package rather than a universal binary: a universal

@@ -30,6 +30,14 @@
 # silently, and this project's own rule is that a
 # number is a definition. The count that has to be right lives in
 # `pr8-exclusions.sh`'s own header, where the cases are.
+#
+# ⚠️ **Nothing runs this file automatically, and it is the only PR 8a case file
+# that nothing runs** (fix round 2). The `mutations` job is
+# `runs-on: ubuntu-24.04` with no matrix, and a case naming a
+# `#[cfg(target_os = "macos")]` test reads `0 passed` there and exits 1 for the
+# whole file — so it cannot be added to that step without a macOS mutations
+# leg. `scripts/mutation-staleness.sh` still proves this case APPLIES on every
+# run; nothing proves it still KILLS except somebody running it on a Mac.
 
 case_ "existsOnDisk must resolve each component with byte-exact equality, not the filesystem's own case-insensitive lookup" \
   src-tauri/src/bridge.rs \

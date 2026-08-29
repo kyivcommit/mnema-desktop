@@ -538,34 +538,64 @@ fn rules_applied_is_false_at_a_realistic_prefix_count() {
     );
 }
 
-/// `WalkRules::pruned_by_builtin_layers` and the walker must agree, because
-/// they are two readings of the same two constants and the whole point of the
-/// predicate is that a caller can ask what the walk will do without running it.
+/// `WalkRules::builtin_layers` and the walker must agree, because they are two
+/// readings of the same layers and the whole point of the predicate is that a
+/// caller can ask what the walk will do without running it.
 ///
-/// Asserted against a real `enumerate`, not against a list written by hand:
-/// the question is "does this answer match the walk", and only the walk can
-/// say. Both directions, plural on each — five directories the walk prunes
-/// (two by name, one by an ancestor's name, two beside a marker) and three it
-/// keeps, including `house/target` and `Projects/House/build`, which carry a
-/// pruned name with nothing beside them to anchor it.
+/// Asserted against a real `enumerate`, not against a list written by hand: the
+/// question is "does this answer match the walk", and only the walk can say.
+///
+/// 🔴 **The fixture's directories are GENERATED from `BUILTIN_DIRS` and
+/// `BUILTIN_FILES`, not typed out**, and that is fix round 2's correction
+/// rather than tidiness. The previous version listed eight directories chosen
+/// from the same five-row enumeration the predicate was written from, so it
+/// agreed with itself: `BUILTIN_FILES` was in neither, and a folder named
+/// `.DS_Store` — which the walk prunes — was reported excludable for a whole
+/// round. Generated from the constants, every entry of either list gets a
+/// directory whether or not anyone remembered it, and a name added to either
+/// list arrives with its own fixture.
+///
+/// **What generation costs, and what is added back by hand.** A fixture
+/// derived from a constant cannot notice that constant shrinking: delete
+/// `.git` from `BUILTIN_DIRS` and both the fixture and the expectation lose it
+/// together. So three names are pinned by hand below — one dot-directory, one
+/// ordinary directory, one from the FILES list — which is the membership half
+/// the generated half cannot hold.
+///
+/// **What it still cannot see**, and it is the third derivation of this set
+/// saying so: a new layer in `builder()` that is neither an override nor
+/// `ANCHORED_DIRS`. Point 1 of `builtin_layers`' doc covers every future
+/// override for free; nothing here can anticipate a second `filter_entry`.
 ///
 /// `gitignore: false`, deliberately: the predicate does not answer for that
 /// layer and never claims to, so leaving it on would compare against a walk
 /// making a decision the predicate is not party to.
 #[test]
-fn pruned_by_builtin_layers_agrees_with_what_the_walk_enumerates() {
+fn builtin_layers_agree_with_what_the_walk_enumerates() {
     let root = tempfile::tempdir().unwrap();
-    let dirs = [
-        ".git/hooks",
-        "node_modules/pkg",
-        "crate/target/debug",
-        "house/target",
-        "code/build",
-        "code/dist",
-        "notes/2019",
-        "Projects/House/build",
-    ];
-    for dir in dirs {
+
+    // Generated: one directory per built-in name, with a file inside it, so
+    // "the walk reached it" is observable.
+    let mut dirs: Vec<String> = WalkRules::BUILTIN_DIRS
+        .iter()
+        .chain(WalkRules::BUILTIN_FILES)
+        .map(|name| format!("{name}/inner"))
+        .collect();
+    // The anchored layer, both directions, plus ordinary controls. Typed out
+    // because this layer is a name AND a sibling marker, which no list of
+    // names can generate.
+    dirs.extend(
+        [
+            "crate/target/debug",
+            "code/build",
+            "code/dist",
+            "house/target",
+            "Projects/House/build",
+            "notes/2019",
+        ]
+        .map(str::to_string),
+    );
+    for dir in &dirs {
         let path = root.path().join(dir);
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("file.txt"), b"x").unwrap();
@@ -579,38 +609,47 @@ fn pruned_by_builtin_layers_agrees_with_what_the_walk_enumerates() {
         root.path(),
         &WalkRules::new(true, false, Vec::new()).unwrap(),
     );
+    let layers = WalkRules::builtin_layers(root.path());
 
     let mut pruned = Vec::new();
     let mut kept = Vec::new();
-    for dir in dirs {
+    for dir in &dirs {
         let reached = walked
             .found
             .iter()
             .any(|f| f.relative.starts_with(&format!("{dir}/")));
-        let predicted = WalkRules::pruned_by_builtin_layers(root.path(), dir);
+        let predicted = layers.prunes(dir);
         assert_eq!(
             predicted, !reached,
             "the predicate says pruned={predicted} for {dir}, the walk reached it={reached}"
         );
-        if predicted { &mut pruned } else { &mut kept }.push(dir);
+        if predicted { &mut pruned } else { &mut kept }.push(dir.as_str());
     }
 
     // The fixture really did build both sides, rather than agreeing trivially
-    // because one of them is empty.
-    assert_eq!(
-        pruned,
-        vec![
-            ".git/hooks",
-            "node_modules/pkg",
-            "crate/target/debug",
-            "code/build",
-            "code/dist"
-        ]
-    );
+    // because one of them is empty — and the kept side is named in full,
+    // because "everything is pruned" would satisfy the loop above.
     assert_eq!(
         kept,
-        vec!["house/target", "notes/2019", "Projects/House/build"]
+        vec!["house/target", "Projects/House/build", "notes/2019"],
+        "the folders the walk keeps: {kept:?}"
     );
+    assert_eq!(
+        pruned.len(),
+        WalkRules::BUILTIN_DIRS.len() + WalkRules::BUILTIN_FILES.len() + 3,
+        "every built-in name plus crate/target/debug, code/build and code/dist: {pruned:?}"
+    );
+
+    // The membership the generated half cannot hold: three names that must
+    // stay on the lists, one of each shape. Deleting any of them from its
+    // constant would otherwise remove it from the fixture and the expectation
+    // together, and this test would still pass.
+    for name in [".git", "node_modules", ".DS_Store"] {
+        assert!(
+            pruned.contains(&format!("{name}/inner").as_str()),
+            "{name} is no longer pruned by the built-in layers: {pruned:?}"
+        );
+    }
 }
 
 /// `WalkRules::check_prefix` must answer exactly what `WalkRules::new` answers

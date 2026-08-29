@@ -2935,7 +2935,7 @@ fn excluding_dotdot_is_refused_and_stores_nothing() {
 }
 
 /// `validate_prefix` answers `Ok(None)` for the empty string — deliberately
-/// not a `RulesError` (`rules.rs:436-445`) — so the command itself has to
+/// not a `RulesError` (`rules.rs:522-531`) — so the command itself has to
 /// refuse it before `Db::add_path_exclusion` ever runs (review round 1, P2).
 /// Asserted on the ROW COUNT, not merely that a value came back: a mutant
 /// that stores the blank row anyway would still return `Ok(())` from a
@@ -3476,7 +3476,7 @@ fn a_stored_exclusion_that_no_longer_validates_refuses_the_walk() {
 /// anywhere pinned it: a stored prefix either becomes a rule or refuses the
 /// job — except the empty string, which does neither. `validate_prefix`
 /// answers `Ok(None)` for it, deliberately not a `RulesError`
-/// (`rules.rs:436-445`), so `WalkRules::new` returns `Ok` with that entry
+/// (`rules.rs:522-531`), so `WalkRules::new` returns `Ok` with that entry
 /// simply dropped and the walk runs with the rules it does have.
 ///
 /// That is the right behaviour and this test does not argue with it: a blank
@@ -6935,7 +6935,7 @@ fn subfolder_rows(listing: &Value) -> Vec<(String, String, String)> {
 /// **Five folders created in an order that is not their sorted order**, not
 /// the brief's minimum of two: with two entries a listing that never sorts
 /// has an even chance of looking sorted, and the claim here is about an order
-/// the window relies on being the same on every machine (`rules.rs:308` makes
+/// the window relies on being the same on every machine (`rules.rs:363` makes
 /// the same choice for the walk). The file is the other direction — a
 /// listing that returned every directory entry would pass the order
 /// assertion and put `c.txt` in a folder tree.
@@ -7311,7 +7311,7 @@ fn listing_an_absolute_path_is_refused() {
 /// Both, because they fail for different reasons and a check that caught only
 /// the first would look right: the outside one escapes the root, and the
 /// inside one does not escape anything — it is refused because the walk runs
-/// `follow_links(false)` (`rules.rs:309`), so nothing under that name is ever
+/// `follow_links(false)` (`rules.rs:364`), so nothing under that name is ever
 /// enumerated and every exclusion rule this listing would offer under it
 /// excludes nothing.
 ///
@@ -7429,7 +7429,7 @@ fn a_directory_whose_name_is_not_utf8_is_counted_and_never_named_lossily() {
 
 /// A symlink to a directory inside the root is answered as its own state, so
 /// no window can draw it as an ordinary folder with a working exclusion
-/// toggle: the walk runs `follow_links(false)` (`rules.rs:309`), so nothing
+/// toggle: the walk runs `follow_links(false)` (`rules.rs:364`), so nothing
 /// under it is ever indexed and a rule naming it excludes nothing.
 ///
 /// Three directions, and the fixture holds more objects than the listing
@@ -7617,7 +7617,7 @@ fn a_wrong_case_relative_path_is_refused() {
 // ---------------------------------------------------------------------------
 
 /// Row 1 of the enumeration, the **ancestry** half: `BUILTIN_DIRS` turns into
-/// `!**/{dir}` overrides (`rules.rs:363-370`), which prune the whole subtree —
+/// `!**/{dir}` overrides (`rules.rs:422-423`), which prune the whole subtree —
 /// so everything under `.git` is pruned too, and offering it as an ordinary
 /// excludable folder is a control that does nothing.
 ///
@@ -7667,7 +7667,7 @@ fn everything_under_a_built_in_directory_is_built_in_too() {
 
 /// Row 2 of the enumeration: `ANCHORED_DIRS` prunes `target`, `build` and
 /// `dist` — but **only** when one of that name's marker files sits in its own
-/// parent (`rules.rs:335-358`), because `build` is also an ordinary English
+/// parent (`rules.rs:387-414`), because `build` is also an ordinary English
 /// word and `Projects/House/build/permits.pdf` is a document.
 ///
 /// Both directions of that condition, which is the whole of this layer: the
@@ -7914,11 +7914,16 @@ fn a_relative_path_that_cannot_be_a_rule_is_refused_with_the_validators_sentence
 /// nothing else: forcing the classifier to answer `true` for every error left
 /// every test in the package green.
 ///
-/// Both directions in one test, because a refusal is a refusal and only the
-/// sentence tells them apart: the `could not be read` sentence must be there,
-/// and the `there is no folder` sentence must not — under D29 the second is
-/// what task 5's UI turns into an offer to remove a rule as stale, for a
-/// folder that is merely on a volume that went away.
+/// **Both directions, and each from its own condition** (fix round 2, N5: the
+/// closing `assert_ne!` this test used to end with could not fail, because the
+/// `assert_eq!` above it had already fixed the value — a locator dressed as an
+/// assertion). The same command is asked twice in one fixture: once about a
+/// folder that is there and cannot be read, once about a folder that is not
+/// there, and each must produce its own sentence. A classifier collapsed to
+/// either answer makes one of the two fail, which is the property; under D29
+/// the expensive collapse is the second sentence for the first condition,
+/// because that is what task 5's UI turns into an offer to remove a rule as
+/// stale, for a folder that is merely on a volume that went away.
 #[cfg(unix)]
 #[test]
 fn a_folder_that_cannot_be_read_is_refused_as_unreadable_not_as_absent() {
@@ -7947,19 +7952,200 @@ fn a_folder_that_cannot_be_read_is_refused_as_unreadable_not_as_absent() {
     // Drop runs — recursive removal needs the directory back.
     std::fs::set_permissions(&locked, original).expect("restoring locked's permissions");
 
-    let sentence = rejected.expect_err("an unreadable folder must be refused");
     assert_eq!(
-        sentence,
+        rejected.expect_err("an unreadable folder must be refused"),
         json!(format!(
             "the folder \"locked\" in watched folder {root} could not be read: Permission denied \
              (os error 13)"
         )),
+        "a folder this process cannot read is the observer's condition, not an absence"
     );
-    assert_ne!(
-        sentence,
+
+    // The other condition, through the same command and the same classifier:
+    // a folder that really is not there still gets the absence sentence. This
+    // is what makes the assertion above a claim about the SPLIT rather than
+    // about one string — a classifier forced to either answer fails one of the
+    // two, and neither assertion can be satisfied by the other's value.
+    assert_eq!(
+        call(
+            &webview,
+            "list_subfolders",
+            json!({ "rootId": root, "relativePath": "absent" }),
+        )
+        .expect_err("a folder that is not there must be refused"),
         json!(format!(
-            "there is no folder \"locked\" in watched folder {root}"
+            "there is no folder \"absent\" in watched folder {root}"
         )),
-        "an error about this process must never be answered as an absence"
+    );
+}
+
+/// Row 1 of the enumeration, the half fix round 1's derivation missed:
+/// `BUILTIN_FILES` compiles to `!**/.DS_Store`, which carries no trailing `/`
+/// and therefore prunes a **directory** of that name at any depth. Somebody
+/// really can create a folder called `.DS_Store`, and the walk will not enter
+/// it.
+///
+/// It is here as its own test rather than folded into the built-in one because
+/// the defect it pins was not "a name missing from a list" but a *reading of
+/// gitignore semantics* — the old predicate enumerated `BUILTIN_DIRS` by hand
+/// and its doc argued that a files list could not matter. What replaced it
+/// asks the compiled matcher, so this test is the end-to-end evidence that the
+/// compiled answer and the walk agree where the hand-read one did not.
+///
+/// Both directions and both depths: the folder itself, a folder under it, and
+/// an ordinary sibling that must stay `open`.
+#[test]
+fn a_directory_named_like_a_built_in_file_is_built_in_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join(".DS_Store/inner")).expect("creating .DS_Store");
+    std::fs::create_dir_all(fixture.path().join("notes/2019")).expect("creating notes");
+    let root = root_for(&webview, fixture.path());
+
+    let top = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+    assert_eq!(
+        subfolder_rows(&top),
+        vec![
+            (
+                ".DS_Store".to_string(),
+                ".DS_Store".to_string(),
+                "builtIn".to_string()
+            ),
+            ("notes".to_string(), "notes".to_string(), "open".to_string()),
+        ],
+        "a directory named like a BUILTIN_FILES entry is pruned by the walk: {top}"
+    );
+
+    let inside = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": ".DS_Store" }),
+    )
+    .expect("listing .DS_Store was rejected");
+    assert_eq!(
+        subfolder_rows(&inside),
+        vec![(
+            "inner".to_string(),
+            ".DS_Store/inner".to_string(),
+            "builtIn".to_string()
+        )],
+        "the subtree goes with it: {inside}"
+    );
+}
+
+/// 🔴 **The listing's `builtIn` claim, asked of the command it is a claim
+/// about.** Fix round 1 wrote the principle — *the listing's claim is a claim
+/// about the other command, so the test asks that command* — and applied it to
+/// exactly one row, the one where the two already agreed. Measured before this
+/// test existed: `exclude_subfolder(".git/hooks")` answered `Ok`, wrote a row,
+/// and `list_exclusions` rendered it `existsOnDisk: true` — protection that
+/// protects nothing, persisted to the database.
+///
+/// **One case per way a row can be `builtIn`**, so no single mechanism
+/// satisfies the test: an override name, an override name as an *ancestor*, a
+/// `BUILTIN_FILES` name as a directory, an anchored name beside its marker, and
+/// an anchored name's *descendant*.
+///
+/// **And the other direction, which is the half that makes this about the
+/// built-in layers rather than about refusing things**: the two folders the
+/// listing reports `open` — `house/target`, which carries a pruned NAME with no
+/// marker beside it, and `notes/2019` — are accepted and stored. A command that
+/// refused everything would satisfy every assertion above.
+///
+/// `list_exclusions` is read at the end rather than trusted: the refusals must
+/// leave nothing behind, and the acceptances must leave exactly themselves.
+#[test]
+fn excluding_a_folder_the_walk_already_prunes_is_refused_and_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for path in [
+        ".git/hooks",
+        "node_modules",
+        ".DS_Store/inner",
+        "crate/target/debug",
+        "house/target",
+        "notes/2019",
+    ] {
+        std::fs::create_dir_all(fixture.path().join(path)).expect("creating a fixture folder");
+    }
+    std::fs::write(fixture.path().join("crate/Cargo.toml"), "[package]")
+        .expect("writing crate/Cargo.toml");
+    let root = root_for(&webview, fixture.path());
+
+    for pruned in [
+        "node_modules",
+        ".git/hooks",
+        ".DS_Store",
+        ".DS_Store/inner",
+        "crate/target",
+        "crate/target/debug",
+    ] {
+        // The listing's claim about this row.
+        let parent = pruned.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+        let name = pruned.rsplit('/').next().expect("a final component");
+        let listing = call(
+            &webview,
+            "list_subfolders",
+            json!({ "rootId": root, "relativePath": parent }),
+        )
+        .unwrap_or_else(|e| panic!("listing {parent:?} was rejected: {e}"));
+        let row = subfolder_rows(&listing)
+            .into_iter()
+            .find(|(entry, _, _)| entry == name)
+            .unwrap_or_else(|| panic!("{pruned} missing from {listing}"));
+        assert_eq!(
+            row.2, "builtIn",
+            "the listing does not call {pruned} builtIn"
+        );
+
+        // The same claim, asked of the command that has to honour it.
+        let refused = match call(
+            &webview,
+            "exclude_subfolder",
+            json!({ "rootId": root, "relativePath": pruned }),
+        ) {
+            Ok(answered) => panic!("excluding {pruned} must be refused, not answered {answered}"),
+            Err(refused) => refused,
+        };
+        assert_eq!(
+            refused,
+            json!(format!(
+                "{pruned:?} in watched folder {root} is already excluded by the built-in rules, \
+                 so a rule naming it would change nothing"
+            )),
+            "the refusal for {pruned} has to be a sentence a person can read"
+        );
+    }
+
+    // The other direction: a pruned NAME with no marker beside it, and an
+    // ordinary folder. Both are `open` and both must store.
+    for open in ["house/target", "notes/2019"] {
+        call(
+            &webview,
+            "exclude_subfolder",
+            json!({ "rootId": root, "relativePath": open }),
+        )
+        .unwrap_or_else(|e| panic!("excluding {open} must succeed: {e}"));
+    }
+
+    assert_eq!(
+        call(&webview, "list_exclusions", json!({ "rootId": root }))
+            .expect("list_exclusions was rejected"),
+        json!([
+            { "prefix": "house/target", "existsOnDisk": true },
+            { "prefix": "notes/2019", "existsOnDisk": true }
+        ]),
+        "the refusals must leave nothing stored and the acceptances exactly themselves"
     );
 }

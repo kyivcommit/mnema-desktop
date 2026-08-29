@@ -75,7 +75,7 @@ pub enum Error {
     InvalidExclusionRule(#[from] mnema_walk::RulesError),
     /// `exclude_subfolder` was handed the empty string. `validate_prefix`
     /// answers `Ok(None)` for it — deliberately not a `RulesError`, since a
-    /// blank row is not a malformed one (`rules.rs:436-445`) — but storing it
+    /// blank row is not a malformed one (`rules.rs:522-531`) — but storing it
     /// would add a rule that excludes nothing and sits in the list looking
     /// like protection (review round 1, P2). Kept apart from
     /// [`Error::InvalidExclusionRule`], which is what `WalkRules::new` itself
@@ -108,7 +108,7 @@ pub enum Error {
     ///
     /// **A symlink INSIDE the root is refused too, and that is not
     /// over-reach.** The walk runs `follow_links(false)`
-    /// (`crates/mnema-walk/src/rules.rs:309`), so nothing under a symlinked
+    /// (`crates/mnema-walk/src/rules.rs:364`), so nothing under a symlinked
     /// name is ever enumerated or indexed; a listing that answered through one
     /// would offer exclusion controls for paths the walk never visits.
     #[error(
@@ -128,6 +128,24 @@ pub enum Error {
     /// process's ability to look.
     #[error("there is no folder {relative_path:?} in watched folder {root_id}")]
     NoSuchSubfolder { root_id: i64, relative_path: String },
+    /// `exclude_subfolder` was handed a path one of the walk's unconditional
+    /// layers already prunes — `.git` and everything under it, a `target`
+    /// beside its `Cargo.toml`, a folder somebody named `.DS_Store`.
+    ///
+    /// **The refusal that makes `list_subfolders`' `builtIn` state true.**
+    /// That state promises the walk prunes the folder and there is nothing to
+    /// toggle; without this, the toggle existed anyway one command over, and
+    /// the row it wrote came back through `list_exclusions` as a rule with
+    /// `existsOnDisk: true` — protection that protects nothing, persisted.
+    /// Decided by `WalkRules::builtin_layers`, the same call the listing makes.
+    ///
+    /// It carries the path so the sentence can name the folder the person
+    /// pressed, and nothing else.
+    #[error(
+        "{relative_path:?} in watched folder {root_id} is already excluded by the built-in \
+         rules, so a rule naming it would change nothing"
+    )]
+    AlreadyPrunedByBuiltIn { root_id: i64, relative_path: String },
     /// `list_subfolders` could not read a folder that is there: a permission
     /// this process does not have, a share that dropped, an entry that failed
     /// mid-listing.

@@ -26,15 +26,19 @@
 # `*** STILL GREEN ***`, because on macOS no IPC test can produce a non-zero
 # count and on Linux the test that would catch it was named by no case. This is
 # the seam limit `bridge::entry_named`'s doc records in the same words — the
-# function is pinned, its call site is not — closed here rather than disclosed,
-# because unlike that one it IS reachable, on one leg.
+# function is pinned, its call site is not — **named here rather than only
+# disclosed, and measured on the Linux leg rather than on the machine that
+# wrote it** (fix round 2, N3: the sentence that stood here said "closed", and
+# nothing had ever observed the case kill).
 #
-# ⚠️ **CI does not run this file, and does not run its sibling either.** The
-# `mutations` job (`.github/workflows/ci.yml:379-382`) runs exactly
-# `source.sh` and `embedding.sh`; every other case file is swept only by
-# `scripts/mutation-staleness.sh`, which proves a case still APPLIES and never
-# that it still kills. Whoever adds this cycle's files to that list should add
-# both — this one is the leg that can run it, since the job is `ubuntu-24.04`.
+# ⚠️ **CI runs this file, and that is the whole point of it.** The `mutations`
+# job is `runs-on: ubuntu-24.04`, so this is the one leg where the case can
+# execute at all; fix round 2 named it there, together with `pr8-exclusions.sh`
+# and `pr8-subfolders.sh`. Its macOS-only counterpart `pr8-exclusions-macos.sh`
+# still cannot be: there is no macOS mutations leg, and adding one is a
+# decision about runner minutes rather than about this file. Until then that
+# one file remains local evidence — `mutation-staleness.sh` proves its case
+# still applies, and nothing proves it still kills.
 
 # The count is computed correctly and then thrown away on the way out. The
 # folder answers with the entries it could name and nothing saying that others
@@ -42,6 +46,6 @@
 # field was added for.
 case_ "the unnameable count the pure function computed is the one the command answers with" \
   src-tauri/src/tree.rs \
-  's~    Ok\(read_subfolders\(\n        &root_canonical,\n        &entries,\n        &relative_path,\n        &prefixes,\n    \)\)~    let mut listing = read_subfolders(\&root_canonical, \&entries, \&relative_path, \&prefixes);\n    listing.unnameable = 0; /* mutant: the count is dropped on the way to the wire */\n    Ok(listing)~' \
+  's~    Ok\(read_subfolders\(\n        &layers,\n        &entries,\n        &relative_path,\n        &prefixes,\n    \)\)~    let mut listing = read_subfolders(\&layers, \&entries, \&relative_path, \&prefixes);\n    listing.unnameable = 0; /* mutant: the count is dropped on the way to the wire */\n    Ok(listing)~' \
   '/* mutant: the count is dropped on the way to the wire */' \
   mnema-desktop 'a_directory_whose_name_is_not_utf8_is_counted_and_never_named_lossily' --test commands

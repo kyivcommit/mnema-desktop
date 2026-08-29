@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::state::AppState;
 use mnema_core::Segment;
 use mnema_index::{Db, PathOccupant};
-use mnema_walk::WalkRules;
+use mnema_walk::{BuiltinLayers, WalkRules};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::State;
@@ -634,7 +634,7 @@ pub struct Subfolder {
     /// What to send back to `exclude_subfolder` — the path relative to the
     /// watched root, built by joining the caller's own `relative_path` with
     /// [`Subfolder::name`]. Never normalised: a prefix is a path the user
-    /// chose from disk, not a pattern (`rules.rs:395-412`).
+    /// chose from disk, not a pattern (`rules.rs:481-498`).
     pub relative_path: String,
     pub state: SubfolderState,
 }
@@ -651,8 +651,8 @@ pub struct Subfolder {
 ///
 /// | # | the layer | asked by | state |
 /// |---|---|---|---|
-/// | 1 | `BUILTIN_DIRS` names the folder **or any ancestor** — the override is `!**/{dir}`, which prunes the subtree | `WalkRules::pruned_by_builtin_layers` | `BuiltIn` |
-/// | 2 | `ANCHORED_DIRS` names the folder **or any ancestor** *and* a marker file sits in that one's own parent | the same call | `BuiltIn` |
+/// | 1 | **any override-based built-in layer** prunes the folder **or an ancestor** — today `BUILTIN_DIRS` and `BUILTIN_FILES`, and tomorrow whatever else `builder()` adds through `OverrideBuilder` | `BuiltinLayers::prunes` | `BuiltIn` |
+/// | 2 | `ANCHORED_DIRS` names the folder **or an ancestor** *and* a marker file sits in that one's own parent — the one built-in layer that is not an override | the same call | `BuiltIn` |
 /// | 3 | `follow_links(false)` — the folder is a symlink | `Entry::is_symlink` | `Symlink` |
 /// | 4 | `validate_prefix` refuses the path as a rule — whitespace at a component's edge, a backslash, a control character, `C:` or `~` as the first component, or a prefix too large to compile alone | `WalkRules::check_prefix` | `UnusableName` |
 /// | 5 | the in-tree `.gitignore` stack | **nothing — see below** | `Open` |
@@ -663,6 +663,26 @@ pub struct Subfolder {
 /// through, and a copy of it in this file would be the fourth round waiting to
 /// happen. Row 3 is the one this listing can see for itself, because the link
 /// is the entry.
+///
+/// 🔴 **Row 1 is a shape, not a list, and fix round 2 is why.** It read
+/// "`BUILTIN_DIRS` names the folder or an ancestor" for a round, and the
+/// predicate behind it enumerated that constant by hand — while `builder()`
+/// also compiles `BUILTIN_FILES` into `!**/.DS_Store`, which carries no
+/// trailing `/` and prunes a *directory* of that name at any depth. A folder
+/// called `.DS_Store` was therefore offered as ordinary and excludable, and
+/// the predicate's own doc argued that could not happen. `BuiltinLayers` now
+/// asks the compiled `Override` — built from the same function `builder()`
+/// adds from — so no reading of gitignore semantics happens on this side and a
+/// future override layer is covered without an edit here. Row 2 stays a named
+/// layer because `filter_entry` is not a glob and no matcher can answer it.
+///
+/// 🔴 **Rows 1 and 2 are a claim about `exclude_subfolder`, and that command
+/// now honours it.** `BuiltIn` says the walk prunes the folder and there is
+/// nothing to toggle; until fix round 2 the toggle worked anyway one command
+/// over, wrote a row, and `list_exclusions` rendered it live. `bridge.rs`
+/// refuses those paths through the same `builtin_layers` call this file makes.
+/// Row 4 was already cross-checked that way — `exclude_subfolder` runs the
+/// same validator — which is why it was the one row where the two agreed.
 ///
 /// ⚠️ **Row 5 is deliberately not closable here, and no claim above covers
 /// it.** Deciding the in-tree `.gitignore` stack means compiling the same
@@ -678,11 +698,21 @@ pub struct Subfolder {
 /// rule holds it" and "you may add one".
 ///
 /// 1. `BuiltIn` — rows 1 and 2 above. Pruned whatever any user rule says
-///    (`rules.rs:363-370` for the overrides, `:255-278` for the anchored
-///    layer), so an `Excluded` badge with a working "include" toggle would
-///    announce one thing and do another.
+///    (`builder()` adds the overrides at `rules.rs:422-423`, `builtin_layers`
+///    compiles the same patterns at `:336-339`, and the anchored layer is
+///    `filter_entry` at `:387-414`), so an
+///    `Excluded` badge with a working "include" toggle would announce one
+///    thing and do another.
+///
+///    ⚠️ A symlink named like an anchored directory, beside that name's
+///    marker, reports `BuiltIn` rather than `Symlink` — `BuiltinLayers` does
+///    not carry `filter_entry`'s own `is_dir()` guard, so the two sides reach
+///    the same outcome by different routes. The row is true either way (the
+///    walk does not descend and nothing under it is indexed) and both states
+///    are non-toggleable, so the precedence is left as it is rather than
+///    reordered for a case where both answers are correct.
 /// 2. `Symlink` — row 3. The walk runs `follow_links(false)`
-///    (`rules.rs:309`), so nothing under this name is ever enumerated.
+///    (`rules.rs:364`), so nothing under this name is ever enumerated.
 /// 3. `ExcludedByAncestor` — a stored rule names an ancestor. Checked
 ///    **before** `Excluded`, so a folder that has both its own rule and an
 ///    excluded ancestor names the ancestor: removing its own rule would leave
@@ -692,8 +722,12 @@ pub struct Subfolder {
 ///    it. The one state whose control does what it says.
 /// 5. `UnusableName` — row 4. Below the two rule states deliberately: a rule
 ///    that already exists is a fact worth reporting, and its removal works.
-///    (Reaching both at once needs a row written straight into the database,
-///    since `exclude_subfolder` runs the same validator.)
+///    (Reaching both at once takes a rule this build's `exclude_subfolder`
+///    would not write, since it runs the same validator — but that is not the
+///    same as impossible: a prefix stored **by an older build whose whitelist
+///    was narrower** reaches it, which is the path `Error::InvalidExclusionRule`
+///    already names for the walk, and a row written straight into the database
+///    reaches it too.)
 /// 6. `Open` — none of the above.
 ///
 /// ⚠️ `rename_all_fields`, for the reason [`SourceAround`] measured: on an
@@ -739,7 +773,7 @@ pub enum SubfolderState {
     BuiltIn,
     /// A symlink to a directory. Listed, so the folder does not look emptier
     /// than it is, but never as an ordinary excludable folder: the walk runs
-    /// `follow_links(false)` (`rules.rs:309`), so nothing under it is indexed
+    /// `follow_links(false)` (`rules.rs:364`), so nothing under it is indexed
     /// and an exclusion rule naming it would exclude nothing.
     Symlink,
     /// The folder **is** walked, and its path is not one an exclusion rule can
@@ -765,7 +799,7 @@ pub enum SubfolderState {
 /// [`SubfolderState::Excluded`], one state down.
 ///
 /// No normalisation of either side, deliberately: a prefix is a path the user
-/// chose from disk (`rules.rs:395-412`), and the walk's own matcher compares
+/// chose from disk (`rules.rs:481-498`), and the walk's own matcher compares
 /// it byte for byte.
 fn is_ancestor_of(prefix: &str, path: &str) -> bool {
     path.len() > prefix.len() && path.as_bytes()[prefix.len()] == b'/' && path.starts_with(prefix)
@@ -775,18 +809,18 @@ fn is_ancestor_of(prefix: &str, path: &str) -> bool {
 /// [`SubfolderState`]'s own, and the argument for each step is there rather
 /// than repeated here.
 ///
-/// `root` is the watched folder's canonical path, needed by the anchored layer
-/// alone: `ANCHORED_DIRS` prunes a name only when a marker file sits in that
-/// directory's own parent, which is a question about the disk and not about
-/// the path. It is the caller's `root_canonical`, so the marker is looked up
-/// under the same real path the listing was read from.
+/// `layers` is compiled once per listing rather than per row — it holds a
+/// globset — and it carries the watched folder's canonical path, which the
+/// anchored layer needs: `ANCHORED_DIRS` prunes a name only when a marker file
+/// sits in that directory's own parent, a question about the disk rather than
+/// about the path.
 fn subfolder_state(
-    root: &Path,
+    layers: &BuiltinLayers,
     relative_path: &str,
     is_symlink: bool,
     prefixes: &[String],
 ) -> SubfolderState {
-    if WalkRules::pruned_by_builtin_layers(root, relative_path) {
+    if layers.prunes(relative_path) {
         return SubfolderState::BuiltIn;
     }
     if is_symlink {
@@ -975,7 +1009,7 @@ fn directory_entries(
 /// The directories among `entries`, sorted by name, plus how many of them had
 /// no name this wire type can carry.
 ///
-/// Sorted by name for the reason the walk sorts (`rules.rs:308`): `read_dir`
+/// Sorted by name for the reason the walk sorts (`rules.rs:363`): `read_dir`
 /// order is the filesystem's, and a window that redraws in a different order on
 /// another machine is a window nobody can point at over the phone.
 ///
@@ -983,7 +1017,7 @@ fn directory_entries(
 /// have been listed: an unnameable *file* is no more missing from this answer
 /// than a nameable one.
 fn read_subfolders(
-    root: &Path,
+    layers: &BuiltinLayers,
     entries: &[Entry],
     parent: &str,
     prefixes: &[String],
@@ -1007,7 +1041,7 @@ fn read_subfolders(
         } else {
             format!("{parent}/{name}")
         };
-        let state = subfolder_state(root, &relative_path, entry.is_symlink, prefixes);
+        let state = subfolder_state(layers, &relative_path, entry.is_symlink, prefixes);
         listed.push(Subfolder {
             name: name.to_string(),
             relative_path,
@@ -1076,8 +1110,11 @@ pub fn list_subfolders(
         relative_path: relative_path.clone(),
         source,
     })?;
+    // Compiled once for the whole listing, not once a row: it holds a globset,
+    // and `subfolder_state` asks it for every entry.
+    let layers = WalkRules::builtin_layers(&root_canonical);
     Ok(read_subfolders(
-        &root_canonical,
+        &layers,
         &entries,
         &relative_path,
         &prefixes,
@@ -1127,9 +1164,10 @@ mod tests {
         ];
 
         // A root that is not there: nothing in this test reaches the disk —
-        // `pruned_by_builtin_layers`' anchored arm is the only caller that
-        // would, and none of these names is on either list.
-        let listing = read_subfolders(Path::new("/nonexistent-root"), &entries, "", &[]);
+        // the anchored arm of `BuiltinLayers::prunes` is the only part that
+        // would, and none of these names is `target`, `build` or `dist`.
+        let layers = WalkRules::builtin_layers(Path::new("/nonexistent-root"));
+        let listing = read_subfolders(&layers, &entries, "", &[]);
 
         let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
@@ -1192,7 +1230,8 @@ mod tests {
             entry(b"kilo", true, false),
         ];
 
-        let listing = read_subfolders(Path::new("/nonexistent-root"), &entries, "", &[]);
+        let layers = WalkRules::builtin_layers(Path::new("/nonexistent-root"));
+        let listing = read_subfolders(&layers, &entries, "", &[]);
 
         let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(

@@ -1,5 +1,5 @@
 use ignore::WalkBuilder;
-use ignore::overrides::OverrideBuilder;
+use ignore::overrides::{Override, OverrideBuilder};
 use std::path::Path;
 use thiserror::Error;
 
@@ -177,11 +177,31 @@ impl WalkRules {
         ),
     ];
 
-    /// A file, not a directory. `BUILTIN_DIRS` is documented as directories
-    /// and this one is not, so it gets its own list rather than pretending
-    /// to be a thirteenth entry in that one (review fix round 1, Minor
-    /// finding).
-    const BUILTIN_FILES: &'static [&'static str] = &[".DS_Store"];
+    /// Names that are a file in every case anyone has met — kept apart from
+    /// `BUILTIN_DIRS`, which is documented as directories, rather than
+    /// pretending to be a thirteenth entry in that one (review fix round 1,
+    /// Minor finding).
+    ///
+    /// ⚠️ **The pattern it compiles to prunes a DIRECTORY of that name as
+    /// well**, and a doc comment here once said the opposite. `!**/.DS_Store`
+    /// carries no trailing `/`, and gitignore semantics match a directory of
+    /// that name at any depth — measured against this repository's pinned
+    /// `ignore 0.4.31` (`Cargo.lock`; a first probe used `^0.4.31`, which
+    /// resolved to 0.4.33, and was re-run pinned):
+    /// `matched(".DS_Store", is_dir = true).is_ignore()` is `true`, as is
+    /// `sub/.DS_Store`, while `notes` and `.git/hooks` are `false`. The
+    /// product's own evidence is `a_directory_named_like_a_built_in_file_is_built_in_too`
+    /// (`src-tauri/tests/commands.rs`) and the drift guard, both of which run
+    /// against the pinned version. So a folder somebody really named
+    /// `.DS_Store` is pruned with its whole subtree, and anything asking
+    /// "what does the walk prune" has to include this list. That is the
+    /// defect [`WalkRules::builtin_layers`] exists to make unrepeatable: it
+    /// asks the compiled matcher rather than either list.
+    ///
+    /// `pub` so a test can generate a fixture from it. A guard whose fixture
+    /// is written from the same enumeration it checks agrees with itself —
+    /// which is exactly how this list stayed missing for a round.
+    pub const BUILTIN_FILES: &'static [&'static str] = &[".DS_Store"];
 
     /// Fails when a user prefix is not, by construction, a well-formed
     /// relative path — see `validate_prefix` and `RulesError`. Nothing is
@@ -232,66 +252,106 @@ impl WalkRules {
         validate_prefix(prefix).map(|_| ())
     }
 
-    /// Whether one of the walk's **unconditional** layers prunes the directory
-    /// at `relative_path` under `root`, or an ancestor of it — so no user
-    /// exclusion rule can change whether anything under it is indexed.
+    /// The override patterns the built-in layers contribute, in the order
+    /// `builder()` adds them.
+    ///
+    /// **One function, two readers**, and that is the whole reason it exists:
+    /// `builder()` turns these into the walk's `Override`, and
+    /// [`WalkRules::builtin_layers`] turns the same strings into the matcher
+    /// that answers what the walk will prune. Before fix round 2 those were
+    /// two loops over two constants in two places, and they had already
+    /// drifted — one of them read `BUILTIN_FILES` and the other did not.
+    ///
+    /// Matching the directory itself prunes its subtree, so a trailing `/**`
+    /// form is redundant (review fix round 1, Minor finding) and, at the
+    /// scale user prefixes can reach, is what pushes the combined pattern set
+    /// past the engine's size limit (the third path in round 1's Critical
+    /// finding).
+    fn builtin_override_patterns() -> Vec<String> {
+        Self::BUILTIN_DIRS
+            .iter()
+            .chain(Self::BUILTIN_FILES)
+            .map(|name| format!("!**/{name}"))
+            .collect()
+    }
+
+    /// The walk's **unconditional** layers, compiled once for one watched
+    /// root, so a caller can ask what the walk will prune without running it.
     ///
     /// Written for one caller and one question: the desktop shell's folder
     /// listing has to know, per row, whether offering "exclude this" would be
-    /// offering a control that does nothing. Answering it from the shell would
-    /// mean a second reading of these constants, and the two would drift.
+    /// offering a control that does nothing, and its `exclude_subfolder` has
+    /// to refuse the same paths the listing marks. Answering it in the shell
+    /// would mean a second reading of these layers, and the two would drift.
     ///
-    /// **The two layers it covers, re-derived from `builder()` rather than
-    /// listed from memory**, and each is read from the same constant
-    /// `builder()` reads:
+    /// 🔴 **It asks the compiled `Override` — the same patterns `builder()`
+    /// adds, from the same function — rather than reading the constants.**
+    /// That is fix round 2's correction and it is not a refactor: the previous
+    /// version enumerated the lists by hand, read `BUILTIN_DIRS`, and argued
+    /// in its own doc that `BUILTIN_FILES` could not matter because those
+    /// "name files, not directories". `!**/.DS_Store` carries no trailing `/`
+    /// and prunes a *directory* of that name at any depth, so a folder called
+    /// `.DS_Store` was offered as ordinary and excludable. Asking globset
+    /// removes the whole class: no reading of gitignore semantics is done
+    /// here, and a name added to either list — or a third list added to
+    /// [`WalkRules::builtin_override_patterns`] — is covered without touching
+    /// this function.
     ///
-    /// 1. [`WalkRules::BUILTIN_DIRS`], turned into `!**/{dir}` overrides. The
-    ///    pattern matches the directory itself, which prunes its whole
-    ///    subtree — so the question is asked of **every component**, not of
-    ///    the last one. `.git/hooks` is pruned because `.git` is.
-    /// 2. `ANCHORED_DIRS`, checked by `filter_entry`: pruned only when one of
-    ///    that name's marker files sits **in its own parent directory**. The
-    ///    marker is looked up here the same way `filter_entry` looks it up,
-    ///    `parent.join(marker).is_file()`, against the parent this walk of the
-    ///    components has reached. `filter_entry` prunes the entry, which
-    ///    prunes its subtree, so this too is asked of every component.
+    /// **What it covers, and it is now two things rather than a list:**
+    ///
+    /// 1. **Every override-based built-in layer**, asked from the compiled
+    ///    matcher, per component — the patterns match the directory itself
+    ///    and the walker then never descends, so `.git/hooks` is pruned
+    ///    because `.git` is, and the question has to be asked of each
+    ///    component rather than of the whole path.
+    /// 2. **`ANCHORED_DIRS`**, which is the one built-in layer that is *not*
+    ///    an override: `filter_entry` prunes those names only when one of the
+    ///    marker files sits in the directory's own parent, which no glob can
+    ///    express. Looked up here the same way `filter_entry` looks it up,
+    ///    `parent.join(marker).is_file()`.
     ///
     /// **What it deliberately does NOT cover, and must never be read as
     /// covering:**
     ///
     /// - **The in-tree `.gitignore` stack** (`git_ignore`/`git_exclude`, both
     ///   gated on `gitignore`). Deciding it means compiling the same ignore
-    ///   stack the walk builds, per directory, from files inside the tree.
-    ///   A folder this function answers `false` for may still be skipped by a
-    ///   `.gitignore`; `false` means "no unconditional layer prunes it", never
-    ///   "it will be indexed".
+    ///   stack the walk builds, per directory, from files inside the tree. A
+    ///   folder this answers `false` for may still be skipped by a
+    ///   `.gitignore`; `false` means "no unconditional layer prunes it",
+    ///   never "it will be indexed".
     /// - **The user's own exclusion rules.** Those are the caller's to report,
     ///   and they are the ones whose control does something.
-    /// - **`BUILTIN_FILES`.** Those name files, not directories, so no
-    ///   directory listing can meet one.
     /// - **Symlinks.** `follow_links(false)` is a property of the walker, not
     ///   of a path, and the caller that needs it can see the link itself.
     ///
+    /// ⚠️ **The one way this can go stale again**, written down because fix
+    /// round 2 is the third derivation of this set and each of the first two
+    /// missed a layer: a NEW layer added to `builder()` that is neither an
+    /// override nor `ANCHORED_DIRS` — a second `filter_entry`, say. Point 1
+    /// covers every future override for free; point 2 is a hand-written
+    /// mirror and is the part to check. `rg -n "filter_entry|over\.add" ` over
+    /// this file lists every candidate.
+    ///
     /// ⚠️ **Both layers are gated on `builtin` inside `builder()`, and this
-    /// function assumes it is on.** Both production call sites pass `true` —
-    /// `src-tauri/src/walk_job.rs:128` and `src-tauri/src/bridge.rs:418`; only
+    /// assumes it is on.** Both production call sites pass `true` —
+    /// `src-tauri/src/walk_job.rs:128` and `src-tauri/src/bridge.rs:419`; only
     /// tests pass `false`. A caller that built rules with `builtin: false`
     /// must not use this.
-    pub fn pruned_by_builtin_layers(root: &Path, relative_path: &str) -> bool {
-        let mut parent = root.to_path_buf();
-        for component in relative_path.split('/') {
-            if Self::BUILTIN_DIRS.contains(&component) {
-                return true;
-            }
-            let anchored = Self::ANCHORED_DIRS.iter().any(|(dir, markers)| {
-                *dir == component && markers.iter().any(|marker| parent.join(marker).is_file())
-            });
-            if anchored {
-                return true;
-            }
-            parent.push(component);
+    pub fn builtin_layers(root: &Path) -> BuiltinLayers {
+        let mut builder = OverrideBuilder::new(root);
+        for pattern in Self::builtin_override_patterns() {
+            let _ = builder.add(&pattern);
         }
-        false
+        BuiltinLayers {
+            root: root.to_path_buf(),
+            // Unreachable with the fixed literals above — they are this
+            // crate's own, not user input — and if it ever were reached the
+            // walk would refuse to index at all rather than index more:
+            // `builder()`'s own `Err` arm answers `rules_applied = false`, and
+            // `walk_root` stops before phase 2 on that. So an empty matcher
+            // here cannot make anything reach a provider that would not have.
+            over: builder.build().unwrap_or_else(|_| Override::empty()),
+        }
     }
 
     /// Builds the walker for this call, plus whether the override-based
@@ -360,16 +420,12 @@ impl WalkRules {
 
         let mut over = OverrideBuilder::new(root);
         if self.builtin {
-            for dir in Self::BUILTIN_DIRS {
-                // Matching the directory itself prunes its subtree — a
-                // trailing `/**` form is redundant (review fix round 1,
-                // Minor finding) and, at the scale user prefixes can reach,
-                // is what pushes the combined pattern set past the engine's
-                // size limit (the third path in round 1's Critical finding).
-                let _ = over.add(&format!("!**/{dir}"));
-            }
-            for file in Self::BUILTIN_FILES {
-                let _ = over.add(&format!("!**/{file}"));
+            // Through the one function that produces these patterns, never a
+            // second loop over the same constants: fix round 2 found the two
+            // readings had already drifted — `BUILTIN_FILES` was added here
+            // and left out of the predicate that answers what this prunes.
+            for pattern in Self::builtin_override_patterns() {
+                let _ = over.add(&pattern);
             }
         }
         // Already validated by `WalkRules::new` — a well-formed relative
@@ -389,6 +445,41 @@ impl WalkRules {
             // unaffected: it does not go through the pattern engine.
             Err(_) => (b, false),
         }
+    }
+}
+
+/// The walk's unconditional layers for one watched root, compiled once.
+///
+/// Built by [`WalkRules::builtin_layers`], whose doc comment carries the
+/// argument for every part of this — what it covers, what it deliberately does
+/// not, and the one way it can go stale.
+pub struct BuiltinLayers {
+    root: std::path::PathBuf,
+    over: Override,
+}
+
+impl BuiltinLayers {
+    /// Whether the walk prunes the directory at `relative_path`, or an
+    /// ancestor of it, whatever the user's rules say.
+    ///
+    /// Per component, because the layers prune a directory and the walker then
+    /// never descends: the whole path is never what matched.
+    pub fn prunes(&self, relative_path: &str) -> bool {
+        let mut parent = self.root.clone();
+        for component in relative_path.split('/') {
+            let path = parent.join(component);
+            if self.over.matched(&path, true).is_ignore() {
+                return true;
+            }
+            let anchored = WalkRules::ANCHORED_DIRS.iter().any(|(dir, markers)| {
+                *dir == component && markers.iter().any(|marker| parent.join(marker).is_file())
+            });
+            if anchored {
+                return true;
+            }
+            parent = path;
+        }
+        false
     }
 }
 
