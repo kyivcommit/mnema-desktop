@@ -746,3 +746,47 @@ fn each_fixture_says_what_it_is_and_its_own_numbers_agree() {
         );
     }
 }
+
+#[test]
+fn two_records_sharing_one_id_both_reach_the_catalogue_and_neither_is_renamed() {
+    // The premise the settings window's model list is built on, pinned here
+    // rather than assumed there. This parser preserves every readable record
+    // and enforces no uniqueness: `id` is copied off the raw record verbatim,
+    // once per record, so a provider that lists one id twice — a mirrored
+    // entry, a stale page joined to a fresh one — produces two entries with
+    // equal ids. A caller that keys a list by this field therefore has to
+    // survive equal keys, and the window's own list does.
+    //
+    // Both directions, because "two entries came back" alone is satisfied by a
+    // build that renamed one of them: the ids are asserted equal, and the
+    // NAMES are asserted different, so the two rows are still two records and
+    // not one record counted twice.
+    let json = r#"{"data":[
+        {"id":"vendor/twin","name":"First listing","context_length":32000,
+         "architecture":{"output_modalities":["text"]}},
+        {"id":"vendor/twin","name":"Second listing","context_length":32000,
+         "architecture":{"output_modalities":["text"]}}
+    ]}"#;
+    let catalogue = models_from_json(Role::Chat, json).expect("parses");
+    assert_eq!(
+        catalogue.entries.len(),
+        2,
+        "both records are readable, so both must come back — dropping one would be a silent \
+         claim that the provider listed one model"
+    );
+    assert_eq!(
+        catalogue.entries[0].id, "vendor/twin",
+        "the id is the provider's own, not one this build minted to keep them apart"
+    );
+    assert_eq!(catalogue.entries[1].id, "vendor/twin");
+    assert_eq!(catalogue.entries[0].name, "First listing");
+    assert_eq!(
+        catalogue.entries[1].name, "Second listing",
+        "the second record is a record of its own and keeps its own name"
+    );
+    assert_eq!(
+        catalogue.unreadable, 0,
+        "a duplicate id is not a read failure: nothing here was refused or counted away"
+    );
+    assert!(catalogue.unreadable_records.is_empty());
+}

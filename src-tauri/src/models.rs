@@ -61,9 +61,144 @@ pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Err
     }
     let check = mnema_provider::check_key(state.provider_base(), &key)?;
     mnema_secrets::store(state.credential_ref(), &key)?;
+    choose_the_default_models_for_roles_with_none(&state, &key);
     Ok(KeyStatus {
         balance: check.balance,
     })
+}
+
+/// The models this product starts with, one constant for both roles.
+///
+/// **One constant and not two, and spelled nowhere else.** A second literal at
+/// a call site is a second opinion about what this product ships with, and the
+/// two would be equal for exactly as long as nobody changed one of them.
+///
+/// ⚠️ **A stated model id is a claim about somebody else's catalogue**, and no
+/// test in this workspace can check it: every one of them talks to
+/// `mnema_mock_provider`, which answers whatever its fixture says, so an id the
+/// provider retired yesterday leaves the suite green while nothing works. That
+/// is what `tests/live_provider.rs`'s `both_default_models_are_still_in_the_
+/// providers_catalogue` is for — `#[ignore]`d, needing the network and no key,
+/// because the catalogue endpoint is public (see [`provider_models`]).
+pub const DEFAULT_MODELS: DefaultModels = DefaultModels {
+    embedding: "openai/text-embedding-3-small",
+    chat: "openai/gpt-5.6-luna",
+};
+
+/// The type behind [`DEFAULT_MODELS`]. A struct rather than two loose consts so
+/// that "the default set" is one thing a caller can pass around and one thing a
+/// live check can iterate — and so that adding a third role names the role it
+/// belongs to instead of a third bare string.
+pub struct DefaultModels {
+    pub embedding: &'static str,
+    pub chat: &'static str,
+}
+
+/// Applies [`DEFAULT_MODELS`] to the roles this index has no answer for, so that
+/// entering a key is enough to make the product work.
+///
+/// **Only where the role is unset**, and the direction that matters is the
+/// second: a key entered over a configuration somebody already made must leave
+/// it exactly where it was. `a_key_entered_over_models_that_are_already_chosen_replaces_neither`
+/// is the test, and its fixture builds the state — an index with both roles
+/// answered — that the happy-path test cannot.
+///
+/// **It cannot fail [`set_key`]**, which is why it returns nothing. The key has
+/// been checked and stored by the time this runs, and a default that could not
+/// be applied — no index open yet, a provider that would not answer this second
+/// question, a job holding the slot — must not turn a key that works into a
+/// rejected command. It is the same argument [`set_embedding_model`]'s own doc
+/// makes about reading the settings back: the window could not tell "the key
+/// was not stored" from "stored, and something after it did not finish", and no
+/// wording could tell them apart because the fact would not be in the message.
+///
+/// **The embedding role is not a `meta` row.** A chat model is a string; an
+/// embedding model is a vector space with a width, and the width comes from the
+/// provider's own answer and never from anything this build assumed (see
+/// [`set_embedding_model`]). So this role costs a second network call — made
+/// only when the index has no active space at all, which is once in an
+/// installation's life.
+///
+/// **The job slot is claimed for the embedding half**, for the reason written
+/// out inside [`set_embedding_model`]: adoption repoints `meta.active_space`,
+/// and a pass that read that pointer at its start goes on writing into the space
+/// it started with. A slot that is already taken means the default is simply not
+/// applied — it is a default, and the next key or the next explicit choice will
+/// apply it.
+///
+/// ⚠️ **The slot is held across the provider call, so `job_status` reports a job
+/// nobody started for as long as that call takes** — up to the thirty seconds
+/// `mnema_provider`'s global timeout allows. It is reachable: press Save and
+/// then press a model, and the change is refused with a sentence about a running
+/// job, which the window draws as one because it asks `job_status` rather than
+/// reading the sentence. It stands, for two reasons. It is
+/// [`set_embedding_model`]'s existing shape rather than a new one, so closing it
+/// in this copy alone would leave the same window open one function over while
+/// making this side look as though the rule were kept. And the obvious close —
+/// check first, claim second, which is `start_embed_job`'s own stated ordering —
+/// is paid for by sending a request that can never be used whenever the slot is
+/// taken: that rule's fallible step is a local read, and this one is a network
+/// round trip.
+fn choose_the_default_models_for_roles_with_none(state: &AppState, key: &str) {
+    // Two `let _`, not one: the roles fail separately and neither failing is a
+    // reason to leave the other unset.
+    let _ = state.with_index(|db| {
+        if db.meta_get(mnema_index::META_CHAT_MODEL)?.is_none() {
+            db.meta_set(mnema_index::META_CHAT_MODEL, DEFAULT_MODELS.chat)?;
+        }
+        Ok(())
+    });
+    // `active_space` and not the model name: the name is read *from* the space
+    // (`read_settings`), so "no space" is what "no embedding model" means here,
+    // and asking the question the other way round would read `None` out of an
+    // index that does have one and mint a second space beside it.
+    let unset = matches!(state.with_index(|db| db.active_space()), Ok(None));
+    if !unset {
+        return;
+    }
+    let Ok(_slot) = state.claim_job() else {
+        return;
+    };
+    let Ok(check) =
+        mnema_provider::check_embedding_model(state.provider_base(), key, DEFAULT_MODELS.embedding)
+    else {
+        return;
+    };
+    let _ = state.with_index(|db| {
+        db.adopt_embedding_model(
+            DEFAULT_MODELS.embedding,
+            check.dim as i64,
+            state.credential_ref(),
+            &mnema_chunk::chunker_hash(),
+        )?;
+        Ok(())
+    });
+}
+
+/// The same defaults, for a key that was already in the store before this index
+/// was open — the one state [`set_key`] could not cover.
+///
+/// **The hole it closes.** Everything above only runs inside `set_key`, and
+/// every step of it is silent when the index is shut: `with_index` fails, so the
+/// chat half writes nothing, and `active_space()` fails, so `unset` is false and
+/// the embedding half returns before it asks the provider anything. That is
+/// exactly the state a boot whose open failed leaves a person in — the settings
+/// screen is reachable, the key is accepted and stored, and nothing else
+/// happens. On the next launch the index opens perfectly and has no models at
+/// all, and there is nothing left for them to press: the key is already there,
+/// so `set_key` will not be called again, and the product cannot embed, cannot
+/// search by meaning and cannot answer. Applying the defaults when an index
+/// *opens* is the other end of the same rule, and it is the end that recovers.
+///
+/// **No key, nothing to do.** The store is asked once, and a store that will not
+/// answer is not a reason to do anything else — this is a default being applied,
+/// not a command being served, and it returns nothing for the reason
+/// [`choose_the_default_models_for_roles_with_none`] returns nothing.
+pub fn choose_the_default_models_for_a_stored_key(state: &AppState) {
+    let Ok(Some(key)) = mnema_secrets::load(state.credential_ref()) else {
+        return;
+    };
+    choose_the_default_models_for_roles_with_none(state, &key);
 }
 
 /// Removes the key. What was embedded stays embedded; what stops is embedding
@@ -571,11 +706,13 @@ pub fn set_chat_model(state: State<'_, AppState>, model: String) -> Result<(), E
 /// Everything the settings screen draws: the key, and the index.
 ///
 /// **Two halves, because they are two facts and they fail separately.** The key
-/// lives in the OS credential store and the rest lives in a database, and the
-/// database is not open until the window asks it to be — `AppState::db` is
-/// `None` until the first `open_index`, and an index written by a newer Mnema
-/// does not open at all, which is a state the application stays in rather than
-/// passes through. The settings screen is exactly the screen someone opens then.
+/// lives in the OS credential store and the rest lives in a database. The
+/// database is opened once, at start-up, by [`crate::boot_index`] — never by
+/// the window, which has no path to `open_index` at all — so `AppState::db` is
+/// `None` only for as long as that boot call has not finished, or forever if it
+/// failed; an index written by a newer Mnema does not open at all, which is a
+/// state the application stays in rather than passes through. The settings
+/// screen is exactly the screen someone opens then.
 ///
 /// The first version measured the key, then let `with_index` fail, and the
 /// measurement died with the call. One message for two facts: the window could
@@ -807,20 +944,32 @@ pub enum IndexSettings {
 /// Why the index said nothing — the discriminant beside
 /// [`IndexSettings::Unreadable`]'s sentence.
 ///
-/// **Two, where the prose named three.** "Never opened" and "opened and failed"
-/// are one value here because this layer genuinely cannot tell them apart:
-/// `AppState::db` is `None` in both cases, since a failed `open_index` returns
-/// before it assigns. The window can separate them, and must — it knows whether
-/// it has called `open_index` and what that answered. What it could not do
-/// before this field is separate either of them from a read that failed on its
-/// own, which is the distinction that decides between "ask the user to open a
-/// folder" and "report a bug".
+/// **Two, where the prose named three** — and the third is no longer dropped.
+/// "Never opened" and "opened and failed" leave `AppState::db` at `None` alike,
+/// since a failed `open_index` returns before it assigns, so the error reaching
+/// this classification is `IndexNotOpen` in both cases and nothing in it can
+/// tell them apart. This paragraph used to hand that job to the window, which
+/// "knows whether it has called `open_index` and what that answered" — the
+/// window had never called it once, which was the defect and not the design.
+/// [`crate::boot_index`] calls it now, and records what it answered in
+/// `AppState`; [`index_settings`] reads that record and reports a failed
+/// start-up open as `ReadFailed` rather than passing `NotOpen` on. What is left
+/// here is the distinction that decides between "ask the user to open a folder"
+/// and "report a bug".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UnreadableCause {
-    /// No index is open. Either the window has not asked for one yet — the
-    /// ordinary state at start-up — or an open failed and left none; see this
-    /// enum's own doc for why those are one value.
+    /// No index is open, and nothing has tried to open one and failed.
+    ///
+    /// It was "the ordinary state at start-up" for as long as nothing opened the
+    /// index at start-up. [`crate::boot_index`] runs at the top of `.setup` now,
+    /// so what this variant says in a running application is that start-up has
+    /// not reached that line yet — a window whose webview is already up and
+    /// invoking while the rest of `.setup` runs can still meet it, and that is
+    /// the honest scope of the claim; an index this build cannot open arrives as
+    /// [`UnreadableCause::ReadFailed`] instead, carrying the boot's own
+    /// sentence. An `AppState` built directly and never booted, which is what
+    /// the tests do, is the state it still describes exactly.
     NotOpen,
     /// An index **is** open and reading it failed. Always a defect of this
     /// build rather than a state of the machine, so a window meeting it is
@@ -849,6 +998,12 @@ impl UnreadableCause {
     /// itself: a fourth way out of that function owes this list a decision.
     /// `a_read_that_failed_is_told_apart_from_an_index_that_is_not_open` pins
     /// the three as they stand.
+    ///
+    /// ⚠️ **Not the last word on `NotOpen`.** [`index_settings`] refines what
+    /// this returns: `NotOpen` with a recorded start-up open failure beside it
+    /// is reported as `ReadFailed`, because one error cannot see a difference
+    /// that `AppState` can. Read on its own, this function answers what the
+    /// error was, not what the window draws.
     fn of(e: &Error) -> Self {
         match e {
             Error::IndexNotOpen => Self::NotOpen,
@@ -989,9 +1144,24 @@ fn index_settings(state: &AppState) -> IndexSettings {
     let read = state.with_index(|db| db.read_snapshot(read_settings));
     match read {
         Ok(settings) => settings,
-        Err(e) => IndexSettings::Unreadable {
-            cause: UnreadableCause::of(&e),
-            reason: e.to_string(),
+        // The refinement [`UnreadableCause::of`] cannot make from where it
+        // stands: it classifies one error, and "no index is open" is the same
+        // error whether nothing has tried to open one yet or the boot tried and
+        // failed. `AppState` carries the boot's answer for exactly this line.
+        //
+        // The sentence shown is the boot's own, not `IndexNotOpen`'s. "The
+        // index is not open" states the consequence, which the `cause` beside
+        // it already says; what the boot recorded names what went wrong, and
+        // `reason` is the field a bug report is pasted from.
+        Err(e) => match (UnreadableCause::of(&e), state.boot_open_error()) {
+            (UnreadableCause::NotOpen, Some(reason)) => IndexSettings::Unreadable {
+                cause: UnreadableCause::ReadFailed,
+                reason,
+            },
+            (cause, _) => IndexSettings::Unreadable {
+                cause,
+                reason: e.to_string(),
+            },
         },
     }
 }

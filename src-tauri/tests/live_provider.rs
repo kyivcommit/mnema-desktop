@@ -32,7 +32,8 @@
 //! it without leaving it in shell history — a leading space where the shell is
 //! configured to drop such lines, or `read -s`.
 
-use mnema_provider::{OPENROUTER_BASE, check_embedding_model, check_key};
+use mnema_desktop::models::DEFAULT_MODELS;
+use mnema_provider::{OPENROUTER_BASE, Role, check_embedding_model, check_key, list_models};
 
 /// Skips rather than fails when no key was supplied: not having run the
 /// acceptance check is not a defect in the product. It says so on the way out,
@@ -104,5 +105,57 @@ fn the_averaging_family_is_still_what_the_measurement_said_it_was() {
             check.dim, check.norm
         ),
         Err(e) => println!("refused, as measured: {e}"),
+    }
+}
+
+/// **A stated model id is a claim about somebody else's catalogue**, and this is
+/// the only run that can settle it. Every other test in this workspace answers
+/// from `mnema_mock_provider`, so an id the provider retired last week leaves
+/// both tabs green while nothing works — the failure no unit test in this
+/// repository can see, because none of them asks the provider anything.
+///
+/// Marked "needs the network" and **not** "spends the owner's money", unlike its
+/// neighbours: `/models` is public and takes no key, measured 2026-08-08 and
+/// written down on `models::provider_models`. So this one runs without
+/// `MNEMA_LIVE_KEY` and there is nothing to skip for.
+///
+/// It calls `mnema_provider::list_models` with the arguments
+/// `models::provider_models` passes it — the same base, no key, the role — which
+/// is that command with its one `State` parameter removed. Building an
+/// `AppState` pointed at the real provider would measure Tauri's managed state,
+/// not the catalogue.
+///
+/// **Both directions, per role.** Present is the claim this build’s owner ruling makes; selectable is
+/// the claim the window makes when it offers the id as a default — a model this
+/// build's own rules refuse is listed, greyed, and cannot be chosen, which is a
+/// default nobody can use. Asserted separately so a failure says which of the
+/// two it was.
+#[test]
+#[ignore = "needs the network"]
+fn both_default_models_are_still_in_the_providers_catalogue() {
+    for (role, id) in [
+        (Role::Embedding, DEFAULT_MODELS.embedding),
+        (Role::Chat, DEFAULT_MODELS.chat),
+    ] {
+        let catalogue = list_models(OPENROUTER_BASE, None, role).expect("the catalogue answers");
+        println!(
+            "{role:?}: {} entries, {} records unreadable",
+            catalogue.entries.len(),
+            catalogue.unreadable
+        );
+        let entry = catalogue.entries.iter().find(|e| e.id == id);
+        let Some(entry) = entry else {
+            panic!(
+                "`{id}` is not in the provider's {role:?} list at all — this product ships it as \
+                 its default for that role, so an installation that enters a key gets a model \
+                 the provider does not have"
+            );
+        };
+        assert!(
+            entry.refusal.is_none(),
+            "`{id}` is listed for {role:?} and this build's own rules refuse it, so it is \
+             offered greyed and cannot be chosen: {:?}",
+            entry.refusal
+        );
     }
 }

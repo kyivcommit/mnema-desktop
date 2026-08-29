@@ -25,7 +25,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // `data-pending="0"` `source-failed` card under a correct header. A future test
 // that waits on `card-source` and asserts anything other than the excerpt would
 // pass against it. Mock the command rather than trusting the crash.
-const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', embeddingModel: null, searchTextArm: true, searchContentArm: false } };
+const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false } };
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
@@ -359,7 +359,7 @@ test('a pinned launcher ignores click-outside (blur) — the pin disables it', a
 });
 
 test('the arms row seeds from model_settings — a present key and a chosen model enable content', async () => {
-  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true } });
+  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true } });
   render(Launcher);
   await vi.waitFor(() => {
     const content = (screen.getAllByRole('checkbox') as HTMLInputElement[])[1];
@@ -378,7 +378,7 @@ test('the arms row seeds from model_settings — a present key and a chosen mode
 // resolves. `content.disabled` alone is already `true` in the pre-seed default (provider starts
 // `false`), so asserting it directly would pass vacuously, seed or no seed.
 test('the arms row seeds from model_settings — a present key with no chosen model leaves content disabled', async () => {
-  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: null, searchTextArm: false, searchContentArm: false } });
+  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: false, searchContentArm: false } });
   render(Launcher);
   await vi.waitFor(() => {
     // Proves the seed actually ran before the real assertion below reads `provider`'s result.
@@ -396,7 +396,7 @@ test('the arms row seeds from model_settings — searchTextArm:false unchecks th
   // flow too: `textOn` defaults to true, so an unchanged default would pass
   // silently — seeding false is the only way to catch a broken or renamed
   // `s.index.searchTextArm` read.
-  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'text-embedding-3-small', searchTextArm: false, searchContentArm: true } });
+  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: false, searchContentArm: true } });
   render(Launcher);
   await vi.waitFor(() => {
     const text = (screen.getAllByRole('checkbox') as HTMLInputElement[])[0];

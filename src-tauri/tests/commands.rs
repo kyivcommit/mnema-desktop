@@ -14,7 +14,7 @@ use std::time::Duration;
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_desktop::bridge;
 use mnema_desktop::job::JobEvent;
-use mnema_desktop::models::set_key;
+use mnema_desktop::models::{IndexSettings, UnreadableCause, model_settings, set_key};
 use mnema_desktop::state::AppState;
 use mnema_desktop::walk_job;
 use mnema_mock_provider::{MockServer, Reply, one_vector};
@@ -207,6 +207,129 @@ fn the_application_puts_the_index_in_the_local_data_directory() {
         app.state::<AppState>().data_dir(),
         expected,
         "the index would not be where the local data directory is"
+    );
+}
+
+/// Start-up opens the index, because until this existed nothing did.
+///
+/// `open_index` was a command with no caller: every mention of it outside this
+/// crate's tests was its own definition, its registration, and the state method
+/// behind it. `AppState::db` stays `None` until one of them runs, and
+/// `with_index` refuses while it is — so a running application could not answer
+/// a question or list a tree, and the settings screen read `Unreadable` for as
+/// long as it was open. Nothing in the suite caught it because every test opens
+/// the index itself.
+///
+/// In-process and not through a launched binary: the directory is chosen once,
+/// in `manage_state`, and `AppState::open_index` reads only what it was handed.
+/// So this test needs no environment redirect and no display, and it fails from
+/// a mutation to `boot_index`'s body rather than from something next to it.
+#[test]
+fn the_boot_opens_the_index() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let app = app_in(dir.path());
+    let index = mnema_desktop::paths::index_path(dir.path());
+
+    // Both directions. Without this half the test passes on a file it did not
+    // create, and would go on passing after the boot stopped opening anything.
+    assert!(
+        !index.exists(),
+        "the fixture must start with no index at {}",
+        index.display()
+    );
+    assert!(
+        matches!(
+            model_settings(app.state()).index,
+            IndexSettings::Unreadable {
+                cause: UnreadableCause::NotOpen,
+                ..
+            }
+        ),
+        "before the boot, nothing has opened the index yet"
+    );
+
+    mnema_desktop::boot_index(app.handle());
+
+    assert!(
+        index.exists(),
+        "start-up did not open the index: nothing at {}",
+        index.display()
+    );
+    // The file on disk is not the same claim as the window seeing an open
+    // index. A `boot_index` whose body opened a connection and then let it
+    // drop — `let _ = state.open_job_index();`, which creates and migrates
+    // the same file through a route that never touches `AppState::db` — would
+    // satisfy the assertion above and leave `db` at `None`: the P0 this task
+    // exists to close, surviving under a green file-existence check. Reading
+    // `model_settings` back is what a person watches instead of the
+    // filesystem.
+    assert!(
+        matches!(model_settings(app.state()).index, IndexSettings::Read(_)),
+        "the index file exists but the window still cannot read it: {:?}",
+        model_settings(app.state()).index
+    );
+}
+
+/// A boot open that failed is not the same thing as a boot that has not run.
+///
+/// `UnreadableCause` folds "never opened" and "opened and failed" into
+/// `NotOpen` because the layer that reports it cannot tell them apart — and
+/// says, in its own doc, that the window can and must. Once the boot is what
+/// opens the index, the window's half of that is the only half left: a
+/// `boot_index` that logged its error and forgot it would leave a person whose
+/// index is broken reading the sentence written for the ordinary state at
+/// start-up.
+///
+/// A directory where the database file belongs is the cheapest index that
+/// cannot be opened, and it fails inside `mnema_index::open` rather than before
+/// it — which is the path a corrupt file takes too.
+#[test]
+fn a_failed_boot_open_reaches_the_window_as_read_failed() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    std::fs::create_dir(mnema_desktop::paths::index_path(dir.path()))
+        .expect("a directory where the index file belongs");
+    let app = app_in(dir.path());
+
+    // The mirror, and it is the half a fixture forgets: before the boot has run
+    // there is genuinely no index open, and that must still read as `NotOpen`.
+    // Without it, an implementation that answers `ReadFailed` unconditionally
+    // passes.
+    assert!(
+        matches!(
+            model_settings(app.state()).index,
+            IndexSettings::Unreadable {
+                cause: UnreadableCause::NotOpen,
+                ..
+            }
+        ),
+        "before the boot, an index nobody has opened is not a failure"
+    );
+
+    mnema_desktop::boot_index(app.handle());
+
+    let IndexSettings::Unreadable { cause, reason } = model_settings(app.state()).index else {
+        panic!("a boot open against an unopenable path must still report Unreadable");
+    };
+    assert_eq!(
+        cause,
+        UnreadableCause::ReadFailed,
+        "a boot open that failed was reported as if no boot had run"
+    );
+    // `reason` is bound, not `..`, because `cause` alone is satisfied by a
+    // mutant that keeps `ReadFailed` but writes `reason: e.to_string()`
+    // instead of the boot's own stored sentence — `e` here is always
+    // `Error::IndexNotOpen` (that is what puts this arm in the `NotOpen`
+    // branch to begin with, `models.rs`'s `index_settings`), so that mutant's
+    // `reason` would be `IndexNotOpen`'s fixed Display text, not a diagnosis
+    // of what this boot's open actually failed on. Both directions: it must
+    // not be that sentence, and it must be the failed open's own.
+    assert_ne!(
+        reason, "the index is not open",
+        "the boot's own diagnostic was replaced by `IndexNotOpen`'s fixed sentence: {reason}"
+    );
+    assert!(
+        reason.starts_with("index: "),
+        "the reason does not carry what the failed database open actually said: {reason}"
     );
 }
 
@@ -1049,8 +1172,16 @@ fn an_index_failure_inside_the_content_arm_stays_local_to_it() {
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
 
-    state.open_index().expect("the index opens");
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).expect("the key is accepted");
+    state.open_index().expect("the index opens");
     let adopted = state
         .with_index(|db| db.adopt_embedding_model(MODEL, DIM, "credential-ref", "chunker-v1"))
         .expect("the default model is adopted");
@@ -1127,8 +1258,16 @@ fn the_content_arm_embeds_the_query_before_it_locks_the_index() {
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
 
-    state.open_index().expect("the index opens");
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).expect("the key is accepted");
+    state.open_index().expect("the index opens");
     state
         .with_index(|db| {
             db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
@@ -1234,8 +1373,16 @@ fn search_reports_the_inspected_pool_not_the_embedded_count() {
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
 
-    state.open_index().expect("the index opens");
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).expect("the key is accepted");
+    state.open_index().expect("the index opens");
 
     state
         .with_index(|db| {
@@ -1523,8 +1670,16 @@ fn ask_without_a_chat_model_returns_citations_only_and_makes_no_chat_call() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     state
         .with_index(|db| {
             db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
@@ -1606,8 +1761,16 @@ fn ask_with_a_model_but_no_candidates_refuses_without_calling_chat() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     set_chat_model_via(&state, "openai/gpt-4o-mini");
 
     let webview = main_webview(&app);
@@ -1662,8 +1825,16 @@ fn ask_maps_each_anchor_to_the_right_citation_and_generates() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     set_chat_model_via(&state, "openai/gpt-4o-mini");
 
     let webview = main_webview(&app);
@@ -1768,8 +1939,16 @@ fn ask_with_an_empty_completion_refuses_as_empty_completion() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     set_chat_model_via(&state, "openai/gpt-4o-mini");
 
     let webview = main_webview(&app);
@@ -1854,8 +2033,16 @@ fn ask_rejects_a_blank_query_before_any_retrieval() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     state
         .with_index(|db| {
             db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")
@@ -1911,8 +2098,16 @@ fn search_rejects_a_blank_query_before_any_retrieval() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
-    state.open_index().unwrap();
+    // **The key first, and then the index.** `set_key` applies
+    // `DEFAULT_MODELS` to every role an OPEN index has no answer for, so
+    // entering the key on an open index would choose an embedding model, mint
+    // a space, and spend an embedding check the reply queue below does not
+    // hold — and, for the tests whose premise is that no chat model is set, it
+    // would set one. In this order it stores the key and touches nothing else,
+    // which is all any test in this file wanted from it. The state is the one a
+    // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
     state
         .with_index(|db| {
             db.adopt_embedding_model(MODEL, DIM as i64, "credential-ref", "chunker-v1")

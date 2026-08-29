@@ -90,6 +90,109 @@ pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Resu
     Ok(())
 }
 
+/// Opens the index once, at start-up — because until this existed, nothing in
+/// the product ever did.
+///
+/// `open_index` had no caller outside this crate's tests: a command, its
+/// registration in the invoke handler, and the state method behind it were the
+/// whole of it, and no line under `ui/src/` so much as names the command — so
+/// nothing ever invoked it. `AppState::db` stays `None` until it runs and
+/// `with_index` refuses while it is, so the shipped application could not
+/// answer a question and could not list a tree, and the settings screen read
+/// `Unreadable` for as long as it stayed open. The suite was green because
+/// every test opens the index for itself — the same shape as the start-up panic
+/// `launch_smoke.rs` was written for, and the reason that file's guard now also
+/// has to prove `.setup` calls this function, not only that the function works.
+///
+/// **It returns nothing and cannot fail the boot.** A `?` here would turn an
+/// index this build cannot open — a database written by a newer Mnema, a
+/// corrupt file — into an application that does not start, and a person who
+/// cannot start it cannot be told why. `AppState::open_index`'s own doc records
+/// the other half of that trade: calling it again re-opens, so a failed open is
+/// recoverable inside the running process rather than only across a restart.
+///
+/// **The error is stored as well as logged**, which is the part that is easy to
+/// leave out. Logged and dropped, a failed boot open is indistinguishable from
+/// a boot that never ran: both leave `db` at `None`, both reach the window as
+/// `IndexNotOpen`, and `UnreadableCause` has to call that "the ordinary state
+/// at start-up". The state carries the answer instead — see
+/// [`state::AppState::set_boot_open_error`] and what `models::index_settings`
+/// then does with it.
+///
+/// **This is where "ask what disappears" (CLAUDE.md) binds this task,
+/// contrary to what the plan assumed when it scoped that pass out.** Opening at
+/// boot means start-up now *writes* — `open_index` creates the directory,
+/// creates the file, and runs `apply(&mut conn)`
+/// (`crates/mnema-index/src/open.rs:118`) before anyone has touched a folder.
+/// Four things considered; nothing found that a person can lose.
+///
+/// 1. **A migration against an index a newer build wrote.** `to_latest` wraps
+///    the whole migration set in one transaction
+///    (`crates/mnema-index/src/migrations.rs:85-88`), so "migration number too
+///    high" fails `open` atomically — the file is left exactly as it was, and
+///    the boot reports it rather than starting from it. `AppState::open_index`'s
+///    own doc already names this state; this function is what makes reaching
+///    it silent-but-safe rather than silent-but-lost.
+/// 2. **The boot racing the job's second connection**
+///    (`AppState::open_job_index`, `state.rs:222`). Structurally it cannot,
+///    today: this call runs inside the `Ready`-event handler that Tauri itself
+///    uses to create every configured window and then call this closure, in
+///    that order, before the event loop advances to deliver anything a webview
+///    could send (`tauri-2.11.5/src/app.rs:2524-2533` builds the windows;
+///    `:1414-1416` runs both inside one `RuntimeRunEvent::Ready` arm) — so no
+///    command reaches `with_index` or `open_job_index` before this line has
+///    already run. Were that ever not true, the two connections still could not
+///    corrupt each other: WAL with a five-second busy timeout serialises them
+///    (`crates/mnema-index/src/open.rs:114-115`), and `to_latest` is a no-op
+///    once `user_version` is current, so the loser of the race would wait, not
+///    fail.
+/// 3. **A `data_dir` that cannot be created.** `open_index` reports
+///    `Error::DataDir` (`state.rs:156-157`); nothing existed yet to lose, and
+///    the window is told `ReadFailed` instead of being shown a healthy state it
+///    does not have.
+/// 4. **A second call.** `AppState::open_index`'s own doc says calling it again
+///    drops the previous connection and reopens — recoverable, not lossy — but
+///    this line is the setter's only caller (also cited from
+///    [`state::AppState::set_boot_open_error`]'s doc), so nothing calls it
+///    twice today.
+///
+/// So opening at boot is safe to keep as a write, and does not, on its own,
+/// owe this task a new index-writing command or a wider pass than this one.
+///
+/// **It also applies the default models, and on a thread of its own.** An index
+/// that opens here is the second half of
+/// [`models::choose_the_default_models_for_a_stored_key`]'s rule — a key stored
+/// while no index was open leaves an installation with a key and no models, and
+/// nothing else ever comes back to fix it. Two reasons it is not run inline:
+/// this closure is Tauri's `Ready` handler, so blocking it is the frozen window
+/// [`bridge::open_index`]'s own doc is about, and the work reads the credential
+/// store (on macOS, possibly a dialog) and then asks the provider a question
+/// with a thirty-second timeout behind it. Neither belongs on the boot path.
+///
+/// **The handle is returned rather than dropped**, and only for that reason: a
+/// test that asserts about what the thread did has to be able to wait for it,
+/// and a test that polls for a background write is a test that reports timing.
+/// The caller in `.setup` drops it, which detaches the thread.
+pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> std::thread::JoinHandle<()> {
+    let state = app.state::<state::AppState>();
+    let outcome = state.open_index();
+    if let Err(e) = &outcome {
+        // The log line is for the terminal a developer launched from; the stored
+        // sentence is for the person who has no terminal.
+        eprintln!("mnema: the index could not be opened at start-up: {e}");
+    }
+    state.set_boot_open_error(outcome.err().map(|e| e.to_string()));
+
+    // Spawned unconditionally, including after a failed open: every step of what
+    // it runs is already silent against an index that will not answer, so the
+    // thread costs one spawn and does nothing. A condition here would be a
+    // second spelling of a rule that is written once, over there.
+    let app = app.clone();
+    std::thread::spawn(move || {
+        models::choose_the_default_models_for_a_stored_key(&app.state::<state::AppState>());
+    })
+}
+
 /// Shows the launcher and focuses it, returning whether the launcher window was
 /// there to act on. The single-instance callback and the tray's "show search"
 /// item share this. §6: the launcher *hides*, so it is *shown* — not
@@ -377,6 +480,16 @@ pub fn run() -> anyhow::Result<()> {
         })
         .setup(|app| {
             manage_state(app.handle())?;
+            // Immediately after the state exists and before anything else in
+            // this closure, so every later step here meets an index that is
+            // already open, and so does every command arriving after start-up —
+            // which is as early as a boot can make it, not a promise about a
+            // webview that is already invoking while `.setup` runs.
+            // The handle is dropped, which detaches the thread it carries: the
+            // boot does not wait on a credential store or a provider, and the
+            // defaults it applies are wanted by the next command, not by the
+            // next line of this closure. See `boot_index`'s own doc.
+            drop(boot_index(app.handle()));
             // §D129: resolve the interface language once at start-up (prefs → OS
             // → EN) and seed it into `AppState` BEFORE the tray is built, which
             // reads it back to label its menu (`tray::build_tray`).

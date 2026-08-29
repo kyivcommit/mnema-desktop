@@ -1,4 +1,30 @@
 export type Key = 'pin' | 'settings_title' | 'indexed_documents'
+  | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_indexing' | 'settings_nav_application'
+  | 'settings_section_not_ready'
+  | 'settings_folders_empty' | 'settings_folders_add' | 'settings_folders_remove'
+  | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
+  | 'models_provider_label' | 'models_provider_name'
+  | 'models_key_label' | 'models_key_saved' | 'models_key_absent_hint'
+  | 'models_key_change' | 'models_key_forget' | 'models_key_save' | 'models_key_cancel'
+  | 'models_key_removed' | 'models_key_nothing_to_remove'
+  | 'models_key_locked' | 'models_key_duplicate' | 'models_key_refused' | 'models_key_defect'
+  | 'models_index_not_open' | 'models_index_read_failed'
+  | 'models_mac_keychain_note' | 'models_load_failed'
+  | 'models_index_label'
+  | 'models_tab_embedding' | 'models_tab_chat'
+  | 'models_status_ready' | 'models_status_not_ready'
+  | 'models_catalogue_empty' | 'models_catalogue_unreadable'
+  | 'models_refusal_input_too_small' | 'models_refusal_no_stated_limit'
+  | 'models_refusal_limit_not_understood' | 'models_refusal_no_stated_output_modalities'
+  | 'models_refusal_no_text_output' | 'models_entry_reason_separator'
+  | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
+  | 'models_catalogue_unreadable_record_known'
+  | 'models_embedding_confirm_title' | 'models_embedding_confirm_estimate'
+  | 'models_embedding_confirm_loss' | 'models_embedding_discard' | 'models_embedding_cancel'
+  | 'models_embedding_retired' | 'models_embedding_retired_none'
+  | 'models_embedding_degraded' | 'models_embedding_reembed' | 'models_embedding_reembed_started'
+  | 'models_embedding_reembed_ended'
+  | 'models_embedding_change_failed' | 'models_job_running' | 'models_index_recover'
   | 'refusal_no_candidates' | 'refusal_empty_completion'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
@@ -14,12 +40,186 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'source_loading' | 'source_failed' | 'source_wrong_document'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
+  | 'settings_folders_scan' | 'settings_folders_scan_named'
+  | 'indexing_walk_starting' | 'indexing_walk_running'
+  | 'indexing_embed_starting' | 'indexing_embed_running'
+  | 'indexing_counts_ratio' | 'indexing_counts_counting'
+  | 'indexing_eta' | 'indexing_eta_unknown'
+  | 'indexing_walk_ended_completed' | 'indexing_walk_ended_partly_read'
+  | 'indexing_walk_ended_cancelled' | 'indexing_walk_ended_failed'
+  | 'indexing_walk_ended_broken_worker' | 'indexing_walk_ended_rules_not_applied'
+  | 'indexing_walk_ended_root_unavailable' | 'indexing_walk_ended_volume_missing'
+  | 'indexing_embed_ended_completed' | 'indexing_embed_ended_cancelled'
+  | 'indexing_embed_ended_failed' | 'indexing_embed_ended_unexpected'
+  | 'indexing_failure_message' | 'indexing_walk_result' | 'indexing_embed_result'
+  | 'indexing_frozen_heading' | 'indexing_frozen_row'
+  | 'indexing_frozen_symlinked_subtree' | 'indexing_frozen_empty_directory'
+  | 'indexing_frozen_unreadable_directory'
+  | 'indexing_note_no_key' | 'indexing_note_no_model' | 'indexing_note_rejected'
+  | 'indexing_unobserved' | 'indexing_cancel'
   | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
     pin: 'Пін',
     settings_title: 'Налаштування',
+    settings_nav_models: 'Моделі',
+    settings_nav_folders: 'Теки',
+    settings_nav_indexing: 'Індексація',
+    settings_nav_application: 'Застосунок',
+    // Shared by both unbuilt sections — one sentence, promises nothing.
+    settings_section_not_ready: 'Ця секція ще не готова.',
+    // §9.2, Task 7. `TreeRoot` (ipc.ts) carries no flag for "walked and found
+    // empty" vs. "not walked yet" — a folder just added and one genuinely
+    // empty are the same value on the wire — so this sentence names only the
+    // absence of watched folders, never a folder's own content. The per-row
+    // count (`settings_folders_indexed`, below) carries the state a folder's
+    // own row can actually prove. (Not "shared with the launcher tree" —
+    // `git grep indexed_documents` shows no launcher component renders that
+    // key, before or after this commit; P3-7 review.)
+    settings_folders_empty: 'Ще жодної теки не додано.',
+    settings_folders_add: 'Додати теку',
+    settings_folders_remove: 'Видалити',
+    // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
+    // shown verbatim beside this, never branched on).
+    settings_folders_load_failed: 'Не вдалося прочитати список тек.',
+    // §9.2 review (P2-4): the bare count read as a claim about the FOLDER
+    // ("this folder has 0 documents"), forever, since the ruling defers the walk
+    // that would ever change it. This key names the subject — the index, not
+    // the folder — reusing `indexed_documents`'s own plural arms rather than
+    // duplicating them (do not change that shared key: it is a different
+    // sentence for a different place, §7.3/launcher `Tree.svelte`).
+    settings_folders_indexed: '{count, plural, one {Проіндексовано: # документ} few {Проіндексовано: # документи} many {Проіндексовано: # документів} other {Проіндексовано: # документа}}',
+    // §9.2 review (P2-5): two "Видалити" buttons in a two-folder list share
+    // one accessible name. `aria-label` carries the folder's own path so a
+    // screen reader distinguishes them; the visible button text stays plain
+    // "Видалити" (settings_folders_remove, above).
+    settings_folders_remove_named: 'Видалити {path}',
+    // §9.1 / Task 4. Provider is a fixed, disabled control (v1 = OpenRouter
+    // only, §4.4) — the name is a catalogue string, not a hardcoded literal,
+    // because it is what a person reads there, not a testid.
+    // 🔴 Live run, finding 1: a label and its value are two things, and this
+    // window has no CSS to say so — it is not written yet, and it lands in a
+    // later PR. Without a separator IN THE TEXT the screen read
+    // «Провайдер OpenRouter» and «Ключ Ключ збережено.»: one broken phrase, and
+    // it would stay one in every text-only rendering of this window — a screen
+    // reader, a copy-paste, a plain-text export — long after styling arrives.
+    // The colon lives inside each label rather than in a shared separator
+    // string because punctuation after a label is a per-locale decision (French
+    // puts a space before it) and because this catalogue already writes it that
+    // way in `settings_folders_indexed`.
+    models_provider_label: 'Провайдер:',
+    models_provider_name: 'OpenRouter',
+    models_key_label: 'Ключ:',
+    // Not a mask. models.rs:150-162 makes the key pub(crate) and never a
+    // command, so the reply carries none and nothing here knows how long the
+    // stored key is — a fixed run of dots would state a length this window
+    // cannot know, and a screen reader would read it out one bullet at a time.
+    // Present is a fact about the store (models.rs:676-679), so it is stated in
+    // words.
+    models_key_saved: 'Ключ збережено.',
+    // Absent is the state of an application nobody has signed into
+    // (models.rs:680-684). It says what the key is for and where it comes from,
+    // and claims nothing about what happens after it is saved — the balance
+    // KeyStatus carries is deliberately not rendered in this PR.
+    models_key_absent_hint: 'Ключ OpenRouter потрібен, щоб застосунок міг звертатися до моделей. Створіть його в обліковому записі OpenRouter і вставте сюди.',
+    models_key_change: 'Змінити',
+    models_key_forget: 'Забути',
+    models_key_save: 'Зберегти',
+    models_key_cancel: 'Скасувати',
+    // KeyRemoval's two answers (models.rs:101-108) — not the same sentence:
+    // NothingToRemove is not a failure and is not "the key was removed" either.
+    models_key_removed: 'Ключ видалено.',
+    models_key_nothing_to_remove: 'Ключа й так не було.',
+    // KeyStoreFailure's four causes (models.rs:718-746), each naming the one
+    // action its own doc comment names — never `reason`, which stays out of
+    // this screen entirely. Locked stands for two situations and claims
+    // neither; Refused is the one value with no action to name.
+    //
+    // Locked renders no controls at all — offering to add or forget a key would
+    // claim the store said something it did not — so its sentence is the only
+    // thing a person has to act on, and it must name an action rather than
+    // describe a state. It names both moves without asserting which situation
+    // happened: models.rs:723-737 records that this build genuinely cannot tell
+    // a locked store from a declined prompt, and that the earlier doc claiming
+    // only "a locked keychain" was falsified by measurement.
+    models_key_locked: 'Сховище ключів не відповіло. Розблокуйте його або дозвольте доступ, коли система про це запитає, і відкрийте це вікно знову.',
+    models_key_duplicate: 'Під іменем цієї інсталяції збережено кілька ключів. Видаліть зайвий у системному сховищі.',
+    models_key_refused: 'Сховище ключів відповіло відмовою. Ця збірка не може визначити, що робити далі.',
+    models_key_defect: 'Це вада цієї збірки, а не стан вашої системи. Повідомте про неї розробникам.',
+    // UnreadableCause's two values (models.rs:826-843) — NotOpen and
+    // ReadFailed both leave `IndexSettings::Unreadable` with no `IndexRead` to
+    // show, so this is the one sentence the section renders on that branch.
+    models_index_not_open: 'Індекс ще не відкрито.',
+    models_index_read_failed: 'Не вдалося прочитати індекс — це вада цієї збірки.',
+    // Platform note (models.rs:606-627) — macOS only; Windows and Linux show
+    // nothing here, because the same sentence would be noise on them.
+    models_mac_keychain_note: 'Кожне оновлення застосунку робить його чужим для збереженого ключа: система один раз попросить пароль від зв’язки ключів для входу.',
+    // The lead-in for a rejected read of `model_settings`. The rejection's own
+    // sentence is shown verbatim beside it and never branched on (§10): a
+    // rejection arrives as text, so this names what failed and the backend says
+    // why.
+    models_load_failed: 'Не вдалося прочитати налаштування моделей.',
+    // Task 5 — the subject header the index sentence lacked: Task 4's review
+    // found "Провайдер / [index sentence] / [mac note] / [key sentence]"
+    // unreadable as a person, because nothing said the second line was about
+    // the index. Shown only alongside that sentence, never on its own.
+    models_index_label: 'Індекс:',
+    models_tab_embedding: 'Ембединг',
+    models_tab_chat: 'Чат',
+    // The green-dot rule (§9.1 / the PR 3 ruling `providerReady` already
+    // carries): provider + key + a chosen embedding model, fail-safe on
+    // anything missing. Named sentences rather than a bare state, so a screen
+    // reader announces the same thing a sighted person reads.
+    models_status_ready: 'Підключено — OpenRouter, ключ і обрана модель embedding готові.',
+    models_status_not_ready: 'Ще не підключено — додайте ключ і оберіть модель embedding, щоб увімкнути пошук за змістом.',
+    // An empty-but-well-formed catalogue (`models.rs:186-190`) is a stated
+    // fact about the provider, not a failure of this build — said once, so a
+    // person does not read a blank tab as a bug.
+    models_catalogue_empty: 'Постачальник наразі не пропонує жодної моделі для цієї ролі.',
+    // `Catalogue.unreadable` (catalogue.rs:246-257): a stated zero is never a
+    // promise the list is complete on its own — this sentence is the promise,
+    // and it is absent exactly when the count is zero.
+    models_catalogue_unreadable: '{count, plural, one {# запис не вдалося прочитати} few {# записи не вдалося прочитати} many {# записів не вдалося прочитати} other {# записів не вдалося прочитати}}.',
+    // `Refusal`'s five variants (catalogue.rs) — one sentence each, fixed
+    // catalogue text rather than the provider's own words: see
+    // `Models.svelte`'s `refusalReason` for why `raw` is not interpolated
+    // into the three variants that carry it.
+    models_refusal_input_too_small: 'Ця модель заявляє ліміт входу {limit} токенів — менше за поріг {floor}, потрібний цій програмі.',
+    models_refusal_no_stated_limit: 'Постачальник не вказує ліміт входу цієї моделі.',
+    models_refusal_limit_not_understood: 'Постачальник вказує ліміт входу у форматі, який ця збірка не вміє прочитати.',
+    models_refusal_no_stated_output_modalities: 'Постачальник не вказує, що видає ця модель.',
+    models_refusal_no_text_output: 'Постачальник заявляє, що ця модель не видає текст.',
+    // The same seam as the labels above, one row lower and never reached by the
+    // live run: a greyed model's name and the sentence saying why it cannot be
+    // chosen are two inline spans, so they read as «Назва моделі Постачальник не
+    // вказує ліміт входу…» — one phrase. The dash belongs to neither of them, so
+    // it is its own string rather than a prefix inside five reason sentences.
+    models_entry_reason_separator: '—',
+    // `RecordId`'s three states (catalogue.rs:293-304) — a record that never
+    // became a model still gets one line naming its position, so "N records
+    // unreadable" points at something (Task 2 review, item 4).
+    models_catalogue_unreadable_record_absent: 'Запис на позиції {index}: постачальник не вказав ідентифікатор моделі.',
+    models_catalogue_unreadable_record_not_a_string: 'Запис на позиції {index}: ідентифікатор моделі не був текстом.',
+    models_catalogue_unreadable_record_known: 'Запис на позиції {index}, ідентифікатор «{id}»: решту запису ця збірка прочитати не змогла.',
+    // §9.1 / Task 6 — обрання моделі ембедингу. Дві цифри про два різні
+    // моменти, і вікно каже, яка з них яка: оцінка ДО дії читається з
+    // `embeddedChunksEverywhere`, а скільки саме зникло — з `AdoptedModel.retired`,
+    // виміряного в мить знищення.
+    models_embedding_confirm_title: 'Змінити модель ембедингу?',
+    models_embedding_confirm_estimate: 'Зараз індекс містить {count, plural, one {# ембединг} few {# ембединги} many {# ембедингів} other {# ембедингів}} в усіх векторних просторах. Це оцінка, зроблена до зміни; скільки саме було відкинуто, буде сказано після неї.',
+    models_embedding_confirm_loss: 'Ці ембединги неможливо перенести: зміна їх відкидає. Пошук за змістом буде недоступний, доки індекс не буде вбудовано наново; пошук за словами працюватиме далі.',
+    models_embedding_discard: 'Відкинути ембединги',
+    models_embedding_cancel: 'Не змінювати модель',
+    models_embedding_retired: 'Зміна відкинула {count, plural, one {# ембединг} few {# ембединги} many {# ембедингів} other {# ембедингів}} з {spaces, plural, one {# векторного простору} other {# векторних просторів}}.',
+    models_embedding_retired_none: 'Зміна нічого не відкинула: жоден векторний простір їй не заважав.',
+    models_embedding_degraded: 'Пошук за змістом недоступний, доки індекс не буде вбудовано наново. Пошук за словами працює далі.',
+    models_embedding_reembed: 'Вбудувати індекс наново',
+    models_embedding_reembed_started: 'Вбудовування почалося.',
+    models_embedding_reembed_ended: 'Вбудовування завершилося, а пошук за змістом досі недоступний. Його можна запустити ще раз.',
+    models_embedding_change_failed: 'Модель ембедингу не прийнято. Прочитайте повідомлення нижче: зміна, яка не завершилася, все одно могла відкинути ембединги.',
+    models_job_running: 'Триває завдання індексації. Його не зупинено, воно працює далі.',
+    models_index_recover: 'Повторний вибір моделі ембедингу це виправляє: він наново записує вказівник, який індекс втратив. Нічого з уже вбудованого при цьому не відкидається.',
     indexed_documents: '{count, plural, one {# документ} few {# документи} many {# документів} other {# документа}}',
     refusal_no_candidates: 'Нічого не знайдено за цим запитом.',
     refusal_empty_completion: 'Модель не повернула відповіді.',
@@ -88,10 +288,132 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# хвилину} few {# хвилини} many {# хвилин} other {# хвилини}} тому',
     recent_hours: '{count, plural, one {# годину} few {# години} many {# годин} other {# години}} тому',
     recent_days: '{count, plural, one {# день} few {# дні} many {# днів} other {# дня}} тому',
+    // §9.2 / Task 8 — running the index, showing it, stopping it. The scan
+    // starts on this control and never on adding a folder, because excluding
+    // subfolders (PR 8) is a move a person still has to make in between.
+    settings_folders_scan: 'Сканувати',
+    // Carries the path so two "Сканувати" buttons in a list stay apart for a
+    // screen reader; the VISIBLE label stays the plain word above.
+    settings_folders_scan_named: 'Сканувати {path}',
+    indexing_walk_starting: 'Читання теки починається…',
+    indexing_walk_running: 'Триває читання теки.',
+    // The embedding pass takes no root and covers the whole index
+    // (embed_job.rs), so neither of these two may name the folder that was
+    // pressed.
+    indexing_embed_starting: 'Вбудовування всього індексу починається…',
+    indexing_embed_running: 'Триває вбудовування всього індексу.',
+    indexing_counts_ratio: 'Опрацьовано {done} з {total}. Пропущено: {skipped}. Відхилено: {refused}.',
+    // `total: 0` is not an edge case: a walk reports it before phase 1 has
+    // counted anything. "0 з 0" would read as "нема чого робити".
+    indexing_counts_counting: 'Опрацьовано {done}. Скільки їх усього, поки не відомо. Пропущено: {skipped}. Відхилено: {refused}.',
+    indexing_eta: 'Залишилось приблизно {seconds} с.',
+    // `secondsLeft` is `Option<u64>`: "ще не відомо" is a real state, and it is
+    // the ordinary one at the start of every run.
+    indexing_eta_unknown: 'Скільки ще лишилось часу, поки не відомо.',
+    indexing_walk_ended_completed: 'Теку прочитано повністю.',
+    // `reason: completed` with `complete: false` (job.rs): phase 1 never saw
+    // the whole tree, so what was deleted under an unreadable subfolder is
+    // still searchable. That is why the word "done" cannot appear here.
+    indexing_walk_ended_partly_read: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Файли, які ви вилучили всередині них, досі знаходяться пошуком.',
+    indexing_walk_ended_cancelled: 'Сканування зупинено на ваше прохання.',
+    indexing_walk_ended_failed: 'Сканування обірвалося через збій.',
+    // The four sentences below are not about a malfunction: they are decisions
+    // the walk itself made (job.rs), and calling them a failure would tell a
+    // person the program broke when instead a folder cannot be read.
+    indexing_walk_ended_broken_worker: 'Сканування спинилося: допоміжна програма, яка читає файли, перестала відповідати.',
+    indexing_walk_ended_rules_not_applied: 'Сканування спинилося: правила виключення не вдалося застосувати, тож теку не читали зовсім.',
+    indexing_walk_ended_root_unavailable: 'Сканування спинилося: у теку не вдалося зайти. Можливо, її прибрали або диск від’єднано.',
+    indexing_walk_ended_volume_missing: 'Сканування спинилося: тека прочиталася порожньою, хоча в індексі є файли з неї. Нічого не вилучено — можливо, диск під’єднано не повністю.',
+    indexing_embed_ended_completed: 'Вбудовування всього індексу завершено.',
+    indexing_embed_ended_cancelled: 'Вбудовування зупинено на ваше прохання.',
+    indexing_embed_ended_failed: 'Вбудовування обірвалося через збій.',
+    // The walk is the only writer of the four `StopReason` reasons (job.rs), so
+    // they cannot reach the embedding pass. A sentence exists for them anyway,
+    // carrying the state's own name: a default branch that draws "finished" is
+    // exactly how a failed pass reads as a successful one.
+    indexing_embed_ended_unexpected: 'Вбудовування спинилося з причини, якої тут не очікували ({reason}).',
+    indexing_failure_message: 'Програма повідомила: {message}',
+    indexing_walk_result: 'Додано документів: {indexed}. Без змін: {unchanged}. Пропущено: {skipped}. Вилучено з індексу: {removed}.',
+    indexing_embed_result: 'Вбудовано фрагментів: {done} з {total}. Відхилено: {refused}.',
+    // `frozen` is shown, not dropped: `removed: 0` alone cannot say whether
+    // anything was silently left untouched (job.rs).
+    indexing_frozen_heading: 'Ці підтеки не звіряли, тож вилучені з них файли досі знаходяться пошуком:',
+    indexing_frozen_row: '{prefix} — {why}',
+    indexing_frozen_symlinked_subtree: 'символьне посилання, сюди не заходили',
+    indexing_frozen_empty_directory: 'прочиталася порожньою',
+    indexing_frozen_unreadable_directory: 'не вдалося прочитати',
+    // The walk runs regardless, because word search needs neither a key
+    // nor a model — so each sentence names what is absent and what already
+    // works.
+    indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',
+    indexing_note_no_model: 'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах у цій теці вже працює.',
+    indexing_note_rejected: 'Запит відхилено.',
+    indexing_unobserved: 'Зараз виконується інше завдання. Це вікно не бачить, як далеко воно просунулося, але зупинити його можна.',
+    indexing_cancel: 'Зупинити',
   },
   en: {
     pin: 'Pin',
     settings_title: 'Settings',
+    settings_nav_models: 'Models',
+    settings_nav_folders: 'Folders',
+    settings_nav_indexing: 'Indexing',
+    settings_nav_application: 'Application',
+    settings_section_not_ready: 'This section is not ready yet.',
+    settings_folders_empty: 'No folder has been added yet.',
+    settings_folders_add: 'Add a folder',
+    settings_folders_remove: 'Remove',
+    settings_folders_load_failed: 'The list of folders could not be read.',
+    settings_folders_indexed: '{count, plural, one {Indexed: # document} other {Indexed: # documents}}',
+    settings_folders_remove_named: 'Remove {path}',
+    models_provider_label: 'Provider:',
+    models_provider_name: 'OpenRouter',
+    models_key_label: 'Key:',
+    models_key_saved: 'A key is saved.',
+    models_key_absent_hint: 'An OpenRouter key lets this application reach the models. Create one in your OpenRouter account and paste it here.',
+    models_key_change: 'Change',
+    models_key_forget: 'Forget',
+    models_key_save: 'Save',
+    models_key_cancel: 'Cancel',
+    models_key_removed: 'The key was removed.',
+    models_key_nothing_to_remove: 'There was no key to remove.',
+    models_key_locked: 'The credential store did not answer. Unlock it, or allow access when the system asks for it, then open this window again.',
+    models_key_duplicate: 'More than one credential is filed under this installation. Remove the duplicate in the system credential store.',
+    models_key_refused: 'The credential store refused to answer. This build cannot tell what to do next.',
+    models_key_defect: 'This is a defect in this build, not a state of your system. Please report it to the developers.',
+    models_index_not_open: 'The index is not open yet.',
+    models_index_read_failed: 'The index could not be read — this is a defect in this build.',
+    models_mac_keychain_note: 'Every update makes this application a stranger to its own key: the system will ask once for your login keychain password.',
+    models_load_failed: 'The model settings could not be read.',
+    models_index_label: 'Index:',
+    models_tab_embedding: 'Embedding',
+    models_tab_chat: 'Chat',
+    models_status_ready: 'Connected — OpenRouter, a key and a chosen embedding model are all set.',
+    models_status_not_ready: 'Not connected yet — add a key and choose an embedding model to enable content search.',
+    models_catalogue_empty: 'The provider does not currently list any models for this role.',
+    models_catalogue_unreadable: '{count, plural, one {# record could not be read} other {# records could not be read}}.',
+    models_refusal_input_too_small: 'This model states an input limit of {limit} tokens, under the {floor} this application requires.',
+    models_refusal_no_stated_limit: 'The provider does not state an input limit for this model.',
+    models_refusal_limit_not_understood: 'The provider states an input limit in a shape this build cannot read.',
+    models_refusal_no_stated_output_modalities: 'The provider does not state what this model outputs.',
+    models_refusal_no_text_output: 'The provider states that this model does not output text.',
+    models_entry_reason_separator: '—',
+    models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
+    models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
+    models_catalogue_unreadable_record_known: 'Record at position {index}, id "{id}": this build could not read the rest of the record.',
+    models_embedding_confirm_title: 'Change the embedding model?',
+    models_embedding_confirm_estimate: 'The index holds {count, plural, one {# embedding} other {# embeddings}} across all its vector spaces right now. That is an estimate read before the change; what the change actually discarded is reported after it.',
+    models_embedding_confirm_loss: 'These embeddings cannot be carried over: the change discards them. Search by meaning will be unavailable until the index is embedded again; search by words will still answer.',
+    models_embedding_discard: 'Discard the embeddings',
+    models_embedding_cancel: 'Do not change the model',
+    models_embedding_retired: 'The change discarded {count, plural, one {# embedding} other {# embeddings}} from {spaces, plural, one {# vector space} other {# vector spaces}}.',
+    models_embedding_retired_none: 'The change discarded nothing: no vector space was in its way.',
+    models_embedding_degraded: 'Search by meaning is unavailable until the index is embedded again. Search by words still answers.',
+    models_embedding_reembed: 'Embed the index again',
+    models_embedding_reembed_started: 'Embedding has started.',
+    models_embedding_reembed_ended: 'The embedding pass has ended, and search by meaning is still unavailable. It can be started again.',
+    models_embedding_change_failed: 'The embedding model was not adopted. Read the message below — a change that fails partway can still have discarded embeddings.',
+    models_job_running: 'An indexing job is running. It was not stopped, and it is still going.',
+    models_index_recover: 'Choosing an embedding model again repairs this: it rewrites the pointer the index lost. Nothing already embedded is discarded by it.',
     indexed_documents: '{count, plural, one {# document} other {# documents}}',
     refusal_no_candidates: 'Nothing was found for this query.',
     refusal_empty_completion: 'The model returned no answer.',
@@ -125,5 +447,40 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',
     recent_days: '{count, plural, one {# day} other {# days}} ago',
+    settings_folders_scan: 'Scan',
+    settings_folders_scan_named: 'Scan {path}',
+    indexing_walk_starting: 'Reading the folder is starting…',
+    indexing_walk_running: 'The folder is being read.',
+    indexing_embed_starting: 'Embedding the whole index is starting…',
+    indexing_embed_running: 'The whole index is being embedded.',
+    indexing_counts_ratio: 'Processed {done} of {total}. Skipped: {skipped}. Given up on: {refused}.',
+    indexing_counts_counting: 'Processed {done}. How many there are in total is not known yet. Skipped: {skipped}. Given up on: {refused}.',
+    indexing_eta: 'About {seconds} s left.',
+    indexing_eta_unknown: 'How much time is left is not known yet.',
+    indexing_walk_ended_completed: 'The folder was read in full.',
+    indexing_walk_ended_partly_read: 'The folder was only partly read: some subfolders could not be entered. Files you deleted inside them are still found by search.',
+    indexing_walk_ended_cancelled: 'The scan was stopped at your request.',
+    indexing_walk_ended_failed: 'The scan broke off because something went wrong.',
+    indexing_walk_ended_broken_worker: 'The scan stopped: the helper program that reads files stopped answering.',
+    indexing_walk_ended_rules_not_applied: 'The scan stopped: the exclusion rules could not be applied, so the folder was not read at all.',
+    indexing_walk_ended_root_unavailable: 'The scan stopped: the folder could not be entered. It may have been removed, or its drive disconnected.',
+    indexing_walk_ended_volume_missing: 'The scan stopped: the folder read as empty although the index still holds files from it. Nothing was deleted — the drive may not be fully attached.',
+    indexing_embed_ended_completed: 'Embedding the whole index has finished.',
+    indexing_embed_ended_cancelled: 'The embedding pass was stopped at your request.',
+    indexing_embed_ended_failed: 'The embedding pass broke off because something went wrong.',
+    indexing_embed_ended_unexpected: 'The embedding pass stopped for a reason not expected here ({reason}).',
+    indexing_failure_message: 'The program reported: {message}',
+    indexing_walk_result: 'Documents added: {indexed}. Unchanged: {unchanged}. Skipped: {skipped}. Removed from the index: {removed}.',
+    indexing_embed_result: 'Chunks embedded: {done} of {total}. Given up on: {refused}.',
+    indexing_frozen_heading: 'These subfolders were not reconciled, so files deleted inside them are still found by search:',
+    indexing_frozen_row: '{prefix} — {why}',
+    indexing_frozen_symlinked_subtree: 'a symbolic link, never entered',
+    indexing_frozen_empty_directory: 'read as empty',
+    indexing_frozen_unreadable_directory: 'could not be read',
+    indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search over this folder already works.',
+    indexing_note_no_model: 'Search by meaning was not started: no embedding model has been chosen. Word search over this folder already works.',
+    indexing_note_rejected: 'The request was refused.',
+    indexing_unobserved: 'Another job is running. This window cannot see how far it has got, but it can still be stopped.',
+    indexing_cancel: 'Stop',
   },
 };

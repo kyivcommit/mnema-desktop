@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, providerReady } from './state';
 import { generated, citationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
-import type { ModelSettings } from '../lib/ipc';
+import type { ModelSettings, IndexSettings } from '../lib/ipc';
 
 test('a blank query is rejected', () => {
   expect(checkQuery('')).toEqual({ ok: false, reason: 'blank' });
@@ -46,31 +46,52 @@ test('AskAnswer maps to the right launcher state', () => {
 const presentKey: ModelSettings['key'] = { kind: 'present' };
 const absentKey: ModelSettings['key'] = { kind: 'absent' };
 const readWithModel: ModelSettings['index'] = {
-  kind: 'read',
+  kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
   embeddingModel: 'text-embedding-3-small',
   searchTextArm: true,
   searchContentArm: false,
 };
 const readNoModel: ModelSettings['index'] = {
-  kind: 'read',
+  kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
   embeddingModel: null,
   searchTextArm: true,
   searchContentArm: false,
 };
 const unreadableIndex: ModelSettings['index'] = { kind: 'unreadable', cause: 'notOpen', reason: '' };
+// `providerReady` reads only `key` and `index` — `platform` is irrelevant to
+// it, so one fixed value stands for all four cases here (PR 7 Task 4 widened
+// `ModelSettings` with this field).
+const platform: ModelSettings['platform'] = 'linux';
 
 test('providerReady: a present key and a chosen model → true', () => {
-  expect(providerReady({ key: presentKey, index: readWithModel })).toBe(true);
+  expect(providerReady({ key: presentKey, index: readWithModel, platform })).toBe(true);
 });
 
 test('providerReady: a present key with no chosen model → false (the live-smoke config)', () => {
-  expect(providerReady({ key: presentKey, index: readNoModel })).toBe(false);
+  expect(providerReady({ key: presentKey, index: readNoModel, platform })).toBe(false);
 });
 
 test('providerReady: a present key with an unreadable index → false', () => {
-  expect(providerReady({ key: presentKey, index: unreadableIndex })).toBe(false);
+  expect(providerReady({ key: presentKey, index: unreadableIndex, platform })).toBe(false);
 });
 
 test('providerReady: an absent key, even with a chosen model → false', () => {
-  expect(providerReady({ key: absentKey, index: readWithModel })).toBe(false);
+  expect(providerReady({ key: absentKey, index: readWithModel, platform })).toBe(false);
+});
+
+// Review P2-8: `index.kind === 'read'` was defended by nothing. Replacing it
+// with `true &&` left all 284 tests passing, because the fixture above that was
+// meant to cover it — `unreadableIndex` — drops TWO conditions at once: an
+// `Unreadable` index carries no `embeddingModel`, so the third conjunct is
+// already false and the second is never the reason the answer is `false`. The
+// fixture below discriminates this conjunct alone: an index that is not `read`
+// yet does carry a model name, which only a cast can build because the wire
+// type does not admit it — and that is the point. The rule is about the index
+// being READ, not merely about a model string being present somewhere.
+const unreadableIndexCarryingAModel = {
+  kind: 'unreadable', cause: 'notOpen', reason: 'r', embeddingModel: 'text-embedding-3-small',
+} as unknown as IndexSettings;
+
+test('providerReady: a present key and a model name on an index that is not read → false', () => {
+  expect(providerReady({ key: presentKey, index: unreadableIndexCarryingAModel, platform })).toBe(false);
 });

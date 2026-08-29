@@ -12,7 +12,15 @@ import {
 } from './fixtures';
 
 const invoke = vi.fn();
-vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...a: unknown[]) => invoke(...a),
+  // Tauri's `Channel` as far as this module uses it: something with an
+  // `onmessage` the runtime calls. Declared inside the factory because
+  // `vi.mock` is hoisted above every binding in this file.
+  Channel: class {
+    onmessage: ((message: unknown) => void) | null = null;
+  },
+}));
 
 test('listTree invokes list_tree', async () => {
   invoke.mockResolvedValue({ roots: [], recents: [] });
@@ -20,6 +28,79 @@ test('listTree invokes list_tree', async () => {
   await ipc.listTree();
 
   expect(invoke).toHaveBeenCalledWith('list_tree');
+});
+
+// PR 7 Task 4: the two model-settings commands `Models.svelte` calls.
+test('setKey invokes set_key with the typed key', async () => {
+  invoke.mockResolvedValue({ balance: { kind: 'notStated' } });
+
+  await ipc.setKey('a-key-value');
+
+  expect(invoke).toHaveBeenCalledWith('set_key', { key: 'a-key-value' });
+});
+
+// PR 7 Task 8: the whole event crosses, not one field of it. The mutation this
+// kills is the shape the module used to have — an `onmessage` that read `event`
+// and threw the ending's contents away, which left every reason, count and
+// frozen prefix unavailable to whatever drew the screen.
+const ENDED_PAYLOAD = {
+  reason: 'volumeMissing', done: 11, total: 11, skipped: 5, complete: true, frozen: [],
+  indexed: 5, unchanged: 1, refused: 0, removed: 4, message: null,
+} as const;
+const PROGRESS_PAYLOAD = { done: 3, total: 8, skipped: 1, refused: 0, secondsLeft: null } as const;
+
+test('startEmbedJob forwards every job event, whole, and takes no root', async () => {
+  invoke.mockResolvedValue(undefined);
+  const seen: unknown[] = [];
+
+  await ipc.startEmbedJob((e) => seen.push(e));
+
+  const call = invoke.mock.calls.at(-1) as [string, { onProgress: { onmessage: (m: unknown) => void } }];
+  expect(call[0]).toBe('start_embed_job');
+  // The pass covers the whole index: a root id here would be a promise it
+  // cannot keep (embed_job.rs).
+  expect(Object.keys(call[1])).toEqual(['onProgress']);
+  const channel = call[1].onProgress;
+  expect(typeof channel.onmessage).toBe('function');
+
+  channel.onmessage({ event: 'progress', data: PROGRESS_PAYLOAD });
+  channel.onmessage({ event: 'ended', data: ENDED_PAYLOAD });
+
+  expect(seen).toEqual([
+    { event: 'progress', data: PROGRESS_PAYLOAD },
+    { event: 'ended', data: ENDED_PAYLOAD },
+  ]);
+});
+
+test('startWalkJob sends the root id it was given and forwards the whole event', async () => {
+  invoke.mockResolvedValue(undefined);
+  const seen: unknown[] = [];
+
+  await ipc.startWalkJob(42, (e) => seen.push(e));
+
+  const call = invoke.mock.calls.at(-1) as [string, { rootId: number; onProgress: { onmessage: (m: unknown) => void } }];
+  expect(call[0]).toBe('start_walk_job');
+  expect(call[1].rootId).toBe(42);
+  call[1].onProgress.onmessage({ event: 'ended', data: ENDED_PAYLOAD });
+  expect(seen).toEqual([{ event: 'ended', data: ENDED_PAYLOAD }]);
+});
+
+// Both directions on the one thing this command must not need: a channel.
+test('cancelJob invokes cancel_job with no arguments and no channel', async () => {
+  invoke.mockResolvedValue(undefined);
+
+  await ipc.cancelJob();
+
+  expect(invoke).toHaveBeenCalledWith('cancel_job');
+  expect(invoke.mock.calls.at(-1)).toHaveLength(1);
+});
+
+test('forgetKey invokes forget_key with no arguments', async () => {
+  invoke.mockResolvedValue({ kind: 'removed' });
+
+  await ipc.forgetKey();
+
+  expect(invoke).toHaveBeenCalledWith('forget_key');
 });
 
 test('sourceAround echoes the whole identity, not just the id', async () => {

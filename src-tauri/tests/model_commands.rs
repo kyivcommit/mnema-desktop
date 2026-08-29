@@ -16,9 +16,9 @@ use mnema_desktop::embed_job::start_embed_job;
 use mnema_desktop::error::Error;
 use mnema_desktop::job::JobEvent;
 use mnema_desktop::models::{
-    ExistingVectors, IndexRead, IndexSettings, KeyRemoval, KeyState, KeyStoreFailure,
-    UnreadableCause, forget_key, key_present, model_settings, provider_models, set_chat_model,
-    set_embedding_model, set_key, set_rerank_model,
+    DEFAULT_MODELS, ExistingVectors, IndexRead, IndexSettings, KeyRemoval, KeyState,
+    KeyStoreFailure, UnreadableCause, forget_key, key_present, model_settings, provider_models,
+    set_chat_model, set_embedding_model, set_key, set_rerank_model,
 };
 use mnema_mock_provider::Reply;
 use serde_json::{Value, json};
@@ -47,10 +47,15 @@ const KEY: &str = "test-key-not-a-real-one-0123456789";
 /// key is there".
 const KEY_ALREADY_ENTERED: &str = "test-key-not-a-real-one-abcdefghij";
 
-/// The model the fixture's provider answers an embedding check for. The same
-/// name `Fixture::adopt_default_model` uses; the mock ignores it, the index does
-/// not.
-const MODEL: &str = "baai/bge-m3";
+/// The model the fixture's provider answers an embedding check for — **this
+/// product's own default**, which is the model an index is on once a key has
+/// been entered. The mock ignores the name; the index does not.
+///
+/// It was a literal of its own until `set_key` began applying `DEFAULT_MODELS`.
+/// Left as one, every test below that says "the model the index is already on"
+/// would have named a model the index was *not* on, and the tests that assert a
+/// space was minted would have been asserting about a second one.
+const MODEL: &str = DEFAULT_MODELS.embedding;
 
 /// The listing the mock answers with: one usable model and one at 512 tokens.
 const TWO_EMBEDDERS: &str = r#"{"data":[
@@ -224,11 +229,25 @@ fn an_absent_key_is_an_answer_rather_than_a_failure() {
 
 #[test]
 fn the_key_never_reaches_the_database_file() {
-    let fx = Fixture::with_provider_accepting_everything();
+    // Two embedding checks, not the usual one: `set_key` spends the first
+    // adopting the default model, and this test spends the second on the write
+    // it is here to watch. One short and the mock answers its `599` sentinel.
+    let fx = Fixture::with_provider_accepting_everything_for(2);
     fx.open_index();
 
     set_key(fx.state(), KEY.into()).expect("accepted");
     fx.adopt_default_model();
+
+    // Adopted here rather than left to the fixture, and that is the whole
+    // repair. `adopt_default_model` used to call `set_embedding_model`; once
+    // `set_key` began choosing the defaults itself, the helper became a read
+    // and an assertion — correct for what it now says, and it took this test's
+    // only pass through the write with it. The mutation this test exists to
+    // catch replaces the model name with the key in exactly that write, so a
+    // test that never reaches the write cannot see it, and did not: the case
+    // stood green while the guard it names had stopped running.
+    set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect("nothing is embedded yet, so keeping the vectors cannot refuse");
 
     // Half one of the positive control. Every assertion below is an assertion
     // of absence, and absence is what a key that was never stored anywhere
@@ -584,22 +603,30 @@ fn an_unknown_role_is_rejected_rather_than_treated_as_chat() {
 #[test]
 fn the_recorded_dimension_is_the_one_the_provider_answered_with() {
     for width in [1024usize, 1536] {
-        let fx = Fixture::with_provider_answering_with_dimension(width);
+        // Two checks: the one `set_key`'s own default adoption makes, and this
+        // test's own. `OTHER_MODEL` and not `MODEL`, because `MODEL` is now the
+        // model that adoption already put the index on — re-choosing it would
+        // find that space instead of minting one, and `created` below would be
+        // asserting the opposite of what it says.
+        let fx = Fixture::with_provider_answering_embedding_checks(width, 2);
         fx.open_index();
         set_key(fx.state(), KEY.into()).expect("accepted");
 
-        let adopted =
-            set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep).expect("chosen");
+        let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+            .expect("chosen");
 
         // What the call says it wrote, and then what the database says it holds.
         // Only the second proves a write happened at all; only the first
         // survives a read-back that fails.
-        assert_eq!(adopted.model, MODEL);
+        assert_eq!(adopted.model, OTHER_MODEL);
         assert_eq!(adopted.dim, width as i64);
-        assert!(adopted.created, "this index had no space before the call");
+        assert!(
+            adopted.created,
+            "this index had no space for this model before the call"
+        );
 
         let read = read_index(&adopted.index);
-        assert_eq!(read.embedding_model.as_deref(), Some(MODEL));
+        assert_eq!(read.embedding_model.as_deref(), Some(OTHER_MODEL));
         assert_eq!(read.embedding_dim, Some(width as i64));
         assert_eq!(read.active_space, Some(adopted.space_id));
         assert_eq!(
@@ -626,16 +653,20 @@ fn the_recorded_dimension_is_the_one_the_provider_answered_with() {
 /// `true` there: `assert!(adopted.created)` above is satisfied by a constant.
 #[test]
 fn choosing_the_same_model_again_reports_a_space_found_rather_than_created() {
-    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    // Three checks: `set_key`'s own default adoption, and this test's two.
+    // `OTHER_MODEL`, because the first call must be the one that MINTS the space
+    // — with `MODEL` it would find the one the default adoption already made,
+    // and `first.created` would be false before the second call ever ran.
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 3);
     fx.open_index();
     set_key(fx.state(), KEY.into()).expect("accepted");
     let first =
-        set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep).expect("chosen");
+        set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep).expect("chosen");
     assert!(first.created);
 
-    // A second embedding check, so the second call has an answer of its own.
-    let second =
-        set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep).expect("chosen again");
+    // A third embedding check, so the second call has an answer of its own.
+    let second = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect("chosen again");
 
     assert!(
         !second.created,
@@ -732,9 +763,17 @@ fn the_settings_reach_the_window_tagged_and_in_camel_case() {
 /// index not being there.
 ///
 /// This is the state the settings screen is opened in: `AppState.db` is `None`
-/// until the window calls `open_index`, and an index this build cannot open
-/// leaves it `None` for the rest of the session. Folded into one message, the
-/// screen tells someone who has a key that they have none.
+/// until something opens the index — in the application that is the boot
+/// (`boot_index`, called from `.setup`), never the window, which is why this
+/// fixture opens nothing and reaches the same `None`. Folded into one message,
+/// the screen tells someone who has a key that they have none.
+///
+/// The `NotOpen` below is still the right expectation *here* and would be the
+/// wrong one in the product: a failed boot open is recorded and reaches the
+/// window as `ReadFailed`. Nothing in this fixture boots, so nothing recorded
+/// anything — which is exactly the mirror
+/// `a_failed_boot_open_reaches_the_window_as_read_failed` asserts from the
+/// other side, in `tests/commands.rs`.
 #[test]
 fn a_key_that_is_there_survives_an_index_that_is_not() {
     let fx = Fixture::with_provider_accepting_everything();
@@ -1142,11 +1181,12 @@ fn the_settings_tell_the_active_space_apart_from_the_whole_index() {
 /// right. Both are asserted, because the claim is about them agreeing.
 #[test]
 fn trying_a_second_model_leaves_a_space_behind_and_it_never_goes_away() {
-    // Four embedding checks: three adoptions and the refused attempt at the end,
-    // which reaches the provider before it reaches the index. One short and that
-    // last call gets the mock's `599` sentinel, and the refusal this test is
-    // about is replaced by one about a provider — measured, on the first run.
-    let fx = Fixture::with_provider_answering_embedding_checks(1024, 4);
+    // Five embedding checks: the one `set_key`'s own default adoption makes,
+    // three presses, and the refused attempt at the end, which reaches the
+    // provider before it reaches the index. One short and that last call gets
+    // the mock's `599` sentinel, and the refusal this test is about is replaced
+    // by one about a provider — measured, on the first run.
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 5);
     fx.open_index();
     set_key(fx.state(), KEY.into()).expect("accepted");
 
@@ -1477,18 +1517,26 @@ fn a_chunk_the_provider_refused_is_counted_where_a_person_can_read_it() {
 /// A person who has entered a key but chosen no model gets a sentence, not a
 /// silence and not a panic. The pass reads `meta.active_space` itself and
 /// refuses; this is that refusal reaching the window as an ending it can render.
+///
+/// **The key goes into the store directly, and that is the only way this state
+/// can still be built.** `set_key` applies `DEFAULT_MODELS` to every role the
+/// index has none for, so a key entered through the command on an open index
+/// leaves an embedding model behind it every time. The state is still reachable
+/// in the product, and this is exactly its shape: a key entered while the index
+/// was not open — a start-up open that failed, and a person who typed their key
+/// into the settings screen it left them on — and an index opened later. What
+/// `set_key` would otherwise contribute here is a credit check this test does
+/// not measure, so nothing is lost by not making it.
 #[test]
 fn a_run_with_no_model_chosen_ends_with_a_message_saying_so() {
     let fx = Fixture::with_provider_accepting_everything();
     fx.open_index();
-    set_key(fx.state(), KEY.into()).expect("the key is accepted");
-    // The credit check `set_key` itself makes, taken off the queue so that the
-    // assertion at the end is about this job and not about that call — and
-    // asserted rather than discarded, because a queue that was empty for some
-    // other reason would make the one below prove nothing.
+    mnema_secrets::store(fx.credential_ref(), KEY).expect("the key goes into the store");
+    // Nothing has spoken to the provider yet, which is what makes the assertion
+    // at the end — that the job never called out — about this job.
     assert!(
-        fx.provider_request().is_some(),
-        "`set_key` made no call at all, so nothing below can distinguish a job that stayed quiet"
+        fx.provider_request().is_none(),
+        "something called the provider before the job did, so the check at the end is about it"
     );
 
     let (channel, events) = job_channel();
@@ -1728,5 +1776,645 @@ fn a_run_leaves_no_vectors_in_a_space_nothing_points_at() {
     assert!(
         matches!(refusal, Error::JobAlreadyRunning),
         "the refusal must name the slot: {refusal:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 6 — the default model set. `DEFAULT_MODELS` is the one place the two ids
+// are spelled, and this is where the rule around them is held: they are applied
+// on the first key, and only to a role the index has no answer for.
+
+/// A chat model somebody has already chosen, so that "it was not overwritten" is
+/// a fact about a value nothing in the product could have written.
+const CHOSEN_CHAT: &str = "vendor/chat-already-chosen";
+
+/// The first key is what turns an unconfigured index into a working one: every
+/// role the window can act on gets the model this product ships with, so that
+/// nobody has to choose one before anything at all can happen.
+///
+/// Read through `model_settings` rather than out of the index by hand, because
+/// that is the reply the window is drawn from: a default written somewhere the
+/// settings command does not look is a default nobody ever sees.
+#[test]
+fn the_first_key_chooses_this_products_model_for_every_role_the_index_has_none_for() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(
+        read.chat_model.as_deref(),
+        Some(DEFAULT_MODELS.chat),
+        "an index with no chat model was left with none"
+    );
+    assert_eq!(
+        read.embedding_model.as_deref(),
+        Some(DEFAULT_MODELS.embedding),
+        "an index with no embedding model was left with none"
+    );
+    // The embedding role is not a `meta` row: it is a vector space, and a model
+    // name recorded without one is a name search cannot use.
+    assert!(
+        read.active_space.is_some(),
+        "the embedding model was recorded without a space to embed into"
+    );
+    assert_eq!(
+        read.embedding_dim,
+        Some(1024),
+        "the width must be the one the provider answered with, not one this build assumed"
+    );
+}
+
+/// The direction a happy-path test forgets, and the one that costs something: a
+/// key entered over a configuration somebody has already made must leave it
+/// exactly as it was.
+///
+/// **The fixture builds the state the guard branches on**, which is the whole
+/// point of it: an index that already has both roles answered. Without that,
+/// "sets both defaults" passes on an implementation that overwrites
+/// unconditionally.
+///
+/// **And the provider has an answer in hand**, which is the second half. With a
+/// mock that has nothing left to say, an implementation that overwrites is
+/// stopped by the fixture running out of replies rather than by anything in the
+/// product — a green that proves the mock's arithmetic. The spare reply is a
+/// valid 1024-wide embedding check, so an unconditional build genuinely adopts,
+/// mints a second space, and is caught here.
+#[test]
+fn a_key_entered_over_models_that_are_already_chosen_replaces_neither() {
+    let fx = Fixture::with_provider_answering_with_dimension(1024);
+    fx.open_index();
+    set_chat_model(fx.state(), CHOSEN_CHAT.into()).expect("a chat model is chosen");
+    // `OTHER_MODEL` and not `MODEL`: `MODEL` **is** this product's default, so an
+    // index already on it is a state a build that overwrites unconditionally
+    // leaves looking exactly the same — same model, same space, same count. The
+    // one thing that tells the two builds apart is an index on a model the
+    // default would have to move it off.
+    fx.state()
+        .with_index(|db| {
+            db.adopt_embedding_model(OTHER_MODEL, 1024, fx.credential_ref(), "chunker-under-test")?;
+            Ok(())
+        })
+        .expect("an embedding model is adopted");
+    let space_before = fx.space_ids();
+
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(
+        read.chat_model.as_deref(),
+        Some(CHOSEN_CHAT),
+        "a chat model somebody chose was replaced by this product's default"
+    );
+    assert_eq!(
+        read.embedding_model.as_deref(),
+        Some(OTHER_MODEL),
+        "the index was repointed at a model nobody asked for"
+    );
+    assert_eq!(
+        fx.space_ids(),
+        space_before,
+        "a space was minted for a role that already had an answer"
+    );
+    // The credit check `set_key` makes is the only request this test expects.
+    // Taken off the queue and asserted, so the check after it is about the
+    // absence of a *second* call rather than about a queue that was empty for
+    // some other reason.
+    assert!(
+        fx.provider_request().is_some(),
+        "the credit check `set_key` makes never arrived, so the check below proves nothing"
+    );
+    assert!(
+        fx.provider_request().is_none(),
+        "a request left the machine to choose a model that was already chosen"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The transition gate: what a confirmed model change costs, measured end to end
+// rather than warned about.
+//
+// A Rust integration test and not a component one, because a component test
+// mocks the very layer where the loss happens. `mnema-mock-provider` is what
+// makes the whole path — embed, search, retire, re-embed — runnable with no
+// network.
+
+/// A query no word of which appears in the seeded text, so a hit for it can
+/// only have come from the content arm.
+const SEMANTIC_ONLY_QUERY: &str = "vulpine";
+
+/// A word that IS in the seeded text, so a hit for it can come from the lexical
+/// arm alone — the control that tells "semantic went dark" apart from "the index
+/// broke".
+const LEXICAL_QUERY: &str = "number";
+
+/// How many chunks a hit is expected for, spelled once: the fixture writes this
+/// many, the run embeds this many, and the searches below match this many.
+const SEEDED_CHUNKS: usize = 1;
+
+/// Every hit's chunk id, in the order the fusion put them — what "found by
+/// meaning" and "found again" are actually compared on, rather than a count that
+/// two different documents would satisfy equally.
+fn hit_ids(answer: &bridge::SearchAnswer) -> Vec<i64> {
+    answer.hits.iter().map(|h| h.chunk_id).collect()
+}
+
+/// How many chunks the content arm itself matched — read off the arm's own
+/// report rather than inferred from `hits`, because the fused list cannot say
+/// which arm put something in it.
+fn content_matched(answer: &bridge::SearchAnswer) -> usize {
+    match answer.content {
+        bridge::ContentArmReport::Answered { matched, .. } => matched,
+        ref other => panic!("the content arm did not answer at all: {other:?}"),
+    }
+}
+
+/// How many the lexical arm matched, on the same terms.
+fn text_matched(answer: &bridge::SearchAnswer) -> usize {
+    match answer.text {
+        bridge::TextArmReport::Answered { matched } => matched,
+        ref other => panic!("the lexical arm did not answer at all: {other:?}"),
+    }
+}
+
+/// **Discarding the vectors takes semantic search with them, and this is that
+/// loss stated as a fact instead of as a warning.**
+///
+/// `set_embedding_model` with [`ExistingVectors::Discard`] is not a migration:
+/// nothing is copied and nothing is re-embedded, and `retrieve` hands the KNN
+/// only the *current* `active_space`. So the moment the change lands, every
+/// semantic hit in the index is gone — while the lexical arm carries on
+/// answering, which is what makes the loss quiet: the launcher keeps replying,
+/// and replies worse.
+///
+/// Four moments, in one run, because no two of them are the same claim:
+///
+/// 1. a hit for a query only the content arm can answer;
+/// 2. that hit gone after the change — and the *lexical* arm still answering,
+///    which is what separates "semantic went dark" from "the index broke";
+/// 3. `start_embed_job` refilling the new space;
+/// 4. the same document findable by meaning again.
+///
+/// **What makes step 2 a measurement of the fix rather than of the seeding** is
+/// step 1 above and `a_change_that_retires_nothing_is_the_same_fixture_taking_the_other_path`
+/// below: the first says this fixture DOES produce a semantic hit, so its
+/// absence later is caused by something; the second says this fixture's change
+/// machinery can also take the non-destructive path, so what causes it is
+/// `Discard` meeting a space with vectors in it.
+#[test]
+fn discarding_the_vectors_takes_semantic_search_with_them_until_the_index_is_refilled() {
+    let fx = Fixture::with_provider_answering_a_run(vec![
+        // The first pass over the queue.
+        Reply::ok(&vectors_for(SEEDED_CHUNKS)),
+        // The semantic search before the change.
+        Reply::ok(&vectors_for(1)),
+        // The embedding check the change itself makes.
+        Reply::ok(&mnema_mock_provider::two_vectors(1024)),
+        // The same semantic search after it, and the lexical control beside it —
+        // the content arm runs on that one too and asks for its own embed.
+        Reply::ok(&vectors_for(1)),
+        Reply::ok(&vectors_for(1)),
+        // The refill, and the semantic search that follows it.
+        Reply::ok(&vectors_for(SEEDED_CHUNKS)),
+        Reply::ok(&vectors_for(1)),
+    ]);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    let doomed_space = fx.active_space().expect("`set_key` chose a model");
+    let chunks = fx.write_indexed_chunks(SEEDED_CHUNKS);
+
+    let (channel, events) = job_channel();
+    start_embed_job(fx.state(), channel).expect("the first embedding pass starts");
+    let (_progress, ending) = events_until_ended(&events);
+    assert_eq!(ending["reason"], json!("completed"), "{ending}");
+
+    // 1 — found by meaning, and by nothing else. The lexical arm is asserted to
+    // have matched NOTHING for this query, which is what makes the hit below
+    // attributable to the content arm rather than to a word that happened to
+    // overlap.
+    let before = bridge::search(fx.state(), SEMANTIC_ONLY_QUERY.into()).expect("the search runs");
+    assert_eq!(
+        text_matched(&before),
+        0,
+        "the lexical arm matched this query, so a hit for it says nothing about meaning"
+    );
+    assert_eq!(
+        content_matched(&before),
+        SEEDED_CHUNKS,
+        "the content arm found nothing before the change, so its silence afterwards would \
+         measure the fixture rather than the change"
+    );
+    assert_eq!(
+        hit_ids(&before),
+        chunks,
+        "the window was shown something other than the document that was seeded"
+    );
+
+    let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Discard)
+        .expect("the confirmed change is accepted");
+    assert_eq!(
+        adopted
+            .retired
+            .iter()
+            .map(|r| (r.space_id, r.embedded_chunks))
+            .collect::<Vec<_>>(),
+        vec![(doomed_space, SEEDED_CHUNKS as i64)],
+        "the change did not report retiring the space the vectors were in"
+    );
+
+    // 2 — the loss. Both halves: the content arm answers and matches nothing,
+    // and the lexical arm still finds the very same document, so this is
+    // semantic search going dark and not an index that broke.
+    let after = bridge::search(fx.state(), SEMANTIC_ONLY_QUERY.into()).expect("the search runs");
+    assert_eq!(
+        content_matched(&after),
+        0,
+        "the content arm still matched something in a space that was just emptied"
+    );
+    assert_eq!(
+        hit_ids(&after),
+        Vec::<i64>::new(),
+        "the window was still shown a hit for a query only the vectors could answer"
+    );
+    let lexical = bridge::search(fx.state(), LEXICAL_QUERY.into()).expect("the search runs");
+    assert_eq!(
+        text_matched(&lexical),
+        SEEDED_CHUNKS,
+        "the lexical arm stopped answering too, so what happened is not the loss this test \
+         is about"
+    );
+    assert_eq!(
+        hit_ids(&lexical),
+        chunks,
+        "the document itself is gone, not merely its vectors"
+    );
+
+    // 3 — the recovery, through the ordinary command: `start_embed_job` takes no
+    // root and covers the whole index, so nothing new is needed to offer it.
+    let (channel, events) = job_channel();
+    start_embed_job(fx.state(), channel).expect("the refill starts");
+    let (_progress, ending) = events_until_ended(&events);
+    assert_eq!(ending["reason"], json!("completed"), "{ending}");
+    assert_eq!(ending["done"], json!(SEEDED_CHUNKS), "{ending}");
+
+    // 4 — findable by meaning again, and in the new space rather than the old.
+    let refilled = bridge::search(fx.state(), SEMANTIC_ONLY_QUERY.into()).expect("the search runs");
+    assert_eq!(
+        content_matched(&refilled),
+        SEEDED_CHUNKS,
+        "the re-embedding pass reported success and semantic search still finds nothing"
+    );
+    assert_eq!(hit_ids(&refilled), chunks);
+    assert_eq!(
+        fx.active_space(),
+        Some(adopted.space_id),
+        "the refilled space is not the one the index points at"
+    );
+    assert!(
+        !fx.space_ids().contains(&doomed_space),
+        "the retired space is still there, so nothing was actually discarded: {:?}",
+        fx.space_ids()
+    );
+}
+
+/// The control the gate above stands on: **the same fixture, taking the
+/// non-destructive path.**
+///
+/// Without it, "the content arm matched nothing after the change" is equally
+/// well explained by a fixture whose `set_embedding_model` cannot leave an index
+/// searchable at all. Here the active space is empty — the state an index is in
+/// before a pass has written anything — and the change is made with
+/// [`ExistingVectors::Keep`], the value that refuses rather than destroys. It is
+/// accepted, it retires nothing, and the index is left pointing at a space of
+/// its own.
+#[test]
+fn a_change_that_retires_nothing_is_the_same_fixture_taking_the_other_path() {
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    let first_space = fx.active_space().expect("`set_key` chose a model");
+    fx.write_indexed_chunks(SEEDED_CHUNKS);
+    assert_eq!(
+        fx.embedded_chunks_in(first_space),
+        0,
+        "this control is about an EMPTY active space, and this one is not empty"
+    );
+
+    let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect("a change that strands nothing is not refused");
+
+    assert_eq!(
+        adopted.retired,
+        Vec::new(),
+        "a change nobody confirmed retired a space"
+    );
+    assert_eq!(
+        fx.space_ids().len(),
+        2,
+        "the space that was left behind is gone, which `Keep` may not do: {:?}",
+        fx.space_ids()
+    );
+    assert_eq!(
+        fx.active_space(),
+        Some(adopted.space_id),
+        "the index does not point at the space the change adopted"
+    );
+    assert_ne!(
+        adopted.space_id, first_space,
+        "the change found the space it started from, so it moved nothing and this control \
+         says nothing about a change at all"
+    );
+}
+
+/// **The failure that leaves the data already destroyed**, forced rather than
+/// reasoned about.
+///
+/// Retiring a space and adopting a model are two transactions and cannot be one
+/// (`Db::drop_space` and `Db::adopt_embedding_model` each open their own, and
+/// SQLite has no nested `BEGIN`). An ordinary failure of the second, after the
+/// first has committed, leaves the vectors gone and `meta.active_space` naming a
+/// space that no longer exists.
+///
+/// **How it is forced, and why this shape rather than a lock or a full disk.**
+/// A second connection racing for the write lock is a timing hypothesis, and a
+/// full disk is not arrangeable from a test on any machine this suite runs on.
+/// What is arrangeable is the next space's own table name: `embedding_space.id`
+/// is `AUTOINCREMENT`, so the id `create_space` will use is readable from
+/// `sqlite_sequence` before the call, and a table already standing under that
+/// name makes `CREATE VIRTUAL TABLE` fail — *after* the retirement has
+/// committed, which is the whole point. Nothing about the product is mocked: the
+/// command takes exactly the path an I/O error would send it down.
+///
+/// Two claims, and the second is the one a window has to live with: the
+/// rejection names the space and the count that went, and a subsequent
+/// `model_settings` reports `Unreadable { cause: ReadFailed }` — because the
+/// error itself reaches the webview as a bare sentence and cannot be branched
+/// on.
+///
+/// **And a third, added by review: the way out is run, not described.** The
+/// window renders `models_index_recover` in this state — "choosing an embedding
+/// model again repairs this" — and until now that sentence was a claim made only
+/// by [`set_embedding_model`]'s own doc and by a component test against a mock.
+/// Neither could tell whether the real index honours it, and the window sends
+/// `Keep`, which is the value that refuses whenever another space is not empty.
+/// The last block below performs the recovering act against this index, in the
+/// state the wreck actually left.
+#[test]
+fn an_adoption_that_fails_after_the_retirement_says_what_was_already_destroyed() {
+    // Three embedding checks: `set_key`'s default adoption, the change that is
+    // supposed to fail, and the recovering act at the end.
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 3);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    let doomed_space = fx.active_space().expect("`set_key` chose a model");
+    fx.embed_chunks_in_the_active_space(EMBEDDED);
+
+    // The name the next space will be given, read from the counter rather than
+    // guessed: a guess that missed would leave the adoption succeeding and this
+    // test asserting about an error that never happened.
+    let next_id: i64 = fx
+        .state()
+        .with_index(|db| {
+            let seq: i64 = db.conn().query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'embedding_space'",
+                [],
+                |r| r.get(0),
+            )?;
+            db.conn()
+                .execute(&format!("CREATE TABLE vec_emb_{} (x)", seq + 1), [])?;
+            Ok(seq + 1)
+        })
+        .expect("the squatting table is created");
+
+    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Discard)
+        .expect_err("the adoption was supposed to fail on the name already taken");
+
+    // The state first, because a rejection that arrived after the drop committed
+    // has already done its damage and this test's subject is what it left behind.
+    assert!(
+        !fx.space_ids().contains(&doomed_space),
+        "the retirement did not commit, so this is not the state this test is about: {:?}",
+        fx.space_ids()
+    );
+    assert_eq!(
+        fx.state()
+            .with_index(|db| db.active_space())
+            .expect("the index answers"),
+        Some(doomed_space),
+        "the pointer moved, so the adoption did not fail where this test needs it to"
+    );
+
+    let Error::RetiredThenFailed { retired, .. } = &refusal else {
+        panic!("the failure did not carry what it had already destroyed: {refusal:?}");
+    };
+    assert_eq!(
+        retired
+            .iter()
+            .map(|r| (r.space_id, r.embedded_chunks))
+            .collect::<Vec<_>>(),
+        vec![(doomed_space, EMBEDDED)],
+        "the sentence does not name the space that went, or what it held"
+    );
+    // The sentence itself, because that is all the window receives: `impl
+    // Serialize for Error` sends the `Display` string and nothing else.
+    let said = refusal.to_string();
+    for expected in [doomed_space.to_string(), EMBEDDED.to_string()] {
+        assert!(
+            said.contains(&expected),
+            "the rejection a person is shown does not name `{expected}`: {said}"
+        );
+    }
+
+    // And the state the window branches on instead of on that sentence.
+    let settings = model_settings(fx.state());
+    assert!(
+        matches!(
+            settings.index,
+            IndexSettings::Unreadable {
+                cause: UnreadableCause::ReadFailed,
+                ..
+            }
+        ),
+        "the wreck does not reach the window as the state it has to branch on: {:?}",
+        settings.index
+    );
+    // Not `NotOpen`, and asserted separately: the index IS open, and telling
+    // somebody whose vectors are gone that nothing has been opened yet sends
+    // them nowhere.
+    assert!(
+        matches!(settings.key, KeyState::Present),
+        "the key half was taken down with the index half"
+    );
+
+    // --- and out of it again, by the act the window offers -------------------
+    //
+    // The obstacle removed is the squatting table and nothing else: the pointer
+    // is still naming a space that is gone, and the refusal `Keep` would
+    // otherwise raise is not disarmed here — it enumerates `embedding_space`,
+    // and the retired space's row went with the `DROP` that committed.
+    fx.state()
+        .with_index(|db| {
+            db.conn()
+                .execute(&format!("DROP TABLE vec_emb_{next_id}"), [])?;
+            Ok(())
+        })
+        .expect("the squatting table is removed");
+
+    // `Keep`, because `Keep` is what the window sends in this state — an index
+    // that will not answer states no estimate, so it asks nothing and sends the
+    // value that refuses rather than destroys.
+    let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect("the recovering act the window offers was refused by the index");
+
+    assert!(
+        adopted.created,
+        "the recovery found a space instead of minting one, so the pointer it wrote is the old one"
+    );
+    assert_eq!(
+        fx.state()
+            .with_index(|db| db.active_space())
+            .expect("the index answers"),
+        Some(adopted.space_id),
+        "the pointer the index lost was not rewritten to the space just adopted"
+    );
+    // And the window's own reading of it: the defect sentence is gone, and the
+    // model named is the one that was just chosen.
+    let recovered = model_settings(fx.state());
+    assert_eq!(
+        read_index(&recovered.index).embedding_model.as_deref(),
+        Some(OTHER_MODEL),
+        "the settings screen does not name the model the recovery adopted"
+    );
+}
+
+/// The default set is applied inside the job slot, and a slot that is taken
+/// means it is simply not applied — a default the next key or the next explicit
+/// choice will apply anyway.
+///
+/// **The reason is `embed_job.rs`'s**, the same one written out inside
+/// `set_embedding_model`: adoption repoints `meta.active_space`, and a pass that
+/// read that pointer when it started goes on writing into the space it started
+/// with. A key entered mid-run must not move it.
+///
+/// **Both directions, and the second is the one a person meets.** A job holding
+/// the slot must not make entering a key fail: the key is checked, stored, and
+/// reported exactly as it would be with nothing running. Only the model choice
+/// waits.
+#[test]
+fn a_key_entered_while_a_job_runs_stores_the_key_and_moves_no_pointer() {
+    // A spare embedding check, so a build that took no slot at all is stopped by
+    // the assertions below rather than by the mock running out of replies —
+    // which would be a fixture artefact wearing a guard's clothes.
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 1);
+    fx.open_index();
+
+    let (probe, _probe_events) = job_channel();
+    bridge::start_probe_job(fx.state(), probe).expect("the probe job starts");
+
+    set_key(fx.state(), KEY.into()).expect("a running job must not stop a key being entered");
+
+    assert!(
+        mnema_secrets::load(fx.credential_ref())
+            .expect("read the store")
+            .is_some(),
+        "the key was not stored, so a job holding the slot cost the person the thing they came \
+         to this screen to do"
+    );
+    assert_eq!(
+        fx.active_space(),
+        None,
+        "the index was repointed while a pass was reading that pointer"
+    );
+    assert_eq!(
+        fx.space_ids(),
+        Vec::<i64>::new(),
+        "a space was minted while a job was running"
+    );
+
+    bridge::cancel_job(fx.state());
+    wait_for_the_slot(&fx);
+}
+
+/// The other end of the same rule, and the state `set_key` alone cannot reach:
+/// a key stored while no index was open leaves an installation with a key and
+/// no models, and nothing ever comes back for it.
+///
+/// **The fixture is the point.** `set_key` is called against a CLOSED index, so
+/// every step of its default pass is silent: `with_index` fails for the chat
+/// half, `active_space()` fails for the embedding half. That is exactly what a
+/// boot whose open failed leaves behind — the settings screen is reachable, the
+/// key is checked, accepted and stored, and nothing else happens. On the next
+/// launch there is nothing left to press: the key is already there, so `set_key`
+/// will not run again, and the product can neither embed nor answer.
+///
+/// The boot is run for real rather than the inner function being called, and its
+/// thread is joined rather than polled: the claim is that **start-up** applies
+/// them, and a test that waited on a timer would report timing.
+#[test]
+fn a_key_stored_while_the_index_was_shut_gets_its_models_at_the_next_boot() {
+    let fx = Fixture::with_provider_accepting_everything();
+
+    set_key(fx.state(), KEY.into()).expect("a closed index must not stop a key being entered");
+
+    // The premise, asserted rather than assumed: nothing was configured, and the
+    // window has nothing to show for the key it just accepted.
+    assert!(
+        matches!(
+            model_settings(fx.state()).index,
+            IndexSettings::Unreadable {
+                cause: UnreadableCause::NotOpen,
+                ..
+            }
+        ),
+        "this test's premise is a key entered while no index was open"
+    );
+
+    mnema_desktop::boot_index(fx.handle())
+        .join()
+        .expect("the boot's default pass panicked");
+
+    let settings = model_settings(fx.state());
+    let index = read_index(&settings.index);
+    assert_eq!(
+        index.embedding_model.as_deref(),
+        Some(DEFAULT_MODELS.embedding),
+        "the boot opened an index with no embedding model, and nothing will ever ask again"
+    );
+    assert_eq!(
+        index.chat_model.as_deref(),
+        Some(DEFAULT_MODELS.chat),
+        "the boot opened an index with no chat model, and nothing will ever ask again"
+    );
+}
+
+/// And the direction that costs something if it is wrong: a boot with no key
+/// stored asks the provider nothing and chooses nothing. Every launch takes this
+/// path until somebody enters a key, so a build that called out here would call
+/// out on every start-up of an installation that has never been signed in.
+#[test]
+fn a_boot_with_no_key_stored_calls_nobody_and_chooses_nothing() {
+    let fx = Fixture::with_provider_accepting_everything();
+
+    mnema_desktop::boot_index(fx.handle())
+        .join()
+        .expect("the boot's default pass panicked");
+
+    assert_eq!(
+        fx.provider_request(),
+        None,
+        "a boot with no key still sent a request to the provider"
+    );
+    let settings = model_settings(fx.state());
+    let index = read_index(&settings.index);
+    assert_eq!(
+        index.embedding_model, None,
+        "a boot with no key chose an embedding model anyway"
+    );
+    assert_eq!(
+        index.chat_model, None,
+        "a boot with no key chose a chat model anyway"
     );
 }

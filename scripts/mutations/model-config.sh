@@ -476,8 +476,8 @@ case_ "the credential store's own sentence is replaced by a summary" \
 
 case_ "the index's own sentence is replaced by a summary" \
   src-tauri/src/models.rs \
-  's~            cause: UnreadableCause::of\(&e\),\n            reason: e\.to_string\(\),~            cause: UnreadableCause::of(\&e),\n            reason: "the index could not be read".to_string(),~' \
-  '            reason: "the index could not be read".to_string(),' \
+  's~            \(cause, _\) => IndexSettings::Unreadable \{\n                cause,\n                reason: e\.to_string\(\),\n            \},~            (cause, _) => IndexSettings::Unreadable {\n                cause,\n                reason: "the index could not be read".to_string(),\n            },~' \
+  '                reason: "the index could not be read".to_string(),' \
   mnema-desktop 'a_key_that_is_there_survives_an_index_that_is_not' --test model_commands
 
 # The harm Task 8 named when it made this command unable to reject anything: if
@@ -486,7 +486,7 @@ case_ "the index's own sentence is replaced by a summary" \
 # like an ordinary cold start.
 case_ "an index that could not be read is answered as an empty one" \
   src-tauri/src/models.rs \
-  's~        Err\(e\) => IndexSettings::Unreadable \{\n            cause: UnreadableCause::of\(&e\),\n            reason: e\.to_string\(\),\n        \},~        Err(_) => IndexSettings::Read(IndexRead {\n            embedding_model: None,\n            embedding_dim: None,\n            active_space: None,\n            embedded_chunks: 0,\n            total_chunks: 0,\n            rerank_model: None,\n            chat_model: None,\n        }),~' \
+  's~        Err\(e\) => match \(UnreadableCause::of\(&e\), state\.boot_open_error\(\)\) \{\n            \(UnreadableCause::NotOpen, Some\(reason\)\) => IndexSettings::Unreadable \{\n                cause: UnreadableCause::ReadFailed,\n                reason,\n            \},\n            \(cause, _\) => IndexSettings::Unreadable \{\n                cause,\n                reason: e\.to_string\(\),\n            \},\n        \},~        Err(_) => IndexSettings::Read(IndexRead {\n            embedding_model: None,\n            embedding_dim: None,\n            active_space: None,\n            embedded_chunks: 0,\n            total_chunks: 0,\n            failed_chunks: 0,\n            space_count: 0,\n            embedded_chunks_everywhere: 0,\n            rerank_model: None,\n            chat_model: None,\n            search_text_arm: false,\n            search_content_arm: false,\n        }),~' \
   '        Err(_) => IndexSettings::Read(IndexRead {' \
   mnema-desktop 'a_key_that_is_there_survives_an_index_that_is_not' --test model_commands
 
@@ -777,3 +777,16 @@ case_ "an excerpt of the provider's list claims to be the whole of it" \
   's~"total_count": 33~"total_count": 6~' \
   '"total_count": 6' \
   mnema-provider 'each_fixture_says_what_it_is_and_its_own_numbers_agree' --test catalogue
+
+# The parser keeps every readable record and enforces no uniqueness over `id`.
+# That is not an oversight to be tidied away: the window's model list keys off
+# this field, and a build that quietly dropped the second of two records sharing
+# an id would report a provider listing one model where it listed two — a
+# silent subtraction from what the provider actually said, in the one place a
+# person goes to choose. Deduplicating is exactly what a later reader is likeliest
+# to "fix", so it is the mutation.
+case_ "the parser drops the second of two records sharing one id" \
+  crates/mnema-provider/src/catalogue.rs \
+  's~        entries\.push\(ModelEntry \{~        if entries.iter().any(|e: &ModelEntry| e.id == raw.id) {\n            continue;\n        }\n        entries.push(ModelEntry {~' \
+  '        if entries.iter().any(|e: &ModelEntry| e.id == raw.id) {' \
+  mnema-provider 'two_records_sharing_one_id_both_reach_the_catalogue_and_neither_is_renamed' --test catalogue

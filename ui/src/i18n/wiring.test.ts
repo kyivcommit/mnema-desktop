@@ -24,7 +24,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string) =>
     cmd === 'list_tree'
       ? Promise.resolve({ roots: [], recents: [] })
-      : Promise.resolve({ key: { kind: 'absent' }, index: { kind: 'read', embeddingModel: null, searchTextArm: true, searchContentArm: false } }),
+      : Promise.resolve({ key: { kind: 'absent' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false } }),
 }));
 
 // 🔴 U1, booked forward from Task 6 and now paid. Both tests below used to read
