@@ -75,7 +75,7 @@ pub enum Error {
     InvalidExclusionRule(#[from] mnema_walk::RulesError),
     /// `exclude_subfolder` was handed the empty string. `validate_prefix`
     /// answers `Ok(None)` for it — deliberately not a `RulesError`, since a
-    /// blank row is not a malformed one (`rules.rs:356-365`) — but storing it
+    /// blank row is not a malformed one (`rules.rs:436-445`) — but storing it
     /// would add a rule that excludes nothing and sits in the list looking
     /// like protection (review round 1, P2). Kept apart from
     /// [`Error::InvalidExclusionRule`], which is what `WalkRules::new` itself
@@ -108,7 +108,7 @@ pub enum Error {
     ///
     /// **A symlink INSIDE the root is refused too, and that is not
     /// over-reach.** The walk runs `follow_links(false)`
-    /// (`crates/mnema-walk/src/rules.rs:229`), so nothing under a symlinked
+    /// (`crates/mnema-walk/src/rules.rs:309`), so nothing under a symlinked
     /// name is ever enumerated or indexed; a listing that answered through one
     /// would offer exclusion controls for paths the walk never visits.
     #[error(

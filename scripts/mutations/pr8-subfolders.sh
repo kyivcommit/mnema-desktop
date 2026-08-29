@@ -1,43 +1,66 @@
 # `list_subfolders` — the exclusion screen's folder tree, read off the disk
-# (task 4 of PR 8a). Run with:
+# (task 4 of PR 8a, plus fix round 1). Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-subfolders.sh
 #
-# Thirteen cases, all against `src-tauri/src/tree.rs`. Ten are killed by tests
-# in `tests/commands.rs` (`--test commands`), which is where a command is
-# exercised the way the webview reaches it; three by `tree.rs`'s own `mod
-# tests` (`--lib`), and those three are not a shortcut — see the next note.
+# Most cases mutate `src-tauri/src/tree.rs`; a few mutate
+# `crates/mnema-walk/src/rules.rs`, and those are here rather than in a
+# `mnema-walk` case file because the tests that kill them are `mnema-desktop`
+# ones and this harness selects a test by package — the same reason
+# `pr8-exclusions.sh` keeps its own `validate_prefix` case. Most run in
+# `tests/commands.rs` (`--test commands`); the rest in `tree.rs`'s own
+# `mod tests` (`--lib`), for the reason two notes down.
 #
-# ⚠️ **Why three cases are killed by a unit test rather than through the IPC.**
-# Two of them are about a directory whose name is not valid UTF-8, and that
-# state **cannot be built on this project's macOS leg**: APFS refuses
-# `create_dir` for such a name outright with `EILSEQ` ("Illegal byte sequence",
-# measured on macOS 26.6.2 while writing the fixture the brief asked for), so an
-# IPC test of it can only ever run on Linux. `read_subfolders` therefore takes a
-# slice of `tree::Entry` — name, is_dir, is_symlink — rather than a `ReadDir`,
-# which is what lets the branch be reached from a test on every platform. The
-# third is the wire-shape test, which is about serde attributes on a type and
-# needs no filesystem at all.
+# ⚠️ **No count of the cases here, deliberately.** A number maintained in the
+# header of the file it counts still drifts — fix round 1 found the previous
+# header's `#[cfg(unix)]` count wrong the day a case was added. Every number a
+# reader needs is one command away and cannot go stale:
 #
-# ⚠️ **Two tests of this task are named by no case here, and both are
-# deliberate.** They are, on one line each so a grep for either finds this note:
+#   grep -c '^case_ '        scripts/mutations/pr8-subfolders.sh   # cases
+#   grep -c ' --lib$'        scripts/mutations/pr8-subfolders.sh   # --lib cases
+#   scripts/mutation-staleness.sh                                  # per-file counts
+#
+# (The three sentences above name which FILE each group mutates and which
+# TARGET it runs under, which is what a reader acts on; those are properties of
+# the case, not a tally that drifts.)
+#
+# ⚠️ **Why the `--lib` cases are killed by a unit test rather than through the
+# IPC.** Two are about a directory whose name is not valid UTF-8, and that state
+# **cannot be built on this project's macOS leg**: APFS refuses `create_dir`
+# for such a name outright with `EILSEQ` ("Illegal byte sequence", measured on
+# macOS 26.6.2), so an IPC test of it can only ever run on Linux.
+# `read_subfolders` therefore takes a slice of `tree::Entry` — name, is_dir,
+# is_symlink — rather than a `ReadDir`, which is what lets the branch be
+# reached from a test on every platform. The third is the sort, over that same
+# pure function, so the case cannot report STILL GREEN on a filesystem that
+# happened to hand five names back already sorted (fix round 1, M2). The fourth
+# is the wire-shape test, which is about serde attributes and needs no
+# filesystem at all.
+#
+# ⚠️ **Platform gating: some cases here name `#[cfg(unix)]` tests**, which is
+# harmless on this repository's two legs — `ubuntu-24.04` and `macos-14`, both
+# unix — and would fail EVERY case in this file the day a Windows leg exists,
+# because the harness's baseline `--exact` selects nothing for a test that does
+# not exist under that `#[cfg]`. **No case here names a `target_os`-gated
+# test**, which is the property that actually has to hold today, and it is
+# checkable rather than remembered:
+#
+#   for t in $(grep -oE "mnema-desktop '[^']+'" scripts/mutations/pr8-subfolders.sh \
+#               | sed "s/mnema-desktop '//;s/'//;s/^tree::tests:://" | sort -u); do
+#     grep -B4 "fn $t()" src-tauri/tests/commands.rs src-tauri/src/tree.rs \
+#       | grep -o 'cfg(target_os[^]]*)' ; done
+#
+# ⚠️ **Two tests of this task are named by no case in THIS file, both because
+# of that rule.** On one line each so a grep for either finds this note:
 #   a_directory_whose_name_is_not_utf8_is_counted_and_never_named_lossily
 #   a_wrong_case_relative_path_is_refused
-# The first is `#[cfg(target_os = "linux")]` and the second
-# `#[cfg(target_os = "macos")]`; naming either would make the harness's baseline
-# read `0 passed` on the other platform and take this whole file's cases down
-# with it, which is exactly the failure `pr8-exclusions-macos.sh` was split off
-# to avoid. The behaviour each pins is covered here by another case: the
-# unnameable pair by the two `--lib` cases below, and the wrong-case refusal by
-# the spelling half of the containment rule, whose mutant this task measured
-# going red against BOTH that test and the symlink one.
-#
-# ⚠️ **"Any unix leg", not "any CI leg"**, the same caveat `pr8-exclusions.sh`
-# carries. Two cases below name `#[cfg(unix)]` tests (the symlink ones), which
-# is harmless on this repository's two legs — `ubuntu-24.04` and `macos-14`,
-# both unix — and would fail every case in this file the day a Windows leg
-# exists, because the harness's baseline `--exact` selects nothing for a test
-# that does not exist under that `#[cfg]`.
+# The first is `#[cfg(target_os = "linux")]` and is named by
+# `scripts/mutations/pr8-subfolders-linux.sh`, the Linux-only sibling this file
+# needs for the one thing it cannot pin (see that file's own header). The
+# second is `#[cfg(target_os = "macos")]` and is named nowhere: the behaviour
+# it pins — a wrong-case path refused — is the spelling half of the containment
+# rule, whose case is below and whose mutant was measured going red against
+# both tests.
 #
 # ⚠️ **Two cases for one `if`, deliberately.** The containment rule is
 # `resolved != expected || !resolved.starts_with(root_canonical)`, and each
@@ -81,7 +104,7 @@ case_ "with several rules holding a folder, the outermost is the one named" \
 
 # The built-in list goes invisible: `.git` and `node_modules` render as
 # ordinary folders with a working toggle that changes nothing about the walk,
-# because the built-in layer prunes them regardless (`rules.rs:283-290`).
+# because the built-in layer prunes them regardless (`rules.rs:363-370`).
 case_ "a name on WalkRules::BUILTIN_DIRS must not report as an ordinary folder" \
   src-tauri/src/tree.rs \
   's~        return SubfolderState::BuiltIn;~        return SubfolderState::Open; /* mutant: built-in invisible */~' \
@@ -89,7 +112,7 @@ case_ "a name on WalkRules::BUILTIN_DIRS must not report as an ordinary folder" 
   mnema-desktop 'a_built_in_directory_is_marked_and_an_ordinary_dot_directory_is_not' --test commands
 
 # The same defect one state over: a symlinked directory as an ordinary
-# excludable folder. The walk runs `follow_links(false)` (`rules.rs:229`), so a
+# excludable folder. The walk runs `follow_links(false)` (`rules.rs:309`), so a
 # rule naming it excludes nothing at all.
 case_ "a symlinked directory must not report as an ordinary folder" \
   src-tauri/src/tree.rs \
@@ -147,6 +170,16 @@ case_ "entries are sorted by name rather than left in read_dir order" \
   src-tauri/src/tree.rs \
   's~    listed\.sort_by\(\|a, b\| a\.name\.cmp\(&b\.name\)\);~    /* mutant: filesystem order */~' \
   '/* mutant: filesystem order */' \
+  mnema-desktop 'tree::tests::the_entries_are_sorted_by_name_whatever_order_they_arrive_in' --lib
+
+# The directories-only filter, removed: files come back as rows in a folder
+# tree. Named by the IPC sorted test, which is what keeps that test — and the
+# `c.txt` half of its assertion — pinned now that the case above moved to the
+# pure function.
+case_ "only directories are listed, never the files beside them" \
+  src-tauri/src/tree.rs \
+  's~        if !entry\.is_dir \{~        if false { /* mutant: files are folders too */~' \
+  'if false { /* mutant: files are folders too */' \
   mnema-desktop 'list_subfolders_answers_the_directories_sorted_and_not_the_files' --test commands
 
 # ---------------------------------------------------------------------------
@@ -178,3 +211,81 @@ case_ "Subfolder crosses the wire in camelCase" \
   's~#\[serde\(rename_all = "camelCase"\)\]\npub struct Subfolder \{~/* mutant: no camelCase rename */\npub struct Subfolder {~' \
   '/* mutant: no camelCase rename */' \
   mnema-desktop 'tree::tests::the_subfolder_wire_shape_is_camel_case' --lib
+
+# ---------------------------------------------------------------------------
+# Fix round 1 — the invariant applied to every instance of it
+#
+# One predicate per layer, in `crates/mnema-walk/src/rules.rs` beside the code
+# it mirrors, and a case per way the listing can offer a folder the walk will
+# not walk. Three of these mutate that file rather than `src-tauri`; they are
+# here rather than in a `mnema-walk` case file because the tests that kill them
+# are `mnema-desktop` ones and this harness selects a test by package — the
+# same reason `pr8-exclusions.sh` keeps its own `validate_prefix` case.
+# ---------------------------------------------------------------------------
+
+# The blocking defect of fix round 1, put back: the built-in question asked of
+# the LAST component only. `!**/{dir}` prunes the subtree, so `.git/hooks` is
+# pruned — but with this mutant the listing offers it as an ordinary folder and
+# `exclude_subfolder` writes a rule the walk ignores.
+case_ "the built-in question is asked of every component, not the last one" \
+  crates/mnema-walk/src/rules.rs \
+  's~            if Self::BUILTIN_DIRS\.contains\(&component\) \{~            if Self::BUILTIN_DIRS.contains(\&component)\n                \&\& parent.join(component) == root.join(relative_path)\n            { /* mutant: last component only */~' \
+  '{ /* mutant: last component only */' \
+  mnema-desktop 'everything_under_a_built_in_directory_is_built_in_too' --test commands
+
+# The anchored layer goes invisible: `target` beside its `Cargo.toml` lists as
+# an ordinary folder, the exclusion succeeds, and the walk had already pruned
+# it.
+case_ "the anchored build-output layer is visible in the listing" \
+  crates/mnema-walk/src/rules.rs \
+  's~            let anchored = Self::ANCHORED_DIRS\.iter\(\)\.any\(\|\(dir, markers\)\| \{\n                \*dir == component && markers\.iter\(\)\.any\(\|marker\| parent\.join\(marker\)\.is_file\(\)\)\n            \}\);~            let anchored = false; /* mutant: anchored layer invisible */~' \
+  'let anchored = false; /* mutant: anchored layer invisible */' \
+  mnema-desktop 'an_anchored_build_directory_is_built_in_only_beside_its_marker' --test commands
+
+# The other direction of the same layer: the marker file stops being checked,
+# so every folder called `target` is reported as pruned. That one is worse than
+# it looks — the row would tell a person that `House/target/permits.pdf` is
+# protected while the walk indexes it.
+case_ "an anchored name is only pruned beside its marker file" \
+  crates/mnema-walk/src/rules.rs \
+  's~                \*dir == component && markers\.iter\(\)\.any\(\|marker\| parent\.join\(marker\)\.is_file\(\)\)~                *dir == component /* mutant: marker unchecked */~' \
+  '*dir == component /* mutant: marker unchecked */' \
+  mnema-desktop 'an_anchored_build_directory_is_built_in_only_beside_its_marker' --test commands
+
+# The first-component rules applied at every depth: `weird/~` becomes a name no
+# rule can express, when it is in fact a rule `exclude_subfolder` accepts. The
+# mirror of the case below — one says the state must appear, this says it must
+# not appear where the validator would not.
+case_ "the drive-letter and `~` rules apply to the first component only" \
+  crates/mnema-walk/src/rules.rs \
+  's~        validate_component\(prefix, component, index == 0\)\?;~        validate_component(prefix, component, index >= 0)?; /* mutant: first-component rules everywhere */~' \
+  '/* mutant: first-component rules everywhere */' \
+  mnema-desktop 'a_folder_whose_path_no_rule_can_name_says_so_instead_of_offering_a_control' --test commands
+
+# A folder whose name no rule can express is offered as an ordinary excludable
+# one; pressing exclude answers with a message about path components for a path
+# the person never typed.
+case_ "a name the validator refuses says so instead of offering a control" \
+  src-tauri/src/tree.rs \
+  's~    if WalkRules::check_prefix\(relative_path\)\.is_err\(\) \{\n        return SubfolderState::UnusableName;\n    \}~    /* mutant: unusable names look ordinary */~' \
+  '/* mutant: unusable names look ordinary */' \
+  mnema-desktop 'a_folder_whose_path_no_rule_can_name_says_so_instead_of_offering_a_control' --test commands
+
+# The asked-for path stops being validated, so `a/.` answers a page of rows
+# whose every `relativePath` `exclude_subfolder` will refuse.
+case_ "a relative_path that cannot be a rule is refused before any row is built" \
+  src-tauri/src/tree.rs \
+  's~    WalkRules::check_prefix\(&relative_path\)\?;~    /* mutant: the asked-for path is not validated */~' \
+  '/* mutant: the asked-for path is not validated */' \
+  mnema-desktop 'a_relative_path_that_cannot_be_a_rule_is_refused_with_the_validators_sentence' --test commands
+
+# The classifier inside `refusal()`, disarmed: every filesystem error about the
+# asked-for path becomes "there is no folder X". That is the sentence task 5
+# turns into an offer to remove a rule as stale — for a folder that is merely
+# on a volume that went away. Fix round 1 measured this branch protected by a
+# correct line of code and nothing else.
+case_ "an error about the observer is never answered as an absence" \
+  src-tauri/src/tree.rs \
+  's~    if crate::bridge::path_error_is_an_answer\(source\.kind\(\)\) \{~    if true { /* mutant: every error is an absence */~' \
+  'if true { /* mutant: every error is an absence */' \
+  mnema-desktop 'a_folder_that_cannot_be_read_is_refused_as_unreadable_not_as_absent' --test commands

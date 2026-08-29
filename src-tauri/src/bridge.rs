@@ -102,7 +102,7 @@ pub fn remove_watched_folder(state: State<'_, AppState>, root_id: i64) -> Result
 /// answer it by comparing this list against a one-level folder listing
 /// (`list_tree`'s subfolders): a stored prefix may name a NESTED folder —
 /// `validate_prefix` accepts a `/`-joined sequence of one or more components
-/// (`mnema-walk/src/rules.rs:336-360`) — while a one-level listing only ever
+/// (`mnema-walk/src/rules.rs:416-440`) — while a one-level listing only ever
 /// answers for the folders directly under the root. `Work/private` would
 /// find no match among `["Work", "Photos"]` there, read as a rule whose
 /// folder is gone, and be offered for removal — un-excluding a folder that
@@ -122,7 +122,7 @@ pub struct StoredExclusion {
 /// the joined path to the filesystem's own lookup, which is case-INSENSITIVE
 /// on APFS (macOS, the default) and on Windows, while `ignore`'s override
 /// matcher is case-sensitive (`WalkRules::builder` never calls
-/// `case_insensitive`, `mnema-walk/src/rules.rs:224-300`). A stored prefix
+/// `case_insensitive`, `mnema-walk/src/rules.rs:304-380`). A stored prefix
 /// `private` against a folder actually spelled `Private` would otherwise
 /// report `existsOnDisk: true` while excluding nothing — a dead rule reading
 /// as live (review round 1, Important 2, measured: `WalkRules::new(true,
@@ -283,7 +283,7 @@ fn entry_named(
 ///   behaviour and would widen the arms past what the two calls need.
 /// - `InvalidInput` (a NUL byte in a component) is permanent and
 ///   **unreachable**: `validate_component` refuses every control character
-///   (`crates/mnema-walk/src/rules.rs:414`) before a prefix can be stored,
+///   (`crates/mnema-walk/src/rules.rs:494`) before a prefix can be stored,
 ///   and only stored prefixes reach [`prefix_exists_on_disk`].
 ///
 /// So the arms are `NotFound | NotADirectory` exactly, and the sentence
@@ -391,7 +391,7 @@ pub fn list_exclusions(
 /// **The candidate alone, not the stored set plus the candidate.**
 /// `WalkRules::new` does not build an aggregate pattern set at all — it
 /// validates one prefix at a time, each in its own throwaway builder
-/// (`rules.rs:200-205,380-386`) — so probing the whole set here would answer
+/// (`rules.rs:200-205,460-466`) — so probing the whole set here would answer
 /// `Ok` for combinations that, measured directly against this repository's
 /// pinned `ignore`/`globset`, do not actually compile as one pattern set
 /// (task-2 brief). The aggregate case is caught at walk time instead:

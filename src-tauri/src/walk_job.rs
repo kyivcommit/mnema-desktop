@@ -109,7 +109,7 @@ pub fn start_walk_job(
     //
     // There is a third outcome besides "a rule" and "a refusal", and it is
     // deliberate: `validate_prefix` answers `Ok(None)` for the empty string
-    // (`rules.rs:363-366`), so a blank stored row is dropped and the walk
+    // (`rules.rs:443-446`), so a blank stored row is dropped and the walk
     // runs with the rules it does have. A blank names no folder, so nothing
     // is believed excluded and then indexed anyway, and `exclude_subfolder`
     // refuses blanks before they can be stored at all. Pinned by one test,

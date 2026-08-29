@@ -537,3 +537,118 @@ fn rules_applied_is_false_at_a_realistic_prefix_count() {
          in aggregate too, not only a deliberately pathological one"
     );
 }
+
+/// `WalkRules::pruned_by_builtin_layers` and the walker must agree, because
+/// they are two readings of the same two constants and the whole point of the
+/// predicate is that a caller can ask what the walk will do without running it.
+///
+/// Asserted against a real `enumerate`, not against a list written by hand:
+/// the question is "does this answer match the walk", and only the walk can
+/// say. Both directions, plural on each — five directories the walk prunes
+/// (two by name, one by an ancestor's name, two beside a marker) and three it
+/// keeps, including `house/target` and `Projects/House/build`, which carry a
+/// pruned name with nothing beside them to anchor it.
+///
+/// `gitignore: false`, deliberately: the predicate does not answer for that
+/// layer and never claims to, so leaving it on would compare against a walk
+/// making a decision the predicate is not party to.
+#[test]
+fn pruned_by_builtin_layers_agrees_with_what_the_walk_enumerates() {
+    let root = tempfile::tempdir().unwrap();
+    let dirs = [
+        ".git/hooks",
+        "node_modules/pkg",
+        "crate/target/debug",
+        "house/target",
+        "code/build",
+        "code/dist",
+        "notes/2019",
+        "Projects/House/build",
+    ];
+    for dir in dirs {
+        let path = root.path().join(dir);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("file.txt"), b"x").unwrap();
+    }
+    // The two markers, which are what make `crate/target` and `code/build`
+    // build output while `house/target` and `Projects/House/build` are folders.
+    fs::write(root.path().join("crate/Cargo.toml"), b"[package]\n").unwrap();
+    fs::write(root.path().join("code/package.json"), b"{}").unwrap();
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(true, false, Vec::new()).unwrap(),
+    );
+
+    let mut pruned = Vec::new();
+    let mut kept = Vec::new();
+    for dir in dirs {
+        let reached = walked
+            .found
+            .iter()
+            .any(|f| f.relative.starts_with(&format!("{dir}/")));
+        let predicted = WalkRules::pruned_by_builtin_layers(root.path(), dir);
+        assert_eq!(
+            predicted, !reached,
+            "the predicate says pruned={predicted} for {dir}, the walk reached it={reached}"
+        );
+        if predicted { &mut pruned } else { &mut kept }.push(dir);
+    }
+
+    // The fixture really did build both sides, rather than agreeing trivially
+    // because one of them is empty.
+    assert_eq!(
+        pruned,
+        vec![
+            ".git/hooks",
+            "node_modules/pkg",
+            "crate/target/debug",
+            "code/build",
+            "code/dist"
+        ]
+    );
+    assert_eq!(
+        kept,
+        vec!["house/target", "notes/2019", "Projects/House/build"]
+    );
+}
+
+/// `WalkRules::check_prefix` must answer exactly what `WalkRules::new` answers
+/// for the same prefix, because its whole purpose is to let a caller ask the
+/// question **before** offering a control that `new` would then refuse. A
+/// wrapper that drifted from the thing it mirrors would put the desktop's
+/// folder listing back where fix round 1 found it: offering an action that
+/// cannot succeed.
+///
+/// Twelve prefixes, six of each answer, covering every rule
+/// `validate_component` applies plus the two it applies to the first component
+/// only — `a/~` is accepted and `~` is not, which is the direction a wrapper
+/// that checked one component at a time would get wrong.
+#[test]
+fn check_prefix_answers_exactly_what_new_answers() {
+    for prefix in [
+        "plain",
+        "Work/private",
+        "a/~",
+        "Photos [2023]",
+        "~tilde-inside",
+        "",
+        " lead",
+        "trail ",
+        "back\\slash",
+        "..",
+        "~",
+        "C:",
+    ] {
+        let wrapper = WalkRules::check_prefix(prefix).is_ok();
+        let real = WalkRules::new(false, false, vec![prefix.to_string()]).is_ok();
+        assert_eq!(
+            wrapper, real,
+            "check_prefix and new disagree about {prefix:?}: {wrapper} vs {real}"
+        );
+    }
+    // Both answers really occur, so the loop is not twelve trivial agreements
+    // on one side.
+    assert!(WalkRules::check_prefix("a/~").is_ok());
+    assert!(WalkRules::check_prefix("~").is_err());
+}

@@ -214,6 +214,86 @@ impl WalkRules {
         Self::default()
     }
 
+    /// The question `WalkRules::new` asks of ONE user prefix, exposed so a
+    /// caller with a folder in front of a person can ask it **before**
+    /// offering a control that would then refuse.
+    ///
+    /// `Ok(())` for the empty string, exactly as `new` treats it — "no rule",
+    /// not a malformed one.
+    ///
+    /// **A wrapper over `validate_prefix`, never a second copy of it.** The
+    /// whitelist has grown across three review rounds (see that function's own
+    /// doc comment), the last of which found four forms the round before had
+    /// let through; a caller that re-implemented "which names are excludable"
+    /// would be a fourth round waiting to happen, and it would disagree
+    /// silently. The compile-probe is included, so a prefix that passes every
+    /// component check and still cannot compile alone is refused here too.
+    pub fn check_prefix(prefix: &str) -> Result<(), RulesError> {
+        validate_prefix(prefix).map(|_| ())
+    }
+
+    /// Whether one of the walk's **unconditional** layers prunes the directory
+    /// at `relative_path` under `root`, or an ancestor of it — so no user
+    /// exclusion rule can change whether anything under it is indexed.
+    ///
+    /// Written for one caller and one question: the desktop shell's folder
+    /// listing has to know, per row, whether offering "exclude this" would be
+    /// offering a control that does nothing. Answering it from the shell would
+    /// mean a second reading of these constants, and the two would drift.
+    ///
+    /// **The two layers it covers, re-derived from `builder()` rather than
+    /// listed from memory**, and each is read from the same constant
+    /// `builder()` reads:
+    ///
+    /// 1. [`WalkRules::BUILTIN_DIRS`], turned into `!**/{dir}` overrides. The
+    ///    pattern matches the directory itself, which prunes its whole
+    ///    subtree — so the question is asked of **every component**, not of
+    ///    the last one. `.git/hooks` is pruned because `.git` is.
+    /// 2. `ANCHORED_DIRS`, checked by `filter_entry`: pruned only when one of
+    ///    that name's marker files sits **in its own parent directory**. The
+    ///    marker is looked up here the same way `filter_entry` looks it up,
+    ///    `parent.join(marker).is_file()`, against the parent this walk of the
+    ///    components has reached. `filter_entry` prunes the entry, which
+    ///    prunes its subtree, so this too is asked of every component.
+    ///
+    /// **What it deliberately does NOT cover, and must never be read as
+    /// covering:**
+    ///
+    /// - **The in-tree `.gitignore` stack** (`git_ignore`/`git_exclude`, both
+    ///   gated on `gitignore`). Deciding it means compiling the same ignore
+    ///   stack the walk builds, per directory, from files inside the tree.
+    ///   A folder this function answers `false` for may still be skipped by a
+    ///   `.gitignore`; `false` means "no unconditional layer prunes it", never
+    ///   "it will be indexed".
+    /// - **The user's own exclusion rules.** Those are the caller's to report,
+    ///   and they are the ones whose control does something.
+    /// - **`BUILTIN_FILES`.** Those name files, not directories, so no
+    ///   directory listing can meet one.
+    /// - **Symlinks.** `follow_links(false)` is a property of the walker, not
+    ///   of a path, and the caller that needs it can see the link itself.
+    ///
+    /// ⚠️ **Both layers are gated on `builtin` inside `builder()`, and this
+    /// function assumes it is on.** Both production call sites pass `true` —
+    /// `src-tauri/src/walk_job.rs:128` and `src-tauri/src/bridge.rs:418`; only
+    /// tests pass `false`. A caller that built rules with `builtin: false`
+    /// must not use this.
+    pub fn pruned_by_builtin_layers(root: &Path, relative_path: &str) -> bool {
+        let mut parent = root.to_path_buf();
+        for component in relative_path.split('/') {
+            if Self::BUILTIN_DIRS.contains(&component) {
+                return true;
+            }
+            let anchored = Self::ANCHORED_DIRS.iter().any(|(dir, markers)| {
+                *dir == component && markers.iter().any(|marker| parent.join(marker).is_file())
+            });
+            if anchored {
+                return true;
+            }
+            parent.push(component);
+        }
+        false
+    }
+
     /// Builds the walker for this call, plus whether the override-based
     /// layers (the unconditional built-in list, user prefixes, `.DS_Store`)
     /// actually combined into a working pattern set. `builder()` itself
