@@ -1259,8 +1259,15 @@ mod tests {
 
         // Present, camelCase — and absent in snake_case, which is the direction
         // that catches a payload carrying both spellings.
-        assert!(rows[0]["relativePath"].is_string(), "{v}");
-        assert!(rows[0]["name"].is_string(), "{v}");
+        //
+        // 🔴 The VALUES, not `is_string()` (fix round 1). A type is satisfied
+        // by any string, so a `name`/`relativePath` swap — the exact confusion
+        // this pair exists to keep apart, and the one a caller sends back to
+        // `exclude_subfolder` — passed it. `sample_subfolders` builds them
+        // differently on purpose: the name is the last component, the relative
+        // path carries `Work/` in front of it.
+        assert_eq!(rows[0]["relativePath"], "Work/open", "{v}");
+        assert_eq!(rows[0]["name"], "open", "{v}");
         assert!(rows[0].get("relative_path").is_none(), "{v}");
 
         let tags = [

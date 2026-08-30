@@ -92,6 +92,29 @@ describe('i18n', () => {
       + 'and no document stops being findable — each is also indexed under another path.');
   });
 
+  // Fix round 1. PR 8a Task 5 added a four-arm Ukrainian plural and the only
+  // counts anything reached were 1 and 2 (`Folders.test.ts:629`, `:1174`) —
+  // which `one` and `few` alone answer, so `many` and `other` crossed
+  // untested. `unnameable` is a count of directory entries whose names are not
+  // valid UTF-8 (`tree.rs`), and nothing bounds it, so 5 and 21 are states a
+  // person can reach. Pinned at the same counts the plurals above use: 5
+  // reaches `many` and 21 reaches `one`, which is what shows the arm reads
+  // `count % 10` and `% 100` rather than "is this 1 or 2".
+  it('the unnameable-subfolders count reaches every Ukrainian plural arm', () => {
+    setLocale('uk');
+    const uk = (n: number) => t('settings_subfolders_unnameable', { count: n });
+    expect(uk(1)).toBe('1 підтеку не показано: її назву не вдалося прочитати як текст.');
+    expect(uk(2)).toBe('2 підтеки не показано: їхні назви не вдалося прочитати як текст.');
+    expect(uk(5)).toBe('5 підтек не показано: їхні назви не вдалося прочитати як текст.');
+    expect(uk(11)).toBe('11 підтек не показано: їхні назви не вдалося прочитати як текст.'); // teen → many
+    expect(uk(21)).toBe('21 підтеку не показано: її назву не вдалося прочитати як текст.');
+
+    setLocale('en');
+    const en = (n: number) => t('settings_subfolders_unnameable', { count: n });
+    expect(en(1)).toBe('1 subfolder is not listed: its name could not be read as text.');
+    expect(en(5)).toBe('5 subfolders are not listed: their names could not be read as text.');
+  });
+
   it('every catalog value is non-empty in both locales', () => {
     for (const loc of ['uk', 'en'] as const) {
       for (const key of Object.keys(messages[loc]) as Key[]) {

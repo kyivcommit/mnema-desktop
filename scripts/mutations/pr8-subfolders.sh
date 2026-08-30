@@ -140,6 +140,26 @@ case_ "an ancestor is a path component boundary, not a string prefix" \
   'path.starts_with(prefix) /* mutant: no boundary */' \
   mnema-desktop 'an_excluded_subfolder_is_marked_and_its_sibling_stays_open' --test commands
 
+# The OTHER half of the same `if`, and until fix round 1 it was defended by
+# nothing: the case above removes the boundary check and keeps `starts_with`,
+# so `starts_with` itself never had a case of its own. Measured before the test
+# below existed: deleting it left `cargo test --workspace` at exit 0, and
+# `list_subfolders` then reported `Work/2024` as
+# `{"kind":"excludedByAncestor","prefix":"Home"}` — a row claiming a rule
+# protects a folder the walk indexes, with no control offered to protect it for
+# real. `Home` and `Work` are the same length, which is what lets the surviving
+# first conjunct answer `true`.
+#
+# ⚠️ Double quotes, alone in this file, because the replacement has to carry a
+# real `b'/'` and a single-quoted shell word cannot hold an apostrophe. Nothing
+# in it is `$` or a backtick, so the shell passes it through unchanged, and the
+# backslashes in the pattern half survive double quotes as they do single ones.
+case_ "an ancestor must agree byte for byte, not merely have a separator where the prefix ends" \
+  src-tauri/src/tree.rs \
+  "s~    path\.len\(\) > prefix\.len\(\) && path\.as_bytes\(\)\[prefix\.len\(\)\] == b./. && path\.starts_with\(prefix\)~    path.len() > prefix.len() && path.as_bytes()[prefix.len()] == b'/' /* mutant: byte equality unchecked */~" \
+  "== b'/' /* mutant: byte equality unchecked */" \
+  mnema-desktop 'a_rule_on_a_different_folder_of_the_same_length_holds_nothing' --test commands
+
 # ---------------------------------------------------------------------------
 # Containment, one half at a time
 # ---------------------------------------------------------------------------

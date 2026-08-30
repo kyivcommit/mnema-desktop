@@ -424,6 +424,21 @@ pub fn list_exclusions(
 /// (`Error::InvalidExclusionRule`'s doc makes the same argument for the
 /// validator). A guard on removal would strand exactly the rows this guard
 /// exists to stop being created.
+///
+/// 🔴 **The root itself has to be there, and this was the third of three sites
+/// where two guarded it** (fix round 1). [`list_exclusions`] and
+/// [`crate::tree::list_subfolders`] both answer [`Error::RootUnavailable`] on
+/// `!root_path.is_dir()` — the walk's own predicate (`walk.rs:288`) — and this
+/// command did not. With the root unmounted, the anchored half of `prunes`
+/// resolves nothing and answers `false`, so a path the walk *always* prunes
+/// passed the guard above and was stored: a live-looking rule that does
+/// nothing, persisted — which is the defect the built-in guard was added to
+/// fix, arriving through a different door.
+///
+/// **Before the blank check and the validator**, unlike the built-in guard
+/// below: those two say something about the path that was sent, and are true
+/// whatever the disk is doing, while this one refuses the whole call because
+/// the folder the rule would be about cannot be read at all.
 #[tauri::command(async)]
 pub fn exclude_subfolder(
     state: State<'_, AppState>,
@@ -433,6 +448,10 @@ pub fn exclude_subfolder(
     let root = state
         .with_index(|db| db.watched_root_path(root_id))?
         .ok_or(Error::UnknownWatchedRoot(root_id))?;
+    let root_path = std::path::Path::new(&root);
+    if !root_path.is_dir() {
+        return Err(Error::RootUnavailable(root_id));
+    }
     if relative_path.is_empty() {
         return Err(Error::BlankExclusionRule);
     }
@@ -446,7 +465,7 @@ pub fn exclude_subfolder(
     // answer does not depend on the choice: the override half matches on the
     // relative path alone, and the marker half resolves through whatever links
     // the root carries either way.
-    if mnema_walk::WalkRules::builtin_layers(std::path::Path::new(&root)).prunes(&relative_path) {
+    if mnema_walk::WalkRules::builtin_layers(root_path).prunes(&relative_path) {
         return Err(Error::AlreadyPrunedByBuiltIn {
             root_id,
             relative_path,

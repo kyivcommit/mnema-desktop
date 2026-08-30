@@ -458,7 +458,32 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     // neither job's shape — the point here is only which thread answers, and a
     // rejection for missing arguments answers from the same place a success
     // would.
-    for cmd in ["open_index", "search", "start_walk_job", "start_embed_job"] {
+    //
+    // 🔴 Fix round 1, I6. The four PR 8a commands were added to the shell and
+    // not to this list. Measured: removing `(async)` from all four left
+    // `cargo test --workspace` at exit 0, and every one of them takes the
+    // index mutex — `list_subfolders` also does a `read_dir` on the watched
+    // folder itself, which on a network share or a sleeping external drive is
+    // the seconds-long call this whole test exists to keep off the main
+    // thread.
+    //
+    // Enumerated from `#[tauri::command(async)]` in `src/`, not from a grep
+    // for this sentence: the phrasing is not the class. The list is every
+    // command in `bridge.rs`, `tree.rs`, `models.rs`, `walk_job.rs` and
+    // `embed_job.rs` that touches the index or the credential store; the five
+    // deliberately blocking ones are `start_probe_job`, `job_status`,
+    // `cancel_job`, `get_locale` and `set_locale`, and `cancel_job` is the
+    // counterweight below.
+    for cmd in [
+        "open_index",
+        "search",
+        "start_walk_job",
+        "start_embed_job",
+        "list_exclusions",
+        "exclude_subfolder",
+        "include_subfolder",
+        "list_subfolders",
+    ] {
         assert_ne!(
             responding_thread(&webview, cmd),
             here,
@@ -2457,17 +2482,25 @@ fn list_exclusions_reports_whether_each_stored_prefix_is_still_on_disk() {
 
     let after = call(&webview, "list_exclusions", json!({ "rootId": root }))
         .expect("list_exclusions was rejected");
-    let after_entries = after
-        .as_array()
-        .expect("list_exclusions did not return an array");
-    let after_private = after_entries
-        .iter()
-        .find(|e| e["prefix"] == json!("Work/private"))
-        .unwrap_or_else(|| panic!("Work/private missing from {after_entries:?}"));
+    // 🔴 Fix round 1, I5. BOTH rows, and the fixture now disagrees with
+    // itself on purpose: `Work/private` is gone and `solo.txt` is still
+    // there. Reading only the renamed row was the gap — measured, computing
+    // the flag once from the first prefix and copying it down the list left
+    // the workspace at exit 0. What that costs is not a cosmetic row: a stale
+    // FIRST rule renders every live rule stale, and task 5's screen then
+    // offers to remove protection that is doing its job, which under D29 puts
+    // that folder's text back on the wire to the provider.
+    //
+    // The whole array, in the order `list_path_exclusions` sorts it
+    // (`write.rs:576`), so neither a value nor a row can go missing.
     assert_eq!(
-        after_private["existsOnDisk"],
-        json!(false),
-        "a prefix whose folder was renamed away must report existsOnDisk false"
+        after,
+        json!([
+            { "prefix": "Work/private", "existsOnDisk": false },
+            { "prefix": "solo.txt", "existsOnDisk": true }
+        ]),
+        "one answer has to carry both flags — a stale first rule must not make a live one \
+         read stale"
     );
 }
 
@@ -2559,6 +2592,71 @@ fn list_exclusions_refuses_when_the_root_itself_is_unreachable() {
              rules cannot be checked"
         ),
         "the refusal should be Error::RootUnavailable's own sentence"
+    );
+}
+
+/// Fix round 1. `exclude_subfolder` was the **third** site of a guard the
+/// other two already had: `list_exclusions` above and
+/// `tree::list_subfolders` both refuse an unreachable root with
+/// `Error::RootUnavailable`, and this one stored the rule regardless.
+///
+/// It matters more here than at either of them, because what an unmounted
+/// root buys is a WRITE. `WalkRules::builtin_layers` resolves its anchored
+/// layer through the disk, so with the root gone `prunes` answers `false` for
+/// every path — and the built-in guard, added in task 4's own fix round for
+/// exactly this, lets a rule the walk will always prune into the database,
+/// where `list_exclusions` renders it as protection that does nothing.
+///
+/// The whole sentence, not a substring: the same one the other two sites
+/// give, so a person reading it cannot tell the three commands apart by their
+/// refusal.
+#[test]
+fn excluding_when_the_root_itself_is_unreachable_is_refused_and_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    // The root folder itself goes away — an unmounted drive, a moved
+    // folder — while the watched_root row remains.
+    std::fs::remove_dir_all(fixture.path()).expect("removing the fixture root");
+
+    let rejected = call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect_err("exclude_subfolder should refuse an unreachable root");
+    assert_eq!(
+        error_text(&rejected),
+        format!(
+            "the folder for watched root {root} is not available right now, so its exclusion \
+             rules cannot be checked"
+        ),
+        "the refusal should be Error::RootUnavailable's own sentence, the same one \
+         list_exclusions and list_subfolders give"
+    );
+
+    // The other half, and the one the sentence alone does not prove: nothing
+    // was written. The root comes back so `list_exclusions` can answer at all —
+    // it refuses an unreachable root too.
+    std::fs::create_dir(fixture.path()).expect("restoring the fixture root");
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([]),
+        "a rule refused because the root was gone must not be in the database once it is back"
     );
 }
 
@@ -2970,12 +3068,24 @@ fn excluding_the_empty_string_is_refused_and_does_not_change_the_row_count() {
         .len();
     assert_eq!(before, 1);
 
-    call(
+    let rejected = call(
         &webview,
         "exclude_subfolder",
         json!({ "rootId": root, "relativePath": "" }),
     )
     .expect_err("excluding the empty string should have been refused");
+    // Fix round 1, Minor. The SENTENCE, not the variant — the Global
+    // Constraint every other refusal on this branch already honours
+    // (`error.rs`'s `impl Serialize` emits `Display` and nothing else, so a
+    // kind never crosses the IPC). Measured before this line existed:
+    // `BlankExclusionRule`'s words occurred nowhere but its own definition, so
+    // swapping the variant for any other left the workspace green while the
+    // person read a different message.
+    assert_eq!(
+        error_text(&rejected),
+        "an exclusion rule cannot be empty",
+        "the refusal should be Error::BlankExclusionRule's own sentence, whole"
+    );
 
     let after = call(&webview, "list_exclusions", json!({ "rootId": root }))
         .expect("list_exclusions was rejected")
@@ -7023,6 +7133,69 @@ fn an_excluded_subfolder_is_marked_and_its_sibling_stays_open() {
             ("b".to_string(), "b".to_string(), "open".to_string()),
         ],
         "the rule names a and nothing else — ab merely starts with it: {listing}"
+    );
+}
+
+/// Fix round 1, I4. The **second** conjunct of `is_ancestor_of` — the
+/// `path.starts_with(prefix)` that says the two paths agree byte for byte up
+/// to the separator — had no test and no mutation case: measured, deleting it
+/// left `cargo test --workspace` at exit 0.
+///
+/// What it costs is the D29 direction, not a cosmetic one. Without it,
+/// `is_ancestor_of("Home", "Work/2024")` is `true` — the lengths work out and
+/// byte 4 of `Work/2024` happens to be `/` — so the row for `2024` comes back
+/// `{"kind":"excludedByAncestor","prefix":"Home"}`: a row that says
+/// "protected by your rule on Home" about a folder the walk indexes and whose
+/// text goes to the provider. It also offers no control, so the person cannot
+/// protect it from this screen either.
+///
+/// **The fixture is the whole test.** `Home` and `Work` are the same length
+/// on purpose — that is what makes the surviving first conjunct answer `true`
+/// — and the rule is stored on the folder that is NOT the one being listed.
+/// `an_excluded_subfolder_is_marked_and_its_sibling_stays_open` cannot reach
+/// this: its rule and its rows share a first component, so the two conjuncts
+/// agree there whatever either one says.
+#[test]
+fn a_rule_on_a_different_folder_of_the_same_length_holds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("Work/2024")).expect("creating Work/2024");
+    std::fs::create_dir(fixture.path().join("Home")).expect("creating Home");
+    let root = root_for(&webview, fixture.path());
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Home" }),
+    )
+    .expect("excluding Home was rejected");
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "Work" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![(
+            "2024".to_string(),
+            "Work/2024".to_string(),
+            "open".to_string(),
+        )],
+        "a rule on Home holds nothing under Work — the two paths share no component: {listing}"
+    );
+    // The positive half of the same fact, stated rather than implied by the
+    // absence of a tag: the row is one the person can act on, which is the
+    // thing the false `excludedByAncestor` took away.
+    assert_eq!(
+        listing["entries"][0]["state"],
+        json!({ "kind": "open" }),
+        "a state carrying a prefix would mean some rule was found to hold this row: {listing}"
     );
 }
 
