@@ -363,7 +363,7 @@ case_ "a folder that is not there is never answered as unreadable" \
 # disagreed.
 case_ "excluding a folder the walk already prunes is refused" \
   src-tauri/src/bridge.rs \
-  's~    if mnema_walk::WalkRules::builtin_layers\(std::path::Path::new\(&root\)\)\.prunes\(&relative_path\) \{~    if false { /* mutant: the built-in layers do not refuse */~' \
+  's~    if mnema_walk::WalkRules::builtin_layers\(root_path\)\.prunes\(&relative_path\) \{~    if false { /* mutant: the built-in layers do not refuse */~' \
   'if false { /* mutant: the built-in layers do not refuse */' \
   mnema-desktop 'excluding_a_folder_the_walk_already_prunes_is_refused_and_stores_nothing' --test commands
 
@@ -372,7 +372,7 @@ case_ "excluding a folder the walk already prunes is refused" \
 # ordinary folder, must both still store.
 case_ "the refusal is about the built-in layers, not about every path" \
   src-tauri/src/bridge.rs \
-  's~    if mnema_walk::WalkRules::builtin_layers\(std::path::Path::new\(&root\)\)\.prunes\(&relative_path\) \{~    if true { /* mutant: every exclusion is refused */~' \
+  's~    if mnema_walk::WalkRules::builtin_layers\(root_path\)\.prunes\(&relative_path\) \{~    if true { /* mutant: every exclusion is refused */~' \
   'if true { /* mutant: every exclusion is refused */' \
   mnema-desktop 'excluding_a_folder_the_walk_already_prunes_is_refused_and_stores_nothing' --test commands
 
