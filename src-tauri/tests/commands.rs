@@ -2506,7 +2506,7 @@ fn list_exclusions_reports_whether_each_stored_prefix_is_still_on_disk() {
     // that folder's text back on the wire to the provider.
     //
     // The whole array, in the order `list_path_exclusions` sorts it
-    // (`write.rs:576`), so neither a value nor a row can go missing.
+    // (`write.rs:580`), so neither a value nor a row can go missing.
     assert_eq!(
         after,
         json!([
@@ -7446,15 +7446,36 @@ fn the_outermost_rule_is_the_one_a_held_subfolder_names() {
 /// of this comment claimed the test held `list_path_exclusions`'
 /// `ORDER BY path_prefix` (`write.rs:580`) — the clause
 /// `SubfolderState::ExcludedByAncestor`'s own doc leans on for "the first
-/// match in that sorted list is the shallowest one". It does not, and neither
-/// can anything else: deleting that `ORDER BY` leaves the whole workspace at
-/// exit 0. `EXPLAIN QUERY PLAN` says why —
-/// `SEARCH ignore_rule USING COVERING INDEX ux_ignore_rule_path
+/// match in that sorted list is the shallowest one". It does not: deleting that
+/// `ORDER BY` leaves the whole workspace at exit 0. `EXPLAIN QUERY PLAN` says
+/// why — `SEARCH ignore_rule USING COVERING INDEX ux_ignore_rule_path
 /// (watched_root_id=? AND path_prefix>?)` — so the rows arrive ordered by
 /// `path_prefix` because the unique index `migrations.rs:90-92` adds is what
-/// the planner walks. The clause is a belt to that index's braces and the
-/// mutant is equivalent. Written down because a test claiming to hold a guard
-/// it cannot is worse than no claim at all.
+/// the planner walks.
+///
+/// 🔴 **The equivalence is conditional, and the condition is that index.** An
+/// earlier draft of this paragraph added "and neither can anything else", which
+/// is false and quietly discharged the next person from writing the test. The
+/// clause CAN be held — by dropping `ux_ignore_rule_path` first, which
+/// `mnema-index`'s `exclusions_come_back_sorted_with_no_index_left_to_walk`
+/// (`crates/mnema-index/tests/tree.rs`) now does. Measured under the same
+/// mutant, on the engine the product links (`rusqlite` `bundled` → 3.53.2, not
+/// a system CLI), with the two rules inserted descendant-first:
+///
+/// ```text
+/// NO INDEX, no ORDER BY = ["a/deep", "a"]     <- insertion order; shallowest-first gone
+/// NO INDEX, ORDER BY    = ["a", "a/deep"]
+/// ```
+///
+/// So the clause is a belt to that index's braces, and the mutant is equivalent
+/// **while** `(watched_root_id, path_prefix)` is covered — not in principle.
+/// Anything that narrows or drops that index (a migration making it partial on
+/// another predicate, or removing it) makes the `ORDER BY` load-bearing again,
+/// and `SubfolderState::ExcludedByAncestor`'s "outermost" — which
+/// `Folders.svelte`'s `heldAbove` now reads too — goes with it. Written down
+/// because a test claiming to hold a guard it cannot is worse than no claim at
+/// all, and a comment telling a reader the guard cannot exist is worse than
+/// both.
 #[test]
 fn a_rule_stored_under_one_that_arrives_later_is_kept_and_still_names_the_outermost() {
     let dir = tempfile::tempdir().unwrap();

@@ -96,7 +96,14 @@
     // question: whether removing THIS rule still leaves rules of the person's
     // own further down the same path. See `heldBelow` for why the sentence
     // needs it.
-    | { kind: 'include'; path: string; existsOnDisk: boolean; heldBelow: boolean };
+    //
+    // `heldAbove` is its mirror and is frozen alongside it, carrying the
+    // ancestor's prefix rather than a flag because the sentence names it. See
+    // `heldAbove`.
+    | {
+        kind: 'include'; path: string; existsOnDisk: boolean;
+        heldBelow: boolean; heldAbove: string | null;
+      };
 
   let panels = $state<Record<number, Panel>>({});
 
@@ -302,14 +309,73 @@
   // is the direction to answer it in: `false` selects the UNCONDITIONAL
   // sentence, which claims more comes back than does. Under D29 an
   // over-statement of what reaches the provider is the safe way round.
+  //
+  // 🔴 Fix round 2, A2: `existsOnDisk`, and it is the same direction again. The
+  // softened sentence promises an EXCEPTION, and without this filter the rule
+  // backing that promise could be one the same panel labels "There is no folder
+  // at this path right now" two rows down (`settings_folders_rule_gone`, drawn
+  // from this very field). At the next scan such a rule excludes nothing, so
+  // the exception understates what reaches the provider — the one direction
+  // D29 does not allow, and the reason this is filtered rather than left with a
+  // written excuse. Dropping the exception selects the unconditional sentence,
+  // which is not merely the safe side here but exactly true: everything present
+  // at this path really is indexed again.
+  //
+  // Per rule, never over the list as a whole: a rule whose folder is gone must
+  // not veto a sibling that is doing its job, which
+  // `a rule below whose folder is gone does not cancel one whose folder is there`
+  // pins against an `every`-shaped reading of the same fact.
   function heldBelow(rules: StoredExclusion[] | null, prefix: string): boolean {
-    return rules !== null && rules.some((rule) => under(rule.prefix, prefix));
+    return rules !== null
+      && rules.some((rule) => rule.existsOnDisk && under(rule.prefix, prefix));
   }
 
-  // The disclosure beside a "remove this rule" control, in its two forms. One
+  // 🔴 Fix round 2, A1. The MIRROR of `heldBelow`, and it exists because the
+  // relation is symmetric and round 1 read one side of it: a rule with one of
+  // the person's own rules ABOVE it releases nothing when it goes, because the
+  // walk is already pruning at the ancestor. Both cost sentences claimed the
+  // opposite, unconditionally, in a state the same two presses reach in the
+  // other order.
+  //
+  // Returns the prefix rather than a boolean, because the sentence it selects
+  // NAMES the rule that has to go first — a row saying "held by a rule" without
+  // saying which leaves the person nothing to go and remove.
+  //
+  // 🔴 The OUTERMOST ancestor, and matching `tree.rs:755-759` is the whole
+  // point: the tree row for `Archive/Held` says "held by your rule on Archive",
+  // and a rule list naming `Archive/Held`'s own nearest ancestor instead would
+  // put two different instructions about one path back on one screen — which is
+  // the defect this fixes. Same evidence as there, too: `list_exclusions`
+  // arrives sorted (`write.rs:580`), and the ancestors of one path form a chain
+  // in which each is a string prefix of the next, so the first match in that
+  // order is the shallowest.
+  //
+  // 🔴 No `existsOnDisk` here, and the asymmetry with `heldBelow` is deliberate
+  // rather than an oversight. That one filters because a gone rule excludes
+  // nothing at the next scan; this one is not a claim about what the ancestor
+  // rule excludes, it is the fact that removing THIS rule changes nothing while
+  // that one stands — true whatever is on disk, since the ancestor's own
+  // pattern prunes the subtree the moment a folder appears there.
+  //
+  // `null` for a failed read, for `heldBelow`'s reason and with its direction:
+  // no ancestor named, so the unconditional sentence stands.
+  function heldAbove(rules: StoredExclusion[] | null, prefix: string): string | null {
+    return rules?.find((rule) => under(prefix, rule.prefix))?.prefix ?? null;
+  }
+
+  // The disclosure beside a "remove this rule" control, in its three forms. One
   // function for both places that draw it — the rule list and the subfolder
   // row a rule names — so the two cannot disagree about the same path.
+  //
+  // A rule held from above comes first, and over the softening rather than
+  // beside it: with an ancestor rule standing, "except what your other rules
+  // further down still exclude" would still promise that the REST comes back,
+  // and none of it does.
   function ruleCostLabel(rules: StoredExclusion[] | null, prefix: string): string {
+    const ancestor = heldAbove(rules, prefix);
+    if (ancestor !== null) {
+      return t('settings_subfolder_excluded_by_ancestor', { prefix: ancestor });
+    }
     return heldBelow(rules, prefix)
       ? t('settings_folders_rule_cost_held_below')
       : t('settings_folders_rule_cost');
@@ -419,7 +485,11 @@
       // the evidence, not a change of mind. `existsOnDisk` has two answers
       // from two kinds of snapshot; this one is a question about the STORED
       // SET, which both callers would have to answer from that same list.
-      pending: { kind: 'include', path, existsOnDisk, heldBelow: heldBelow(panel.rules, path) },
+      pending: {
+        kind: 'include', path, existsOnDisk,
+        heldBelow: heldBelow(panel.rules, path),
+        heldAbove: heldAbove(panel.rules, path),
+      },
     });
   }
 
@@ -883,11 +953,18 @@
       cost:
         pending.kind === 'exclude'
           ? t('settings_folders_exclude_cost', { paths: pending.paths, documents: pending.documents })
+          // 🔴 Fix round 2, A1. Before `existsOnDisk`, not after it: the `_gone`
+          // arm promises that a folder appearing here later is indexed and sent
+          // to the provider, and while an ancestor rule stands that is false
+          // too. The fact that decides this question is that removing this rule
+          // releases nothing at all, and it holds whatever is on disk.
+          : pending.heldAbove !== null
+            ? t('settings_subfolder_excluded_by_ancestor', { prefix: pending.heldAbove })
           : pending.existsOnDisk
-            // The `_gone` arm is left unconditioned deliberately: it already
-            // says nothing is being indexed at this path today, and its clause
-            // about a folder appearing later over-states the exposure rather
-            // than under-stating it, which is the D29-safe direction.
+            // The `_gone` arm is left unconditioned on `heldBelow` deliberately:
+            // it already says nothing is being indexed at this path today, and
+            // its clause about a folder appearing later over-states the exposure
+            // rather than under-stating it, which is the D29-safe direction.
             ? pending.heldBelow
               ? t('settings_folders_include_cost_held_below')
               : t('settings_folders_include_cost')

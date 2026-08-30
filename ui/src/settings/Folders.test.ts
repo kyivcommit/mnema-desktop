@@ -690,6 +690,25 @@ const RULE_COST = {
     + ' окрім того, що й далі виключають ваші інші правила глибше за цим шляхом.',
 };
 
+// ── Fix round 2, A1: the mirror of the above ────────────────────────────────
+//
+// The relation `heldBelow` reads is symmetric, and round 1 read one side of it.
+// A rule with one of the person's own rules ABOVE it releases NOTHING when it
+// goes — the walk is already pruning at the ancestor — so both cost sentences
+// were false about it, unconditionally, in a state reachable by the same two
+// presses in the other order.
+//
+// 🔴 Not a new string. This is the sentence the TREE has always drawn one row
+// above (`settings_subfolder_excluded_by_ancestor`), re-used at the two sites
+// that decide what removing a rule costs, so the screen says ONE thing about
+// one path. Written as functions because it names the ancestor, and the
+// ancestor is the OUTERMOST one — `tree.rs:755-759`'s choice, which the rule
+// list must match or the same screen names two different rules to remove.
+const heldBy = (prefix: string) =>
+  `Held by your rule on ${prefix}. Remove that rule first — another rule may still hold this folder.`;
+const heldByUk = (prefix: string) =>
+  `Утримується вашим правилом на ${prefix}. Спершу приберіть те правило — теку може утримувати ще одне.`;
+
 // 🔴 The pair is the whole point of the fixture, and the fixture asserts BOTH
 // members: the ancestor has a rule under it and the descendant has none, so a
 // screen that printed the new sentence everywhere satisfies neither row.
@@ -704,8 +723,11 @@ test('a rule with another of your rules under it says what removing it does not 
 
   expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
     .toBe(['Archive', RULE_COST.held, 'Remove the rule'].join(' '));
+  // 🔴 Fix round 2, A1: the mirror row. `Archive` is a rule of the person's own
+  // ABOVE this one, so removing this one releases nothing at all — the walk
+  // prunes at `Archive` either way. The unconditional sentence was false here.
   expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
-    .toBe(['Archive/Held', RULE_COST.plain, 'Remove the rule'].join(' '));
+    .toBe(['Archive/Held', heldBy('Archive'), 'Remove the rule'].join(' '));
 
   // The same rule read from the subfolder row that names it. It draws the
   // sentence at its own site (`buildLevel`), so a fix applied only to the rule
@@ -725,7 +747,7 @@ test('a rule with another of your rules under it says what removing it does not 
   expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
     .toBe(['Archive', RULE_COST.heldUk, 'Прибрати правило'].join(' '));
   expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
-    .toBe(['Archive/Held', RULE_COST.plainUk, 'Прибрати правило'].join(' '));
+    .toBe(['Archive/Held', heldByUk('Archive'), 'Прибрати правило'].join(' '));
 });
 
 // 🔴 The whole screen for the storable pair, read line by line, because the
@@ -774,12 +796,17 @@ test('the pair reads as one screen: the tree names only the outermost, the rule 
     'Archive', 'Excluded by your rule.', RULE_COST.held, 'Do not exclude', 'Subfolders',
     // And its child names the OUTERMOST rule, never its own — so on this line
     // alone the rule on `Archive/Held` is invisible.
-    'Held',
-    'Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.',
+    'Held', heldBy('Archive'),
     // The rule list, which is where it is not invisible.
     'Your exclusion rules for this folder:',
     'Archive', RULE_COST.held, 'Remove the rule',
-    'Archive/Held', RULE_COST.plain, 'Remove the rule',
+    // 🔴 Fix round 2, A1. This line is why the whole row is asserted as one
+    // string: the rule list's row for `Archive/Held` used to carry the
+    // unconditional sentence three lines under a tree row saying the folder is
+    // held by `Archive`, so one screen said two things about one path. It now
+    // says the SAME thing as the tree row, word for word and about the same
+    // rule — which is the point of re-using the tree's own string here.
+    'Archive/Held', heldBy('Archive'), 'Remove the rule',
   ].join(' '));
 });
 
@@ -834,6 +861,173 @@ test('the include question names the rules further down that removing this one l
     'надсилається провайдеру моделі — окрім того, що й далі виключають ваші інші правила',
     'глибше за цим шляхом.',
     'Підтвердити Скасувати',
+  ].join(' '));
+});
+
+// 🔴 Fix round 2, A1 — the third site, and the one a press actually lands on.
+// The rule list's Remove control opens this question, so a screen corrected in
+// the list alone would still ask the person to confirm a false consequence: the
+// question is the last thing read before the rule goes.
+test('the include question about a rule held from above says removing it releases nothing', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+    ],
+  );
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive/Held' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive/Held?',
+    heldBy('Archive'),
+    'Confirm Cancel',
+  ].join(' '));
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  // D130, and the same reason the two rows above are read in both locales: the
+  // arm this fix adds is a `t()` call like any other, and a hard-coded English
+  // sentence would satisfy the assertion above and nothing else.
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
+    'Більше не виключати Archive/Held?',
+    heldByUk('Archive'),
+    'Підтвердити Скасувати',
+  ].join(' '));
+});
+
+// 🔴 The state where the two conditions in the question disagree, and it is the
+// reason the ancestor is read BEFORE `existsOnDisk` rather than after it. With
+// the folder gone AND a rule above, the `_gone` arm's own second sentence —
+// "if a folder appears there later, it is indexed and its text is sent to the
+// model provider" — is false while the ancestor rule stands. No other row in
+// this file builds both facts at once, so the order of those two branches is
+// otherwise free to be wrong.
+test('a question about a gone rule held from above names the ancestor, not the empty path', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: false },
+    ],
+  );
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive/Held' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive/Held?',
+    heldBy('Archive'),
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// 🔴 Two ancestors, and the row must name the SHALLOWEST — `tree.rs:755-759`'s
+// own choice, which the tree row three lines above has always made. Naming
+// `Archive/Held` here instead would send the person to remove a rule that
+// changes nothing while `Archive` stands, and would put two different
+// instructions about one path on one screen again. `list_exclusions` arrives
+// sorted (`write.rs:580`) and the ancestors of one path form a chain, so the
+// first match in that order is the outermost; without this row the search
+// could take the last match and the fixture above, which has one ancestor,
+// would stay green.
+test('a rule with two of your rules above it names the outermost, as the tree does', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+      { prefix: 'Archive/Held/Deep', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held/Deep')))
+    .toBe(['Archive/Held/Deep', heldBy('Archive'), 'Remove the rule'].join(' '));
+  // And the middle rule, which has one rule above it and one below: the fact
+  // that releases nothing is the one above, so it wins over the softening.
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
+    .toBe(['Archive/Held', heldBy('Archive'), 'Remove the rule'].join(' '));
+});
+
+// 🔴 A sibling of an ANCESTOR is not an ancestor: `Arch` is a string prefix of
+// `Archive/Held` and holds nothing of it, because `anchored_pattern` produces
+// `!/Arch`, which does not match. Without this row the separator could be
+// dropped from the ancestor search and every test above would stay green —
+// and the screen would then tell a person to go and remove a rule that is not
+// holding this folder at all, leaving the real consequence unsaid.
+test('a rule whose prefix merely starts the same way is not an ancestor', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Arch', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
+    .toBe(['Archive/Held', RULE_COST.plain, 'Remove the rule'].join(' '));
+});
+
+// ── Fix round 2, A2 ─────────────────────────────────────────────────────────
+//
+// The softening promises an exception, and round 1 let a rule the SAME PANEL
+// labels "There is no folder at this path right now" back that promise. At the
+// next scan such a rule excludes nothing, so the sentence understates what
+// reaches the provider — the one direction D29 does not allow. The condition
+// now consults the rule's own `existsOnDisk`, which drops the exception and
+// selects the unconditional sentence: an overstatement, and exactly true here,
+// because everything present at this path really is indexed again.
+test('a rule below whose folder is gone does not soften the sentence', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: false },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
+    .toBe(['Archive', RULE_COST.plain, 'Remove the rule'].join(' '));
+
+});
+
+// The other direction, and it is not the same assertion negated: a rule whose
+// folder is gone must not veto a sibling rule that is doing its job. A
+// condition written as "every rule below exists" satisfies the row above and
+// fails here.
+test('a rule below whose folder is gone does not cancel one whose folder is there', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Gone', existsOnDisk: false },
+      { prefix: 'Archive/Here', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
+    .toBe(['Archive', RULE_COST.held, 'Remove the rule'].join(' '));
+});
+
+// The question freezes the answer, so it has to freeze the corrected one.
+test('the include question does not soften on the strength of a rule whose folder is gone', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: false },
+    ],
+  );
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again, and its text is',
+    'sent to the model provider.',
+    'Confirm Cancel',
   ].join(' '));
 });
 

@@ -559,6 +559,52 @@ fn exclusions_come_back_sorted() {
     );
 }
 
+/// 🔴 Fix round 2, A3. The row above cannot fail from the `ORDER BY` going: the
+/// planner walks `ux_ignore_rule_path` (`migrations.rs:89-92`), which is
+/// `(watched_root_id, path_prefix)`, so the rows come back sorted whether the
+/// clause is there or not — `EXPLAIN QUERY PLAN` says
+/// `SEARCH ignore_rule USING COVERING INDEX ux_ignore_rule_path`. Delete the
+/// clause and the whole workspace stays at exit 0.
+///
+/// So the equivalence is **conditional on that index**, and this is the test
+/// that says so out loud instead of a comment telling the next person the guard
+/// cannot exist. Drop the index and the two orders come apart:
+///
+/// ```text
+/// NO INDEX, no ORDER BY = ["a/deep", "a"]     <- insertion order
+/// NO INDEX, ORDER BY    = ["a", "a/deep"]
+/// ```
+///
+/// What rests on it: `SubfolderState::ExcludedByAncestor` promises the
+/// **outermost** ancestor and gets it by taking the first match in this list
+/// (`tree.rs:755-759`), and `Folders.svelte`'s `heldAbove` reads the same list
+/// the same way to name the rule a person must remove first. A migration that
+/// narrowed or dropped this index would make the clause load-bearing again with
+/// nothing else noticing.
+///
+/// Descendant first, deliberately: with `["a", "a/deep"]` inserted in that
+/// order, insertion order and sorted order agree and the fixture proves
+/// nothing.
+#[test]
+fn exclusions_come_back_sorted_with_no_index_left_to_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/alpha").unwrap();
+
+    db.add_path_exclusion(root, "a/deep").unwrap();
+    db.add_path_exclusion(root, "a").unwrap();
+
+    db.conn()
+        .execute_batch("DROP INDEX ux_ignore_rule_path;")
+        .unwrap();
+
+    assert_eq!(
+        db.list_path_exclusions(root).unwrap(),
+        vec!["a", "a/deep"],
+        "with no index to walk, only the ORDER BY puts the outermost rule first"
+    );
+}
+
 /// The cascade is the schema's (`schema.sql:52`), and it is asserted by
 /// counting rows rather than by "no error": a cascade that silently stopped
 /// working leaves rules pointing at a root that no longer exists, and the next

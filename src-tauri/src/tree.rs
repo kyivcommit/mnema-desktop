@@ -753,7 +753,7 @@ pub enum SubfolderState {
     /// nothing to go and remove.
     ///
     /// The **outermost** ancestor when several hold it. `list_path_exclusions`
-    /// sorts (`write.rs:576`), and the ancestors of one path form a chain in
+    /// sorts (`write.rs:580`), and the ancestors of one path form a chain in
     /// which each is a string prefix of the next, so the first match in that
     /// sorted list is the shallowest one — the rule whose removal has to come
     /// first.
