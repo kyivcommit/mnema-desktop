@@ -1070,7 +1070,7 @@ test('the expanded panel switches language with everything else on screen', asyn
   expect(screen.getByRole('button', { name: 'Підтеки теки /synthetic/root' })).toBeTruthy();
   // The visible button text, not just its aria-label — `expandLabel` and
   // `removeRuleLabel` each guard their own `void $locale` at
-  // Folders.svelte:835-836, outside `rows`.
+  // Folders.svelte:855-856, outside `rows`.
   expect(screen.getAllByText('Підтеки').length).toBeGreaterThan(0);
   expect(screen.getByText('Прибрати правило')).toBeTruthy();
 });
@@ -1850,7 +1850,7 @@ test('an embedding pass ending does not withdraw a question raised after the wal
 });
 
 // M1. `settings_folders_question_withdrawn` was asserted only under
-// `setLocale('en')`, and `withdrawnNote` (Folders.svelte:809-812) needed its
+// `setLocale('en')`, and `withdrawnNote` (Folders.svelte:829-832) needed its
 // own switch test by this file's own stated standard (`Folders.test.ts:1450`
 // above, of the exclude/include branches): a literal swapped in for THIS
 // `t()` call specifically would not be caught by a switch test that only ever

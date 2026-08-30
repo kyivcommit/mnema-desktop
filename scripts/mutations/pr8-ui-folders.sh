@@ -161,9 +161,12 @@ case_ "the remove-rule label must read the locale, or it freezes at the first re
 # because the rule names `archive` and the folder had become `Archive`. This is
 # the exact line the file used to have, and the whole-window test is the one
 # that dies on it.
+# Fix round 2 moved this call behind an arrow (`.then(() => rereadPanels(pass))`)
+# so the ending's `pass` could reach the withdrawal below — same guard, updated
+# shape.
 case_ "a finished scan must re-read the panel, not only the row above it" \
   ui/src/settings/Folders.svelte \
-  "s{    refresh\(\)\.then\(rereadPanels\)\.catch\(\(e\) => \{}{    refresh().catch((e) => \{}" \
+  "s{    refresh\(\)\.then\(\(\) => rereadPanels\(pass\)\)\.catch\(\(e\) => \{}{    refresh().catch((e) => \{}" \
   "    refresh().catch((e) => {" \
   src/settings/Indexing.test.ts 'a finished scan re-reads the open panel, so a renamed folder stops reading as excluded' runner=vitest
 
@@ -172,6 +175,9 @@ case_ "a finished scan must re-read the panel, not only the row above it" \
 # that test still passes against this mutation. The panel test dies on the
 # subfolder that never arrives — `Unable to find an element by:
 # [data-testid="subfolder-1-first-after"]`.
+#
+# Fix round 2 gave `reread` a `pass` parameter, so the marker below now names
+# that signature rather than the old parameterless one.
 case_ "every open panel must be re-read, and by the set of paths it has open" \
   ui/src/settings/Folders.svelte \
   "s{      void read\(rootId, openPathsOf\(panel\.tree\)\);\n}{}" \
@@ -179,7 +185,7 @@ case_ "every open panel must be re-read, and by the set of paths it has open" \
     }
   }
 
-  function reread() {" \
+  function reread(pass: JobPass | null) {" \
   src/settings/Folders.test.ts 'a job ending re-reads every expanded panel, not only the root whose Scan was pressed' runner=vitest
 
 # The other half, and the mirror of the case above: deleting the withdrawal
@@ -187,9 +193,14 @@ case_ "every open panel must be re-read, and by the set of paths it has open" \
 # standing is a question whose two numbers were read from a `list_tree` taken
 # before this scan — and the sentence a person answers must not be one the
 # ending has already falsified.
+#
+# Fix round 2, review I1: the guard now also requires `pass === 'walk'`, so the
+# pattern below removes the whole conditional, `pass` clause included — this
+# case is about the withdrawal EXISTING at all, not about which pass it fires
+# on (that is the case after this one).
 case_ "a question standing when a job ends must be withdrawn, not left over the new listing" \
   ui/src/settings/Folders.svelte \
-  "s{      if \(panel\.pending !== null\) \{\n        ask\(rootId\);\n        patch\(rootId, \{ pending: null, withdrawn: panel\.pending\.path \}\);\n      \}\n}{}" \
+  "s{      if \(pass === 'walk' && panel\.pending !== null\) \{\n        ask\(rootId\);\n        patch\(rootId, \{ pending: null, withdrawn: panel\.pending\.path \}\);\n      \}\n}{}" \
   "      // \`checking\` reply still on the wire raises nothing when it lands.
       void read(rootId, openPathsOf(panel.tree));" \
   src/settings/Folders.test.ts 'a question standing when a job ends is withdrawn by name, and nothing is stored' runner=vitest
@@ -202,7 +213,7 @@ case_ "a question standing when a job ends must be withdrawn, not left over the 
 case_ "withdrawing a question must also stop the check already on the wire" \
   ui/src/settings/Folders.svelte \
   "s{        ask\(rootId\);\n        patch\(rootId, \{ pending: null, withdrawn: panel\.pending\.path \}\);}{        patch(rootId, \{ pending: null, withdrawn: panel.pending.path \});}" \
-  "      if (panel.pending !== null) {
+  "      if (pass === 'walk' && panel.pending !== null) {
         patch(rootId, { pending: null, withdrawn: panel.pending.path });" \
   src/settings/Folders.test.ts 'a check still in flight when a job ends raises no question when its reply lands' runner=vitest
 
@@ -216,8 +227,14 @@ case_ "withdrawing a question must also stop the check already on the wire" \
 # none had at that moment. The re-read stays unconditional on purpose — see
 # `rereadPanels`'s own comment — so this case targets only the withdrawal's
 # `pass === 'walk'` clause, not the call to `read` beside it.
+#
+# `#` rather than `{}` as the `s///` delimiter: the replacement text itself
+# ends in an unescaped, unbalanced `{` (it opens the `if` block being restored
+# to its old unconditional form), and `s{...}{...}` requires each half to be
+# brace-balanced on its own — measured, the brace form aborts with "Unknown
+# regexp modifier" and two cascading syntax errors from the unmatched brace.
 case_ "the withdrawal must not fire on a pass that changed nothing about the question" \
   ui/src/settings/Folders.svelte \
-  "s{if \(pass === 'walk' && panel\.pending !== null\) \{}{if (panel.pending !== null) {}" \
+  "s#if \(pass === 'walk' && panel\.pending !== null\) \{#if (panel.pending !== null) {#" \
   "if (panel.pending !== null) {" \
   src/settings/Folders.test.ts 'an embedding pass ending does not withdraw a question raised after the walk that chained it' runner=vitest
