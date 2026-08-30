@@ -667,6 +667,121 @@ test('a nested rule whose folder is present is not labelled gone; the one that i
   expect(gone.getByRole('button', { name: 'Remove the rule on Old notes' })).toBeTruthy();
 });
 
+// ── Fix round 1, I2 ─────────────────────────────────────────────────────────
+//
+// `settings_folders_rule_cost` was unconditional, and the state that
+// contradicts it is storable from this very screen: `exclude_subfolder` has no
+// ancestor guard (`bridge.rs:429-451`), `add_path_exclusion` is
+// `ON CONFLICT DO NOTHING` (`write.rs:604-612`), and `subfolder_state` still
+// reports the ancestor as `excluded` (`tree.rs:817-848`) so the control to
+// remove it is offered. Exclude `Archive/Held`, then include `Archive` back,
+// and "anything at this path is indexed again" was contradicted by the rule
+// list two lines below it.
+//
+// It over-warns rather than under-warns, so no D29 direction was crossed —
+// but a sentence that is false in a reachable state is the F5 class, and the
+// fix is to make it true rather than to delete it.
+const RULE_COST = {
+  plain: 'Without this rule, anything at this path is indexed again from the next scan on.',
+  held: 'Without this rule, anything at this path is indexed again from the next scan on —'
+    + ' except what your other rules further down this path still exclude.',
+  plainUk: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування.',
+  heldUk: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування —'
+    + ' окрім того, що й далі виключають ваші інші правила глибше за цим шляхом.',
+};
+
+// 🔴 The pair is the whole point of the fixture, and the fixture asserts BOTH
+// members: the ancestor has a rule under it and the descendant has none, so a
+// screen that printed the new sentence everywhere satisfies neither row.
+test('a rule with another of your rules under it says what removing it does not release', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' }), sub('Work')],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
+    .toBe(['Archive', RULE_COST.held, 'Remove the rule'].join(' '));
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
+    .toBe(['Archive/Held', RULE_COST.plain, 'Remove the rule'].join(' '));
+
+  // The same rule read from the subfolder row that names it. It draws the
+  // sentence at its own site (`buildLevel`), so a fix applied only to the rule
+  // list would leave these two rows disagreeing about one path.
+  expect(visibleText(screen.getByTestId('subfolder-1-Archive')))
+    .toBe(['Archive', 'Excluded by your rule.', RULE_COST.held, 'Do not exclude', 'Subfolders'].join(' '));
+  // And the row no rule names carries no disclosure at all — the sentence
+  // belongs to the control that takes protection away, not to every row.
+  expect(visibleText(screen.getByTestId('subfolder-1-Work')))
+    .toBe(['Work', 'No rule excludes this folder.', 'Exclude', 'Subfolders'].join(' '));
+
+  // D130: a new string is a string in both locales, and both arms of the new
+  // condition are read in the second one too.
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
+    .toBe(['Archive', RULE_COST.heldUk, 'Прибрати правило'].join(' '));
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
+    .toBe(['Archive/Held', RULE_COST.plainUk, 'Прибрати правило'].join(' '));
+});
+
+// 🔴 A sibling is not a rule under it. `Archive2` merely starts with `Archive`;
+// `anchored_pattern` produces `!/Archive`, which does not match it, so removing
+// the rule on `Archive` really does release everything at that path. Without
+// this row, `under`'s separator could be dropped from `heldBelow` and the test
+// above would stay green.
+test('a rule whose prefix merely starts with this one does not soften the sentence', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive2', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
+    .toBe(['Archive', RULE_COST.plain, 'Remove the rule'].join(' '));
+});
+
+// The question a person answers has to say what the list says. It is frozen
+// into `Pending` beside `existsOnDisk`, for that field's own reason: a re-read
+// landing underneath must not renumber — or re-word — a sentence somebody is
+// part way through reading.
+test('the include question names the rules further down that removing this one leaves standing', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+    ],
+  );
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again, and its text is',
+    'sent to the model provider — except what your other rules further down this path still',
+    'exclude.',
+    'Confirm Cancel',
+  ].join(' '));
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
+    'Більше не виключати Archive?',
+    'Від наступного сканування все всередині цієї теки індексується знову, а її текст',
+    'надсилається провайдеру моделі — окрім того, що й далі виключають ваші інші правила',
+    'глибше за цим шляхом.',
+    'Підтвердити Скасувати',
+  ].join(' '));
+});
+
 test('a folder with no rules says so instead of showing an empty heading', async () => {
   await expand([sub('Work')], []);
 

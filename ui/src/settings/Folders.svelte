@@ -92,7 +92,11 @@
     // true when it was asked, and a re-read landing underneath it must not
     // silently change the sentence a person is in the middle of reading. It is
     // the RULE's own field, never re-derived here (`ipc.ts:118`).
-    | { kind: 'include'; path: string; existsOnDisk: boolean };
+    // `heldBelow` is carried for the same reason, and answers a different
+    // question: whether removing THIS rule still leaves rules of the person's
+    // own further down the same path. See `heldBelow` for why the sentence
+    // needs it.
+    | { kind: 'include'; path: string; existsOnDisk: boolean; heldBelow: boolean };
 
   let panels = $state<Record<number, Panel>>({});
 
@@ -255,6 +259,43 @@
     return relativePath.startsWith(`${prefix}/`);
   }
 
+  // 🔴 Fix round 1, I2. Whether a rule of the person's own remains STRICTLY
+  // under `prefix` — the fact two of this screen's sentences were written
+  // without and are false in a state this very screen can reach.
+  //
+  // The state is storable and nothing refuses it: `exclude_subfolder` checks an
+  // unknown root, a blank path, the validator and the built-in layers and
+  // nothing else (`bridge.rs:429-451` — there is no ancestor guard), and
+  // `add_path_exclusion` is `INSERT … ON CONFLICT DO NOTHING`
+  // (`write.rs:604-612`), so a rule on `Archive/Held` and a rule on `Archive`
+  // are both stored. `subfolder_state` then still reports `Archive` as
+  // `Excluded` (`tree.rs:817-848` asks about an ancestor, and `Archive` has
+  // none), so this screen offers to remove it — and "anything at this path is
+  // indexed again" was contradicted by the rule list two lines below it.
+  //
+  // Through `under`, so the boundary rule is the one the cost count already
+  // uses: a rule on `Archive2` is a sibling of `Archive`, not a rule under it,
+  // and `anchored_pattern` agrees. Strict, so the rule being removed is never
+  // its own answer.
+  //
+  // `null` is a panel whose read failed, which draws neither a rule row nor a
+  // subfolder row and cannot reach either caller. It answers `false`, and that
+  // is the direction to answer it in: `false` selects the UNCONDITIONAL
+  // sentence, which claims more comes back than does. Under D29 an
+  // over-statement of what reaches the provider is the safe way round.
+  function heldBelow(rules: StoredExclusion[] | null, prefix: string): boolean {
+    return rules !== null && rules.some((rule) => under(rule.prefix, prefix));
+  }
+
+  // The disclosure beside a "remove this rule" control, in its two forms. One
+  // function for both places that draw it — the rule list and the subfolder
+  // row a rule names — so the two cannot disagree about the same path.
+  function ruleCostLabel(rules: StoredExclusion[] | null, prefix: string): string {
+    return heldBelow(rules, prefix)
+      ? t('settings_folders_rule_cost_held_below')
+      : t('settings_folders_rule_cost');
+  }
+
   // The two numbers, from ONE `list_tree` reply, and they are about different
   // things.
   //
@@ -349,11 +390,17 @@
   // `rules` from one `Promise.all`, so a rendered row and a null rule list do
   // not coexist, and a default no test can reach is a guard that cannot fail.
   function askInclude(rootId: number, path: string, existsOnDisk: boolean) {
-    if (panels[rootId] === undefined) return;
+    const panel = panels[rootId];
+    if (panel === undefined) return;
     ask(rootId);
     patch(rootId, {
       actionError: null, alreadyGone: false, withdrawn: null,
-      pending: { kind: 'include', path, existsOnDisk },
+      // Read from `panel.rules` here and NOT handed over by the caller, which
+      // is the opposite of `existsOnDisk` one line up — and the difference is
+      // the evidence, not a change of mind. `existsOnDisk` has two answers
+      // from two kinds of snapshot; this one is a question about the STORED
+      // SET, which both callers would have to answer from that same list.
+      pending: { kind: 'include', path, existsOnDisk, heldBelow: heldBelow(panel.rules, path) },
     });
   }
 
@@ -746,7 +793,10 @@
   };
   type Level = { unnameableLabel: string | null; emptyLabel: string | null; rows: SubRow[] };
 
-  function buildLevel(node: SubTree): Level {
+  // `rules` is threaded down the whole recursion rather than read from the
+  // panel at each level, because it is one fact about one panel and a second
+  // reading of it is a second answer that can disagree.
+  function buildLevel(node: SubTree, rules: StoredExclusion[] | null): Level {
     const rows = node.listing.entries.map((entry) => {
       const { sentence, control, expandable } = describe(entry.state);
       const child = node.children[entry.relativePath];
@@ -765,11 +815,11 @@
         // The disclosure sits beside the control BEFORE it is pressed: taking a
         // rule away is not a tidy-up, it puts a subtree back in front of the
         // next scan.
-        costLabel: control === 'include' ? t('settings_folders_rule_cost') : null,
+        costLabel: control === 'include' ? ruleCostLabel(rules, entry.relativePath) : null,
         expandable,
         expandAriaLabel: t('settings_folders_expand_named', { path: entry.relativePath }),
         open: child !== undefined,
-        children: child === undefined ? null : buildLevel(child),
+        children: child === undefined ? null : buildLevel(child, rules),
       };
     });
     return {
@@ -815,7 +865,13 @@
         pending.kind === 'exclude'
           ? t('settings_folders_exclude_cost', { paths: pending.paths, documents: pending.documents })
           : pending.existsOnDisk
-            ? t('settings_folders_include_cost')
+            // The `_gone` arm is left unconditioned deliberately: it already
+            // says nothing is being indexed at this path today, and its clause
+            // about a folder appearing later over-states the exposure rather
+            // than under-stating it, which is the D29-safe direction.
+            ? pending.heldBelow
+              ? t('settings_folders_include_cost_held_below')
+              : t('settings_folders_include_cost')
             : t('settings_folders_include_cost_gone'),
       confirmLabel: t('settings_folders_confirm'),
       confirmAriaLabel:
@@ -842,7 +898,7 @@
           panel === undefined
             ? null
             : {
-                level: panel.tree === null ? null : buildLevel(panel.tree),
+                level: panel.tree === null ? null : buildLevel(panel.tree, panel.rules),
                 loadingLabel:
                   panel.tree === null && panel.loadError === null
                     ? t('settings_subfolders_loading')
@@ -870,7 +926,7 @@
                     : panel.rules.map((rule) => ({
                         rule,
                         goneLabel: rule.existsOnDisk ? null : t('settings_folders_rule_gone'),
-                        costLabel: t('settings_folders_rule_cost'),
+                        costLabel: ruleCostLabel(panel.rules, rule.prefix),
                         removeAriaLabel: t('settings_folders_rule_remove_named', { prefix: rule.prefix }),
                       })),
                 rulesHeading: t('settings_folders_rules_heading'),

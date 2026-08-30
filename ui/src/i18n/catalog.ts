@@ -51,10 +51,12 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_subfolder_include' | 'settings_subfolder_include_named'
   | 'settings_folders_rules_heading' | 'settings_folders_rules_none'
   | 'settings_folders_rule_gone' | 'settings_folders_rule_cost'
+  | 'settings_folders_rule_cost_held_below'
   | 'settings_folders_rule_remove' | 'settings_folders_rule_remove_named'
   | 'settings_folders_rule_already_gone' | 'settings_folders_question_withdrawn'
   | 'settings_folders_exclude_checking' | 'settings_folders_exclude_cost'
-  | 'settings_folders_include_cost' | 'settings_folders_include_cost_gone'
+  | 'settings_folders_include_cost' | 'settings_folders_include_cost_held_below'
+  | 'settings_folders_include_cost_gone'
   | 'settings_folders_confirm_exclude_heading' | 'settings_folders_confirm_include_heading'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
   | 'settings_folders_confirm_exclude_named' | 'settings_folders_confirm_include_named'
@@ -363,6 +365,15 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // із кнопкою ДО натискання й каже, що станеться далі. Одне речення для
     // обох місць — і для правила у списку, і для перемикача «не виключати».
     settings_folders_rule_cost: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування.',
+    // 🔴 Рев'ю фінальної гілки, I2. Речення вище безумовне, а стан, який йому
+    // суперечить, зберігається без жодної відмови: `exclude_subfolder` не має
+    // гарди на предка (`bridge.rs:429-451`), а `add_path_exclusion` —
+    // `ON CONFLICT DO NOTHING` (`write.rs:604-612`), тож правила і на
+    // `Archive`, і на `Archive/Held` лежать поруч, і `Archive` досі
+    // показується як `excluded`. Тоді «все за цим шляхом знову
+    // індексуватиметься» спростовує перелік правил двома рядками нижче.
+    // Речення не викидають — його роблять правдивим.
+    settings_folders_rule_cost_held_below: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування — окрім того, що й далі виключають ваші інші правила глибше за цим шляхом.',
     settings_folders_rule_remove: 'Прибрати правило',
     settings_folders_rule_remove_named: 'Прибрати правило на {prefix}',
     // `include_subfolder` відповідає, чи справді щось прибрали (bridge.rs).
@@ -391,6 +402,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // завищенням, тільки в інший бік. Зате наслідок відомий точно (D29): текст
     // піде провайдеру.
     settings_folders_include_cost: 'Від наступного сканування все всередині цієї теки індексується знову, а її текст надсилається провайдеру моделі.',
+    // Той самий стан, що й у `settings_folders_rule_cost_held_below`, тільки в
+    // питанні: людину питають про правило, під яким лишаються її ж інші
+    // правила. `heldBelow` заморожене в `Pending` разом із `existsOnDisk` — з
+    // тієї самої причини: перечитування не має міняти речення під тим, хто
+    // його читає.
+    settings_folders_include_cost_held_below: 'Від наступного сканування все всередині цієї теки індексується знову, а її текст надсилається провайдеру моделі — окрім того, що й далі виключають ваші інші правила глибше за цим шляхом.',
     // 🔴 Рев'ю раунду 1 (I1): те саме вікно вже знає, що теки за цим шляхом
     // немає — `existsOnDisk` приходить із бекенда (`bridge.rs:117`) і саме з
     // нього намальовано `settings_folders_rule_gone` у переліку правил тієї ж
@@ -625,6 +642,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_rules_none: 'You have not excluded anything in this folder.',
     settings_folders_rule_gone: 'There is no folder at this path right now.',
     settings_folders_rule_cost: 'Without this rule, anything at this path is indexed again from the next scan on.',
+    settings_folders_rule_cost_held_below: 'Without this rule, anything at this path is indexed again from the next scan on — except what your other rules further down this path still exclude.',
     settings_folders_rule_remove: 'Remove the rule',
     settings_folders_rule_remove_named: 'Remove the rule on {prefix}',
     settings_folders_rule_already_gone: 'There was no such rule left to remove. The list has been re-read.',
@@ -632,6 +650,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_exclude_checking: 'Checking what this exclusion removes…',
     settings_folders_exclude_cost: 'As of now: on the next scan the index loses {paths, plural, one {# file} other {# files}} from this folder, and {documents, plural, =0 {no document stops being findable — each is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}.',
     settings_folders_include_cost: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider.',
+    settings_folders_include_cost_held_below: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider — except what your other rules further down this path still exclude.',
     settings_folders_include_cost_gone: 'There is no folder at this path right now, so nothing is being indexed today. If a folder appears there later, it is indexed and its text is sent to the model provider.',
     settings_folders_confirm_exclude_heading: 'Exclude {path}?',
     settings_folders_confirm_include_heading: 'Stop excluding {path}?',
