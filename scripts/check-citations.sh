@@ -24,11 +24,16 @@
 #   scripts/check-citations.sh --self-test  # the citation pattern against a
 #                                           # table of strings, and nothing else
 #
-# Output, one block per citation:
+# Output, one block per citation. This example was pasted from a run and not
+# written by hand — it had gone stale by nineteen lines otherwise (fix round 2,
+# B5), which is the exact defect this script exists to find, sitting in its own
+# usage text. Re-derive it the same way rather than editing it:
 #
-#   src-tauri/src/tree.rs:715  ->  crates/mnema-walk/src/rules.rs:369
-#     claim | /// 2. `Symlink` — the walk runs `follow_links(false)`
-#     :369  |             .follow_links(false)
+#   scripts/check-citations.sh src-tauri/src/tree.rs | grep -A2 'tree.rs:715'
+#
+#   src-tauri/src/tree.rs:715  ->  crates/mnema-walk/src/rules.rs:388 (ambiguous (2 matches), took the nearest to the citing file)
+#     claim | ///    (`rules.rs:388`), so nothing under this name is ever enumerated.
+#     :388  |             .follow_links(false)
 #
 # **It does not decide whether a citation is right.** Whether `:369` is the
 # right line for that sentence is a judgement about meaning, and the reader is

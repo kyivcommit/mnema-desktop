@@ -5,21 +5,30 @@
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
 #
-# Sixteen cases. By the file each one mutates: ten in `src-tauri/src/bridge.rs`
-# and one in `crates/mnema-index/src/write.rs`, which together are the three
-# commands that read and write a rule (`list_exclusions`, `exclude_subfolder`,
-# `include_subfolder`) and the tests written for task-2 of PR 8a; three in
-# `src-tauri/src/walk_job.rs` and the tests written for task-3, which is where a
-# stored rule stops being a row and starts removing files; and two in
-# `crates/mnema-walk/src/rules.rs` — `validate_prefix`, killed by a
+# What is here, by the file each case mutates. `src-tauri/src/bridge.rs` and
+# `crates/mnema-index/src/write.rs` are together the three commands that read
+# and write a rule (`list_exclusions`, `exclude_subfolder`, `include_subfolder`)
+# and the tests written for task-2 of PR 8a; `src-tauri/src/walk_job.rs` is
+# task-3, where a stored rule stops being a row and starts removing files; and
+# `crates/mnema-walk/src/rules.rs` holds two — `validate_prefix`, killed by a
 # `mnema-desktop` test, and `anchored_pattern`, killed by a `mnema-walk` one.
 #
-# ⚠️ Until the second `rules.rs` case was added this paragraph said that one was
-# "the only case here that mutates a file outside `src-tauri`", which the
-# `write.rs` case above had already made false — a count in a comment is a
-# definition, and this one had been wrong for two tasks. Grouping by the file
-# mutated rather than by the command tested is what makes it checkable:
-# `grep -A1 '^case_ ' … | grep -E '^\s+(src-tauri|crates)/' | sort | uniq -c`.
+# ⚠️ **No count of the cases here, deliberately, and this file has now paid for
+# that twice.** Until the second `rules.rs` case was added this paragraph said
+# that one was "the only case here that mutates a file outside `src-tauri`",
+# which the `write.rs` case had already made false. That was corrected — in
+# this header, and NOT in the sentence itself, which went on saying it at its
+# own site until fix round 2 found it there (B3). A correction written where
+# the reader of the correction is, rather than where the wrong sentence is, is
+# not a correction. Every number this header used to carry has been replaced by
+# the command that re-derives it:
+#
+#   grep -c '^case_ ' scripts/mutations/pr8-exclusions.sh              # cases
+#   grep -A1 '^case_ ' scripts/mutations/pr8-exclusions.sh \
+#     | grep -E '^\s+(src-tauri|crates)/' | sort | uniq -c             # by file mutated
+#   grep -c ' --test commands$' scripts/mutations/pr8-exclusions.sh    # by target
+#   grep -c ' --lib$'           scripts/mutations/pr8-exclusions.sh
+#   grep -c ' --test rules$'    scripts/mutations/pr8-exclusions.sh
 #
 # That `rules.rs` pair is worth reading together, because the first of them used
 # to carry the sentence "it is here rather than in a `mnema-walk` file because
@@ -28,16 +37,24 @@
 # package PER CASE, so a file may mix them freely, and what a file is for is the
 # feature it covers. Both of these are the folder-exclusion feature.
 #
-# Fourteen run in `tests/commands.rs` (`--test commands`), one in `bridge.rs`'s
+# Most run in `tests/commands.rs` (`--test commands`), one in `bridge.rs`'s
 # own `mod tests` (`--lib`) — that one because the site it names, a per-entry
 # `io::Error` from a directory listing, cannot be forced out of a real
 # filesystem and so is reached through `entry_named`'s iterator parameter
 # rather than through the IPC (review round 4, N3) — and one in
 # `crates/mnema-walk/tests/rules.rs` (`--test rules`).
 #
-# ⚠️ **"Any unix leg", not "any CI leg" (review round 3, Minor N2).** Four of
-# these sixteen cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
-# three of the `prefix_exists_on_disk` permission/kind cases) — harmless on
+# ⚠️ **"Any unix leg", not "any CI leg" (review round 3, Minor N2).** Some cases
+# here name `#[cfg(unix)]` tests (the two dangling-symlink roots, and the
+# `prefix_exists_on_disk` permission/kind cases) — the count was wrong here too,
+# so take it from the code:
+#
+#   for t in $(grep -oE "mnema-[a-z]+ '[^']+'" scripts/mutations/pr8-exclusions.sh \
+#               | sed "s/.*'\(.*\)'/\1/" | sort -u); do
+#     grep -rn -B3 "fn ${t}(" src-tauri crates | grep -q 'cfg(unix)' && echo "$t"
+#   done
+#
+# They are harmless on
 # this repository's two CI legs (`ubuntu-24.04`, `macos-14`, both unix), but
 # a claim of "any CI leg" is false the moment a Windows leg exists, and would
 # fail every case in this file the same way Important A did, for the same
@@ -284,8 +301,13 @@ case_ "every stored prefix must reach WalkRules::new, not only the first" \
 # `mnema-walk`'s own tests do not pin the empty string at all. So the call
 # site's promise that "a later change to that `Ok(None)` cannot quietly turn
 # this line into a refusal" rested on one test continuing to exist, and this
-# is what would notice if it stopped. The only case in this file that mutates
-# a file outside `src-tauri`.
+# is what would notice if it stopped.
+#
+# ⚠️ This sentence used to end "The only case in this file that mutates a file
+# outside `src-tauri`", and it was not: the `write.rs` case above and the
+# `anchored_pattern` case below do too. The header was corrected when that was
+# first found and this line was left saying it, which is why the header now
+# carries the command rather than a claim (fix round 2, B3).
 case_ "a blank stored prefix must stay a non-error" \
   crates/mnema-walk/src/rules.rs \
   's{    if prefix\.is_empty\(\) \{\n        return Ok\(None\);\n    \}}{    if prefix.is_empty() \{\n        return Err(RulesError::EmptyComponent \{ prefix: prefix.to_string() \});\n    \}}' \

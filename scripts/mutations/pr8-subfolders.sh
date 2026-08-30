@@ -9,14 +9,21 @@
 #
 # Cases mutate `src-tauri/src/tree.rs`, `src-tauri/src/bridge.rs` and
 # `crates/mnema-walk/src/rules.rs`. The `mnema-walk` ones are here rather than
-# in a `mnema-walk` case file because almost all of them are killed by
+# in a `mnema-walk` case file because most of them are killed by
 # `mnema-desktop` tests and this harness selects a test by package — the same
-# reason `pr8-exclusions.sh` keeps its own `validate_prefix` case. **One is
-# not**: "the walker compiles the same built-in patterns the predicate does"
-# runs `-p mnema-walk --test rules`, because the property it breaks is a
-# disagreement between the predicate and the walk, and the drift guard is the
-# only test that runs both. A case file is not one package here; the `case_`
-# line names its own.
+# reason `pr8-exclusions.sh` keeps its own `validate_prefix` case.
+#
+# ⚠️ **Some are not**, and this sentence said "One is not" while three already
+# ran `-p mnema-walk --test rules` (fix round 2, B4 — a number in a comment is
+# a definition, and it was two short). All three name the same test,
+# `builtin_layers_agree_with_what_the_walk_enumerates`, for the same reason:
+# the property each breaks is a disagreement between the predicate and the
+# walk, and the drift guard is the only test that runs both. Which cases they
+# are is one command away and cannot go stale:
+#
+#   grep -n " mnema-walk '" scripts/mutations/pr8-subfolders.sh
+#
+# A case file is not one package here; the `case_` line names its own.
 #
 # Most cases run in `tests/commands.rs` (`--test commands`); the rest in
 # `tree.rs`'s own `mod tests` (`--lib`), for the reason two notes down, or in
