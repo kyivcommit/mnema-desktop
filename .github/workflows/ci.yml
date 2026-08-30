@@ -335,17 +335,24 @@ jobs:
     # 33235659149 (`2e0880e`): staleness 9s, the harness step **9m52s**, green.
     # The paragraph below was written before that run and is kept because its
     # reasoning is what the number confirmed — but its case count was already
-    # wrong when it was written (161 against 163 in the files) and is now 170,
-    # which is why the sentence after it names how to count rather than a
-    # number to trust:
+    # wrong when it was written (161 against 163 in the files), and every
+    # number written here since has gone stale within a round or two: 170 while
+    # the files held 175, and this comment was last repaired two commits before
+    # it was wrong again. So no count is asserted here as a present fact. This
+    # is how to count, and it is the sentence to trust:
     #
     #   cat scripts/mutations/{source,embedding,pr8-exclusions,pr8-subfolders,pr8-subfolders-linux,pr8-ui-folders}.sh | grep -c '^case_ '
     #
-    # The six added since are `pr8-ui-folders.sh`'s, and they are the cheapest
-    # in the directory: they compile nothing and run one vitest test each —
-    # **13.8s for the whole file** on an Apple M2 Max, including the worktree
-    # and the dependency links. Even at four times that on the runner it is a
-    # minute against a limit with eighteen to spare.
+    # That command answered **179** at fix round 2 of PR 8a — a reading of that
+    # tree, not a property of this file, and it is expected to have moved by the
+    # time anybody reads this. Run it.
+    #
+    # The ones added since the 9m52s run are `pr8-ui-folders.sh`'s (count them
+    # with `grep -c '^case_ ' scripts/mutations/pr8-ui-folders.sh`), and they
+    # are the cheapest in the directory: they compile nothing and run one vitest
+    # test each — **13.8s for the whole file** on an Apple M2 Max, including the
+    # worktree and the dependency links. Even at four times that on the runner
+    # it is a minute against a limit with eighteen to spare.
     #
     # The paragraph as written, which the 9m52s confirmed:
     # The step below then named 161 cases, and the new 42 are not like the old
@@ -370,12 +377,20 @@ jobs:
       # job before two minutes of setup, not after.
       #
       # It answers the question the step at the bottom cannot. That one runs ONE
-      # case file and proves its tests still go red; this reads all twenty-four
-      # and asks whether the cases still match the code they were written
-      # against. On the branch this was added on, three cases in two files had
-      # stopped applying — one of them behind the very test cited as proof a
+      # case file and proves its tests still go red; this reads every file in
+      # `scripts/mutations/` and asks whether the cases still match the code they
+      # were written against. On the branch this was added on, three cases in two
+      # files had stopped applying — one of them behind the very test cited as proof a
       # repair was still pinned — and nothing else was looking: `branch-review.sh`
       # is a case file like any other and was clean while they rotted.
+      #
+      # ⚠️ **This line used to say "all twenty-four", and no number belongs
+      # here** (fix round 2, B7): the directory holds 41 `.sh` files and the
+      # sweep reports 34 of them as case files, the other 7 being stand-in
+      # workers that declare an interpreter — both figures as of fix round 2 of
+      # PR 8a, both moving, and neither worth trusting from a comment. The run's
+      # own last two lines print the second one every time, and the first is
+      # `ls scripts/mutations/*.sh | wc -l`.
       #
       # No argument, so it sweeps every file. The single-file form exists and is
       # deliberately not what runs here: a green line about one file gets read as
