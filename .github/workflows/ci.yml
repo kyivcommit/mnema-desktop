@@ -331,8 +331,25 @@ jobs:
     # leg first executed: pull request #7, **6m17s, green** — five times the
     # margin, on the 119 cases this step ran then.
     #
-    # ⚠️ **That margin is no longer five times and is not currently measured.**
-    # The step below now names 161 cases, and the new 42 are not like the old
+    # ⚠️ **Measured since, and the margin is about three times.** Run
+    # 33235659149 (`2e0880e`): staleness 9s, the harness step **9m52s**, green.
+    # The paragraph below was written before that run and is kept because its
+    # reasoning is what the number confirmed — but its case count was already
+    # wrong when it was written (161 against 163 in the files) and is now 170,
+    # which is why the sentence after it names how to count rather than a
+    # number to trust:
+    #
+    #   cat scripts/mutations/{source,embedding,pr8-exclusions,pr8-subfolders,\
+    #     pr8-subfolders-linux,pr8-ui-folders}.sh | grep -c '^case_ '
+    #
+    # The six added since are `pr8-ui-folders.sh`'s, and they are the cheapest
+    # in the directory: they compile nothing and run one vitest test each —
+    # **13.8s for the whole file** on an Apple M2 Max, including the worktree
+    # and the dependency links. Even at four times that on the runner it is a
+    # minute against a limit with eighteen to spare.
+    #
+    # The paragraph as written, which the 9m52s confirmed:
+    # The step below then named 161 cases, and the new 42 are not like the old
     # 119: they mutate `src-tauri` and `mnema-walk` and re-run `--test
     # commands`, the slowest target in the workspace, while `source.sh` and
     # `embedding.sh` mutate leaf crates. Scaling 6m17s by case count is
@@ -375,7 +392,7 @@ jobs:
         run: rustup toolchain install
       # The harness's own worktree only carries vendor/ and
       # src-tauri/binaries/ if this checkout already has them
-      # (mutation-check.sh:57, :75-76) — both are git-ignored, so a case
+      # (mutation-check.sh:156, :174-175) — both are git-ignored, so a case
       # touching mnema-desktop needs the same setup `check` uses to build it
       # at all.
       - name: Linux system dependencies
@@ -388,6 +405,28 @@ jobs:
         run: scripts/stage-sidecar.sh debug
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
+      # For `pr8-ui-folders.sh` and nothing else in this job: its cases run
+      # vitest, and `mutation-check.sh` links `ui/node_modules` into its
+      # worktree rather than installing there, so the directory has to exist in
+      # this checkout first. Same `lts/*` and same `npm ci` as `check` — the
+      # lockfile, not a fresh resolution.
+      #
+      # `npm run build` and `npm run test` are deliberately NOT repeated here:
+      # `check` already runs both, and this job needs the dependency tree, not a
+      # second opinion about the frontend.
+      #
+      # Measured cost on run 33235659149 (`2e0880e`, this branch's merge-base),
+      # from `check (ubuntu-24.04)`: setup-node **1s**, and the step that runs
+      # `npm ci` **plus** `npm run build` **plus** `npm run test` took **20s**
+      # end to end — so `npm ci` alone is under twenty seconds. That is a
+      # measurement of the same commands on the same runner image, not this
+      # job's own number, which the first run after this change will produce.
+      - name: Node.js, for the mutation cases that run vitest
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 'lts/*'
+      - name: Install the frontend dependencies the vitest cases run against
+        run: npm ci --prefix ui
       # ⚠️ **This list is not every case file, and the omission is a decision
       # rather than an oversight.** `scripts/mutation-staleness.sh` above
       # sweeps all of them and proves each case still APPLIES; this step proves
@@ -404,6 +443,13 @@ jobs:
       # mutations leg, which is a separate decision about runner minutes — see
       # that file's own header. `pr8-subfolders-linux.sh` is the mirror case
       # and belongs HERE for the same reason it cannot run on macOS.
+      #
+      # `pr8-ui-folders.sh` has no such split and needs none: its tests run in
+      # jsdom, nothing in them is behind a platform condition, and the whole
+      # file is green on this leg. What it does need is the two steps above —
+      # a case whose runner is not installed fails its baseline for a reason
+      # that is not the mutation, which is the same defect the vendored
+      # libraries and the staged sidecar are copied into the worktree to avoid.
       - name: Run the mutation cases named below
         run: |
           scripts/mutation-check.sh scripts/mutations/source.sh
@@ -411,6 +457,7 @@ jobs:
           scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
           scripts/mutation-check.sh scripts/mutations/pr8-subfolders.sh
           scripts/mutation-check.sh scripts/mutations/pr8-subfolders-linux.sh
+          scripts/mutation-check.sh scripts/mutations/pr8-ui-folders.sh
 
   bundle:
     # One architecture per package rather than a universal binary: a universal

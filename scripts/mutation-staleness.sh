@@ -64,8 +64,12 @@
 # time, by luck of definition order rather than by what the pattern named.
 # Each was narrowed to name its enclosing function or arm rather than loosened
 # or exempted, verified to produce the byte-identical mutation it always had,
-# and this sweep is the record that all 546 now match exactly what their own
-# flag says they should.
+# and this sweep is the record that all 546 matched exactly what their own
+# flag said they should.
+#
+# ⚠️ 546 is what that run covered and is not the number today — every run of
+# this script re-derives it, and prints it beside the files it read. Do not
+# quote the figure above as a current total; run the sweep.
 #
 # What it does **not** check: that the case names a test that exists (the
 # harness's baseline pass does that), that the mutation compiles, or that
@@ -186,11 +190,20 @@ unreadable=0
 # its own exclusions visible.
 every_match_count=0
 
-# case_ <label> <file> <perl-expr> <marker> <package> <test-name> <cargo args...>
+# case_ <label> <file> <perl-expr> <marker> <target> <test-name> [runner=<name>] [args...]
 #
 # The same signature the case files are written against, so one file serves both
-# tools. Everything from the package onwards belongs to the harness and is
+# tools. Everything from the target onwards belongs to the harness and is
 # ignored here.
+#
+# ⚠️ **Including the runner, which is why a green line here says nothing about
+# one.** `mutation-check.sh` grew an optional `runner=` field so a case can name
+# a vitest test instead of a cargo one; this script never reads it, so a
+# misspelled runner name, a `runner=` written after another argument, and a
+# vitest case naming a test file that does not exist all pass here unremarked.
+# `mutation-check.sh` refuses each of those by exiting 2 — that is the only
+# place they are checked, and this note is here so nobody reads `stale: 0` as
+# covering them.
 case_() {
   local label="$1" file="$2" expr="$3" marker="$4"
   checked=$((checked + 1))

@@ -5,23 +5,38 @@
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
 #
-# Fifteen cases. Eleven against `list_exclusions`, `exclude_subfolder` or
-# `include_subfolder` (`src-tauri/src/bridge.rs`) and the tests written for
-# task-2 of PR 8a; three against `start_walk_job` (`src-tauri/src/walk_job.rs`)
-# and the tests written for task-3, which is where a stored rule stops being
-# a row and starts removing files; and one against `validate_prefix` in
-# `crates/mnema-walk/src/rules.rs`, the only case here that mutates a file
-# outside `src-tauri` — it is here rather than in a `mnema-walk` file because
-# the test that kills it is a `mnema-desktop` one, and this harness selects a
-# test by package. Fourteen run in `tests/commands.rs`
-# (`--test commands`) and one in `bridge.rs`'s own `mod tests` (`--lib`) —
-# the last because the site it names, a per-entry `io::Error` from a
-# directory listing, cannot be forced out of a real filesystem and so is
-# reached through `entry_named`'s iterator parameter rather than through the
-# IPC (review round 4, N3).
+# Sixteen cases. By the file each one mutates: ten in `src-tauri/src/bridge.rs`
+# and one in `crates/mnema-index/src/write.rs`, which together are the three
+# commands that read and write a rule (`list_exclusions`, `exclude_subfolder`,
+# `include_subfolder`) and the tests written for task-2 of PR 8a; three in
+# `src-tauri/src/walk_job.rs` and the tests written for task-3, which is where a
+# stored rule stops being a row and starts removing files; and two in
+# `crates/mnema-walk/src/rules.rs` — `validate_prefix`, killed by a
+# `mnema-desktop` test, and `anchored_pattern`, killed by a `mnema-walk` one.
+#
+# ⚠️ Until the second `rules.rs` case was added this paragraph said that one was
+# "the only case here that mutates a file outside `src-tauri`", which the
+# `write.rs` case above had already made false — a count in a comment is a
+# definition, and this one had been wrong for two tasks. Grouping by the file
+# mutated rather than by the command tested is what makes it checkable:
+# `grep -A1 '^case_ ' … | grep -E '^\s+(src-tauri|crates)/' | sort | uniq -c`.
+#
+# That `rules.rs` pair is worth reading together, because the first of them used
+# to carry the sentence "it is here rather than in a `mnema-walk` file because
+# the test that kills it is a `mnema-desktop` one" — a true fact about that
+# case, and never the reason a case lives in a file: this harness selects a
+# package PER CASE, so a file may mix them freely, and what a file is for is the
+# feature it covers. Both of these are the folder-exclusion feature.
+#
+# Fourteen run in `tests/commands.rs` (`--test commands`), one in `bridge.rs`'s
+# own `mod tests` (`--lib`) — that one because the site it names, a per-entry
+# `io::Error` from a directory listing, cannot be forced out of a real
+# filesystem and so is reached through `entry_named`'s iterator parameter
+# rather than through the IPC (review round 4, N3) — and one in
+# `crates/mnema-walk/tests/rules.rs` (`--test rules`).
 #
 # ⚠️ **"Any unix leg", not "any CI leg" (review round 3, Minor N2).** Four of
-# these fifteen cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
+# these sixteen cases name `#[cfg(unix)]` tests (the dangling-symlink root, and
 # three of the `prefix_exists_on_disk` permission/kind cases) — harmless on
 # this repository's two CI legs (`ubuntu-24.04`, `macos-14`, both unix), but
 # a claim of "any CI leg" is false the moment a Windows leg exists, and would
@@ -247,3 +262,24 @@ case_ "a blank stored prefix must stay a non-error" \
   's{    if prefix\.is_empty\(\) \{\n        return Ok\(None\);\n    \}}{    if prefix.is_empty() \{\n        return Err(RulesError::EmptyComponent \{ prefix: prefix.to_string() \});\n    \}}' \
   'return Err(RulesError::EmptyComponent { prefix: prefix.to_string() });' \
   mnema-desktop 'a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_anything' --test commands
+
+# Task 6, finding N3: measured during that task's review and never written
+# down anywhere a run could re-check it, which is the whole reason this file
+# exists. `anchored_pattern` builds the override line one prefix becomes, and
+# the mutant appends a `*` — so `private` stops naming the folder `private`
+# and starts naming everything whose path begins with those seven letters.
+# `private2/b.txt` and `privateer.txt` are then removed from the index as
+# well, and the person is told the folder they asked about was excluded.
+#
+# Measured at c12fb9d, with a control: this mutant fails
+# `a_user_prefix_does_not_remove_a_sibling_whose_name_starts_with_it`
+# (`left: []  right: ["private2/b.txt", "privateer.txt"]`) and leaves
+# `a_user_prefix_removes_its_subtree` — the obvious test for the same
+# function — **still green**, run through this harness as a deliberate
+# green case and then removed. Task 6 measured the wider version of the same
+# claim across four crates and found this to be the only test that dies.
+case_ "a rule must not swallow a sibling whose name merely starts with it" \
+  crates/mnema-walk/src/rules.rs \
+  's{    format!\("!/\{\}", globset::escape\(normalized_prefix\)\)}{    format!("!/\{\}*", globset::escape(normalized_prefix))}' \
+  'format!("!/{}*", globset::escape(normalized_prefix))' \
+  mnema-walk 'a_user_prefix_does_not_remove_a_sibling_whose_name_starts_with_it' --test rules

@@ -22,6 +22,57 @@
 # CARGO_TARGET_DIR, so an interrupted run cannot leave a mutation in the tree
 # you are working in.
 #
+# ── Two runners, and why there had to be a second ─────────────────────────────
+#
+# For most of this file's life it ran `cargo test` and nothing else, which made
+# it blind to every guard in `ui/`. That is not a gap in coverage, it is a
+# **false statement in the gate**: the line PR 8a's task reports quote as their
+# evidence, `651 cases, stale 0`, was true of `crates/` and `src-tauri/` and
+# said nothing about the Svelte components, so that number would have stayed
+# green on the day a UI guard was weakened. PR 8a's Tasks 5, 6 and 7 backed thirty-odd UI guards with hand
+# reverts written into task reports — evidence in a place no later change can
+# trip over. This is that evidence moved somewhere a script can re-run it.
+#
+# A case names its runner as an optional field straight after the test name:
+#
+#   case_ "…" "src-tauri/src/tree.rs" 's/…/…/' "…" \
+#     mnema-desktop the_test_name --lib          # cargo, the default
+#
+#   case_ "…" "ui/src/settings/Folders.svelte" 's/…/…/' "…" \
+#     src/settings/Folders.test.ts 'the whole test name' runner=vitest
+#
+# For `cargo` the fifth field is the package and the trailing arguments are
+# cargo's own target selectors. For `vitest` the fifth field is the test FILE,
+# relative to `ui/`, the sixth is the whole test name, and nothing else is
+# accepted. Every case written before there was a second runner keeps meaning
+# exactly what it said, which is why the field is optional and positioned
+# where an absent one costs nothing.
+#
+# ⚠️ **The vitest half needs `ui/node_modules`, and it is gitignored** — so the
+# worktree has none and it is linked in below, the same problem `vendor/` and
+# the staged sidecar already have and for the same reason: a baseline that
+# fails because a dependency is missing is a red that is not about the
+# mutation.
+#
+# 🔴 **A crashed oracle is not a kill, and vitest has this failure where cargo
+# does not.** A mutant that makes a Svelte render throw does not fail the test —
+# it kills the run that was supposed to judge it. Vitest reports that as
+#
+#      Tests  62 passed (62)
+#     Errors  1 error
+#
+# and exits **1**. Three readers on this branch took that summary for a passing
+# run; read as an exit code alone it is indistinguishable from a kill, and
+# counting it as one would record "this test protects that line" about a test
+# that never saw the mutant. So the vitest branch below never reads the exit
+# status. It reads the printed counts, and an `Errors` line is a BROKEN CASE —
+# the same verdict a mutation that does not compile gets, because it is the same
+# fact: the test did not run against the mutation. Measured, at c12fb9d:
+# deleting `patch`'s early return (`ui/src/settings/Folders.svelte:121`) is
+# exactly this shape, and `scripts/mutations/pr8-ui-folders.sh` mutates that
+# guard a second way instead — a fresh panel rather than a deleted line — which
+# renders, so the oracle survives to answer, and it answers red.
+#
 # **Its cheap sibling: `scripts/mutation-staleness.sh <case-file>`.** This script
 # answers "does the test still go red" and takes 3:17 on an Apple M2 Max, cold
 # `CARGO_TARGET_DIR`, 80 cases over 69 baseline tests — measured with `time`
@@ -55,7 +106,10 @@
 # occurrence, `g` requires at least one. No exception list — the one
 # legitimate many-match case (`linux-resource.sh`'s "no case arm sets a
 # library any more") declares its own multiplicity in its own syntax. Applied
-# for real against all 546 expressions in this repository, it found eight
+# for real against all 546 expressions this repository held then (a figure every
+# run of `mutation-staleness.sh` re-derives and prints beside the files it read,
+# so take it from there rather than from this sentence, which has already gone
+# stale once), it found eight
 # cases sharing a pattern with a sibling function or match arm — one of them
 # the exact shape above, an unanchored 4-space pattern matching inside a
 # 12-space-indented sibling as a substring — each narrowed to name its
@@ -123,6 +177,30 @@ git -C "$REPO" worktree add -q --detach "$TREE" HEAD || exit 1
 [ -d "$REPO/src-tauri/binaries" ] \
   && cp -R "$REPO/src-tauri/binaries" "$TREE/src-tauri/binaries"
 
+# And `ui/node_modules`, for the third time and the same reason: gitignored, so
+# absent from the worktree, and a `runner=vitest` case would fail its baseline
+# because the runner is not installed rather than because its test is not green.
+#
+# Linked per entry rather than as one symlink over the whole directory, and the
+# exception is the point: vitest writes its transform cache to
+# `node_modules/.vite`, so a single symlink would have this harness writing
+# into the checkout it promises not to touch — and sharing that cache with
+# whatever `npm test` is running next door. A real directory holding links to
+# each package leaves `.vite` inside the worktree, where the trap deletes it.
+# 88 MB linked, not copied; measured cost of a `vitest run` of one named test
+# in a fresh worktree this way: 1.2s.
+if [ -d "$REPO/ui/node_modules" ]; then
+  mkdir -p "$TREE/ui/node_modules"
+  shopt -s dotglob nullglob
+  for dep in "$REPO"/ui/node_modules/*; do
+    depname=$(basename "$dep")
+    [ "$depname" = ".vite" ] && continue
+    ln -s "$dep" "$TREE/ui/node_modules/$depname"
+  done
+  shopt -u dotglob nullglob
+fi
+VITEST="$TREE/ui/node_modules/.bin/vitest"
+
 cd "$TREE" || exit 1
 
 red=0
@@ -156,12 +234,119 @@ expr_wants_every_match() {
 
 seen=""
 
-# case_ <label> <file> <perl-expr> <marker> <package> <test-name> <cargo target args...>
+# ── The vitest runner's reading of its own output ─────────────────────────────
+#
+# Vitest says how a run went in two summary lines and NOT in its exit status,
+# which is 1 for a failed assertion and 1 for a mutant that threw before any
+# assertion could run. Both are parsed, and every verdict below is drawn from
+# the counts rather than from `$?`.
+#
+#      Tests  1 failed | 61 skipped (62)
+#     Errors  1 error
+#
+# `tail -1` because the last such line is the summary; a test that printed the
+# word itself would be picked up otherwise. The `Tests` pattern deliberately
+# does NOT require a digit — `Tests  no tests` is a real state (a file that
+# failed to collect) and has to reach the "nothing ran" verdict rather than the
+# "vitest printed nothing" one, which means something different.
+vitest_summary=""
+vitest_errline=""
+vitest_passed=0
+vitest_failed=0
+vitest_errors=0
+
+# The count standing immediately before <word> in <line>, or 0 when there is
+# none. `2 errors` answers a query for `error`, which is what is wanted.
+vitest_count() {
+  local n
+  n=$(printf '%s' "$1" | grep -oE "[0-9]+ $2" | head -1 | grep -oE '^[0-9]+')
+  printf '%s' "${n:-0}"
+}
+
+vitest_read() {
+  vitest_summary=$(printf '%s' "$1" | grep -E '^[[:space:]]*Tests[[:space:]]' | tail -1 | sed 's/^[[:space:]]*//')
+  vitest_errline=$(printf '%s' "$1" | grep -E '^[[:space:]]*Errors[[:space:]]+[0-9]+ error' | tail -1 | sed 's/^[[:space:]]*//')
+  vitest_passed=$(vitest_count "$vitest_summary" passed)
+  vitest_failed=$(vitest_count "$vitest_summary" failed)
+  vitest_errors=$(vitest_count "$vitest_errline" error)
+}
+
+# Runs the case's named test, unmutated or mutated according to the tree it is
+# called against, and prints everything the runner said.
+#
+# `--reporter=default` is pinned rather than left to the configuration: every
+# verdict above is a parse of that reporter's two summary lines, and a
+# `reporters` key added to `ui/vite.config.ts` would otherwise change what this
+# function is reading without changing a line of this script.
+#
+# ⚠️ `-t` is a REGULAR EXPRESSION, not a literal — a test name carrying `(`,
+# `[` or `?` will select something other than itself. Nothing here escapes it,
+# because the baseline pass already refuses anything that does not select
+# exactly one passing test, in either direction: a name that matches nothing,
+# and a name that matches two.
+run_named_test() {
+  case "$runner" in
+    cargo)
+      cargo test -p "$pkg" "$@" -- --exact "$test" 2>&1
+      ;;
+    vitest)
+      if [ ! -x "$VITEST" ]; then
+        echo "no vitest in the worktree — $REPO/ui/node_modules has no .bin/vitest."
+        echo "Run \`npm install\` in ui/; this harness links that directory, it does not install."
+        return 127
+      fi
+      ( cd "$TREE/ui" && "$VITEST" run "$pkg" --reporter=default -t "$test" ) 2>&1
+      ;;
+  esac
+}
+
+# case_ <label> <file> <perl-expr> <marker> <target> <test-name> [runner=<name>] [runner args...]
+#
+# `<target>` and the trailing arguments belong to the runner: for `cargo` (the
+# default) the package and cargo's own target selectors, for `vitest` the test
+# file relative to `ui/` and nothing else. See the header.
 #
 # Runs in two passes over the same case file. `$mode` selects which.
 case_() {
   local label="$1" file="$2" expr="$3" marker="$4" pkg="$5" test="$6"
   shift 6
+
+  # Optional, and first if it is there at all — so every case written before
+  # there was a second runner is unchanged and still means `cargo`.
+  local runner=cargo
+  case "${1-}" in
+    runner=*) runner="${1#runner=}"; shift ;;
+  esac
+
+  # Both of these exit the whole run rather than counting a broken case: they
+  # are errors in how the case file is WRITTEN, not results about the code, and
+  # a miswritten case that merely increments a counter is one somebody reads
+  # past. `mutation-staleness.sh` reads only the first four fields, so it can
+  # say nothing about either — this is the only place they are checked.
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      runner=*)
+        echo "BROKEN CASE FILE: $label puts $arg after another argument. The runner has to come" >&2
+        echo "straight after the test name, or it is passed to the runner as one of its own." >&2
+        exit 2
+        ;;
+    esac
+  done
+  case "$runner" in
+    cargo) ;;
+    vitest)
+      if [ $# -ne 0 ]; then
+        echo "BROKEN CASE FILE: the vitest runner takes a test file and a test name and nothing" >&2
+        echo "else; $label also passes: $*" >&2
+        exit 2
+      fi
+      ;;
+    *)
+      echo "BROKEN CASE FILE: $label names an unknown runner '$runner'. Known: cargo, vitest." >&2
+      exit 2
+      ;;
+  esac
 
   if [ "$mode" = baseline ]; then
     # A case naming a test that is already failing, or misspelled, would read as
@@ -169,25 +354,60 @@ case_() {
     # has nothing to do with the mutation. So every named test is run once
     # unmutated first and must be green. Deduplicated: several cases usually
     # target one test.
-    local key="|$pkg $* $test|"
+    local key="|$runner $pkg $* $test|"
     case "$seen" in *"$key"*) return 0 ;; esac
     seen="$seen$key"
 
     local out
-    out=$(cargo test -p "$pkg" "$@" -- --exact "$test" 2>&1)
+    out=$(run_named_test "$@")
 
-    # `1 passed`, not merely exit zero. `--exact` with a name that matches
-    # nothing runs no tests and exits 0, so a misspelled case would sail through
-    # here and then be reported one step later as "the test does not protect
-    # what it names" — a true-sounding verdict about a test that does not exist.
-    if printf '%s' "$out" | grep -q 'test result: ok\. 1 passed'; then
+    if [ "$runner" = cargo ]; then
+      # `1 passed`, not merely exit zero. `--exact` with a name that matches
+      # nothing runs no tests and exits 0, so a misspelled case would sail
+      # through here and then be reported one step later as "the test does not
+      # protect what it names" — a true-sounding verdict about a test that does
+      # not exist.
+      if printf '%s' "$out" | grep -q 'test result: ok\. 1 passed'; then
+        baseline_ok=$((baseline_ok + 1))
+      elif printf '%s' "$out" | grep -q 'test result: ok\. 0 passed'; then
+        echo "BASELINE FAILURE: no test named $test — check the spelling in the case file"
+        baseline_bad=$((baseline_bad + 1))
+      else
+        echo "BASELINE FAILURE: $test is not green before any mutation"
+        printf '%s' "$out" | grep -E "panicked at|^error" | head -3 | sed 's/^/  /'
+        baseline_bad=$((baseline_bad + 1))
+      fi
+      # Deterministic, for the reason given at the end of this function.
+      return 0
+    fi
+
+    # The same requirement in vitest's own words, and it takes a count because
+    # nothing else here distinguishes the three ways a run can be worthless.
+    # `-t` with a name nobody wrote skips every test in the file and exits 0;
+    # `-t` with a name that is a substring of two runs both, and a case that
+    # cannot say which test protects the line is not evidence about either.
+    vitest_read "$out"
+    if [ -z "$vitest_summary" ]; then
+      echo "BASELINE FAILURE: vitest printed no summary for $pkg — it never got as far as running"
+      printf '%s' "$out" | head -3 | sed 's/^/  /'
+      baseline_bad=$((baseline_bad + 1))
+    elif [ "$vitest_errors" -ne 0 ]; then
+      # Before any mutation, so it is the test file's own problem and every
+      # verdict this case could reach afterwards would be about that instead.
+      echo "BASELINE FAILURE: $test throws outside its assertions before any mutation"
+      echo "  $vitest_summary / $vitest_errline"
+      baseline_bad=$((baseline_bad + 1))
+    elif [ "$vitest_passed" -eq 1 ] && [ "$vitest_failed" -eq 0 ]; then
       baseline_ok=$((baseline_ok + 1))
-    elif printf '%s' "$out" | grep -q 'test result: ok\. 0 passed'; then
-      echo "BASELINE FAILURE: no test named $test — check the spelling in the case file"
+    elif [ "$vitest_passed" -eq 0 ] && [ "$vitest_failed" -eq 0 ]; then
+      echo "BASELINE FAILURE: no test named $test in $pkg — check the spelling in the case file"
+      baseline_bad=$((baseline_bad + 1))
+    elif [ "$vitest_passed" -gt 1 ]; then
+      echo "BASELINE FAILURE: $test selects $vitest_passed tests in $pkg, not one — the name is"
+      echo '  a regular expression matched as a substring, so name the test in full.'
       baseline_bad=$((baseline_bad + 1))
     else
-      echo "BASELINE FAILURE: $test is not green before any mutation"
-      printf '%s' "$out" | grep -E "panicked at|^error" | head -3 | sed 's/^/  /'
+      echo "BASELINE FAILURE: $test is not green before any mutation ($vitest_summary)"
       baseline_bad=$((baseline_bad + 1))
     fi
     # Deterministic, for the reason given at the end of this function.
@@ -236,27 +456,65 @@ case_() {
   # `local out` is deliberately on its own line: `local out=$(...)` would make
   # `$?` the exit status of `local`, which is always 0.
   local out status
-  out=$(cargo test -p "$pkg" "$@" -- --exact "$test" 2>&1)
+  out=$(run_named_test "$@")
   status=$?
 
-  # Checked before the status, because a mutation that does not compile also
-  # exits non-zero. Counting that as red is the no-op defect wearing a different
-  # hat: the test never ran, so it proved nothing.
-  if printf '%s' "$out" | grep -qE 'error\[E[0-9]+\]|could not compile'; then
-    echo "   BROKEN CASE: the mutation does not compile, so $test never ran"
-    printf '%s' "$out" | grep -E 'error\[E[0-9]+\]|^error' | head -3 | sed 's/^/     /'
-    broken=$((broken + 1))
-  elif [ $status -ne 0 ]; then
-    echo "   red"
-    # `missing`/`unexpected` are here because an assertion that compares sets
-    # puts its detail on continuation lines carrying none of the other words:
-    # without them a corpus case prints its location and nothing about which
-    # dimension diverged, which is most of what the case is for.
-    printf '%s' "$out" | grep -E "panicked at|assertion|left:|right:|not found|missing|unexpected" | head -6 | sed 's/^/     /'
-    red=$((red + 1))
+  if [ "$runner" = cargo ]; then
+    # Checked before the status, because a mutation that does not compile also
+    # exits non-zero. Counting that as red is the no-op defect wearing a
+    # different hat: the test never ran, so it proved nothing.
+    if printf '%s' "$out" | grep -qE 'error\[E[0-9]+\]|could not compile'; then
+      echo "   BROKEN CASE: the mutation does not compile, so $test never ran"
+      printf '%s' "$out" | grep -E 'error\[E[0-9]+\]|^error' | head -3 | sed 's/^/     /'
+      broken=$((broken + 1))
+    elif [ $status -ne 0 ]; then
+      echo "   red"
+      # `missing`/`unexpected` are here because an assertion that compares sets
+      # puts its detail on continuation lines carrying none of the other words:
+      # without them a corpus case prints its location and nothing about which
+      # dimension diverged, which is most of what the case is for.
+      printf '%s' "$out" | grep -E "panicked at|assertion|left:|right:|not found|missing|unexpected" | head -6 | sed 's/^/     /'
+      red=$((red + 1))
+    else
+      echo "   *** STILL GREEN: $test does not protect what it names ***"
+      green=$((green + 1))
+    fi
   else
-    echo "   *** STILL GREEN: $test does not protect what it names ***"
-    green=$((green + 1))
+    # 🔴 `$status` is deliberately not read here, and that is the whole point of
+    # this branch. Vitest exits 1 for a failed assertion AND for a mutant that
+    # threw before any assertion could run, so the exit code cannot tell a kill
+    # from a killed oracle — which is how three people on this branch read
+    # `Tests 62 passed (62)` beside `Errors 1 error` as a passing run. The
+    # counts can, and they are read in the order that makes a crash impossible
+    # to score as a result.
+    vitest_read "$out"
+    if [ -z "$vitest_summary" ]; then
+      echo "   BROKEN CASE: vitest printed no summary, so $test never ran — the mutation most"
+      echo "   likely stopped the file being parsed at all"
+      printf '%s' "$out" | grep -vE '^[[:space:]]*$' | head -3 | sed 's/^/     /'
+      broken=$((broken + 1))
+    elif [ "$vitest_errors" -ne 0 ]; then
+      echo "   BROKEN CASE: the mutation threw outside the test, so nothing judged it"
+      echo "   $vitest_summary / $vitest_errline — a crashed oracle is not a kill"
+      printf '%s' "$out" | grep -E 'Error:|TypeError|ReferenceError' | head -3 | sed 's/^/     /'
+      broken=$((broken + 1))
+    elif [ "$vitest_failed" -ge 1 ]; then
+      echo "   red"
+      printf '%s' "$out" | grep -E "AssertionError|Error:|expected|Unable to find" | head -6 | sed 's/^/     /'
+      red=$((red + 1))
+    elif [ "$vitest_passed" -eq 1 ]; then
+      echo "   *** STILL GREEN: $test does not protect what it names ***"
+      green=$((green + 1))
+    else
+      # Green at the baseline, and now selecting nothing: the mutation renamed
+      # or removed the test itself, or — the shape this is here for — stopped
+      # the file being collected at all, which vitest reports as `Tests no
+      # tests` beside a failed test FILE. Either way no test met the mutant,
+      # and cargo's "does not compile" verdict is the same fact.
+      echo "   BROKEN CASE: after the mutation nothing named $test ran ($vitest_summary)"
+      printf '%s' "$out" | grep -E 'Error:|error:|Failed to (parse|load)' | head -3 | sed 's/^/     /'
+      broken=$((broken + 1))
+    fi
   fi
   restore
   # Deterministic, so that the status of `. "$CASES"` is only ever about the
