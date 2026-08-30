@@ -392,7 +392,7 @@ jobs:
         run: rustup toolchain install
       # The harness's own worktree only carries vendor/ and
       # src-tauri/binaries/ if this checkout already has them
-      # (mutation-check.sh:156, :174-175) — both are git-ignored, so a case
+      # (mutation-check.sh:159, :177-178) — both are git-ignored, so a case
       # touching mnema-desktop needs the same setup `check` uses to build it
       # at all.
       - name: Linux system dependencies
