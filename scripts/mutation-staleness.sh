@@ -201,8 +201,10 @@ every_match_count=0
 # a vitest test instead of a cargo one; this script never reads it, so a
 # misspelled runner name, a `runner=` written after another argument, and a
 # vitest case naming a test file that does not exist all pass here unremarked.
-# `mutation-check.sh` refuses each of those by exiting 2 — that is the only
-# place they are checked, and this note is here so nobody reads `stale: 0` as
+# `mutation-check.sh` refuses each of those — an unknown runner name and a
+# `runner=` written after another argument both exit 2, a named test file that
+# does not exist is a baseline failure and exits 1 — that is the only place
+# they are checked, and this note is here so nobody reads `stale: 0` as
 # covering them.
 case_() {
   local label="$1" file="$2" expr="$3" marker="$4"

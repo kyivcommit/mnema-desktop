@@ -389,7 +389,7 @@ case_() {
     vitest_read "$out"
     if [ -z "$vitest_summary" ]; then
       echo "BASELINE FAILURE: vitest printed no summary for $pkg — it never got as far as running"
-      printf '%s' "$out" | head -3 | sed 's/^/  /'
+      printf '%s\n' "$out" | head -3 | sed 's/^/  /'
       baseline_bad=$((baseline_bad + 1))
     elif [ "$vitest_errors" -ne 0 ]; then
       # Before any mutation, so it is the test file's own problem and every

@@ -44,14 +44,23 @@
 # no platform split. Its tests run in jsdom and none of them sits behind a
 # platform condition, so every case here runs on either CI leg.
 #
-# ⚠️ **What is NOT here, named rather than left as a silence.** Task 6's thirteen
-# reverts and Task 5's remaining two are guards of classes this file already
-# covers at one site each — a `describe` arm, a catalogue key pinned per locale,
-# a `$locale` anchor — and three of them are not case-shaped at all: one kills
-# ten tests (`roots` instead of a fresh `listTree()`), one leaks across the
-# file's fixtures and kills eight, and one is green by design. Every guard in
-# `Indexing.svelte`, `Models.svelte` and the i18n catalogue has no case file at
-# all. `stale: 0` still says nothing about any of them.
+# ⚠️ **What is NOT here, named rather than left as a silence.** Apart from
+# reverts 5, 6 and 7 (next paragraph), Task 6's thirteen reverts and Task 5's
+# remaining two are guards of classes this file already covers at one site
+# each — a `describe` arm, a `$locale` anchor — and three of them are not
+# case-shaped at all: one kills ten tests (`roots` instead of a fresh
+# `listTree()`), one leaks across the file's fixtures and kills eight, and one
+# is green by design. Task 6's catalogue-key reverts (#9-12) are pins on a
+# locale string, not a `$locale` anchor — no case here covers that class.
+# Every guard in `Indexing.svelte`, `Models.svelte` and the i18n catalogue has
+# no case file at all. `stale: 0` still says nothing about any of them.
+#
+# ⚠️ **Task 6's reverts 5, 6 and 7 are not covered by any class above.** The
+# `paths === 0` shortcut, storing immediately instead of raising the question,
+# and storing anyway after a rejected `list_tree` are the confirm-question
+# flow — `askExclude`/`askInclude` at `Folders.svelte:289-345`, guarded at
+# `:309` by `if (cost.paths === 0)`. That flow lives in the same file this
+# case file covers, and none of the six cases here pins it.
 
 # Task 5, and the direction `Record<SubfolderState['kind'], …>` cannot see: that
 # annotation checks the union against ITSELF, so it is satisfied by a union one

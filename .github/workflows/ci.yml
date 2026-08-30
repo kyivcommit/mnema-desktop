@@ -339,8 +339,7 @@ jobs:
     # which is why the sentence after it names how to count rather than a
     # number to trust:
     #
-    #   cat scripts/mutations/{source,embedding,pr8-exclusions,pr8-subfolders,\
-    #     pr8-subfolders-linux,pr8-ui-folders}.sh | grep -c '^case_ '
+    #   cat scripts/mutations/{source,embedding,pr8-exclusions,pr8-subfolders,pr8-subfolders-linux,pr8-ui-folders}.sh | grep -c '^case_ '
     #
     # The six added since are `pr8-ui-folders.sh`'s, and they are the cheapest
     # in the directory: they compile nothing and run one vitest test each —
