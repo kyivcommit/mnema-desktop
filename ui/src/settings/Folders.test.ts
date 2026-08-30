@@ -1044,6 +1044,11 @@ test('the expanded panel switches language with everything else on screen', asyn
   // still caches an English value here and the read after the switch is a
   // genuinely later one.
   expect(screen.getByText('No rule excludes this folder.')).toBeTruthy();
+  // `expandLabel` and `removeRuleLabel` are each their own `$derived.by`,
+  // outside `rows` — read their visible button text (not the aria-labels
+  // `rows` already covers below) before the switch too.
+  expect(screen.getAllByText('Subfolders').length).toBeGreaterThan(0);
+  expect(screen.getByText('Remove the rule')).toBeTruthy();
 
   setLocale('uk');
   await Promise.resolve();
@@ -1063,6 +1068,11 @@ test('the expanded panel switches language with everything else on screen', asyn
   expect(within(screen.getByTestId('subfolder-1-Archive/secret')).queryAllByRole('button')).toHaveLength(0);
   expect(screen.getByRole('button', { name: 'Прибрати правило на Old notes' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Підтеки теки /synthetic/root' })).toBeTruthy();
+  // The visible button text, not just its aria-label — `expandLabel` and
+  // `removeRuleLabel` each guard their own `void $locale` at
+  // Folders.svelte:755-756, outside `rows`.
+  expect(screen.getAllByText('Підтеки').length).toBeGreaterThan(0);
+  expect(screen.getByText('Прибрати правило')).toBeTruthy();
 });
 
 // 🔴 Read the screen, not the DOM. Every assertion above is satisfied by a
