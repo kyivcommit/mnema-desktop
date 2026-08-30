@@ -26,6 +26,8 @@
 #   the panel loop      — every open panel, by the paths that panel has open
 #   the withdrawal      — a question standing when a job ends is taken back
 #   the withdrawal's bump — and the check already on the wire is stopped with it
+#   the withdrawal's pass — only a WALK's ending takes a question back, never
+#                            an embedding pass's (fix round 2, review I1)
 #
 # ⚠️ **One case here mutates Rust and is killed by a TypeScript test**, which is
 # the pairing the wire pin exists for: Rust and TypeScript share no compiler, so
@@ -203,3 +205,19 @@ case_ "withdrawing a question must also stop the check already on the wire" \
   "      if (panel.pending !== null) {
         patch(rootId, { pending: null, withdrawn: panel.pending.path });" \
   src/settings/Folders.test.ts 'a check still in flight when a job ends raises no question when its reply lands' runner=vitest
+
+# ── Fix round 2, review I1 ────────────────────────────────────────────────────
+#
+# The withdrawal used to fire on ANY ending, including a chained embedding
+# pass — which takes no root and moves nothing about a question raised AFTER
+# the walk that chained it had already landed. Reverting to the unconditional
+# guard is the exact bug the review reproduced: a press made while the
+# embedding pass runs is discarded, and the panel claims a scan ended when
+# none had at that moment. The re-read stays unconditional on purpose — see
+# `rereadPanels`'s own comment — so this case targets only the withdrawal's
+# `pass === 'walk'` clause, not the call to `read` beside it.
+case_ "the withdrawal must not fire on a pass that changed nothing about the question" \
+  ui/src/settings/Folders.svelte \
+  "s{if \(pass === 'walk' && panel\.pending !== null\) \{}{if (panel.pending !== null) {}" \
+  "if (panel.pending !== null) {" \
+  src/settings/Folders.test.ts 'an embedding pass ending does not withdraw a question raised after the walk that chained it' runner=vitest

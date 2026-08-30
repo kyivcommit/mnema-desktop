@@ -1660,6 +1660,29 @@ function endWalk() {
   });
 }
 
+// Fix round 2, I1. The opposite of `answerModelSettings`: a key AND a chosen
+// model, so `jobs.ts`'s own `chain()` does not stop at either precondition and
+// a walk's ending really does start `start_embed_job` — the only way to reach
+// an EMBEDDING pass's own ending through the real controller.
+function answerModelSettingsReady() {
+  invoke.mockImplementation((cmd: string) =>
+    Promise.resolve(cmd === 'model_settings'
+      ? { key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'emb-1' } }
+      : undefined));
+}
+
+function endEmbed() {
+  const call = [...invoke.mock.calls].reverse().find((c) => c[0] === 'start_embed_job');
+  if (call === undefined) throw new Error('start_embed_job was never invoked');
+  (call[1] as { onProgress: { onmessage: (e: unknown) => void } }).onProgress.onmessage({
+    event: 'ended',
+    data: {
+      reason: 'completed', done: 0, total: 0, skipped: 0, refused: 0, complete: true,
+      indexed: 0, unchanged: 0, removed: 0, frozen: [], message: null,
+    },
+  });
+}
+
 test('a job ending re-reads every expanded panel, not only the root whose Scan was pressed', async () => {
   setLocale('en'); // seed, do not inherit
   answerModelSettings();
@@ -1777,4 +1800,87 @@ test('a check still in flight when a job ends raises no question when its reply 
 
   expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
   expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// ── Fix round 2, I1 ────────────────────────────────────────────────────────
+//
+// The withdrawal used to fire on ANY ending, including an embedding pass
+// chained behind a walk (`jobs.ts:223`, `chainsEmbedPass`). Reproduced through
+// the real controller: the walk ends, the embedding pass starts on its own —
+// it takes no root and covers the whole index (`jobs.ts:18-21`) — and while it
+// runs the person raises a fresh question. Nothing about that question is
+// stale: its numbers were read AFTER the walk had already landed. The
+// embedding pass then ends having indexed nothing and changed no rule, and
+// used to discard the question anyway, printing "a scan ended" when none had
+// at that moment.
+test('an embedding pass ending does not withdraw a question raised after the walk that chained it', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettingsReady();
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await screen.findByTestId('subfolder-1-drop');
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  endWalk();
+  // The walk's own ending chains the embedding pass.
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_embed_job')).toBe(true));
+
+  // Raised WHILE the embedding pass runs — its cost is computed now, after the
+  // walk already landed, so nothing about it is stale.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+
+  endEmbed();
+  await tick();
+  await tick();
+
+  // Both directions: the press survives, and nothing claims a scan ended.
+  expect(screen.getByTestId('folder-confirm-1')).toBeTruthy();
+  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// M1. `settings_folders_question_withdrawn` was asserted only under
+// `setLocale('en')`, and `withdrawnNote` (Folders.svelte:809-812) needed its
+// own switch test by this file's own stated standard (`Folders.test.ts:1450`
+// above, of the exclude/include branches): a literal swapped in for THIS
+// `t()` call specifically would not be caught by a switch test that only ever
+// reaches a different arm.
+test('the withdrawn-question note switches language with everything else', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettings();
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  endWalk();
+  await screen.findByTestId('folder-question-withdrawn-1');
+
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
+    'Питання про «drop» знято: сканування закінчилося, і цю панель перечитано.'
+    + ' Натисніть ще раз, якщо це досі потрібно.',
+  );
 });

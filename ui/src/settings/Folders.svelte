@@ -9,7 +9,7 @@
     type StoredExclusion, type Subfolder, type SubfolderListing, type SubfolderState,
     type TreeListing, type TreeRoot,
   } from '../lib/ipc';
-  import type { JobController, JobPhase } from './jobs';
+  import type { JobController, JobPass, JobPhase } from './jobs';
 
   // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove, and scan.
   //
@@ -472,23 +472,38 @@
   // `exclude` and `include` compute `want` the same way and have the same
   // window; the alternative is a second record of what is open, and
   // `panel.tree` already answers that question.
-  function rereadPanels() {
+  //
+  // 🔴 PR 8a, Task 8 fix round 2. `pass` is the ending's own, `null` only at
+  // `onMount` where there is no ending to have a pass. The RE-READ stays
+  // unconditional — an embedding pass moves `list_exclusions`' `existsOnDisk`
+  // and `list_subfolders` exactly as a walk can (D29 sends the same rename
+  // window through either). The WITHDRAWAL does not: it is spelled "a scan
+  // ended", and only a walk is one. A walk reads ONE folder and moves the two
+  // numbers `Pending` freezes (`jobs.ts`'s own words); an embedding pass covers
+  // the whole index, takes no root, and changes no rule and no file count for
+  // the folder the question is about — so a person's still-open press has
+  // nothing invalidated to withdraw it over. Reviewed and reproduced: raising
+  // an exclude question while a CHAINED embedding pass runs, then letting
+  // that pass end, used to discard the press and print "a scan ended" when
+  // none had.
+  function rereadPanels(pass: JobPass | null) {
     for (const [key, panel] of Object.entries(panels)) {
       const rootId = Number(key);
-      // 🔴 The question goes, and not in silence. Its two numbers were read
-      // from a `list_tree` taken BEFORE this scan, and `Pending` freezes them
-      // on purpose: they cannot be corrected in place without renumbering a
-      // sentence somebody is part way through reading, and they cannot be left
-      // standing, because a scan is precisely the event that makes them wrong.
-      // The include question is no safer — it carries `existsOnDisk`, the one
-      // fact the rename that produced this defect invalidated. So the question
-      // is withdrawn and the panel says which folder it was about; pressing
-      // again asks it afresh against the state that is now on screen.
+      // 🔴 The question goes, and not in silence, ONLY on a walk's own ending.
+      // Its two numbers were read from a `list_tree` taken BEFORE this scan,
+      // and `Pending` freezes them on purpose: they cannot be corrected in
+      // place without renumbering a sentence somebody is part way through
+      // reading, and they cannot be left standing, because a walk ending is
+      // precisely the event that makes them wrong. The include question is no
+      // safer — it carries `existsOnDisk`, the one fact the rename that
+      // produced this defect invalidated. So the question is withdrawn and the
+      // panel says which folder it was about; pressing again asks it afresh
+      // against the state that is now on screen.
       //
       // `ask` and not `generations`: this is that counter's own meaning — the
       // answer to a question already in flight has stopped being wanted — so a
       // `checking` reply still on the wire raises nothing when it lands.
-      if (panel.pending !== null) {
+      if (pass === 'walk' && panel.pending !== null) {
         ask(rootId);
         patch(rootId, { pending: null, withdrawn: panel.pending.path });
       }
@@ -496,17 +511,17 @@
     }
   }
 
-  function reread() {
+  function reread(pass: JobPass | null) {
     // Panels after the roots, never beside them: `refresh` is what deletes the
     // expansion of a root that has gone, and a `list_subfolders` fired for that
     // root would answer with a rejection drawn into a panel about to vanish.
-    refresh().then(rereadPanels).catch((e) => {
+    refresh().then(() => rereadPanels(pass)).catch((e) => {
       loadError = e instanceof Error ? e.message : String(e);
     });
   }
 
   onMount(() => {
-    reread();
+    reread(null); // no ending yet, so no pass — and no panel is open to withdraw
     // Live run, finding 2. Task 7 re-reads after an add and after a remove;
     // the event nobody wired is the one that changes the NUMBER this list shows
     // — a job ending. The row went on stating zero indexed documents while the
@@ -517,14 +532,19 @@
     // it as well — see `rereadPanels`, which is where the second half of this
     // finding is written up.
     //
-    // EVERY ending, not only a walk's, and the reason is asymmetry rather than
-    // caution: a re-read that finds the same numbers rewrites them invisibly,
-    // while a missed one leaves a falsehood a person can act on. "Which pass
-    // writes documents" is also a fact about today's two passes, not about this
-    // row — and this window does not always know what is running at all
-    // (`runningUnobserved` is the state where it has no channel), so keying off
-    // the pass would be keying off something it cannot always see. Endings are
-    // rare: at most a handful per run, never one per progress report.
+    // The RE-READ fires on EVERY ending, not only a walk's, and the reason is
+    // asymmetry rather than caution: a re-read that finds the same numbers
+    // rewrites them invisibly, while a missed one leaves a falsehood a person
+    // can act on. This window does not always know what is running at all
+    // (`runningUnobserved` is the state where it has no channel), so keying the
+    // RE-READ off the pass would be keying it off something it cannot always
+    // see. Endings are rare: at most a handful per run, never one per progress
+    // report.
+    //
+    // The WITHDRAWAL inside `rereadPanels` is narrower — see its own comment.
+    // `phase.pass` is passed through here rather than dropped, because that is
+    // the one fact `rereadPanels` needs and this subscription is the only place
+    // that has it.
     //
     // Compared by phase IDENTITY, not by kind: the controller writes a fresh
     // phase object per event, so a progress report changes the object without
@@ -535,7 +555,7 @@
     return jobs.state.subscribe(({ phase }) => {
       if (phase === seen) return;
       seen = phase;
-      if (phase.kind === 'ended') reread();
+      if (phase.kind === 'ended') reread(phase.pass);
     });
   });
 
