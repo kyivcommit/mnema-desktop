@@ -45,6 +45,53 @@ describe('i18n', () => {
     expect(en(2)).toBe('Generation is unavailable. The search found 2 passages.');
   });
 
+  // Task 7. PR 8a Task 6 added this key with two independent plural arguments
+  // (`paths`, `documents`) and no test at any count that tells the four CLDR
+  // arms apart — the component tests that exercise it (Folders.test.ts) only
+  // ever reach 1 and 2. Pinned here, beside the catalogue's other plurals, at
+  // the same five counts `indexed_documents` above already uses: 1/21 reach
+  // `one`, 2/22 reach `few`, 5 reaches `many` — and 21/22 confirm the arm reads
+  // `count % 10` and `% 100`, not merely "is this 1 or 2". `documents` also
+  // carries an explicit `=0` arm (Folders.svelte review I1: a stated zero is
+  // its own sentence, never the plural's `other`), pinned separately.
+  it('the exclusion-cost sentence counts both paths and documents through CLDR plural, in both locales', () => {
+    setLocale('uk');
+    const uk = (paths: number, documents: number) => t('settings_folders_exclude_cost', { paths, documents });
+    expect(uk(1, 1)).toBe(
+      'Станом на зараз: при наступному скануванні індекс втратить 1 файл із цієї теки, '
+      + 'а 1 документ більше не знайдеться: інші шляхи на нього не ведуть.');
+    expect(uk(2, 2)).toBe(
+      'Станом на зараз: при наступному скануванні індекс втратить 2 файли із цієї теки, '
+      + 'а 2 документи більше не знайдуться: інші шляхи на них не ведуть.');
+    expect(uk(5, 5)).toBe(
+      'Станом на зараз: при наступному скануванні індекс втратить 5 файлів із цієї теки, '
+      + 'а 5 документів більше не знайдуться: інші шляхи на них не ведуть.');
+    expect(uk(21, 21)).toBe(
+      'Станом на зараз: при наступному скануванні індекс втратить 21 файл із цієї теки, '
+      + 'а 21 документ більше не знайдеться: інші шляхи на нього не ведуть.');
+    expect(uk(22, 22)).toBe(
+      'Станом на зараз: при наступному скануванні індекс втратить 22 файли із цієї теки, '
+      + 'а 22 документи більше не знайдуться: інші шляхи на них не ведуть.');
+    // The `=0` arm for `documents`, against a `paths` count that is itself
+    // non-zero — the state Folders.svelte review comment "🔴 ДВА числа..."
+    // exists for: a path is lost and no document is.
+    expect(uk(2, 0)).toBe(
+      'Станом на зараз: при наступному скануванні індекс втратить 2 файли із цієї теки, '
+      + 'а жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим шляхом.');
+
+    setLocale('en');
+    const en = (paths: number, documents: number) => t('settings_folders_exclude_cost', { paths, documents });
+    expect(en(1, 1)).toBe(
+      'As of now: on the next scan the index loses 1 file from this folder, '
+      + 'and 1 document stops being findable: no other path names it.');
+    expect(en(2, 2)).toBe(
+      'As of now: on the next scan the index loses 2 files from this folder, '
+      + 'and 2 documents stop being findable: no other path names them.');
+    expect(en(5, 0)).toBe(
+      'As of now: on the next scan the index loses 5 files from this folder, '
+      + 'and no document stops being findable — each is also indexed under another path.');
+  });
+
   it('every catalog value is non-empty in both locales', () => {
     for (const loc of ['uk', 'en'] as const) {
       for (const key of Object.keys(messages[loc]) as Key[]) {

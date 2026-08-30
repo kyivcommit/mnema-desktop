@@ -447,8 +447,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // survived, and the text was still found by search. Under D29 that is the direction that tells a person
     // their text is withheld while it is on its way to the provider.
     //
-    // `indexing_frozen_heading` below keeps its "усередині них": it renders
-    // only off a non-empty `frozen`, `report.frozen` is assigned at
+    // `indexing_frozen_heading` below keeps the narrower scope this sentence
+    // gave up: it renders only off a non-empty `frozen`, `report.frozen` is assigned at
     // `walk.rs:747` — past the gate — so `complete: false` always carries
     // `frozen: []`, and on the completed walk that does show it reconciliation
     // ran everywhere except the prefixes it goes on to name. Same class, two
@@ -479,8 +479,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // The same two cases as `indexing_walk_ended_partly_read` above, for the
     // same reason, one level more specific: this list NAMES the subtrees.
     //
-    // 🔴 And it is the one place "усередині них" is TRUE — see the B1 note on
-    // that key. This heading only ever renders on a walk that reconciled the
+    // 🔴 And it is the one place the narrower scope IS true — see the B1 note
+    // on that key. This heading only ever renders on a walk that reconciled the
     // rest of the root, and only for prefixes that are in fact frozen. It is
     // not, and does not claim to be, a complete account of which exclusions
     // failed to take effect: a rule naming a frozen prefix ITSELF produces no

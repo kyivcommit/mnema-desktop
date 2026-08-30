@@ -1044,6 +1044,15 @@ test('a language switch after a WALK ending reaches its sentence, its counts and
   await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
   channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0, frozen: [...FROZEN] }));
   await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
+  // Task 7. `frozenHeading` (Indexing.svelte:148) is its own key inside this
+  // same `walkLines` block (line 139-140's `void $locale`) — the two
+  // parameterized tests further down mount fresh under one locale each and so
+  // cannot see whether this key itself re-renders on a LIVE switch, only that
+  // it resolves correctly at mount. Read under 'uk' BEFORE the switch below,
+  // the same way the labels-switch test in Folders.test.ts does — a hardcoded
+  // English literal here would otherwise still satisfy the 'en' assertions
+  // after the switch and pass unnoticed.
+  expect(container.textContent ?? '').toContain('Ці підтеки не звіряли, тож і видалені файли');
 
   setLocale('en');
   await tick();
@@ -1053,6 +1062,8 @@ test('a language switch after a WALK ending reaches its sentence, its counts and
   expect(text).toContain('Documents added: 5.');
   expect(text).toContain('notes/link — a symbolic link, never entered');
   expect(text).not.toContain('Теку прочитано');
+  expect(text).toContain('These subfolders were not reconciled, so both deleted files');
+  expect(text).not.toContain('Ці підтеки не звіряли');
 });
 
 // The lines a WALK ending never draws: the pass line, the counts, the estimate

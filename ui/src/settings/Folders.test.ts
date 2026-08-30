@@ -1437,6 +1437,42 @@ test('a rule whose folder is still there keeps the unconditional provider senten
   ].join(' '));
 });
 
+// Task 7. `confirmView` (Folders.svelte:682-707) builds the heading, the cost
+// sentence, and both aria-labels for the INCLUDE branch inside the same
+// `void $locale` block the exclude branch above already proves reactive — but
+// each branch is its own ternary arm, and a literal swapped in for one of
+// THESE calls specifically would not be caught by a switch test that only ever
+// reaches the exclude arm. Two states, `existsOnDisk` true here and false in
+// the test below, cover both halves of the cost ternary (Folders.svelte:693-698).
+test('the "stop excluding" question switches language with everything else', async () => {
+  await openWithRule('en', [{ prefix: 'Old notes', existsOnDisk: true }]);
+  await fireEvent.click(screen.getByRole('button', { name: REMOVE_RULE_LABEL.en }));
+  await screen.findByTestId('folder-confirm-1');
+
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
+    'Більше не виключати Old notes?',
+    'Від наступного сканування все всередині цієї теки індексується знову,',
+    'а її текст надсилається провайдеру моделі.',
+    'Підтвердити Скасувати',
+  ].join(' '));
+  expect(screen.getByRole('button', { name: 'Підтвердити скасування правила на Old notes' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Залишити Old notes як є' })).toBeTruthy();
+});
+
+test('the "stop excluding" question for a folder that is gone switches language with everything else', async () => {
+  await openWithRule('en', [{ prefix: 'Old notes', existsOnDisk: false }]);
+  await fireEvent.click(screen.getByRole('button', { name: REMOVE_RULE_LABEL.en }));
+  await screen.findByTestId('folder-confirm-1');
+
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe(GONE_COST.uk);
+});
+
 // 🔴 The OTHER caller, and it answers `existsOnDisk` from different evidence:
 // the row is a directory entry `list_subfolders` read off the disk, so the
 // folder is there whatever a stale rule list says. This pins that the row site
@@ -1499,6 +1535,11 @@ test('a question already on screen switches language with everything else', asyn
     'а 2 документи більше не знайдуться: інші шляхи на них не ведуть.',
     'Підтвердити Скасувати',
   ].join(' '));
+  // The two aria-labels `visibleText` cannot see: `confirmAriaLabel` and
+  // `cancelAriaLabel` are the same `void $locale` block, but each is its own
+  // `t()` call (Folders.svelte:700-705) and neither is a text node.
+  expect(screen.getByRole('button', { name: 'Підтвердити виключення drop' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Залишити drop як є' })).toBeTruthy();
 });
 
 // The gap between the press and the answer is a state a person sits in, and a
@@ -1521,6 +1562,16 @@ test('the wait for the fresh reply says what is being checked', async () => {
   expect(visibleText(await screen.findByTestId('folder-confirm-1')))
     .toBe('Checking what this exclusion removes…');
   expect(excludeSubfolder).not.toHaveBeenCalled();
+
+  // Task 7. `checkingLabel` (Folders.svelte:684) is its own branch of
+  // `confirmView`, reached only in the gap this test holds open — a switch
+  // test landing after `release()` would never pass through here at all.
+  setLocale('uk');
+  await tick();
+  expect(visibleText(screen.getByTestId('folder-confirm-1')))
+    .toBe('Перевіряємо, що прибере це виключення…');
+  setLocale('en');
+  await tick();
 
   release(listing([root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] })]));
   await waitFor(() => expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
