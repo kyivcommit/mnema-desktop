@@ -728,6 +728,61 @@ test('a rule with another of your rules under it says what removing it does not 
     .toBe(['Archive/Held', RULE_COST.plainUk, 'Прибрати правило'].join(' '));
 });
 
+// 🔴 The whole screen for the storable pair, read line by line, because the
+// brief for this fix carried an inference worth settling by rendering rather
+// than by reasoning: that `list_subfolders` reporting `Held` as
+// `excludedByAncestor {prefix: "Archive"}` leaves the person unable to see the
+// rule on `Archive/Held` at all.
+//
+// Half true, and the half that is false is the half that decides the sentence's
+// shape. The TREE never names the descendant's own rule — the row for `Held`
+// says "Held by your rule on Archive", which is the outermost, and that is
+// `subfolder_state`'s deliberate choice. But the RULE LIST in the same panel is
+// `list_exclusions`' whole answer for the root, so `Archive/Held` has a row of
+// its own three lines below, with its own Remove control. The conditional
+// sentence therefore points at something the person can actually go and find,
+// which is what makes "except what your other rules further down this path
+// still exclude" an instruction rather than a riddle.
+test('the pair reads as one screen: the tree names only the outermost, the rule list names both', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root' }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+  ]));
+  listSubfolders.mockImplementation((_rootId: number, path: string) =>
+    Promise.resolve(path === ''
+      ? subfolders([sub('Archive', { kind: 'excluded' })])
+      : subfolders([sub('Held', { kind: 'excludedByAncestor', prefix: 'Archive' }, 'Archive')])));
+  listExclusions.mockResolvedValue([
+    { prefix: 'Archive', existsOnDisk: true },
+    { prefix: 'Archive/Held', existsOnDisk: true },
+  ]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await screen.findByTestId('subfolder-1-Archive');
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-Archive'));
+  await screen.findByTestId('subfolder-1-Archive/Held');
+
+  expect(visibleText(screen.getByTestId('folder-row-1'))).toBe([
+    '/synthetic/root',
+    'Indexed: 0 documents',
+    'Subfolders', 'Scan', 'Remove',
+    // The tree. `Archive` carries the conditional sentence, because a rule of
+    // the person's own remains under it.
+    'Archive', 'Excluded by your rule.', RULE_COST.held, 'Do not exclude', 'Subfolders',
+    // And its child names the OUTERMOST rule, never its own — so on this line
+    // alone the rule on `Archive/Held` is invisible.
+    'Held',
+    'Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.',
+    // The rule list, which is where it is not invisible.
+    'Your exclusion rules for this folder:',
+    'Archive', RULE_COST.held, 'Remove the rule',
+    'Archive/Held', RULE_COST.plain, 'Remove the rule',
+  ].join(' '));
+});
+
 // 🔴 A sibling is not a rule under it. `Archive2` merely starts with `Archive`;
 // `anchored_pattern` produces `!/Archive`, which does not match it, so removing
 // the rule on `Archive` really does release everything at that path. Without

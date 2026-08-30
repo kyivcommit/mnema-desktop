@@ -7397,6 +7397,109 @@ fn the_outermost_rule_is_the_one_a_held_subfolder_names() {
         json!("a"),
         "with two ancestors holding it, the row names the outermost: {deeper}"
     );
+
+    // 🔴 Fix round 1, I5's second half. This test is the only fixture anywhere
+    // that stores a NESTED PAIR, and until this line it never asked
+    // `list_exclusions` what it does with one — measured, zero occurrences of
+    // the command in this body. So nothing said the pair comes back as TWO
+    // rows: a `list_exclusions` that dropped any prefix an ancestor already
+    // covers would leave the whole suite green, and the panel would show one
+    // rule where the person stored two. Under D29 that reads as protection
+    // they still have and can take away in one press.
+    //
+    // It also makes this test the measured backing for a claim the folder
+    // screen rests on: the two assertions above show the TREE naming only `a`
+    // for a folder two rules hold, so a person reading the tree alone never
+    // learns that `a/deep` has a rule of its own — and the assertion below is
+    // what says `list_exclusions` is where they do. `Folders.test.ts`'s "the
+    // pair reads as one screen" renders both halves together.
+    //
+    // The whole array: both prefixes, both flags, in the sorted order
+    // `Db::list_path_exclusions` promises (`write.rs:580`).
+    let rules = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        rules,
+        json!([
+            { "prefix": "a", "existsOnDisk": true },
+            { "prefix": "a/deep", "existsOnDisk": true }
+        ]),
+        "an ancestor and its descendant are two rules, and both are the person's to see: {rules}"
+    );
+}
+
+/// The same pair stored the other way round — **descendant first** — which no
+/// fixture built at all before fix round 1.
+///
+/// **What it pins that the test above cannot.** Storing an ancestor over a
+/// rule that is already there has to keep both: `add_path_exclusion` is
+/// `INSERT … ON CONFLICT DO NOTHING` (`write.rs:604-612`) and neither command
+/// has an ancestor guard, so the second rule is simply a second row. Measured
+/// as a mutant — `exclude_subfolder` refusing a prefix that is an ancestor of
+/// a stored rule — this test is the **only** one in the file that fails;
+/// `the_outermost_rule_is_the_one_a_held_subfolder_names` never stores an
+/// ancestor over a descendant and stays green. That matters beyond bookkeeping:
+/// an ancestor guard is the wrong fix for the sentence that used to promise
+/// removing a rule un-excludes its folder, and this is the test that says so.
+///
+/// 🔴 **What it does NOT pin, measured rather than assumed.** The first draft
+/// of this comment claimed the test held `list_path_exclusions`'
+/// `ORDER BY path_prefix` (`write.rs:580`) — the clause
+/// `SubfolderState::ExcludedByAncestor`'s own doc leans on for "the first
+/// match in that sorted list is the shallowest one". It does not, and neither
+/// can anything else: deleting that `ORDER BY` leaves the whole workspace at
+/// exit 0. `EXPLAIN QUERY PLAN` says why —
+/// `SEARCH ignore_rule USING COVERING INDEX ux_ignore_rule_path
+/// (watched_root_id=? AND path_prefix>?)` — so the rows arrive ordered by
+/// `path_prefix` because the unique index `migrations.rs:90-92` adds is what
+/// the planner walks. The clause is a belt to that index's braces and the
+/// mutant is equivalent. Written down because a test claiming to hold a guard
+/// it cannot is worse than no claim at all.
+#[test]
+fn a_rule_stored_under_one_that_arrives_later_is_kept_and_still_names_the_outermost() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("a/deep/deeper")).expect("creating a/deep/deeper");
+    let root = root_for(&webview, fixture.path());
+
+    // Descendant first, ancestor second — the reverse of the test above.
+    for prefix in ["a/deep", "a"] {
+        call(
+            &webview,
+            "exclude_subfolder",
+            json!({ "rootId": root, "relativePath": prefix }),
+        )
+        .unwrap_or_else(|e| panic!("excluding {prefix} was rejected: {e}"));
+    }
+
+    let rules = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        rules,
+        json!([
+            { "prefix": "a", "existsOnDisk": true },
+            { "prefix": "a/deep", "existsOnDisk": true }
+        ]),
+        "an ancestor stored after its descendant must not swallow it, and the answer comes \
+         back sorted rather than in the order the rules arrived — which mechanism holds that \
+         is in this test's own doc: {rules}"
+    );
+
+    let deeper = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a/deep" }),
+    )
+    .expect("list_subfolders was rejected");
+    assert_eq!(
+        deeper["entries"][0]["state"],
+        json!({ "kind": "excludedByAncestor", "prefix": "a" }),
+        "the outermost rule is the one to remove first, whichever rule was stored first: \
+         {deeper}"
+    );
 }
 
 /// The built-in list is visible as its own state, and a dot-directory the

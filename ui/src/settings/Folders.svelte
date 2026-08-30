@@ -272,6 +272,25 @@
   // `Excluded` (`tree.rs:817-848` asks about an ancestor, and `Archive` has
   // none), so this screen offers to remove it — and "anything at this path is
   // indexed again" was contradicted by the rule list two lines below it.
+  // Probed rather than reasoned: both orders of the two calls answer `Ok` and
+  // `list_exclusions` comes back with both prefixes, which
+  // `the_outermost_rule_is_the_one_a_held_subfolder_names` and
+  // `a_rule_stored_under_one_that_arrives_later_is_kept_and_still_names_the_outermost`
+  // (`src-tauri/tests/commands.rs`) now pin.
+  //
+  // 🔴 And the rule this condition names is one the TREE never shows. A folder
+  // held by two rules reports the OUTERMOST (`subfolder_state`'s own choice),
+  // so the row for `Archive/Held` says "held by your rule on Archive" and its
+  // own rule appears nowhere above. It appears in the RULE LIST of this same
+  // panel, which is `list_exclusions`' whole answer for the root — which is
+  // what makes "your other rules further down this path" something a person
+  // can go and find rather than a sentence about nothing they can see.
+  // `Folders.test.ts`'s "the pair reads as one screen" reads both halves.
+  //
+  // That is an invariant rather than a coincidence, and it is why the sentence
+  // needs no path in it: this function and the rule list are handed the SAME
+  // `panel.rules`, so a `true` here cannot name a rule the panel is not also
+  // drawing a row for.
   //
   // Through `under`, so the boundary rule is the one the cost count already
   // uses: a rule on `Archive2` is a sibling of `Archive`, not a rule under it,
