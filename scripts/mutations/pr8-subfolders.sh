@@ -21,7 +21,16 @@
 # walk, and the drift guard is the only test that runs both. Which cases they
 # are is one command away and cannot go stale:
 #
-#   grep -n " mnema-walk '" scripts/mutations/pr8-subfolders.sh
+#   grep -n "^  mnema-walk '" scripts/mutations/pr8-subfolders.sh
+#
+# 🔴 Fix round 3, item 4: the pattern used to be `" mnema-walk '"`, which also
+# matched this very sentence — 4 lines for 3 cases. Anchored at the start of
+# the line, so only a `case_`'s own target field can match. Output, so the
+# next reader can tell a drift from a rerun without retyping the command:
+#
+#   293:  mnema-walk 'builtin_layers_agree_with_what_the_walk_enumerates' --test rules
+#   397:  mnema-walk 'builtin_layers_agree_with_what_the_walk_enumerates' --test rules
+#   408:  mnema-walk 'builtin_layers_agree_with_what_the_walk_enumerates' --test rules
 #
 # A case file is not one package here; the `case_` line names its own.
 #

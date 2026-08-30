@@ -970,6 +970,38 @@ test('a rule whose prefix merely starts the same way is not an ancestor', async 
     .toBe(['Archive/Held', RULE_COST.plain, 'Remove the rule'].join(' '));
 });
 
+// 🔴 Fix round 3, item 1. No fixture anywhere else in this file gives an
+// ANCESTOR rule `existsOnDisk: false` — every case above that holds a folder
+// from above uses a live one, so `heldAbove` consulting `existsOnDisk` (it
+// must not, per its own doc at `Folders.svelte:353-358`) has nothing to catch
+// it on. `Archive` is gone from disk but its rule row has not been removed,
+// and the doc's own claim is that removing `Archive/Held` still changes
+// nothing: the ancestor's pattern prunes the subtree the moment a folder
+// reappears there, whatever is on disk right now.
+//
+// Assert both directions in one fixture: `Archive/Held` stays firm under a
+// gone ancestor (this is the direction the mutant breaks — filtering the
+// ancestor by `existsOnDisk` drops it, and the row falls through to the
+// unconditional `RULE_COST.plain`); `Other`, which has no ancestor at all and
+// is held only by a LIVE rule below it, still softens to `RULE_COST.held` —
+// showing the ancestor fix left the ordinary heldBelow path alone.
+test('a rule held by a gone ancestor stays firm; a rule held below a live one still softens', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: false },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+      { prefix: 'Other', existsOnDisk: true },
+      { prefix: 'Other/Nested', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
+    .toBe(['Archive/Held', heldBy('Archive'), 'Remove the rule'].join(' '));
+  expect(visibleText(screen.getByTestId('folder-rule-1-Other')))
+    .toBe(['Other', RULE_COST.held, 'Remove the rule'].join(' '));
+});
+
 // ── Fix round 2, A2 ─────────────────────────────────────────────────────────
 //
 // The softening promises an exception, and round 1 let a rule the SAME PANEL

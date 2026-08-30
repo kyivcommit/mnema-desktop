@@ -560,7 +560,7 @@ fn exclusions_come_back_sorted() {
 }
 
 /// 🔴 Fix round 2, A3. The row above cannot fail from the `ORDER BY` going: the
-/// planner walks `ux_ignore_rule_path` (`migrations.rs:89-92`), which is
+/// planner walks `ux_ignore_rule_path` (`migrations.rs:90-92`), which is
 /// `(watched_root_id, path_prefix)`, so the rows come back sorted whether the
 /// clause is there or not — `EXPLAIN QUERY PLAN` says
 /// `SEARCH ignore_rule USING COVERING INDEX ux_ignore_rule_path`. Delete the
