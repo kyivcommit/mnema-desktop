@@ -175,14 +175,18 @@ pub struct StoredExclusion {
 ///    this diff" §4: measured, `Work` at `0o444` flips this exact call from
 ///    `Ok` to `Err(PermissionDenied)` while nothing about the rule changed).
 ///
-/// [`list_exclusions`]'s own root guard (`!root.is_dir()`) is the fifth
-/// filesystem outcome in this file and deliberately **not** classified: its
-/// output is not a boolean about a rule but a refusal of the whole call,
-/// disclosed to the person as `RootUnavailable`'s own sentence, so the harm
-/// this class does — a rule silently mislabelled — cannot arise there. Its
-/// job is to match the walk's own predicate for "is this root usable"
-/// exactly (see that function's doc comment), not to answer the same
-/// question a second, possibly-disagreeing way.
+/// 5. The root guard `!root_path.is_dir()`, which occurs **twice** in this
+///    file — in [`list_exclusions`] and, since fix round 1, in
+///    [`exclude_subfolder`] — and deliberately is **not** classified in
+///    either place: its output is not a boolean about a rule but a refusal
+///    of the whole call, disclosed to the person as `RootUnavailable`'s own
+///    sentence, so the harm this class does — a rule silently mislabelled —
+///    cannot arise there. Its job is to match the walk's own predicate for
+///    "is this root usable" exactly (see those functions' doc comments), not
+///    to answer the same question a second, possibly-disagreeing way. 🔴 It
+///    was one site when this list was written and the sentence said so; a
+///    reader who trusted the count rather than the file would have missed
+///    the second.
 fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
     let mut current = root.to_path_buf();
     for component in prefix.split('/') {
@@ -341,19 +345,22 @@ pub(crate) fn path_error_is_an_answer(kind: std::io::ErrorKind) -> bool {
 /// the answer this product already trusts to decide a root is unusable,
 /// not inventing a second one that can disagree with it.
 ///
-/// **This is the one filesystem *error* in this file that does not go
+/// **This is one of the two filesystem *errors* in this file that do not go
 /// through [`path_error_is_an_answer`] (review round 4's re-derived
-/// enumeration, where it is the fifth entry; row 3 there also skips the
-/// classifier, but row 3 is an `Ok` with no error in it to classify).**
-/// `Path::is_dir()` already collapses every failure — answer or observer
-/// alike — into `false`/"refuse", the same shape the classifier exists to
-/// avoid elsewhere; kept here anyway, deliberately, for two reasons. The
-/// point of this line is byte-for-byte agreement with `walk.rs:288`, not a
-/// more finely reasoned answer of its own — and what it produces is not a
-/// boolean *about a rule* but a refusal of the whole call, carrying
-/// `RootUnavailable`'s own sentence to the person, so the harm the
-/// classifier exists to prevent (a rule silently mislabelled live or stale)
-/// cannot arise from it in either direction.
+/// enumeration, where the pair are the fifth entry; row 3 there also skips
+/// the classifier, but row 3 is an `Ok` with no error in it to classify).**
+/// The other is the identical guard [`exclude_subfolder`] gained in fix
+/// round 1 — 🔴 it was "the one" here until that command became the third
+/// site of this guard, which is the enumeration-not-extended shape this
+/// branch keeps paying for. `Path::is_dir()` already collapses every
+/// failure — answer or observer alike — into `false`/"refuse", the same
+/// shape the classifier exists to avoid elsewhere; kept here anyway,
+/// deliberately, for two reasons. The point of this line is byte-for-byte
+/// agreement with `walk.rs:288`, not a more finely reasoned answer of its
+/// own — and what it produces is not a boolean *about a rule* but a refusal
+/// of the whole call, carrying `RootUnavailable`'s own sentence to the
+/// person, so the harm the classifier exists to prevent (a rule silently
+/// mislabelled live or stale) cannot arise from it in either direction.
 #[tauri::command(async)]
 pub fn list_exclusions(
     state: State<'_, AppState>,

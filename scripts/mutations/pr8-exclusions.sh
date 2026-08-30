@@ -150,10 +150,16 @@ case_ "the final stat must classify its own errors too, not fold every one into 
 # stored prefix answer `existsOnDisk: false` instead of refusing the whole
 # call — the same field lying that a per-prefix `.unwrap_or(false)` produced
 # before fix round 1, now for the entire list at once.
+#
+# ⚠️ Anchored on the LINE AFTER the guard, and that is not decoration: fix
+# round 1 gave `exclude_subfolder` the identical three lines, so the bare
+# `if !root_path.is_dir() {` now matches twice and the harness reports BROKEN
+# rather than a result. `let prefixes` follows only this one; `if
+# relative_path.is_empty()` follows the other, whose own two cases are below.
 case_ "an unreachable watched root must refuse the whole list_exclusions call" \
   src-tauri/src/bridge.rs \
-  's{    if !root_path\.is_dir\(\) \{}{    if false \{}' \
-  'if false {' \
+  's~    if !root_path\.is_dir\(\) \{\n        return Err\(Error::RootUnavailable\(root_id\)\);\n    \}\n    let prefixes~    if false { /* mutant: list guard disarmed */\n        return Err(Error::RootUnavailable(root_id));\n    }\n    let prefixes~' \
+  'if false { /* mutant: list guard disarmed */' \
   mnema-desktop 'list_exclusions_refuses_when_the_root_itself_is_unreachable' --test commands
 
 # Review round 2, Minor B. The guard is present but weakened back to what
@@ -161,11 +167,34 @@ case_ "an unreachable watched root must refuse the whole list_exclusions call" \
 # `!root.is_dir()`. `symlink_metadata` resolves fine for a symlink whose
 # TARGET is gone, so a dangling-symlink root would pass this weaker guard
 # and land in Important 1's own failure mode one line later.
+#
+# Anchored the same way and for the same reason as the case above.
 case_ "a dangling symlink root must be caught by is_dir(), not the weaker symlink_metadata check" \
   src-tauri/src/bridge.rs \
-  's~    if !root_path\.is_dir\(\) \{~    if std::fs::symlink_metadata(root_path).is_err() {~' \
-  'std::fs::symlink_metadata(root_path).is_err()' \
+  's~    if !root_path\.is_dir\(\) \{\n        return Err\(Error::RootUnavailable\(root_id\)\);\n    \}\n    let prefixes~    if std::fs::symlink_metadata(root_path).is_err() { /* mutant: weaker list guard */\n        return Err(Error::RootUnavailable(root_id));\n    }\n    let prefixes~' \
+  'std::fs::symlink_metadata(root_path).is_err() { /* mutant: weaker list guard */' \
   mnema-desktop 'list_exclusions_refuses_when_the_root_is_a_dangling_symlink' --test commands
+
+# ── Fix round 1 ───────────────────────────────────────────────────────────────
+#
+# The same guard at the site that WRITES. `exclude_subfolder` was the third
+# command to read the root's path and the only one that did not check it, so
+# with the root unmounted `WalkRules::builtin_layers` resolved nothing, `prunes`
+# answered false for every path, and a rule the walk always prunes was stored
+# and then rendered as live protection. Two cases, mirroring the two above,
+# because the pair are different claims: that the guard is there at all, and
+# that it is the walk's own predicate rather than the weaker stat.
+case_ "an unreachable watched root must refuse exclude_subfolder, which writes" \
+  src-tauri/src/bridge.rs \
+  's~    if !root_path\.is_dir\(\) \{\n        return Err\(Error::RootUnavailable\(root_id\)\);\n    \}\n    if relative_path~    if false { /* mutant: write guard disarmed */\n        return Err(Error::RootUnavailable(root_id));\n    }\n    if relative_path~' \
+  'if false { /* mutant: write guard disarmed */' \
+  mnema-desktop 'excluding_when_the_root_itself_is_unreachable_is_refused_and_stores_nothing' --test commands
+
+case_ "the write site's guard must be is_dir() too, or a dangling symlink root stores a rule" \
+  src-tauri/src/bridge.rs \
+  's~    if !root_path\.is_dir\(\) \{\n        return Err\(Error::RootUnavailable\(root_id\)\);\n    \}\n    if relative_path~    if std::fs::symlink_metadata(root_path).is_err() { /* mutant: weaker write guard */\n        return Err(Error::RootUnavailable(root_id));\n    }\n    if relative_path~' \
+  'std::fs::symlink_metadata(root_path).is_err() { /* mutant: weaker write guard */' \
+  mnema-desktop 'excluding_when_the_root_is_a_dangling_symlink_is_refused' --test commands
 
 # Review round 2, Minor C. `read_dir`'s "I could not look" branch, reverted
 # to the pre-fix "I could not look" == "it is not there" collapse: a rule

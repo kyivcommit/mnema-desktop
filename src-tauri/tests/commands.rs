@@ -2660,6 +2660,67 @@ fn excluding_when_the_root_itself_is_unreachable_is_refused_and_stores_nothing()
     );
 }
 
+/// The write site's half of review round 2's Minor B, added with the guard
+/// itself in fix round 1: `!root_path.is_dir()` and not the weaker
+/// `symlink_metadata(..).is_err()`, which resolves fine for a symlink whose
+/// target is gone. Without this test the guard above is pinned only against a
+/// root that is plainly absent, where both predicates agree — so the choice of
+/// predicate, which is the thing review round 2 measured at the other site,
+/// would be undefended here.
+#[cfg(unix)]
+#[test]
+fn excluding_when_the_root_is_a_dangling_symlink_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let target = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(target.path().join("Docs")).expect("creating Docs");
+    let link_parent = tempfile::tempdir().unwrap();
+    let link_path = link_parent.path().join("root_link");
+    std::os::unix::fs::symlink(target.path(), &link_path).expect("creating the root symlink");
+
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": link_path.display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    // Both directions: while the target is there the rule stores, so the
+    // refusal below is about the dangling link and not about this command
+    // having stopped working.
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs while the root resolves was rejected");
+
+    // The symlink's TARGET goes away; the symlink itself — the watched root's
+    // stored path — still resolves as a path, just to nothing.
+    drop(target);
+
+    let rejected = call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Photos" }),
+    )
+    .expect_err("exclude_subfolder should refuse a root that is a dangling symlink");
+    assert_eq!(
+        error_text(&rejected),
+        format!(
+            "the folder for watched root {root} is not available right now, so its exclusion \
+             rules cannot be checked"
+        ),
+        "a dangling symlink root must be refused here the same way list_exclusions refuses it"
+    );
+}
+
 /// Review round 2, Minor B: a dangling symlink root passes a bare
 /// `symlink_metadata(..).is_err()` guard (a symlink's own metadata resolves
 /// fine even when its target is gone), so the old guard let this case
