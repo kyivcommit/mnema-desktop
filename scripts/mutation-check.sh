@@ -475,6 +475,32 @@ case_() {
       # dimension diverged, which is most of what the case is for.
       printf '%s' "$out" | grep -E "panicked at|assertion|left:|right:|not found|missing|unexpected" | head -6 | sed 's/^/     /'
       red=$((red + 1))
+    elif ! printf '%s' "$out" | grep -q 'test result: ok\. 1 passed'; then
+      # 🔴 Fix round 2, B1. `1 passed`, not merely exit zero — and this is the
+      # SAME check the baseline pass has made since it was written, twenty lines
+      # above at `test result: ok. 0 passed`. This branch did not have it, so a
+      # mutation that renamed the `#[test]` itself made `--exact` select
+      # nothing, cargo print `running 0 tests` and exit 0, and this harness
+      # announce that a test which had just been renamed out of existence "does
+      # not protect what it names". Demonstrated by construction, not reasoned:
+      # a throwaway case renaming `exclusions_come_back_sorted` printed exactly
+      # that verdict before this line existed.
+      #
+      # 🔴 It is also the exact defect this file was extended to catch. The
+      # vitest branch below has carried the same guard since round 7b (`after
+      # the mutation nothing named $test ran`), so teaching the harness a second
+      # runner gave the new half a defence the old half still lacked — the seam
+      # covering half its sites, inside the instrument built against that class.
+      # And the uncovered half is the one the plan's Global Constraints single
+      # out by name: `--exact` with a name nobody wrote is how a guard in PR 7
+      # passed while selecting nothing.
+      #
+      # Any binary saying `1 passed` is enough, for the baseline's reason: a
+      # case with no `--test` selector runs every test binary in the package and
+      # all but one of them report `0 passed`.
+      echo "   BROKEN CASE: after the mutation nothing named $test ran"
+      printf '%s' "$out" | grep -E 'running [0-9]+ test|test result:' | head -3 | sed 's/^/     /'
+      broken=$((broken + 1))
     else
       echo "   *** STILL GREEN: $test does not protect what it names ***"
       green=$((green + 1))
