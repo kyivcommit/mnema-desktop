@@ -904,6 +904,17 @@
         // The disclosure sits beside the control BEFORE it is pressed: taking a
         // rule away is not a tidy-up, it puts a subtree back in front of the
         // next scan.
+        //
+        // 🔴 Fix round 3, item 2: `ruleCostLabel`'s ancestor branch can never
+        // fire from here. `control === 'include'` only when `describe` reads
+        // `SubfolderState::Excluded`, and `subfolder_state`
+        // (`src-tauri/src/tree.rs:829-838`) checks an ancestor's prefix
+        // BEFORE the entry's own — a folder held by both its own rule and one
+        // above always reports `ExcludedByAncestor` instead, which `describe`
+        // maps to `control: 'none'`. So `heldAbove` is always null wherever
+        // this call reaches it; the two sites that actually decide what
+        // removing a rule held from above costs are the rule list
+        // (`ruleCostLabel` below) and `confirmView`'s include arm — not here.
         costLabel: control === 'include' ? ruleCostLabel(rules, entry.relativePath) : null,
         expandable,
         expandAriaLabel: t('settings_folders_expand_named', { path: entry.relativePath }),
