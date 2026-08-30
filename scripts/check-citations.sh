@@ -21,6 +21,8 @@
 #   scripts/check-citations.sh              # every tracked file
 #   scripts/check-citations.sh <path>...    # only these citing files
 #   scripts/check-citations.sh --strict     # also fail on the two shapes below
+#   scripts/check-citations.sh --self-test  # the citation pattern against a
+#                                           # table of strings, and nothing else
 #
 # Output, one block per citation:
 #
@@ -80,12 +82,18 @@ cd "$REPO" || exit 1
 
 STRICT=0
 NAMED=0
+SELFTEST=0
 LIST="/tmp/.citation-files.$$"
+# 🔴 Fix round 2, B6: the list file is created here and read inside python, so
+# an interrupt between the two leaves it in `/tmp` forever. `$$` makes each
+# leftover a new name rather than one that gets overwritten.
+trap 'rm -f "$LIST"' EXIT INT TERM
 : > "$LIST"
 for arg in "$@"; do
   case "$arg" in
     --strict) STRICT=1 ;;
-    -*) echo "unknown option: $arg" >&2; rm -f "$LIST"; exit 2 ;;
+    --self-test) SELFTEST=1 ;;
+    -*) echo "unknown option: $arg" >&2; exit 2 ;;
     *) printf '%s\n' "$arg" >> "$LIST"; NAMED=1 ;;
   esac
 done
@@ -93,11 +101,12 @@ if [ "$NAMED" -eq 0 ]; then
   git ls-files > "$LIST"
 fi
 
-python3 - "$REPO" "$LIST" "$STRICT" "$NAMED" <<'PY'
+python3 - "$REPO" "$LIST" "$STRICT" "$NAMED" "$SELFTEST" <<'PY'
 import os, re, sys
 
 repo, listing = sys.argv[1], sys.argv[2]
 strict, named = sys.argv[3] == "1", sys.argv[4] == "1"
+selftest = sys.argv[5] == "1"
 files = [f.strip() for f in open(listing) if f.strip()]
 os.unlink(listing)
 
@@ -115,13 +124,69 @@ EXT_ALT = "|".join(re.escape(e) for e in EXTS)
 
 # A path, then one line or a span of lines, optionally a comma list of either.
 SPAN = r"\d+(?:-\d+)?"
-STEM = r"[A-Za-z0-9_][A-Za-z0-9_./-]*"
+# 🔴 Fix round 2, B2. The leading `\.?` is the fix, and what it cost while it was
+# missing is worse than a miss: a citation into a dot-directory —
+# `.github/workflows/ci.yml:189` — matched from the `g`, resolved nothing, and
+# was filed as "names a path this repository does not have". Its line was then
+# never range-checked at all. Measured: that same path with a five-digit line
+# number nowhere near the end of the file exited 0, where the identical
+# overshoot written on an ordinary path exits 1. (Not spelled out here: this
+# file is swept like any other, and the overshoot would fail the run.) A checker
+# that
+# answers "no such file" about a file that exists is worse than one that says
+# nothing — it turns a real check into a silent pass, and reports it as a
+# finding about the writer.
+#
+# One optional dot, and then a name character: a bare `.` cannot start a stem,
+# so a sentence ending in a full stop before a citation ("…the end. tree.rs:100")
+# still binds to `tree.rs` and not to `. tree.rs`. `--self-test` pins both
+# directions against the compiled expression rather than against this comment.
+STEM = r"\.?[A-Za-z0-9_][A-Za-z0-9_./-]*"
 CITED = re.compile(rf"({STEM}\.(?:{EXT_ALT})):({SPAN}(?:,{SPAN})*)")
 # The same shape with ANY extension, so a target this repository has no file
 # type for is reported instead of skipped in silence.
 ANY_EXT = re.compile(rf"({STEM}\.([A-Za-z][A-Za-z0-9]{{0,9}})):({SPAN}(?:,{SPAN})*)")
 # The bare form, always inside backticks so prose like "see 12:30" is not one.
 BARE = re.compile(rf"`:({SPAN}(?:,{SPAN})*)`")
+
+if selftest:
+    # 🔴 Fix round 2, B2. A table of strings whose right answer is written beside
+    # them, run against the expression COMPILED ABOVE — not a copy of it, which
+    # is how a self-test comes to pass over a pattern nobody uses. The first row
+    # is the defect: before the leading `\.?`, `CITED` matched from the `g` and
+    # the citation was reported as naming a path this repository does not have.
+    #
+    # ⚠️ The colon is written `@` and swapped in at run time, deliberately: a
+    # probe spelled out in full would be a citation in this file's own source,
+    # and the sweep would range-check the table — the `99999` row would then
+    # fail the very run it is here to protect. Found by running it.
+    def probe(text):
+        return text.replace("@", ":")
+
+    PROBES = [
+        (".github/workflows/ci.yml@189", [".github/workflows/ci.yml"]),
+        ("`.github/workflows/ci.yml@99999` overshoots", [".github/workflows/ci.yml"]),
+        ("see crates/mnema-index/src/write.rs@580", ["crates/mnema-index/src/write.rs"]),
+        # The other direction, and the reason the dot is optional and followed
+        # by a name character: a full stop ending a sentence is not the start of
+        # a path.
+        ("that is the end. tree.rs@100 follows", ["tree.rs"]),
+        ("two on a line: tree.rs@10 and bridge.rs@20", ["tree.rs", "bridge.rs"]),
+        # No citation at all: a time of day must not become one.
+        ("the meeting is at 12@30", []),
+    ]
+    bad = 0
+    for text, want in PROBES:
+        text = probe(text)
+        got = [m.group(1) for m in CITED.finditer(text)]
+        if got != want:
+            bad += 1
+            print(f"SELF-TEST FAILURE: {text!r}\n  expected {want}\n  got      {got}")
+    if bad:
+        print(f"--- {bad} of {len(PROBES)} probes failed ---")
+        sys.exit(1)
+    print(f"--- self-test: {len(PROBES)} probes, all as written ---")
+    sys.exit(0)
 
 def shared_prefix(a, b):
     """How many leading path components two files share."""
