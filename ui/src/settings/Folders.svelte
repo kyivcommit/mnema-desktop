@@ -265,7 +265,7 @@
   //
   // The state is storable and nothing refuses it: `exclude_subfolder` checks an
   // unknown root, a blank path, the validator and the built-in layers and
-  // nothing else (`bridge.rs:429-451` — there is no ancestor guard), and
+  // nothing else (`bridge.rs:450-483` — there is no ancestor guard), and
   // `add_path_exclusion` is `INSERT … ON CONFLICT DO NOTHING`
   // (`write.rs:604-612`), so a rule on `Archive/Held` and a rule on `Archive`
   // are both stored. `subfolder_state` then still reports `Archive` as

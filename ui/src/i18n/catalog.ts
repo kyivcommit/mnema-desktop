@@ -367,7 +367,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_rule_cost: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування.',
     // 🔴 Рев'ю фінальної гілки, I2. Речення вище безумовне, а стан, який йому
     // суперечить, зберігається без жодної відмови: `exclude_subfolder` не має
-    // гарди на предка (`bridge.rs:429-451`), а `add_path_exclusion` —
+    // гарди на предка (`bridge.rs:450-483`), а `add_path_exclusion` —
     // `ON CONFLICT DO NOTHING` (`write.rs:604-612`), тож правила і на
     // `Archive`, і на `Archive/Held` лежать поруч, і `Archive` досі
     // показується як `excluded`. Тоді «все за цим шляхом знову

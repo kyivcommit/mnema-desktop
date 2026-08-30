@@ -671,7 +671,7 @@ test('a nested rule whose folder is present is not labelled gone; the one that i
 //
 // `settings_folders_rule_cost` was unconditional, and the state that
 // contradicts it is storable from this very screen: `exclude_subfolder` has no
-// ancestor guard (`bridge.rs:429-451`), `add_path_exclusion` is
+// ancestor guard (`bridge.rs:450-483`), `add_path_exclusion` is
 // `ON CONFLICT DO NOTHING` (`write.rs:604-612`), and `subfolder_state` still
 // reports the ancestor as `excluded` (`tree.rs:817-848`) so the control to
 // remove it is offered. Exclude `Archive/Held`, then include `Archive` back,
