@@ -228,6 +228,28 @@ contains() {
 # for "trailing run of letters", `([a-zA-Z]*)$`, matched empty on this
 # platform's bash even against a string that plainly ends in letters —
 # measured, not assumed.
+#
+# 🔴 **Judged from the expression's FIRST LINE (fix round 2, B8, disclosure).**
+# `perl -ne` runs this block once per line and `exit`s on the first, so a
+# `case_` whose perl expression spans several physical lines is classified by
+# the trailing characters of line one — which are usually mid-pattern, not the
+# flags. Not a defect today, and re-derivable rather than remembered: sourcing
+# every case file with a recording `case_` gives 667 expressions, 8 of them
+# multi-line, and for each of those 8 the first line and the last agree (all
+# eight: no `/g`). It becomes a defect the day a multi-line expression carries
+# `/g` on its closing line: guard 3 would then demand exactly one occurrence of
+# a pattern written to match several, and report a BROKEN CASE about a case
+# that is fine.
+#
+# To re-derive, write a two-line recorder and source every case file with it:
+#
+#   case_() { printf '%s\\0' "$3"; }
+#   for f in scripts/mutations/*.sh; do . "$f"; done
+#
+# then split the output on NUL and compare, for each expression containing a
+# newline, the trailing letters of its first line against those of its last.
+# ⚠️ Run it with `< /dev/null`: one case file's expression otherwise consumes
+# the recorder's stdin and the sweep never finishes — measured, twice.
 expr_wants_every_match() {
   printf '%s' "$1" | perl -ne 'exit(/([a-zA-Z]*)$/ && $1 =~ /g/ ? 0 : 1)'
 }
