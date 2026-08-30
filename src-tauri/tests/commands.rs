@@ -468,12 +468,26 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     // thread.
     //
     // Enumerated from `#[tauri::command(async)]` in `src/`, not from a grep
-    // for this sentence: the phrasing is not the class. The list is every
-    // command in `bridge.rs`, `tree.rs`, `models.rs`, `walk_job.rs` and
-    // `embed_job.rs` that touches the index or the credential store; the five
-    // deliberately blocking ones are `start_probe_job`, `job_status`,
-    // `cancel_job`, `get_locale` and `set_locale`, and `cancel_job` is the
-    // counterweight below.
+    // for this sentence: the phrasing is not the class.
+    //
+    // ⚠️ **This list is not every `(async)` command, and saying so is part of
+    // the finding.** Re-derived from the attribute:
+    //
+    //     grep -c 'tauri::command(async)' src-tauri/src/*.rs
+    //
+    // gives 23, against 5 deliberately blocking ones (`start_probe_job`,
+    // `job_status`, `cancel_job`, `get_locale`, `set_locale`; `cancel_job` is
+    // the counterweight below, and `models.rs:287` names the attribute in a
+    // doc comment rather than using it). So 15 `(async)` commands — every one
+    // in `models.rs`, plus `list_tree`, `source_around`, `ask`,
+    // `set_search_arms`, `skips`, `add_watched_folder` and
+    // `remove_watched_folder` — are checked by nothing here.
+    //
+    // That is a gap this branch did not create and does not close, written
+    // down rather than left for the list's shape to imply it was considered.
+    // What the four below have in common with the four above them is that a
+    // person waits on them from the folder screen while a job holds the index
+    // mutex; the rest is one enumeration and belongs to whoever widens it.
     for cmd in [
         "open_index",
         "search",
