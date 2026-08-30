@@ -473,49 +473,77 @@
   // window; the alternative is a second record of what is open, and
   // `panel.tree` already answers that question.
   //
-  // 🔴 PR 8a, Task 8 fix round 2. `pass` is the ending's own, `null` only at
-  // `onMount` where there is no ending to have a pass. The RE-READ stays
-  // unconditional — an embedding pass moves `list_exclusions`' `existsOnDisk`
-  // and `list_subfolders` exactly as a walk can (D29 sends the same rename
-  // window through either). The WITHDRAWAL does not: it is spelled "a scan
-  // ended", and only a walk is one. A walk reads ONE folder and moves the two
-  // numbers `Pending` freezes (`jobs.ts`'s own words); an embedding pass covers
-  // the whole index, takes no root, and changes no rule and no file count for
-  // the folder the question is about — so a person's still-open press has
-  // nothing invalidated to withdraw it over. Reviewed and reproduced: raising
-  // an exclude question while a CHAINED embedding pass runs, then letting
-  // that pass end, used to discard the press and print "a scan ended" when
-  // none had.
-  function rereadPanels(pass: JobPass | null) {
+  // 🔴 PR 8a, Task 8 fix round 2. `reread`'s `pass` is the ending's own, `null`
+  // only at `onMount` where there is no ending to have a pass. The RE-READ
+  // below stays unconditional — an embedding pass moves `list_exclusions`'
+  // `existsOnDisk` and `list_subfolders` exactly as a walk can (D29 sends the
+  // same rename window through either). The WITHDRAWAL does not: it is spelled
+  // "a scan ended", and only a walk is one. A walk reads ONE folder and moves
+  // the two numbers `Pending` freezes (`jobs.ts`'s own words); an embedding
+  // pass covers the whole index, takes no root, and changes no rule and no file
+  // count for the folder the question is about — so a person's still-open press
+  // has nothing invalidated to withdraw it over. Reviewed and reproduced:
+  // raising an exclude question while a CHAINED embedding pass runs, then
+  // letting that pass end, used to discard the press and print "a scan ended"
+  // when none had. That is why the two live in separate functions, and fix
+  // round 1 then found the second reason they have to.
+
+  // 🔴 The question goes, and not in silence, ONLY on a walk's own ending.
+  // Its two numbers were read from a `list_tree` taken BEFORE this scan,
+  // and `Pending` freezes them on purpose: they cannot be corrected in
+  // place without renumbering a sentence somebody is part way through
+  // reading, and they cannot be left standing, because a walk ending is
+  // precisely the event that makes them wrong. The include question is no
+  // safer — it carries `existsOnDisk`, the one fact the rename that
+  // produced this defect invalidated. So the question is withdrawn and the
+  // panel says which folder it was about; pressing again asks it afresh
+  // against the state that is now on screen.
+  //
+  // `ask` and not `generations`: this is that counter's own meaning — the
+  // answer to a question already in flight has stopped being wanted — so a
+  // `checking` reply still on the wire raises nothing when it lands.
+  //
+  // 🔴 Fix round 1, I1. Its own function, called from `reread` BEFORE any I/O
+  // starts, and that placement is the whole finding. It used to sit at the top
+  // of `rereadPanels`, which runs inside `refresh().then(…)` — so a rejected
+  // `list_tree` at a walk's ending took the withdrawal down with it, and the
+  // ending is consumed exactly once (`seen = phase` advances first), so it
+  // never came back. The next successful `refresh` — a chained embedding
+  // ending, an add, a remove, none of which withdraw anything — then cleared
+  // `loadError` and redrew the panel WITH the question still standing, stating
+  // pre-scan numbers as current and carrying no `withdrawnNote` to say a scan
+  // had happened underneath it.
+  //
+  // The question is made wrong by the ENDING, not by a successful re-read, so
+  // nothing about withdrawing it may depend on a call that can fail. The
+  // direction is chosen and it is the safe one: a question withdrawn once too
+  // often costs a second press, a question left standing states frozen numbers
+  // as current, and under D29 the include question left standing is a person
+  // being asked to unprotect a folder on facts a scan has already moved.
+  function withdrawQuestions() {
     for (const [key, panel] of Object.entries(panels)) {
+      if (panel.pending === null) continue;
       const rootId = Number(key);
-      // 🔴 The question goes, and not in silence, ONLY on a walk's own ending.
-      // Its two numbers were read from a `list_tree` taken BEFORE this scan,
-      // and `Pending` freezes them on purpose: they cannot be corrected in
-      // place without renumbering a sentence somebody is part way through
-      // reading, and they cannot be left standing, because a walk ending is
-      // precisely the event that makes them wrong. The include question is no
-      // safer — it carries `existsOnDisk`, the one fact the rename that
-      // produced this defect invalidated. So the question is withdrawn and the
-      // panel says which folder it was about; pressing again asks it afresh
-      // against the state that is now on screen.
-      //
-      // `ask` and not `generations`: this is that counter's own meaning — the
-      // answer to a question already in flight has stopped being wanted — so a
-      // `checking` reply still on the wire raises nothing when it lands.
-      if (pass === 'walk' && panel.pending !== null) {
-        ask(rootId);
-        patch(rootId, { pending: null, withdrawn: panel.pending.path });
-      }
-      void read(rootId, openPathsOf(panel.tree));
+      ask(rootId);
+      patch(rootId, { pending: null, withdrawn: panel.pending.path });
+    }
+  }
+
+  function rereadPanels() {
+    for (const [key, panel] of Object.entries(panels)) {
+      void read(Number(key), openPathsOf(panel.tree));
     }
   }
 
   function reread(pass: JobPass | null) {
+    // Synchronous, and first: see `withdrawQuestions`. It reads no I/O and
+    // cannot fail, so there is no path on which a walk's ending leaves a
+    // pending question standing.
+    if (pass === 'walk') withdrawQuestions();
     // Panels after the roots, never beside them: `refresh` is what deletes the
     // expansion of a root that has gone, and a `list_subfolders` fired for that
     // root would answer with a rejection drawn into a panel about to vanish.
-    refresh().then(() => rereadPanels(pass)).catch((e) => {
+    refresh().then(rereadPanels).catch((e) => {
       loadError = e instanceof Error ? e.message : String(e);
     });
   }

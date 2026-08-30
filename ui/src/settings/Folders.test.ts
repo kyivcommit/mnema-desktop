@@ -1849,6 +1849,65 @@ test('an embedding pass ending does not withdraw a question raised after the wal
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
+// ── Fix round 1, I1 ─────────────────────────────────────────────────────────
+//
+// The withdrawal used to run inside `refresh().then(…)`, so a rejected
+// `list_tree` at a walk's ending took it down with the re-read — and the ending
+// is consumed once (`seen = phase` advances before `reread` is called), so it
+// never came back. The evidence was then wiped by an unrelated success: the
+// chained embedding pass's own ending refreshes fine, clears `loadError`, and
+// redraws the panel with the question still on it, stating numbers a scan has
+// already moved and carrying nothing to say a scan happened.
+//
+// The failure is driven through the real controller so the chaining is the
+// product's own: `answerModelSettingsReady` is what lets the walk's ending
+// start the embedding pass.
+test('a walk ending withdraws the question even when the re-read that follows it fails', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettingsReady();
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+
+  // Queued here and not at the top, so it is the re-read AT THE ENDING that
+  // fails and nothing earlier consumes it.
+  listTree.mockRejectedValueOnce(new Error('the folder list could not be read'));
+  endWalk();
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_embed_job')).toBe(true));
+
+  // The direction nobody asserted: the failure is visible rather than silent.
+  // While it stands, the panel is off screen entirely — which is exactly how
+  // the stale question used to survive unnoticed.
+  await waitFor(() => expect(visibleText(screen.getByTestId('folders-load-reason')))
+    .toBe('the folder list could not be read'));
+
+  // The unrelated success that used to wipe the evidence: the chained
+  // embedding pass ends, `list_tree` answers, `loadError` clears and the panel
+  // comes back.
+  endEmbed();
+  await waitFor(() => expect(screen.queryByTestId('folders-load-reason')).toBeNull());
+  await screen.findByTestId('folder-panel-1');
+
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
+    'The question about “drop” has been withdrawn: a scan ended and this panel was'
+    + ' read again. Press again if you still want to.',
+  );
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
 // M1. `settings_folders_question_withdrawn` was asserted only under
 // `setLocale('en')`, and `withdrawnNote` (Folders.svelte:829-832) needed its
 // own switch test by this file's own stated standard (`Folders.test.ts:1450`
