@@ -68,6 +68,11 @@
     // A fact, not an error, and stored as the fact rather than as its sentence
     // so a language switch re-renders it.
     alreadyGone: boolean;
+    // PR 8a, Task 8: the path a question was about when a job ending withdrew
+    // it, or `null`. The PATH and not the sentence, for the reason `Pending`
+    // carries numbers and `alreadyGone` is a boolean: a sentence frozen here
+    // would keep its language through a switch.
+    withdrawn: string | null;
     // PR 8a, Task 6: the question now in front of the person for this row, or
     // `null`. At most one per row — a second press replaces the first, so no
     // two questions about the same folder can be on screen disagreeing.
@@ -183,7 +188,7 @@
       ...panels,
       [rootId]: {
         tree: null, rules: null, loadError: null, actionError: null,
-        alreadyGone: false, pending: null,
+        alreadyGone: false, withdrawn: null, pending: null,
       },
     };
     void read(rootId, new Set());
@@ -289,7 +294,14 @@
   async function askExclude(rootId: number, path: string) {
     if (panels[rootId] === undefined) return;
     const generation = ask(rootId);
-    patch(rootId, { actionError: null, alreadyGone: false, pending: { kind: 'checking', path } });
+    // `withdrawn` is cleared HERE and in `askInclude`, and deliberately not
+    // also in `exclude`/`include`: every path into those two runs through one
+    // of these two functions first (`exclude`'s zero-cost shortcut included),
+    // so a third site would be a second guard over one fact.
+    patch(rootId, {
+      actionError: null, alreadyGone: false, withdrawn: null,
+      pending: { kind: 'checking', path },
+    });
     let listing: TreeListing;
     try {
       listing = await listTree();
@@ -340,7 +352,7 @@
     if (panels[rootId] === undefined) return;
     ask(rootId);
     patch(rootId, {
-      actionError: null, alreadyGone: false,
+      actionError: null, alreadyGone: false, withdrawn: null,
       pending: { kind: 'include', path, existsOnDisk },
     });
   }
@@ -430,8 +442,65 @@
     loadError = null; // a successful read is proof the earlier one is stale
   }
 
+  // ── PR 8a, Task 8. Live run, finding 1: what a finished scan leaves behind ─
+  //
+  // `refresh` re-reads the ROW — the roots and their counts — and nothing under
+  // it. An expanded panel is read from two other places, the disk
+  // (`list_subfolders`) and the stored rules (`list_exclusions`), and a scan
+  // ending is exactly the moment both can have moved: measured, `archive` was
+  // renamed to `Archive` between two scans, the walk indexed the folder again
+  // because the rule still names the old spelling byte for byte, and the row
+  // went on reading "archive — excluded by your rule" while that folder's text
+  // was on its way to the model provider (D29). Collapsing and re-expanding by
+  // hand was the only thing that corrected it.
+  //
+  // This is PR 7's finding 2 one level deeper, and the asymmetry argument
+  // written at the subscription below is the same one: a re-read that finds the
+  // listing unchanged rewrites it invisibly, a missed one leaves a falsehood a
+  // person can act on.
+  //
+  // 🔴 EVERY open panel, each with the subfolders that panel currently has
+  // open, so an ending that arrives while three roots are expanded does not
+  // shut two of them. Started together rather than one after another: the roots
+  // are independent — `read` checks THIS root's generation and `patch` writes
+  // into THIS root's panel — so the order between them is not observable, and
+  // awaiting one would hold the others stale for the length of its call.
+  //
+  // The limit, stated rather than left silent: `want` is taken from the tree
+  // the panel HOLDS, so an expand still on the wire when the ending lands is
+  // discarded with every other in-flight read and that subfolder does not open.
+  // `exclude` and `include` compute `want` the same way and have the same
+  // window; the alternative is a second record of what is open, and
+  // `panel.tree` already answers that question.
+  function rereadPanels() {
+    for (const [key, panel] of Object.entries(panels)) {
+      const rootId = Number(key);
+      // 🔴 The question goes, and not in silence. Its two numbers were read
+      // from a `list_tree` taken BEFORE this scan, and `Pending` freezes them
+      // on purpose: they cannot be corrected in place without renumbering a
+      // sentence somebody is part way through reading, and they cannot be left
+      // standing, because a scan is precisely the event that makes them wrong.
+      // The include question is no safer — it carries `existsOnDisk`, the one
+      // fact the rename that produced this defect invalidated. So the question
+      // is withdrawn and the panel says which folder it was about; pressing
+      // again asks it afresh against the state that is now on screen.
+      //
+      // `ask` and not `generations`: this is that counter's own meaning — the
+      // answer to a question already in flight has stopped being wanted — so a
+      // `checking` reply still on the wire raises nothing when it lands.
+      if (panel.pending !== null) {
+        ask(rootId);
+        patch(rootId, { pending: null, withdrawn: panel.pending.path });
+      }
+      void read(rootId, openPathsOf(panel.tree));
+    }
+  }
+
   function reread() {
-    refresh().catch((e) => {
+    // Panels after the roots, never beside them: `refresh` is what deletes the
+    // expansion of a root that has gone, and a `list_subfolders` fired for that
+    // root would answer with a rejection drawn into a panel about to vanish.
+    refresh().then(rereadPanels).catch((e) => {
       loadError = e instanceof Error ? e.message : String(e);
     });
   }
@@ -443,6 +512,10 @@
     // — a job ending. The row went on stating zero indexed documents while the
     // report under it said four had been added, and the index agreed with the
     // report, not with the row.
+    //
+    // Task 8 widened what that ending re-reads from the row to the panel under
+    // it as well — see `rereadPanels`, which is where the second half of this
+    // finding is written up.
     //
     // EVERY ending, not only a walk's, and the reason is asymmetry rather than
     // caution: a re-read that finds the same numbers rewrites them invisibly,
@@ -730,6 +803,13 @@
                 failedLabel: t('settings_subfolders_failed'),
                 actionError: panel.actionError,
                 note: panel.alreadyGone ? t('settings_folders_rule_already_gone') : null,
+                // Built here, inside the `void $locale` rebuild, for the reason
+                // `confirmView` is: the words follow a language switch, the
+                // path comes from the panel.
+                withdrawnNote:
+                  panel.withdrawn === null
+                    ? null
+                    : t('settings_folders_question_withdrawn', { path: panel.withdrawn }),
                 confirm: panel.pending === null ? null : confirmView(panel.pending),
                 // 🔴 A rule is "the folder is gone" when and only when its own
                 // `existsOnDisk` says so. Comparing this list against the
@@ -824,6 +904,9 @@
                 <p data-testid={`folder-subfolder-error-${root.rootId}`}>{panel.actionError}</p>
               {/if}
               {#if panel.note}<p data-testid={`folder-rule-note-${root.rootId}`}>{panel.note}</p>{/if}
+              {#if panel.withdrawnNote}
+                <p data-testid={`folder-question-withdrawn-${root.rootId}`}>{panel.withdrawnNote}</p>
+              {/if}
               <!-- The question, and nothing stored until it is answered. Placed
                    above the listing rather than inside the row that was
                    pressed: the re-read behind it can redraw that row, and a

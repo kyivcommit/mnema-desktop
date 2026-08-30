@@ -844,13 +844,13 @@ test('a root that disappears from the list takes its expansion with it', async (
 });
 
 // 🔴 Review finding I2. This case is `patch`'s early return
-// (`Folders.svelte:86`) and nothing else, and the shape of it was measured
+// (`Folders.svelte:126`) and nothing else, and the shape of it was measured
 // three times before it held.
 //
 // The write it pins is the one `exclude` makes AFTER the person has shut the
-// row: `await read(rootId, want)` on line `Folders.svelte:190` runs behind the
+// row: `await read(rootId, want)` on line `Folders.svelte:413` runs behind the
 // action, raises the generation itself, and so passes `read`'s own check
-// (`:127`) — the counter cannot stand in for the early return here, because
+// (`:167`) — the counter cannot stand in for the early return here, because
 // the counter is not what says no. With the early return dropped, `patch`
 // spreads a missing panel and BUILDS one out of the re-read's own fields, and
 // the row the person closed comes back open with the listing from before the
@@ -1070,7 +1070,7 @@ test('the expanded panel switches language with everything else on screen', asyn
   expect(screen.getByRole('button', { name: 'Підтеки теки /synthetic/root' })).toBeTruthy();
   // The visible button text, not just its aria-label — `expandLabel` and
   // `removeRuleLabel` each guard their own `void $locale` at
-  // Folders.svelte:755-756, outside `rows`.
+  // Folders.svelte:835-836, outside `rows`.
   expect(screen.getAllByText('Підтеки').length).toBeGreaterThan(0);
   expect(screen.getByText('Прибрати правило')).toBeTruthy();
 });
@@ -1447,13 +1447,13 @@ test('a rule whose folder is still there keeps the unconditional provider senten
   ].join(' '));
 });
 
-// Task 7. `confirmView` (Folders.svelte:682-707) builds the heading, the cost
+// Task 7. `confirmView` (Folders.svelte:755-780) builds the heading, the cost
 // sentence, and both aria-labels for the INCLUDE branch inside the same
 // `void $locale` block the exclude branch above already proves reactive — but
 // each branch is its own ternary arm, and a literal swapped in for one of
 // THESE calls specifically would not be caught by a switch test that only ever
 // reaches the exclude arm. Two states, `existsOnDisk` true here and false in
-// the test below, cover both halves of the cost ternary (Folders.svelte:693-698).
+// the test below, cover both halves of the cost ternary (Folders.svelte:766-771).
 test('the "stop excluding" question switches language with everything else', async () => {
   await openWithRule('en', [{ prefix: 'Old notes', existsOnDisk: true }]);
   await fireEvent.click(screen.getByRole('button', { name: REMOVE_RULE_LABEL.en }));
@@ -1547,7 +1547,7 @@ test('a question already on screen switches language with everything else', asyn
   ].join(' '));
   // The two aria-labels `visibleText` cannot see: `confirmAriaLabel` and
   // `cancelAriaLabel` are the same `void $locale` block, but each is its own
-  // `t()` call (Folders.svelte:700-705) and neither is a text node.
+  // `t()` call (Folders.svelte:773-778) and neither is a text node.
   expect(screen.getByRole('button', { name: 'Підтвердити виключення drop' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Залишити drop як є' })).toBeTruthy();
 });
@@ -1573,7 +1573,7 @@ test('the wait for the fresh reply says what is being checked', async () => {
     .toBe('Checking what this exclusion removes…');
   expect(excludeSubfolder).not.toHaveBeenCalled();
 
-  // Task 7. `checkingLabel` (Folders.svelte:684) is its own branch of
+  // Task 7. `checkingLabel` (Folders.svelte:757) is its own branch of
   // `confirmView`, reached only in the gap this test holds open — a switch
   // test landing after `release()` would never pass through here at all.
   setLocale('uk');
@@ -1617,6 +1617,156 @@ test('a row shut while the check is in flight raises no question when the reply 
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+
+  release(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]));
+  await tick();
+  await tick();
+
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// ── PR 8a, Task 8: a job ending re-reads the panel, not only the row ─────────
+//
+// The live run's finding 1, in this file's own terms. `Indexing.test.ts` holds
+// the whole-window form — the renamed folder that went on reading "excluded by
+// your rule" while its text was being sent to the provider. What is here is the
+// machinery that form cannot reach: several roots open at once, and a question
+// standing on screen when the ending lands.
+//
+// Driven through the REAL controller and the real `startWalkJob`, so what is
+// exercised is the wiring a press goes through rather than a store shaped like
+// one. `model_settings` answers "there is no key", which stops the chained
+// embedding pass inside the controller's own pre-check — a second job would
+// send a second ending, and every assertion below is about what ONE ending
+// does.
+function answerModelSettings() {
+  invoke.mockImplementation((cmd: string) =>
+    Promise.resolve(cmd === 'model_settings' ? { key: { kind: 'absent' } } : undefined));
+}
+
+function endWalk() {
+  const call = [...invoke.mock.calls].reverse().find((c) => c[0] === 'start_walk_job');
+  if (call === undefined) throw new Error('start_walk_job was never invoked');
+  (call[1] as { onProgress: { onmessage: (e: unknown) => void } }).onProgress.onmessage({
+    event: 'ended',
+    data: {
+      reason: 'completed', done: 1, total: 1, skipped: 0, refused: 0, complete: true,
+      indexed: 1, unchanged: 0, removed: 0, frozen: [], message: null,
+    },
+  });
+}
+
+test('a job ending re-reads every expanded panel, not only the root whose Scan was pressed', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettings();
+  listTree.mockResolvedValue(listing(EMPTY_ROOTS));
+  listSubfolders.mockImplementation((rootId: number) =>
+    Promise.resolve(subfolders([sub(rootId === 1 ? 'first-before' : 'second-before')])));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await fireEvent.click(screen.getByTestId('folder-expand-2'));
+  await screen.findByTestId('subfolder-1-first-before');
+  await screen.findByTestId('subfolder-2-second-before');
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  // Swapped only after the walk has started, so the new names can reach the
+  // screen only by both panels being READ again.
+  listSubfolders.mockImplementation((rootId: number) =>
+    Promise.resolve(subfolders([sub(rootId === 1 ? 'first-after' : 'second-after')])));
+
+  endWalk();
+
+  await screen.findByTestId('subfolder-1-first-after');
+  // 🔴 The root nobody pressed Scan on. Narrowing the re-read to the pressed
+  // root would leave this panel stale — and there is nothing to narrow it BY:
+  // an `Ending` (`jobs.ts`) carries counts and an outcome and no root at all,
+  // and `runningUnobserved` is the state where this window has no channel to
+  // read one from even in principle.
+  expect(screen.getByTestId('subfolder-2-second-after')).toBeTruthy();
+  expect(screen.queryByTestId('subfolder-1-first-before')).toBeNull();
+  expect(screen.queryByTestId('subfolder-2-second-before')).toBeNull();
+});
+
+// The question's two numbers were read from a `list_tree` taken BEFORE the
+// scan, and `Pending` freezes them so the sentence cannot renumber itself under
+// somebody reading it. A scan ending is the event that makes them wrong, so the
+// question goes — and it goes visibly, because a press that vanishes without a
+// word is its own kind of falsehood.
+test('a question standing when a job ends is withdrawn by name, and nothing is stored', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettings();
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+  // Both directions: the question is on screen and unwithdrawn until the ending.
+  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  endWalk();
+
+  await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
+  expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
+    'The question about “drop” has been withdrawn: a scan ended and this panel was'
+    + ' read again. Press again if you still want to.',
+  );
+  // Withdrawn, not answered: a question taken off the screen must not store the
+  // rule it was asking about.
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+
+  // And asking again clears the note rather than leaving it beside a live
+  // question about the same folder.
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
+});
+
+// The same withdrawal one step earlier, where the generation counter is what
+// does the work: the press has been made, the `list_tree` behind it is still on
+// the wire, and there is no question on screen yet to remove. `ask` is bumped,
+// so the reply raises nothing when it lands — and the person is told which
+// press it was that came to nothing.
+test('a check still in flight when a job ends raises no question when its reply lands', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettings();
+  let release: (v: TreeListing) => void = () => {};
+  listTree.mockResolvedValueOnce(listing(EMPTY_ROOTS));
+  listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => { release = r; }));
+  listTree.mockResolvedValue(listing(EMPTY_ROOTS));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  expect(visibleText(await screen.findByTestId('folder-confirm-1')))
+    .toBe('Checking what this exclusion removes…');
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  endWalk();
+  await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
+  expect(screen.getByTestId('folder-question-withdrawn-1')).toBeTruthy();
 
   release(listing([
     root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),

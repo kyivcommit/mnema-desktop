@@ -22,6 +22,10 @@
 #   the shut-row guard  — `patch` writes nothing into a panel that is gone
 #   the excluded toggle — an excluded folder can still be opened and looked into
 #   the two locale anchors — `void $locale` on the expand and remove-rule labels
+#   the panel re-read   — a finished scan re-reads the panel, not only the row
+#   the panel loop      — every open panel, by the paths that panel has open
+#   the withdrawal      — a question standing when a job ends is taken back
+#   the withdrawal's bump — and the check already on the wire is stopped with it
 #
 # ⚠️ **One case here mutates Rust and is killed by a TypeScript test**, which is
 # the pairing the wire pin exists for: Rust and TypeScript share no compiler, so
@@ -58,9 +62,12 @@
 # ⚠️ **Task 6's reverts 5, 6 and 7 are not covered by any class above.** The
 # `paths === 0` shortcut, storing immediately instead of raising the question,
 # and storing anyway after a rejected `list_tree` are the confirm-question
-# flow — `askExclude`/`askInclude` at `Folders.svelte:289-345`, guarded at
-# `:309` by `if (cost.paths === 0)`. That flow lives in the same file this
-# case file covers, and none of the six cases here pins it.
+# flow — `askExclude`/`askInclude` at `Folders.svelte:294-358`, guarded at
+# `:321` by `if (cost.paths === 0)`. That flow lives in the same file this
+# case file covers. Task 8's cases reach one edge of it — a question WITHDRAWN
+# by a job ending, and the generation bump that goes with it — and pin none of
+# the three reverts named above: the shortcut itself, storing immediately
+# instead of asking, and storing anyway after a rejected `list_tree`.
 
 # Task 5, and the direction `Record<SubfolderState['kind'], …>` cannot see: that
 # annotation checks the union against ITSELF, so it is satisfied by a union one
@@ -108,8 +115,8 @@ case_ "the row's controls must be named, because undefined is not 'none'" \
 # `aria-expanded`.
 case_ "a write into a panel that is gone must be dropped, not turned into a new panel" \
   ui/src/settings/Folders.svelte \
-  "s{    if \(panel === undefined\) return; // the row was shut while this was running\n    panels = \{ \.\.\.panels, \[rootId\]: \{ \.\.\.panel, \.\.\.fields \} \};}{    panels = \{ ...panels, [rootId]: \{ ...(panel ?? \{ tree: null, rules: null, loadError: null, actionError: null, alreadyGone: false, pending: null \}), ...fields \} \};}" \
-  "    panels = { ...panels, [rootId]: { ...(panel ?? { tree: null, rules: null, loadError: null, actionError: null, alreadyGone: false, pending: null }), ...fields } };" \
+  "s{    if \(panel === undefined\) return; // the row was shut while this was running\n    panels = \{ \.\.\.panels, \[rootId\]: \{ \.\.\.panel, \.\.\.fields \} \};}{    panels = \{ ...panels, [rootId]: \{ ...(panel ?? \{ tree: null, rules: null, loadError: null, actionError: null, alreadyGone: false, withdrawn: null, pending: null \}), ...fields \} \};}" \
+  "    panels = { ...panels, [rootId]: { ...(panel ?? { tree: null, rules: null, loadError: null, actionError: null, alreadyGone: false, withdrawn: null, pending: null }), ...fields } };" \
   src/settings/Folders.test.ts 'a row shut while an exclude is in flight is not re-opened by the re-read behind it' runner=vitest
 
 # Task 5. An excluded folder is still one a person can look inside, even though
@@ -142,3 +149,57 @@ case_ "the remove-rule label must read the locale, or it freezes at the first re
   "s{const removeRuleLabel = \\\$derived\.by\(\(\) => \{ void \\\$locale; return t\('settings_folders_rule_remove'\); \}\);}{const removeRuleLabel = \\\$derived.by(() => t('settings_folders_rule_remove'));}" \
   "const removeRuleLabel = \$derived.by(() => t('settings_folders_rule_remove'));" \
   src/settings/Folders.test.ts 'the expanded panel switches language with everything else on screen' runner=vitest
+
+# ── Task 8: what a finished scan re-reads ────────────────────────────────────
+#
+# The live run's finding 1. `refresh` re-read the ROW and nothing under it, so a
+# panel open across a scan went on showing the listing and the rules from before
+# it: measured on a case-only rename, the row read "archive — Виключено вашим
+# правилом" while that same folder's text was being sent to the model provider,
+# because the rule names `archive` and the folder had become `Archive`. This is
+# the exact line the file used to have, and the whole-window test is the one
+# that dies on it.
+case_ "a finished scan must re-read the panel, not only the row above it" \
+  ui/src/settings/Folders.svelte \
+  "s{    refresh\(\)\.then\(rereadPanels\)\.catch\(\(e\) => \{}{    refresh().catch((e) => \{}" \
+  "    refresh().catch((e) => {" \
+  src/settings/Indexing.test.ts 'a finished scan re-reads the open panel, so a renamed folder stops reading as excluded' runner=vitest
+
+# The half of `rereadPanels` that reads. Deleting it leaves the withdrawal
+# behind, which is why the withdrawal test is NOT the one named here: measured,
+# that test still passes against this mutation. The panel test dies on the
+# subfolder that never arrives — `Unable to find an element by:
+# [data-testid="subfolder-1-first-after"]`.
+case_ "every open panel must be re-read, and by the set of paths it has open" \
+  ui/src/settings/Folders.svelte \
+  "s{      void read\(rootId, openPathsOf\(panel\.tree\)\);\n}{}" \
+  "      }
+    }
+  }
+
+  function reread() {" \
+  src/settings/Folders.test.ts 'a job ending re-reads every expanded panel, not only the root whose Scan was pressed' runner=vitest
+
+# The other half, and the mirror of the case above: deleting the withdrawal
+# leaves the read, and the panel test passes against it. A question left
+# standing is a question whose two numbers were read from a `list_tree` taken
+# before this scan — and the sentence a person answers must not be one the
+# ending has already falsified.
+case_ "a question standing when a job ends must be withdrawn, not left over the new listing" \
+  ui/src/settings/Folders.svelte \
+  "s{      if \(panel\.pending !== null\) \{\n        ask\(rootId\);\n        patch\(rootId, \{ pending: null, withdrawn: panel\.pending\.path \}\);\n      \}\n}{}" \
+  "      // \`checking\` reply still on the wire raises nothing when it lands.
+      void read(rootId, openPathsOf(panel.tree));" \
+  src/settings/Folders.test.ts 'a question standing when a job ends is withdrawn by name, and nothing is stored' runner=vitest
+
+# And the generation bump inside it, which clearing `pending` alone does not do.
+# Without it the press whose `list_tree` was still on the wire when the ending
+# landed comes back as a question — over the listing that has just replaced the
+# one it was asked about. Anchored on the two lines together because
+# `ask(rootId);` occurs eight times in this file.
+case_ "withdrawing a question must also stop the check already on the wire" \
+  ui/src/settings/Folders.svelte \
+  "s{        ask\(rootId\);\n        patch\(rootId, \{ pending: null, withdrawn: panel\.pending\.path \}\);}{        patch(rootId, \{ pending: null, withdrawn: panel.pending.path \});}" \
+  "      if (panel.pending !== null) {
+        patch(rootId, { pending: null, withdrawn: panel.pending.path });" \
+  src/settings/Folders.test.ts 'a check still in flight when a job ends raises no question when its reply lands' runner=vitest

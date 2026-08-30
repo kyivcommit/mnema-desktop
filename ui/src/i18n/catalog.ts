@@ -52,7 +52,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_folders_rules_heading' | 'settings_folders_rules_none'
   | 'settings_folders_rule_gone' | 'settings_folders_rule_cost'
   | 'settings_folders_rule_remove' | 'settings_folders_rule_remove_named'
-  | 'settings_folders_rule_already_gone'
+  | 'settings_folders_rule_already_gone' | 'settings_folders_question_withdrawn'
   | 'settings_folders_exclude_checking' | 'settings_folders_exclude_cost'
   | 'settings_folders_include_cost' | 'settings_folders_include_cost_gone'
   | 'settings_folders_confirm_exclude_heading' | 'settings_folders_confirm_include_heading'
@@ -368,6 +368,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `include_subfolder` відповідає, чи справді щось прибрали (bridge.rs).
     // «Правила вже не було» — не помилка, а факт про екран, який застарів.
     settings_folders_rule_already_gone: 'Такого правила вже не було. Список перечитано.',
+    // PR 8a, Task 8. Числа в питанні заморожені на мить натиску (`Pending`), а
+    // сканування — це саме та подія, після якої вони брешуть. Мовчки прибрати
+    // питання не можна: натиск людини зник би без сліду. Тому питання знімають
+    // і кажуть, про яку теку воно було.
+    settings_folders_question_withdrawn: 'Питання про «{path}» знято: сканування закінчилося, і цю панель перечитано. Натисніть ще раз, якщо це досі потрібно.',
     // ── PR 8a, Task 6: що коштує виключення, сказане ДО збереження ──────────
     //
     // Натиснута кнопка перечитує `list_tree` — число зі старого знімка описує
@@ -623,6 +628,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_rule_remove: 'Remove the rule',
     settings_folders_rule_remove_named: 'Remove the rule on {prefix}',
     settings_folders_rule_already_gone: 'There was no such rule left to remove. The list has been re-read.',
+    settings_folders_question_withdrawn: 'The question about “{path}” has been withdrawn: a scan ended and this panel was read again. Press again if you still want to.',
     settings_folders_exclude_checking: 'Checking what this exclusion removes…',
     settings_folders_exclude_cost: 'As of now: on the next scan the index loses {paths, plural, one {# file} other {# files}} from this folder, and {documents, plural, =0 {no document stops being findable — each is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}.',
     settings_folders_include_cost: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider.',

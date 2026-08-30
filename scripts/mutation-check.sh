@@ -68,7 +68,7 @@
 # status. It reads the printed counts, and an `Errors` line is a BROKEN CASE —
 # the same verdict a mutation that does not compile gets, because it is the same
 # fact: the test did not run against the mutation. Measured, at c12fb9d:
-# deleting `patch`'s early return (`ui/src/settings/Folders.svelte:121`) is
+# deleting `patch`'s early return (`ui/src/settings/Folders.svelte:126`) is
 # exactly this shape, and `scripts/mutations/pr8-ui-folders.sh` mutates that
 # guard a second way instead — a fresh panel rather than a deleted line — which
 # renders, so the oracle survives to answer, and it answers red.
