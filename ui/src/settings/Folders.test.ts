@@ -2478,3 +2478,195 @@ test('the withdrawn-question note switches language with everything else', async
     + ' Натисніть ще раз, якщо це досі потрібно.',
   );
 });
+
+// ---------------------------------------------------------------------------
+// PR 8a, fix round 5 — the SECOND and THIRD sites of round 4's own rule.
+//
+// Round 4 taught `refresh` that a panel belongs to a folder and not to a
+// number. `askExclude` went on matching a fresh `list_tree` on the id alone, so
+// the question quoted another folder's file and document counts under this
+// folder's row and stored this folder's relative path on the new root's id.
+// `askInclude` read no listing at all, which is the worse half: it went
+// straight to `include_subfolder` and could take a person's rule off a folder
+// they never pointed at — under D29 that folder's text is at the model provider
+// after the next scan.
+//
+// 🔴 Every fixture below moves BOTH ends of the identity, and that is what
+// makes it a test of the rule rather than of half of it: the panel's id (9)
+// comes back naming a different folder, AND the panel's own path comes back
+// under a different id. A predicate that asked only "is this path still in the
+// listing" is green on an id-only fixture; one that asked only "is this id
+// still in the listing" is green on a path-only one.
+//
+// The pairs are pairs for the reason round 4's are: a guard that refuses
+// everything satisfies every assertion about a refusal. The one-line mutants,
+// named in advance:
+//   `if (!namesFolder(listing, rootId, panel.rootPath))` deleted at either site
+//     → that site's refusal test fails, its "still asks" twin stays green;
+//   the same condition replaced by `if (true)` at either site
+//     → that site's "still asks" test fails, its refusal twin stays green.
+const REUSED_ID = [
+  // The id the panel was opened under, now naming another folder — and holding
+  // two indexed paths under `Work`, so a question asked from it would be a
+  // question quoting numbers this person's folder never had.
+  root({
+    rootId: 9,
+    absolutePath: '/synthetic/gamma',
+    files: [file('Work/x.md', 'doc-x'), file('Work/y.md', 'doc-y')],
+  }),
+  // And the panel's own folder, still watched, under a different id.
+  root({ rootId: 4, absolutePath: '/synthetic/beta', files: [] }),
+];
+
+const CHANGED_NOTE_EN =
+  'This folder is no longer the one that was on screen: another folder has taken its place.'
+  + ' Nothing was changed, and the list has been re-read.';
+
+async function openBetaPanel(entries: Subfolder[], rules: StoredExclusion[]) {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing([
+    root({ rootId: 9, absolutePath: '/synthetic/beta' }),
+    root({ rootId: 4, absolutePath: '/synthetic/alpha' }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders(entries));
+  listExclusions.mockResolvedValue(rules);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/beta')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-9'));
+  await waitFor(() => expect(screen.getByTestId('folder-rules-9')).toBeTruthy());
+}
+
+test('an exclude question is not asked when the id now names another folder, and quotes none of its numbers', async () => {
+  await openBetaPanel([sub('Work')], []);
+  // Everything from the press on reads the changed world, the re-read included.
+  listTree.mockResolvedValue(listing(REUSED_ID));
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
+
+  await waitFor(() => expect(screen.getByTestId('folders-root-changed')).toBeTruthy());
+  expect(visibleText(screen.getByTestId('folders-root-changed'))).toBe(CHANGED_NOTE_EN);
+  // Not merely "no question": none of gamma's numbers is on screen under
+  // beta's row, which is the sentence the defect actually produced.
+  expect(screen.queryByTestId('folder-confirm-9')).toBeNull();
+  expect(screen.queryByText(/2 files/)).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+  // The panel belongs to the folder, so it goes with it, and the list now shows
+  // what is at that id.
+  await waitFor(() => expect(screen.queryByTestId('folder-panel-9')).toBeNull());
+  expect(screen.getByText('/synthetic/gamma')).toBeTruthy();
+
+  setLocale('uk');
+  await tick();
+  expect(visibleText(screen.getByTestId('folders-root-changed'))).toBe(
+    'Ця тека вже не та, що була на екрані: її місце посіла інша.'
+    + ' Нічого не змінено, список перечитано.',
+  );
+});
+
+// The other direction, and the fixture still moves a root: ANOTHER folder has
+// changed hands between the two reads, and this panel's has not. A guard that
+// asked whether the listing as a whole had moved would refuse here.
+test('an exclude question is asked as before when this folder\'s id and path still agree', async () => {
+  await openBetaPanel([sub('Work')], []);
+  listTree.mockResolvedValue(listing([
+    root({
+      rootId: 9,
+      absolutePath: '/synthetic/beta',
+      files: [file('Work/x.md', 'doc-x'), file('Work/y.md', 'doc-y')],
+    }),
+    root({ rootId: 7, absolutePath: '/synthetic/alpha', files: [] }),
+  ]));
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-9'))).toBe([
+    'Exclude Work?',
+    'As of now: on the next scan the index loses 2 files from this folder,',
+    'and 2 documents stop being findable: no other path names them.',
+    'Confirm Cancel',
+  ].join(' '));
+  expect(screen.queryByTestId('folders-root-changed')).toBeNull();
+});
+
+// 🔴 The mirror, and the one that removes protection rather than over-warning.
+test('a rule is not removed when the id now names another folder, and no question offers to', async () => {
+  await openBetaPanel([sub('Archive', { kind: 'excluded' })], [{ prefix: 'Archive', existsOnDisk: true }]);
+  listTree.mockResolvedValue(listing(REUSED_ID));
+  includeSubfolder.mockResolvedValue(true);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive' }));
+
+  await waitFor(() => expect(screen.getByTestId('folders-root-changed')).toBeTruthy());
+  expect(visibleText(screen.getByTestId('folders-root-changed'))).toBe(CHANGED_NOTE_EN);
+  // The control that would take the rule away is not on screen at all: a person
+  // cannot confirm a removal on a folder they never pointed at.
+  expect(screen.queryByTestId('folder-confirm-9')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Confirm not excluding Archive' })).toBeNull();
+  expect(includeSubfolder).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.queryByTestId('folder-panel-9')).toBeNull());
+});
+
+test('a rule removal is asked about and goes through when this folder\'s id and path still agree', async () => {
+  await openBetaPanel([sub('Archive', { kind: 'excluded' })], [{ prefix: 'Archive', existsOnDisk: true }]);
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 9, absolutePath: '/synthetic/beta', files: [] }),
+    root({ rootId: 7, absolutePath: '/synthetic/alpha', files: [] }),
+  ]));
+  includeSubfolder.mockResolvedValue(true);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-9'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again,',
+    'and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '));
+  expect(screen.queryByTestId('folders-root-changed')).toBeNull();
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Archive' }));
+  await waitFor(() => expect(includeSubfolder).toHaveBeenCalledWith(9, 'Archive'));
+});
+
+// The gap this press now has and did not have before, in both languages. The
+// exclude wait says what it is costing; this one is not costing anything, and a
+// shared sentence would tell a person their removal is being counted up.
+test('the wait before a rule removal says what it is checking, and switches language', async () => {
+  setLocale('en'); // seed, do not inherit
+  let release: (v: TreeListing) => void = () => {};
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 9, absolutePath: '/synthetic/beta' })]));
+  listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => { release = r; }));
+  listSubfolders.mockResolvedValue(subfolders([sub('Archive', { kind: 'excluded' })]));
+  listExclusions.mockResolvedValue([{ prefix: 'Archive', existsOnDisk: true }]);
+  includeSubfolder.mockResolvedValue(true);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/beta')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-9'));
+  await waitFor(() => expect(screen.getByTestId('folder-rules-9')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-9')))
+    .toBe('Checking that this is still the same folder…');
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  setLocale('uk');
+  await tick();
+  expect(visibleText(screen.getByTestId('folder-confirm-9')))
+    .toBe('Перевіряємо, що це досі та сама тека…');
+  setLocale('en');
+  await tick();
+
+  release(listing([root({ rootId: 9, absolutePath: '/synthetic/beta' })]));
+  await waitFor(() => expect(visibleText(screen.getByTestId('folder-confirm-9'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again,',
+    'and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' ')));
+});

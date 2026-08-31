@@ -33,6 +33,10 @@
 #                            id has been handed to another folder (round 4, I1)
 #   the list's own generation — the older `list_tree` of two overlapping ones
 #                            writes nothing, resolved or rejected (round 4, I2)
+#   the question's own identity — the SAME rule at the two sites that act on it:
+#                            a question is asked, and a rule is removed, only
+#                            while the id and the path still agree, and only the
+#                            press whose folder moved is refused (round 5)
 #
 # ⚠️ **One case here mutates Rust and is killed by a TypeScript test**, which is
 # the pairing the wire pin exists for: Rust and TypeScript share no compiler, so
@@ -275,10 +279,15 @@ case_ "the withdrawal must not depend on a call that can fail" \
 # This one is the shape the branch had before the fix: the id is present, so
 # the panel is kept, and the old folder's subfolders are drawn under the new
 # folder's path.
+#
+# ⚠️ Fix round 5 moved the comparison itself into `namesFolder`, which all three
+# sites now call, so these two mutate the CALL and not the comparison: a mutant
+# inside the predicate would change what all three sites decide at once and say
+# nothing about any of them.
 case_ "a panel must not be kept by an id that now names a different folder" \
   ui/src/settings/Folders.svelte \
-  "s{      if \(live\.get\(rootId\) === panel\.rootPath\) \{}{      if (live.has(rootId)) \{ /* mutant: the id alone */}" \
-  "if (live.has(rootId)) { /* mutant: the id alone */" \
+  "s{      if \(namesFolder\(listing, rootId, panel\.rootPath\)\) \{}{      if (listing.roots.some((r) => r.rootId === rootId)) \{ /* mutant: the id alone */}" \
+  "if (listing.roots.some((r) => r.rootId === rootId)) { /* mutant: the id alone */" \
   src/settings/Folders.test.ts 'a root id handed to a different folder does not keep the old' runner=vitest
 
 # And its mirror, which is the reason the pair exists at all: a prune that drops
@@ -288,7 +297,7 @@ case_ "a panel must not be kept by an id that now names a different folder" \
 # the one named below, which is the case written for this direction.
 case_ "a panel whose folder is unchanged must survive the refresh" \
   ui/src/settings/Folders.svelte \
-  "s{      if \(live\.get\(rootId\) === panel\.rootPath\) \{\n        kept\[rootId\] = panel;}{      if (false) \{ /* mutant: nothing survives */\n        kept[rootId] = panel;}" \
+  "s{      if \(namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n        kept\[rootId\] = panel;}{      if (false) \{ /* mutant: nothing survives */\n        kept[rootId] = panel;}" \
   "if (false) { /* mutant: nothing survives */" \
   src/settings/Folders.test.ts 'a refresh that finds the same folder under the same id keeps its expansion open' runner=vitest
 
@@ -318,3 +327,61 @@ case_ "a stale list_tree REJECTION must not print a failure over a newer answer"
   "s{\n      if \(refreshes !== generation\) return;\n      throw e;}{\n      /* mutant: a stale rejection is not stale */\n      throw e;}" \
   "/* mutant: a stale rejection is not stale */" \
   src/settings/Folders.test.ts 'a list_tree rejection that lands after a newer answer prints no failure over it' runner=vitest
+
+# ── Fix round 5: the second and third sites of round 4's own rule ─────────────
+#
+# Round 4 taught `refresh` that a panel belongs to a folder rather than to a
+# number, and left the same question being asked of the id alone at the two
+# places that ACT on it. `askExclude` matched a fresh `list_tree` on the id, so
+# with the id handed to another folder the question quoted that folder's file
+# and document counts under this folder's row (measured: the DOM under the
+# first mutant below carries `Exclude Work?`, `loses 2 files from this folder`
+# and `2 documents stop being findable` inside `folder-confirm-9`, whose row
+# reads `/synthetic/beta`). `askInclude` read no listing at all and went
+# straight to a control that removes a rule — under D29, protection taken off a
+# folder the person never pointed at.
+#
+# Four cases, in two pairs, for the reason round 4's two are a pair: a guard
+# that refuses everything satisfies every assertion about a refusal, and a guard
+# that is not there satisfies every assertion about a question being asked. Each
+# "refuse everything" mutant is broad — 17 and 16 tests in this file
+# respectively — and the harness runs only the one named on the case, which is
+# the test written for that direction.
+#
+# The predicate itself is deliberately not mutated anywhere: `namesFolder` is
+# called from all three sites, so a mutant inside it changes what all three
+# decide at once and pins none of them.
+case_ "an exclude question must not be built from a listing that no longer names this folder" \
+  ui/src/settings/Folders.svelte \
+  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    const cost}{    /* mutant: the id alone decides the count */\n    const cost}" \
+  "/* mutant: the id alone decides the count */" \
+  src/settings/Folders.test.ts 'an exclude question is not asked when the id now names another folder' runner=vitest
+
+case_ "an exclude question must still be asked when the id and the path agree" \
+  ui/src/settings/Folders.svelte \
+  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    const cost}{    if (true) \{ /* mutant: every question refused */\n      abandonChangedFolder(rootId);\n      return;\n    \}\n    const cost}" \
+  "if (true) { /* mutant: every question refused */" \
+  src/settings/Folders.test.ts 'an exclude question is asked as before when this folder' runner=vitest
+
+# The mirror, and the half that removes protection rather than over-warning.
+case_ "a rule must not be removed on a folder the listing no longer puts at this id" \
+  ui/src/settings/Folders.svelte \
+  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    patch\(rootId, \{\n      // Read from}{    /* mutant: no listing is consulted before the removal */\n    patch(rootId, \{\n      // Read from}" \
+  "/* mutant: no listing is consulted before the removal */" \
+  src/settings/Folders.test.ts 'a rule is not removed when the id now names another folder' runner=vitest
+
+case_ "a rule removal must still be asked about when the id and the path agree" \
+  ui/src/settings/Folders.svelte \
+  "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    patch\(rootId, \{\n      // Read from}{    if (true) \{ /* mutant: every removal refused */\n      abandonChangedFolder(rootId);\n      return;\n    \}\n    patch(rootId, \{\n      // Read from}" \
+  "if (true) { /* mutant: every removal refused */" \
+  src/settings/Folders.test.ts 'a rule removal is asked about and goes through when this folder' runner=vitest
+
+# And the sentence the new wait says. Not a locale-string pin — the string is
+# pinned by an ordinary test — but a BRANCH: `confirmView` picks between two
+# `checking` sentences on `Pending.of`, and a press routed to the other one
+# tells a person their removal is being costed up when nothing is being counted.
+case_ "the wait before a removal must not say it is costing an exclusion" \
+  ui/src/settings/Folders.svelte \
+  "s{      pending: \{ kind: 'checking', path, of: 'include' \},}{      pending: \{ kind: 'checking', path, of: 'exclude' \}, /* mutant: one sentence over both waits */}" \
+  "of: 'exclude' }, /* mutant: one sentence over both waits */" \
+  src/settings/Folders.test.ts 'the wait before a rule removal says what it is checking' runner=vitest

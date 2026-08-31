@@ -54,7 +54,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_folders_rule_cost_held_below'
   | 'settings_folders_rule_remove' | 'settings_folders_rule_remove_named'
   | 'settings_folders_rule_already_gone' | 'settings_folders_question_withdrawn'
-  | 'settings_folders_exclude_checking' | 'settings_folders_exclude_cost'
+  | 'settings_folders_exclude_checking' | 'settings_folders_include_checking'
+  | 'settings_folders_folder_changed' | 'settings_folders_exclude_cost'
   | 'settings_folders_include_cost' | 'settings_folders_include_cost_held_below'
   | 'settings_folders_include_cost_gone'
   | 'settings_folders_confirm_exclude_heading' | 'settings_folders_confirm_include_heading'
@@ -405,6 +406,17 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Натиснута кнопка перечитує `list_tree` — число зі старого знімка описує
     // мить, яка вже минула. Поки відповідь у дорозі, натиск має бути видимим.
     settings_folders_exclude_checking: 'Перевіряємо, що прибере це виключення…',
+    // PR 8a, коло виправлень 5. Натиск «прибрати правило» теж чекає на
+    // `list_tree`, але з іншої причини: він нічого не рахує, він з'ясовує, чи це
+    // досі та сама тека. Спільне речення на два очікування було б неправдою про
+    // одне з них.
+    settings_folders_include_checking: 'Перевіряємо, що це досі та сама тека…',
+    // 🔴 PR 8a, коло виправлень 5. `watched_root.id` — це `INTEGER PRIMARY KEY`
+    // без `AUTOINCREMENT`, тож SQLite видає видалений ідентифікатор наступній
+    // теці. Панель могли відкрити для однієї теки, а той самий ідентифікатор
+    // тепер належить іншій — і тоді дія пішла б не на ту теку. Нічого не
+    // збережено; список перечитано, щоб на екрані була та тека, яка там є.
+    settings_folders_folder_changed: 'Ця тека вже не та, що була на екрані: її місце посіла інша. Нічого не змінено, список перечитано.',
     // 🔴 ДВА числа, і вони про різні речі. `paths` — проіндексовані шляхи під
     // цим префіксом; `documents` — документи, у яких жодного шляху поза ним не
     // лишається. Документ живий, доки його називає бодай один шлях
@@ -668,6 +680,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_rule_already_gone: 'There was no such rule left to remove. The list has been re-read.',
     settings_folders_question_withdrawn: 'The question about “{path}” has been withdrawn: a scan ended and this panel was read again. Press again if you still want to.',
     settings_folders_exclude_checking: 'Checking what this exclusion removes…',
+    settings_folders_include_checking: 'Checking that this is still the same folder…',
+    settings_folders_folder_changed: 'This folder is no longer the one that was on screen: another folder has taken its place. Nothing was changed, and the list has been re-read.',
     settings_folders_exclude_cost: 'As of now: on the next scan the index loses {paths, plural, one {# file} other {# files}} from this folder, and {documents, plural, =0 {no document stops being findable — each is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}.',
     settings_folders_include_cost: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider.',
     settings_folders_include_cost_held_below: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider — except what your other rules further down this path still exclude.',

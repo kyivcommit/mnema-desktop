@@ -40,6 +40,17 @@
   // beside no lead-in of this component's own — §10: a rejection arrives as
   // a sentence, never a kind, and no re-read is implied by it.
   let actionError = $state<string | null>(null);
+  // 🔴 PR 8a, fix round 5. Set when a press was about a folder the fresh
+  // listing no longer puts at this id — see `namesFolder`. Component-level and
+  // not on the panel, because the panel is precisely what goes: `refresh` drops
+  // it, so a note written into it would be dropped with it and the press would
+  // read as a press that did nothing.
+  //
+  // A boolean and not the sentence, for `alreadyGone`'s reason: a `t()` frozen
+  // here would keep its language through a switch. Cleared where `actionError`
+  // is — by the next press — because it is the same rule: what the last press
+  // led to stands until the next one.
+  let rootChanged = $state(false);
 
   // ── PR 8a, Task 5: what an expanded folder holds ──────────────────────────
   //
@@ -92,8 +103,15 @@
   // switch. And numbers READ ONCE, from one reply — re-deriving them per render
   // would let the question a person is answering renumber itself underneath
   // them.
+  // 🔴 PR 8a, fix round 5. `of` is carried because the wait is now reached by
+  // BOTH presses and the two are waiting for different things: the exclude
+  // press is finding out what its rule removes, the include press is finding
+  // out whether this row still names the folder the panel was opened for. One
+  // sentence over both would be false of one of them, and the false half is the
+  // include one — telling a person their removal is being costed when nothing
+  // of the sort is being counted.
   type Pending =
-    | { kind: 'checking'; path: string }
+    | { kind: 'checking'; path: string; of: 'exclude' | 'include' }
     | { kind: 'exclude'; path: string; paths: number; documents: number }
     // `existsOnDisk` is carried, not looked up when the question is drawn, for
     // the same reason `paths`/`documents` are: the question states what was
@@ -443,19 +461,87 @@
     return { paths, documents };
   }
 
+  // ── PR 8a, fix round 5: an answer about a root is about THAT root ─────────
+  //
+  // 🔴 `watched_root.id` is `INTEGER PRIMARY KEY` with no `AUTOINCREMENT`
+  // (`schema.sql:11-15`), so it is a rowid alias and SQLite hands a deleted id
+  // out again in the ordinary case: remove the folder added last, add another,
+  // and the new one gets the old id. Round 4 wrote the consequence into
+  // `refresh` — a panel is kept only while the id AND the path still agree —
+  // and it is written HERE now, once, as the one function all three sites call
+  // rather than as three copies of one comparison. What this closes is exactly
+  // two sites drifting apart: round 4's comparison went into `refresh` while
+  // `askExclude` went on matching a fresh listing on the id alone (so the
+  // question quoted another folder's file and document counts under this
+  // folder's row) and `askInclude` read no listing at all (so removing a rule
+  // could take the protection off a folder the person never pointed at — under
+  // D29, that folder's text on its way to the provider at the next scan).
+  //
+  // `===` against a value that is `undefined` when the id has gone, so ONE
+  // comparison answers both cases — the folder has left, and the id now names a
+  // different folder — and neither can be fixed without the other.
+  //
+  // The listing is the CALLER's and is never read again here: what makes this
+  // an answer rather than a guess is that the reply deciding the identity is
+  // the same reply the numbers are counted from.
+  //
+  // The limit, stated rather than left silent: this settles the identity at the
+  // moment the question is raised, and a person then sits in front of that
+  // question for as long as they like. A remove-and-add landing in THAT gap is
+  // caught only if a `refresh` happens to run before the answer — every
+  // `refresh` prunes the panel and takes the question with it — and not
+  // otherwise. Closing that gap costs a `list_tree` on every confirmation,
+  // which is a decision about the whole action flow rather than about this
+  // rule, and it is not taken here.
+  function namesFolder(listing: TreeListing, rootId: number, rootPath: string): boolean {
+    return listing.roots.find((root) => root.rootId === rootId)?.absolutePath === rootPath;
+  }
+
+  // 🔴 What both presses do when the id and the path disagree, in ONE place
+  // because there is one answer and neither press may invent its own.
+  //
+  // Nothing is stored and the panel is not corrected: `Panel.rootPath` already
+  // says a panel whose folder has changed is not a panel to correct, it is one
+  // to drop. It is not dropped here either — `refresh` owns that, applying
+  // `namesFolder` to every panel at once, and re-reading the list is also what
+  // puts the folder that IS at this id on screen. A bare refusal leaving the
+  // stale row standing would answer the next press the same way for ever.
+  //
+  // The question goes synchronously all the same, ahead of that re-read: the
+  // re-read is slow and can fail, and the `checking` sentence must not stand
+  // over either.
+  //
+  // No `ask` bump here, deliberately, and this is not the missing half of one:
+  // the only holder of this root's current ask generation is the caller, which
+  // returns on the next line, and the prune inside `refresh` bumps the counter
+  // itself as it drops the panel. A second bump would be a guard whose mutant
+  // dies from its neighbour.
+  function abandonChangedFolder(rootId: number) {
+    patch(rootId, { pending: null });
+    rootChanged = true;
+    reread(null); // no ending, so no pass — and no question left to withdraw
+  }
+
   // 🔴 The re-read is not a nicety: a count taken from the listing this window
   // already holds is a number about a moment that has passed — a job may have
   // added or removed paths since the row was drawn.
   async function askExclude(rootId: number, path: string) {
-    if (panels[rootId] === undefined) return;
+    // Captured before the await, and only the fields that may be: `rootPath` is
+    // written once at `toggleRoot` and never patched, so it cannot have moved
+    // underneath. A row shut and reopened under the same id during the await is
+    // a different panel, and `toggleRoot` bumps `asks` twice getting there, so
+    // the generation check below has already returned by then.
+    const panel = panels[rootId];
+    if (panel === undefined) return;
     const generation = ask(rootId);
+    rootChanged = false;
     // `withdrawn` is cleared HERE and in `askInclude`, and deliberately not
     // also in `exclude`/`include`: every path into those two runs through one
     // of these two functions first (`exclude`'s zero-cost shortcut included),
     // so a third site would be a second guard over one fact.
     patch(rootId, {
       actionError: null, alreadyGone: false, withdrawn: null,
-      pending: { kind: 'checking', path },
+      pending: { kind: 'checking', path, of: 'exclude' },
     });
     let listing: TreeListing;
     try {
@@ -470,6 +556,14 @@
       return;
     }
     if (asks[rootId] !== generation) return;
+    // 🔴 Before `costOf` and not after it: that function keys on the id alone,
+    // and a `relativePath` means nothing outside the root it belongs to. With
+    // the id handed to another folder, both numbers are that folder's and the
+    // path stored on a confirmation would be this folder's — see `namesFolder`.
+    if (!namesFolder(listing, rootId, panel.rootPath)) {
+      abandonChangedFolder(rootId);
+      return;
+    }
     const cost = costOf(listing, rootId, path);
     // No question over nothing: a confirmation a person can always click
     // through is training for the one that matters.
@@ -481,10 +575,19 @@
     patch(rootId, { pending: { kind: 'exclude', path, ...cost } });
   }
 
-  // No re-read, and deliberately no count. This window does not know what is on
-  // disk under a folder the walk has been pruning, so a number here would be
-  // invented; what IS known is the consequence, and that is what the sentence
-  // states.
+  // 🔴 A re-read now, and deliberately still no count. Fix round 5 gave this
+  // function the `list_tree` it never had, read for ONE fact and no other: that
+  // this id still names the folder this panel was opened for. Without it this
+  // was the worse half of round 4's own defect — the exclude question merely
+  // quoted another folder's numbers, while this one went straight to
+  // `include_subfolder` with an id that could belong to a folder the person
+  // never pointed at, taking a rule off it. Over-warning is a nuisance;
+  // silently removing protection is the direction D29 does not allow.
+  //
+  // The count stays absent for the reason it always was: this window does not
+  // know what is on disk under a folder the walk has been pruning, so a number
+  // here would be invented; what IS known is the consequence, and that is what
+  // the sentence states.
   //
   // 🔴 One fact is not invented either, because the window already has it:
   // whether there is a folder at this path at all. The panel prints
@@ -503,12 +606,39 @@
   // plus a fallback for a state that cannot happen — `read` fills `tree` and
   // `rules` from one `Promise.all`, so a rendered row and a null rule list do
   // not coexist, and a default no test can reach is a guard that cannot fail.
-  function askInclude(rootId: number, path: string, existsOnDisk: boolean) {
+  async function askInclude(rootId: number, path: string, existsOnDisk: boolean) {
+    // Captured before the await for `askExclude`'s reason, and `rules` is read
+    // from that same capture on purpose: the question states what was true when
+    // it was ASKED, exactly as the `existsOnDisk` its caller hands over at the
+    // moment of the press does. Reading one half of the sentence from after the
+    // await and the other from before it is how the two come to disagree.
     const panel = panels[rootId];
     if (panel === undefined) return;
-    ask(rootId);
+    const generation = ask(rootId);
+    rootChanged = false;
     patch(rootId, {
       actionError: null, alreadyGone: false, withdrawn: null,
+      pending: { kind: 'checking', path, of: 'include' },
+    });
+    let listing: TreeListing;
+    try {
+      listing = await listTree();
+    } catch (e) {
+      if (asks[rootId] !== generation) return;
+      // The rule is NOT removed and no question is raised: this window could
+      // not find out whether the id still names this folder, and under D29 a
+      // removal taken on an answer it never read is the one direction that
+      // cannot be undone — the folder's text is at the provider after the next
+      // scan. §10 — what crossed is a sentence, so the sentence is what appears.
+      patch(rootId, { pending: null, actionError: message(e) });
+      return;
+    }
+    if (asks[rootId] !== generation) return;
+    if (!namesFolder(listing, rootId, panel.rootPath)) {
+      abandonChangedFolder(rootId);
+      return;
+    }
+    patch(rootId, {
       // Read from `panel.rules` here and NOT handed over by the caller, which
       // is the opposite of `existsOnDisk` one line up — and the difference is
       // the evidence, not a change of mind. `existsOnDisk` has two answers
@@ -639,14 +769,15 @@
     // No new identifier scheme, deliberately: the id stays the key, and what is
     // compared is the path the listing gives against the path the panel was
     // built for (`Panel.rootPath`).
-    const live = new Map(roots.map((r) => [r.rootId, r.absolutePath]));
+    //
+    // 🔴 PR 8a, fix round 5: through `namesFolder` and not through a comparison
+    // written here. Round 4 left this comparison at one site while the two
+    // questions asked the id alone; one function is what stops the next site
+    // from being a third copy that can drift.
     const kept: Record<number, Panel> = {};
     for (const [key, panel] of Object.entries(panels)) {
       const rootId = Number(key);
-      // `===` against a value that is `undefined` when the id has gone, so ONE
-      // comparison answers both cases and neither can be fixed without the
-      // other. A `live.has(rootId)` beside it would be the half-seam again.
-      if (live.get(rootId) === panel.rootPath) {
+      if (namesFolder(listing, rootId, panel.rootPath)) {
         kept[rootId] = panel;
         continue;
       }
@@ -818,6 +949,7 @@
 
   async function addFolder() {
     actionError = null;
+    rootChanged = false; // what the last press led to stands until the next one
     const selected = await open({ directory: true });
     if (selected === null) return; // cancelled dialog — calls nothing further
     try {
@@ -838,6 +970,7 @@
 
   async function removeFolder(rootId: number) {
     actionError = null;
+    rootChanged = false; // what the last press led to stands until the next one
     try {
       await removeWatchedFolder(rootId);
     } catch (e) {
@@ -1045,7 +1178,18 @@
 
   function confirmView(pending: Pending): ConfirmView {
     if (pending.kind === 'checking') {
-      return { kind: 'checking', checkingLabel: t('settings_folders_exclude_checking') };
+      // Two sentences, because the two presses are waiting for different things
+      // — see `Pending.of`. Chosen here rather than frozen at the press, like
+      // every other word on this screen: this function runs inside the
+      // `void $locale` rebuild, so both follow a language switch.
+      return {
+        kind: 'checking',
+        checkingLabel: t(
+          pending.of === 'exclude'
+            ? 'settings_folders_exclude_checking'
+            : 'settings_folders_include_checking',
+        ),
+      };
     }
     const path = pending.path;
     return {
@@ -1138,6 +1282,12 @@
 
   const expandLabel = $derived.by(() => { void $locale; return t('settings_folders_expand'); });
   const removeRuleLabel = $derived.by(() => { void $locale; return t('settings_folders_rule_remove'); });
+  // 🔴 PR 8a, fix round 5. Words derived from the boolean `rootChanged` holds,
+  // under `void $locale` like every other sentence on this screen.
+  const rootChangedLabel = $derived.by(() => {
+    void $locale;
+    return rootChanged ? t('settings_folders_folder_changed') : null;
+  });
 </script>
 
 {#snippet subfolders(level: Level, rootId: number)}
@@ -1175,6 +1325,13 @@
 {/snippet}
 
 <div class="folders">
+  <!-- Above the list and not beside the Add control at the foot of it, where
+       `actionError` sits: this sentence is about the list itself, which has
+       just been re-read underneath the person, and the row they pressed on is
+       one of the things that has gone from it. -->
+  {#if rootChangedLabel}
+    <p data-testid="folders-root-changed">{rootChangedLabel}</p>
+  {/if}
   {#if loadError}
     <p>{loadFailedLabel}</p>
     <p data-testid="folders-load-reason">{loadError}</p>
