@@ -37,6 +37,10 @@
 #                            a question is asked, and a rule is removed, only
 #                            while the id and the path still agree, and only the
 #                            press whose folder moved is refused (round 5)
+#   the unread removal   — a rejected re-read before a rule removal refuses and
+#                            says so, in both directions: not silently, and not
+#                            by raising the question on an answer never read
+#                            (round 6, item 1)
 #
 # ⚠️ **One case here mutates Rust and is killed by a TypeScript test**, which is
 # the pairing the wire pin exists for: Rust and TypeScript share no compiler, so
@@ -70,15 +74,19 @@
 # Every guard in `Indexing.svelte`, `Models.svelte` and the i18n catalogue has
 # no case file at all. `stale: 0` still says nothing about any of them.
 #
-# ⚠️ **Task 6's reverts 5, 6 and 7 are not covered by any class above.** The
+# ⚠️ **Task 6's reverts 5 and 6 are not covered by any class above**, and
+# revert 7 is covered at one of its two sites only, by round 6's addition. The
 # `paths === 0` shortcut, storing immediately instead of raising the question,
 # and storing anyway after a rejected `list_tree` are the confirm-question
-# flow — `askExclude`/`askInclude` at `Folders.svelte:294-358`, guarded at
-# `:321` by `if (cost.paths === 0)`. That flow lives in the same file this
+# flow — `askExclude` at `Folders.svelte:528` and `askInclude` at `:609`,
+# guarded at `:568` by `if (cost.paths === 0)`. That flow lives in the same file this
 # case file covers. Task 8's cases reach one edge of it — a question WITHDRAWN
 # by a job ending, and the generation bump that goes with it — and pin none of
-# the three reverts named above: the shortcut itself, storing immediately
-# instead of asking, and storing anyway after a rejected `list_tree`.
+# the shortcut itself or storing immediately instead of asking. "The unread
+# removal", below, pins revert 7 at `askInclude`'s catch; `askExclude`'s own
+# catch has the identical shape and is pinned by an ordinary test (`a rejected
+# re-read stores nothing, shows no loss sentence, and prints the backend
+# sentence`) but by no case here.
 
 # Task 5, and the direction `Record<SubfolderState['kind'], …>` cannot see: that
 # annotation checks the union against ITSELF, so it is satisfied by a union one
@@ -351,6 +359,12 @@ case_ "a stale list_tree REJECTION must not print a failure over a newer answer"
 # The predicate itself is deliberately not mutated anywhere: `namesFolder` is
 # called from all three sites, so a mutant inside it changes what all three
 # decide at once and pins none of them.
+#
+# Measured, round 6, item 5: flipping the final `===` to `!==` in
+# `namesFolder`'s body (`Folders.svelte:500`) fails 41 of this file's 90
+# tests, scattered across every test that reaches any of the three call
+# sites — not one test, not a handful, the same non-case-shaped class already
+# named above for the three Task 6 reverts. No case is added for it.
 case_ "an exclude question must not be built from a listing that no longer names this folder" \
   ui/src/settings/Folders.svelte \
   "s{    if \(!namesFolder\(listing, rootId, panel\.rootPath\)\) \{\n      abandonChangedFolder\(rootId\);\n      return;\n    \}\n    const cost}{    /* mutant: the id alone decides the count */\n    const cost}" \
@@ -385,3 +399,24 @@ case_ "the wait before a removal must not say it is costing an exclusion" \
   "s{      pending: \{ kind: 'checking', path, of: 'include' \},}{      pending: \{ kind: 'checking', path, of: 'exclude' \}, /* mutant: one sentence over both waits */}" \
   "of: 'exclude' }, /* mutant: one sentence over both waits */" \
   src/settings/Folders.test.ts 'the wait before a rule removal says what it is checking' runner=vitest
+
+# ── Fix round 6, item 1: `askInclude`'s rejected-listing branch ───────────────
+#
+# `askInclude`'s catch (`Folders.svelte:629-637`) is the twin of `askExclude`'s
+# own catch above — a rejected `list_tree` under D29 must refuse the removal
+# AND say so, never remove silently and never raise the question anyway on an
+# answer this window never read. `askExclude`'s twin is pinned by an ordinary
+# test (`a rejected re-read stores nothing, shows no loss sentence, and prints
+# the backend sentence`); this branch had no case here and no pin, and both
+# mutants below were measured green across the whole suite before this round.
+case_ "a rejected re-read for a rule removal must not refuse silently" \
+  ui/src/settings/Folders.svelte \
+  "s{      // cannot be undone — the folder's text is at the provider after the next\n      // scan\. §10 — what crossed is a sentence, so the sentence is what appears\.\n      patch\(rootId, \{ pending: null, actionError: message\(e\) \}\);}{      // cannot be undone — the folder's text is at the provider after the next\n      // scan. §10 — what crossed is a sentence, so the sentence is what appears.\n      patch(rootId, { pending: null }); /* mutant: the refusal is silent */}" \
+  "patch(rootId, { pending: null }); /* mutant: the refusal is silent */" \
+  src/settings/Folders.test.ts 'a rejected re-read for a rule removal removes nothing and shows the backend sentence, but a later successful re-read still removes it' runner=vitest
+
+case_ "a rejected re-read for a rule removal must not raise the question anyway" \
+  ui/src/settings/Folders.svelte \
+  "s{      // cannot be undone — the folder's text is at the provider after the next\n      // scan\. §10 — what crossed is a sentence, so the sentence is what appears\.\n      patch\(rootId, \{ pending: null, actionError: message\(e\) \}\);}{      // cannot be undone — the folder's text is at the provider after the next\n      // scan. §10 — what crossed is a sentence, so the sentence is what appears.\n      patch(rootId, { pending: \{ kind: 'include', path, existsOnDisk, heldBelow: false, heldAbove: null \} \}); /* mutant: raises the removal question anyway */}" \
+  "/* mutant: raises the removal question anyway */" \
+  src/settings/Folders.test.ts 'a rejected re-read for a rule removal removes nothing and shows the backend sentence, but a later successful re-read still removes it' runner=vitest

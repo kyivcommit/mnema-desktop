@@ -2057,6 +2057,47 @@ test('a rejected re-read stores nothing, shows no loss sentence, and prints the 
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
+// Fix round 6, item 1. The MIRROR of the test above, for `askInclude`'s own
+// re-read: fix round 5 gave this branch a deliberate D29 safety decision — a
+// removal decided on an answer this window never read is the one direction
+// that cannot be undone — and its twin above is pinned, but this one was not.
+// Two mutants of the branch (`Folders.svelte:629-637`) were measured green
+// across the whole suite: one making the refusal silent, one raising the
+// removal question anyway on a rejected listing.
+//
+// Both directions, for the reason the pair of tests two sections up state: a
+// guard that refuses every removal is satisfied by a test that only checks the
+// refusal, so this one also re-presses after a successful re-read and confirms
+// the removal still goes through for the same folder.
+test('a rejected re-read for a rule removal removes nothing and shows the backend sentence, but a later successful re-read still removes it', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listTree.mockRejectedValueOnce(new Error('the index is not open'));
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Work')]));
+  listExclusions.mockResolvedValue([{ prefix: 'Old notes', existsOnDisk: true }]);
+  includeSubfolder.mockResolvedValue(true);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('folder-rules-1')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Old notes' }));
+  await waitFor(() =>
+    expect(screen.getByTestId('folder-subfolder-error-1').textContent).toBe('the index is not open'));
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  // The successful direction, same folder, same id: refusing this press too
+  // would still satisfy every assertion above.
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Old notes' }));
+  await screen.findByTestId('folder-confirm-1');
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Old notes' }));
+
+  expect(includeSubfolder).toHaveBeenCalledWith(1, 'Old notes');
+});
+
 // D130. The question is a reactive string like everything else on this screen:
 // a `t()` call frozen at the moment of the click would keep the English
 // sentence in front of a person who has since switched language.
@@ -2520,7 +2561,7 @@ const REUSED_ID = [
 
 const CHANGED_NOTE_EN =
   'This folder is no longer the one that was on screen: another folder has taken its place.'
-  + ' Nothing was changed, and the list has been re-read.';
+  + ' Nothing was changed.';
 
 async function openBetaPanel(entries: Subfolder[], rules: StoredExclusion[]) {
   setLocale('en'); // seed, do not inherit
@@ -2561,7 +2602,7 @@ test('an exclude question is not asked when the id now names another folder, and
   await tick();
   expect(visibleText(screen.getByTestId('folders-root-changed'))).toBe(
     'Ця тека вже не та, що була на екрані: її місце посіла інша.'
-    + ' Нічого не змінено, список перечитано.',
+    + ' Нічого не змінено.',
   );
 });
 

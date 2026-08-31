@@ -47,9 +47,12 @@
   // read as a press that did nothing.
   //
   // A boolean and not the sentence, for `alreadyGone`'s reason: a `t()` frozen
-  // here would keep its language through a switch. Cleared where `actionError`
-  // is — by the next press — because it is the same rule: what the last press
-  // led to stands until the next one.
+  // here would keep its language through a switch. Cleared at the four
+  // functions a press into this component can start — `askExclude`,
+  // `askInclude`, `addFolder`, `removeFolder` — for the same rule as
+  // `actionError`: what the last press led to stands until the next one. Not
+  // at `exclude`/`include` or `answer` themselves: those run only once one of
+  // the four above has already cleared it for this press.
   let rootChanged = $state(false);
 
   // ── PR 8a, Task 5: what an expanded folder holds ──────────────────────────
@@ -643,7 +646,10 @@
       // is the opposite of `existsOnDisk` one line up — and the difference is
       // the evidence, not a change of mind. `existsOnDisk` has two answers
       // from two kinds of snapshot; this one is a question about the STORED
-      // SET, which both callers would have to answer from that same list.
+      // SET, which both callers would have to answer from that same list —
+      // read from the capture two lines up, not from `panels[rootId]` here, so
+      // it is one `await` stale if a re-read landed during `listTree()`, for
+      // the same reason `existsOnDisk` is (see above).
       pending: {
         kind: 'include', path, existsOnDisk,
         heldBelow: heldBelow(panel.rules, path),

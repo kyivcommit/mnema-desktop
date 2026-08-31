@@ -415,8 +415,15 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // без `AUTOINCREMENT`, тож SQLite видає видалений ідентифікатор наступній
     // теці. Панель могли відкрити для однієї теки, а той самий ідентифікатор
     // тепер належить іншій — і тоді дія пішла б не на ту теку. Нічого не
-    // збережено; список перечитано, щоб на екрані була та тека, яка там є.
-    settings_folders_folder_changed: 'Ця тека вже не та, що була на екрані: її місце посіла інша. Нічого не змінено, список перечитано.',
+    // збережено.
+    //
+    // 🔴 Коло виправлень 6. Раніше речення твердило й «список перечитано» —
+    // а `reread` (`Folders.svelte:912-914`) переходить у цей стан ще ДО того,
+    // як `refresh()` завершиться, і той виклик може відхилитись: тоді
+    // `loadError` показує свій власний рядок з причиною окремим абзацом, а
+    // список лишається таким, яким був. Твердження про сам перечит було
+    // неправдою саме в тому стані, заради якого банер існує.
+    settings_folders_folder_changed: 'Ця тека вже не та, що була на екрані: її місце посіла інша. Нічого не змінено.',
     // 🔴 ДВА числа, і вони про різні речі. `paths` — проіндексовані шляхи під
     // цим префіксом; `documents` — документи, у яких жодного шляху поза ним не
     // лишається. Документ живий, доки його називає бодай один шлях
@@ -681,7 +688,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_question_withdrawn: 'The question about “{path}” has been withdrawn: a scan ended and this panel was read again. Press again if you still want to.',
     settings_folders_exclude_checking: 'Checking what this exclusion removes…',
     settings_folders_include_checking: 'Checking that this is still the same folder…',
-    settings_folders_folder_changed: 'This folder is no longer the one that was on screen: another folder has taken its place. Nothing was changed, and the list has been re-read.',
+    // 🔴 Fix round 6. Used to also claim "and the list has been re-read" —
+    // `reread` (`Folders.svelte:912-914`) reaches this state before `refresh()`
+    // settles, and that call can be rejected: `loadError` then prints its own
+    // sentence in a separate paragraph while the list stays exactly as stale as
+    // it was. The re-read claim was false in the one state this banner exists
+    // for.
+    settings_folders_folder_changed: 'This folder is no longer the one that was on screen: another folder has taken its place. Nothing was changed.',
     settings_folders_exclude_cost: 'As of now: on the next scan the index loses {paths, plural, one {# file} other {# files}} from this folder, and {documents, plural, =0 {no document stops being findable — each is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}.',
     settings_folders_include_cost: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider.',
     settings_folders_include_cost_held_below: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider — except what your other rules further down this path still exclude.',
