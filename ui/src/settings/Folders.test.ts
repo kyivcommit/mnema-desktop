@@ -3,13 +3,23 @@ import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Folders from './Folders.svelte';
 import { setLocale, t } from '../i18n';
 import { createJobController } from './jobs';
-import type { TreeListing, TreeRoot } from '../lib/ipc';
+import { tick } from 'svelte';
+import type {
+  StoredExclusion, Subfolder, SubfolderListing, SubfolderState, TreeFile, TreeListing, TreeRoot,
+} from '../lib/ipc';
 
 // Mocked in the shape Arms.test.ts:5-6 / Models.test.ts:13-30 already use —
 // the typed wrappers, not the raw `invoke`.
 const listTree = vi.fn();
 const addWatchedFolder = vi.fn();
 const removeWatchedFolder = vi.fn();
+// PR 8a Task 5. Mocked as wrappers for the same reason the three above are:
+// what this file is about is the screen, not the wire encoding, and
+// `ipc.test.ts` owns the argument names each of these sends.
+const listSubfolders = vi.fn();
+const listExclusions = vi.fn();
+const excludeSubfolder = vi.fn();
+const includeSubfolder = vi.fn();
 // The job commands are the REAL wrappers, deliberately: they are what carry
 // the `'start_walk_job'` wire string this file asserts is never sent, and a
 // mock of them would make that assertion about this file's own fake.
@@ -18,6 +28,10 @@ vi.mock('../lib/ipc', async (real) => ({
   listTree: (...a: unknown[]) => listTree(...a),
   addWatchedFolder: (...a: unknown[]) => addWatchedFolder(...a),
   removeWatchedFolder: (...a: unknown[]) => removeWatchedFolder(...a),
+  listSubfolders: (...a: unknown[]) => listSubfolders(...a),
+  listExclusions: (...a: unknown[]) => listExclusions(...a),
+  excludeSubfolder: (...a: unknown[]) => excludeSubfolder(...a),
+  includeSubfolder: (...a: unknown[]) => includeSubfolder(...a),
 }));
 
 // The dialog plugin needs its own mock — a separate module from `../lib/ipc`.
@@ -46,6 +60,14 @@ beforeEach(() => {
   removeWatchedFolder.mockReset();
   invoke.mockReset();
   open.mockReset();
+  listSubfolders.mockReset();
+  listExclusions.mockReset();
+  excludeSubfolder.mockReset();
+  includeSubfolder.mockReset();
+  // Defaults for the tests that never expand a row: an empty listing and no
+  // rules. A test that expands states its own.
+  listSubfolders.mockResolvedValue({ entries: [], unnameable: 0 });
+  listExclusions.mockResolvedValue([]);
 });
 afterEach(() => {
   cleanup();
@@ -338,4 +360,2354 @@ test('a language switch reaches the empty-state sentence too', async () => {
   await Promise.resolve();
 
   expect(screen.getByText('Ще жодної теки не додано.')).toBeTruthy();
+});
+
+// ── PR 8a, Task 5: the folder row expands ────────────────────────────────────
+
+function sub(name: string, state: SubfolderState = { kind: 'open' }, parent = ''): Subfolder {
+  return { name, relativePath: parent ? `${parent}/${name}` : name, state };
+}
+function subfolders(entries: Subfolder[], unnameable = 0): SubfolderListing {
+  return { entries, unnameable };
+}
+
+// Every text node under `el`, in document order, joined by a single space —
+// what a person reads, in the order they read it. NOT `textContent`: that
+// concatenates two neighbouring rows into one word whenever the markup happens
+// to leave no whitespace between them, so an assertion written against it is an
+// assertion about indentation.
+function visibleText(el: HTMLElement): string {
+  const walker = el.ownerDocument.createTreeWalker(el, 4 /* SHOW_TEXT */);
+  const parts: string[] = [];
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim();
+    if (text !== '') parts.push(text);
+  }
+  return parts.join(' ');
+}
+
+// Two roots in every fixture below, not one. The expansion is held per root,
+// and a component that kept one listing for the whole list would satisfy every
+// assertion a single-root fixture can make while showing the second folder's
+// subfolders under the first.
+async function expand(
+  entries: Subfolder[],
+  rules: StoredExclusion[] = [],
+  unnameable = 0,
+  files: TreeRoot['files'] = [],
+) {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders(entries, unnameable));
+  listExclusions.mockResolvedValue(rules);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('folder-rules-1')).toBeTruthy());
+}
+
+test('the row expands by value, asks for the root level, and collapsing throws the listing away', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Work'), sub('Archive')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+
+  // By VALUE, both directions: a shut row states `false`, not nothing at all.
+  // The attribute is in the F3 guard's MACHINE_ATTRS (`guard.test.ts:47`), so
+  // nothing else in this repository polices it.
+  expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByText('Work')).toBeNull();
+  expect(listSubfolders).not.toHaveBeenCalled(); // a shut row costs no read_dir
+
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+
+  await waitFor(() => expect(screen.getByText('Work')).toBeTruthy());
+  expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByText('Archive')).toBeTruthy();
+  expect(listSubfolders).toHaveBeenCalledWith(1, '');
+  expect(listExclusions).toHaveBeenCalledWith(1);
+
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+
+  expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByText('Work')).toBeNull();
+
+  // Re-expanding reads the disk again rather than redrawing what was fetched
+  // before: a cached listing is a claim about a moment that has passed, and
+  // the folder can have changed while the row was shut.
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(listSubfolders).toHaveBeenCalledTimes(2));
+  expect(listExclusions).toHaveBeenCalledTimes(2);
+});
+
+test('two rows expand independently, each showing its own root\'s subfolders', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root' }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+  ]));
+  listSubfolders.mockImplementation((rootId: number) =>
+    Promise.resolve(subfolders([sub(rootId === 1 ? 'FirstOnly' : 'SecondOnly')])));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/other')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('folder-expand-2'));
+  await waitFor(() => expect(screen.getByText('SecondOnly')).toBeTruthy());
+
+  // The row that was NOT pressed stays shut and shows nothing.
+  expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByText('FirstOnly')).toBeNull();
+  expect(listSubfolders).toHaveBeenCalledWith(2, '');
+  expect(listSubfolders).toHaveBeenCalledTimes(1);
+});
+
+// The six states, one test each. `SubfolderState` has six variants
+// (`src-tauri/src/tree.rs`), and the acceptance criterion Task 4 exists to
+// establish is that no folder the walk will prune may be offered to a person as
+// excludable — so four of the six carry no toggle at all, for two different
+// reasons that must not read alike.
+test('an open subfolder is the one state that offers to exclude it', async () => {
+  await expand([sub('Work')]);
+
+  const row = within(screen.getByTestId('subfolder-1-Work'));
+  expect(row.getByText('No rule excludes this folder.')).toBeTruthy();
+  expect(row.getByRole('button', { name: 'Exclude Work' })).toBeTruthy();
+});
+
+test('an excluded subfolder offers to include it and says what that costs first', async () => {
+  await expand([sub('Archive', { kind: 'excluded' })], [{ prefix: 'Archive', existsOnDisk: true }]);
+
+  const row = within(screen.getByTestId('subfolder-1-Archive'));
+  expect(row.getByText('Excluded by your rule.')).toBeTruthy();
+  // The disclosure is on screen BEFORE the press, not after it.
+  expect(row.getByText('Without this rule, anything at this path is indexed again from the next scan on.')).toBeTruthy();
+  expect(row.getByRole('button', { name: 'Do not exclude Archive' })).toBeTruthy();
+  expect(row.queryByRole('button', { name: 'Exclude Archive' })).toBeNull();
+});
+
+// 🔴 Review finding I1. An excluded folder opens, and the reason is not
+// symmetry: every path to an `excludedByAncestor` row runs through a folder
+// that is itself `Excluded` (`subfolder_state` asks about an ancestor before
+// asking about the folder itself, `tree.rs:829-838`), so while `excluded` was
+// shut that state was tested and unreachable — and a person who had protected
+// a folder could never look inside to see what they had protected.
+test('an excluded folder opens, and what is inside it names the rule and offers nothing', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockImplementation((_rootId: number, path: string) =>
+    Promise.resolve(path === ''
+      ? subfolders([sub('Archive', { kind: 'excluded' })])
+      : subfolders([sub('tax', { kind: 'excludedByAncestor', prefix: 'Archive' }, 'Archive')])));
+  listExclusions.mockResolvedValue([{ prefix: 'Archive', existsOnDisk: true }]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  // By test id, not by text: `Archive` is on screen twice — the subfolder row
+  // and the stored rule that names it — and a text query would be ambiguous.
+  await waitFor(() => expect(screen.getByTestId('subfolder-1-Archive')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-Archive'));
+
+  await waitFor(() => expect(screen.getByText('tax')).toBeTruthy());
+  expect(screen.getByTestId('subfolder-expand-1-Archive').getAttribute('aria-expanded')).toBe('true');
+  const held = within(screen.getByTestId('subfolder-1-Archive/tax'));
+  expect(held.getByText('Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.')).toBeTruthy();
+  // Nothing under a rule is toggleable and nothing under it opens further, so
+  // opening the rule's own folder adds a level to read and no control to press.
+  expect(held.queryAllByRole('button')).toHaveLength(0);
+  expect(screen.queryByTestId('subfolder-expand-1-Archive/tax')).toBeNull();
+});
+
+// The pin in `ipc.test.ts` is what stops this state arriving; this is what the
+// screen does if it arrives anyway. Before the fix the row drew a button with
+// no text and no `aria-label` whose click called `include_subfolder` — an
+// unlabelled control that removed the person's exclusion rule.
+test('a state this build has never heard of offers no control, and the rule stays reachable', async () => {
+  // The shell is not bound by this window's union, which is the whole finding:
+  // a variant added to `tree.rs` and not mirrored here arrives all the same.
+  const unknown = { kind: 'quarantined' } as unknown as SubfolderState;
+  await expand([sub('Vault', unknown)], [{ prefix: 'Vault', existsOnDisk: true }]);
+
+  const row = within(screen.getByTestId('subfolder-1-Vault'));
+  expect(row.getByText('Vault')).toBeTruthy(); // still listed, never silently dropped
+  expect(row.queryAllByRole('button')).toHaveLength(0);
+  expect(includeSubfolder).not.toHaveBeenCalled();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+  // And the protection is still reachable, by the control that names it.
+  expect(screen.getByRole('button', { name: 'Remove the rule on Vault' })).toBeTruthy();
+});
+
+test('an ancestor-held subfolder names the rule holding it and offers no control at all', async () => {
+  await expand([sub('secret', { kind: 'excludedByAncestor', prefix: 'Work' }, 'Work')]);
+
+  const row = within(screen.getByTestId('subfolder-1-Work/secret'));
+  // The prefix the state CARRIES, not the row's own path: a row that says
+  // "held by a rule" without naming it leaves nothing to go and remove.
+  // "first", not "to change this folder": the state names the OUTERMOST
+  // ancestor rule (`tree.rs:755-759`), so with rules on both `Archive` and
+  // `Archive/sub` removing `Archive` does not free `Archive/sub/x`. The
+  // sentence names the first step and promises no result.
+  expect(row.getByText('Held by your rule on Work. Remove that rule first — another rule may still hold this folder.')).toBeTruthy();
+  expect(row.queryAllByRole('button')).toHaveLength(0);
+});
+
+test('a built-in subfolder says the application made the rule, and offers no control', async () => {
+  await expand([sub('node_modules', { kind: 'builtIn' })]);
+
+  const row = within(screen.getByTestId('subfolder-1-node_modules'));
+  expect(row.getByText('The application never indexes this folder, so there is no rule to add or remove.')).toBeTruthy();
+  expect(row.queryAllByRole('button')).toHaveLength(0);
+});
+
+// 🔴 The acceptance criterion, at the place it is easiest to break. A child of
+// a symlinked directory comes back `Open` from `list_subfolders`
+// (`subfolder_state` asks `is_symlink` about the entry itself), so a row that
+// could be expanded here would offer "Exclude" over a subtree the walk never
+// enters — a rule that excludes nothing, on a folder nothing indexes.
+test('a symlinked subfolder offers neither a toggle nor a way to open it', async () => {
+  await expand([sub('Link', { kind: 'symlink' })]);
+
+  const row = within(screen.getByTestId('subfolder-1-Link'));
+  expect(row.getByText('A link to another folder. The scan never follows links, so nothing inside it is indexed.')).toBeTruthy();
+  expect(row.queryAllByRole('button')).toHaveLength(0);
+});
+
+test('an unusable name says the opposite fact from a built-in folder, not the same one', async () => {
+  await expand([sub('node_modules', { kind: 'builtIn' }), sub('Trailing ', { kind: 'unusableName' })]);
+
+  // The trailing space is the defect this state is ABOUT, so the query keeps
+  // it: testing-library trims an attribute value before comparing it, and the
+  // default matcher would have found this row under the name it does not have.
+  const row = within(screen.getByTestId('subfolder-1-Trailing ', { normalizer: (v) => v }));
+  expect(row.getByText('This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.')).toBeTruthy();
+  expect(row.queryAllByRole('button')).toHaveLength(0);
+  // Both are non-toggleable, and for opposite reasons: one folder's contents
+  // never reach a provider, this one's do. Two sentences that read alike would
+  // pass every assertion above.
+  const builtIn = screen.getByTestId('subfolder-1-node_modules').textContent;
+  expect(screen.getByTestId('subfolder-1-Trailing ', { normalizer: (v) => v }).textContent)
+    .not.toBe(builtIn);
+});
+
+test('expanding a subfolder asks for that subfolder\'s own path', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockImplementation((_rootId: number, path: string) =>
+    Promise.resolve(path === ''
+      ? subfolders([sub('Work')])
+      : subfolders([sub('notes', { kind: 'open' }, 'Work')])));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByText('Work')).toBeTruthy());
+
+  const nested = screen.getByTestId('subfolder-expand-1-Work');
+  expect(nested.getAttribute('aria-expanded')).toBe('false');
+  await fireEvent.click(nested);
+
+  await waitFor(() => expect(screen.getByText('notes')).toBeTruthy());
+  expect(screen.getByTestId('subfolder-expand-1-Work').getAttribute('aria-expanded')).toBe('true');
+  expect(listSubfolders).toHaveBeenCalledWith(1, 'Work');
+  expect(screen.getByTestId('subfolder-1-Work/notes')).toBeTruthy();
+});
+
+test('a non-zero unnameable count is stated, so the folder does not read as emptier than it is', async () => {
+  await expand([sub('Work')], [], 2);
+
+  expect(screen.getByText('2 subfolders are not listed: their names could not be read as text.')).toBeTruthy();
+});
+
+test('a zero unnameable count states nothing at all', async () => {
+  await expand([sub('Work')], [], 0);
+
+  expect(screen.queryByText(/are not listed/)).toBeNull();
+  expect(screen.queryByText(/is not listed/)).toBeNull();
+});
+
+test('a folder with no subfolders says so rather than showing an empty space', async () => {
+  await expand([]);
+
+  expect(screen.getByText('This folder has no subfolders.')).toBeTruthy();
+});
+
+// 🔴 D-a, amended twice. A rule is "the folder is gone" when and only when its
+// own `existsOnDisk` says so. Comparing the rule list against the one-level
+// listing marks `Work/private` stale — the folder is real, one level down —
+// and invites a person to delete a rule that is still doing its job.
+test('a nested rule whose folder is present is not labelled gone; the one that is says so', async () => {
+  await expand(
+    [sub('Work')],
+    [
+      { prefix: 'Work/private', existsOnDisk: true },
+      { prefix: 'Old notes', existsOnDisk: false },
+    ],
+  );
+
+  const nested = within(screen.getByTestId('folder-rule-1-Work/private'));
+  expect(nested.getByText('Work/private')).toBeTruthy();
+  expect(nested.queryByText('There is no folder at this path right now.')).toBeNull();
+
+  const gone = within(screen.getByTestId('folder-rule-1-Old notes'));
+  expect(gone.getByText('There is no folder at this path right now.')).toBeTruthy();
+  // Both carry the cost sentence: removing either is a disclosure, not a
+  // tidy-up.
+  expect(gone.getByText('Without this rule, anything at this path is indexed again from the next scan on.')).toBeTruthy();
+  expect(gone.getByRole('button', { name: 'Remove the rule on Old notes' })).toBeTruthy();
+});
+
+// ── Fix round 1, I2 ─────────────────────────────────────────────────────────
+//
+// `settings_folders_rule_cost` was unconditional, and the state that
+// contradicts it is storable from this very screen: `exclude_subfolder` has no
+// ancestor guard (`bridge.rs:450-483`), `add_path_exclusion` is
+// `ON CONFLICT DO NOTHING` (`write.rs:604-612`), and `subfolder_state` still
+// reports the ancestor as `excluded` (`tree.rs:817-848`) so the control to
+// remove it is offered. Exclude `Archive/Held`, then include `Archive` back,
+// and "anything at this path is indexed again" was contradicted by the rule
+// list two lines below it.
+//
+// It over-warns rather than under-warns, so no D29 direction was crossed —
+// but a sentence that is false in a reachable state is the F5 class, and the
+// fix is to make it true rather than to delete it.
+const RULE_COST = {
+  plain: 'Without this rule, anything at this path is indexed again from the next scan on.',
+  held: 'Without this rule, anything at this path is indexed again from the next scan on —'
+    + ' except what your other rules further down this path still exclude.',
+  plainUk: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування.',
+  heldUk: 'Без цього правила все за цим шляхом знову індексуватиметься від наступного сканування —'
+    + ' окрім того, що й далі виключають ваші інші правила глибше за цим шляхом.',
+};
+
+// ── Fix round 2, A1: the mirror of the above ────────────────────────────────
+//
+// The relation `heldBelow` reads is symmetric, and round 1 read one side of it.
+// A rule with one of the person's own rules ABOVE it releases NOTHING when it
+// goes — the walk is already pruning at the ancestor — so both cost sentences
+// were false about it, unconditionally, in a state reachable by the same two
+// presses in the other order.
+//
+// 🔴 Not a new string. This is the sentence the TREE has always drawn one row
+// above (`settings_subfolder_excluded_by_ancestor`), re-used at the two sites
+// that decide what removing a rule costs, so the screen says ONE thing about
+// one path. Written as functions because it names the ancestor, and the
+// ancestor is the OUTERMOST one — `tree.rs:755-759`'s choice, which the rule
+// list must match or the same screen names two different rules to remove.
+const heldBy = (prefix: string) =>
+  `Held by your rule on ${prefix}. Remove that rule first — another rule may still hold this folder.`;
+const heldByUk = (prefix: string) =>
+  `Утримується вашим правилом на ${prefix}. Спершу приберіть те правило — теку може утримувати ще одне.`;
+
+// 🔴 The pair is the whole point of the fixture, and the fixture asserts BOTH
+// members: the ancestor has a rule under it and the descendant has none, so a
+// screen that printed the new sentence everywhere satisfies neither row.
+test('a rule with another of your rules under it says what removing it does not release', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' }), sub('Work')],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
+    .toBe(['Archive', RULE_COST.held, 'Remove the rule'].join(' '));
+  // 🔴 Fix round 2, A1: the mirror row. `Archive` is a rule of the person's own
+  // ABOVE this one, so removing this one releases nothing at all — the walk
+  // prunes at `Archive` either way. The unconditional sentence was false here.
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
+    .toBe(['Archive/Held', heldBy('Archive'), 'Remove the rule'].join(' '));
+
+  // The same rule read from the subfolder row that names it. It draws the
+  // sentence at its own site (`buildLevel`), so a fix applied only to the rule
+  // list would leave these two rows disagreeing about one path.
+  expect(visibleText(screen.getByTestId('subfolder-1-Archive')))
+    .toBe(['Archive', 'Excluded by your rule.', RULE_COST.held, 'Do not exclude', 'Subfolders'].join(' '));
+  // And the row no rule names carries no disclosure at all — the sentence
+  // belongs to the control that takes protection away, not to every row.
+  expect(visibleText(screen.getByTestId('subfolder-1-Work')))
+    .toBe(['Work', 'No rule excludes this folder.', 'Exclude', 'Subfolders'].join(' '));
+
+  // D130: a new string is a string in both locales, and both arms of the new
+  // condition are read in the second one too.
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
+    .toBe(['Archive', RULE_COST.heldUk, 'Прибрати правило'].join(' '));
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
+    .toBe(['Archive/Held', heldByUk('Archive'), 'Прибрати правило'].join(' '));
+});
+
+// 🔴 The whole screen for the storable pair, read line by line, because the
+// brief for this fix carried an inference worth settling by rendering rather
+// than by reasoning: that `list_subfolders` reporting `Held` as
+// `excludedByAncestor {prefix: "Archive"}` leaves the person unable to see the
+// rule on `Archive/Held` at all.
+//
+// Half true, and the half that is false is the half that decides the sentence's
+// shape. The TREE never names the descendant's own rule — the row for `Held`
+// says "Held by your rule on Archive", which is the outermost, and that is
+// `subfolder_state`'s deliberate choice. But the RULE LIST in the same panel is
+// `list_exclusions`' whole answer for the root, so `Archive/Held` has a row of
+// its own three lines below, with its own Remove control. The conditional
+// sentence therefore points at something the person can actually go and find,
+// which is what makes "except what your other rules further down this path
+// still exclude" an instruction rather than a riddle.
+test('the pair reads as one screen: the tree names only the outermost, the rule list names both', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root' }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+  ]));
+  listSubfolders.mockImplementation((_rootId: number, path: string) =>
+    Promise.resolve(path === ''
+      ? subfolders([sub('Archive', { kind: 'excluded' })])
+      : subfolders([sub('Held', { kind: 'excludedByAncestor', prefix: 'Archive' }, 'Archive')])));
+  listExclusions.mockResolvedValue([
+    { prefix: 'Archive', existsOnDisk: true },
+    { prefix: 'Archive/Held', existsOnDisk: true },
+  ]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await screen.findByTestId('subfolder-1-Archive');
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-Archive'));
+  await screen.findByTestId('subfolder-1-Archive/Held');
+
+  expect(visibleText(screen.getByTestId('folder-row-1'))).toBe([
+    '/synthetic/root',
+    'Indexed: 0 documents',
+    'Subfolders', 'Scan', 'Remove',
+    // The tree. `Archive` carries the conditional sentence, because a rule of
+    // the person's own remains under it.
+    'Archive', 'Excluded by your rule.', RULE_COST.held, 'Do not exclude', 'Subfolders',
+    // And its child names the OUTERMOST rule, never its own — so on this line
+    // alone the rule on `Archive/Held` is invisible.
+    'Held', heldBy('Archive'),
+    // The rule list, which is where it is not invisible.
+    'Your exclusion rules for this folder:',
+    'Archive', RULE_COST.held, 'Remove the rule',
+    // 🔴 Fix round 2, A1. This line is why the whole row is asserted as one
+    // string: the rule list's row for `Archive/Held` used to carry the
+    // unconditional sentence three lines under a tree row saying the folder is
+    // held by `Archive`, so one screen said two things about one path. It now
+    // says the SAME thing as the tree row, word for word and about the same
+    // rule — which is the point of re-using the tree's own string here.
+    'Archive/Held', heldBy('Archive'), 'Remove the rule',
+  ].join(' '));
+});
+
+// 🔴 A sibling is not a rule under it. `Archive2` merely starts with `Archive`;
+// `anchored_pattern` produces `!/Archive`, which does not match it, so removing
+// the rule on `Archive` really does release everything at that path. Without
+// this row, `under`'s separator could be dropped from `heldBelow` and the test
+// above would stay green.
+test('a rule whose prefix merely starts with this one does not soften the sentence', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive2', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
+    .toBe(['Archive', RULE_COST.plain, 'Remove the rule'].join(' '));
+});
+
+// The question a person answers has to say what the list says. It is frozen
+// into `Pending` beside `existsOnDisk`, for that field's own reason: a re-read
+// landing underneath must not renumber — or re-word — a sentence somebody is
+// part way through reading.
+test('the include question names the rules further down that removing this one leaves standing', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+    ],
+  );
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again, and its text is',
+    'sent to the model provider — except what your other rules further down this path still',
+    'exclude.',
+    'Confirm Cancel',
+  ].join(' '));
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
+    'Більше не виключати Archive?',
+    'Від наступного сканування все всередині цієї теки індексується знову, а її текст',
+    'надсилається провайдеру моделі — окрім того, що й далі виключають ваші інші правила',
+    'глибше за цим шляхом.',
+    'Підтвердити Скасувати',
+  ].join(' '));
+});
+
+// 🔴 Fix round 2, A1 — the third site, and the one a press actually lands on.
+// The rule list's Remove control opens this question, so a screen corrected in
+// the list alone would still ask the person to confirm a false consequence: the
+// question is the last thing read before the rule goes.
+test('the include question about a rule held from above says removing it releases nothing', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+    ],
+  );
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive/Held' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive/Held?',
+    heldBy('Archive'),
+    'Confirm Cancel',
+  ].join(' '));
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  // D130, and the same reason the two rows above are read in both locales: the
+  // arm this fix adds is a `t()` call like any other, and a hard-coded English
+  // sentence would satisfy the assertion above and nothing else.
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
+    'Більше не виключати Archive/Held?',
+    heldByUk('Archive'),
+    'Підтвердити Скасувати',
+  ].join(' '));
+});
+
+// 🔴 The state where the two conditions in the question disagree, and it is the
+// reason the ancestor is read BEFORE `existsOnDisk` rather than after it. With
+// the folder gone AND a rule above, the `_gone` arm's own second sentence —
+// "if a folder appears there later, it is indexed and its text is sent to the
+// model provider" — is false while the ancestor rule stands. No other row in
+// this file builds both facts at once, so the order of those two branches is
+// otherwise free to be wrong.
+test('a question about a gone rule held from above names the ancestor, not the empty path', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: false },
+    ],
+  );
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive/Held' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive/Held?',
+    heldBy('Archive'),
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// 🔴 Two ancestors, and the row must name the SHALLOWEST — `tree.rs:755-759`'s
+// own choice, which the tree row three lines above has always made. Naming
+// `Archive/Held` here instead would send the person to remove a rule that
+// changes nothing while `Archive` stands, and would put two different
+// instructions about one path on one screen again. `list_exclusions` arrives
+// sorted (`write.rs:580`) and the ancestors of one path form a chain, so the
+// first match in that order is the outermost; without this row the search
+// could take the last match and the fixture above, which has one ancestor,
+// would stay green.
+test('a rule with two of your rules above it names the outermost, as the tree does', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+      { prefix: 'Archive/Held/Deep', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held/Deep')))
+    .toBe(['Archive/Held/Deep', heldBy('Archive'), 'Remove the rule'].join(' '));
+  // And the middle rule, which has one rule above it and one below: the fact
+  // that releases nothing is the one above, so it wins over the softening.
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
+    .toBe(['Archive/Held', heldBy('Archive'), 'Remove the rule'].join(' '));
+});
+
+// 🔴 A sibling of an ANCESTOR is not an ancestor: `Arch` is a string prefix of
+// `Archive/Held` and holds nothing of it, because `anchored_pattern` produces
+// `!/Arch`, which does not match. Without this row the separator could be
+// dropped from the ancestor search and every test above would stay green —
+// and the screen would then tell a person to go and remove a rule that is not
+// holding this folder at all, leaving the real consequence unsaid.
+test('a rule whose prefix merely starts the same way is not an ancestor', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Arch', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
+    .toBe(['Archive/Held', RULE_COST.plain, 'Remove the rule'].join(' '));
+});
+
+// 🔴 Fix round 3, item 1. No fixture anywhere else in this file gives an
+// ANCESTOR rule `existsOnDisk: false` — every case above that holds a folder
+// from above uses a live one, so `heldAbove` consulting `existsOnDisk` (it
+// must not, per its own doc at `Folders.svelte:353-358`) has nothing to catch
+// it on. `Archive` is gone from disk but its rule row has not been removed,
+// and the doc's own claim is that removing `Archive/Held` still changes
+// nothing: the ancestor's pattern prunes the subtree the moment a folder
+// reappears there, whatever is on disk right now.
+//
+// Assert both directions in one fixture: `Archive/Held` stays firm under a
+// gone ancestor (this is the direction the mutant breaks — filtering the
+// ancestor by `existsOnDisk` drops it, and the row falls through to the
+// unconditional `RULE_COST.plain`); `Other`, which has no ancestor at all and
+// is held only by a LIVE rule below it, still softens to `RULE_COST.held` —
+// showing the ancestor fix left the ordinary heldBelow path alone.
+test('a rule held by a gone ancestor stays firm; a rule held below a live one still softens', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: false },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+      { prefix: 'Other', existsOnDisk: true },
+      { prefix: 'Other/Nested', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive/Held')))
+    .toBe(['Archive/Held', heldBy('Archive'), 'Remove the rule'].join(' '));
+  expect(visibleText(screen.getByTestId('folder-rule-1-Other')))
+    .toBe(['Other', RULE_COST.held, 'Remove the rule'].join(' '));
+});
+
+// ── Fix round 2, A2 ─────────────────────────────────────────────────────────
+//
+// The softening promises an exception, and round 1 let a rule the SAME PANEL
+// labels "There is no folder at this path right now" back that promise. At the
+// next scan such a rule excludes nothing, so the sentence understates what
+// reaches the provider — the one direction D29 does not allow. The condition
+// now consults the rule's own `existsOnDisk`, which drops the exception and
+// selects the unconditional sentence: an overstatement, and exactly true here,
+// because everything present at this path really is indexed again.
+test('a rule below whose folder is gone does not soften the sentence', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: false },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
+    .toBe(['Archive', RULE_COST.plain, 'Remove the rule'].join(' '));
+
+});
+
+// The other direction, and it is not the same assertion negated: a rule whose
+// folder is gone must not veto a sibling rule that is doing its job. A
+// condition written as "every rule below exists" satisfies the row above and
+// fails here.
+test('a rule below whose folder is gone does not cancel one whose folder is there', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Gone', existsOnDisk: false },
+      { prefix: 'Archive/Here', existsOnDisk: true },
+    ],
+  );
+
+  expect(visibleText(screen.getByTestId('folder-rule-1-Archive')))
+    .toBe(['Archive', RULE_COST.held, 'Remove the rule'].join(' '));
+});
+
+// The question freezes the answer, so it has to freeze the corrected one.
+test('the include question does not soften on the strength of a rule whose folder is gone', async () => {
+  await expand(
+    [sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: false },
+    ],
+  );
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again, and its text is',
+    'sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+test('a folder with no rules says so instead of showing an empty heading', async () => {
+  await expand([sub('Work')], []);
+
+  expect(screen.getByText('You have not excluded anything in this folder.')).toBeTruthy();
+});
+
+test('excluding a subfolder sends its path and re-reads the listing from disk', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValueOnce(subfolders([sub('Work')]));
+  listExclusions.mockResolvedValueOnce([]);
+  listSubfolders.mockResolvedValueOnce(subfolders([sub('Work', { kind: 'excluded' })]));
+  listExclusions.mockResolvedValueOnce([{ prefix: 'Work', existsOnDisk: true }]);
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude Work' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
+
+  expect(excludeSubfolder).toHaveBeenCalledWith(1, 'Work');
+  // The state on screen comes from the re-read, never from a local patch: the
+  // row now offers the opposite control, and the rule appears in the list.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Work' })).toBeTruthy());
+  expect(screen.getByTestId('folder-rule-1-Work')).toBeTruthy();
+  expect(listSubfolders).toHaveBeenCalledTimes(2);
+});
+
+test('removing a rule sends its own prefix and re-reads', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Work')]));
+  listExclusions.mockResolvedValueOnce([
+    { prefix: 'Work/private', existsOnDisk: true },
+    { prefix: 'Old notes', existsOnDisk: false },
+  ]);
+  listExclusions.mockResolvedValueOnce([{ prefix: 'Work/private', existsOnDisk: true }]);
+  includeSubfolder.mockResolvedValue(true);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('folder-rule-1-Old notes')).toBeTruthy());
+
+  // The SECOND rule is removed, not the first: a positional implementation
+  // would send `Work/private` here.
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Old notes' }));
+  // Task 6 put a question in between: the press asks, the confirmation stores.
+  // The prefix this test is about is carried by the QUESTION, so a component
+  // that answered with the row under the cursor would still send the wrong one.
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Old notes' }));
+
+  expect(includeSubfolder).toHaveBeenCalledWith(1, 'Old notes');
+  await waitFor(() => expect(screen.queryByTestId('folder-rule-1-Old notes')).toBeNull());
+  expect(screen.getByTestId('folder-rule-1-Work/private')).toBeTruthy(); // untouched
+});
+
+// `include_subfolder` answers whether a row went (`bridge.rs:465-471`). `false`
+// is not a failure: it is the screen having been out of date, and saying so is
+// the difference between a control that worked and one that did nothing.
+test('a rule that was already gone says so rather than reporting success in silence', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Work')]));
+  listExclusions.mockResolvedValueOnce([{ prefix: 'Old notes', existsOnDisk: false }]);
+  listExclusions.mockResolvedValueOnce([]);
+  includeSubfolder.mockResolvedValue(false);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('folder-rule-1-Old notes')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Old notes' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Old notes' }));
+
+  await waitFor(() => expect(screen.getByText('There was no such rule left to remove. The list has been re-read.')).toBeTruthy());
+});
+
+test('a rule removal that answers true says nothing about a missing rule', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Work')]));
+  listExclusions.mockResolvedValueOnce([{ prefix: 'Old notes', existsOnDisk: false }]);
+  listExclusions.mockResolvedValueOnce([]);
+  includeSubfolder.mockResolvedValue(true);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('folder-rule-1-Old notes')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Old notes' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Old notes' }));
+
+  await waitFor(() => expect(screen.queryByTestId('folder-rule-1-Old notes')).toBeNull());
+  expect(screen.queryByText('There was no such rule left to remove. The list has been re-read.')).toBeNull();
+});
+
+test('a rejected list_subfolders shows the backend sentence, apart from the load and action errors', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockRejectedValue(new Error('That folder is not there any more.'));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+
+  await waitFor(() => expect(screen.getByText('The subfolders of this folder could not be read.')).toBeTruthy());
+  expect(screen.getByText('That folder is not there any more.')).toBeTruthy();
+  // Held apart from both banners this component already had: the list of
+  // folders is still readable, and no add or remove failed.
+  expect(screen.queryByTestId('folders-load-reason')).toBeNull();
+  expect(screen.queryByTestId('folders-action-error')).toBeNull();
+  expect(screen.getByText('/synthetic/root')).toBeTruthy(); // the row itself stays
+});
+
+// `exclude_subfolder` can refuse a path the listing showed
+// (`Error::AlreadyPrunedByBuiltIn`, added by Task 4 so the command agrees with
+// the listing). The sentence is rendered verbatim and nothing branches on which
+// rejection it was; the decision comes from a re-read.
+test('a rejected exclude shows the backend sentence and re-reads the state', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValueOnce(subfolders([sub('.git')]));
+  listExclusions.mockResolvedValue([]);
+  listSubfolders.mockResolvedValueOnce(subfolders([sub('.git', { kind: 'builtIn' })]));
+  excludeSubfolder.mockRejectedValue(
+    new Error('The application already skips ".git" in /synthetic/root, so a rule for it would change nothing.'),
+  );
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude .git' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude .git' }));
+
+  await waitFor(() => expect(screen.getByText(
+    'The application already skips ".git" in /synthetic/root, so a rule for it would change nothing.',
+  )).toBeTruthy());
+  // The re-read is what decides what the row says next — not the rejection,
+  // which nothing here parses.
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Exclude .git' })).toBeNull());
+  expect(screen.getByText('The application never indexes this folder, so there is no rule to add or remove.')).toBeTruthy();
+});
+
+test('a root that disappears from the list takes its expansion with it', async () => {
+  setLocale('en'); // seed, do not inherit
+  const alpha = root({ rootId: 3, absolutePath: '/synthetic/alpha' });
+  const beta = root({ rootId: 9, absolutePath: '/synthetic/beta' });
+  listTree.mockResolvedValueOnce(listing([alpha, beta]));
+  listTree.mockResolvedValueOnce(listing([alpha]));
+  listSubfolders.mockResolvedValue(subfolders([sub('OnlyUnderBeta')]));
+  listExclusions.mockResolvedValue([]);
+  removeWatchedFolder.mockResolvedValue(1);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/beta')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-9'));
+  await waitFor(() => expect(screen.getByText('OnlyUnderBeta')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove /synthetic/beta' }));
+
+  await waitFor(() => expect(screen.queryByText('/synthetic/beta')).toBeNull());
+  // A watched root's id can be handed out again by SQLite after the row is
+  // deleted, and an expansion left behind under that id would draw the old
+  // folder's subfolders under a new one.
+  expect(screen.queryByText('OnlyUnderBeta')).toBeNull();
+  expect(screen.getByTestId('folder-expand-3').getAttribute('aria-expanded')).toBe('false');
+});
+
+// ── PR 8a, fix round 4, item 1: the other half of the case above ─────────────
+//
+// The comment inside the test above names the hazard and the test checks ONE of
+// its two cases: the id has gone. This is the case rowid reuse actually
+// produces — the id is still in the listing and now names a DIFFERENT folder.
+// `watched_root.id` is `INTEGER PRIMARY KEY` with no `AUTOINCREMENT`
+// (`schema.sql:11-15`), so removing the most recently added root and adding
+// another hands the new one the old id.
+//
+// The pair is written as a pair on purpose, and neither half is sufficient:
+// dropping every panel on every refresh satisfies the first of these two and
+// fails the second, and keeping every panel whose id is present satisfies the
+// second and fails the first. The one-line mutants, named in advance and both
+// measured: `live.get(rootId) === panel.rootPath` → `live.has(rootId)` fails
+// the first and leaves the second green; → `false` fails the second and leaves
+// the first green.
+test('a root id handed to a different folder does not keep the old folder\'s expansion', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 9, absolutePath: '/synthetic/beta' })]));
+  // The same id, a different path — what the person's remove-then-add did to
+  // this window between its two reads.
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 9, absolutePath: '/synthetic/gamma' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('OnlyUnderBeta')]));
+  listExclusions.mockResolvedValue([]);
+  open.mockResolvedValue('/synthetic/gamma');
+  addWatchedFolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/beta')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-9'));
+  await waitFor(() => expect(screen.getByText('OnlyUnderBeta')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/gamma')).toBeTruthy());
+
+  // The expansion belonged to `/synthetic/beta`, and drawing it here would put
+  // `OnlyUnderBeta` under `/synthetic/gamma` — with controls that then exclude
+  // or include on the NEW root using the OLD root's relative path.
+  expect(screen.queryByText('OnlyUnderBeta')).toBeNull();
+  expect(screen.queryByTestId('folder-panel-9')).toBeNull();
+  expect(screen.getByTestId('folder-expand-9').getAttribute('aria-expanded')).toBe('false');
+});
+
+test('a refresh that finds the same folder under the same id keeps its expansion open', async () => {
+  setLocale('en'); // seed, do not inherit
+  const beta = root({ rootId: 9, absolutePath: '/synthetic/beta' });
+  listTree.mockResolvedValueOnce(listing([beta]));
+  // The same root, unchanged, beside a newly added one: nothing about this
+  // panel's identity has moved, so nothing about the panel may.
+  listTree.mockResolvedValueOnce(
+    listing([beta, root({ rootId: 10, absolutePath: '/synthetic/added' })]),
+  );
+  listSubfolders.mockResolvedValue(subfolders([sub('OnlyUnderBeta')]));
+  listExclusions.mockResolvedValue([]);
+  open.mockResolvedValue('/synthetic/added');
+  addWatchedFolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/beta')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-9'));
+  await waitFor(() => expect(screen.getByText('OnlyUnderBeta')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/added')).toBeTruthy());
+
+  // Still open, and still holding the listing it was opened with: an add does
+  // not re-read a panel (only a job ending does), so this text is the panel
+  // the refresh kept and not one it fetched again.
+  expect(screen.getByText('OnlyUnderBeta')).toBeTruthy();
+  expect(screen.getByTestId('folder-panel-9')).toBeTruthy();
+  expect(screen.getByTestId('folder-expand-9').getAttribute('aria-expanded')).toBe('true');
+});
+
+// ── PR 8a, fix round 4, item 2: two `list_tree` calls, answered out of order ──
+//
+// `refresh` is reachable from four places — mount, an add, a remove, and a job
+// ending — and had no generation guard of its own, while a panel's read has had
+// one since Task 5. Two of them overlap here by construction rather than by
+// luck: the mount's read is left on the wire and the add's is resolved first.
+//
+// The mutant, named in advance: delete `if (refreshes !== generation) return;`
+// (the one after the `await`, not the one in the `catch`) and the older listing
+// replaces the newer one — `/synthetic/stale` appears and `/synthetic/fresh`
+// goes. Both directions are asserted for the reason the brief gives: a guard
+// that returns unconditionally also removes the stale row, and would pass a
+// test that only looked for its absence.
+test('an older list_tree that lands after a newer one replaces neither the list nor the panels', async () => {
+  setLocale('en'); // seed, do not inherit
+  let settleFirst: (l: TreeListing) => void = () => {};
+  listTree
+    .mockReturnValueOnce(new Promise<TreeListing>((r) => { settleFirst = r; }))
+    .mockResolvedValueOnce(listing([root({ rootId: 2, absolutePath: '/synthetic/fresh' })]));
+  open.mockResolvedValue('/synthetic/fresh');
+  addWatchedFolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(listTree).toHaveBeenCalledTimes(1)); // mount's read, still on the wire
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/fresh')).toBeTruthy());
+  expect(listTree).toHaveBeenCalledTimes(2); // the two really did overlap
+
+  settleFirst(listing([root({ rootId: 1, absolutePath: '/synthetic/stale' })]));
+  // A real turn of the event loop, not a microtask: the older answer has an
+  // `await` and a Svelte render to get through, and a test that stopped before
+  // both would report "not drawn" about a draw not yet attempted.
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.queryByText('/synthetic/stale')).toBeNull();
+  expect(screen.getByText('/synthetic/fresh')).toBeTruthy(); // and the newer answer stands
+});
+
+// The rejection half of the same guard, and its own line: every caller of
+// `refresh` turns a rejection into `loadError`, which replaces the whole list
+// with a failure banner. An older failure landing behind a newer success would
+// therefore say the list cannot be read over a list that has just been read.
+//
+// The mutant: delete `if (refreshes !== generation) return;` from the `catch`
+// so the stale rejection is rethrown, and the banner appears.
+test('a list_tree rejection that lands after a newer answer prints no failure over it', async () => {
+  setLocale('en'); // seed, do not inherit
+  let failFirst: (e: Error) => void = () => {};
+  listTree
+    .mockReturnValueOnce(new Promise<TreeListing>((_resolve, reject) => { failFirst = reject; }))
+    .mockResolvedValueOnce(listing([root({ rootId: 2, absolutePath: '/synthetic/fresh' })]));
+  open.mockResolvedValue('/synthetic/fresh');
+  addWatchedFolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(listTree).toHaveBeenCalledTimes(1));
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/fresh')).toBeTruthy());
+
+  failFirst(new Error('The index is not open yet.'));
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.queryByTestId('folders-load-reason')).toBeNull();
+  expect(screen.getByText('/synthetic/fresh')).toBeTruthy();
+});
+
+// 🔴 Review finding I2. This case is `patch`'s early return
+// (`Folders.svelte:126`) and nothing else, and the shape of it was measured
+// three times before it held.
+//
+// The write it pins is the one `exclude` makes AFTER the person has shut the
+// row: `await read(rootId, want)` on line `Folders.svelte:413` runs behind the
+// action, raises the generation itself, and so passes `read`'s own check
+// (`:167`) — the counter cannot stand in for the early return here, because
+// the counter is not what says no. With the early return dropped, `patch`
+// spreads a missing panel and BUILDS one out of the re-read's own fields, and
+// the row the person closed comes back open with the listing from before the
+// action in it.
+//
+// 🔴 The exclude here RESOLVES, and that is the whole reason this case can
+// fail. The first two attempts used a rejected exclude, and a rejection cannot
+// be the oracle: `exclude`'s `catch` patches `{ actionError }` alone, so the
+// panel the mutant builds has no `tree` — `undefined`, not `null` — and
+// `buildLevel` throws inside the `rows` derived before anything reaches the
+// DOM. Vitest reports that as an unhandled error beside 44 passing tests, and
+// Svelte draws nothing further, so every assertion about the screen still
+// passes. A resolved exclude patches `{ tree, rules, loadError }`, which is a
+// panel that renders, and the re-opened row is then visible to an assertion.
+//
+// ⚠️ Read the whole summary, not the pass count: that run prints
+// `Tests 44 passed (44)` **and** `Errors 1 error`, and it **exits 1**. CI runs
+// `npm --prefix ui run test` (`.github/workflows/ci.yml:189`) and would have
+// failed on it, so a crashed oracle is not a false green in CI. What it defeats
+// is the INSTRUMENT: `ui/` has no mutation harness, so a guard here is checked
+// by deleting it and reading the output — and three readers in a row took
+// `44 passed, 0 failed` for a passing run and concluded this guard had no
+// mutant. **Record a hand revert by its exit code and `Errors` count, never by
+// its pass count.**
+//
+// The `listSubfolders` count is the positive control: without it this case
+// would also be green if the re-read never happened at all, which is a
+// different component from the one being tested.
+test('a row shut while an exclude is in flight is not re-opened by the re-read behind it', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Work')]));
+  listExclusions.mockResolvedValue([]);
+  let accept: () => void = () => {};
+  excludeSubfolder.mockReturnValueOnce(new Promise<void>((resolve) => { accept = () => resolve(); }));
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByText('Work')).toBeTruthy());
+  expect(listSubfolders).toHaveBeenCalledTimes(1);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' })); // in flight
+  await fireEvent.click(screen.getByTestId('folder-expand-1')); // the person shuts the row
+  expect(screen.queryByTestId('folder-panel-1')).toBeNull(); // and it is shut
+
+  accept();
+  // Real turns of the event loop, not microtasks: the re-read behind the
+  // action is an awaited `Promise.all` and a Svelte render, and a chain of
+  // `await Promise.resolve()` stops short of both — measured, and it is what
+  // made the first attempt at this case unfalsifiable.
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+
+  // The re-read DID run and DID try to write: the guard is what refused it,
+  // not an absent call.
+  expect(listSubfolders).toHaveBeenCalledTimes(2);
+  expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByTestId('folder-panel-1')).toBeNull();
+  expect(screen.queryByText('Work')).toBeNull();
+});
+
+// Renamed after review I2: this case cannot claim a late listing was DISCARDED,
+// because two independent guards each satisfy it alone — the generation counter
+// and `patch`'s early return — so neither has a mutant here. What it does check
+// is stated in its name and both halves are real: collapsing issues no read,
+// and a listing still on the wire puts nothing on screen. Each guard's own
+// case is elsewhere, and each of those two now fails alone when its own guard
+// is dropped and stays green when the other's is: the counter's is `an older
+// listing that lands after a newer one`, and the early return's is `a row shut
+// while an exclude is in flight is not re-opened by the re-read behind it`.
+test('collapsing a row reads nothing, and a listing still on the wire draws nothing', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  let settle: (l: SubfolderListing) => void = () => {};
+  listSubfolders.mockReturnValueOnce(new Promise<SubfolderListing>((r) => { settle = r; }));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('folder-expand-1')); // opens, request in flight
+  await fireEvent.click(screen.getByTestId('folder-expand-1')); // shut again before it lands
+
+  settle(subfolders([sub('TooLate')]));
+  expect(listSubfolders).toHaveBeenCalledTimes(1); // shutting the row reads nothing
+  await new Promise((r) => setTimeout(r, 0)); // a real turn, so the draw is attempted
+
+  expect(screen.queryByText('TooLate')).toBeNull();
+  expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('false');
+});
+
+// 🔴 The collapse case above is held by TWO neighbouring defences and not by
+// the generation counter: a shut row has no panel entry left to write into, so
+// dropping the counter entirely leaves that test green, and so does dropping
+// `patch`'s early return (both measured). The case the counter is actually for
+// is this one — a row shut and opened again while the first read is still on
+// the wire, where the panel entry EXISTS when the older answer lands and
+// nothing else would stop it being drawn over the newer one.
+test('an older listing that lands after a newer one is discarded, not drawn over it', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  let settleFirst: (l: SubfolderListing) => void = () => {};
+  listSubfolders
+    .mockReturnValueOnce(new Promise<SubfolderListing>((r) => { settleFirst = r; }))
+    .mockResolvedValueOnce(subfolders([sub('Fresh')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('folder-expand-1')); // read A, in flight
+  await fireEvent.click(screen.getByTestId('folder-expand-1')); // shut
+  await fireEvent.click(screen.getByTestId('folder-expand-1')); // read B, a new panel
+  await waitFor(() => expect(screen.getByText('Fresh')).toBeTruthy());
+
+  settleFirst(subfolders([sub('Stale')]));
+  // A real turn of the event loop, not three microtasks: the older read has an
+  // awaited `Promise.all` and a Svelte render to get through, and a test that
+  // stops before either would report "not drawn" about a draw that had not been
+  // attempted yet.
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.queryByText('Stale')).toBeNull();
+  expect(screen.getByText('Fresh')).toBeTruthy(); // and the newer answer is still there
+  expect(screen.getByTestId('folder-expand-1').getAttribute('aria-expanded')).toBe('true');
+});
+
+// What disappears when a rule appears. `Work` itself stays open — a rule's own
+// folder is readable (I1) — but the level under `Work/notes` does not: the
+// re-read gives `notes` the ancestor state, which offers no way to open it, and
+// a subtree left hanging under it would be a list of folders a person can no
+// longer collapse, under a row whose contents are no longer read at all.
+//
+// Two mock levels below the root on purpose: with one, `notes` would be the
+// deepest thing on screen and its own children would never have existed, so
+// nothing would be left to disappear. Measured with two: dropping
+// `describe(...).expandable` from `fetchTree` fails this case and no other.
+test('excluding an open folder keeps that folder open and takes the level under its new ancestor rule away', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  let excluded = false;
+  listSubfolders.mockImplementation((_rootId: number, path: string) => {
+    if (path === '') {
+      return Promise.resolve(subfolders([sub('Work', excluded ? { kind: 'excluded' } : { kind: 'open' })]));
+    }
+    if (path === 'Work') {
+      return Promise.resolve(subfolders([
+        sub('notes', excluded ? { kind: 'excludedByAncestor', prefix: 'Work' } : { kind: 'open' }, 'Work'),
+      ]));
+    }
+    return Promise.resolve(subfolders([sub('drafts', { kind: 'open' }, 'Work/notes')]));
+  });
+  listExclusions.mockImplementation(() =>
+    Promise.resolve(excluded ? [{ prefix: 'Work', existsOnDisk: true }] : []));
+  excludeSubfolder.mockImplementation(() => { excluded = true; return Promise.resolve(undefined); });
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByText('Work')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-Work'));
+  await waitFor(() => expect(screen.getByText('notes')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-Work/notes'));
+  await waitFor(() => expect(screen.getByText('drafts')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
+
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Work' })).toBeTruthy());
+  // The folder the person just protected is still open, and still openable.
+  expect(screen.getByText('notes')).toBeTruthy();
+  expect(screen.getByTestId('subfolder-expand-1-Work').getAttribute('aria-expanded')).toBe('true');
+  // The level under the new ancestor rule is gone, and so is the control that
+  // opened it.
+  expect(screen.queryByText('drafts')).toBeNull();
+  expect(screen.queryByTestId('subfolder-expand-1-Work/notes')).toBeNull();
+});
+
+test('the expanded panel switches language with everything else on screen', async () => {
+  await expand(
+    [
+      sub('Work'),
+      sub('Archive', { kind: 'excluded' }),
+      sub('secret', { kind: 'excludedByAncestor', prefix: 'Archive' }, 'Archive'),
+      sub('node_modules', { kind: 'builtIn' }),
+    ],
+    [{ prefix: 'Old notes', existsOnDisk: false }],
+    1,
+  );
+  // Read under 'en' BEFORE the switch, so a $derived missing `void $locale`
+  // still caches an English value here and the read after the switch is a
+  // genuinely later one.
+  expect(screen.getByText('No rule excludes this folder.')).toBeTruthy();
+  // `expandLabel` and `removeRuleLabel` are each their own `$derived.by`,
+  // outside `rows` — read their visible button text (not the aria-labels
+  // `rows` already covers below) before the switch too.
+  expect(screen.getAllByText('Subfolders').length).toBeGreaterThan(0);
+  expect(screen.getByText('Remove the rule')).toBeTruthy();
+
+  setLocale('uk');
+  await Promise.resolve();
+
+  expect(screen.getByText('Жодне правило не виключає цю теку.')).toBeTruthy();
+  expect(screen.getByText('Застосунок ніколи не індексує цю теку, тож тут немає правила, яке можна додати чи прибрати.')).toBeTruthy();
+  expect(screen.getByText('Наразі за цим шляхом теки немає.')).toBeTruthy();
+  expect(screen.getByText('1 підтеку не показано: її назву не вдалося прочитати як текст.')).toBeTruthy();
+  // The sentence that names the outermost rule, in the language it is read in:
+  // "спершу", not a promise that removing that rule changes this folder.
+  expect(screen.getByText('Утримується вашим правилом на Archive. Спершу приберіть те правило — теку може утримувати ще одне.')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Виключити Work' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Не виключати Archive' })).toBeTruthy();
+  // An excluded folder opens here too — the control exists in both locales, and
+  // the row held by the rule below it still offers none.
+  expect(screen.getByRole('button', { name: 'Підтеки теки Archive' })).toBeTruthy();
+  expect(within(screen.getByTestId('subfolder-1-Archive/secret')).queryAllByRole('button')).toHaveLength(0);
+  expect(screen.getByRole('button', { name: 'Прибрати правило на Old notes' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Підтеки теки /synthetic/root' })).toBeTruthy();
+  // The visible button text, not just its aria-label — `expandLabel` and
+  // `removeRuleLabel` each guard their own `void $locale` at
+  // Folders.svelte:855-856, outside `rows`.
+  expect(screen.getAllByText('Підтеки').length).toBeGreaterThan(0);
+  expect(screen.getByText('Прибрати правило')).toBeTruthy();
+});
+
+// 🔴 Read the screen, not the DOM. Every assertion above is satisfied by a
+// panel that renders the right elements in the wrong words, or the right words
+// against the wrong row. This one reads the whole row — its count line, its
+// controls, every subfolder sentence and every stored rule — as a person would,
+// in order, and states the entire text.
+test('the whole expanded row reads as one screen, in order, with every sentence it claims', async () => {
+  await expand(
+    [
+      sub('Archive', { kind: 'excluded' }),
+      sub('Held', { kind: 'excludedByAncestor', prefix: 'Archive' }),
+      sub('Link', { kind: 'symlink' }),
+      sub('Trailing ', { kind: 'unusableName' }),
+      sub('Work'),
+      sub('node_modules', { kind: 'builtIn' }),
+    ],
+    [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Work/private', existsOnDisk: true },
+      { prefix: 'Old notes', existsOnDisk: false },
+    ],
+    1,
+    [{ relativePath: 'a.md', documentId: 'd1' }, { relativePath: 'b.md', documentId: 'd2' }],
+  );
+
+  const cost = 'Without this rule, anything at this path is indexed again from the next scan on.';
+  const text = visibleText(screen.getByTestId('folder-row-1'));
+
+  expect(text).toBe([
+    '/synthetic/root',
+    'Indexed: 2 documents',
+    'Subfolders', 'Scan', 'Remove',
+    '1 subfolder is not listed: its name could not be read as text.',
+    'Archive', 'Excluded by your rule.', cost, 'Do not exclude', 'Subfolders',
+    'Held', 'Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.',
+    'Link', 'A link to another folder. The scan never follows links, so nothing inside it is indexed.',
+    'Trailing', 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
+    'Work', 'No rule excludes this folder.', 'Exclude', 'Subfolders',
+    'node_modules', 'The application never indexes this folder, so there is no rule to add or remove.',
+    'Your exclusion rules for this folder:',
+    'Archive', cost, 'Remove the rule',
+    'Work/private', cost, 'Remove the rule',
+    'Old notes', 'There is no folder at this path right now.', cost, 'Remove the rule',
+  ].join(' '));
+});
+
+// ---------------------------------------------------------------------------
+// PR 8a, Task 6 — what an exclusion costs, said before it is stored.
+//
+// 🔴 Every fixture below states BOTH numbers in the sentence it asserts. They
+// are two different facts about the same reply — indexed PATHS under the
+// prefix, and DOCUMENTS for which no path outside it survives — and an
+// implementation that counts paths and calls them documents satisfies any
+// assertion that reads only one of them. `deleting_one_copy_keeps_the_document`
+// (`crates/mnema-ingest/tests/walk.rs:1168`) is the behaviour they mirror:
+// `forget_if_unnamed` drops a document when its LAST path goes, never before.
+// ---------------------------------------------------------------------------
+
+function file(relativePath: string, documentId: string): TreeFile {
+  return { relativePath, documentId };
+}
+
+// `before` is what `list_tree` answered at mount; `after` is what it answers on
+// the re-read the click makes. They are DIFFERENT on purpose in every count
+// test — `before` carries no files at all, so a component that counted from the
+// mount snapshot would store without ceremony and every count assertion here
+// would fail on a missing element rather than on a wrong number.
+async function askExclude(name: string, before: TreeRoot[], after: TreeRoot[] | Error) {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing(before));
+  if (after instanceof Error) listTree.mockRejectedValueOnce(after);
+  else listTree.mockResolvedValueOnce(listing(after));
+  listSubfolders.mockResolvedValue(subfolders([sub(name)]));
+  listExclusions.mockResolvedValue([]);
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: `Exclude ${name}` })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: `Exclude ${name}` }));
+}
+
+const EMPTY_ROOTS = [
+  root({ rootId: 1, absolutePath: '/synthetic/root', files: [] }),
+  root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+];
+
+test('excluding a folder that holds two documents names two paths AND two documents', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-x'), file('drop/y.md', 'doc-y')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Exclude drop?',
+    'As of now: on the next scan the index loses 2 files from this folder,',
+    'and 2 documents stop being findable: no other path names them.',
+    'Confirm Cancel',
+  ].join(' '));
+  // The question is a question: nothing is stored while it is on screen.
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// 🔴 The state that tells the two numbers apart. One `documentId`, two paths,
+// one of them outside the prefix: the index loses a path and loses no document.
+test('a second copy inside the same root keeps the document, so the count is one path and zero documents', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-1'), file('keep/copy.md', 'doc-1')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Exclude drop?',
+    'As of now: on the next scan the index loses 1 file from this folder,',
+    'and no document stops being findable — each is also indexed under another path.',
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// 🔴 The same fact across a root boundary. A count taken per root sees only
+// `/synthetic/root`, finds the document's last path there, and overstates.
+test('a second copy under a DIFFERENT watched folder keeps the document too', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [file('other/x.md', 'doc-1')] }),
+  ]);
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Exclude drop?',
+    'As of now: on the next scan the index loses 1 file from this folder,',
+    'and no document stops being findable — each is also indexed under another path.',
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1, M2 — what `Folders.svelte`'s `under` is a copy OF, and what
+// holds the other end of it.
+//
+// 🔴 The review, quoting this file's own older comment, said `under` is a hand
+// copy of `crates/mnema-ingest/src/walk.rs:878`. It is not, and the difference
+// decides where a pin belongs. That Rust function is called from exactly two
+// places — `walk.rs:696`, the ancestor climb, and `walk.rs:768`, inside
+// `should_delete` — and both pass a FROZEN prefix. It never sees an exclusion
+// rule. What decides whether an exclusion rule covers a path is
+// `crates/mnema-walk/src/rules.rs:522`'s `anchored_pattern` — `!/{escaped}` —
+// compiled by `ignore`'s gitignore line parser, whose directory patterns match
+// across a separator and not into a sibling. A tripwire on `walk.rs`'s `under`
+// would have pinned a neighbour: the two encode the same separator rule today
+// by coincidence of correctness, not because one is derived from the other.
+//
+// So the tie is a PAIR, the shape `rust-enum.ts` already argues for. This side
+// is `a sibling whose name merely starts with the prefix is not counted`,
+// directly below. The Rust side is, in `crates/mnema-walk/tests/rules.rs`,
+// `a_user_prefix_does_not_remove_a_sibling_whose_name_starts_with_it`, which
+// this round had to WRITE: `a_user_prefix_removes_its_subtree` fixes `private`
+// and `public`, names sharing no prefix, and no Rust fixture anywhere under
+// `crates/` or `src-tauri/` paired a prefix with a sibling starting with it, so
+// nothing said `private2/` survives a rule on `private`. Neither half closes the gap alone, and the real fix — one rule,
+// no copy — is `list_tree` carrying the count.
+// ---------------------------------------------------------------------------
+
+// 🔴 `drop2` is a SIBLING of `drop`, not a child: `anchored_pattern` produces
+// `!/drop`, which the gitignore parser matches across a separator and not into
+// a sibling. A count written with `startsWith(prefix)` alone passes every other
+// state in this file and fails only here — it would promise a person that
+// `drop2/y.md` disappears as well.
+test('a sibling whose name merely starts with the prefix is not counted', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-1'), file('drop2/y.md', 'doc-2')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Exclude drop?',
+    'As of now: on the next scan the index loses 1 file from this folder,',
+    'and 1 document stops being findable: no other path names it.',
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// A confirmation over nothing trains a person to click through the one that
+// matters, so there is none: the rule is stored on the press. `keep/x.md` is
+// indexed and `empty/` holds nothing, so the reply is not empty — a component
+// that skipped the question by failing to read the reply at all would pass an
+// assertion made against a reply with no files in it.
+test('excluding a folder holding no indexed path stores it with no question and no loss sentence', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing(EMPTY_ROOTS));
+  listTree.mockResolvedValueOnce(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('keep/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]));
+  listSubfolders.mockResolvedValueOnce(subfolders([sub('empty')]));
+  listSubfolders.mockResolvedValue(subfolders([sub('empty', { kind: 'excluded' })]));
+  listExclusions.mockResolvedValueOnce([]);
+  listExclusions.mockResolvedValue([{ prefix: 'empty', existsOnDisk: true }]);
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude empty' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude empty' }));
+
+  await waitFor(() => expect(excludeSubfolder).toHaveBeenCalledWith(1, 'empty'));
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  // "Says so plainly" is the row itself, after the re-read: no loss sentence,
+  // and the state a person came to set.
+  await waitFor(() => expect(visibleText(screen.getByTestId('subfolder-1-empty'))).toBe(
+    'empty Excluded by your rule.'
+    + ' Without this rule, anything at this path is indexed again from the next scan on.'
+    + ' Do not exclude Subfolders',
+  ));
+});
+
+test('cancelling stores nothing and leaves the row saying the folder is not excluded', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-x'), file('drop/y.md', 'doc-y')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+  await screen.findByTestId('folder-confirm-1');
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Leave drop as it is' }));
+
+  await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+  // Not only "nothing was sent": the row still SAYS the folder is open, and
+  // still offers the control that would exclude it.
+  const row = within(screen.getByTestId('subfolder-1-drop'));
+  expect(row.getByText('No rule excludes this folder.')).toBeTruthy();
+  expect(row.getByRole('button', { name: 'Exclude drop' })).toBeTruthy();
+});
+
+test('confirming stores the rule that was asked about, and the question goes', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-x'), file('drop/y.md', 'doc-y')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+  await screen.findByTestId('folder-confirm-1');
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm excluding drop' }));
+
+  await waitFor(() => expect(excludeSubfolder).toHaveBeenCalledWith(1, 'drop'));
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+});
+
+// 🔴 The inverse, and deliberately NOT a count: this window does not know what
+// is on disk under a folder it has been ignoring, and inventing a number there
+// would be the overstatement the count above was amended to remove.
+test('taking a rule away asks first, and names the provider rather than a number', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Archive', { kind: 'excluded' })]));
+  listExclusions.mockResolvedValue([{ prefix: 'Archive', existsOnDisk: true }]);
+  includeSubfolder.mockResolvedValue(true);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Archive' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again,',
+    'and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '));
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Archive' }));
+  await waitFor(() => expect(includeSubfolder).toHaveBeenCalledWith(1, 'Archive'));
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1, I1 — the panel used to disagree with itself about one folder.
+//
+// The question said "its text is sent to the model provider" while the rule row
+// further down the same panel said "There is no folder at this path right now",
+// both drawn from the same `panel.rules` in the same render. `existsOnDisk` is
+// the backend's own answer (`bridge.rs:117`), already on screen; the question
+// now reads it rather than promising a cost the same panel denies.
+//
+// Both directions, in both locales, and both against the WHOLE confirmation
+// text: an assertion that only checks the new sentence is present passes on a
+// box that prints both.
+// ---------------------------------------------------------------------------
+
+const GONE_COST = {
+  en: [
+    'Stop excluding Old notes?',
+    'There is no folder at this path right now, so nothing is being indexed today.',
+    'If a folder appears there later, it is indexed and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '),
+  uk: [
+    'Більше не виключати Old notes?',
+    'Наразі за цим шляхом теки немає, тож зараз нічого не індексується.',
+    'Якщо тека там з’явиться згодом, вона індексується, а її текст надсилається провайдеру моделі.',
+    'Підтвердити Скасувати',
+  ].join(' '),
+} as const;
+
+const REMOVE_RULE_LABEL = { en: 'Remove the rule on Old notes', uk: 'Прибрати правило на Old notes' } as const;
+
+async function openWithRule(loc: 'en' | 'uk', rules: StoredExclusion[]) {
+  setLocale(loc); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Work')]));
+  listExclusions.mockResolvedValue(rules);
+  includeSubfolder.mockResolvedValue(true);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('folder-rules-1')).toBeTruthy());
+}
+
+for (const loc of ['en', 'uk'] as const) {
+  test(`removing a rule whose folder is gone is not promised to the provider (${loc})`, async () => {
+    await openWithRule(loc, [{ prefix: 'Old notes', existsOnDisk: false }]);
+
+    await fireEvent.click(screen.getByRole('button', { name: REMOVE_RULE_LABEL[loc] }));
+
+    expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe(GONE_COST[loc]);
+    // The other half of the contradiction, still on screen, still saying the
+    // same thing as the question above it.
+    expect(visibleText(screen.getByTestId('folder-rule-1-Old notes')))
+      .toContain(loc === 'en' ? 'There is no folder at this path right now.' : 'Наразі за цим шляхом теки немає.');
+    expect(includeSubfolder).not.toHaveBeenCalled();
+  });
+}
+
+// The direction the test above cannot see on its own: a rule whose folder IS
+// there must keep the unconditional sentence. Without this, the gone sentence
+// could be returned for every rule and every assertion above would still pass.
+test('a rule whose folder is still there keeps the unconditional provider sentence', async () => {
+  await openWithRule('en', [{ prefix: 'Old notes', existsOnDisk: true }]);
+
+  await fireEvent.click(screen.getByRole('button', { name: REMOVE_RULE_LABEL.en }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Old notes?',
+    'From the next scan on, everything inside this folder is indexed again,',
+    'and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// Task 7. `confirmView` (Folders.svelte:755-780) builds the heading, the cost
+// sentence, and both aria-labels for the INCLUDE branch inside the same
+// `void $locale` block the exclude branch above already proves reactive — but
+// each branch is its own ternary arm, and a literal swapped in for one of
+// THESE calls specifically would not be caught by a switch test that only ever
+// reaches the exclude arm. Two states, `existsOnDisk` true here and false in
+// the test below, cover both halves of the cost ternary (Folders.svelte:766-771).
+test('the "stop excluding" question switches language with everything else', async () => {
+  await openWithRule('en', [{ prefix: 'Old notes', existsOnDisk: true }]);
+  await fireEvent.click(screen.getByRole('button', { name: REMOVE_RULE_LABEL.en }));
+  await screen.findByTestId('folder-confirm-1');
+
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
+    'Більше не виключати Old notes?',
+    'Від наступного сканування все всередині цієї теки індексується знову,',
+    'а її текст надсилається провайдеру моделі.',
+    'Підтвердити Скасувати',
+  ].join(' '));
+  expect(screen.getByRole('button', { name: 'Підтвердити скасування правила на Old notes' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Залишити Old notes як є' })).toBeTruthy();
+});
+
+test('the "stop excluding" question for a folder that is gone switches language with everything else', async () => {
+  await openWithRule('en', [{ prefix: 'Old notes', existsOnDisk: false }]);
+  await fireEvent.click(screen.getByRole('button', { name: REMOVE_RULE_LABEL.en }));
+  await screen.findByTestId('folder-confirm-1');
+
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe(GONE_COST.uk);
+});
+
+// 🔴 The OTHER caller, and it answers `existsOnDisk` from different evidence:
+// the row is a directory entry `list_subfolders` read off the disk, so the
+// folder is there whatever a stale rule list says. This pins that the row site
+// still passes `true` — the rule below it says the folder is gone, and if the
+// row went looking through `panel.rules` instead of standing on its own
+// listing, this question would turn into the conditional sentence for a folder
+// that is demonstrably on screen.
+test('a subfolder row asks about the folder it is a listing of, not about the rule list', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Archive', { kind: 'excluded' })]));
+  listExclusions.mockResolvedValue([{ prefix: 'Archive', existsOnDisk: false }]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Archive' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again,',
+    'and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '));
+});
+
+// The `list_tree` the count is read from can be refused like any other call.
+// §10: what crosses is a sentence, so the sentence is what is shown.
+test('a rejected re-read stores nothing, shows no loss sentence, and prints the backend sentence', async () => {
+  await askExclude('drop', EMPTY_ROOTS, new Error('the index is not open'));
+
+  await waitFor(() =>
+    expect(screen.getByTestId('folder-subfolder-error-1').textContent).toBe('the index is not open'));
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// Fix round 6, item 1. The MIRROR of the test above, for `askInclude`'s own
+// re-read: fix round 5 gave this branch a deliberate D29 safety decision — a
+// removal decided on an answer this window never read is the one direction
+// that cannot be undone — and its twin above is pinned, but this one was not.
+// Two mutants of the branch (`Folders.svelte:629-637`) were measured green
+// across the whole suite: one making the refusal silent, one raising the
+// removal question anyway on a rejected listing.
+//
+// Both directions, for the reason the pair of tests two sections up state: a
+// guard that refuses every removal is satisfied by a test that only checks the
+// refusal, so this one also re-presses after a successful re-read and confirms
+// the removal still goes through for the same folder.
+test('a rejected re-read for a rule removal removes nothing and shows the backend sentence, but a later successful re-read still removes it', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listTree.mockRejectedValueOnce(new Error('the index is not open'));
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('Work')]));
+  listExclusions.mockResolvedValue([{ prefix: 'Old notes', existsOnDisk: true }]);
+  includeSubfolder.mockResolvedValue(true);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('folder-rules-1')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Old notes' }));
+  await waitFor(() =>
+    expect(screen.getByTestId('folder-subfolder-error-1').textContent).toBe('the index is not open'));
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  // The successful direction, same folder, same id: refusing this press too
+  // would still satisfy every assertion above.
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Old notes' }));
+  await screen.findByTestId('folder-confirm-1');
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Old notes' }));
+
+  expect(includeSubfolder).toHaveBeenCalledWith(1, 'Old notes');
+});
+
+// D130. The question is a reactive string like everything else on this screen:
+// a `t()` call frozen at the moment of the click would keep the English
+// sentence in front of a person who has since switched language.
+test('a question already on screen switches language with everything else', async () => {
+  await askExclude('drop', EMPTY_ROOTS, [
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [file('drop/x.md', 'doc-x'), file('drop/y.md', 'doc-y')],
+    }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]);
+  await screen.findByTestId('folder-confirm-1');
+
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
+    'Виключити drop?',
+    'Станом на зараз: при наступному скануванні індекс втратить 2 файли із цієї теки,',
+    'а 2 документи більше не знайдуться: інші шляхи на них не ведуть.',
+    'Підтвердити Скасувати',
+  ].join(' '));
+  // The two aria-labels `visibleText` cannot see: `confirmAriaLabel` and
+  // `cancelAriaLabel` are the same `void $locale` block, but each is its own
+  // `t()` call (Folders.svelte:773-778) and neither is a text node.
+  expect(screen.getByRole('button', { name: 'Підтвердити виключення drop' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Залишити drop як є' })).toBeTruthy();
+});
+
+// The gap between the press and the answer is a state a person sits in, and a
+// press that draws nothing reads as a press that did nothing.
+test('the wait for the fresh reply says what is being checked', async () => {
+  setLocale('en'); // seed, do not inherit
+  let release: (v: TreeListing) => void = () => {};
+  listTree.mockResolvedValueOnce(listing(EMPTY_ROOTS));
+  listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => { release = r; }));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-1')))
+    .toBe('Checking what this exclusion removes…');
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+
+  // Task 7. `checkingLabel` (Folders.svelte:757) is its own branch of
+  // `confirmView`, reached only in the gap this test holds open — a switch
+  // test landing after `release()` would never pass through here at all.
+  setLocale('uk');
+  await tick();
+  expect(visibleText(screen.getByTestId('folder-confirm-1')))
+    .toBe('Перевіряємо, що прибере це виключення…');
+  setLocale('en');
+  await tick();
+
+  release(listing([root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] })]));
+  await waitFor(() => expect(visibleText(screen.getByTestId('folder-confirm-1'))).toBe([
+    'Exclude drop?',
+    'As of now: on the next scan the index loses 1 file from this folder,',
+    'and 1 document stops being findable: no other path names it.',
+    'Confirm Cancel',
+  ].join(' ')));
+});
+
+// Task 6 opened an async gap of its own — the `list_tree` between the press and
+// the question — and this is that gap's own "what appears wrongly" case. The
+// row is shut while the reply is on the wire; the reply must raise nothing,
+// because the panel it would raise a question in is not the one that was
+// pressed. `panels[rootId]` alone does NOT decide this: a row shut and reopened
+// is a fresh panel under the same key, and `patch` writes to it happily.
+test('a row shut while the check is in flight raises no question when the reply lands', async () => {
+  setLocale('en'); // seed, do not inherit
+  let release: (v: TreeListing) => void = () => {};
+  listTree.mockResolvedValueOnce(listing(EMPTY_ROOTS));
+  listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => { release = r; }));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+
+  // Shut, then open again: the panel under key 1 is a new one.
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+
+  release(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]));
+  await tick();
+  await tick();
+
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// ── PR 8a, Task 8: a job ending re-reads the panel, not only the row ─────────
+//
+// The live run's finding 1, in this file's own terms. `Indexing.test.ts` holds
+// the whole-window form — the renamed folder that went on reading "excluded by
+// your rule" while its text was being sent to the provider. What is here is the
+// machinery that form cannot reach: several roots open at once, and a question
+// standing on screen when the ending lands.
+//
+// Driven through the REAL controller and the real `startWalkJob`, so what is
+// exercised is the wiring a press goes through rather than a store shaped like
+// one. `model_settings` answers "there is no key", which stops the chained
+// embedding pass inside the controller's own pre-check — a second job would
+// send a second ending, and every assertion below is about what ONE ending
+// does.
+function answerModelSettings() {
+  invoke.mockImplementation((cmd: string) =>
+    Promise.resolve(cmd === 'model_settings' ? { key: { kind: 'absent' } } : undefined));
+}
+
+function endWalk() {
+  const call = [...invoke.mock.calls].reverse().find((c) => c[0] === 'start_walk_job');
+  if (call === undefined) throw new Error('start_walk_job was never invoked');
+  (call[1] as { onProgress: { onmessage: (e: unknown) => void } }).onProgress.onmessage({
+    event: 'ended',
+    data: {
+      reason: 'completed', done: 1, total: 1, skipped: 0, refused: 0, complete: true,
+      indexed: 1, unchanged: 0, removed: 0, frozen: [], message: null,
+    },
+  });
+}
+
+// Fix round 2, I1. The opposite of `answerModelSettings`: a key AND a chosen
+// model, so `jobs.ts`'s own `chain()` does not stop at either precondition and
+// a walk's ending really does start `start_embed_job` — the only way to reach
+// an EMBEDDING pass's own ending through the real controller.
+function answerModelSettingsReady() {
+  invoke.mockImplementation((cmd: string) =>
+    Promise.resolve(cmd === 'model_settings'
+      ? { key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'emb-1' } }
+      : undefined));
+}
+
+function endEmbed() {
+  const call = [...invoke.mock.calls].reverse().find((c) => c[0] === 'start_embed_job');
+  if (call === undefined) throw new Error('start_embed_job was never invoked');
+  (call[1] as { onProgress: { onmessage: (e: unknown) => void } }).onProgress.onmessage({
+    event: 'ended',
+    data: {
+      reason: 'completed', done: 0, total: 0, skipped: 0, refused: 0, complete: true,
+      indexed: 0, unchanged: 0, removed: 0, frozen: [], message: null,
+    },
+  });
+}
+
+test('a job ending re-reads every expanded panel, not only the root whose Scan was pressed', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettings();
+  listTree.mockResolvedValue(listing(EMPTY_ROOTS));
+  listSubfolders.mockImplementation((rootId: number) =>
+    Promise.resolve(subfolders([sub(rootId === 1 ? 'first-before' : 'second-before')])));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await fireEvent.click(screen.getByTestId('folder-expand-2'));
+  await screen.findByTestId('subfolder-1-first-before');
+  await screen.findByTestId('subfolder-2-second-before');
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  // Swapped only after the walk has started, so the new names can reach the
+  // screen only by both panels being READ again.
+  listSubfolders.mockImplementation((rootId: number) =>
+    Promise.resolve(subfolders([sub(rootId === 1 ? 'first-after' : 'second-after')])));
+
+  endWalk();
+
+  await screen.findByTestId('subfolder-1-first-after');
+  // 🔴 The root nobody pressed Scan on. Narrowing the re-read to the pressed
+  // root would leave this panel stale — and there is nothing to narrow it BY:
+  // an `Ending` (`jobs.ts`) carries counts and an outcome and no root at all,
+  // and `runningUnobserved` is the state where this window has no channel to
+  // read one from even in principle.
+  expect(screen.getByTestId('subfolder-2-second-after')).toBeTruthy();
+  expect(screen.queryByTestId('subfolder-1-first-before')).toBeNull();
+  expect(screen.queryByTestId('subfolder-2-second-before')).toBeNull();
+});
+
+// The question's two numbers were read from a `list_tree` taken BEFORE the
+// scan, and `Pending` freezes them so the sentence cannot renumber itself under
+// somebody reading it. A scan ending is the event that makes them wrong, so the
+// question goes — and it goes visibly, because a press that vanishes without a
+// word is its own kind of falsehood.
+test('a question standing when a job ends is withdrawn by name, and nothing is stored', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettings();
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+  // Both directions: the question is on screen and unwithdrawn until the ending.
+  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  endWalk();
+
+  await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
+  expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
+    'The question about “drop” has been withdrawn: a scan ended and this panel was'
+    + ' read again. Press again if you still want to.',
+  );
+  // Withdrawn, not answered: a question taken off the screen must not store the
+  // rule it was asking about.
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+
+  // And asking again clears the note rather than leaving it beside a live
+  // question about the same folder.
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
+});
+
+// The same withdrawal one step earlier, where the generation counter is what
+// does the work: the press has been made, the `list_tree` behind it is still on
+// the wire, and there is no question on screen yet to remove. `ask` is bumped,
+// so the reply raises nothing when it lands — and the person is told which
+// press it was that came to nothing.
+test('a check still in flight when a job ends raises no question when its reply lands', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettings();
+  let release: (v: TreeListing) => void = () => {};
+  listTree.mockResolvedValueOnce(listing(EMPTY_ROOTS));
+  listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => { release = r; }));
+  listTree.mockResolvedValue(listing(EMPTY_ROOTS));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  expect(visibleText(await screen.findByTestId('folder-confirm-1')))
+    .toBe('Checking what this exclusion removes…');
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  endWalk();
+  await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
+  expect(screen.getByTestId('folder-question-withdrawn-1')).toBeTruthy();
+
+  release(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]));
+  await tick();
+  await tick();
+
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// ── Fix round 2, I1 ────────────────────────────────────────────────────────
+//
+// The withdrawal used to fire on ANY ending, including an embedding pass
+// chained behind a walk (`jobs.ts:223`, `chainsEmbedPass`). Reproduced through
+// the real controller: the walk ends, the embedding pass starts on its own —
+// it takes no root and covers the whole index (`jobs.ts:18-21`) — and while it
+// runs the person raises a fresh question. Nothing about that question is
+// stale: its numbers were read AFTER the walk had already landed. The
+// embedding pass then ends having indexed nothing and changed no rule, and
+// used to discard the question anyway, printing "a scan ended" when none had
+// at that moment.
+test('an embedding pass ending does not withdraw a question raised after the walk that chained it', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettingsReady();
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await screen.findByTestId('subfolder-1-drop');
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  endWalk();
+  // The walk's own ending chains the embedding pass.
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_embed_job')).toBe(true));
+
+  // Raised WHILE the embedding pass runs — its cost is computed now, after the
+  // walk already landed, so nothing about it is stale.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+
+  endEmbed();
+  await tick();
+  await tick();
+
+  // Both directions: the press survives, and nothing claims a scan ended.
+  expect(screen.getByTestId('folder-confirm-1')).toBeTruthy();
+  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// ── Fix round 1, I1 ─────────────────────────────────────────────────────────
+//
+// The withdrawal used to run inside `refresh().then(…)`, so a rejected
+// `list_tree` at a walk's ending took it down with the re-read — and the ending
+// is consumed once (`seen = phase` advances before `reread` is called), so it
+// never came back. The evidence was then wiped by an unrelated success: the
+// chained embedding pass's own ending refreshes fine, clears `loadError`, and
+// redraws the panel with the question still on it, stating numbers a scan has
+// already moved and carrying nothing to say a scan happened.
+//
+// The failure is driven through the real controller so the chaining is the
+// product's own: `answerModelSettingsReady` is what lets the walk's ending
+// start the embedding pass.
+test('a walk ending withdraws the question even when the re-read that follows it fails', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettingsReady();
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+
+  // Queued here and not at the top, so it is the re-read AT THE ENDING that
+  // fails and nothing earlier consumes it.
+  listTree.mockRejectedValueOnce(new Error('the folder list could not be read'));
+  endWalk();
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_embed_job')).toBe(true));
+
+  // The direction nobody asserted: the failure is visible rather than silent.
+  // While it stands, the panel is off screen entirely — which is exactly how
+  // the stale question used to survive unnoticed.
+  await waitFor(() => expect(visibleText(screen.getByTestId('folders-load-reason')))
+    .toBe('the folder list could not be read'));
+
+  // The unrelated success that used to wipe the evidence: the chained
+  // embedding pass ends, `list_tree` answers, `loadError` clears and the panel
+  // comes back.
+  endEmbed();
+  await waitFor(() => expect(screen.queryByTestId('folders-load-reason')).toBeNull());
+  await screen.findByTestId('folder-panel-1');
+
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
+    'The question about “drop” has been withdrawn: a scan ended and this panel was'
+    + ' read again. Press again if you still want to.',
+  );
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// M1. `settings_folders_question_withdrawn` was asserted only under
+// `setLocale('en')`, and `withdrawnNote` (Folders.svelte:829-832) needed its
+// own switch test by this file's own stated standard (`Folders.test.ts:1450`
+// above, of the exclude/include branches): a literal swapped in for THIS
+// `t()` call specifically would not be caught by a switch test that only ever
+// reaches a different arm.
+test('the withdrawn-question note switches language with everything else', async () => {
+  setLocale('en'); // seed, do not inherit
+  answerModelSettings();
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+
+  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  endWalk();
+  await screen.findByTestId('folder-question-withdrawn-1');
+
+  setLocale('uk');
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
+    'Питання про «drop» знято: сканування закінчилося, і цю панель перечитано.'
+    + ' Натисніть ще раз, якщо це досі потрібно.',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// PR 8a, fix round 5 — the SECOND and THIRD sites of round 4's own rule.
+//
+// Round 4 taught `refresh` that a panel belongs to a folder and not to a
+// number. `askExclude` went on matching a fresh `list_tree` on the id alone, so
+// the question quoted another folder's file and document counts under this
+// folder's row and stored this folder's relative path on the new root's id.
+// `askInclude` read no listing at all, which is the worse half: it went
+// straight to `include_subfolder` and could take a person's rule off a folder
+// they never pointed at — under D29 that folder's text is at the model provider
+// after the next scan.
+//
+// 🔴 Every fixture below moves BOTH ends of the identity, and that is what
+// makes it a test of the rule rather than of half of it: the panel's id (9)
+// comes back naming a different folder, AND the panel's own path comes back
+// under a different id. A predicate that asked only "is this path still in the
+// listing" is green on an id-only fixture; one that asked only "is this id
+// still in the listing" is green on a path-only one.
+//
+// The pairs are pairs for the reason round 4's are: a guard that refuses
+// everything satisfies every assertion about a refusal. The one-line mutants,
+// named in advance:
+//   `if (!namesFolder(listing, rootId, panel.rootPath))` deleted at either site
+//     → that site's refusal test fails, its "still asks" twin stays green;
+//   the same condition replaced by `if (true)` at either site
+//     → that site's "still asks" test fails, its refusal twin stays green.
+const REUSED_ID = [
+  // The id the panel was opened under, now naming another folder — and holding
+  // two indexed paths under `Work`, so a question asked from it would be a
+  // question quoting numbers this person's folder never had.
+  root({
+    rootId: 9,
+    absolutePath: '/synthetic/gamma',
+    files: [file('Work/x.md', 'doc-x'), file('Work/y.md', 'doc-y')],
+  }),
+  // And the panel's own folder, still watched, under a different id.
+  root({ rootId: 4, absolutePath: '/synthetic/beta', files: [] }),
+];
+
+const CHANGED_NOTE_EN =
+  'This folder is no longer the one that was on screen: another folder has taken its place.'
+  + ' Nothing was changed.';
+
+async function openBetaPanel(entries: Subfolder[], rules: StoredExclusion[]) {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing([
+    root({ rootId: 9, absolutePath: '/synthetic/beta' }),
+    root({ rootId: 4, absolutePath: '/synthetic/alpha' }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders(entries));
+  listExclusions.mockResolvedValue(rules);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/beta')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-9'));
+  await waitFor(() => expect(screen.getByTestId('folder-rules-9')).toBeTruthy());
+}
+
+test('an exclude question is not asked when the id now names another folder, and quotes none of its numbers', async () => {
+  await openBetaPanel([sub('Work')], []);
+  // Everything from the press on reads the changed world, the re-read included.
+  listTree.mockResolvedValue(listing(REUSED_ID));
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
+
+  await waitFor(() => expect(screen.getByTestId('folders-root-changed')).toBeTruthy());
+  expect(visibleText(screen.getByTestId('folders-root-changed'))).toBe(CHANGED_NOTE_EN);
+  // Not merely "no question": none of gamma's numbers is on screen under
+  // beta's row, which is the sentence the defect actually produced.
+  expect(screen.queryByTestId('folder-confirm-9')).toBeNull();
+  expect(screen.queryByText(/2 files/)).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+  // The panel belongs to the folder, so it goes with it, and the list now shows
+  // what is at that id.
+  await waitFor(() => expect(screen.queryByTestId('folder-panel-9')).toBeNull());
+  expect(screen.getByText('/synthetic/gamma')).toBeTruthy();
+
+  setLocale('uk');
+  await tick();
+  expect(visibleText(screen.getByTestId('folders-root-changed'))).toBe(
+    'Ця тека вже не та, що була на екрані: її місце посіла інша.'
+    + ' Нічого не змінено.',
+  );
+});
+
+// The other direction, and the fixture still moves a root: ANOTHER folder has
+// changed hands between the two reads, and this panel's has not. A guard that
+// asked whether the listing as a whole had moved would refuse here.
+test('an exclude question is asked as before when this folder\'s id and path still agree', async () => {
+  await openBetaPanel([sub('Work')], []);
+  listTree.mockResolvedValue(listing([
+    root({
+      rootId: 9,
+      absolutePath: '/synthetic/beta',
+      files: [file('Work/x.md', 'doc-x'), file('Work/y.md', 'doc-y')],
+    }),
+    root({ rootId: 7, absolutePath: '/synthetic/alpha', files: [] }),
+  ]));
+  excludeSubfolder.mockResolvedValue(undefined);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-9'))).toBe([
+    'Exclude Work?',
+    'As of now: on the next scan the index loses 2 files from this folder,',
+    'and 2 documents stop being findable: no other path names them.',
+    'Confirm Cancel',
+  ].join(' '));
+  expect(screen.queryByTestId('folders-root-changed')).toBeNull();
+});
+
+// 🔴 The mirror, and the one that removes protection rather than over-warning.
+test('a rule is not removed when the id now names another folder, and no question offers to', async () => {
+  await openBetaPanel([sub('Archive', { kind: 'excluded' })], [{ prefix: 'Archive', existsOnDisk: true }]);
+  listTree.mockResolvedValue(listing(REUSED_ID));
+  includeSubfolder.mockResolvedValue(true);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive' }));
+
+  await waitFor(() => expect(screen.getByTestId('folders-root-changed')).toBeTruthy());
+  expect(visibleText(screen.getByTestId('folders-root-changed'))).toBe(CHANGED_NOTE_EN);
+  // The control that would take the rule away is not on screen at all: a person
+  // cannot confirm a removal on a folder they never pointed at.
+  expect(screen.queryByTestId('folder-confirm-9')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Confirm not excluding Archive' })).toBeNull();
+  expect(includeSubfolder).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.queryByTestId('folder-panel-9')).toBeNull());
+});
+
+test('a rule removal is asked about and goes through when this folder\'s id and path still agree', async () => {
+  await openBetaPanel([sub('Archive', { kind: 'excluded' })], [{ prefix: 'Archive', existsOnDisk: true }]);
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 9, absolutePath: '/synthetic/beta', files: [] }),
+    root({ rootId: 7, absolutePath: '/synthetic/alpha', files: [] }),
+  ]));
+  includeSubfolder.mockResolvedValue(true);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-9'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again,',
+    'and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' '));
+  expect(screen.queryByTestId('folders-root-changed')).toBeNull();
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm not excluding Archive' }));
+  await waitFor(() => expect(includeSubfolder).toHaveBeenCalledWith(9, 'Archive'));
+});
+
+// The gap this press now has and did not have before, in both languages. The
+// exclude wait says what it is costing; this one is not costing anything, and a
+// shared sentence would tell a person their removal is being counted up.
+test('the wait before a rule removal says what it is checking, and switches language', async () => {
+  setLocale('en'); // seed, do not inherit
+  let release: (v: TreeListing) => void = () => {};
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 9, absolutePath: '/synthetic/beta' })]));
+  listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => { release = r; }));
+  listSubfolders.mockResolvedValue(subfolders([sub('Archive', { kind: 'excluded' })]));
+  listExclusions.mockResolvedValue([{ prefix: 'Archive', existsOnDisk: true }]);
+  includeSubfolder.mockResolvedValue(true);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/beta')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-9'));
+  await waitFor(() => expect(screen.getByTestId('folder-rules-9')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive' }));
+
+  expect(visibleText(await screen.findByTestId('folder-confirm-9')))
+    .toBe('Checking that this is still the same folder…');
+  expect(includeSubfolder).not.toHaveBeenCalled();
+
+  setLocale('uk');
+  await tick();
+  expect(visibleText(screen.getByTestId('folder-confirm-9')))
+    .toBe('Перевіряємо, що це досі та сама тека…');
+  setLocale('en');
+  await tick();
+
+  release(listing([root({ rootId: 9, absolutePath: '/synthetic/beta' })]));
+  await waitFor(() => expect(visibleText(screen.getByTestId('folder-confirm-9'))).toBe([
+    'Stop excluding Archive?',
+    'From the next scan on, everything inside this folder is indexed again,',
+    'and its text is sent to the model provider.',
+    'Confirm Cancel',
+  ].join(' ')));
 });

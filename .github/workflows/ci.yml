@@ -328,11 +328,46 @@ jobs:
     # save nothing is how a slow gate becomes one people work around.
     runs-on: ubuntu-24.04
     # Thirty was a guess when this leg was written, and it stayed one until the
-    # leg first executed: pull request #7, **6m17s, green**. So the limit is
-    # roughly five times the only run there has ever been — the same margin
-    # `check` argues for itself above, and now for the same reason: a measured
-    # slowest run rather than a number nobody had a basis for. Raise it from a
-    # measurement if the case file grows enough to want it, not from a feeling.
+    # leg first executed: pull request #7, **6m17s, green** — five times the
+    # margin, on the 119 cases this step ran then.
+    #
+    # ⚠️ **Measured since, and the margin is about three times.** Run
+    # 33235659149 (`2e0880e`): staleness 9s, the harness step **9m52s**, green.
+    # The paragraph below was written before that run and is kept because its
+    # reasoning is what the number confirmed — but its case count was already
+    # wrong when it was written (161 against 163 in the files), and every
+    # number written here since has gone stale within a round or two: 170 while
+    # the files held 175, and this comment was last repaired two commits before
+    # it was wrong again. So no count is asserted here as a present fact. This
+    # is how to count, and it is the sentence to trust:
+    #
+    #   cat scripts/mutations/{source,embedding,pr8-exclusions,pr8-subfolders,pr8-subfolders-linux,pr8-ui-folders}.sh | grep -c '^case_ '
+    #
+    # That command answered **179** at fix round 2 of PR 8a — a reading of that
+    # tree, not a property of this file, and it is expected to have moved by the
+    # time anybody reads this. Run it.
+    #
+    # The ones added since the 9m52s run are `pr8-ui-folders.sh`'s (count them
+    # with `grep -c '^case_ ' scripts/mutations/pr8-ui-folders.sh`), and they
+    # are the cheapest in the directory: they compile nothing and run one vitest
+    # test each — **13.8s for the whole file** on an Apple M2 Max, including the
+    # worktree and the dependency links. Even at four times that on the runner
+    # it is a minute against a limit with eighteen to spare.
+    #
+    # The paragraph as written, which the 9m52s confirmed:
+    # The step below then named 161 cases, and the new 42 are not like the old
+    # 119: they mutate `src-tauri` and `mnema-walk` and re-run `--test
+    # commands`, the slowest target in the workspace, while `source.sh` and
+    # `embedding.sh` mutate leaf crates. Scaling 6m17s by case count is
+    # therefore wrong in both directions at once — it also scales a fixed
+    # setup (checkout, toolchain, apt, sidecar, Pdfium, the first build) that
+    # does not grow with cases. The only number anybody has for the new half is
+    # **5m21s for those 42 cases on a warm developer machine**, which is not
+    # this runner and bounds nothing here; it does say the per-case model
+    # under-counts by roughly 2.4x. So: this limit is expected to hold with
+    # room, and the first run after this change is what turns that into a
+    # measurement. Raise it from that run if it wants raising, not from a
+    # feeling and not from the arithmetic above.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -342,12 +377,20 @@ jobs:
       # job before two minutes of setup, not after.
       #
       # It answers the question the step at the bottom cannot. That one runs ONE
-      # case file and proves its tests still go red; this reads all twenty-four
-      # and asks whether the cases still match the code they were written
-      # against. On the branch this was added on, three cases in two files had
-      # stopped applying — one of them behind the very test cited as proof a
+      # case file and proves its tests still go red; this reads every file in
+      # `scripts/mutations/` and asks whether the cases still match the code they
+      # were written against. On the branch this was added on, three cases in two
+      # files had stopped applying — one of them behind the very test cited as proof a
       # repair was still pinned — and nothing else was looking: `branch-review.sh`
       # is a case file like any other and was clean while they rotted.
+      #
+      # ⚠️ **This line used to say "all twenty-four", and no number belongs
+      # here** (fix round 2, B7): the directory holds 41 `.sh` files and the
+      # sweep reports 34 of them as case files, the other 7 being stand-in
+      # workers that declare an interpreter — both figures as of fix round 2 of
+      # PR 8a, both moving, and neither worth trusting from a comment. The run's
+      # own last two lines print the second one every time, and the first is
+      # `ls scripts/mutations/*.sh | wc -l`.
       #
       # No argument, so it sweeps every file. The single-file form exists and is
       # deliberately not what runs here: a green line about one file gets read as
@@ -363,7 +406,7 @@ jobs:
         run: rustup toolchain install
       # The harness's own worktree only carries vendor/ and
       # src-tauri/binaries/ if this checkout already has them
-      # (mutation-check.sh:57, :75-76) — both are git-ignored, so a case
+      # (mutation-check.sh:159, :177-178) — both are git-ignored, so a case
       # touching mnema-desktop needs the same setup `check` uses to build it
       # at all.
       - name: Linux system dependencies
@@ -376,10 +419,59 @@ jobs:
         run: scripts/stage-sidecar.sh debug
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
-      - name: Run this cycle's mutation cases
+      # For `pr8-ui-folders.sh` and nothing else in this job: its cases run
+      # vitest, and `mutation-check.sh` links `ui/node_modules` into its
+      # worktree rather than installing there, so the directory has to exist in
+      # this checkout first. Same `lts/*` and same `npm ci` as `check` — the
+      # lockfile, not a fresh resolution.
+      #
+      # `npm run build` and `npm run test` are deliberately NOT repeated here:
+      # `check` already runs both, and this job needs the dependency tree, not a
+      # second opinion about the frontend.
+      #
+      # Measured cost on run 33235659149 (`2e0880e`, this branch's merge-base),
+      # from `check (ubuntu-24.04)`: setup-node **1s**, and the step that runs
+      # `npm ci` **plus** `npm run build` **plus** `npm run test` took **20s**
+      # end to end — so `npm ci` alone is under twenty seconds. That is a
+      # measurement of the same commands on the same runner image, not this
+      # job's own number, which the first run after this change will produce.
+      - name: Node.js, for the mutation cases that run vitest
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 'lts/*'
+      - name: Install the frontend dependencies the vitest cases run against
+        run: npm ci --prefix ui
+      # ⚠️ **This list is not every case file, and the omission is a decision
+      # rather than an oversight.** `scripts/mutation-staleness.sh` above
+      # sweeps all of them and proves each case still APPLIES; this step proves
+      # a case still KILLS, and only for what is named here. A file left out is
+      # local evidence and nothing more — which is what PR 8a's four files were
+      # until now, and what `source.sh`/`embedding.sh` alone made this step's
+      # old name ("this cycle's mutation cases") untrue two cycles ago.
+      #
+      # ⚠️ **`pr8-exclusions-macos.sh` is deliberately absent and cannot be
+      # added here.** This job is `runs-on: ubuntu-24.04` with no matrix, and
+      # that file's one case names a `#[cfg(target_os = "macos")]` test; off
+      # macOS the harness's baseline `--exact` selects nothing, reads
+      # `0 passed`, and exits 1 for the whole file. Running it needs a macOS
+      # mutations leg, which is a separate decision about runner minutes — see
+      # that file's own header. `pr8-subfolders-linux.sh` is the mirror case
+      # and belongs HERE for the same reason it cannot run on macOS.
+      #
+      # `pr8-ui-folders.sh` has no such split and needs none: its tests run in
+      # jsdom, nothing in them is behind a platform condition, and the whole
+      # file is green on this leg. What it does need is the two steps above —
+      # a case whose runner is not installed fails its baseline for a reason
+      # that is not the mutation, which is the same defect the vendored
+      # libraries and the staged sidecar are copied into the worktree to avoid.
+      - name: Run the mutation cases named below
         run: |
           scripts/mutation-check.sh scripts/mutations/source.sh
           scripts/mutation-check.sh scripts/mutations/embedding.sh
+          scripts/mutation-check.sh scripts/mutations/pr8-exclusions.sh
+          scripts/mutation-check.sh scripts/mutations/pr8-subfolders.sh
+          scripts/mutation-check.sh scripts/mutations/pr8-subfolders-linux.sh
+          scripts/mutation-check.sh scripts/mutations/pr8-ui-folders.sh
 
   bundle:
     # One architecture per package rather than a universal binary: a universal

@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setLocale } from '../i18n';
+import { camelOf, rustEnumVariants } from '../lib/rust-enum';
 import type {
   ModelSettings, Catalogue, ModelEntry, ModelRefusal, RecordId, UnreadableRecord, ModelRole,
 } from '../lib/ipc';
@@ -1158,71 +1159,6 @@ test('a catalogue of nothing but unreadable records does not also claim the prov
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CATALOGUE_RS = readFileSync(join(HERE, '../../../crates/mnema-provider/src/catalogue.rs'), 'utf8');
-
-function rustEnumVariants(rawSource: string, enumName: string): string[] {
-  // Review P1-2: comments are stripped BEFORE the depth walk, not after it.
-  // The old form walked the raw text and justified itself with "every doc
-  // comment brace is a self-balanced pair on its own line" — a description of
-  // today's comments, not an invariant of Rust. The reviewer added a sixth
-  // `Refusal` variant behind a doc comment carrying a lone `}`; the walk
-  // stopped there, the body was truncated, and this file reported
-  // `2 passed | 60 skipped` — green, having never seen the new variant.
-  const source = rawSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
-  const headerRe = new RegExp(`pub enum ${enumName}\\s*\\{`);
-  const m = headerRe.exec(source);
-  if (!m) throw new Error(`enum ${enumName} not found in catalogue.rs — has it moved or been renamed?`);
-  let depth = 1;
-  let i = m.index + m[0].length;
-  const start = i;
-  while (depth > 0) {
-    if (source[i] === '{') depth++;
-    else if (source[i] === '}') depth--;
-    i++;
-    if (i > source.length) throw new Error(`ran off the end of the file looking for the closing brace of ${enumName}`);
-  }
-  const noComments = source.slice(start, i - 1);
-  // P3-13: the mirror maps a Rust variant name to its wire name with serde's
-  // own `RenameRule::CamelCase` (`camelOf` below) and has no way to express an
-  // explicit `#[serde(rename = "…")]` on a variant. It cannot be made to guess
-  // one, so it says so here rather than deriving a wire name that is silently
-  // wrong. `rename_all` is the enum-level rule this mirror already assumes and
-  // is deliberately not matched.
-  if (/#\[serde\([^)]*\brename\s*=/.test(noComments)) {
-    throw new Error(
-      `${enumName} now carries an explicit #[serde(rename = "…")] on a variant. This mirror derives ` +
-      'wire names with serde\'s CamelCase rule alone and cannot express a rename — teach camelOf ' +
-      'about it, or pin that variant\'s wire name here, before trusting this test again.',
-    );
-  }
-  const variants: string[] = [];
-  let d = 0;
-  let cur = '';
-  for (const ch of noComments) {
-    if (ch === '{') d++;
-    if (ch === '}') d--;
-    if (ch === ',' && d === 0) {
-      if (cur.trim()) variants.push(cur.trim());
-      cur = '';
-    } else {
-      cur += ch;
-    }
-  }
-  if (cur.trim()) variants.push(cur.trim());
-  return variants.map((v) => {
-    const name = /^([A-Za-z0-9_]+)/.exec(v.trim());
-    if (!name) throw new Error(`could not parse a variant name out of: ${v}`);
-    return name[1];
-  }).filter(Boolean);
-}
-
-// PascalCase → camelCase the way serde's own `RenameRule::CamelCase` does it
-// (`serde_derive::internals::case`): lowercase the first character, leave the
-// rest exactly as written — verified against this crate's own multi-word
-// variants already mirrored in `ipc.ts` (`notOpen`, `nothingToRemove`,
-// `envelopeNotUnderstood`), none of which get an interior letter touched.
-function camelOf(pascal: string): string {
-  return pascal.charAt(0).toLowerCase() + pascal.slice(1);
-}
 
 // Review P1-3: `raw` is provider text under exactly the rule `reason` is under
 // — it does not reach the screen. The old fixture said `'sample-raw'`, ten

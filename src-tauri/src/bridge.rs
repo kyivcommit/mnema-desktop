@@ -86,6 +86,416 @@ pub fn remove_watched_folder(state: State<'_, AppState>, root_id: i64) -> Result
     state.with_index(|db| db.delete_watched_root(root_id))
 }
 
+/// One stored exclusion rule, plus whether the path it names is still on
+/// disk.
+///
+/// **`exists_on_disk` promises "this path is still there", not "this path is
+/// a directory".** A prefix naming a FILE excludes that file — there is no
+/// is-a-directory check at write time (see [`exclude_subfolder`]) — so
+/// gating this field on `is_dir()` would label a working rule stale and a
+/// stale-rule control would offer to remove it (review round 1, Minor 1: the
+/// brief's original `is_dir()` mandate was right about subtrees and wrong
+/// about the effect — a file prefix excludes the named file just fine).
+///
+/// **`exists_on_disk` is answered here, by the backend, and this is not a
+/// convenience (task-2 brief, review round 2, P1).** The window cannot
+/// answer it by comparing this list against a one-level folder listing
+/// (`list_tree`'s subfolders): a stored prefix may name a NESTED folder —
+/// `validate_prefix` accepts a `/`-joined sequence of one or more components
+/// (`mnema-walk/src/rules.rs:526-552`) — while a one-level listing only ever
+/// answers for the folders directly under the root. `Work/private` would
+/// find no match among `["Work", "Photos"]` there, read as a rule whose
+/// folder is gone, and be offered for removal — un-excluding a folder that
+/// is still full and, under D29, still headed to a third-party provider on
+/// the next scan. One filesystem lookup per stored prefix, on the side that
+/// has the filesystem, is the whole fix — see [`prefix_exists_on_disk`] for
+/// why that lookup is not a bare `symlink_metadata` on the joined path.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredExclusion {
+    pub prefix: String,
+    pub exists_on_disk: bool,
+}
+
+/// Resolves `prefix` against real directory entries under `root`, one
+/// component at a time, comparing names with byte equality — not by handing
+/// the joined path to the filesystem's own lookup, which is case-INSENSITIVE
+/// on APFS (macOS, the default) and on Windows, while `ignore`'s override
+/// matcher is case-sensitive (`WalkRules::builder` never calls
+/// `case_insensitive`, `mnema-walk/src/rules.rs:383-467`). A stored prefix
+/// `private` against a folder actually spelled `Private` would otherwise
+/// report `existsOnDisk: true` while excluding nothing — a dead rule reading
+/// as live (review round 1, Important 2, measured: `WalkRules::new(true,
+/// true, vec!["private"])` over a fixture holding `Private/secret.txt`
+/// leaves `Private/secret.txt` in the walk's own `found`, i.e. the rule
+/// excludes nothing, while the naive `symlink_metadata` check answered
+/// `true`).
+///
+/// `symlink_metadata`, not `metadata`, at the last step: a symlink is not
+/// followed to decide existence, matching `WalkRules::builder`'s own
+/// `follow_links(false)`. Existence alone, not `is_dir()` — see
+/// [`StoredExclusion`]'s own doc comment for why the directory check was
+/// dropped.
+///
+/// **Every filesystem *error* in this function reaches the return value
+/// through [`path_error_is_an_answer`] — review round 3's ruling on the
+/// *shape* of the fix, after rounds 1 and 2 each closed one instance of the
+/// same defect (`.unwrap_or(false)`, `.ok()`) and left another standing.**
+/// Error, not outcome (review round 5, N5): row 3 below reaches the return
+/// value without the classifier and is right to, because it carries no
+/// error to classify. The wider word was the same sentence pattern that hid
+/// the fourth site for three rounds.
+///
+/// Round 3's own enumeration then missed one (review round 4, N3), so this
+/// set was **re-derived from the file** rather than extended: every point
+/// where a call, an iterator item, a `Result` or an `Option` becomes a
+/// branch here — outcomes, which is wider than errors on purpose — listed
+/// so the next reader can check the set rather than trust it.
+///
+/// 1. `read_dir(&current)` failing outright — the directory cannot be
+///    listed at all.
+/// 2. A single `io::Result<DirEntry>` from that same listing failing
+///    mid-iteration — [`entry_named`]'s `?`. This was `.flatten()` until
+///    round 4, and `.flatten()` **discards** an `Err`, which makes a
+///    directory entry that could not be read indistinguishable from an
+///    absent name: control fell to 3 below and a live rule read as stale —
+///    the same under-exclusion direction as 1 and 4, one call deeper. It is
+///    propagated into the *same* `match` arms as 1 rather than getting arms
+///    of its own: both errors say "this listing could not answer", so one
+///    classification covers them and there is no second copy to drift.
+/// 3. The listing succeeding and holding no entry with this name —
+///    `Ok(None)`, an answer carrying no error, and the only branch here
+///    that needs no classifier. Its correctness rests on 2: while per-entry
+///    errors were discarded, this arm was answering for them too.
+/// 4. The final `symlink_metadata(&current)`, which used to be a bare
+///    `.is_ok()` — folding a `PermissionDenied` on a *listable but not
+///    traversable* ancestor (mode `0o444`: `read_dir` needs read, resolving
+///    a name inside it needs execute) into `false` exactly the way `.ok()`
+///    did in the loop before round 2 (review round 3, "not introduced by
+///    this diff" §4: measured, `Work` at `0o444` flips this exact call from
+///    `Ok` to `Err(PermissionDenied)` while nothing about the rule changed).
+///
+/// 5. The root guard `!root_path.is_dir()`, which occurs **twice** in this
+///    file — in [`list_exclusions`] and, since fix round 1, in
+///    [`exclude_subfolder`] — and deliberately is **not** classified in
+///    either place: its output is not a boolean about a rule but a refusal
+///    of the whole call, disclosed to the person as `RootUnavailable`'s own
+///    sentence, so the harm this class does — a rule silently mislabelled —
+///    cannot arise there. Its job is to match the walk's own predicate for
+///    "is this root usable" exactly (see those functions' doc comments), not
+///    to answer the same question a second, possibly-disagreeing way. 🔴 It
+///    was one site when this list was written and the sentence said so; a
+///    reader who trusted the count rather than the file would have missed
+///    the second.
+fn prefix_exists_on_disk(root: &std::path::Path, prefix: &str) -> bool {
+    let mut current = root.to_path_buf();
+    for component in prefix.split('/') {
+        match std::fs::read_dir(&current).and_then(|entries| entry_named(entries, component)) {
+            Ok(Some(path)) => current = path,
+            Ok(None) => return false,
+            Err(e) if path_error_is_an_answer(e.kind()) => return false,
+            Err(_) => return true,
+        }
+    }
+    match std::fs::symlink_metadata(&current) {
+        Ok(_) => true,
+        Err(e) if path_error_is_an_answer(e.kind()) => false,
+        Err(_) => true,
+    }
+}
+
+/// The path of the first entry whose name equals `component` **byte for
+/// byte**, `Ok(None)` if the listing held none, and the **first `Err` the
+/// listing produced** if it could not be read to the end — see
+/// [`prefix_exists_on_disk`]'s doc comment, site 2, for why that last one is
+/// not `.flatten()`.
+///
+/// **It takes the iterator rather than the directory path so that outcome
+/// can be handed to it by a test.** A per-entry `io::Error` (EIO, a share
+/// dropping between batches) cannot be forced deterministically out of a
+/// real filesystem — its reachability is read from `ReadDir`'s own
+/// `Item = io::Result<DirEntry>` contract, not from a run (review round 4,
+/// N3) — and a guard whose only test would need an injected filesystem is a
+/// guard nobody checks. Rounds 1, 2 and 3 each left the next instance of
+/// this defect standing; this seam is what lets round 4's mutant die.
+///
+/// **What the seam does not buy, measured (review round 5, N5).** This
+/// function's body is pinned. Its **use**, the `and_then` line in
+/// [`prefix_exists_on_disk`], is not — and no test can pin it. The
+/// re-review reverted that call site to `.flatten()`'s behaviour while
+/// leaving this function present and correct, and ran the mutant against
+/// both the whole-function IPC test and the `--lib` guard test
+/// `a_directory_entry_that_cannot_be_read_is_an_error_not_an_absence`:
+/// `red: 0   still green: 2   broken cases: 0` — the last number is what
+/// says the mutant really compiled and applied. So the defect that took
+/// four rounds to close can be reintroduced one line above this function
+/// with the whole suite green.
+///
+/// That is inherent rather than a missing case: moving the untestable part
+/// out of the loop is exactly what made the guard testable, and no test can
+/// observe a per-entry error through a real filesystem, so no mutation case
+/// could kill a call-site mutant either. **If you are editing that
+/// `and_then` line, nothing is standing under you — the tests below cover
+/// this function's body, not the wiring that reaches it.**
+fn entry_named(
+    entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
+    component: &str,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name() == std::ffi::OsStr::new(component) {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
+}
+
+/// The classifier review round 3 asked for: whether an `io::Error` from a
+/// filesystem lookup is **an answer about the path** — the path, however
+/// spelled, cannot exist in the shape asked, and that fact does not lift on
+/// its own — or **a report about the observer** — this process could not
+/// tell right now, and the condition is transient: a permission gets fixed,
+/// a volume comes back, and the truth returns with it when it does.
+///
+/// **The split:**
+/// - [`std::io::ErrorKind::NotFound`] — the named component is not there.
+///   An answer.
+/// - [`std::io::ErrorKind::NotADirectory`] — an ancestor component exists
+///   but is not a directory (a folder replaced by a file of the same name,
+///   `ENOTDIR`). Also an answer, and the reason it is its own arm rather
+///   than falling into the `NotFound`-shaped bucket by resemblance: unlike a
+///   permission problem this does not lift by itself — the path cannot come
+///   back until someone recreates it as a directory — so treating it as
+///   observer-side (review round 2's shipped code) answered `true` for a
+///   rule that is permanently, not transiently, gone (review round 3,
+///   Minor N1, measured: an ancestor replaced by a file flips this from the
+///   `false` round 1 gave it to `true`).
+/// - Everything else — `PermissionDenied`, and the network-mount kinds a
+///   watched folder on a share can produce — is an observer condition and
+///   answers `true`, i.e. is **not** "an answer" here.
+///
+/// **The criterion above ranges over the kinds these lookups can produce
+/// from a *validated* prefix, and not over `ErrorKind` at large (review
+/// round 4, N4).** Two kinds satisfy "does not lift on its own" and are on
+/// the observer side anyway; both were measured rather than reasoned about,
+/// and both stay where they are deliberately:
+/// - `FilesystemLoop` (`ELOOP`, from an `x -> y -> x` symlink pair) is
+///   permanent, and the direction costs nothing either way:
+///   `WalkRules::builder`'s `follow_links(false)` means nothing under a
+///   symlink loop is walked or indexed, so such a rule protects nothing and
+///   endangers nothing whichever boolean it gets. Moving it would buy no
+///   behaviour and would widen the arms past what the two calls need.
+/// - `InvalidInput` (a NUL byte in a component) is permanent and
+///   **unreachable**: `validate_component` refuses every control character
+///   (`crates/mnema-walk/src/rules.rs:604`) before a prefix can be stored,
+///   and only stored prefixes reach [`prefix_exists_on_disk`].
+///
+/// So the arms are `NotFound | NotADirectory` exactly, and the sentence
+/// above describes what they do rather than a wider rule they only
+/// approximately follow.
+///
+/// **Why the wrong side costs what it costs, and why it is chosen anyway.**
+/// A live rule misread as stale (an observer condition wrongly on the
+/// answer side) offers removal in Task 5's UI, and accepting that offer
+/// sends the folder's contents to the provider under D29 — a privacy cost.
+/// A dead rule misread as live (an answer wrongly on the observer side)
+/// only produces a list entry with no stale-rule control and no ordinary
+/// folder-tree toggle either, since the path is in neither
+/// `list_path_exclusions` nor `list_subfolders`'s intersection — clutter and
+/// a false sense of protection, not a leak, since there is nothing under a
+/// gone path left to index. The second cost is the one this split accepts
+/// in exchange for never paying the first — both directions checked, not
+/// only the one this round's finding named.
+///
+/// Used at every site in this file where a filesystem *error* becomes
+/// `exists_on_disk`'s boolean — error, not outcome, for the reason given on
+/// [`prefix_exists_on_disk`], whose doc comment carries the re-derived
+/// enumeration and says why the root guard in [`list_exclusions`] is
+/// deliberately outside it.
+pub(crate) fn path_error_is_an_answer(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// **The root itself is stat'd once, before the loop, and an unreachable
+/// root refuses the whole call rather than answering per prefix (review
+/// round 1, Important 1).** An external drive unmounted, a network volume
+/// down, or the folder moved all make `prefix_exists_on_disk` fail for
+/// every candidate — the same way `std::fs::read_dir` fails for a root that
+/// is not there. Left unguarded, that reads as "every rule's folder is
+/// gone", and a stale-rule control would offer to remove all of a root's
+/// exclusions in one screen; accepting that offer sends every previously
+/// protected folder's contents to the provider on the next scan under D29.
+/// Refusing is the conservative direction — the product already renders a
+/// job refusal this way (`EndReason::RootUnavailable`, `job.rs:79-87`), so
+/// this is the same shape applied one command earlier.
+///
+/// **`!root.is_dir()`, not `symlink_metadata(..).is_err()` (review round 2,
+/// Minor B).** The walk itself decides "is this root usable" with exactly
+/// this predicate (`crates/mnema-ingest/src/walk.rs:288`,
+/// `StopReason::RootUnavailable`), and `symlink_metadata` is strictly
+/// weaker: it succeeds for a root that is a DANGLING symlink and for a root
+/// that exists but cannot be read, both measured to pass the old guard and
+/// then land in Important 1's own failure mode one line later — every
+/// prefix answering `false`. Matching the walk's own predicate is matching
+/// the answer this product already trusts to decide a root is unusable,
+/// not inventing a second one that can disagree with it.
+///
+/// **This is one of the two filesystem *errors* in this file that do not go
+/// through [`path_error_is_an_answer`] (review round 4's re-derived
+/// enumeration, where the pair are the fifth entry; row 3 there also skips
+/// the classifier, but row 3 is an `Ok` with no error in it to classify).**
+/// The other is the identical guard [`exclude_subfolder`] gained in fix
+/// round 1 — 🔴 it was "the one" here until that command became the third
+/// site of this guard, which is the enumeration-not-extended shape this
+/// branch keeps paying for. `Path::is_dir()` already collapses every
+/// failure — answer or observer alike — into `false`/"refuse", the same
+/// shape the classifier exists to avoid elsewhere; kept here anyway,
+/// deliberately, for two reasons. The point of this line is byte-for-byte
+/// agreement with `walk.rs:288`, not a more finely reasoned answer of its
+/// own — and what it produces is not a boolean *about a rule* but a refusal
+/// of the whole call, carrying `RootUnavailable`'s own sentence to the
+/// person, so the harm the classifier exists to prevent (a rule silently
+/// mislabelled live or stale) cannot arise from it in either direction.
+#[tauri::command(async)]
+pub fn list_exclusions(
+    state: State<'_, AppState>,
+    root_id: i64,
+) -> Result<Vec<StoredExclusion>, Error> {
+    let root = state
+        .with_index(|db| db.watched_root_path(root_id))?
+        .ok_or(Error::UnknownWatchedRoot(root_id))?;
+    let root_path = std::path::Path::new(&root);
+    if !root_path.is_dir() {
+        return Err(Error::RootUnavailable(root_id));
+    }
+    let prefixes = state.with_index(|db| db.list_path_exclusions(root_id))?;
+    Ok(prefixes
+        .into_iter()
+        .map(|prefix| {
+            let exists_on_disk = prefix_exists_on_disk(root_path, &prefix);
+            StoredExclusion {
+                prefix,
+                exists_on_disk,
+            }
+        })
+        .collect())
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// **The rule this command exists to enforce: a prefix is validated by
+/// `WalkRules::new` before it is stored**, and a refusal reaches the person
+/// as `RulesError`'s own sentence. Storing a prefix the walk will later
+/// refuse is the failure mode the whole validator was written against
+/// (`rules.rs:28-49`): the rule would silently match nothing, and under D29
+/// the folder it named would keep going to the provider.
+///
+/// **The candidate alone, not the stored set plus the candidate.**
+/// `WalkRules::new` does not build an aggregate pattern set at all — it
+/// validates one prefix at a time, each in its own throwaway builder
+/// (`rules.rs:219-224,570-578`) — so probing the whole set here would answer
+/// `Ok` for combinations that, measured directly against this repository's
+/// pinned `ignore`/`globset`, do not actually compile as one pattern set
+/// (task-2 brief). The aggregate case is caught at walk time instead:
+/// `walk_root` turns a failed combined compile into
+/// `StopReason::RulesNotApplied` before phase 2 ever runs, and nothing is
+/// sent to a provider on that path.
+///
+/// The empty string is refused before `WalkRules::new` even runs:
+/// `validate_prefix` answers `Ok(None)` for it, which is not an error, and a
+/// command that treated "no error" as "store it" would write a rule that
+/// excludes nothing (review round 1, P2).
+///
+/// 🔴 **And a path the walk already prunes is refused too** — the second half
+/// of the same rule, added in task 4's fix round 2. `list_subfolders` reports
+/// such a folder as `builtIn` and offers no control, but that was a claim
+/// about *this* command that this command did not honour: measured, before the
+/// guard below, `exclude_subfolder(".git/hooks")` answered `Ok` and wrote a
+/// row, and `list_exclusions` then rendered it with `existsOnDisk: true` — a
+/// live-looking rule, on the exclusion screen of this same pull request, that
+/// the walk ignores entirely. The listing's claim is a claim about this
+/// command, so this command has to make it true.
+///
+/// **Through [`mnema_walk::WalkRules::builtin_layers`], the same call the
+/// listing makes**, never a second reading of the built-in lists: two
+/// answers to "does the walk prune this" are exactly what fix round 2 found
+/// already drifted inside `mnema-walk` itself.
+///
+/// **Not `include_subfolder`'s problem, deliberately.** Removing a rule must
+/// always work, including one an older build stored before this guard existed
+/// (`Error::InvalidExclusionRule`'s doc makes the same argument for the
+/// validator). A guard on removal would strand exactly the rows this guard
+/// exists to stop being created.
+///
+/// 🔴 **The root itself has to be there, and this was the third of three sites
+/// where two guarded it** (fix round 1). [`list_exclusions`] and
+/// [`crate::tree::list_subfolders`] both answer [`Error::RootUnavailable`] on
+/// `!root_path.is_dir()` — the walk's own predicate (`walk.rs:288`) — and this
+/// command did not. With the root unmounted, the anchored half of `prunes`
+/// resolves nothing and answers `false`, so a path the walk *always* prunes
+/// passed the guard above and was stored: a live-looking rule that does
+/// nothing, persisted — which is the defect the built-in guard was added to
+/// fix, arriving through a different door.
+///
+/// **Before the blank check and the validator**, unlike the built-in guard
+/// below: those two say something about the path that was sent, and are true
+/// whatever the disk is doing, while this one refuses the whole call because
+/// the folder the rule would be about cannot be read at all.
+#[tauri::command(async)]
+pub fn exclude_subfolder(
+    state: State<'_, AppState>,
+    root_id: i64,
+    relative_path: String,
+) -> Result<(), Error> {
+    let root = state
+        .with_index(|db| db.watched_root_path(root_id))?
+        .ok_or(Error::UnknownWatchedRoot(root_id))?;
+    let root_path = std::path::Path::new(&root);
+    if !root_path.is_dir() {
+        return Err(Error::RootUnavailable(root_id));
+    }
+    if relative_path.is_empty() {
+        return Err(Error::BlankExclusionRule);
+    }
+    mnema_walk::WalkRules::new(true, true, vec![relative_path.clone()])?;
+    // After the validator, so a malformed path gets the validator's own
+    // sentence rather than this one: `.git/../x` is wrong for a reason that
+    // has nothing to do with the built-in layers.
+    //
+    // The stored root path, not a canonicalised one — the same path the walk
+    // is handed (`walk_job.rs`) and the same one `list_exclusions` stats. The
+    // answer does not depend on the choice: the override half matches on the
+    // relative path alone, and the marker half resolves through whatever links
+    // the root carries either way.
+    if mnema_walk::WalkRules::builtin_layers(root_path).prunes(&relative_path) {
+        return Err(Error::AlreadyPrunedByBuiltIn {
+            root_id,
+            relative_path,
+        });
+    }
+    state.with_index(|db| db.add_path_exclusion(root_id, &relative_path))?;
+    Ok(())
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// `Db::remove_path_exclusion` already answers whether a row went; this is a
+/// thin pass-through, not a rewrap into `()` — Task 5's stale-rule control
+/// needs "removed" told apart from "there was nothing there".
+#[tauri::command(async)]
+pub fn include_subfolder(
+    state: State<'_, AppState>,
+    root_id: i64,
+    relative_path: String,
+) -> Result<bool, Error> {
+    state.with_index(|db| db.remove_path_exclusion(root_id, &relative_path))
+}
+
 /// The window needs a citation, not a chunk id. `mnema-index` already
 /// re-exports `Citation` and it is `Serialize` (its derive in `write.rs`), so this
 /// crosses the seam without touching the dependency graph — the seam was
@@ -911,7 +1321,7 @@ mod tests {
             content: ContentArmReport::Off,
         };
         let v = serde_json::to_value(&refused).unwrap();
-        // The reason is nested under `reason`, not `kind` (ruling R4, bridge.rs:466-476).
+        // The reason is nested under `reason`, not `kind` (ruling R4, bridge.rs:867-873).
         assert_eq!(v["kind"], json!("refused"));
         assert_eq!(v["reason"]["kind"], json!("noCandidates"));
     }
@@ -985,5 +1395,55 @@ mod tests {
                 "rootId": null
             })
         );
+    }
+
+    /// Site 2 of [`prefix_exists_on_disk`]'s enumeration, the one review
+    /// round 4 (N3) found still unclassified after three fix rounds: a
+    /// listing that fails on a single entry must not read as a listing that
+    /// simply does not hold the name. `.flatten()` — what stood here — makes
+    /// those two indistinguishable, and `prefix_exists_on_disk` answers the
+    /// second with `false`: a live rule reported stale, offered for removal
+    /// in Task 5's UI, and the folder's contents sent to the provider under
+    /// D29 if the offer is taken.
+    ///
+    /// The `Err` is synthetic and comes first, with a real entry behind it
+    /// whose name is not the one asked for: correct code stops at the `Err`,
+    /// `.flatten()` walks past it to the end and answers `Ok(None)`. A real
+    /// per-entry error cannot be forced out of a filesystem deterministically
+    /// — see [`entry_named`]'s doc comment for why the iterator is the
+    /// parameter.
+    #[test]
+    fn a_directory_entry_that_cannot_be_read_is_an_error_not_an_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Photos")).unwrap();
+        let listing = std::iter::once(Err(std::io::Error::from(std::io::ErrorKind::Other)))
+            .chain(std::fs::read_dir(dir.path()).unwrap());
+
+        let outcome = entry_named(listing, "private");
+
+        // Positive on the kind, not merely `is_err()`: the caller branches on
+        // `kind()` through `path_error_is_an_answer`, so an error arriving
+        // with a different kind than the listing produced is a different
+        // answer, not the same one.
+        let error = outcome.expect_err("an unreadable entry must not answer as an absent name");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    }
+
+    /// The other direction of the test above, which on its own is satisfied
+    /// by an [`entry_named`] that answers `Err` for everything: a listing
+    /// that reads cleanly still has to tell a present name from an absent
+    /// one, and hand back the entry's own path rather than a re-joined one.
+    #[test]
+    fn a_listing_that_reads_cleanly_answers_found_and_absent_with_no_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Photos")).unwrap();
+
+        let found = entry_named(std::fs::read_dir(dir.path()).unwrap(), "Photos")
+            .expect("a clean listing is not an error");
+        assert_eq!(found, Some(dir.path().join("Photos")));
+
+        let absent = entry_named(std::fs::read_dir(dir.path()).unwrap(), "private")
+            .expect("a clean listing is not an error");
+        assert_eq!(absent, None);
     }
 }

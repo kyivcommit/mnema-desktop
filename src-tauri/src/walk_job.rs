@@ -23,7 +23,8 @@ use crate::job::{self, EndReason, Ended, Frozen, JobEvent, Progress};
 use crate::state::AppState;
 
 /// `(async)` for the reason given on [`crate::bridge::open_index`]: unlike
-/// `start_probe_job`, this command reads the root's path through
+/// `start_probe_job`, this command reads the root's path — and, since the
+/// exclusion commands exist, its stored exclusion rules — through
 /// `with_index` before it ever spawns a thread, and every other caller of
 /// `with_index` in this crate is `(async)` for exactly that reason — a
 /// window-issued command that can wait on the same mutex must not be the one
@@ -31,11 +32,23 @@ use crate::state::AppState;
 /// spawning the walk's own OS thread are cheap either way; what moved this
 /// off `start_probe_job`'s blocking shape is the lookup in front of them.
 ///
-/// Every fallible step below runs **before** [`AppState::claim_job`], not
-/// after: an unknown `root_id` (a folder removed by a second window, a stale
-/// id a reloaded page still has) or a `Pool` that refuses its own config
-/// must be refused without ever taking the slot. Claiming it first and
-/// releasing it on the first `?` gives the same end state one command later,
+/// Every fallible step **that must not take the slot** runs before
+/// [`AppState::claim_job`]. The qualifier is the whole claim, and the two
+/// previous rewrites of this sentence got it wrong in opposite directions:
+/// a count ("all three of them") that was short by one, then a universal
+/// ("every fallible step below") that was simply false —
+/// `state.open_job_index()?` is a fallible step below and it runs AFTER the
+/// claim, deliberately, for the reason its own comment gives down there
+/// (review round 1 M2, review round 2 N1). What this paragraph is about is
+/// a property, not a tally.
+///
+/// The steps it holds for, named rather than counted: the index read
+/// itself, which fails as [`Error::IndexNotOpen`], [`Error::StatePoisoned`]
+/// or [`Error::Index`]; an unknown `root_id` (a folder removed by a second
+/// window, a stale id a reloaded page still has); a stored exclusion prefix
+/// that `WalkRules::new` refuses; and a `Pool` that refuses its own config.
+/// Claiming the slot first and releasing it on the first `?` would give the
+/// same end state one command later,
 /// but for as long as this call runs `job_status` would report a job
 /// running for a call that was always going to fail — a page polling it at
 /// the wrong moment sees a lie, however short-lived.
@@ -45,22 +58,74 @@ pub fn start_walk_job(
     root_id: i64,
     on_progress: Channel<JobEvent>,
 ) -> Result<(), Error> {
-    let root = state
-        .with_index(|db| db.watched_root_path(root_id))?
-        .ok_or(Error::UnknownWatchedRoot(root_id))?;
-    let root = PathBuf::from(root);
+    // The root's path and the exclusion rules for that root, read under one
+    // `with_index` lock rather than two. They are one question — what is
+    // being walked, and with which rules — and every writer in this crate
+    // reaches the index through the same mutex, so two acquisitions leave a
+    // window between them in which another window's command commits.
+    // `Db::delete_watched_root` is the writer that makes that concrete: it
+    // runs as one transaction, and deleting the row cascades this root's
+    // `ignore_rule` rows away with it (`write.rs:757-784`), so a path read
+    // before it and an exclusion list read after it describe two different
+    // states of the index. One lock makes the pair one answer.
+    let (root, user_prefixes) = state.with_index(|db| {
+        Ok((
+            db.watched_root_path(root_id)?,
+            db.list_path_exclusions(root_id)?,
+        ))
+    })?;
+    let root = PathBuf::from(root.ok_or(Error::UnknownWatchedRoot(root_id))?);
 
-    // No exclusion-rule command exists yet — nothing in this task adds one —
-    // so every watched folder walks with the built-in list and `.gitignore`
-    // on and no user prefixes. **Provisional**: the smallest default that
-    // lets a walk run at all, not a stand-in for the settings UI the
-    // interface spec still owes.
-    // `.expect` rather than `?`: `validate_prefix` only ever runs over
-    // `user_prefixes`, which is empty here, so `RulesError` cannot be
-    // produced by this call — not "should not", cannot, by inspection of
-    // `WalkRules::new`'s own loop.
-    let rules = WalkRules::new(true, true, Vec::new())
-        .expect("no user prefixes are passed, so validate_prefix never runs");
+    // Every watched folder walks with the built-in list and `.gitignore` on,
+    // plus whatever subfolders the person excluded for this root through
+    // `bridge::exclude_subfolder`. The two flags are still the fixed default
+    // this file has always passed; only the third argument is new, and it is
+    // the whole of what makes a saved rule mean anything.
+    //
+    // `?` rather than the `.expect` that stood here: that justification was
+    // exact and it died with `Vec::new()`. `validate_prefix` now runs over
+    // prefixes that came out of the database, and a stored prefix CAN fail
+    // it — one written by an older build whose validator was narrower (the
+    // whitelist in `rules.rs` grew across three review rounds), or one
+    // written straight through `Db::add_path_exclusion`, which deliberately
+    // does not validate because validation belongs at the command, the one
+    // place a person is standing there to fix it.
+    //
+    // So the refusal is the point, not a formality. This line runs on the
+    // command's own thread and before `claim_job`, so a refusal reaches the
+    // window as an ordinary rejection carrying `RulesError`'s own sentence —
+    // which `ui/src/settings/jobs.ts:283-290` already renders as `note: {
+    // kind: 'rejected', sentence }`, so nothing new is owed on the other
+    // side. An `.expect` on the same line would instead panic inside a
+    // command, which is not a shape any window can render at all.
+    // And refusing is the conservative direction rather than the strict
+    // one: the alternative is a walk that runs with the rule silently
+    // absent, and under D29 an indexed file is a file whose text is sent to
+    // a third-party provider. This is the same answer `Walked::rules_
+    // applied` gives one layer down, where the prefixes are each valid but
+    // refuse to combine — there the whole override layer stops applying and
+    // `walk_root` stops before phase 2 rather than indexing what the rules
+    // no longer cover.
+    //
+    // There is a third outcome besides "a rule" and "a refusal", and it is
+    // deliberate: `validate_prefix` answers `Ok(None)` for the empty string
+    // (`rules.rs:553-556`), so a blank stored row is dropped and the walk
+    // runs with the rules it does have. A blank names no folder, so nothing
+    // is believed excluded and then indexed anyway, and `exclude_subfolder`
+    // refuses blanks before they can be stored at all. Pinned by one test,
+    // and beneath it by the `scripts/mutations/pr8-exclusions.sh` case named
+    // "a blank stored prefix must stay a non-error" — named, not numbered,
+    // because a position in that file is one more count that drifts:
+    //
+    // `a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_anything`
+    //
+    // on its own line, unwrapped, because a wrapped identifier answers to no
+    // search: broken across two comment lines, as it was, `grep` for that
+    // name across the repository returned only the definition, so a rename
+    // would have left this comment claiming a pin that was gone (review
+    // round 2, N4). A later change to that `Ok(None)` cannot now quietly
+    // turn this line into a refusal.
+    let rules = WalkRules::new(true, true, user_prefixes)?;
 
     // `Pool::new` never touches the worker path — it opens the diagnostics
     // file, if any, and allocates empty slots. A worker that does not exist

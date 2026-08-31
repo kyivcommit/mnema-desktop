@@ -481,3 +481,149 @@ fn the_tree_listing_reads_files_and_recents_from_one_snapshot() {
         "the second connection's commit never landed, so the snapshot proved nothing"
     );
 }
+
+// ---------------------------------------------------------------- exclusions
+
+/// A rule belongs to the root it was set on. `ignore_rule.watched_root_id` has
+/// always said so; nothing read or wrote the table until now, so this is the
+/// first thing that would notice a query that dropped the root from its WHERE
+/// clause — and a rule that leaked across roots would exclude a folder in a
+/// place the person never asked, silently, until they went looking for a file.
+#[test]
+fn a_path_exclusion_belongs_to_one_root_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let a = db.insert_watched_root("/tmp/alpha").unwrap();
+    let b = db.insert_watched_root("/tmp/beta").unwrap();
+
+    assert!(db.add_path_exclusion(a, "Work/private").unwrap());
+
+    assert_eq!(db.list_path_exclusions(a).unwrap(), vec!["Work/private"]);
+    assert!(
+        db.list_path_exclusions(b).unwrap().is_empty(),
+        "the other root must not inherit the rule"
+    );
+}
+
+/// Pressing "exclude" twice is one rule, and the second press says so rather
+/// than failing: the caller is a window, and a person clicking again is not an
+/// error state. `false` is the whole signal that nothing was written.
+#[test]
+fn adding_the_same_exclusion_twice_writes_one_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/alpha").unwrap();
+
+    assert!(db.add_path_exclusion(root, "Photos").unwrap());
+    assert!(
+        !db.add_path_exclusion(root, "Photos").unwrap(),
+        "the second add must report that it wrote nothing"
+    );
+
+    assert_eq!(db.list_path_exclusions(root).unwrap(), vec!["Photos"]);
+}
+
+/// Removing reports whether a row actually went. The window needs the two apart:
+/// after a rename it offers to delete a rule whose folder is gone, and "there
+/// was nothing there" is a different sentence from "removed".
+#[test]
+fn removing_an_exclusion_reports_whether_a_row_went() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/alpha").unwrap();
+    db.add_path_exclusion(root, "Photos").unwrap();
+
+    assert!(db.remove_path_exclusion(root, "Photos").unwrap());
+    assert!(
+        !db.remove_path_exclusion(root, "Photos").unwrap(),
+        "removing a rule that is not there is not an error, and not a removal"
+    );
+    assert!(db.list_path_exclusions(root).unwrap().is_empty());
+}
+
+/// Several rules on one root come back in a stable order, so a window renders
+/// the same list twice running.
+#[test]
+fn exclusions_come_back_sorted() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/alpha").unwrap();
+
+    db.add_path_exclusion(root, "Work/private").unwrap();
+    db.add_path_exclusion(root, "Archive").unwrap();
+    db.add_path_exclusion(root, "Photos").unwrap();
+
+    assert_eq!(
+        db.list_path_exclusions(root).unwrap(),
+        vec!["Archive", "Photos", "Work/private"]
+    );
+}
+
+/// 🔴 Fix round 2, A3. The row above cannot fail from the `ORDER BY` going: the
+/// planner walks `ux_ignore_rule_path` (`migrations.rs:90-92`), which is
+/// `(watched_root_id, path_prefix)`, so the rows come back sorted whether the
+/// clause is there or not — `EXPLAIN QUERY PLAN` says
+/// `SEARCH ignore_rule USING COVERING INDEX ux_ignore_rule_path`. Delete the
+/// clause and the whole workspace stays at exit 0.
+///
+/// So the equivalence is **conditional on that index**, and this is the test
+/// that says so out loud instead of a comment telling the next person the guard
+/// cannot exist. Drop the index and the two orders come apart:
+///
+/// ```text
+/// NO INDEX, no ORDER BY = ["a/deep", "a"]     <- insertion order
+/// NO INDEX, ORDER BY    = ["a", "a/deep"]
+/// ```
+///
+/// What rests on it: `SubfolderState::ExcludedByAncestor` promises the
+/// **outermost** ancestor and gets it by taking the first match in this list
+/// (`tree.rs:755-759`), and `Folders.svelte`'s `heldAbove` reads the same list
+/// the same way to name the rule a person must remove first. A migration that
+/// narrowed or dropped this index would make the clause load-bearing again with
+/// nothing else noticing.
+///
+/// Descendant first, deliberately: with `["a", "a/deep"]` inserted in that
+/// order, insertion order and sorted order agree and the fixture proves
+/// nothing.
+#[test]
+fn exclusions_come_back_sorted_with_no_index_left_to_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/alpha").unwrap();
+
+    db.add_path_exclusion(root, "a/deep").unwrap();
+    db.add_path_exclusion(root, "a").unwrap();
+
+    db.conn()
+        .execute_batch("DROP INDEX ux_ignore_rule_path;")
+        .unwrap();
+
+    assert_eq!(
+        db.list_path_exclusions(root).unwrap(),
+        vec!["a", "a/deep"],
+        "with no index to walk, only the ORDER BY puts the outermost rule first"
+    );
+}
+
+/// The cascade is the schema's (`schema.sql:52`), and it is asserted by
+/// counting rows rather than by "no error": a cascade that silently stopped
+/// working leaves rules pointing at a root that no longer exists, and the next
+/// root to reuse that id inherits them.
+#[test]
+fn removing_a_watched_root_takes_its_exclusions_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let doomed = db.insert_watched_root("/tmp/alpha").unwrap();
+    let kept = db.insert_watched_root("/tmp/beta").unwrap();
+    db.add_path_exclusion(doomed, "Photos").unwrap();
+    db.add_path_exclusion(kept, "Photos").unwrap();
+
+    db.delete_watched_root(doomed).unwrap();
+
+    let remaining: i64 = db
+        .conn()
+        .query_row("SELECT count(*) FROM ignore_rule", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(remaining, 1, "only the surviving root's rule may remain");
+    assert_eq!(db.list_path_exclusions(kept).unwrap(), vec!["Photos"]);
+}

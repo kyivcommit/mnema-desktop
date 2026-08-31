@@ -194,10 +194,16 @@ const MATRIX: Row[] = [
   {
     // Phase 1 never saw the whole tree, so phase 3 was skipped: nothing was
     // deleted, and that is precisely what the sentence warns about.
+    //
+    // 🔴 "nothing" is the whole root, not the unreadable subfolders (review
+    // round 1, B1). `walk.rs:511` returns before `known` is read and before any
+    // `delete_path`, so a rule newly covering a top-level folder nowhere near
+    // the unreadable one survives too — measured `removed=0`, row kept, still
+    // findable. The sentence below says so; it used to say "inside them".
     name: 'partlyRead',
     ending: { reason: 'completed', complete: false, ...READ_NOT_RECONCILED },
-    uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Файли, які ви вилучили всередині них, досі знаходяться пошуком.',
-    en: 'The folder was only partly read: some subfolders could not be entered. Files you deleted inside them are still found by search.',
+    uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+    en: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
     result: NOT_RECONCILED_RESULT,
   },
   {
@@ -391,7 +397,7 @@ test('subtrees reconciliation refused to touch are named, each with its own reas
   await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
 
   const text = container.textContent ?? '';
-  expect(text).toContain('Ці підтеки не звіряли, тож вилучені з них файли досі знаходяться пошуком:');
+  expect(text).toContain('Ці підтеки не звіряли, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком:');
   expect(text).toContain('notes/archive — не вдалося прочитати');
   expect(text).toContain('notes/link — символьне посилання, сюди не заходили');
   expect(text).toContain('notes/void — прочиталася порожньою');
@@ -1038,6 +1044,15 @@ test('a language switch after a WALK ending reaches its sentence, its counts and
   await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
   channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0, frozen: [...FROZEN] }));
   await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
+  // Task 7. `frozenHeading` (Indexing.svelte:148) is its own key inside this
+  // same `walkLines` block (line 139-140's `void $locale`) — the two
+  // parameterized tests further down mount fresh under one locale each and so
+  // cannot see whether this key itself re-renders on a LIVE switch, only that
+  // it resolves correctly at mount. Read under 'uk' BEFORE the switch below,
+  // the same way the labels-switch test in Folders.test.ts does — a hardcoded
+  // English literal here would otherwise still satisfy the 'en' assertions
+  // after the switch and pass unnoticed.
+  expect(container.textContent ?? '').toContain('Ці підтеки не звіряли, тож і видалені файли');
 
   setLocale('en');
   await tick();
@@ -1047,6 +1062,8 @@ test('a language switch after a WALK ending reaches its sentence, its counts and
   expect(text).toContain('Documents added: 5.');
   expect(text).toContain('notes/link — a symbolic link, never entered');
   expect(text).not.toContain('Теку прочитано');
+  expect(text).toContain('These subfolders were not reconciled, so both deleted files');
+  expect(text).not.toContain('Ці підтеки не звіряли');
 });
 
 // The lines a WALK ending never draws: the pass line, the counts, the estimate
@@ -1223,6 +1240,72 @@ test('an embedding pass ending re-reads the list as well', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// PR 8a live run, finding 1 — the same class one level deeper, and this one
+// makes the screen state something false about where a person's text is going.
+//
+// Measured by hand on a case-only rename: `6-rename/archive` was excluded by a
+// rule and its panel was open, reading «archive — Виключено вашим правилом». In
+// a terminal, `mv archive Archive`. Pressing Сканувати reported «Додано
+// документів: 2» — the walk indexes the folder again, because the rule names
+// `archive` byte for byte and the folder is now `Archive`. The row went on
+// reading «Виключено вашим правилом» about a folder whose text was on its way
+// to the model provider (D29). Collapsing and re-expanding by hand was the only
+// thing that corrected it.
+//
+// Written here rather than in `Folders.test.ts` for the reason finding 2's own
+// tests are: the whole window renders, the controller is the real one, and the
+// ending arrives down the channel `start_walk_job` was handed.
+// ---------------------------------------------------------------------------
+
+const BEFORE_RENAME = {
+  list_subfolders: { entries: [{ name: 'archive', relativePath: 'archive', state: { kind: 'excluded' } }], unnameable: 0 },
+  list_exclusions: [{ prefix: 'archive', existsOnDisk: true }],
+};
+const AFTER_RENAME = {
+  list_subfolders: { entries: [{ name: 'Archive', relativePath: 'Archive', state: { kind: 'open' } }], unnameable: 0 },
+  // The rule still names the old spelling, and now nothing is at that path.
+  list_exclusions: [{ prefix: 'archive', existsOnDisk: false }],
+};
+
+const panelText = (rootId: number) => visible(screen.getByTestId(`folder-panel-${rootId}`));
+
+async function openPanel() {
+  reply(BEFORE_RENAME);
+  await openFolders();
+  await fireEvent.click(screen.getByTestId('folder-expand-4'));
+  await screen.findByTestId('folder-rules-4');
+}
+
+test('a finished scan re-reads the open panel, so a renamed folder stops reading as excluded', async () => {
+  await openPanel();
+  // Both directions start here: while the rule matched, this is what the panel
+  // truthfully said. A test asserting only the end state would pass on a panel
+  // that had read «Archive» all along.
+  expect(panelText(4)).toContain('archive Виключено вашим правилом.');
+  expect(panelText(4)).not.toContain('Наразі за цим шляхом теки немає.');
+
+  await fireEvent.click(scanButton(4));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  // The disk moved underneath, mid-run. Swapped here so the new spelling can
+  // only reach the screen by the panel being READ again.
+  reply(AFTER_RENAME);
+
+  // A progress report is not an ending, and the panel is not re-read on one.
+  channelOf('start_walk_job')(progressEvent());
+  await tick();
+  expect(panelText(4)).toContain('archive Виключено вашим правилом.');
+
+  channelOf('start_walk_job')(endedEvent());
+
+  await waitFor(() => expect(panelText(4)).toContain('Archive Жодне правило не виключає цю теку.'));
+  // The sentence the owner read over a folder being indexed at that moment.
+  expect(panelText(4)).not.toContain('Виключено вашим правилом.');
+  // And the rule list, read from the same ending: the rule is still stored and
+  // now names nothing on disk, which is the fact that explains the re-indexing.
+  expect(panelText(4)).toContain('archive Наразі за цим шляхом теки немає.');
+});
+
+// ---------------------------------------------------------------------------
 // Live run, finding 3 — a section says it is not built, and shows the thing it
 // is for.
 //
@@ -1317,3 +1400,61 @@ test('on an unbuilt section with no job running there is no Cancel and no strip'
   expect(calls('cancel_job')).toHaveLength(0);
   expect(screen.getByText('Ця секція ще не готова.')).toBeTruthy();
 });
+
+// ---------------------------------------------------------------------------
+// PR 8a, Task 6 — the two sentences that enumerate what an incomplete walk
+// leaves behind, and the case both of them used to omit.
+//
+// 🔴 A path under a frozen prefix is never deleted (`should_delete`,
+// `walk.rs:767`), and that rule does not ask WHY the path stopped being seen.
+// A file the person deleted and a file a rule now excludes are the same
+// absence to phase 3 — so both survive, both stay searchable, and both go to
+// the provider on a later pass. Naming only deletion is an enumeration that
+// leaves out the one case PR 8 is entirely about.
+//
+// Asserted through the rendered screen in BOTH locales, not by reading the
+// catalog: a key changed in one locale and left behind in the other is exactly
+// what a catalog-reading test cannot see.
+// ---------------------------------------------------------------------------
+
+const PARTLY_READ_NAMES_EXCLUSIONS = {
+  uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+  en: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
+} as const;
+
+const FROZEN_NAMES_EXCLUSIONS = {
+  uk: 'Ці підтеки не звіряли, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком:',
+  en: 'These subfolders were not reconciled, so both deleted files and files your exclusion rules now cover are still found by search inside them:',
+} as const;
+
+for (const loc of ['uk', 'en'] as const) {
+  test(`a partly read folder names exclusions, not deletions alone (${loc})`, async () => {
+    await openFolders(loc);
+    await fireEvent.click(scanButton(1));
+    await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+    channelOf('start_walk_job')(endedEvent({ reason: 'completed', complete: false, ...READ_NOT_RECONCILED }));
+    await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
+
+    expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(PARTLY_READ_NAMES_EXCLUSIONS[loc]);
+  });
+
+  test(`the frozen-subtree heading names exclusions, not deletions alone (${loc})`, async () => {
+    const { container } = await openFolders(loc);
+    await fireEvent.click(scanButton(1));
+    await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+    // 🔴 `complete: true`, and it is not cosmetic (review round 1, M3).
+    // `report.frozen` is assigned at `walk.rs:747`, past the
+    // `if !walked.complete || !stopped_cleanly { return }` gate at
+    // `walk.rs:511`, so `complete: false` ALWAYS carries `frozen: []` and the
+    // pair this fixture used to send is a screen the backend cannot draw. The
+    // heading renders off `frozen.length > 0` alone, so the assertion is the
+    // same one — now made about a state that happens. Measured shape:
+    // `complete=true removed=0 frozen=[Frozen{prefix:"linked",…}]`.
+    channelOf('start_walk_job')(endedEvent({ complete: true, removed: 0, frozen: [...FROZEN] }));
+    await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
+
+    expect(container.textContent ?? '').toContain(FROZEN_NAMES_EXCLUSIONS[loc]);
+  });
+}

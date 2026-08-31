@@ -399,7 +399,7 @@ test('the tree lets go of the mark when the next answer is a refusal', async () 
 });
 
 // 🔴 Ruling AC, the half that is easy to lose: only the answer-and-source pair is
-// keyed. `state` changes twice per question (`Launcher.svelte:41,44`), so a keyed
+// keyed. `state` changes twice per question (`Launcher.svelte:42,45`), so a keyed
 // tree refetches and snaps shut every folder the person opened — in the card
 // whose whole purpose is browsing folder neighbours (§7). Task 7 built `Tree` on
 // that promise; this is where it is kept.

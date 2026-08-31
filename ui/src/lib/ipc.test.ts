@@ -1,6 +1,10 @@
 import { expect, test, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as ipc from './ipc';
-import type { SourceAround } from './ipc';
+import { camelOf, rustEnumVariants } from './rust-enum';
+import type { SourceAround, StoredExclusion, SubfolderListing, SubfolderState } from './ipc';
 import {
   generated,
   generatedArchived,
@@ -192,4 +196,161 @@ test('generatedNoPath has neither a path nor a coordinate', () => {
   const c = generatedNoPath.citations[0];
   expect(c.relativePath).toBeNull();
   expect(c.coordinate).toEqual({ kind: 'none' });
+});
+
+// PR 8a Task 5: the four commands the folder row's expansion calls.
+//
+// Argument NAMES, not just values. Tauri matches a command's parameters by
+// name, so `relative_path` here would reach the shell as a missing argument and
+// be rejected — a failure no assertion about the returned shape would see.
+test('listSubfolders names its arguments the way the command declares them', async () => {
+  invoke.mockResolvedValue({ entries: [], unnameable: 0 });
+
+  await ipc.listSubfolders(7, 'Work/private');
+
+  expect(invoke).toHaveBeenCalledWith('list_subfolders', { rootId: 7, relativePath: 'Work/private' });
+});
+
+// The root's own level is `''`, not a missing argument: `list_subfolders`
+// validates the path it is given, and `WalkRules::check_prefix("")` is the one
+// empty string it accepts (`crates/mnema-walk/src/rules.rs:554-556`).
+test('listSubfolders asks for the root level with an empty path, not without one', async () => {
+  invoke.mockResolvedValue({ entries: [], unnameable: 0 });
+
+  await ipc.listSubfolders(1, '');
+
+  expect(invoke).toHaveBeenCalledWith('list_subfolders', { rootId: 1, relativePath: '' });
+});
+
+test('listSubfolders returns the listing whole — the state tag and its payload included', async () => {
+  const listing: SubfolderListing = {
+    entries: [
+      { name: 'private', relativePath: 'Work/private', state: { kind: 'excludedByAncestor', prefix: 'Work' } },
+      { name: 'notes', relativePath: 'Work/notes', state: { kind: 'open' } },
+    ],
+    unnameable: 2,
+  };
+  invoke.mockResolvedValue(listing);
+
+  await expect(ipc.listSubfolders(7, 'Work')).resolves.toEqual(listing);
+});
+
+test('listExclusions takes the root id and nothing else', async () => {
+  invoke.mockResolvedValue([]);
+
+  await ipc.listExclusions(4);
+
+  expect(invoke).toHaveBeenCalledWith('list_exclusions', { rootId: 4 });
+  // Both directions: the assertion above is satisfied by a call carrying a
+  // second argument nobody looked at, and a stray `relativePath` here would be
+  // a rule prefix sent to a command that does not take one.
+  expect(Object.keys((invoke.mock.calls.at(-1) as [string, object])[1])).toEqual(['rootId']);
+});
+
+test('listExclusions returns each stored rule with its own existsOnDisk', async () => {
+  const rules: StoredExclusion[] = [
+    { prefix: 'Old notes', existsOnDisk: false },
+    { prefix: 'Work/private', existsOnDisk: true },
+  ];
+  invoke.mockResolvedValue(rules);
+
+  await expect(ipc.listExclusions(4)).resolves.toEqual(rules);
+});
+
+test('excludeSubfolder sends the root id and the path the listing gave it', async () => {
+  invoke.mockResolvedValue(undefined);
+
+  await ipc.excludeSubfolder(3, 'Work/private');
+
+  expect(invoke).toHaveBeenCalledWith('exclude_subfolder', { rootId: 3, relativePath: 'Work/private' });
+});
+
+// `include_subfolder` answers whether a row went (`bridge.rs:465-471`), and the
+// wrapper has to carry that answer through: "the rule is gone now" and "there
+// was no rule left to remove" are two different things to say to a person.
+test('includeSubfolder sends the pair and returns whether a rule was removed', async () => {
+  invoke.mockResolvedValue(true);
+
+  await expect(ipc.includeSubfolder(3, 'Archive')).resolves.toBe(true);
+  expect(invoke).toHaveBeenCalledWith('include_subfolder', { rootId: 3, relativePath: 'Archive' });
+
+  invoke.mockResolvedValue(false);
+  await expect(ipc.includeSubfolder(3, 'Archive')).resolves.toBe(false);
+});
+
+// The whole union, both halves of it: the six spellings pinned as values, and a
+// mapping TypeScript can only accept when every variant of `SubfolderState` has
+// an entry. A seventh variant added to `tree.rs` and mirrored here fails
+// `npm run check` on the missing key; one mirrored under a wrong tag fails the
+// list below. The tags are `tree.rs`'s own
+// (`the_subfolder_wire_shape_is_camel_case`), not this file's invention.
+//
+// ⚠️ It says nothing at all about a variant added to `tree.rs` and NOT
+// mirrored here — the direction that actually happens. That is the next test.
+// One sample per variant, and the annotation is the point: TypeScript accepts
+// this object only when it has an entry for every member of the union and no
+// entry for anything else, so `Object.keys` below is the union enumerated at
+// run time rather than a list written beside it.
+const byTag: Record<SubfolderState['kind'], SubfolderState> = {
+  open: { kind: 'open' },
+  excluded: { kind: 'excluded' },
+  excludedByAncestor: { kind: 'excludedByAncestor', prefix: 'Work' },
+  builtIn: { kind: 'builtIn' },
+  symlink: { kind: 'symlink' },
+  unusableName: { kind: 'unusableName' },
+};
+
+test('SubfolderState carries every state the shell can send, and exactly those six', () => {
+  expect(Object.keys(byTag).sort()).toEqual(
+    ['builtIn', 'excluded', 'excludedByAncestor', 'open', 'symlink', 'unusableName'],
+  );
+  // The payload the ancestor state carries is the whole reason that row can
+  // name the rule holding it.
+  const held = byTag.excludedByAncestor;
+  expect(held.kind === 'excludedByAncestor' && held.prefix).toBe('Work');
+});
+
+// 🔴 The direction the test above cannot see, and the one that actually
+// happens. `Record<SubfolderState['kind'], …>` checks the union against
+// ITSELF, so it is satisfied by any union — including one that is a variant
+// behind `tree.rs`. Rust and TypeScript share no compiler: a variant added to
+// the enum that OWNS this wire shape, and not mirrored here, fails nothing.
+// It reaches `Folders.svelte`'s classifier as a state that file has never
+// heard of, and the review that found this rendered the result — a folder
+// name, an empty sentence, and an unlabelled button that removed the person's
+// exclusion rule.
+//
+// Both directions in one comparison: a variant Rust gains and this file has
+// never heard of fails here, and so does one this file still lists after Rust
+// has dropped it. The spelling half is Rust's own
+// `the_subfolder_wire_shape_is_camel_case` (`tree.rs:1254`), which serializes
+// each state and pins the tag string — this half derives the wire name with
+// serde's camelCase rule and would not notice `rename_all` changing. Neither
+// closes the gap alone.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TREE_RS = readFileSync(join(HERE, '../../../src-tauri/src/tree.rs'), 'utf8');
+
+test('SubfolderState is exactly what tree.rs defines, in the spelling serde sends', () => {
+  expect(Object.keys(byTag).sort()).toEqual(
+    rustEnumVariants(TREE_RS, 'SubfolderState').map(camelOf).sort(),
+  );
+});
+
+test('the subfolder wire types reject Rust snake_case spellings', () => {
+  const listing: SubfolderListing = {
+    entries: [{
+      name: 'private', relativePath: 'Work/private', state: { kind: 'open' },
+      // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
+      relative_path: 'Work/private',
+    }],
+    unnameable: 0,
+  };
+  const rule: StoredExclusion = {
+    prefix: 'Work/private', existsOnDisk: true,
+    // @ts-expect-error same, for the rule list's own field.
+    exists_on_disk: true,
+  };
+
+  expect(listing.entries[0].relativePath).toBe('Work/private');
+  expect(rule.existsOnDisk).toBe(true);
 });

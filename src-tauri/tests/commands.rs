@@ -101,6 +101,83 @@ fn fixture_dir() -> tempfile::TempDir {
     dir
 }
 
+/// A fixture for the exclusion commands: a NESTED folder (`Work/private`) and
+/// a bare FILE (`solo.txt`) at the root — the two shapes `list_exclusions`
+/// must tell apart when it answers `existsOnDisk` per stored prefix (task-2
+/// brief, "Required fixture states for `exists_on_disk`").
+fn exclusion_fixture_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the exclusion fixture");
+    std::fs::create_dir_all(dir.path().join("Work/private")).expect("creating Work/private");
+    std::fs::write(dir.path().join("Work/private/note.txt"), "private note")
+        .expect("writing Work/private/note.txt");
+    std::fs::write(dir.path().join("solo.txt"), "a lone file").expect("writing solo.txt");
+    dir
+}
+
+/// A watched folder holding two subfolders with one indexable file each.
+///
+/// Two folders of the same shape, not one folder and one top-level file: the
+/// claim the exclusion tests make is "the excluded one went and the other
+/// stayed", and that is only a claim about the exclusion if the half that
+/// stays is the same kind of thing as the half that goes. A top-level file
+/// would also survive a rule that had silently excluded everything under
+/// every subfolder.
+fn keep_and_drop_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the keep/drop fixture");
+    std::fs::create_dir(dir.path().join("keep")).expect("creating keep/");
+    std::fs::create_dir(dir.path().join("drop")).expect("creating drop/");
+    std::fs::write(
+        dir.path().join("keep/kept.txt"),
+        "the kept file mentions herons",
+    )
+    .expect("writing keep/kept.txt");
+    std::fs::write(
+        dir.path().join("drop/dropped.txt"),
+        "the dropped file mentions herons",
+    )
+    .expect("writing drop/dropped.txt");
+    dir
+}
+
+/// The state the feature is in as soon as a person excludes a SECOND folder,
+/// which no fixture in this workspace built before review round 1 (B1): two
+/// excluded folders and one kept, one indexable file in each.
+///
+/// Two of them, not one, is the whole point. `keep_and_drop_dir` above pins
+/// that a stored prefix is applied; nothing pinned that every stored prefix
+/// is. Measured in review round 1, against the shipped code, which passes
+/// the whole `Vec` correctly: truncating it to its first entry
+/// (`user_prefixes.into_iter().take(1).collect()`) left `cargo test -p
+/// mnema-desktop` at 233 passed, 0 failed. `drop_a`/`drop_b` rather than two
+/// unrelated names so the sort `Db::list_path_exclusions` applies is
+/// predictable, and so the surviving half of any truncation is a file this
+/// test names.
+fn two_dropped_and_one_kept_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the two-exclusion fixture");
+    for (folder, file, text) in [
+        ("drop_a", "a.txt", "the first dropped file mentions herons"),
+        ("drop_b", "b.txt", "the second dropped file mentions herons"),
+        ("keep", "kept.txt", "the kept file mentions herons"),
+    ] {
+        std::fs::create_dir(dir.path().join(folder)).expect("creating a fixture folder");
+        std::fs::write(dir.path().join(folder).join(file), text).expect("writing a fixture file");
+    }
+    dir
+}
+
+/// What the index actually holds under one root, sorted — the same list
+/// reconciliation itself compares a walk against (`Db::paths_under_root`).
+///
+/// `Ended::removed` is a number and this is the fact behind it: a walk that
+/// reported `removed: 1` and a walk that reported `removed: 1` while deleting
+/// the wrong row are the same number. Every exclusion test below asserts on
+/// both.
+fn indexed_paths(app: &tauri::App<MockRuntime>, root_id: i64) -> Vec<String> {
+    app.state::<AppState>()
+        .with_index(|db| db.paths_under_root(root_id))
+        .expect("reading the paths the index holds under the root")
+}
+
 /// Starts a real walk over `root_id` and blocks until the window would have
 /// heard `Ended`, returning its payload for the caller to inspect.
 ///
@@ -381,7 +458,46 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     // neither job's shape — the point here is only which thread answers, and a
     // rejection for missing arguments answers from the same place a success
     // would.
-    for cmd in ["open_index", "search", "start_walk_job", "start_embed_job"] {
+    //
+    // 🔴 Fix round 1, I6. The four PR 8a commands were added to the shell and
+    // not to this list. Measured: removing `(async)` from all four left
+    // `cargo test --workspace` at exit 0, and every one of them takes the
+    // index mutex — `list_subfolders` also does a `read_dir` on the watched
+    // folder itself, which on a network share or a sleeping external drive is
+    // the seconds-long call this whole test exists to keep off the main
+    // thread.
+    //
+    // Enumerated from `#[tauri::command(async)]` in `src/`, not from a grep
+    // for this sentence: the phrasing is not the class.
+    //
+    // ⚠️ **This list is not every `(async)` command, and saying so is part of
+    // the finding.** Re-derived from the attribute:
+    //
+    //     grep -c 'tauri::command(async)' src-tauri/src/*.rs
+    //
+    // gives 23, against 5 deliberately blocking ones (`start_probe_job`,
+    // `job_status`, `cancel_job`, `get_locale`, `set_locale`; `cancel_job` is
+    // the counterweight below, and `models.rs:287` names the attribute in a
+    // doc comment rather than using it). So 15 `(async)` commands — every one
+    // in `models.rs`, plus `list_tree`, `source_around`, `ask`,
+    // `set_search_arms`, `skips`, `add_watched_folder` and
+    // `remove_watched_folder` — are checked by nothing here.
+    //
+    // That is a gap this branch did not create and does not close, written
+    // down rather than left for the list's shape to imply it was considered.
+    // What the four below have in common with the four above them is that a
+    // person waits on them from the folder screen while a job holds the index
+    // mutex; the rest is one enumeration and belongs to whoever widens it.
+    for cmd in [
+        "open_index",
+        "search",
+        "start_walk_job",
+        "start_embed_job",
+        "list_exclusions",
+        "exclude_subfolder",
+        "include_subfolder",
+        "list_subfolders",
+    ] {
         assert_ne!(
             responding_thread(&webview, cmd),
             here,
@@ -2300,6 +2416,848 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
     );
 }
 
+/// `list_exclusions` answers `existsOnDisk` PER STORED PREFIX, not by
+/// comparing against a one-level folder listing (review round 2, P1 —
+/// `bridge::list_exclusions`'s own doc explains why the per-level comparison
+/// is wrong at its root: a stored prefix may name a NESTED folder). Three
+/// fixture states in one test, each a shape the wrong design gets wrong or
+/// cannot answer at all: a nested prefix whose folder is present, the same
+/// prefix after the folder is renamed away, and a prefix naming a FILE.
+///
+/// The FILE case reports `true`, not `false` (review round 1, Minor 1): a
+/// prefix naming a file excludes that file just fine, so `existsOnDisk`
+/// promises "this path is still there," not "this path is a directory" —
+/// gating on `is_dir()` would label a working rule stale.
+#[test]
+fn list_exclusions_reports_whether_each_stored_prefix_is_still_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = exclusion_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Work/private" }),
+    )
+    .expect("excluding Work/private was rejected");
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "solo.txt" }),
+    )
+    .expect("excluding solo.txt was rejected");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    let entries = list
+        .as_array()
+        .expect("list_exclusions did not return an array");
+    assert_eq!(
+        entries.len(),
+        2,
+        "both stored prefixes should be listed: {entries:?}"
+    );
+
+    let by_prefix = |p: &str| {
+        entries
+            .iter()
+            .find(|e| e["prefix"] == json!(p))
+            .unwrap_or_else(|| panic!("{p} missing from {entries:?}"))
+    };
+    assert_eq!(
+        by_prefix("Work/private")["existsOnDisk"],
+        json!(true),
+        "a NESTED prefix whose folder is present must report existsOnDisk true — the state a \
+         per-level comparison against list_subfolders would get wrong"
+    );
+    assert_eq!(
+        by_prefix("solo.txt")["existsOnDisk"],
+        json!(true),
+        "a prefix naming a FILE excludes that file just fine and must report existsOnDisk \
+         true — is_dir() would wrongly label a working rule stale"
+    );
+
+    std::fs::rename(
+        fixture.path().join("Work/private"),
+        fixture.path().join("Work/renamed"),
+    )
+    .expect("renaming Work/private away");
+
+    let after = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    // 🔴 Fix round 1, I5. BOTH rows, and the fixture now disagrees with
+    // itself on purpose: `Work/private` is gone and `solo.txt` is still
+    // there. Reading only the renamed row was the gap — measured, computing
+    // the flag once from the first prefix and copying it down the list left
+    // the workspace at exit 0. What that costs is not a cosmetic row: a stale
+    // FIRST rule renders every live rule stale, and task 5's screen then
+    // offers to remove protection that is doing its job, which under D29 puts
+    // that folder's text back on the wire to the provider.
+    //
+    // The whole array, in the order `list_path_exclusions` sorts it
+    // (`write.rs:580`), so neither a value nor a row can go missing.
+    assert_eq!(
+        after,
+        json!([
+            { "prefix": "Work/private", "existsOnDisk": false },
+            { "prefix": "solo.txt", "existsOnDisk": true }
+        ]),
+        "one answer has to carry both flags — a stale first rule must not make a live one \
+         read stale"
+    );
+}
+
+/// `symlink_metadata` on a joined path goes through the filesystem's own
+/// name lookup, which is case-INSENSITIVE on APFS (macOS, this test's
+/// platform among others) and on Windows — while `ignore`'s override
+/// matcher, what the walk itself uses, is case-sensitive. A prefix stored as
+/// `private` against a folder actually spelled `Private` must therefore
+/// report `existsOnDisk: false`: the rule excludes nothing (a case-sensitive
+/// match never fires), so a case-insensitive stat that answered `true` would
+/// read a dead rule as live (review round 1, Important 2).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_prefix_that_only_matches_the_folders_name_by_case_reports_not_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("Private")).expect("creating Private");
+    std::fs::write(fixture.path().join("Private/secret.txt"), "secret")
+        .expect("writing Private/secret.txt");
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "private" }),
+    )
+    .expect("excluding private was rejected");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([{ "prefix": "private", "existsOnDisk": false }]),
+        "a prefix that only matches the folder's real name by case must report existsOnDisk \
+         false — the filesystem's own lookup would say true, and the rule excludes nothing"
+    );
+}
+
+/// `list_exclusions` must refuse the whole call when the watched root
+/// itself is unreachable, rather than answering per prefix with
+/// `existsOnDisk: false` for every stored rule — the same field lying that
+/// a per-prefix `.unwrap_or(false)` would produce, but for the entire list
+/// at once (review round 1, Important 1).
+#[test]
+fn list_exclusions_refuses_when_the_root_itself_is_unreachable() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs was rejected");
+
+    // The root folder itself goes away — an unmounted drive, a moved
+    // folder — while the watched_root row and its exclusion rule remain.
+    std::fs::remove_dir_all(fixture.path()).expect("removing the fixture root");
+
+    let rejected = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect_err("list_exclusions should refuse an unreachable root");
+    assert_eq!(
+        error_text(&rejected),
+        format!(
+            "the folder for watched root {root} is not available right now, so its exclusion \
+             rules cannot be checked"
+        ),
+        "the refusal should be Error::RootUnavailable's own sentence"
+    );
+}
+
+/// Fix round 1. `exclude_subfolder` was the **third** site of a guard the
+/// other two already had: `list_exclusions` above and
+/// `tree::list_subfolders` both refuse an unreachable root with
+/// `Error::RootUnavailable`, and this one stored the rule regardless.
+///
+/// It matters more here than at either of them, because what an unmounted
+/// root buys is a WRITE. `WalkRules::builtin_layers` resolves its anchored
+/// layer through the disk, so with the root gone `prunes` answers `false` for
+/// every path — and the built-in guard, added in task 4's own fix round for
+/// exactly this, lets a rule the walk will always prune into the database,
+/// where `list_exclusions` renders it as protection that does nothing.
+///
+/// The whole sentence, not a substring: the same one the other two sites
+/// give, so a person reading it cannot tell the three commands apart by their
+/// refusal.
+#[test]
+fn excluding_when_the_root_itself_is_unreachable_is_refused_and_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    // The root folder itself goes away — an unmounted drive, a moved
+    // folder — while the watched_root row remains.
+    std::fs::remove_dir_all(fixture.path()).expect("removing the fixture root");
+
+    let rejected = call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect_err("exclude_subfolder should refuse an unreachable root");
+    assert_eq!(
+        error_text(&rejected),
+        format!(
+            "the folder for watched root {root} is not available right now, so its exclusion \
+             rules cannot be checked"
+        ),
+        "the refusal should be Error::RootUnavailable's own sentence, the same one \
+         list_exclusions and list_subfolders give"
+    );
+
+    // The other half, and the one the sentence alone does not prove: nothing
+    // was written. The root comes back so `list_exclusions` can answer at all —
+    // it refuses an unreachable root too.
+    std::fs::create_dir(fixture.path()).expect("restoring the fixture root");
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([]),
+        "a rule refused because the root was gone must not be in the database once it is back"
+    );
+}
+
+/// The write site's half of review round 2's Minor B, added with the guard
+/// itself in fix round 1: `!root_path.is_dir()` and not the weaker
+/// `symlink_metadata(..).is_err()`, which resolves fine for a symlink whose
+/// target is gone. Without this test the guard above is pinned only against a
+/// root that is plainly absent, where both predicates agree — so the choice of
+/// predicate, which is the thing review round 2 measured at the other site,
+/// would be undefended here.
+#[cfg(unix)]
+#[test]
+fn excluding_when_the_root_is_a_dangling_symlink_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let target = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(target.path().join("Docs")).expect("creating Docs");
+    let link_parent = tempfile::tempdir().unwrap();
+    let link_path = link_parent.path().join("root_link");
+    std::os::unix::fs::symlink(target.path(), &link_path).expect("creating the root symlink");
+
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": link_path.display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    // Both directions: while the target is there the rule stores, so the
+    // refusal below is about the dangling link and not about this command
+    // having stopped working.
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs while the root resolves was rejected");
+
+    // The symlink's TARGET goes away; the symlink itself — the watched root's
+    // stored path — still resolves as a path, just to nothing.
+    drop(target);
+
+    let rejected = call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Photos" }),
+    )
+    .expect_err("exclude_subfolder should refuse a root that is a dangling symlink");
+    assert_eq!(
+        error_text(&rejected),
+        format!(
+            "the folder for watched root {root} is not available right now, so its exclusion \
+             rules cannot be checked"
+        ),
+        "a dangling symlink root must be refused here the same way list_exclusions refuses it"
+    );
+}
+
+/// Review round 2, Minor B: a dangling symlink root passes a bare
+/// `symlink_metadata(..).is_err()` guard (a symlink's own metadata resolves
+/// fine even when its target is gone), so the old guard let this case
+/// through into Important 1's own failure mode — every prefix answering
+/// `existsOnDisk: false`. `!root.is_dir()` — the walk's own predicate
+/// (`crates/mnema-ingest/src/walk.rs:288`) follows the symlink and correctly
+/// answers "not a directory" for a dangling one.
+#[cfg(unix)]
+#[test]
+fn list_exclusions_refuses_when_the_root_is_a_dangling_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let target = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(target.path().join("Docs")).expect("creating Docs");
+    let link_parent = tempfile::tempdir().unwrap();
+    let link_path = link_parent.path().join("root_link");
+    std::os::unix::fs::symlink(target.path(), &link_path).expect("creating the root symlink");
+
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": link_path.display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs was rejected");
+
+    // The symlink's TARGET goes away; the symlink itself (the watched
+    // root's stored path) still resolves as a path, just to nothing.
+    drop(target);
+
+    let rejected = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect_err("list_exclusions should refuse a root that is a dangling symlink");
+    assert_eq!(
+        error_text(&rejected),
+        format!(
+            "the folder for watched root {root} is not available right now, so its exclusion \
+             rules cannot be checked"
+        ),
+        "a dangling symlink root must be refused the same way a plainly missing one is"
+    );
+}
+
+/// Review round 2, Minor B/C: an unreadable ROOT (mode `000`) still passes
+/// `!root.is_dir()` — `is_dir()` only needs the PARENT directory's execute
+/// bit, not read access to the root itself, the same weakness the walk's
+/// own predicate has (`walk.rs:288`) and this command deliberately matches
+/// rather than improves on. So the guard does not refuse here; what must
+/// not happen is `prefix_exists_on_disk`'s own `read_dir(root)` call
+/// collapsing "I could not list it" into "it is gone" — a live rule must
+/// still read `existsOnDisk: true`, not `false`.
+#[cfg(unix)]
+#[test]
+fn a_rule_under_an_unreadable_root_reports_present_not_stale() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs was rejected");
+
+    let original_mode = std::fs::metadata(fixture.path()).unwrap().permissions();
+    std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o000))
+        .expect("chmod 000 on the fixture root");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }));
+
+    // Restored before any assertion can panic and before the TempDir's own
+    // Drop runs — an unreadable directory would otherwise survive the test.
+    std::fs::set_permissions(fixture.path(), original_mode)
+        .expect("restoring the fixture root's permissions");
+
+    assert_eq!(
+        list.expect("list_exclusions was rejected"),
+        json!([{ "prefix": "Docs", "existsOnDisk": true }]),
+        "a rule under a root that cannot be read must not be reported stale"
+    );
+}
+
+/// Review round 2, Minor C, the measured case: `Work` at `--x--x--x` (mode
+/// `0o111`) is TRAVERSABLE but not LISTABLE — `read_dir(Work)` needs read
+/// permission, which the old `.ok()` handling folded into "not found" the
+/// same way a genuinely absent folder would be. A nested prefix under such
+/// an ancestor must still read `existsOnDisk: true`.
+#[cfg(unix)]
+#[test]
+fn a_rule_under_an_unreadable_ancestor_reports_present_not_stale() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = exclusion_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Work/private" }),
+    )
+    .expect("excluding Work/private was rejected");
+
+    let work_path = fixture.path().join("Work");
+    let original_mode = std::fs::metadata(&work_path).unwrap().permissions();
+    std::fs::set_permissions(&work_path, std::fs::Permissions::from_mode(0o111))
+        .expect("chmod --x--x--x on Work");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }));
+
+    // Restored before any assertion can panic and before TempDir's own Drop
+    // runs — recursive removal needs Work to be listable again.
+    std::fs::set_permissions(&work_path, original_mode).expect("restoring Work's permissions");
+
+    assert_eq!(
+        list.expect("list_exclusions was rejected"),
+        json!([{ "prefix": "Work/private", "existsOnDisk": true }]),
+        "a rule under an unreadable (but traversable) ancestor must not be reported stale"
+    );
+}
+
+/// Review round 3, Minor N1: `NotADirectory` (`ENOTDIR`) is an ANSWER about
+/// the path, not an observer condition — an ancestor replaced by a file of
+/// the same name cannot come back on its own the way a permission problem
+/// can, so it belongs with `NotFound` on the "not there" side. This is the
+/// site `prefix_exists_on_disk`'s per-component `read_dir` classifies
+/// through `path_error_is_an_answer`.
+#[cfg(unix)]
+#[test]
+fn a_rule_under_an_ancestor_that_became_a_file_reports_not_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = exclusion_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Work/private" }),
+    )
+    .expect("excluding Work/private was rejected");
+
+    // `Work` stops being a directory at all — the shape a folder replaced by
+    // a same-named file produces. `read_dir("Work/private"'s parent lookup)`
+    // now fails with ENOTDIR, not ENOENT.
+    let work_path = fixture.path().join("Work");
+    std::fs::remove_dir_all(&work_path).expect("removing Work");
+    std::fs::write(&work_path, "Work is now a file").expect("writing a file named Work");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([{ "prefix": "Work/private", "existsOnDisk": false }]),
+        "an ancestor that is now a FILE must report existsOnDisk false — ENOTDIR does not lift \
+         on its own the way a permission problem does"
+    );
+}
+
+/// The item review round 3 recorded as "not introduced by this diff, but the
+/// lead should see it": the final `symlink_metadata` in
+/// `prefix_exists_on_disk` used to be a bare `.is_ok()`, folding a
+/// `PermissionDenied` at the LAST step into `false` the same way `.ok()` did
+/// in the loop before round 2. Mode `0o444` (listable — `read_dir` needs
+/// read — but not traversable — resolving a name inside it needs execute)
+/// is the shape that reaches this exact call rather than the loop's own
+/// `read_dir`.
+#[cfg(unix)]
+#[test]
+fn a_rule_whose_final_stat_needs_a_non_traversable_ancestor_reports_present_not_stale() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = exclusion_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Work/private" }),
+    )
+    .expect("excluding Work/private was rejected");
+
+    let work_path = fixture.path().join("Work");
+    let original_mode = std::fs::metadata(&work_path).unwrap().permissions();
+    // r--r--r--: read_dir(Work) still lists "private" (readdir needs only
+    // read), but resolving "Work/private" by name at the final stat needs
+    // execute on Work, which this mode does not grant.
+    std::fs::set_permissions(&work_path, std::fs::Permissions::from_mode(0o444))
+        .expect("chmod r--r--r-- on Work");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }));
+
+    // Restored before any assertion can panic and before TempDir's own Drop
+    // runs — recursive removal needs Work to be traversable again.
+    std::fs::set_permissions(&work_path, original_mode).expect("restoring Work's permissions");
+
+    assert_eq!(
+        list.expect("list_exclusions was rejected"),
+        json!([{ "prefix": "Work/private", "existsOnDisk": true }]),
+        "a rule whose final stat cannot be reached because an ancestor is not traversable must \
+         not be reported stale"
+    );
+}
+
+/// `list_exclusions`'s own `UnknownWatchedRoot` refusal (added beyond the
+/// brief, for the same reason `exclude_subfolder` checks it) needs its own
+/// test — otherwise `.ok_or(Error::UnknownWatchedRoot(root_id))` could
+/// become `unwrap_or_default()` with the whole suite still green (review
+/// round 1, Minor 3).
+#[test]
+fn listing_exclusions_under_an_unknown_root_id_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let rejected = call(&webview, "list_exclusions", json!({ "rootId": 999_999 }))
+        .expect_err("an unknown root id should have been refused");
+    assert_eq!(
+        error_text(&rejected),
+        "no watched folder with id 999999",
+        "the refusal should be UnknownWatchedRoot's own sentence"
+    );
+}
+
+/// `Db::add_path_exclusion`'s own doc says pressing "exclude" twice is one
+/// rule, not an error — the bare `ON CONFLICT DO NOTHING` its query relies
+/// on. This is what proves the command layer does not get in the way of
+/// that: excluding an already-excluded folder a second time must still
+/// succeed, and the list must not grow a second row for it.
+#[test]
+fn excluding_the_same_subfolder_twice_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs the first time was rejected");
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs a second time must not be an error");
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([{ "prefix": "Docs", "existsOnDisk": false }]),
+        "excluding the same folder twice must still be exactly one rule"
+    );
+}
+
+/// `WalkRules::new` is the one validator, and it refuses `..` the same way it
+/// refuses it during a real walk (`RulesError::DotComponent`). The refusal
+/// must both reach the window as readable text and leave nothing stored.
+#[test]
+fn excluding_dotdot_is_refused_and_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let rejected = call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": ".." }),
+    )
+    .expect_err("excluding .. should have been refused");
+    // The whole message, not a substring of it (review round 1, Minor 4): the
+    // input sent WAS "..", so `.contains("..")` is satisfied by any refusal
+    // that merely echoes the input, including a future refusal for an
+    // unrelated reason. `RulesError::DotComponent`'s own sentence
+    // (`rules.rs:68-71`), unchanged across the `Error::InvalidExclusionRule`
+    // seam (`#[error("{0}")]`).
+    assert_eq!(
+        error_text(&rejected),
+        "exclusion rule \"..\" has a `..` path component — name the folder directly, not `.` \
+         or `..`",
+        "the refusal should be RulesError::DotComponent's own sentence, whole"
+    );
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(list, json!([]), "a refused rule must not be stored");
+}
+
+/// `validate_prefix` answers `Ok(None)` for the empty string — deliberately
+/// not a `RulesError` (`rules.rs:546-555`) — so the command itself has to
+/// refuse it before `Db::add_path_exclusion` ever runs (review round 1, P2).
+/// Asserted on the ROW COUNT, not merely that a value came back: a mutant
+/// that stores the blank row anyway would still return `Ok(())` from a
+/// weaker assertion.
+#[test]
+fn excluding_the_empty_string_is_refused_and_does_not_change_the_row_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs was rejected");
+    let before = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected")
+        .as_array()
+        .expect("list_exclusions did not return an array")
+        .len();
+    assert_eq!(before, 1);
+
+    let rejected = call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect_err("excluding the empty string should have been refused");
+    // Fix round 1, Minor. The SENTENCE, not the variant — the Global
+    // Constraint every other refusal on this branch already honours
+    // (`error.rs`'s `impl Serialize` emits `Display` and nothing else, so a
+    // kind never crosses the IPC). Measured before this line existed:
+    // `BlankExclusionRule`'s words occurred nowhere but its own definition, so
+    // swapping the variant for any other left the workspace green while the
+    // person read a different message.
+    assert_eq!(
+        error_text(&rejected),
+        "an exclusion rule cannot be empty",
+        "the refusal should be Error::BlankExclusionRule's own sentence, whole"
+    );
+
+    let after = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected")
+        .as_array()
+        .expect("list_exclusions did not return an array")
+        .len();
+    assert_eq!(
+        after, before,
+        "an Ok(None) prefix must not become a stored row (review round 1, P2)"
+    );
+}
+
+/// A `rootId` `watched_root` has no row for — the same refusal
+/// `start_walk_job` already gives, reused here rather than surfacing the
+/// foreign-key violation `Db::add_path_exclusion` would otherwise hit.
+#[test]
+fn excluding_under_an_unknown_root_id_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let rejected = call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": 999_999, "relativePath": "Docs" }),
+    )
+    .expect_err("an unknown root id should have been refused");
+    assert_eq!(
+        error_text(&rejected),
+        "no watched folder with id 999999",
+        "the refusal should be UnknownWatchedRoot's own sentence"
+    );
+}
+
+/// `Db::remove_path_exclusion` already tells apart "removed" from "there was
+/// nothing there"; the command must not throw that answer away — Task 5's
+/// stale-rule control needs it. Both directions asserted, not only the first.
+#[test]
+fn including_a_subfolder_removes_the_rule_and_reports_whether_a_row_went() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("excluding Docs was rejected");
+
+    let removed = call(
+        &webview,
+        "include_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("include_subfolder was rejected");
+    assert_eq!(
+        removed,
+        json!(true),
+        "a row was there and should have been reported removed"
+    );
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([]),
+        "the list must shrink once the rule is removed"
+    );
+
+    let removed_again = call(
+        &webview,
+        "include_subfolder",
+        json!({ "rootId": root, "relativePath": "Docs" }),
+    )
+    .expect("include_subfolder was rejected");
+    assert_eq!(
+        removed_again,
+        json!(false),
+        "removing an absent rule must report false, not true — Task 5's stale-rule control \
+         needs the two told apart"
+    );
+}
+
 /// A dangling symlink is exactly the shape `PreSkipRule::NotAFile` names —
 /// `crates/mnema-ingest/src/walk.rs`'s own match arm for it says so in
 /// words: "a symlink, a dangling symlink, a FIFO, a socket or a device." It
@@ -2406,6 +3364,450 @@ fn an_unreadable_subdirectory_tells_the_window_reconciliation_did_not_run() {
         ending["complete"],
         json!(false),
         "an unreadable subdirectory must not report as a walk that saw everything: {ending}"
+    );
+}
+
+/// The whole point of the three exclusion commands: a rule the person saved
+/// is applied by the next walk, and "applied" means the file is no longer in
+/// the index — not merely that the walk declined to look at it again.
+/// `WalkRules`'s own doc comment states that contract ("a rule that newly
+/// excludes an already-indexed file removes it on the next walk, which is
+/// what makes 'I excluded that folder' mean 'it is no longer findable'"), and
+/// until this test nothing on this side of the seam checked it: `start_walk_
+/// job` built its rules from `Vec::new()` and read no stored prefix at all.
+///
+/// The first walk is not setup, it is the control: without it, "the index
+/// does not hold `drop/dropped.txt`" is satisfied by a walk that never
+/// indexed anything, which is a different green.
+#[test]
+fn a_walk_applies_a_stored_exclusion_and_removes_what_it_now_covers() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = keep_and_drop_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["drop/dropped.txt".to_string(), "keep/kept.txt".to_string()],
+        "the first walk did not index both files, so nothing below is about exclusion"
+    );
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "drop" }),
+    )
+    .expect("exclude_subfolder was rejected");
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(1),
+        "the walk did not reconcile away the newly excluded file: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["keep/kept.txt".to_string()],
+        "the excluded file is still findable, or the walk took the wrong one with it"
+    );
+}
+
+/// Review round 1, B1. Everything above pins that *a* stored prefix is
+/// applied; nothing pinned that *every* stored prefix is, and the state
+/// where that matters is the ordinary one — a person excludes a folder, and
+/// then excludes another.
+///
+/// The failure it exists to catch runs in the direction this feature makes
+/// expensive. Under a defect that applies only the first rule, the walk
+/// reports `reason: "completed"`, `list_exclusions` still shows both rules
+/// with `existsOnDisk: true`, and every file under the second one stays
+/// indexed and searchable — which under D29 is a file whose text goes to a
+/// third-party provider after the person was shown that it would not.
+/// Measured in review round 1, before this test existed: truncating the
+/// vector to its first entry left the whole package green at 233 passed, 0
+/// failed. It fails here now, at `removed`.
+///
+/// `removed == 2` and the index contents are both asserted, because they are
+/// two different facts: a walk that removed the right number of rows and a
+/// walk that removed the wrong two produce the same count.
+#[test]
+fn a_walk_applies_every_stored_exclusion_not_only_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = two_dropped_and_one_kept_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec![
+            "drop_a/a.txt".to_string(),
+            "drop_b/b.txt".to_string(),
+            "keep/kept.txt".to_string()
+        ],
+        "the first walk did not index all three files, so nothing below is about exclusion"
+    );
+
+    for folder in ["drop_a", "drop_b"] {
+        call(
+            &webview,
+            "exclude_subfolder",
+            json!({ "rootId": root, "relativePath": folder }),
+        )
+        .expect("exclude_subfolder was rejected");
+    }
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([
+            { "prefix": "drop_a", "existsOnDisk": true },
+            { "prefix": "drop_b", "existsOnDisk": true }
+        ]),
+        "both rules must actually be stored, or this test is about one rule again"
+    );
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(2),
+        "the walk applied fewer rules than were stored, or more: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["keep/kept.txt".to_string()],
+        "a file under a stored exclusion is still findable, or the kept one went with them"
+    );
+}
+
+/// The mirror of the test above, and it is not optional. Every assertion
+/// there is one-sided: `removed == 1` and "only `keep/kept.txt` is left" are
+/// both satisfied by a walk that deletes on some other grounds entirely — a
+/// rules layer that failed to compile, a reconciliation that fired on the
+/// wrong list. This is the control that says the deletion came from the rule
+/// and not from walking at all: the same fixture, the same two walks, one
+/// difference — no exclusion is stored — and nothing goes.
+#[test]
+fn a_walk_with_no_exclusion_stored_removes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = keep_and_drop_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    // The precondition, asserted rather than assumed (review round 1, I1).
+    // `run_walk_to_completion` promises only `reason == "completed"`, which a
+    // walk that indexed nothing satisfies — and with nothing in the index,
+    // `removed == 0` below holds trivially and the final contents assertion
+    // is satisfied by the SECOND walk's own indexing. Measured in review
+    // round 1: with the walk above deleted and this assertion not yet
+    // written, every other assertion in this test still passed. A control
+    // that survives the removal of the state it controls for is not one.
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["drop/dropped.txt".to_string(), "keep/kept.txt".to_string()],
+        "the first walk did not index both files, so `removed == 0` below would mean nothing"
+    );
+
+    let list = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        list,
+        json!([]),
+        "this control is only a control if the root really has no rule on it"
+    );
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(0),
+        "a second walk over an unchanged folder with no rule deleted something: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["drop/dropped.txt".to_string(), "keep/kept.txt".to_string()],
+        "a walk with no exclusion stored must leave the index exactly as it found it"
+    );
+}
+
+/// A stored prefix that `WalkRules::new` refuses makes the job REFUSE TO
+/// START, with the sentence, rather than walking with the rule silently
+/// absent.
+///
+/// The state is reachable, and only one way: `Db::add_path_exclusion`
+/// deliberately does not validate — validation lives at
+/// `bridge::exclude_subfolder`, the one place a person is standing there to
+/// fix it — so this writes the bad prefix through the `Db` method and never
+/// through the command. That is also how a real one arrives: a rule stored
+/// by an older build, whose validator was narrower than today's (the
+/// whitelist in `rules.rs` grew across three review rounds, each one turning
+/// prefixes that used to be accepted into prefixes that are not).
+///
+/// Refusing is the conservative direction under D29 and it is asserted in
+/// both halves: the walk must not run, AND the index must still hold
+/// everything it held before — a refusal that also emptied the index would
+/// satisfy "the walk did not run" just as well.
+#[test]
+fn a_stored_exclusion_that_no_longer_validates_refuses_the_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = keep_and_drop_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    let before = indexed_paths(&app, root);
+    assert_eq!(
+        before.len(),
+        2,
+        "the first walk did not index the fixture, so the refusal below proves nothing"
+    );
+
+    let state = app.state::<AppState>();
+    state
+        .with_index(|db| db.add_path_exclusion(root, ".."))
+        .expect("writing an unvalidated prefix straight to the index");
+
+    let (channel, _events) = job_channel();
+    let refusal = walk_job::start_walk_job(state.clone(), root, channel)
+        .expect_err("a walk started even though a stored prefix cannot become a rule");
+    // The whole sentence, not a substring of it (review round 1, M3). All
+    // eight `RulesError` variants open with `exclusion rule {prefix:?}` —
+    // the whole enum, `rules.rs:50-129`, not the `52-80` first written here,
+    // which stopped after four of them and so certified half of what the
+    // word "every" was doing (review round 2, N3). A substring therefore
+    // proves "some `RulesError` about `..`" rather than which one — the same
+    // weakening `excluding_dotdot_is_refused_and_stores_nothing` already
+    // carries a round-1 note about. The sentence crosses the
+    // `Error::InvalidExclusionRule` seam unchanged (`#[error("{0}")]`,
+    // `error.rs:74` — it was cited as `:60` by the same commit that pushed
+    // it down fourteen lines, review round 2, N2), so equality costs nothing
+    // here either.
+    assert_eq!(
+        refusal.to_string(),
+        "exclusion rule \"..\" has a `..` path component — name the folder directly, not `.` \
+         or `..`",
+        "the refusal should be RulesError::DotComponent's own sentence, whole"
+    );
+
+    assert!(
+        !state.job_is_running(),
+        "the refused walk took the job slot on its way out"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        before,
+        "the refused walk changed the index, so something ran before it refused"
+    );
+}
+
+/// Review round 1, M5. The blank prefix is the THIRD outcome at
+/// `walk_job.rs`'s `WalkRules::new` call, and until this test nothing
+/// anywhere pinned it: a stored prefix either becomes a rule or refuses the
+/// job — except the empty string, which does neither. `validate_prefix`
+/// answers `Ok(None)` for it, deliberately not a `RulesError`
+/// (`rules.rs:546-555`), so `WalkRules::new` returns `Ok` with that entry
+/// simply dropped and the walk runs with the rules it does have.
+///
+/// That is the right behaviour and this test does not argue with it: a blank
+/// row names no folder, so no named file is believed excluded and then
+/// indexed anyway, and refusing every future walk over the root on the
+/// strength of a row that excludes nothing would cost the feature for no
+/// protection gained. The row is also unreachable through the commands —
+/// `exclude_subfolder` refuses it with `Error::BlankExclusionRule` — which
+/// is why it is written here through `Db::add_path_exclusion`, the same way
+/// the invalid prefix above is.
+///
+/// What this pins is the choice, so that a later change to `validate_prefix`'s
+/// `Ok(None)` cannot turn this call site into a refusal, or into a rule that
+/// matches something, without one test saying so.
+#[test]
+fn a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = keep_and_drop_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    let before = indexed_paths(&app, root);
+    assert_eq!(
+        before,
+        vec!["drop/dropped.txt".to_string(), "keep/kept.txt".to_string()],
+        "the first walk did not index the fixture, so nothing below is about the blank row"
+    );
+
+    app.state::<AppState>()
+        .with_index(|db| db.add_path_exclusion(root, ""))
+        .expect("writing a blank prefix straight to the index");
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "a blank stored row must not stop the walk — it names no folder to protect: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(0),
+        "a rule that names no folder must not remove anything: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        before,
+        "a blank stored row changed what the index holds"
+    );
+}
+
+/// The boundary this whole feature stands on, and it belongs to somebody
+/// else's code: phase 3 FREEZES a subtree it cannot account for instead of
+/// deleting it (`resolve_ancestor`, `mnema-ingest/src/walk.rs:852-873`), and
+/// a folder the rules excluded is absent from `found` in a way that looks
+/// identical from there. What tells them apart is the disk —
+/// `resolve_ancestor` answers `None` for a directory that still HAS entries,
+/// so an excluded folder still full of files reconciles rather than freezing.
+///
+/// Nothing in this file would notice if that changed. A freezing rule that
+/// also covered a non-empty directory would turn every exclusion into a
+/// silent no-op — `removed: 0`, the rows still searchable, `reason:
+/// "completed"` — and the only visible difference would be a `frozen` entry
+/// nobody asserts on. So this asserts on it: a NESTED excluded folder, two
+/// files under it, all of them still on disk, and `frozen` empty.
+#[test]
+fn an_excluded_subfolder_that_still_holds_its_files_is_reconciled_not_frozen() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("Archive/2023")).expect("creating Archive/2023");
+    std::fs::write(
+        fixture.path().join("Archive/2023/one.txt"),
+        "the first archived note",
+    )
+    .expect("writing Archive/2023/one.txt");
+    std::fs::write(
+        fixture.path().join("Archive/2023/two.txt"),
+        "the second archived note",
+    )
+    .expect("writing Archive/2023/two.txt");
+    std::fs::create_dir(fixture.path().join("keep")).expect("creating keep/");
+    std::fs::write(fixture.path().join("keep/kept.txt"), "the kept note")
+        .expect("writing keep/kept.txt");
+
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec![
+            "Archive/2023/one.txt".to_string(),
+            "Archive/2023/two.txt".to_string(),
+            "keep/kept.txt".to_string()
+        ],
+        "the first walk did not index the fixture, so nothing below is about freezing"
+    );
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Archive" }),
+    )
+    .expect("exclude_subfolder was rejected");
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["frozen"],
+        json!([]),
+        "the excluded folder is still on disk with both its files in it, so nothing about it \
+         is ambiguous — freezing it would make the exclusion a no-op: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(2),
+        "both files under the excluded folder should have been reconciled away: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["keep/kept.txt".to_string()],
+        "the excluded files are still findable, or the walk took the kept one with them"
     );
 }
 
@@ -5659,5 +7061,1463 @@ fn a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragra
         "source_around race: {ROUNDS} calls -> excerpt={excerpts} gone={refusals} \
          (idReused={reused}, noSuchChunk={}); writer rebuilt {rebuilds} times",
         refusals - reused
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `list_subfolders` — the exclusion screen's folder tree, read off the disk.
+// ---------------------------------------------------------------------------
+
+/// The three calls every `list_subfolders` test below opens with, and the
+/// root id they produce. Written once because none of the assertions in this
+/// section are about `open_index` or `add_watched_folder`.
+fn root_for(webview: &WebviewWindow<MockRuntime>, path: &std::path::Path) -> i64 {
+    call(webview, "open_index", json!({})).expect("open_index was rejected");
+    call(
+        webview,
+        "add_watched_folder",
+        json!({ "path": path.display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id")
+}
+
+/// One listing as `(name, relativePath, state kind)` triples, in the order it
+/// came back.
+///
+/// A triple rather than a name: a listing that got every name right and every
+/// state wrong satisfies any assertion about names alone, and the two fields
+/// that a caller acts on are the path it would send back to
+/// `exclude_subfolder` and the state that decides whether it may.
+fn subfolder_rows(listing: &Value) -> Vec<(String, String, String)> {
+    listing["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("list_subfolders answered no entries array: {listing}"))
+        .iter()
+        .map(|e| {
+            (
+                e["name"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("an entry carries no name: {e}"))
+                    .to_string(),
+                e["relativePath"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("an entry carries no relativePath: {e}"))
+                    .to_string(),
+                e["state"]["kind"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("an entry carries no state kind: {e}"))
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Directories come back, files do not, and the order is by name rather than
+/// whatever the filesystem happened to hand out.
+///
+/// **Five folders created in an order that is not their sorted order**, not
+/// the brief's minimum of two: with two entries a listing that never sorts
+/// has an even chance of looking sorted, and the claim here is about an order
+/// the window relies on being the same on every machine (`rules.rs:387` makes
+/// the same choice for the walk). The file is the other direction — a
+/// listing that returned every directory entry would pass the order
+/// assertion and put `c.txt` in a folder tree.
+#[test]
+fn list_subfolders_answers_the_directories_sorted_and_not_the_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for name in ["m", "a", "z", "b", "k"] {
+        std::fs::create_dir(fixture.path().join(name)).expect("creating a fixture folder");
+    }
+    std::fs::write(fixture.path().join("c.txt"), "a file, not a folder").expect("writing c.txt");
+    let root = root_for(&webview, fixture.path());
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![
+            ("a".to_string(), "a".to_string(), "open".to_string()),
+            ("b".to_string(), "b".to_string(), "open".to_string()),
+            ("k".to_string(), "k".to_string(), "open".to_string()),
+            ("m".to_string(), "m".to_string(), "open".to_string()),
+            ("z".to_string(), "z".to_string(), "open".to_string()),
+        ],
+        "the five folders must come back sorted by name, and the file must not come back at \
+         all: {listing}"
+    );
+    assert_eq!(
+        listing["unnameable"],
+        json!(0),
+        "every name in this fixture is valid UTF-8, so nothing was omitted: {listing}"
+    );
+}
+
+/// A stored rule naming a folder marks that folder, and only that folder.
+///
+/// Both directions in one assertion: a listing that marked everything
+/// `excluded` would satisfy the half about `a`.
+///
+/// **`ab` is the third folder and it is not decoration.** Its name *starts
+/// with* the stored rule `a` without being under it, which is what makes this
+/// a test of path components rather than of string prefixes. Without it,
+/// dropping the `/` boundary check in `is_ancestor_of` leaves every assertion
+/// in this file green — measured: that mutant is a case in
+/// scripts/mutations/pr8-subfolders.sh and it is this fixture that kills it.
+#[test]
+fn an_excluded_subfolder_is_marked_and_its_sibling_stays_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("a")).expect("creating a/");
+    std::fs::create_dir(fixture.path().join("ab")).expect("creating ab/");
+    std::fs::create_dir(fixture.path().join("b")).expect("creating b/");
+    let root = root_for(&webview, fixture.path());
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "a" }),
+    )
+    .expect("excluding a was rejected");
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![
+            ("a".to_string(), "a".to_string(), "excluded".to_string()),
+            ("ab".to_string(), "ab".to_string(), "open".to_string()),
+            ("b".to_string(), "b".to_string(), "open".to_string()),
+        ],
+        "the rule names a and nothing else — ab merely starts with it: {listing}"
+    );
+}
+
+/// Fix round 1, I4. The **second** conjunct of `is_ancestor_of` — the
+/// `path.starts_with(prefix)` that says the two paths agree byte for byte up
+/// to the separator — had no test and no mutation case: measured, deleting it
+/// left `cargo test --workspace` at exit 0.
+///
+/// What it costs is the D29 direction, not a cosmetic one. Without it,
+/// `is_ancestor_of("Home", "Work/2024")` is `true` — the lengths work out and
+/// byte 4 of `Work/2024` happens to be `/` — so the row for `2024` comes back
+/// `{"kind":"excludedByAncestor","prefix":"Home"}`: a row that says
+/// "protected by your rule on Home" about a folder the walk indexes and whose
+/// text goes to the provider. It also offers no control, so the person cannot
+/// protect it from this screen either.
+///
+/// **The fixture is the whole test.** `Home` and `Work` are the same length
+/// on purpose — that is what makes the surviving first conjunct answer `true`
+/// — and the rule is stored on the folder that is NOT the one being listed.
+/// `an_excluded_subfolder_is_marked_and_its_sibling_stays_open` cannot reach
+/// this: its rule and its rows share a first component, so the two conjuncts
+/// agree there whatever either one says.
+#[test]
+fn a_rule_on_a_different_folder_of_the_same_length_holds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("Work/2024")).expect("creating Work/2024");
+    std::fs::create_dir(fixture.path().join("Home")).expect("creating Home");
+    let root = root_for(&webview, fixture.path());
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "Home" }),
+    )
+    .expect("excluding Home was rejected");
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "Work" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![(
+            "2024".to_string(),
+            "Work/2024".to_string(),
+            "open".to_string(),
+        )],
+        "a rule on Home holds nothing under Work — the two paths share no component: {listing}"
+    );
+    // The positive half of the same fact, stated rather than implied by the
+    // absence of a tag: the row is one the person can act on, which is the
+    // thing the false `excludedByAncestor` took away.
+    assert_eq!(
+        listing["entries"][0]["state"],
+        json!({ "kind": "open" }),
+        "a state carrying a prefix would mean some rule was found to hold this row: {listing}"
+    );
+}
+
+/// A folder no rule names, under a folder a rule does, says **which** rule
+/// holds it — the value, not merely the variant.
+///
+/// The brief's minimum state, kept as its own test: one rule, one level down.
+/// The plural case (several rules holding one folder) is the test below.
+#[test]
+fn a_subfolder_under_an_excluded_ancestor_names_the_rule_that_holds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("a/deep")).expect("creating a/deep");
+    std::fs::create_dir(fixture.path().join("b")).expect("creating b/");
+    let root = root_for(&webview, fixture.path());
+
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "a" }),
+    )
+    .expect("excluding a was rejected");
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![(
+            "deep".to_string(),
+            "a/deep".to_string(),
+            "excludedByAncestor".to_string()
+        )],
+        "a/deep is held by an ancestor's rule, not by one of its own: {listing}"
+    );
+    assert_eq!(
+        listing["entries"][0]["state"]["prefix"],
+        json!("a"),
+        "the row has to name the rule that holds it, or a person cannot find the rule to \
+         remove: {listing}"
+    );
+}
+
+/// Several stored rules can hold one folder at once, and the row names the
+/// **outermost** of them — the one whose removal has to come first.
+///
+/// Two fixture states the single-rule test above cannot reach:
+///
+/// - `a/deep` has a rule of its own (`a/deep`) **and** an excluded ancestor
+///   (`a`). It reports `excludedByAncestor`, not `excluded`: removing its own
+///   rule would leave the ancestor's, so a row offering that control would
+///   offer one that changes nothing a person can see — the class this whole
+///   PR refuses (`BuiltIn` exists for the same reason).
+/// - `a/deep/deeper` has two ancestors holding it. `Db::list_path_exclusions`
+///   sorts, and the ancestors of one path form a chain in which each is a
+///   string prefix of the next, so the first match in that sorted list is the
+///   outermost one. The assertion is on the value `"a"`, which is what makes
+///   this a test of that choice rather than of the variant.
+#[test]
+fn the_outermost_rule_is_the_one_a_held_subfolder_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("a/deep/deeper")).expect("creating a/deep/deeper");
+    let root = root_for(&webview, fixture.path());
+
+    for prefix in ["a", "a/deep"] {
+        call(
+            &webview,
+            "exclude_subfolder",
+            json!({ "rootId": root, "relativePath": prefix }),
+        )
+        .unwrap_or_else(|e| panic!("excluding {prefix} was rejected: {e}"));
+    }
+
+    let held = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a" }),
+    )
+    .expect("list_subfolders was rejected");
+    assert_eq!(
+        subfolder_rows(&held),
+        vec![(
+            "deep".to_string(),
+            "a/deep".to_string(),
+            "excludedByAncestor".to_string()
+        )],
+        "a/deep has a rule of its own AND an excluded ancestor; the ancestor is what a person \
+         has to remove first: {held}"
+    );
+    assert_eq!(
+        held["entries"][0]["state"]["prefix"],
+        json!("a"),
+        "the row must name the ancestor's rule, not its own: {held}"
+    );
+
+    let deeper = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a/deep" }),
+    )
+    .expect("list_subfolders was rejected");
+    assert_eq!(
+        subfolder_rows(&deeper),
+        vec![(
+            "deeper".to_string(),
+            "a/deep/deeper".to_string(),
+            "excludedByAncestor".to_string()
+        )],
+        "two rules hold a/deep/deeper: {deeper}"
+    );
+    assert_eq!(
+        deeper["entries"][0]["state"]["prefix"],
+        json!("a"),
+        "with two ancestors holding it, the row names the outermost: {deeper}"
+    );
+
+    // 🔴 Fix round 1, I5's second half. This test is the only fixture anywhere
+    // that stores a NESTED PAIR, and until this line it never asked
+    // `list_exclusions` what it does with one — measured, zero occurrences of
+    // the command in this body. So nothing said the pair comes back as TWO
+    // rows: a `list_exclusions` that dropped any prefix an ancestor already
+    // covers would leave the whole suite green, and the panel would show one
+    // rule where the person stored two. Under D29 that reads as protection
+    // they still have and can take away in one press.
+    //
+    // It also makes this test the measured backing for a claim the folder
+    // screen rests on: the two assertions above show the TREE naming only `a`
+    // for a folder two rules hold, so a person reading the tree alone never
+    // learns that `a/deep` has a rule of its own — and the assertion below is
+    // what says `list_exclusions` is where they do. `Folders.test.ts`'s "the
+    // pair reads as one screen" renders both halves together.
+    //
+    // The whole array: both prefixes, both flags, in the sorted order
+    // `Db::list_path_exclusions` promises (`write.rs:580`).
+    let rules = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        rules,
+        json!([
+            { "prefix": "a", "existsOnDisk": true },
+            { "prefix": "a/deep", "existsOnDisk": true }
+        ]),
+        "an ancestor and its descendant are two rules, and both are the person's to see: {rules}"
+    );
+}
+
+/// The same pair stored the other way round — **descendant first** — which no
+/// fixture built at all before fix round 1.
+///
+/// **What it pins that the test above cannot.** Storing an ancestor over a
+/// rule that is already there has to keep both: `add_path_exclusion` is
+/// `INSERT … ON CONFLICT DO NOTHING` (`write.rs:604-612`) and neither command
+/// has an ancestor guard, so the second rule is simply a second row. Measured
+/// as a mutant — `exclude_subfolder` refusing a prefix that is an ancestor of
+/// a stored rule — this test is the **only** one in the file that fails;
+/// `the_outermost_rule_is_the_one_a_held_subfolder_names` never stores an
+/// ancestor over a descendant and stays green. That matters beyond bookkeeping:
+/// an ancestor guard is the wrong fix for the sentence that used to promise
+/// removing a rule un-excludes its folder, and this is the test that says so.
+///
+/// 🔴 **What it does NOT pin, measured rather than assumed.** The first draft
+/// of this comment claimed the test held `list_path_exclusions`'
+/// `ORDER BY path_prefix` (`write.rs:580`) — the clause
+/// `SubfolderState::ExcludedByAncestor`'s own doc leans on for "the first
+/// match in that sorted list is the shallowest one". It does not: deleting that
+/// `ORDER BY` leaves the whole workspace at exit 0. `EXPLAIN QUERY PLAN` says
+/// why — `SEARCH ignore_rule USING COVERING INDEX ux_ignore_rule_path
+/// (watched_root_id=? AND path_prefix>?)` — so the rows arrive ordered by
+/// `path_prefix` because the unique index `migrations.rs:90-92` adds is what
+/// the planner walks.
+///
+/// 🔴 **The equivalence is conditional, and the condition is that index.** An
+/// earlier draft of this paragraph added "and neither can anything else", which
+/// is false and quietly discharged the next person from writing the test. The
+/// clause CAN be held — by dropping `ux_ignore_rule_path` first, which
+/// `mnema-index`'s `exclusions_come_back_sorted_with_no_index_left_to_walk`
+/// (`crates/mnema-index/tests/tree.rs`) now does. Measured under the same
+/// mutant, on the engine the product links (`rusqlite` `bundled` → 3.53.2, not
+/// a system CLI), with the two rules inserted descendant-first:
+///
+/// ```text
+/// NO INDEX, no ORDER BY = ["a/deep", "a"]     <- insertion order; shallowest-first gone
+/// NO INDEX, ORDER BY    = ["a", "a/deep"]
+/// ```
+///
+/// So the clause is a belt to that index's braces, and the mutant is equivalent
+/// **while** `(watched_root_id, path_prefix)` is covered — not in principle.
+/// Anything that narrows or drops that index (a migration making it partial on
+/// another predicate, or removing it) makes the `ORDER BY` load-bearing again,
+/// and `SubfolderState::ExcludedByAncestor`'s "outermost" — which
+/// `Folders.svelte`'s `heldAbove` now reads too — goes with it. Written down
+/// because a test claiming to hold a guard it cannot is worse than no claim at
+/// all, and a comment telling a reader the guard cannot exist is worse than
+/// both.
+#[test]
+fn a_rule_stored_under_one_that_arrives_later_is_kept_and_still_names_the_outermost() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("a/deep/deeper")).expect("creating a/deep/deeper");
+    let root = root_for(&webview, fixture.path());
+
+    // Descendant first, ancestor second — the reverse of the test above.
+    for prefix in ["a/deep", "a"] {
+        call(
+            &webview,
+            "exclude_subfolder",
+            json!({ "rootId": root, "relativePath": prefix }),
+        )
+        .unwrap_or_else(|e| panic!("excluding {prefix} was rejected: {e}"));
+    }
+
+    let rules = call(&webview, "list_exclusions", json!({ "rootId": root }))
+        .expect("list_exclusions was rejected");
+    assert_eq!(
+        rules,
+        json!([
+            { "prefix": "a", "existsOnDisk": true },
+            { "prefix": "a/deep", "existsOnDisk": true }
+        ]),
+        "an ancestor stored after its descendant must not swallow it, and the answer comes \
+         back sorted rather than in the order the rules arrived — which mechanism holds that \
+         is in this test's own doc: {rules}"
+    );
+
+    let deeper = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a/deep" }),
+    )
+    .expect("list_subfolders was rejected");
+    assert_eq!(
+        deeper["entries"][0]["state"],
+        json!({ "kind": "excludedByAncestor", "prefix": "a" }),
+        "the outermost rule is the one to remove first, whichever rule was stored first: \
+         {deeper}"
+    );
+}
+
+/// The built-in list is visible as its own state, and a dot-directory the
+/// list does not name is not.
+///
+/// Both directions, because a rule that marked every dotfile would satisfy
+/// the `.git` half alone — and `node_modules` is the other half of that: a
+/// built-in name that is not a dot-directory at all. Four entries, so
+/// neither classifier ("starts with a dot" or "is on the list") can pass by
+/// coincidence.
+#[test]
+fn a_built_in_directory_is_marked_and_an_ordinary_dot_directory_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for name in [".git", ".config", "node_modules", "notes"] {
+        std::fs::create_dir(fixture.path().join(name)).expect("creating a fixture folder");
+    }
+    let root = root_for(&webview, fixture.path());
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![
+            (
+                ".config".to_string(),
+                ".config".to_string(),
+                "open".to_string()
+            ),
+            (
+                ".git".to_string(),
+                ".git".to_string(),
+                "builtIn".to_string()
+            ),
+            (
+                "node_modules".to_string(),
+                "node_modules".to_string(),
+                "builtIn".to_string()
+            ),
+            ("notes".to_string(), "notes".to_string(), "open".to_string()),
+        ],
+        "the two names WalkRules::BUILTIN_DIRS holds are builtIn and the other two are not: \
+         {listing}"
+    );
+}
+
+/// A `relative_path` naming a folder that is not there is **refused with a
+/// sentence**. An empty list would be a claim that the folder holds no
+/// subfolders, which is a different thing and the dangerous one: it is the
+/// answer a window would draw as "nothing here to exclude".
+#[test]
+fn listing_a_folder_that_is_not_there_is_refused_rather_than_answered_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("a")).expect("creating a/");
+    let root = root_for(&webview, fixture.path());
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "nope" }),
+    )
+    .expect_err("a folder that is not there must be refused, not answered with an empty list");
+    assert_eq!(
+        rejected,
+        json!(format!(
+            "there is no folder \"nope\" in watched folder {root}"
+        )),
+        "the refusal has to be a sentence a person can read"
+    );
+}
+
+/// `..` resolves out of the watched folder, and the listing refuses it.
+///
+/// The parent of a temporary directory exists, so this is not the
+/// "no such folder" case in disguise: the path resolves perfectly well, and
+/// to somewhere this command has no business reading.
+#[test]
+fn listing_a_path_that_climbs_out_of_the_root_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("a")).expect("creating a/");
+    let root = root_for(&webview, fixture.path());
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": ".." }),
+    )
+    .expect_err("a path climbing out of the root must be refused");
+    assert_eq!(
+        rejected,
+        json!(format!(
+            "\"..\" does not name a folder inside watched folder {root}: it resolves somewhere \
+             else"
+        )),
+        "the refusal has to be a sentence a person can read"
+    );
+}
+
+/// An absolute `relative_path` is refused.
+///
+/// **This is the case only the containment half of the check catches.**
+/// `Path::join` given an absolute path throws the root away and answers the
+/// absolute path itself, so the "resolves where its spelling says" half is
+/// satisfied — the spelling says `/…` and it resolves to `/…`. The other
+/// directory is canonicalised first so that nothing here depends on the
+/// platform's own symlinks (`/var` is a symlink to `/private/var` on macOS,
+/// which would make this test pass through the wrong half of the check).
+#[test]
+fn listing_an_absolute_path_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("a")).expect("creating a/");
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outside.path().join("secrets")).expect("creating secrets/");
+    let outside_canonical = outside
+        .path()
+        .canonicalize()
+        .expect("canonicalising the outside directory");
+    let root = root_for(&webview, fixture.path());
+
+    let asked = outside_canonical.join("secrets").display().to_string();
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": asked.clone() }),
+    )
+    .expect_err("an absolute path must be refused");
+    assert_eq!(
+        rejected,
+        json!(format!(
+            "{asked:?} does not name a folder inside watched folder {root}: it resolves \
+             somewhere else"
+        )),
+        "the refusal has to be a sentence a person can read"
+    );
+}
+
+/// A `relative_path` that reaches its target through a **real symlink** is
+/// refused, whether the target is outside the watched folder or inside it.
+///
+/// Both, because they fail for different reasons and a check that caught only
+/// the first would look right: the outside one escapes the root, and the
+/// inside one does not escape anything — it is refused because the walk runs
+/// `follow_links(false)` (`rules.rs:388`), so nothing under that name is ever
+/// enumerated and every exclusion rule this listing would offer under it
+/// excludes nothing.
+///
+/// The link is built, not asserted about: a containment check written against
+/// the string alone passes every lexical test and still follows this one.
+#[cfg(unix)]
+#[test]
+fn listing_through_a_symlink_is_refused_in_or_out_of_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("real/inner")).expect("creating real/inner");
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outside.path().join("secrets")).expect("creating secrets/");
+    std::os::unix::fs::symlink(outside.path(), fixture.path().join("out"))
+        .expect("linking out of the root");
+    std::os::unix::fs::symlink(fixture.path().join("real"), fixture.path().join("in"))
+        .expect("linking inside the root");
+    let root = root_for(&webview, fixture.path());
+
+    for asked in ["out/secrets", "in", "in/inner"] {
+        let rejected = match call(
+            &webview,
+            "list_subfolders",
+            json!({ "rootId": root, "relativePath": asked }),
+        ) {
+            Ok(answered) => {
+                panic!(
+                    "{asked} reached through a symlink must be refused, not answered with \
+                        {answered}"
+                )
+            }
+            Err(rejected) => rejected,
+        };
+        assert_eq!(
+            rejected,
+            json!(format!(
+                "{asked:?} does not name a folder inside watched folder {root}: it resolves \
+                 somewhere else"
+            )),
+            "{asked} was refused with the wrong sentence"
+        );
+    }
+}
+
+/// A directory whose name is not valid UTF-8 is **omitted and counted**,
+/// never rendered lossily: `to_string_lossy` would put a name on screen that
+/// no longer opens the folder, and a rule saved from it would exclude
+/// nothing.
+///
+/// **Two of them, not one.** `unnameable` is a count, and a field that
+/// answered `1` unconditionally — or `true` widened into a number — passes
+/// every assertion a single unnameable entry can make.
+///
+/// ⚠️ **`target_os = "linux"`, not `unix`, and the gate is a fact about the
+/// filesystem rather than about the code.** APFS refuses to create a name that
+/// is not valid UTF-8 at all — measured on macOS 26.6.2 while writing this very
+/// test: `create_dir` fails with `EILSEQ`, "Illegal byte sequence", so the
+/// fixture cannot be built and the property cannot be observed through a real
+/// directory there. It is observed instead by this test's unit-level twin in
+/// `tree.rs`, which reaches `read_subfolders` through the `Entry` seam and runs
+/// on every unix; its name is
+/// a_directory_whose_name_is_not_utf8_is_counted_and_never_named, on one line so
+/// that a grep for it finds this reference. That twin, not this test, is what
+/// the mutation cases name, so this gate cannot take a case file's baseline down
+/// with it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_directory_whose_name_is_not_utf8_is_counted_and_never_named_lossily() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for bytes in [b"bad\xffone".as_slice(), b"bad\xfetwo".as_slice()] {
+        std::fs::create_dir(fixture.path().join(std::ffi::OsStr::from_bytes(bytes)))
+            .expect("creating a folder whose name is not UTF-8");
+    }
+    for name in ["alpha", "beta"] {
+        std::fs::create_dir(fixture.path().join(name)).expect("creating a nameable folder");
+    }
+    let root = root_for(&webview, fixture.path());
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    let names: Vec<String> = subfolder_rows(&listing)
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "only the two nameable folders may be listed: {listing}"
+    );
+    assert!(
+        !names.iter().any(|name| name.contains('\u{FFFD}')),
+        "a name was rendered lossily instead of being omitted: {listing}"
+    );
+    assert_eq!(
+        listing["unnameable"],
+        json!(2),
+        "both unnameable folders have to be counted, or the folder looks emptier than it is: \
+         {listing}"
+    );
+}
+
+/// A symlink to a directory inside the root is answered as its own state, so
+/// no window can draw it as an ordinary folder with a working exclusion
+/// toggle: the walk runs `follow_links(false)` (`rules.rs:388`), so nothing
+/// under it is ever indexed and a rule naming it excludes nothing.
+///
+/// Three directions, and the fixture holds more objects than the listing
+/// returns, which is the point of it:
+///
+/// - the symlinked directory is `symlink`, not `open`;
+/// - an ordinary directory beside it is still `open`, so the state is not
+///   simply painted over everything;
+/// - a **dangling** link and a link to a **file** are not folders at all and
+///   are not listed — the two shapes that reach the same follow as the first
+///   one and must not come back as entries.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_directory_is_its_own_state_and_a_link_to_no_directory_is_not_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("real")).expect("creating real/");
+    std::fs::create_dir(fixture.path().join("plain")).expect("creating plain/");
+    std::fs::write(fixture.path().join("file.txt"), "a file").expect("writing file.txt");
+    std::os::unix::fs::symlink(fixture.path().join("real"), fixture.path().join("link"))
+        .expect("linking to a directory");
+    std::os::unix::fs::symlink(fixture.path().join("gone"), fixture.path().join("dangling"))
+        .expect("linking to nothing");
+    std::os::unix::fs::symlink(
+        fixture.path().join("file.txt"),
+        fixture.path().join("filelink"),
+    )
+    .expect("linking to a file");
+    let root = root_for(&webview, fixture.path());
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![
+            (
+                "link".to_string(),
+                "link".to_string(),
+                "symlink".to_string()
+            ),
+            ("plain".to_string(), "plain".to_string(), "open".to_string()),
+            ("real".to_string(), "real".to_string(), "open".to_string()),
+        ],
+        "the link to a directory is its own state, the ordinary folders stay open, and the \
+         dangling link and the link to a file are not folders: {listing}"
+    );
+}
+
+/// A `root_id` no `watched_root` row carries is refused before anything
+/// touches the filesystem — the same guard `list_exclusions` and
+/// `exclude_subfolder` already carry.
+#[test]
+fn listing_subfolders_under_an_unknown_root_id_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": 999_999, "relativePath": "" }),
+    )
+    .expect_err("an unknown root id must be refused");
+    assert_eq!(rejected, json!("no watched folder with id 999999"));
+}
+
+/// A watched folder that is not there refuses the whole call, rather than
+/// answering "this folder has no subfolders" — which is what a window would
+/// draw as a tree with nothing in it to exclude, for a folder whose contents
+/// are still being indexed the moment the drive comes back.
+#[test]
+fn listing_subfolders_of_an_unreachable_root_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("a")).expect("creating a/");
+    let root = root_for(&webview, fixture.path());
+    let moved = fixture.path().with_extension("moved");
+    std::fs::rename(fixture.path(), &moved).expect("moving the watched folder away");
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    );
+    // Put back before any assertion can panic, so the TempDir's own Drop still
+    // has something to remove.
+    std::fs::rename(&moved, fixture.path()).expect("moving the watched folder back");
+
+    assert_eq!(
+        rejected.expect_err("an unreachable root must be refused"),
+        json!(format!(
+            "the folder for watched root {root} is not available right now, so its exclusion \
+             rules cannot be checked"
+        )),
+    );
+}
+
+/// A `relative_path` whose spelling differs from the folder's only by case is
+/// refused, even where the filesystem itself would open it.
+///
+/// **`target_os = "macos"`, because the property does not exist on a
+/// case-sensitive filesystem.** There `PRIVATE` simply is not there and the
+/// refusal is the ordinary "no such folder" one, which proves nothing about
+/// this check. Here the folder *is* found — APFS's own lookup is
+/// case-insensitive — and `std::fs::canonicalize` corrects the spelling back to
+/// `Private` (measured on macOS 26.6.2), so the containment check's first half
+/// sees a resolved path that is not the one it was asked for and refuses.
+///
+/// It has to refuse. `ignore`'s override matcher, which is what the walk
+/// applies, is case-sensitive, so every `relativePath` this command would build
+/// under a wrong-case ancestor names a rule that excludes nothing — the same
+/// dead-rule class `list_exclusions` reports as `existsOnDisk: false`, one
+/// command over.
+///
+/// Named by no mutation case, deliberately: a `#[cfg(target_os = "macos")]`
+/// test in a case file makes the harness's baseline read `0 passed` on Linux
+/// and takes that whole file's cases down with it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_wrong_case_relative_path_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("Private/inner")).expect("creating Private/inner");
+    let root = root_for(&webview, fixture.path());
+
+    // The precondition, asserted rather than assumed: with the right spelling
+    // the same call answers, so what the next one refuses is the spelling and
+    // not the folder.
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "Private" }),
+    )
+    .expect("list_subfolders was rejected for the folder's real name");
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![(
+            "inner".to_string(),
+            "Private/inner".to_string(),
+            "open".to_string()
+        )],
+        "the correctly spelled path must answer, or this test is about nothing: {listing}"
+    );
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "PRIVATE" }),
+    )
+    .expect_err("a path whose case does not match the folder's must be refused");
+    assert_eq!(
+        rejected,
+        json!(format!(
+            "\"PRIVATE\" does not name a folder inside watched folder {root}: it resolves \
+             somewhere else"
+        )),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 — one invariant, a test per instance.
+//
+// The invariant: a row this listing shows must not offer an exclusion control
+// that cannot succeed or that changes nothing. The enumeration it is checked
+// against is re-derived in `SubfolderState`'s own doc comment, from
+// `crates/mnema-walk/src/rules.rs`; the row of it that is DELIBERATELY not
+// closable — the in-tree `.gitignore` stack — has no test here and must not
+// grow one, because closing it means compiling the walk's ignore stack per
+// directory and this listing does not.
+// ---------------------------------------------------------------------------
+
+/// Row 1 of the enumeration, the **ancestry** half: `BUILTIN_DIRS` turns into
+/// `!**/{dir}` overrides (`rules.rs:446-447`), which prune the whole subtree —
+/// so everything under `.git` is pruned too, and offering it as an ordinary
+/// excludable folder is a control that does nothing.
+///
+/// This was the blocking defect of fix round 1, measured through this very
+/// call: `list_subfolders(root, ".git")` answered `hooks` as `open`, and
+/// `exclude_subfolder(".git/hooks")` then **succeeded**, writing a rule the
+/// walk ignores.
+///
+/// Three directions, so neither "the name is on the list" nor "anything nested
+/// is pruned" passes by coincidence: two different built-in ancestors (one a
+/// dot-directory, one not), and an ordinary folder at the same depth under a
+/// name that is on neither list.
+#[test]
+fn everything_under_a_built_in_directory_is_built_in_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for path in [".git/hooks", "node_modules/pkg", "notes/2019"] {
+        std::fs::create_dir_all(fixture.path().join(path)).expect("creating a fixture folder");
+    }
+    let root = root_for(&webview, fixture.path());
+
+    for (parent, child, expected) in [
+        (".git", "hooks", "builtIn"),
+        ("node_modules", "pkg", "builtIn"),
+        ("notes", "2019", "open"),
+    ] {
+        let listing = call(
+            &webview,
+            "list_subfolders",
+            json!({ "rootId": root, "relativePath": parent }),
+        )
+        .unwrap_or_else(|e| panic!("listing {parent} was rejected: {e}"));
+        assert_eq!(
+            subfolder_rows(&listing),
+            vec![(
+                child.to_string(),
+                format!("{parent}/{child}"),
+                expected.to_string()
+            )],
+            "the state of {parent}/{child} is wrong: {listing}"
+        );
+    }
+}
+
+/// Row 2 of the enumeration: `ANCHORED_DIRS` prunes `target`, `build` and
+/// `dist` — but **only** when one of that name's marker files sits in its own
+/// parent (`rules.rs:411-438`), because `build` is also an ordinary English
+/// word and `Projects/House/build/permits.pdf` is a document.
+///
+/// Both directions of that condition, which is the whole of this layer: the
+/// same folder name, once beside its marker and once not, in one fixture. A
+/// listing that reported every `target` as `builtIn` would hide a folder that
+/// really is indexed and really can be excluded, which is the mirror defect
+/// and just as bad — the row would say "protected" of a folder whose contents
+/// go to the provider.
+#[test]
+fn an_anchored_build_directory_is_built_in_only_beside_its_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    // A real crate: `target` beside `Cargo.toml`.
+    std::fs::create_dir_all(fixture.path().join("crate/target/debug"))
+        .expect("creating crate/target/debug");
+    std::fs::write(fixture.path().join("crate/Cargo.toml"), "[package]")
+        .expect("writing crate/Cargo.toml");
+    // The same name with nothing beside it to anchor against.
+    std::fs::create_dir_all(fixture.path().join("house/target")).expect("creating house/target");
+    let root = root_for(&webview, fixture.path());
+
+    let anchored = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "crate" }),
+    )
+    .expect("listing crate was rejected");
+    assert_eq!(
+        subfolder_rows(&anchored),
+        vec![(
+            "target".to_string(),
+            "crate/target".to_string(),
+            "builtIn".to_string()
+        )],
+        "target beside Cargo.toml is pruned by the anchored layer: {anchored}"
+    );
+
+    let unanchored = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "house" }),
+    )
+    .expect("listing house was rejected");
+    assert_eq!(
+        subfolder_rows(&unanchored),
+        vec![(
+            "target".to_string(),
+            "house/target".to_string(),
+            "open".to_string()
+        )],
+        "target with no marker beside it is an ordinary folder: {unanchored}"
+    );
+
+    // The ancestry half of the same layer: `filter_entry` prunes the entry,
+    // which prunes its subtree, so `crate/target/debug` is pruned too.
+    let inside = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "crate/target" }),
+    )
+    .expect("listing crate/target was rejected");
+    assert_eq!(
+        subfolder_rows(&inside),
+        vec![(
+            "debug".to_string(),
+            "crate/target/debug".to_string(),
+            "builtIn".to_string()
+        )],
+        "everything under an anchored build directory is pruned with it: {inside}"
+    );
+}
+
+/// Row 4 of the enumeration: a folder that **is** walked and whose path no
+/// exclusion rule can name, because `WalkRules::check_prefix` refuses it.
+///
+/// Six refused shapes and two accepted ones, in one fixture, because the
+/// question is a whole grammar rather than a list of characters:
+///
+/// - leading and trailing whitespace, a backslash, a control character — the
+///   per-component rules, which apply at every depth;
+/// - `~` and `C:` at the TOP level — the two rules `validate_component`
+///   applies to the first component only;
+/// - `plain` — an ordinary folder, so the state is not painted over
+///   everything;
+/// - **`weird/~`** — the same `~` one level down, where it is a perfectly good
+///   rule. Without it, "refuse any component named `~`" passes every other
+///   assertion here, and a folder that could be excluded would be shown as one
+///   that cannot.
+#[cfg(unix)]
+#[test]
+fn a_folder_whose_path_no_rule_can_name_says_so_instead_of_offering_a_control() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for name in [
+        " lead",
+        "trail ",
+        "back\\slash",
+        "bell\u{0007}ing",
+        "~",
+        "C:",
+        "plain",
+    ] {
+        std::fs::create_dir(fixture.path().join(name))
+            .unwrap_or_else(|e| panic!("creating {name:?}: {e}"));
+    }
+    std::fs::create_dir_all(fixture.path().join("weird/~")).expect("creating weird/~");
+    let root = root_for(&webview, fixture.path());
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+    let states: Vec<(String, String)> = subfolder_rows(&listing)
+        .into_iter()
+        .map(|(name, _, state)| (name, state))
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            (" lead".to_string(), "unusableName".to_string()),
+            ("C:".to_string(), "unusableName".to_string()),
+            ("back\\slash".to_string(), "unusableName".to_string()),
+            ("bell\u{0007}ing".to_string(), "unusableName".to_string()),
+            ("plain".to_string(), "open".to_string()),
+            ("trail ".to_string(), "unusableName".to_string()),
+            ("weird".to_string(), "open".to_string()),
+            ("~".to_string(), "unusableName".to_string()),
+        ],
+        "every name the validator refuses must say so, and no other name may: {listing}"
+    );
+
+    // The first-component rule, from the other side.
+    let nested = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "weird" }),
+    )
+    .expect("listing weird was rejected");
+    assert_eq!(
+        subfolder_rows(&nested),
+        vec![("~".to_string(), "weird/~".to_string(), "open".to_string())],
+        "`~` is refused as the FIRST component only, so weird/~ is an ordinary excludable \
+         folder: {nested}"
+    );
+
+    // The claim the state makes about the other command, asserted rather than
+    // assumed: what the listing calls unusable, `exclude_subfolder` refuses,
+    // and what it calls open, `exclude_subfolder` accepts.
+    let refused = call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "trail " }),
+    )
+    .expect_err("excluding a name the validator refuses must fail");
+    assert_eq!(
+        refused,
+        json!(
+            "exclusion rule \"trail \" has a path component that begins or ends with whitespace \
+             — remove it"
+        ),
+    );
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "weird/~" }),
+    )
+    .expect("excluding weird/~ must succeed, or `open` was the wrong state for it");
+}
+
+/// A `relative_path` that stays inside the root and still cannot be a rule is
+/// refused with the validator's own sentence — the same one
+/// `exclude_subfolder` would give.
+///
+/// `.` and `//` reach this and nothing else does: `Path`'s `PartialEq`
+/// compares `Components`, which normalises both away, so containment answers
+/// "it resolves exactly where its spelling says" for `a/.` and `a//b`. Every
+/// `relativePath` such a call would emit — `a/./x` — inherits the refusal, so
+/// the whole listing is refused rather than a page of rows nothing can act on.
+#[test]
+fn a_relative_path_that_cannot_be_a_rule_is_refused_with_the_validators_sentence() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join("a/b")).expect("creating a/b");
+    let root = root_for(&webview, fixture.path());
+
+    let dotted = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a/." }),
+    )
+    .expect_err("a path with a `.` component must be refused");
+    assert_eq!(
+        dotted,
+        json!(
+            "exclusion rule \"a/.\" has a `.` path component — name the folder directly, not `.` \
+             or `..`"
+        ),
+    );
+
+    let doubled = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a//b" }),
+    )
+    .expect_err("a path with a doubled separator must be refused");
+    assert_eq!(
+        doubled,
+        json!(
+            "exclusion rule \"a//b\" has an empty path component — remove the leading, trailing, \
+             or doubled `/`"
+        ),
+    );
+
+    // The control: the same folder, spelled as a rule can name it, answers.
+    let plain = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "a" }),
+    )
+    .expect("listing a was rejected");
+    assert_eq!(
+        subfolder_rows(&plain),
+        vec![("b".to_string(), "a/b".to_string(), "open".to_string())],
+    );
+}
+
+/// A folder that is there and cannot be read refuses with the **observer's**
+/// sentence, never the path's.
+///
+/// This is `refusal()`'s classifier branch — the one guard the global
+/// constraints single out, and the class four consecutive fix rounds on task 2
+/// failed to close. Fix round 1 found it held up by a correct line of code and
+/// nothing else: forcing the classifier to answer `true` for every error left
+/// every test in the package green.
+///
+/// **Both directions, and each from its own condition** (fix round 2, N5: the
+/// closing `assert_ne!` this test used to end with could not fail, because the
+/// `assert_eq!` above it had already fixed the value — a locator dressed as an
+/// assertion). The same command is asked twice in one fixture: once about a
+/// folder that is there and cannot be read, once about a folder that is not
+/// there, and each must produce its own sentence. A classifier collapsed to
+/// either answer makes one of the two fail, which is the property; under D29
+/// the expensive collapse is the second sentence for the first condition,
+/// because that is what task 5's UI turns into an offer to remove a rule as
+/// stale, for a folder that is merely on a volume that went away.
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_read_is_refused_as_unreadable_not_as_absent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    let locked = fixture.path().join("locked");
+    std::fs::create_dir(&locked).expect("creating locked/");
+    let root = root_for(&webview, fixture.path());
+
+    let original = std::fs::metadata(&locked).unwrap().permissions();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("chmod 000 on locked");
+
+    let rejected = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "locked" }),
+    );
+
+    // Restored before any assertion can panic and before the TempDir's own
+    // Drop runs — recursive removal needs the directory back.
+    std::fs::set_permissions(&locked, original).expect("restoring locked's permissions");
+
+    assert_eq!(
+        rejected.expect_err("an unreadable folder must be refused"),
+        json!(format!(
+            "the folder \"locked\" in watched folder {root} could not be read: Permission denied \
+             (os error 13)"
+        )),
+        "a folder this process cannot read is the observer's condition, not an absence"
+    );
+
+    // The other condition, through the same command and the same classifier:
+    // a folder that really is not there still gets the absence sentence. This
+    // is what makes the assertion above a claim about the SPLIT rather than
+    // about one string — a classifier forced to either answer fails one of the
+    // two, and neither assertion can be satisfied by the other's value.
+    assert_eq!(
+        call(
+            &webview,
+            "list_subfolders",
+            json!({ "rootId": root, "relativePath": "absent" }),
+        )
+        .expect_err("a folder that is not there must be refused"),
+        json!(format!(
+            "there is no folder \"absent\" in watched folder {root}"
+        )),
+    );
+}
+
+/// Row 1 of the enumeration, the half fix round 1's derivation missed:
+/// `BUILTIN_FILES` compiles to `!**/.DS_Store`, which carries no trailing `/`
+/// and therefore prunes a **directory** of that name at any depth. Somebody
+/// really can create a folder called `.DS_Store`, and the walk will not enter
+/// it.
+///
+/// It is here as its own test rather than folded into the built-in one because
+/// the defect it pins was not "a name missing from a list" but a *reading of
+/// gitignore semantics* — the old predicate enumerated `BUILTIN_DIRS` by hand
+/// and its doc argued that a files list could not matter. What replaced it
+/// asks the compiled matcher, so this test is the end-to-end evidence that the
+/// compiled answer and the walk agree where the hand-read one did not.
+///
+/// Both directions and both depths: the folder itself, a folder under it, and
+/// an ordinary sibling that must stay `open`.
+#[test]
+fn a_directory_named_like_a_built_in_file_is_built_in_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(fixture.path().join(".DS_Store/inner")).expect("creating .DS_Store");
+    std::fs::create_dir_all(fixture.path().join("notes/2019")).expect("creating notes");
+    let root = root_for(&webview, fixture.path());
+
+    let top = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+    assert_eq!(
+        subfolder_rows(&top),
+        vec![
+            (
+                ".DS_Store".to_string(),
+                ".DS_Store".to_string(),
+                "builtIn".to_string()
+            ),
+            ("notes".to_string(), "notes".to_string(), "open".to_string()),
+        ],
+        "a directory named like a BUILTIN_FILES entry is pruned by the walk: {top}"
+    );
+
+    let inside = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": ".DS_Store" }),
+    )
+    .expect("listing .DS_Store was rejected");
+    assert_eq!(
+        subfolder_rows(&inside),
+        vec![(
+            "inner".to_string(),
+            ".DS_Store/inner".to_string(),
+            "builtIn".to_string()
+        )],
+        "the subtree goes with it: {inside}"
+    );
+}
+
+/// 🔴 **The listing's `builtIn` claim, asked of the command it is a claim
+/// about.** Fix round 1 wrote the principle — *the listing's claim is a claim
+/// about the other command, so the test asks that command* — and applied it to
+/// exactly one row, the one where the two already agreed. Measured before this
+/// test existed: `exclude_subfolder(".git/hooks")` answered `Ok`, wrote a row,
+/// and `list_exclusions` rendered it `existsOnDisk: true` — protection that
+/// protects nothing, persisted to the database.
+///
+/// **One case per way a row can be `builtIn`**, so no single mechanism
+/// satisfies the test: an override name, an override name as an *ancestor*, a
+/// `BUILTIN_FILES` name as a directory, an anchored name beside its marker, and
+/// an anchored name's *descendant*.
+///
+/// **And the other direction, which is the half that makes this about the
+/// built-in layers rather than about refusing things**: the two folders the
+/// listing reports `open` — `house/target`, which carries a pruned NAME with no
+/// marker beside it, and `notes/2019` — are accepted and stored. A command that
+/// refused everything would satisfy every assertion above.
+///
+/// `list_exclusions` is read at the end rather than trusted: the refusals must
+/// leave nothing behind, and the acceptances must leave exactly themselves.
+#[test]
+fn excluding_a_folder_the_walk_already_prunes_is_refused_and_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for path in [
+        ".git/hooks",
+        "node_modules",
+        ".DS_Store/inner",
+        "crate/target/debug",
+        "house/target",
+        "notes/2019",
+    ] {
+        std::fs::create_dir_all(fixture.path().join(path)).expect("creating a fixture folder");
+    }
+    std::fs::write(fixture.path().join("crate/Cargo.toml"), "[package]")
+        .expect("writing crate/Cargo.toml");
+    let root = root_for(&webview, fixture.path());
+
+    for pruned in [
+        "node_modules",
+        ".git/hooks",
+        ".DS_Store",
+        ".DS_Store/inner",
+        "crate/target",
+        "crate/target/debug",
+    ] {
+        // The listing's claim about this row.
+        let parent = pruned.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+        let name = pruned.rsplit('/').next().expect("a final component");
+        let listing = call(
+            &webview,
+            "list_subfolders",
+            json!({ "rootId": root, "relativePath": parent }),
+        )
+        .unwrap_or_else(|e| panic!("listing {parent:?} was rejected: {e}"));
+        let row = subfolder_rows(&listing)
+            .into_iter()
+            .find(|(entry, _, _)| entry == name)
+            .unwrap_or_else(|| panic!("{pruned} missing from {listing}"));
+        assert_eq!(
+            row.2, "builtIn",
+            "the listing does not call {pruned} builtIn"
+        );
+
+        // The same claim, asked of the command that has to honour it.
+        let refused = match call(
+            &webview,
+            "exclude_subfolder",
+            json!({ "rootId": root, "relativePath": pruned }),
+        ) {
+            Ok(answered) => panic!("excluding {pruned} must be refused, not answered {answered}"),
+            Err(refused) => refused,
+        };
+        assert_eq!(
+            refused,
+            json!(format!(
+                "{pruned:?} in watched folder {root} is already excluded by the built-in rules, \
+                 so a rule naming it would change nothing"
+            )),
+            "the refusal for {pruned} has to be a sentence a person can read"
+        );
+    }
+
+    // The other direction: a pruned NAME with no marker beside it, and an
+    // ordinary folder. Both are `open` and both must store.
+    for open in ["house/target", "notes/2019"] {
+        call(
+            &webview,
+            "exclude_subfolder",
+            json!({ "rootId": root, "relativePath": open }),
+        )
+        .unwrap_or_else(|e| panic!("excluding {open} must succeed: {e}"));
+    }
+
+    assert_eq!(
+        call(&webview, "list_exclusions", json!({ "rootId": root }))
+            .expect("list_exclusions was rejected"),
+        json!([
+            { "prefix": "house/target", "existsOnDisk": true },
+            { "prefix": "notes/2019", "existsOnDisk": true }
+        ]),
+        "the refusals must leave nothing stored and the acceptances exactly themselves"
     );
 }

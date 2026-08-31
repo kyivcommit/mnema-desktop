@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { END_REASONS, FROZEN_REASONS, type JobEnded, type JobEvent } from '../lib/ipc';
+import { camelOf, rustEnumVariants } from '../lib/rust-enum';
 import {
   createJobController, outcomeOf, endingOf, chainsEmbedPass, progressShape,
   OUTCOME_KINDS, type OutcomeKind,
@@ -51,81 +52,21 @@ function ended(name: keyof typeof REAL): JobEnded {
 
 // ---------------------------------------------------------------------------
 // The mirror: derived from the Rust source at test time, never hand-copied.
-// Lifted from `Models.test.ts`'s `rustEnumVariants`, including its fix —
-// comments are stripped BEFORE the brace walk, or a `}` inside a doc comment
-// truncates the enum body and the test reports green having never seen the
-// variants past it. `job.rs`'s `EndReason` doc comment is exactly that shape:
-// it names `walk_job.rs` and carries prose full of punctuation.
+// The reader is `lib/rust-enum.ts`, which carries its own tests. It lived here
+// as a copy lifted from `Models.test.ts` until a third mirror made two copies
+// worth ending.
 //
 // ⚠️ This is HALF of the guard, and the half that cannot see its own blind
-// spot. It reads variant NAMES and applies serde's camelCase rule to them by
-// hand; it never reads the enum's `#[serde(rename_all = …)]`, so switching
-// that attribute to `snake_case` leaves every test in this file green while the
-// wire spelling changes underneath. The other half is Rust's own
-// `every_end_reason_has_its_camel_case_spelling_pinned` (`job.rs:770`), which
-// serializes each variant and pins the string. Neither closes the gap alone:
-// the pair does. A variant-level `#[serde(rename = "…")]` is refused outright
-// below, because this side could not express it either way.
+// spot. `rustEnumVariants` reads variant NAMES and `camelOf` applies serde's
+// camelCase rule to them; neither reads the enum's `#[serde(rename_all = …)]`,
+// so switching that attribute to `snake_case` leaves every test in this file
+// green while the wire spelling changes underneath. The other half is Rust's
+// own `every_end_reason_has_its_camel_case_spelling_pinned` (`job.rs:770`),
+// which serializes each variant and pins the string. Neither closes the gap
+// alone: the pair does.
 // ---------------------------------------------------------------------------
 const HERE = dirname(fileURLToPath(import.meta.url));
 const JOB_RS = readFileSync(join(HERE, '../../../src-tauri/src/job.rs'), 'utf8');
-
-function rustEnumVariants(rawSource: string, enumName: string): string[] {
-  const source = rawSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
-  const m = new RegExp(`pub enum ${enumName}\\s*\\{`).exec(source);
-  if (!m) throw new Error(`enum ${enumName} not found in job.rs — has it moved or been renamed?`);
-  let depth = 1;
-  let i = m.index + m[0].length;
-  const start = i;
-  while (depth > 0) {
-    if (source[i] === '{') depth++;
-    else if (source[i] === '}') depth--;
-    i++;
-    if (i > source.length) throw new Error(`ran off the end of job.rs looking for the closing brace of ${enumName}`);
-  }
-  const body = source.slice(start, i - 1);
-  if (/#\[serde\([^)]*\brename\s*=/.test(body)) {
-    throw new Error(
-      `${enumName} now carries an explicit #[serde(rename = "…")] on a variant. This mirror derives ` +
-      'wire names with serde\'s CamelCase rule alone and cannot express a rename.',
-    );
-  }
-  const variants: string[] = [];
-  let d = 0;
-  let cur = '';
-  for (const ch of body) {
-    if (ch === '{') d++;
-    if (ch === '}') d--;
-    if (ch === ',' && d === 0) {
-      if (cur.trim()) variants.push(cur.trim());
-      cur = '';
-    } else {
-      cur += ch;
-    }
-  }
-  if (cur.trim()) variants.push(cur.trim());
-  return variants.map((v) => {
-    const name = /^([A-Za-z0-9_]+)/.exec(v.trim());
-    if (!name) throw new Error(`could not parse a variant name out of: ${v}`);
-    return name[1];
-  });
-}
-
-const camelOf = (pascal: string) => pascal.charAt(0).toLowerCase() + pascal.slice(1);
-
-test('the parser reads a variant hidden behind a doc comment carrying a lone brace', () => {
-  const fixture = `
-/// A doc comment with a lone } in it.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Sample {
-    First,
-    /// A brace } here truncated the body before comments were stripped first.
-    Second,
-}
-`;
-  expect(rustEnumVariants(fixture, 'Sample')).toEqual(['First', 'Second']);
-});
 
 // Both directions in one comparison: a variant Rust gains and this window has
 // never heard of fails here, and so does one this window still lists after Rust

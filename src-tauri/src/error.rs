@@ -51,6 +51,116 @@ pub enum Error {
     /// the path it names.
     #[error("no watched folder with id {0}")]
     UnknownWatchedRoot(i64),
+    /// A prefix `WalkRules::new` refuses. **Two producers**, and the second
+    /// is why the first's guarantee is not one:
+    ///
+    /// - `exclude_subfolder` runs the validator before the row is written,
+    ///   so nothing the commands store is ever a prefix the walk would then
+    ///   skip silently. That is a claim about rules written by THIS build
+    ///   through THAT command, and it was once written here as though it
+    ///   were a claim about every stored rule (review round 1, M1).
+    /// - `start_walk_job` runs the same validator over what the database
+    ///   actually holds, because a stored prefix can fail it anyway: written
+    ///   by an older build whose whitelist was narrower (`rules.rs:28-49`
+    ///   describes it growing across three rounds), or written straight
+    ///   through `Db::add_path_exclusion`, which deliberately does not
+    ///   validate. There the refusal stops the whole job rather than one
+    ///   save, which is the conservative direction under D29 — see that call
+    ///   site's own comment.
+    ///
+    /// `#[from]` carries `RulesError`'s own sentence unchanged, which is
+    /// already safe to show: every variant names the rule the person typed
+    /// and nothing else.
+    #[error("{0}")]
+    InvalidExclusionRule(#[from] mnema_walk::RulesError),
+    /// `exclude_subfolder` was handed the empty string. `validate_prefix`
+    /// answers `Ok(None)` for it — deliberately not a `RulesError`, since a
+    /// blank row is not a malformed one (`rules.rs:546-555`) — but storing it
+    /// would add a rule that excludes nothing and sits in the list looking
+    /// like protection (review round 1, P2). Kept apart from
+    /// [`Error::InvalidExclusionRule`], which is what `WalkRules::new` itself
+    /// can produce and this case never reaches.
+    #[error("an exclusion rule cannot be empty")]
+    BlankExclusionRule,
+    /// `list_exclusions` stat'd the watched root itself and it was not
+    /// there — an unmounted external drive, a network volume down, the
+    /// folder moved. Refusing the whole call is the conservative direction:
+    /// answering per prefix with `existsOnDisk: false` would read as "every
+    /// rule's folder is gone" (review round 1, Important 1).
+    #[error(
+        "the folder for watched root {0} is not available right now, so its exclusion rules \
+         cannot be checked"
+    )]
+    RootUnavailable(i64),
+    /// `list_subfolders` was asked for a folder that resolves outside the
+    /// watched root, or that does not resolve to where its own spelling says
+    /// it is. Four shapes reach it, and the set is open rather than a list to
+    /// be kept in step: `..`, an absolute path, a path reaching its target
+    /// through a symlink, and — on a case-insensitive filesystem — a spelling
+    /// whose case is not the folder's own.
+    ///
+    /// One sentence for all of them, because they are one refusal: the
+    /// containment rule is "the canonicalised path is exactly the watched
+    /// root's canonical path joined with what was asked for", and each breaks
+    /// it in its own way. Naming them apart would mean telling a caller which
+    /// shape its escape took, which is a detail no window needs and one an
+    /// attacker would.
+    ///
+    /// **A symlink INSIDE the root is refused too, and that is not
+    /// over-reach.** The walk runs `follow_links(false)`
+    /// (`crates/mnema-walk/src/rules.rs:388`), so nothing under a symlinked
+    /// name is ever enumerated or indexed; a listing that answered through one
+    /// would offer exclusion controls for paths the walk never visits.
+    #[error(
+        "{relative_path:?} does not name a folder inside watched folder {root_id}: it resolves \
+         somewhere else"
+    )]
+    SubfolderNotUnderRoot { root_id: i64, relative_path: String },
+    /// `list_subfolders` was asked for a folder that is not there, or for a
+    /// path naming a file.
+    ///
+    /// **A refusal rather than an empty listing**, which is the whole reason
+    /// this variant exists: `entries: []` is a claim that the folder holds no
+    /// subfolders, and a window draws that as a tree with nothing in it left
+    /// to exclude. Reached only through
+    /// [`crate::bridge::path_error_is_an_answer`] — an error that says
+    /// something about the path, never one that says something about this
+    /// process's ability to look.
+    #[error("there is no folder {relative_path:?} in watched folder {root_id}")]
+    NoSuchSubfolder { root_id: i64, relative_path: String },
+    /// `exclude_subfolder` was handed a path one of the walk's unconditional
+    /// layers already prunes — `.git` and everything under it, a `target`
+    /// beside its `Cargo.toml`, a folder somebody named `.DS_Store`.
+    ///
+    /// **The refusal that makes `list_subfolders`' `builtIn` state true.**
+    /// That state promises the walk prunes the folder and there is nothing to
+    /// toggle; without this, the toggle existed anyway one command over, and
+    /// the row it wrote came back through `list_exclusions` as a rule with
+    /// `existsOnDisk: true` — protection that protects nothing, persisted.
+    /// Decided by `WalkRules::builtin_layers`, the same call the listing makes.
+    ///
+    /// It carries the path so the sentence can name the folder the person
+    /// pressed, and nothing else.
+    #[error(
+        "{relative_path:?} in watched folder {root_id} is already excluded by the built-in \
+         rules, so a rule naming it would change nothing"
+    )]
+    AlreadyPrunedByBuiltIn { root_id: i64, relative_path: String },
+    /// `list_subfolders` could not read a folder that is there: a permission
+    /// this process does not have, a share that dropped, an entry that failed
+    /// mid-listing.
+    ///
+    /// The observer side of [`crate::bridge::path_error_is_an_answer`]'s
+    /// split, and it refuses the whole call rather than answering with the
+    /// entries it managed to read. A short listing is indistinguishable from a
+    /// folder with fewer subfolders in it, and under D29 the folders that went
+    /// missing from it are exactly the ones nobody would then exclude.
+    #[error("the folder {relative_path:?} in watched folder {root_id} could not be read: {source}")]
+    SubfolderUnreadable {
+        root_id: i64,
+        relative_path: String,
+        source: std::io::Error,
+    },
     /// Indexing could not continue at all — the extraction pool is broken, or
     /// the database is.
     ///

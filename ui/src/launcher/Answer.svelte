@@ -33,7 +33,7 @@
   // Ruling D: `citationLabel()` reads the locale store at call time (through
   // `t()` and `formatLocator()`) but is not reactive on its own, so the whole
   // preview list is rebuilt inside one $derived.by that reads $locale — the
-  // house pattern (Arms.svelte:11-12, Cards.svelte:16-18).
+  // house pattern (Arms.svelte:11-12, Cards.svelte:91).
   // Ruling S: the rule itself lives in `i18n/label.ts` and `Source.svelte`
   // calls the same function — one rule, one place. What stays here is the
   // reactivity, which is per-component.
