@@ -1239,6 +1239,145 @@ test('a root that disappears from the list takes its expansion with it', async (
   expect(screen.getByTestId('folder-expand-3').getAttribute('aria-expanded')).toBe('false');
 });
 
+// ── PR 8a, fix round 4, item 1: the other half of the case above ─────────────
+//
+// The comment inside the test above names the hazard and the test checks ONE of
+// its two cases: the id has gone. This is the case rowid reuse actually
+// produces — the id is still in the listing and now names a DIFFERENT folder.
+// `watched_root.id` is `INTEGER PRIMARY KEY` with no `AUTOINCREMENT`
+// (`schema.sql:11-15`), so removing the most recently added root and adding
+// another hands the new one the old id.
+//
+// The pair is written as a pair on purpose, and neither half is sufficient:
+// dropping every panel on every refresh satisfies the first of these two and
+// fails the second, and keeping every panel whose id is present satisfies the
+// second and fails the first. The one-line mutants, named in advance and both
+// measured: `live.get(rootId) === panel.rootPath` → `live.has(rootId)` fails
+// the first and leaves the second green; → `false` fails the second and leaves
+// the first green.
+test('a root id handed to a different folder does not keep the old folder\'s expansion', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 9, absolutePath: '/synthetic/beta' })]));
+  // The same id, a different path — what the person's remove-then-add did to
+  // this window between its two reads.
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 9, absolutePath: '/synthetic/gamma' })]));
+  listSubfolders.mockResolvedValue(subfolders([sub('OnlyUnderBeta')]));
+  listExclusions.mockResolvedValue([]);
+  open.mockResolvedValue('/synthetic/gamma');
+  addWatchedFolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/beta')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-9'));
+  await waitFor(() => expect(screen.getByText('OnlyUnderBeta')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/gamma')).toBeTruthy());
+
+  // The expansion belonged to `/synthetic/beta`, and drawing it here would put
+  // `OnlyUnderBeta` under `/synthetic/gamma` — with controls that then exclude
+  // or include on the NEW root using the OLD root's relative path.
+  expect(screen.queryByText('OnlyUnderBeta')).toBeNull();
+  expect(screen.queryByTestId('folder-panel-9')).toBeNull();
+  expect(screen.getByTestId('folder-expand-9').getAttribute('aria-expanded')).toBe('false');
+});
+
+test('a refresh that finds the same folder under the same id keeps its expansion open', async () => {
+  setLocale('en'); // seed, do not inherit
+  const beta = root({ rootId: 9, absolutePath: '/synthetic/beta' });
+  listTree.mockResolvedValueOnce(listing([beta]));
+  // The same root, unchanged, beside a newly added one: nothing about this
+  // panel's identity has moved, so nothing about the panel may.
+  listTree.mockResolvedValueOnce(
+    listing([beta, root({ rootId: 10, absolutePath: '/synthetic/added' })]),
+  );
+  listSubfolders.mockResolvedValue(subfolders([sub('OnlyUnderBeta')]));
+  listExclusions.mockResolvedValue([]);
+  open.mockResolvedValue('/synthetic/added');
+  addWatchedFolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/beta')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-9'));
+  await waitFor(() => expect(screen.getByText('OnlyUnderBeta')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/added')).toBeTruthy());
+
+  // Still open, and still holding the listing it was opened with: an add does
+  // not re-read a panel (only a job ending does), so this text is the panel
+  // the refresh kept and not one it fetched again.
+  expect(screen.getByText('OnlyUnderBeta')).toBeTruthy();
+  expect(screen.getByTestId('folder-panel-9')).toBeTruthy();
+  expect(screen.getByTestId('folder-expand-9').getAttribute('aria-expanded')).toBe('true');
+});
+
+// ── PR 8a, fix round 4, item 2: two `list_tree` calls, answered out of order ──
+//
+// `refresh` is reachable from four places — mount, an add, a remove, and a job
+// ending — and had no generation guard of its own, while a panel's read has had
+// one since Task 5. Two of them overlap here by construction rather than by
+// luck: the mount's read is left on the wire and the add's is resolved first.
+//
+// The mutant, named in advance: delete `if (refreshes !== generation) return;`
+// (the one after the `await`, not the one in the `catch`) and the older listing
+// replaces the newer one — `/synthetic/stale` appears and `/synthetic/fresh`
+// goes. Both directions are asserted for the reason the brief gives: a guard
+// that returns unconditionally also removes the stale row, and would pass a
+// test that only looked for its absence.
+test('an older list_tree that lands after a newer one replaces neither the list nor the panels', async () => {
+  setLocale('en'); // seed, do not inherit
+  let settleFirst: (l: TreeListing) => void = () => {};
+  listTree
+    .mockReturnValueOnce(new Promise<TreeListing>((r) => { settleFirst = r; }))
+    .mockResolvedValueOnce(listing([root({ rootId: 2, absolutePath: '/synthetic/fresh' })]));
+  open.mockResolvedValue('/synthetic/fresh');
+  addWatchedFolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(listTree).toHaveBeenCalledTimes(1)); // mount's read, still on the wire
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/fresh')).toBeTruthy());
+  expect(listTree).toHaveBeenCalledTimes(2); // the two really did overlap
+
+  settleFirst(listing([root({ rootId: 1, absolutePath: '/synthetic/stale' })]));
+  // A real turn of the event loop, not a microtask: the older answer has an
+  // `await` and a Svelte render to get through, and a test that stopped before
+  // both would report "not drawn" about a draw not yet attempted.
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.queryByText('/synthetic/stale')).toBeNull();
+  expect(screen.getByText('/synthetic/fresh')).toBeTruthy(); // and the newer answer stands
+});
+
+// The rejection half of the same guard, and its own line: every caller of
+// `refresh` turns a rejection into `loadError`, which replaces the whole list
+// with a failure banner. An older failure landing behind a newer success would
+// therefore say the list cannot be read over a list that has just been read.
+//
+// The mutant: delete `if (refreshes !== generation) return;` from the `catch`
+// so the stale rejection is rethrown, and the banner appears.
+test('a list_tree rejection that lands after a newer answer prints no failure over it', async () => {
+  setLocale('en'); // seed, do not inherit
+  let failFirst: (e: Error) => void = () => {};
+  listTree
+    .mockReturnValueOnce(new Promise<TreeListing>((_resolve, reject) => { failFirst = reject; }))
+    .mockResolvedValueOnce(listing([root({ rootId: 2, absolutePath: '/synthetic/fresh' })]));
+  open.mockResolvedValue('/synthetic/fresh');
+  addWatchedFolder.mockResolvedValue(undefined);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(listTree).toHaveBeenCalledTimes(1));
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/fresh')).toBeTruthy());
+
+  failFirst(new Error('The index is not open yet.'));
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.queryByTestId('folders-load-reason')).toBeNull();
+  expect(screen.getByText('/synthetic/fresh')).toBeTruthy();
+});
+
 // 🔴 Review finding I2. This case is `patch`'s early return
 // (`Folders.svelte:126`) and nothing else, and the shape of it was measured
 // three times before it held.

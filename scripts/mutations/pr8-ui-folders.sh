@@ -28,6 +28,11 @@
 #   the withdrawal's bump — and the check already on the wire is stopped with it
 #   the withdrawal's pass — only a WALK's ending takes a question back, never
 #                            an embedding pass's (fix round 2, review I1)
+#   the panel's identity — a kept panel is one whose PATH is still the same, in
+#                            BOTH directions: kept when it is, dropped when the
+#                            id has been handed to another folder (round 4, I1)
+#   the list's own generation — the older `list_tree` of two overlapping ones
+#                            writes nothing, resolved or rejected (round 4, I2)
 #
 # ⚠️ **One case here mutates Rust and is killed by a TypeScript test**, which is
 # the pairing the wire pin exists for: Rust and TypeScript share no compiler, so
@@ -256,3 +261,60 @@ case_ "the withdrawal must not depend on a call that can fail" \
   "s{    if \(pass === 'walk'\) withdrawQuestions\(\);\n(    //[^\n]*\n)+    refresh\(\)\.then\(rereadPanels\)\.catch\(\(e\) => \{}{    refresh().then(() => \{ if (pass === 'walk') withdrawQuestions(); rereadPanels(); \}).catch((e) => \{ /* mutant: withdrawal downstream of the refresh */}" \
   "/* mutant: withdrawal downstream of the refresh */" \
   src/settings/Folders.test.ts 'a walk ending withdraws the question even when the re-read that follows it fails' runner=vitest
+
+# ── Fix round 4, item 1: the panel's identity ─────────────────────────────────
+#
+# `watched_root.id` is `INTEGER PRIMARY KEY` with no `AUTOINCREMENT`
+# (`schema.sql:11-15`), so SQLite hands a deleted id out again in the ordinary
+# case. The prune in `refresh` therefore has TWO cases and not one, and the
+# branch shipped the first alone with a comment that named the hazard — the
+# class this branch has paid for three times. The two cases below are a PAIR:
+# each mutant is green under the other's test, which is what says neither half
+# is standing on the other's defence.
+#
+# This one is the shape the branch had before the fix: the id is present, so
+# the panel is kept, and the old folder's subfolders are drawn under the new
+# folder's path.
+case_ "a panel must not be kept by an id that now names a different folder" \
+  ui/src/settings/Folders.svelte \
+  "s{      if \(live\.get\(rootId\) === panel\.rootPath\) \{}{      if (live.has(rootId)) \{ /* mutant: the id alone */}" \
+  "if (live.has(rootId)) { /* mutant: the id alone */" \
+  src/settings/Folders.test.ts 'a root id handed to a different folder does not keep the old' runner=vitest
+
+# And its mirror, which is the reason the pair exists at all: a prune that drops
+# EVERYTHING satisfies every assertion about a panel disappearing. This mutant
+# is broad — it takes seven tests in this file down, six of them about a job
+# ending re-reading panels that are no longer there — and the harness runs only
+# the one named below, which is the case written for this direction.
+case_ "a panel whose folder is unchanged must survive the refresh" \
+  ui/src/settings/Folders.svelte \
+  "s{      if \(live\.get\(rootId\) === panel\.rootPath\) \{\n        kept\[rootId\] = panel;}{      if (false) \{ /* mutant: nothing survives */\n        kept[rootId] = panel;}" \
+  "if (false) { /* mutant: nothing survives */" \
+  src/settings/Folders.test.ts 'a refresh that finds the same folder under the same id keeps its expansion open' runner=vitest
+
+# ── Fix round 4, item 2: the list's own generation ────────────────────────────
+#
+# A panel's read has had a generation guard since Task 5; the read of the LIST
+# had none, and `refresh` is reachable from four places — mount, an add, a
+# remove and a job ending — so two `list_tree` calls can be on the wire at once.
+# Without this line the older answer lands behind the newer one and both
+# replaces `roots` and prunes the panels against it.
+#
+# Anchored on the line after it, because the identical guard also appears in the
+# `catch` above (the next case) and a bare pattern would match twice.
+case_ "the older of two overlapping list_tree answers must not replace the list" \
+  ui/src/settings/Folders.svelte \
+  "s{\n    if \(refreshes !== generation\) return;\n    roots = listing\.roots;}{\n    /* mutant: no guard on the list's own read */\n    roots = listing.roots;}" \
+  "/* mutant: no guard on the list's own read */" \
+  src/settings/Folders.test.ts 'an older list_tree that lands after a newer one replaces neither the list nor the panels' runner=vitest
+
+# The rejection half of the same guard, and its own case for the reason item 1's
+# two cases are separate: every caller of `refresh` turns a rejection into
+# `loadError`, which replaces the whole list with a failure banner — so a guard
+# written for the resolved path alone leaves an older failure free to print "the
+# list could not be read" over a list that has just been read.
+case_ "a stale list_tree REJECTION must not print a failure over a newer answer" \
+  ui/src/settings/Folders.svelte \
+  "s{\n      if \(refreshes !== generation\) return;\n      throw e;}{\n      /* mutant: a stale rejection is not stale */\n      throw e;}" \
+  "/* mutant: a stale rejection is not stale */" \
+  src/settings/Folders.test.ts 'a list_tree rejection that lands after a newer answer prints no failure over it' runner=vitest

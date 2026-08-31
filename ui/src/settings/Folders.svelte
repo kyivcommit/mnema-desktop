@@ -55,6 +55,14 @@
   // come back.
   type SubTree = { listing: SubfolderListing; children: Record<string, SubTree> };
   type Panel = {
+    // 🔴 PR 8a, fix round 4, item 1: the absolute path this panel was built
+    // for, recorded so that `refresh` can tell "the same root" apart from "the
+    // same id". The id alone cannot answer that question — see the prune in
+    // `refresh` for why, and for what it costs when it is asked of the id.
+    // Written once, at `toggleRoot`, from the very row the person pressed; it
+    // is never patched, because a panel whose path has changed is not a panel
+    // to correct, it is one to drop.
+    rootPath: string;
     tree: SubTree | null;
     rules: StoredExclusion[] | null;
     // A rejected `list_subfolders`/`list_exclusions`. Held apart from the two
@@ -112,6 +120,20 @@
   // row is shut — or when a newer read has started — is dropped instead of
   // being drawn over whatever the person is looking at now.
   const generations: Record<number, number> = {};
+
+  // 🔴 PR 8a, fix round 4, item 2. The same shape one level up: `generations`
+  // guards ONE panel's read, and there was nothing guarding the read of the
+  // LIST. `refresh` is reachable from four places — `onMount`, an add, a
+  // remove, and a job ending — so two `list_tree` calls can be on the wire at
+  // once, and the one asked for first is not the one that has to answer first.
+  // The older answer used to land behind the newer one and both replace `roots`
+  // with a list that has been superseded AND prune the panels against it.
+  //
+  // One counter for the whole list rather than one per call site, for the
+  // reason `generations` is one per root: what matters is whether this is still
+  // the newest question asked, and the four callers are asking the same one.
+  // Not `$state`: nothing renders from it.
+  let refreshes = 0;
 
   // Task 6's own counter, and NOT `generations`. The rule, stated once rather
   // than as a list of sites that would drift from the code under it: it is
@@ -185,7 +207,13 @@
     }
   }
 
-  function toggleRoot(rootId: number) {
+  // Takes the ROW and not its id (fix round 4, item 1): the panel has to record
+  // which folder it was opened for, and the only place that knows it without a
+  // second lookup is the row the person pressed. A `roots.find(...)` here would
+  // be the same fact read a second time, out of a list a refresh can replace
+  // between the render and the click.
+  function toggleRoot(root: TreeRoot) {
+    const rootId = root.rootId;
     if (panels[rootId] !== undefined) {
       generations[rootId] = (generations[rootId] ?? 0) + 1;
       ask(rootId); // a question the person shut the row on is not asked again
@@ -198,6 +226,7 @@
     panels = {
       ...panels,
       [rootId]: {
+        rootPath: root.absolutePath,
         tree: null, rules: null, loadError: null, actionError: null,
         alreadyGone: false, withdrawn: null, pending: null,
       },
@@ -564,16 +593,80 @@
   }
 
   async function refresh() {
-    const listing = await listTree();
+    const generation = (refreshes += 1);
+    let listing: TreeListing;
+    try {
+      listing = await listTree();
+    } catch (e) {
+      // 🔴 A stale REJECTION is stale too, and it is the half that a guard
+      // written for the resolved path alone would leave standing. All four
+      // callers turn a rejection from here into `loadError`, so an older
+      // failure landing behind a newer success would print "the list of folders
+      // could not be read" over a list that has just been read successfully —
+      // the exact state `loadError = null` below exists to prevent. Swallowed
+      // here rather than at the four call sites, because it is one fact about
+      // one reply and four copies of it would be four places to forget.
+      if (refreshes !== generation) return;
+      throw e;
+    }
+    // 🔴 PR 8a, fix round 4, item 2. Nothing below this line may run for an
+    // answer that has been overtaken: not `roots`, not `panels`, not
+    // `loadError`. See `refreshes` for what overlaps and why.
+    if (refreshes !== generation) return;
     roots = listing.roots;
     // An expansion belongs to a row, and outlives it for no longer than the
     // row itself: `remove_watched_folder` deletes a database row whose id
     // SQLite may hand out again, and an expansion left behind under that id
     // would draw one folder's subfolders under another folder's path.
-    const live = new Set(roots.map((r) => r.rootId));
-    const kept = Object.fromEntries(
-      Object.entries(panels).filter(([rootId]) => live.has(Number(rootId))),
-    );
+    //
+    // 🔴 PR 8a, fix round 4, item 1. That sentence was already written here,
+    // and it covered ONE of the hazard's two cases — "the id is gone". The
+    // other case is the one rowid reuse actually produces: the id is STILL
+    // THERE and now names a different folder. `watched_root.id` is
+    // `INTEGER PRIMARY KEY` with no `AUTOINCREMENT` (`schema.sql:11-15`), so it
+    // is a rowid alias and SQLite hands a deleted id out again — remove the
+    // most recently added root, add another, and the new one gets the old id.
+    // That is the ordinary case, not an exotic one. Kept across it, the panel
+    // draws the OLD folder's subfolders under the NEW folder's path, and its
+    // controls then exclude or include on the new root carrying a
+    // `relativePath` from the old one — under D29, a rule the person never
+    // asked for, or a folder's text sent to the provider.
+    //
+    // This is the class this branch has already paid for three times: a seam
+    // covering half of its own sites, written by somebody who was thinking
+    // about the hazard and named it in the comment above.
+    //
+    // No new identifier scheme, deliberately: the id stays the key, and what is
+    // compared is the path the listing gives against the path the panel was
+    // built for (`Panel.rootPath`).
+    const live = new Map(roots.map((r) => [r.rootId, r.absolutePath]));
+    const kept: Record<number, Panel> = {};
+    for (const [key, panel] of Object.entries(panels)) {
+      const rootId = Number(key);
+      // `===` against a value that is `undefined` when the id has gone, so ONE
+      // comparison answers both cases and neither can be fixed without the
+      // other. A `live.has(rootId)` beside it would be the half-seam again.
+      if (live.get(rootId) === panel.rootPath) {
+        kept[rootId] = panel;
+        continue;
+      }
+      // The panel goes and the two counters that outlive it are bumped with it,
+      // exactly as a collapse does in `toggleRoot`: a `list_subfolders` still on
+      // the wire for the folder that has left must not be drawn into a panel
+      // opened later under the reused id, and a question asked about that folder
+      // must raise nothing when its reply lands.
+      //
+      // ⚠️ Stated rather than claimed: neither bump has a reachable mutant
+      // today, so no test here pins them and none pretends to. Every way back
+      // into this id runs through `toggleRoot`, which bumps both itself, and
+      // `read` bumps `generations` at the start of every read — so a stale reply
+      // is refused by a neighbouring defence on every path measured. They are
+      // written because the ownership rule is "the panel's counters die with the
+      // panel", and a rule kept only where it is currently observable is a rule
+      // the next call site will not inherit.
+      generations[rootId] = (generations[rootId] ?? 0) + 1;
+      ask(rootId);
+    }
     if (Object.keys(kept).length !== Object.keys(panels).length) panels = kept;
     loadError = null; // a successful read is proof the earlier one is stale
   }
@@ -1098,7 +1191,7 @@
             data-testid={`folder-expand-${root.rootId}`}
             aria-expanded={expanded}
             aria-label={expandAriaLabel}
-            onclick={() => toggleRoot(root.rootId)}>{expandLabel}</button>
+            onclick={() => toggleRoot(root)}>{expandLabel}</button>
           <button
             type="button"
             data-testid={`folder-scan-${root.rootId}`}
