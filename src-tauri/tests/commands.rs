@@ -8835,10 +8835,24 @@ fn mask_preview_counts_the_index_and_not_the_disk() {
 /// A mask is global, so the preview is too: it counts across every watched
 /// folder, not the one a window happens to be showing.
 ///
-/// The grouping is asked the same question across roots — `shared` here has one
-/// copy under each root and both match, so it is one document that stops being
-/// findable, not two. A preview that counted per root and added up would say
-/// two.
+/// 🔴 I1 — `documents` is the number this fixture exists to guard, and an
+/// earlier version of it did not: `shared`'s second copy matched too
+/// (`there.pdf`), so `documents` was `1` whether or not the second root was
+/// ever visited and the whole kill of the root-narrowing mutant
+/// (`db.list_watched_roots()?.into_iter().take(1)`) came from `paths` alone
+/// (`paths: 1, documents: 1` under the mutant vs. `paths: 2, documents: 1`
+/// correct — `documents` never moved). Here `shared`'s second copy
+/// (`there.txt`, under root 1) does **not** match `*.pdf`, so the document
+/// stays findable through it and the correct answer is `documents: 0`. A
+/// preview that only ever reaches root 0 — the mutant above, or a naive "stop
+/// at the first root" implementation — sees `shared` with every path it
+/// visited matching and answers `documents: 1`, overstating a loss that is not
+/// real. `paths` is `1` either way (only `here.pdf` ever matches), so this is
+/// the fixture in which `documents`, not `paths`, is what fails. Verified
+/// against `tree.rs:222-243`: `per_document["shared"]` ends at `(seen: 2,
+/// matched: 1)` when both roots are read, so `seen == matched` is false and the
+/// entry is excluded; under the mutant root 1 is never read, so the entry ends
+/// at `(1, 1)` and is included.
 #[test]
 fn mask_preview_counts_across_every_watched_root() {
     let dir = tempfile::tempdir().unwrap();
@@ -8865,7 +8879,7 @@ fn mask_preview_counts_across_every_watched_root() {
     app.state::<AppState>()
         .with_index(|db| {
             seed_indexed_file(db, roots[0], "shared", "here.pdf");
-            seed_second_copy(db, roots[1], "shared", "there.pdf");
+            seed_second_copy(db, roots[1], "shared", "there.txt");
             seed_indexed_file(db, roots[1], "other", "other.txt");
             Ok(())
         })
@@ -8874,8 +8888,9 @@ fn mask_preview_counts_across_every_watched_root() {
     assert_eq!(
         call(&webview, "mask_preview", json!({ "pattern": "*.pdf" }))
             .expect("mask_preview was rejected"),
-        json!({ "paths": 2, "documents": 1 }),
-        "one document with a copy under each root is one document, not two"
+        json!({ "paths": 1, "documents": 0 }),
+        "`here.pdf` matches and `there.txt` does not, so `shared` is not fully \
+         matched and must not be counted as a document that stops being findable"
     );
 }
 
@@ -9081,5 +9096,91 @@ fn a_stored_mask_that_no_longer_validates_refuses_the_walk() {
         indexed_paths(&app, root),
         Vec::<String>::new(),
         "the refusal must come before anything is indexed"
+    );
+}
+
+/// 🔴 B1 — a walk is never exercised with more than one stored mask. The call
+/// at `walk_job.rs:149` passes the whole vector to a single `.with_masks(masks)`
+/// and that is correct, but every OTHER walk fixture in this file stores
+/// exactly one mask, so a mutant that truncates the stored set to its first
+/// element (`db.list_masks()?.into_iter().take(1).collect::<Vec<_>>()`) leaves
+/// the entire package green. This is the exact twin of the exclusion side's
+/// "every stored prefix must reach `WalkRules::new`, not only the first"
+/// (`scripts/mutations/pr8-exclusions.sh`), and the mask layer inherited the
+/// code shape without inheriting the guard.
+///
+/// **Deliberately `*.pdf` and `*.tmp`, not `*.pdf` and `*.txt`.**
+/// `MaskLayer::matches` asks about the file's LAST path component
+/// (`rules.rs:410`), so a `*.txt` mask would also take `archive.pdf/keep.txt`
+/// by its basename `keep.txt` — folding the directory-name-collision case into
+/// this one and making "the folder that shares its name survives" false for a
+/// reason that has nothing to do with the set-truncation defect this test
+/// exists to catch. `*.tmp` matches nothing already in `mask_fixture_dir()`,
+/// so `draft.tmp` is written into a copy of it here, and it is the ONLY file
+/// the second mask can take.
+///
+/// **The masks are added in an order that makes the mutant's `take(1)` bite.**
+/// `Db::list_masks` returns patterns sorted (pinned by
+/// `the_mask_commands_store_list_and_remove_through_the_ipc`), and `"*.pdf"` <
+/// `"*.tmp"` byte-for-byte, so `take(1)` keeps `*.pdf` and drops `*.tmp`
+/// regardless of the order `add_mask` was called in. Under the mutant
+/// `report.pdf` still goes and `draft.tmp` does not — the walk reports
+/// `completed` and `removed: 1` where two masks were stored.
+#[test]
+fn a_walk_applies_every_stored_mask_not_only_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = mask_fixture_dir();
+    std::fs::write(
+        fixture.path().join("draft.tmp"),
+        "the second masked file mentions herons",
+    )
+    .expect("writing draft.tmp");
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec![
+            "archive.pdf/keep.txt".to_string(),
+            "draft.tmp".to_string(),
+            "notes.txt".to_string(),
+            "report.pdf".to_string(),
+        ],
+        "the first walk did not index all four files, so nothing below is about the masks"
+    );
+
+    for pattern in ["*.pdf", "*.tmp"] {
+        call(&webview, "add_mask", json!({ "pattern": pattern }))
+            .unwrap_or_else(|e| panic!("add_mask({pattern}) was rejected: {e}"));
+    }
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(2),
+        "the walk did not reconcile away both masked files, only truncating to \
+         the first stored mask would leave one of them behind: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["archive.pdf/keep.txt".to_string(), "notes.txt".to_string()],
+        "both stored masks must apply — a set truncated to the first would leave \
+         draft.tmp indexed, and the folder sharing the mask's name must still survive"
     );
 }

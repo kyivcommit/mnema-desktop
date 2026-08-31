@@ -233,9 +233,15 @@ pub fn mask_preview(state: State<'_, AppState>, pattern: String) -> Result<MaskP
                 }
             }
 
+            // No `&& *matched > 0`: every entry is created immediately before
+            // `entry.0 += 1` two lines up, so `seen >= 1` always, and
+            // `seen == matched` already implies `matched >= 1`. The second
+            // conjunct could never be false where the first was true —
+            // reviewed and confirmed unreachable rather than assumed
+            // (fix round 1, M3) — so it read as a check that could not fire.
             let documents = per_document
                 .values()
-                .filter(|(seen, matched)| seen == matched && *matched > 0)
+                .filter(|(seen, matched)| seen == matched)
                 .count() as i64;
 
             Ok(MaskPreview { paths, documents })

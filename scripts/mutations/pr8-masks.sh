@@ -173,6 +173,18 @@ case_ "the walk must read the stored masks, not walk without them" \
   '            Vec::new(),' \
   mnema-desktop 'a_walk_applies_a_stored_mask_and_keeps_the_folder_that_shares_its_name' --test commands
 
+# 🔴 Fix round 1, B1. The set truncated to its first stored mask rather than
+# emptied outright — the twin of `pr8-exclusions.sh`'s "every stored prefix
+# must reach `WalkRules::new`, not only the first". Every OTHER case in this
+# file that runs a walk stores exactly one mask, so this mutant survived the
+# whole package until `a_walk_applies_every_stored_mask_not_only_the_first`
+# stored two: `*.pdf`, which the mutant keeps, and `*.tmp`, which it drops.
+case_ "the walk must apply every stored mask, not only the first" \
+  src-tauri/src/walk_job.rs \
+  's{            db\.list_masks\(\)\?,}{            db.list_masks()?.into_iter().take(1).collect::<Vec<_>>(), /* mutant */}' \
+  '/* mutant */' \
+  mnema-desktop 'a_walk_applies_every_stored_mask_not_only_the_first' --test commands
+
 # 🔴 D-c's directory ruling, end to end. The `is_file()` half of the mask
 # predicate removed, so the mask prunes a DIRECTORY whose name matches it and
 # takes everything inside with it — measured in the plan: with `*.pdf` as an
