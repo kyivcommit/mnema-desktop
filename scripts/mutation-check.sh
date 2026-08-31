@@ -285,9 +285,38 @@ vitest_count() {
   printf '%s' "${n:-0}"
 }
 
+# 🔴 **Colour is stripped before anything is matched, and this is the whole
+# reason this function was blind for a day.** Vitest writes its summary as
+# `  \e[2m      Tests \e[22m \e[1m\e[32m1 passed\e[39m…`, so every pattern
+# below anchored with `^[[:space:]]*Tests` fails: an escape sequence sits
+# between the indent and the word. Locally the output is not a terminal, the
+# colour is off, and every pattern matches — in GitHub Actions the colour is
+# ON, and this harness reported eleven green tests as "vitest printed no
+# summary" and refused to mutate against any of them.
+#
+# The failure direction was the safe one — it refused rather than scoring a
+# mutant it had not measured — but a parser that reads the product's output
+# only in the configuration the author happened to run it in is not a parser.
+#
+# ⚠️ `NO_COLOR=1` is also set where vitest is invoked, and that is hygiene, not
+# the guarantee: it is a request to a third-party library that any of its
+# dependencies may stop honouring. This line is what this script can promise.
+#
+# 🔴 **Both were measured ALONE, and each is enough on its own** — which is
+# exactly why the pair is a trap for the next reader. With the colour forced on
+# (`FORCE_COLOR=1 bash scripts/mutation-check.sh <case file>`, which reproduces
+# GitHub Actions in one command), removing `NO_COLOR=1` leaves the run green
+# through this strip, and removing this strip leaves it green through
+# `NO_COLOR=1`. So deleting either one changes nothing anybody would notice,
+# and deleting both brings the whole vitest half back to "printed no summary".
+# **Neither is pinned by a case**: a case would have to set `FORCE_COLOR` for
+# the run it measures, and this harness deliberately does not reach into the
+# environment of the runner it drives. Re-check by hand with the command above.
 vitest_read() {
-  vitest_summary=$(printf '%s' "$1" | grep -E '^[[:space:]]*Tests[[:space:]]' | tail -1 | sed 's/^[[:space:]]*//')
-  vitest_errline=$(printf '%s' "$1" | grep -E '^[[:space:]]*Errors[[:space:]]+[0-9]+ error' | tail -1 | sed 's/^[[:space:]]*//')
+  local plain
+  plain=$(printf '%s' "$1" | sed $'s/\033\[[0-9;]*m//g')
+  vitest_summary=$(printf '%s' "$plain" | grep -E '^[[:space:]]*Tests[[:space:]]' | tail -1 | sed 's/^[[:space:]]*//')
+  vitest_errline=$(printf '%s' "$plain" | grep -E '^[[:space:]]*Errors[[:space:]]+[0-9]+ error' | tail -1 | sed 's/^[[:space:]]*//')
   vitest_passed=$(vitest_count "$vitest_summary" passed)
   vitest_failed=$(vitest_count "$vitest_summary" failed)
   vitest_errors=$(vitest_count "$vitest_errline" error)
@@ -317,7 +346,10 @@ run_named_test() {
         echo "Run \`npm install\` in ui/; this harness links that directory, it does not install."
         return 127
       fi
-      ( cd "$TREE/ui" && "$VITEST" run "$pkg" --reporter=default -t "$test" ) 2>&1
+      # `NO_COLOR=1`: see the note above `vitest_read`. Without it the summary
+      # arrives wrapped in escape sequences on any runner that forces colour,
+      # which GitHub Actions does and a local shell does not.
+      ( cd "$TREE/ui" && NO_COLOR=1 "$VITEST" run "$pkg" --reporter=default -t "$test" ) 2>&1
       ;;
   esac
 }
