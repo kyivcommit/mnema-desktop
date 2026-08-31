@@ -125,7 +125,7 @@ case_ "the blank check must not trim: whitespace is the validator's refusal, not
 # none, because it is a claim a person acts on.
 case_ "mask_preview must count documents by grouping, not by counting paths" \
   src-tauri/src/tree.rs \
-  's~            let documents = per_document\n                \.values\(\)\n                \.filter\(\|\(seen, matched\)\| seen == matched && \*matched > 0\)\n                \.count\(\) as i64;~            /* mutant: paths counted as documents */\n            let documents = paths;~' \
+  's~            let documents = per_document\n                \.values\(\)\n                \.filter\(\|\(seen, matched\)\| seen == matched\)\n                \.count\(\) as i64;~            /* mutant: paths counted as documents */\n            let documents = paths;~' \
   '/* mutant: paths counted as documents */' \
   mnema-desktop 'mask_preview_counts_paths_and_documents_apart' --test commands
 
