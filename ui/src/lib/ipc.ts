@@ -134,6 +134,36 @@ export const excludeSubfolder = (rootId: number, relativePath: string) =>
 export const includeSubfolder = (rootId: number, relativePath: string) =>
   invoke<boolean>('include_subfolder', { rootId, relativePath });
 
+// What `pattern` would remove, counted over the INDEX by the walk's own
+// matcher (`tree.rs`). The window has no glob library and must not grow one: a
+// count derived here would be a second implementation of the rule and would
+// disagree with the walk at exactly the edges the mask layer was built to pin
+// — the `.gitignore` parser edges, the case folding, the normalisation form.
+//
+// 🔴 The two numbers have different subjects and neither stands in for the
+// other. `paths` is every indexed path the mask matches; `documents` is the
+// ids for which EVERY indexed path matches — the ones that stop being findable
+// at all. A document with a second copy elsewhere loses a path and goes
+// nowhere, so `documents: 0` beside a non-zero `paths` is a real state.
+//
+// 🔴 `paths` is a FLOOR, not an exact count, and the sentence built from it
+// says so: it counts `status = 'indexed'` rows only, while the walk's
+// reconcile set is status-agnostic, so a masked file belonging to a `pending`,
+// `failed` or `skipped` document is removed by the walk and appears in no
+// preview.
+export type MaskPreview = { paths: number; documents: number };
+
+// No `rootId` anywhere below, and that is the whole difference from the
+// exclusion wrappers (D-c): a mask is global to the index, so there is no
+// per-root list to ask for.
+export const listMasks = () => invoke<string[]>('list_masks');
+export const maskPreview = (pattern: string) => invoke<MaskPreview>('mask_preview', { pattern });
+export const addMask = (pattern: string) => invoke<void>('add_mask', { pattern });
+// Answers whether a row actually went, for `includeSubfolder`'s reason: a
+// second window may have removed the same mask first, and "the mask is gone
+// now" and "there was no mask left to remove" are different things to say.
+export const removeMask = (pattern: string) => invoke<boolean>('remove_mask', { pattern });
+
 export type Freshness =
   | { kind: 'current' } | { kind: 'reindexed' } | { kind: 'fileChanged' }
   | { kind: 'fileMissing' } | { kind: 'noPath' };

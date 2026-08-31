@@ -62,6 +62,17 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
   | 'settings_folders_confirm_exclude_named' | 'settings_folders_confirm_include_named'
   | 'settings_folders_confirm_cancel_named'
+  | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_none'
+  | 'settings_masks_add' | 'settings_masks_input_label'
+  | 'settings_masks_remove' | 'settings_masks_remove_named'
+  | 'settings_masks_checking' | 'settings_masks_load_failed'
+  | 'settings_masks_confirm_add_heading' | 'settings_masks_confirm_remove_heading'
+  | 'settings_masks_add_cost' | 'settings_masks_add_cost_none' | 'settings_masks_remove_cost'
+  | 'settings_masks_confirm' | 'settings_masks_confirm_cancel'
+  | 'settings_masks_confirm_add_named' | 'settings_masks_confirm_remove_named'
+  | 'settings_masks_confirm_cancel_named'
+  | 'settings_masks_refused_add' | 'settings_masks_refused_remove'
+  | 'settings_masks_refused_case_note' | 'settings_masks_already_gone'
   | 'indexing_walk_starting' | 'indexing_walk_running'
   | 'indexing_embed_starting' | 'indexing_embed_running'
   | 'indexing_counts_ratio' | 'indexing_counts_counting'
@@ -467,6 +478,49 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_exclude_named: 'Підтвердити виключення {path}',
     settings_folders_confirm_include_named: 'Підтвердити скасування правила на {path}',
     settings_folders_confirm_cancel_named: 'Залишити {path} як є',
+    settings_masks_heading: 'Маски файлів',
+    // Три факти в одному абзаці, і жоден із них не виводиться з решти екрана:
+    // маска глобальна (D-c), тому не стосується тієї теки, поруч з якою вона
+    // намальована; кожна тека застосує її на СВОЄМУ наступному скануванні,
+    // тому одне сканування нічого не завершує; і регістр не має значення —
+    // Task 9b згортає регістр та нормалізує обидві сторони порівняння, тож
+    // «*.PDF» і «*.pdf» це одне правило, збережене двома рядками.
+    settings_masks_explainer: 'Маска стосується одразу всіх ваших тек: вона порівнюється з іменем файлу на будь-якій глибині. Кожна тека застосує її під час свого наступного сканування. Регістр літер не має значення, тож «*.PDF» і «*.pdf» — це одне й те саме правило.',
+    settings_masks_none: 'Жодної маски ще не додано.',
+    settings_masks_add: 'Додати маску',
+    settings_masks_input_label: 'Нова маска:',
+    settings_masks_remove: 'Видалити',
+    settings_masks_remove_named: 'Видалити маску {mask}',
+    settings_masks_checking: 'Перевіряємо, що прибере ця маска…',
+    settings_masks_load_failed: 'Не вдалося прочитати список масок.',
+    settings_masks_confirm_add_heading: 'Додати маску {mask}?',
+    settings_masks_confirm_remove_heading: 'Видалити маску {mask}?',
+    // 🔴 «Щонайменше», і це не обережність, а вимір. `mask_preview.paths`
+    // рахує лише рядки зі `status = 'indexed'` (`write.rs`), а множина, яку
+    // звіряє прохід, статусу не питає — тож файл документа в стані `pending`,
+    // `failed` чи `skipped` прохід прибере, а прев'ю його не показало. Точне
+    // число тут стало б обіцянкою, яку `removed: 5` після «3 файли» зробило б
+    // неправдою. Остання фраза називає саме той залишок.
+    settings_masks_add_cost: 'Станом на зараз під цю маску підпадає щонайменше {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} з уже проіндексованих, і {documents, plural, =0 {жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим шляхом} one {# документ більше не знайдеться: інші шляхи на нього не ведуть} few {# документи більше не знайдуться: інші шляхи на них не ведуть} many {# документів більше не знайдуться: інші шляхи на них не ведуть} other {# документа більше не знайдуться}}. Наступне сканування кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.',
+    // Нуль має власне речення: у спільному з ненульовим випадком гілка
+    // `=0` для документів каже «кожен із них проіндексовано ще й за іншим
+    // шляхом», а коли не підпав жоден шлях, казати нема про кого.
+    settings_masks_add_cost_none: 'Станом на зараз під цю маску не підпадає жоден із уже проіндексованих файлів. Наступне сканування кожної теки все одно може щось прибрати: файли, які так і не проіндексувалися, тут не враховані.',
+    settings_masks_remove_cost: 'Від наступного сканування кожної теки файли, які стримувала ця маска, індексуються знову, а їхній текст надсилається провайдеру моделі.',
+    settings_masks_confirm: 'Підтвердити',
+    settings_masks_confirm_cancel: 'Скасувати',
+    settings_masks_confirm_add_named: 'Підтвердити додавання маски {mask}',
+    settings_masks_confirm_remove_named: 'Підтвердити видалення маски {mask}',
+    settings_masks_confirm_cancel_named: 'Залишити {mask} як є',
+    // 🔴 Рамка навколо відмови, а не заміна її. Речення бекенда показується
+    // дослівно (жоден компонент не розгалужується на вид помилки), але
+    // `reason` всередині нього цитує ЗГОРНУТИЙ взірець: хто ввів «[A-_]x.txt»,
+    // читає про «[a-_]x.txt». Тому маску як її ввели називає ця рамка, а
+    // наступний рядок пояснює, звідки інший регістр у відповіді.
+    settings_masks_refused_add: 'Маску {mask} не додано. Ось що відповіла перевірка:',
+    settings_masks_refused_remove: 'Маску {mask} не видалено. Ось що відповів індекс:',
+    settings_masks_refused_case_note: 'У цій відповіді маска може бути записана іншим регістром, ніж ви ввели: маски порівнюються без урахування регістру.',
+    settings_masks_already_gone: 'Такої маски вже не було. Список перечитано.',
     indexing_walk_starting: 'Читання теки починається…',
     indexing_walk_running: 'Триває читання теки.',
     // The embedding pass takes no root and covers the whole index
@@ -706,6 +760,29 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_exclude_named: 'Confirm excluding {path}',
     settings_folders_confirm_include_named: 'Confirm not excluding {path}',
     settings_folders_confirm_cancel_named: 'Leave {path} as it is',
+    settings_masks_heading: 'File masks',
+    settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule.',
+    settings_masks_none: 'No file mask has been added yet.',
+    settings_masks_add: 'Add a mask',
+    settings_masks_input_label: 'New mask:',
+    settings_masks_remove: 'Remove',
+    settings_masks_remove_named: 'Remove the mask {mask}',
+    settings_masks_checking: 'Checking what this mask removes…',
+    settings_masks_load_failed: 'The list of masks could not be read.',
+    settings_masks_confirm_add_heading: 'Add the mask {mask}?',
+    settings_masks_confirm_remove_heading: 'Remove the mask {mask}?',
+    settings_masks_add_cost: 'As of now, at least {paths, plural, one {# file} other {# files}} already indexed match this mask, and {documents, plural, =0 {no document stops being findable — each one is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}. The next scan of each folder can remove more than that: files that never finished indexing are not counted here.',
+    settings_masks_add_cost_none: 'As of now, no file that is already indexed matches this mask. The next scan of each folder can still remove files: those that never finished indexing are not counted here.',
+    settings_masks_remove_cost: 'From the next scan of each folder on, the files this mask was holding back are indexed again, and their text is sent to the model provider.',
+    settings_masks_confirm: 'Confirm',
+    settings_masks_confirm_cancel: 'Cancel',
+    settings_masks_confirm_add_named: 'Confirm adding the mask {mask}',
+    settings_masks_confirm_remove_named: 'Confirm removing the mask {mask}',
+    settings_masks_confirm_cancel_named: 'Leave {mask} as it is',
+    settings_masks_refused_add: 'The mask {mask} was not added. This is what the check answered:',
+    settings_masks_refused_remove: 'The mask {mask} was not removed. This is what the index answered:',
+    settings_masks_refused_case_note: 'The answer above can quote your mask in a different letter case than the one you typed: masks are compared with letter case ignored.',
+    settings_masks_already_gone: 'There was no such mask left to remove. The list has been re-read.',
     indexing_walk_starting: 'Reading the folder is starting…',
     indexing_walk_running: 'The folder is being read.',
     indexing_embed_starting: 'Embedding the whole index is starting…',

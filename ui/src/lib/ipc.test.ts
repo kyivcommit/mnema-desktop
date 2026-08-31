@@ -278,6 +278,64 @@ test('includeSubfolder sends the pair and returns whether a rule was removed', a
   await expect(ipc.includeSubfolder(3, 'Archive')).resolves.toBe(false);
 });
 
+// The four mask wrappers. `Masks.test.ts` mocks these wrappers rather than
+// `invoke`, deliberately — what that file is about is the screen — so the wire
+// names live here and nowhere else. A wrapper that sent `{ mask: … }` where the
+// command declares `pattern` would leave every screen test green and every real
+// call refused.
+test('listMasks takes no argument at all — a mask is global, not per root', async () => {
+  invoke.mockResolvedValue([]);
+
+  await ipc.listMasks();
+
+  // Both directions: the wire string AND the absence of a payload. `listMasks`
+  // is the one list command in this file with no `rootId`, and a `rootId`
+  // smuggled in here would be a per-root reading of a global rule.
+  expect(invoke).toHaveBeenCalledWith('list_masks');
+  expect((invoke.mock.calls.at(-1) as unknown[]).length).toBe(1);
+});
+
+test('listMasks returns the stored patterns whole, in the order the shell sent them', async () => {
+  // Two, not one: a wrapper that returned `[list[0]]` satisfies a one-element
+  // fixture, and the order is the shell's (`Db::list_masks` sorts) rather than
+  // anything this side re-derives.
+  invoke.mockResolvedValue(['*.pdf', '*.tmp']);
+
+  await expect(ipc.listMasks()).resolves.toEqual(['*.pdf', '*.tmp']);
+});
+
+test('maskPreview sends the pattern under the name the command declares', async () => {
+  invoke.mockResolvedValue({ paths: 4, documents: 1 });
+
+  await expect(ipc.maskPreview('*.pdf')).resolves.toEqual({ paths: 4, documents: 1 });
+
+  expect(invoke).toHaveBeenCalledWith('mask_preview', { pattern: '*.pdf' });
+  expect(Object.keys((invoke.mock.calls.at(-1) as [string, object])[1])).toEqual(['pattern']);
+});
+
+test('addMask sends the pattern exactly as typed, untrimmed', async () => {
+  invoke.mockResolvedValue(undefined);
+
+  // The surrounding space is the point: `validate_mask` refuses it with a
+  // sentence of its own, and a wrapper that trimmed would hand the shell a
+  // different rule from the one the person typed and looked at.
+  await ipc.addMask(' *.pdf ');
+
+  expect(invoke).toHaveBeenCalledWith('add_mask', { pattern: ' *.pdf ' });
+});
+
+test('removeMask carries back whether a row actually went', async () => {
+  invoke.mockResolvedValue(true);
+
+  await expect(ipc.removeMask('*.pdf')).resolves.toBe(true);
+  expect(invoke).toHaveBeenCalledWith('remove_mask', { pattern: '*.pdf' });
+
+  // The other direction, because `false` is the answer the editor turns into a
+  // different sentence: there was no such mask left to remove.
+  invoke.mockResolvedValue(false);
+  await expect(ipc.removeMask('*.pdf')).resolves.toBe(false);
+});
+
 // The whole union, both halves of it: the six spellings pinned as values, and a
 // mapping TypeScript can only accept when every variant of `SubfolderState` has
 // an entry. A seventh variant added to `tree.rs` and mirrored here fails
