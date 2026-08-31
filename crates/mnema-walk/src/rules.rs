@@ -3,10 +3,19 @@ use ignore::overrides::{Override, OverrideBuilder};
 use std::path::Path;
 use thiserror::Error;
 
-/// The three layers, in the order they are applied. All of them are live at
+/// The rule layers, in the order they are applied. All of them are live at
 /// every walk rather than one-off actions: a rule that newly excludes an
 /// already-indexed file removes it on the next walk, which is what makes
 /// "I excluded that folder" mean "it is no longer findable" (§5).
+///
+/// §5's three — the built-in list, the in-tree `.gitignore` stack, and the
+/// user's path prefixes — plus a fourth this crate grew for PR 8b: the user's
+/// **file masks**. The fourth is not a variant of the third and does not live
+/// beside it. A prefix is a **path**, comes from disk, and rides the shared
+/// `Override`; a mask is a **glob over one file name**, is typed, is global
+/// rather than per-root, and has to be file-only — which the `Override` cannot
+/// express. [`MaskLayer`] carries the measurement behind every clause of that
+/// sentence.
 #[derive(Debug, Default, Clone)]
 pub struct WalkRules {
     builtin: bool,
@@ -23,6 +32,11 @@ pub struct WalkRules {
     /// 3, Critical finding). `builder()` relies on that: it does not
     /// re-check any of it before turning a prefix into a pattern.
     user_prefixes: Vec<String>,
+    /// The user's file masks, already validated and compiled — see
+    /// [`MaskLayer`] for what this layer is and, more importantly, for the
+    /// failure modes it does and does not share with the `Override` the two
+    /// fields above feed.
+    masks: MaskLayer,
 }
 
 /// A user-supplied exclusion prefix that cannot become a rule at all — not
@@ -126,6 +140,140 @@ pub enum RulesError {
          watched folder, not a shorthand for a home directory"
     )]
     HomeDirectoryShorthand { prefix: String },
+    /// A mask names a **file**, and a file's name never contains `/`. Refused
+    /// rather than reinterpreted as a path, because a path is what a *prefix*
+    /// expresses and a prefix comes from disk (D-a), where the byte-equality
+    /// question is already settled; confining a typed rule to one path
+    /// component is what keeps it from having to be a correct path as well.
+    ///
+    /// It cannot be left to the compile probe: measured on the pinned
+    /// `globset 0.4.19`, `logs/*.tmp` compiles without error and then matches
+    /// nothing, because [`MaskLayer`] asks about a name. The cost, named:
+    /// `logs/*.tmp` cannot be expressed in v1, and a person who wants it
+    /// excludes the folder instead.
+    #[error(
+        "file mask {mask:?} cannot contain `/` — a mask names a file, and a folder is excluded \
+         with an exclusion rule instead"
+    )]
+    MaskContainsSlash { mask: String },
+    /// The same platform-dependent trap [`RulesError::ContainsBackslash`]
+    /// refuses for a prefix, arriving by a different door.
+    /// `globset`'s `backslash_escape` is on where `\` is not a path separator
+    /// and off where it is, so `a\bee.txt` matches `abee.txt` here and
+    /// `a\bee.txt` on Windows. No rewrite is unambiguous, so it is refused.
+    #[error("file mask {mask:?} cannot contain a backslash — name the file without one")]
+    MaskContainsBackslash { mask: String },
+    /// A control character cannot be part of a real file name that a person
+    /// typed on purpose.
+    #[error("file mask {mask:?} contains a control character, which cannot name a file")]
+    MaskContainsControlCharacter { mask: String },
+    /// `globset` does **not** trim what the `.gitignore` line parser trims:
+    /// measured, `"*.pdf "` matches `"report.pdf "` and not `"report.pdf"`. So
+    /// a stray keystroke compiles into a mask for a name almost nobody has, and
+    /// nothing says so — the under-exclusion direction. Refused at both edges,
+    /// exactly as [`RulesError::SurroundingWhitespace`] refuses it for a
+    /// prefix.
+    #[error("file mask {mask:?} begins or ends with whitespace — remove it")]
+    MaskSurroundingWhitespace { mask: String },
+    /// 🔴 The one `.gitignore` edge decided by **refusal** rather than by
+    /// giving it a literal meaning, and the asymmetry with `#` is deliberate.
+    /// A leading `#` has no competing intent — the only thing `#notes.txt` can
+    /// mean is the file of that name, so it is taken literally and pinned by a
+    /// case. A leading `!` has two: to a person who knows `.gitignore` it means
+    /// *re-include*, and to this layer it is an ordinary character. Serving the
+    /// second silently gives them a mask for a file name almost nobody has,
+    /// which is the under-exclusion direction; a sentence is the only thing
+    /// that can tell them the first is not on offer.
+    ///
+    /// Scoped to the leading position: `!` inside a character class is
+    /// `globset`'s own negation and keeps working.
+    #[error(
+        "file mask {mask:?} starts with `!` — a mask only ever excludes, so there is nothing for \
+         a `!` to put back"
+    )]
+    MaskStartsWithExclamationMark { mask: String },
+    /// A mask that passes every check above and still cannot compile on its
+    /// own — `[`, for one, is an unclosed character class. The mirror of
+    /// [`RulesError::InvalidPrefix`], and, unlike that one, it is the whole of
+    /// the compile story rather than half of it: see [`MaskLayer`] for why this
+    /// layer has no aggregate failure to disclose.
+    #[error("file mask {mask:?} could not be compiled: {reason}")]
+    InvalidMask { mask: String, reason: String },
+}
+
+/// The user's file masks, compiled: a **file-only** layer that lives inside
+/// `builder()`'s one `filter_entry` closure rather than in the `Override`, and
+/// a public predicate so a caller can ask what it will remove without running
+/// a walk.
+///
+/// **Why it is not in the `Override`, which is where every other rule layer
+/// lives.** `ignore` decides file from directory on one condition —
+/// `if !glob.is_only_dir() || is_dir` (`ignore-0.4.31/src/gitignore.rs:273`) —
+/// so a pattern that is not explicitly directory-only matches **both**, and
+/// `.gitignore` syntax can express directory-only (a trailing `/`) while it
+/// cannot express file-only. Measured with `!*.pdf` as the only override over a
+/// tree holding `archive.pdf/keep.txt`: the walk kept `["notes.txt"]` alone —
+/// a whole subtree gone on a rule a person wrote about files. A mask therefore
+/// cannot live there at all, which is what
+/// `a_mask_never_prunes_a_directory` pins.
+///
+/// **And why it is inside the existing closure rather than a second one.**
+/// `WalkBuilder::filter_entry` *replaces* the predicate rather than adding one
+/// ("only one filter predicate can be applied to a `WalkBuilder`. Calling this
+/// subsequent times overrides previous filter predicates",
+/// `ignore-0.4.31/src/walk.rs:1042-1044`), and the one slot already holds the
+/// `ANCHORED_DIRS` layer. A second call would silently un-anchor
+/// `target`/`build`/`dist` — pinned by
+/// `a_stored_mask_does_not_un_anchor_the_builtin_layer`.
+///
+/// 🔴 **Which failure modes this shares with the `Override`, and which it does
+/// not.** It does **not** feed [`crate::Walked::rules_applied`]: that flag is
+/// the combined `Override`'s, and a mask is not part of that set, so **a mask
+/// can never be the input that empties the built-in list**. Nothing about the
+/// mask layer can make `.git` or `node_modules` start being indexed.
+///
+/// The mirror of that is the part worth stating rather than discovering: a mask
+/// failure therefore has **no equivalent of that signal**, and needs its own
+/// answer. The answer taken here is to remove the failure rather than report
+/// it. Every mask is validated and compiled **alone**, in `validate_mask`, and
+/// kept as its own compiled matcher; this layer is a `Vec` scanned with `any`,
+/// never a `GlobSet` whose combined automaton has a size limit. So the
+/// aggregate "every rule silently stopped applying" state that `rules_applied`
+/// exists to disclose does not arise here — there is no aggregate step in which
+/// it could. If this ever becomes a `GlobSet` for speed, that is the moment a
+/// mask needs a disclosure of its own, and this paragraph is the notice.
+///
+/// **What it does share:** a mask removal is recorded nowhere — no `PreSkip`,
+/// no `unreadable` — exactly like every other rule layer (see
+/// `Walked::unreadable`: rule removals are not read failures). And it is
+/// **global**: `WalkRules` carries no root, so one mask removes matching files
+/// under every watched folder, each on its own next walk.
+#[derive(Debug, Default, Clone)]
+pub struct MaskLayer {
+    /// One compiled matcher per mask, in the order given. Empty is the common
+    /// case and is what `default()` produces.
+    globs: Vec<globset::GlobMatcher>,
+}
+
+impl MaskLayer {
+    /// Whether a mask removes the file at `relative_path`.
+    ///
+    /// 🔴 **The single answer to "would this mask match", and the reason it is
+    /// public.** The walk asks it, and Task 10's `mask_preview` counts with it;
+    /// a preview standing on a second copy of the rule would disagree with the
+    /// walk at exactly the edges this layer's cases pin down — the `.gitignore`
+    /// parser edges, the ASCII-only case folding, the normalisation forms.
+    /// `the_mask_predicate_answers_exactly_what_the_walk_removes` is the guard
+    /// that they stay one answer.
+    ///
+    /// Asked of the **last component** of the path, which is what makes a mask
+    /// apply at every depth without any pattern-level anchoring: the walk hands
+    /// it a bare file name, a caller holding an indexed relative path hands it
+    /// `Work/report.pdf`, and both are asking about `report.pdf`.
+    pub fn matches(&self, relative_path: &str) -> bool {
+        let name = relative_path.rsplit('/').next().unwrap_or(relative_path);
+        self.globs.iter().any(|glob| glob.is_match(name))
+    }
 }
 
 impl WalkRules {
@@ -226,12 +374,50 @@ impl WalkRules {
             builtin,
             gitignore,
             user_prefixes: normalized,
+            // Masks are the builder step's, never `new`'s — see
+            // `with_masks` for why `new` keeps its signature.
+            masks: MaskLayer::default(),
         })
     }
 
     /// No rules at all. For tests that are about enumeration itself.
     pub fn none() -> Self {
         Self::default()
+    }
+
+    /// The user's file masks, whole — a builder step rather than a fourth
+    /// argument to [`WalkRules::new`], because `new` has 36 real call sites
+    /// (two of them production, `src-tauri/src/walk_job.rs` and
+    /// `src-tauri/src/bridge.rs`) and none of the other 34 cares about masks.
+    /// It **replaces** the set rather than adding to it, the same way `new`
+    /// takes the whole prefix vector: there is one mask set per walk, and a
+    /// caller assembling it from storage has it in one piece.
+    ///
+    /// Fails when a mask is not, by construction, a glob over a single file
+    /// name — see `validate_mask` and the `Mask…` arms of [`RulesError`].
+    /// Nothing is rewritten: a mask is either exactly the shape [`MaskLayer`]
+    /// can compile, or it is refused with a sentence naming what to type
+    /// instead. An empty string is the one non-error, meaning "no rule" — the
+    /// blank row in an editor — and it stores nothing.
+    pub fn with_masks(mut self, masks: Vec<String>) -> Result<Self, RulesError> {
+        let mut globs = Vec::with_capacity(masks.len());
+        for mask in &masks {
+            if let Some(compiled) = validate_mask(mask)? {
+                globs.push(compiled);
+            }
+        }
+        self.masks = MaskLayer { globs };
+        Ok(self)
+    }
+
+    /// The compiled mask layer, so a caller can ask what a mask would remove
+    /// without running a walk — the entry point Task 10's `mask_preview` counts
+    /// with. See [`MaskLayer::matches`] for why it is the *same* matcher rather
+    /// than a second one, and [`WalkRules::with_masks`] for how to build a
+    /// throwaway `WalkRules` around one candidate mask, which is also what
+    /// validates it.
+    pub fn masks(&self) -> &MaskLayer {
+        &self.masks
     }
 
     /// The question `WalkRules::new` asks of ONE user prefix, exposed so a
@@ -408,15 +594,42 @@ impl WalkRules {
             .parents(false);
 
         let builtin = self.builtin;
+        // 🔴 One `filter_entry` call, holding two layers. `WalkBuilder`'s
+        // doc: "only one filter predicate can be applied to a `WalkBuilder`.
+        // Calling this subsequent times overrides previous filter
+        // predicates" (`walk.rs:1042-1044`) — a second call for the masks
+        // would silently un-anchor `target`/`build`/`dist`.
+        let masks = self.masks.clone();
         b.filter_entry(move |entry| {
             // The root itself is never a candidate — pruning it would empty
             // the whole walk, not remove one directory from it.
-            if !builtin || entry.depth() == 0 {
+            if entry.depth() == 0 {
                 return true;
             }
             let Some(name) = entry.file_name().to_str() else {
                 return true;
             };
+            // The user's masks, and they are **not** gated on `builtin`:
+            // turning the built-in list off is a statement about this crate's
+            // own list, never about a rule the person typed.
+            //
+            // 🔴 **`is_file`, not `!is_dir`, and the difference is a
+            // disclosure.** Both never prune a directory, which is the rule
+            // this layer exists for; but `!is_dir` also swallows everything
+            // this crate names in `PreSkip` — a symlink, a dangling symlink, a
+            // FIFO — and an entry whose `file_type()` cannot be read at all.
+            // None of those is ever indexed either way, so the only thing
+            // `!is_dir` would change is that `enumerate` stops *saying* the
+            // walk met them (`PreSkipRule::NotAFile`, `NotAFileSubtree`,
+            // `Unreadable`). Asking the positive question keeps the mask's
+            // effect confined to what a mask is about: files that would
+            // otherwise be indexed.
+            if entry.file_type().is_some_and(|t| t.is_file()) && masks.matches(name) {
+                return false;
+            }
+            if !builtin {
+                return true;
+            }
             for &(dir, markers) in Self::ANCHORED_DIRS {
                 if dir != name {
                     continue;
@@ -578,6 +791,94 @@ fn validate_prefix(prefix: &str) -> Result<Option<String>, RulesError> {
         })?;
 
     Ok(Some(prefix.to_string()))
+}
+
+/// A mask, against what a mask IS rather than against a list of ways to be
+/// wrong — the lesson `validate_prefix` paid three review rounds for. A
+/// well-formed mask is a glob over **one file name**: it holds no `/`, no `\`
+/// and no control character, does not begin or end with whitespace, does not
+/// begin with `!`, and compiles on its own.
+///
+/// 🔴 **The `.gitignore` parser edges are decided here, not inherited.** A
+/// prefix reaches `GitignoreBuilder::add_line` through `OverrideBuilder`; a
+/// mask never does, because [`MaskLayer`] owns it instead — so `#`, `!`,
+/// trailing whitespace and `\` do not arrive with the meanings that parser
+/// gives them, and each needed a decision of its own. Measured on the pinned
+/// `globset 0.4.19` and pinned by a case each: `#` and a `[!a]` class are
+/// ordinary and are kept (`a_leading_hash_in_a_mask_is_an_ordinary_character`,
+/// `a_leading_exclamation_mark_in_a_mask_is_refused`'s first half); a leading
+/// `!`, either whitespace edge and a `\` anywhere are refused, each for the
+/// reason written on its `RulesError` arm. "Whatever the library does" is not a
+/// decision — it is how `./Photos` became a rule that compiled fine and matched
+/// nothing.
+///
+/// `Ok(None)` is the one non-error: a literal empty string, meaning "no rule",
+/// the same blank-row case `validate_prefix` allows. It must never become a
+/// stored mask — an empty glob compiles fine and matches the empty name, which
+/// no walk would ever ask about, so the mistake would be invisible everywhere
+/// except [`MaskLayer::matches`].
+///
+/// **Case-insensitive, and only here** (owner's ruling, 2026-08-31). The reason
+/// is the failure direction, not simplicity: case-sensitive is `globset`'s
+/// default and costs nothing, so this flag is the extra line. Case-sensitive
+/// would mean a person writes `*.pdf`, `REPORT.PDF` is indexed anyway, and
+/// under D29 its text goes to a third-party provider — D-a's under-exclusion
+/// hole, arriving through a typed rule. Case-insensitive errs toward excluding
+/// too much, which a person can see and undo. The prefix layer keeps `globset`'s
+/// default, because its rules come from disk and need no help.
+///
+/// ⚠️ **Two things that ruling does NOT close, measured rather than assumed.**
+///
+/// - **Unicode normalisation is a separate axis.** `caf\u{e9}.pdf` (NFC) and
+///   `cafe\u{301}.pdf` (NFD, the form macOS hands out) are different byte
+///   strings under any case folding, and measured here they do not match each
+///   other in either direction. Nothing normalises anything.
+/// - **The folding is ASCII only.** `globset` compiles a case-insensitive glob
+///   to a non-Unicode regex and then asks for case insensitivity — measured,
+///   `ÜBUNG.TXT` compiles to `(?-u)(?i)^\xc3\x9cBUNG\.TXT$` — so `(?i)` folds
+///   the ASCII bytes and leaves the two bytes of `Ü` alone. `É.txt` does not
+///   match `é.txt`.
+///
+/// Both are pinned by cases (`a_mask_does_not_bridge_unicode_normalisation`,
+/// `mask_case_folding_is_ascii_only`) so that a later session finds the answer
+/// written down instead of discovering it.
+fn validate_mask(mask: &str) -> Result<Option<globset::GlobMatcher>, RulesError> {
+    if mask.is_empty() {
+        return Ok(None);
+    }
+    if mask.contains('/') {
+        return Err(RulesError::MaskContainsSlash {
+            mask: mask.to_string(),
+        });
+    }
+    if mask.contains('\\') {
+        return Err(RulesError::MaskContainsBackslash {
+            mask: mask.to_string(),
+        });
+    }
+    if mask.chars().any(|c| c.is_control()) {
+        return Err(RulesError::MaskContainsControlCharacter {
+            mask: mask.to_string(),
+        });
+    }
+    if mask != mask.trim() {
+        return Err(RulesError::MaskSurroundingWhitespace {
+            mask: mask.to_string(),
+        });
+    }
+    if mask.starts_with('!') {
+        return Err(RulesError::MaskStartsWithExclamationMark {
+            mask: mask.to_string(),
+        });
+    }
+    globset::GlobBuilder::new(mask)
+        .case_insensitive(true)
+        .build()
+        .map(|glob| Some(glob.compile_matcher()))
+        .map_err(|err| RulesError::InvalidMask {
+            mask: mask.to_string(),
+            reason: err.to_string(),
+        })
 }
 
 /// One component of a `/`-split prefix against the whitelist described on

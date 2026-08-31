@@ -13,7 +13,7 @@ mod rules;
 // returns it, and a caller with a save dialog in front of a person needs to
 // match on it or put it in a signature, not just observe that `new` failed
 // (review fix round 2, Critical finding — this line was the whole gap).
-pub use rules::{BuiltinLayers, RulesError, WalkRules};
+pub use rules::{BuiltinLayers, MaskLayer, RulesError, WalkRules};
 
 // Defined in the shared-types crate, re-exported here so a caller that only
 // deals with the walk can name it without a second dependency.
@@ -131,6 +131,13 @@ pub struct Walked {
     /// `rules_applied == false` means "the walk may have kept files the
     /// user asked to exclude, so do not index or send them anywhere."
     /// Nothing in this crate reads this field yet — Task 7 does.
+    ///
+    /// 🔴 **The user's file masks are NOT one of the layers this answers
+    /// for**, and that cuts both ways. A mask can never be the input that
+    /// empties the built-in list, because it never joins the combined
+    /// `Override`; and equally, a mask has no equivalent of this signal, so it
+    /// could not report an aggregate failure of its own here even if it had
+    /// one. [`crate::MaskLayer`] states why it has none to report.
     pub rules_applied: bool,
 }
 
