@@ -380,8 +380,11 @@ case_() {
     case "$seen" in *"$key"*) return 0 ;; esac
     seen="$seen$key"
 
-    local out
+    # `local out` on its own line for the reason given at the mutated pass
+    # below: `local out=$(...)` makes `$?` the status of `local`, always 0.
+    local out status
     out=$(run_named_test "$@")
+    status=$?
 
     if [ "$runner" = cargo ]; then
       # `1 passed`, not merely exit zero. `--exact` with a name that matches
@@ -410,8 +413,23 @@ case_() {
     # cannot say which test protects the line is not evidence about either.
     vitest_read "$out"
     if [ -z "$vitest_summary" ]; then
+      # 🔴 The exit status is printed HERE and nowhere else, and it is
+      # diagnostic rather than a verdict — every verdict in this script is a
+      # parse of the counts, for the reason written above `vitest_read`. But
+      # "printed no summary" has three very different causes that the counts
+      # cannot tell apart, and the status can: 1 is vitest reporting a problem,
+      # 127 is a runner that is not there, and 137 is a process killed by the
+      # kernel with nothing to say.
+      #
+      # 🔴 And the whole output, not `head -3`. It was `head -3` until a CI run
+      # of this branch, where vitest printed its three-line banner and then
+      # died: the banner IS three lines, so the diagnostic showed the banner
+      # and hid whatever came after it. A truncated diagnostic is the same
+      # defect this project keeps paying for — a count from a limited query
+      # read as the whole answer — and it cost a day here.
       echo "BASELINE FAILURE: vitest printed no summary for $pkg — it never got as far as running"
-      printf '%s\n' "$out" | head -3 | sed 's/^/  /'
+      echo "  vitest exit status: $status"
+      printf '%s\n' "$out" | sed 's/^/  /'
       baseline_bad=$((baseline_bad + 1))
     elif [ "$vitest_errors" -ne 0 ]; then
       # Before any mutation, so it is the test file's own problem and every
@@ -539,7 +557,8 @@ case_() {
     if [ -z "$vitest_summary" ]; then
       echo "   BROKEN CASE: vitest printed no summary, so $test never ran — the mutation most"
       echo "   likely stopped the file being parsed at all"
-      printf '%s' "$out" | grep -vE '^[[:space:]]*$' | head -3 | sed 's/^/     /'
+      echo "   vitest exit status: $status"
+      printf '%s' "$out" | grep -vE '^[[:space:]]*$' | sed 's/^/     /'
       broken=$((broken + 1))
     elif [ "$vitest_errors" -ne 0 ]; then
       echo "   BROKEN CASE: the mutation threw outside the test, so nothing judged it"
