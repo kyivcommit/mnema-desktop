@@ -1249,6 +1249,14 @@ fn a_mask_containing_a_backslash_is_refused() {
 /// So the guard is not "the predicate returns the right answers"; it is "the
 /// predicate and the walk answer the same question about the same paths".
 ///
+/// 🔴 **Over regular files, which is the whole of its fixture and the whole of
+/// its claim.** Review measured the two apart on a symlink and on a FIFO: the
+/// walk asks `is_file()` first and this predicate asks nothing about the entry,
+/// so it calls them removed and the walk keeps them. The skew only ever
+/// overstates — nothing the walk removes is called safe — and it cannot be seen
+/// from here, because every name below is an ordinary file. The `#[cfg(unix)]`
+/// case further down is the one that pins the walk's half.
+///
 /// 🔴 **`sub/report.pdf` is the path that makes it a guard rather than a
 /// coincidence.** The walk hands the predicate a bare file name; `mask_preview`
 /// will hand it an indexed relative path. A `matches` that compared the whole
@@ -1258,7 +1266,7 @@ fn a_mask_containing_a_backslash_is_refused() {
 /// `report` and its name does. `other/REPORT2.PDF` sits in a folder of its own
 /// because macOS's default filesystem could not hold it beside `report.pdf`.
 #[test]
-fn the_mask_predicate_answers_exactly_what_the_walk_removes() {
+fn the_mask_predicate_and_the_walk_agree_on_regular_files() {
     let paths = [
         "report.pdf",
         "sub/report.pdf",

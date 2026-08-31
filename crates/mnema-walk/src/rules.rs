@@ -263,8 +263,20 @@ impl MaskLayer {
     /// a preview standing on a second copy of the rule would disagree with the
     /// walk at exactly the edges this layer's cases pin down — the `.gitignore`
     /// parser edges, the ASCII-only case folding, the normalisation forms.
-    /// `the_mask_predicate_answers_exactly_what_the_walk_removes` is the guard
+    /// `the_mask_predicate_and_the_walk_agree_on_regular_files` is the guard
     /// that they stay one answer.
+    ///
+    /// 🔴 **It answers about the name, not about the entry, and the walk asks it
+    /// SECOND.** The walk's condition is `is_file() && matches(name)`, so on a
+    /// symlink, a FIFO, or an entry whose `file_type()` cannot be read at all,
+    /// this predicate says "removed" where the walk removes nothing. The skew is
+    /// one-directional — everything the walk removes, this predicate also calls
+    /// removed, never the reverse — so it can overstate a mask's reach and can
+    /// never understate it. It is unreachable through `Found::relative`, which
+    /// carries regular files only; it becomes reachable the moment a caller
+    /// counts over a **disk listing** instead. Task 10's `mask_preview` must
+    /// therefore count over indexed relative paths, or it will show a person
+    /// more files than the next walk will take.
     ///
     /// Asked of the **last component** of the path, which is what makes a mask
     /// apply at every depth without any pattern-level anchoring: the walk hands
