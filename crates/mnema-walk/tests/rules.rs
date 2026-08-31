@@ -988,12 +988,20 @@ fn a_stored_mask_does_not_un_anchor_the_builtin_layer() {
 }
 
 /// 🔴 **The owner's ruling of 2026-08-31, and the reason is the failure
-/// direction, not simplicity.** Case-sensitive is `globset`'s default and costs
-/// nothing; the flag is the extra line. Case-sensitive means a person writes
+/// direction, not simplicity.** A case-sensitive mask means a person writes
 /// `*.pdf`, `REPORT.PDF` is indexed anyway, and under D29 its text goes to a
 /// third-party provider — the same under-exclusion hole D-a exists to avoid,
-/// arriving through a typed rule. Case-insensitive errs toward excluding too
-/// much, which a person can see and undo.
+/// arriving through a typed rule. Erring toward excluding too much is the
+/// direction a person can see and undo.
+///
+/// 🔴 **This is the case the Unicode work must not cost, which is why it is
+/// listed first among the mask cases and not folded into one of them.** An
+/// uppercase extension is what cameras, scanners and Windows produce, so this is
+/// the shape that actually occurs; a change that made `Копія*` work and stopped
+/// `*.PDF` from removing `report.pdf` would have broken the common case to fix
+/// the rare one. Measured: it dies from either half of `caseless_form` being
+/// removed, so it is a live guard on the new mechanism and not a leftover from
+/// the flag that used to deliver the ruling.
 #[test]
 fn a_mask_matches_a_file_name_whatever_its_ascii_case() {
     let kept = walk_with_masks(
@@ -1005,19 +1013,21 @@ fn a_mask_matches_a_file_name_whatever_its_ascii_case() {
     assert_eq!(kept, ["notes.txt"]);
 }
 
-/// The other half of the same ruling, and it is a separate case because a flag
-/// applied to the wrong matcher would satisfy the one above while silently
+/// The other half of the same ruling, and it is a separate case because folding
+/// applied one layer too wide would satisfy the one above while silently
 /// changing exclusion semantics for rules that come from **disk** and need no
-/// help. `OverrideBuilder::case_insensitive` is scoped by add order rather than
-/// per builder (`ignore-0.4.31/src/overrides.rs:149-151`), so one shared builder
-/// can hold both semantics at once — which is exactly how this could go wrong
-/// without any test noticing.
+/// help. Two ways that could happen, and both are live: `caseless_form` could be
+/// called on a prefix as well as on a mask, or — the older shape, from when the
+/// ruling was delivered by a builder flag — `OverrideBuilder::case_insensitive`
+/// is scoped by add order rather than per builder
+/// (`ignore-0.4.31/src/overrides.rs:149-151`), so one shared builder can hold
+/// both semantics at once.
 ///
 /// The fixture is one folder, not two, on purpose: macOS's default filesystem
 /// is case-insensitive at lookup, so `Photos` and `photos` cannot both exist.
 /// Both directions are still asserted, by walking the same tree twice.
 #[test]
-fn a_user_prefix_is_still_case_sensitive_beside_a_mask() {
+fn a_user_prefix_is_still_byte_exact_beside_a_mask() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("Photos")).unwrap();
     fs::write(root.path().join("Photos/a.jpg"), b"x").unwrap();
@@ -1054,99 +1064,455 @@ fn a_user_prefix_is_still_case_sensitive_beside_a_mask() {
     );
 }
 
-/// 🔴 **A measurement, not a prediction, and it is the hole the ruling above
-/// does NOT close.** `café.pdf` in NFC (`caf\u{e9}.pdf`) and in NFD
-/// (`cafe\u{301}.pdf`) are different byte strings under any case folding, and
-/// macOS hands out NFD. Measured on this repository's pinned `globset 0.4.19`:
-/// with `case_insensitive(true)`, a mask in one form does **not** match a name
-/// in the other, in either direction.
+/// 🔴 **The other half of "one folding mechanism, and only in the mask layer":
+/// a prefix must not acquire the normalisation bridge either.** A prefix comes
+/// from disk (D-a) — the window hands back the bytes the walk itself reported —
+/// so the two forms are never a question there, and making the prefix layer
+/// normalise would silently widen every stored exclusion instead.
 ///
-/// The case is written against the form the filesystem actually handed back
-/// rather than against an assumed one, because APFS preserves what it is given
-/// while HFS+ converted to NFD — so the constant to compare against is not
-/// knowable in advance, and a fixture that guessed would pass for the wrong
-/// reason on one of them.
+/// Written against the form the filesystem actually returned, for the same
+/// reason the mask case is: APFS stores what it is given and HFS+ converted to
+/// NFD, so the on-disk form is not a constant this case can assume.
+///
+/// Both directions: the prefix in the form the walk reported excludes the
+/// folder, and the prefix in the other form excludes nothing.
 #[test]
-fn a_mask_does_not_bridge_unicode_normalisation() {
-    const NFC: &str = "caf\u{e9}.pdf";
-    const NFD: &str = "cafe\u{301}.pdf";
+fn a_user_prefix_is_not_normalised_beside_a_mask() {
+    const KYIV_NFC: &str = "\u{41a}\u{438}\u{457}\u{432}";
+    const KYIV_NFD: &str = "\u{41a}\u{438}\u{456}\u{308}\u{432}";
 
     let root = tempfile::tempdir().unwrap();
-    fs::write(root.path().join(NFD), b"x").unwrap();
-    fs::write(root.path().join("notes.txt"), b"x").unwrap();
+    fs::create_dir_all(root.path().join(KYIV_NFD)).unwrap();
+    fs::write(root.path().join(KYIV_NFD).join("a.jpg"), b"x").unwrap();
+    fs::write(root.path().join("keep.txt"), b"x").unwrap();
 
-    let plain: Vec<String> = enumerate(root.path(), &WalkRules::none())
+    let walk = |prefix: &str| -> Vec<String> {
+        let rules = WalkRules::new(false, false, vec![prefix.to_string()])
+            .unwrap()
+            .with_masks(vec!["*.pdf".to_string()])
+            .unwrap();
+        enumerate(root.path(), &rules)
+            .found
+            .iter()
+            .map(|f| f.relative.clone())
+            .collect()
+    };
+
+    let on_disk = enumerate(root.path(), &WalkRules::none())
         .found
         .iter()
         .map(|f| f.relative.clone())
-        .collect();
-    let handed_back = plain
-        .iter()
-        .find(|p| p.ends_with(".pdf"))
-        .expect("the walk found the file this case is about")
-        .clone();
-    let other_form = if handed_back == NFD { NFC } else { NFD };
+        .find(|p| p.ends_with("/a.jpg"))
+        .expect("the walk found the file inside the folder this case is about");
+    let folder = on_disk
+        .strip_suffix("/a.jpg")
+        .expect("the path this case just matched on")
+        .to_string();
+    let other_form = if folder == KYIV_NFD {
+        KYIV_NFC
+    } else {
+        KYIV_NFD
+    };
     assert_ne!(
-        handed_back.as_str(),
+        folder.as_str(),
         other_form,
-        "the two normalisation forms must be different byte strings, or this case proves nothing"
+        "the two forms of the folder name must be different byte strings, or this case proves \
+         nothing"
     );
 
-    let same_form = WalkRules::none()
-        .with_masks(vec![handed_back.clone()])
-        .unwrap();
-    let kept: Vec<String> = enumerate(root.path(), &same_form)
-        .found
-        .iter()
-        .map(|f| f.relative.clone())
-        .collect();
     assert_eq!(
-        kept,
-        ["notes.txt"],
-        "a mask in the form the filesystem uses removes the file"
+        walk(&folder),
+        ["keep.txt"],
+        "the prefix in the form the walk reported must exclude its folder"
     );
-
-    let cross_form = WalkRules::none()
-        .with_masks(vec![other_form.to_string()])
-        .unwrap();
-    let kept: Vec<String> = enumerate(root.path(), &cross_form)
-        .found
-        .iter()
-        .map(|f| f.relative.clone())
-        .collect();
     assert_eq!(
-        kept,
-        [handed_back.as_str(), "notes.txt"],
-        "normalisation is bridged after all — the measurement this case pins has changed, and \
-         D138's stated hole with it"
+        // Sorted by path bytes — `k` (0x6b) precedes the first byte of `К`
+        // (0xd0), so the folder that survived comes second.
+        walk(other_form),
+        ["keep.txt", on_disk.as_str()],
+        "the mask layer's normalisation leaked into the prefix layer"
     );
 }
 
-/// 🔴 **The second measurement the ruling does not close: the folding is ASCII
-/// only.** `globset` compiles a case-insensitive glob to a **non-Unicode**
-/// regex and then asks for case insensitivity — measured, the compiled form of
-/// `ÜBUNG.TXT` is `(?-u)(?i)^\xc3\x9cBUNG\.TXT$` — so `(?i)` folds the ASCII
-/// bytes and leaves the two bytes of `Ü` alone. `É.txt` does not match `é.txt`.
+/// 🔴 **The hole Task 9 measured, closed: a mask and a name in different
+/// normalisation forms now match.** `café.pdf` composed (`caf\u{e9}.pdf`) and
+/// decomposed (`cafe\u{301}.pdf`) are different byte strings that name the same
+/// file to a person, and the form on disk is not predictable — APFS stores what
+/// it was given, HFS+ converted to NFD. A mask that only matched one form left
+/// the file indexed, and under D29 its text goes to a provider.
 ///
-/// Both directions in one fixture, differing on one axis at a time: the same
-/// non-ASCII letter with the ASCII part re-cased matches, and the non-ASCII
-/// letter re-cased does not.
+/// **Both directions, and the fixture is built to make them two directions
+/// rather than one twice.** `café.pdf` is created composed and `Київ.txt` is
+/// created decomposed, so the two on-disk names are in opposite forms; each is
+/// then masked with *its* counterpart form. The guard below fails loudly if the
+/// filesystem normalised them into the same form, because at that point the
+/// case would be asserting one direction twice and looking like two.
+///
+/// Every constant is compared against **the form the walk handed back**, never
+/// against a guessed one — the discipline Task 9's version of this case
+/// established, and the reason it does not pass for the wrong reason on one of
+/// two filesystems.
+///
+/// In Ukrainian only `й` and `ї` decompose at all, which is why the second name
+/// is `Київ` and not, say, `звіт`: a name with nothing to decompose would make
+/// this case green while proving nothing.
 #[test]
-fn mask_case_folding_is_ascii_only() {
-    let kept = walk_with_masks(&["\u{dc}bung.txt", "notes.txt"], false, &["\u{dc}BUNG.TXT"]);
+fn a_mask_bridges_unicode_normalisation_in_both_directions() {
+    const CAFE_NFC: &str = "caf\u{e9}.pdf";
+    const CAFE_NFD: &str = "cafe\u{301}.pdf";
+    const KYIV_NFC: &str = "\u{41a}\u{438}\u{457}\u{432}.txt";
+    const KYIV_NFD: &str = "\u{41a}\u{438}\u{456}\u{308}\u{432}.txt";
+
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join(CAFE_NFC), b"x").unwrap();
+    fs::write(root.path().join(KYIV_NFD), b"x").unwrap();
+    fs::write(root.path().join("notes.txt"), b"x").unwrap();
+
+    let walk = |masks: &[&str]| -> Vec<String> {
+        let rules = WalkRules::none()
+            .with_masks(masks.iter().map(|m| m.to_string()).collect())
+            .unwrap();
+        enumerate(root.path(), &rules)
+            .found
+            .iter()
+            .map(|f| f.relative.clone())
+            .collect()
+    };
+
+    let on_disk = walk(&[]);
+    let cafe = on_disk
+        .iter()
+        .find(|p| p.ends_with(".pdf"))
+        .expect("the walk found the composed-form file this case is about")
+        .clone();
+    let kyiv = on_disk
+        .iter()
+        .find(|p| p.ends_with(".txt") && *p != "notes.txt")
+        .expect("the walk found the decomposed-form file this case is about")
+        .clone();
+
+    let cafe_other = if cafe == CAFE_NFD { CAFE_NFC } else { CAFE_NFD };
+    let kyiv_other = if kyiv == KYIV_NFD { KYIV_NFC } else { KYIV_NFD };
+    assert_ne!(
+        cafe.as_str(),
+        cafe_other,
+        "the two forms of café must be different byte strings, or this case proves nothing"
+    );
+    assert_ne!(
+        kyiv.as_str(),
+        kyiv_other,
+        "the two forms of Київ must be different byte strings, or this case proves nothing"
+    );
+    assert_ne!(
+        cafe == CAFE_NFC,
+        kyiv == KYIV_NFC,
+        "the fixture's two files landed in the SAME normalisation form ({cafe:?}, {kyiv:?}) — \
+         this filesystem normalises names, so the two assertions below would be one direction \
+         asserted twice rather than both"
+    );
+
+    // Direction one: a composed mask against a decomposed name, or the reverse
+    // — whichever way round this filesystem put café.
+    let kept = walk(&[cafe_other]);
+    assert!(
+        !kept.contains(&cafe),
+        "a mask in the other normalisation form did not remove {cafe:?}; kept = {kept:?}"
+    );
+    assert!(
+        kept.contains(&kyiv) && kept.contains(&"notes.txt".to_string()),
+        "the mask took a neighbour with it; kept = {kept:?}"
+    );
+
+    // Direction two: the same question with the forms the other way round.
+    let kept = walk(&[kyiv_other]);
+    assert!(
+        !kept.contains(&kyiv),
+        "a mask in the other normalisation form did not remove {kyiv:?}; kept = {kept:?}"
+    );
+    assert!(
+        kept.contains(&cafe) && kept.contains(&"notes.txt".to_string()),
+        "the mask took a neighbour with it; kept = {kept:?}"
+    );
+
+    // And the plain case a transform could break while fixing the two above: a
+    // mask in the *same* form as the name still matches.
+    let kept = walk(&[&cafe, &kyiv]);
     assert_eq!(
         kept,
         ["notes.txt"],
-        "the ASCII half of the name folds, so this mask removes the file"
+        "a mask in the form the filesystem uses stopped removing the file"
+    );
+}
+
+/// 🔴 **The guard on the ORDER inside the transform, and it exists because
+/// removing that order changed nothing anywhere else.** `caseless_form` is
+/// `NFC(fold(NFD(x)))`, and the inner `NFD` was measured to be load-bearing:
+/// `U+0345` COMBINING GREEK YPOGEGRAMMENI has canonical combining class 240 and
+/// case-folds to `U+03B9` GREEK SMALL LETTER IOTA, class 0 — so folding first
+/// destroys the ordering information the normalisation afterwards needs. Run
+/// before the code was written, on `α U+0345 U+0300` against its own canonical
+/// ordering `α U+0300 U+0345`: `NFC(fold(x))` gives `U+03B1 U+1F76` for the
+/// first and `U+1F70 U+03B9` for the second, while `NFC(fold(NFD(x)))` gives
+/// `U+1F70 U+03B9` for both.
+///
+/// 🔴 **Every other case in this file has inputs that are already in a normal
+/// form, so deleting the inner `NFD` left all forty-three of them green.**
+/// Measured by deleting it. A file name is arbitrary bytes and nothing
+/// guarantees a normal form — any program can create one — so the state is
+/// reachable, and this is the only case that builds it.
+///
+/// It goes through `MaskLayer::matches` rather than through a walk because
+/// creating the file would put the question to the filesystem, which on APFS
+/// normalises at lookup and would answer it for the wrong reason.
+///
+/// Both directions, plus a neighbour that must not match, so a `matches` that
+/// had become "always true" would not pass this.
+#[test]
+fn a_mask_matches_a_name_that_is_in_no_normal_form_at_all() {
+    // α + YPOGEGRAMMENI + GRAVE: not canonically ordered, because 240 > 230.
+    const UNORDERED: &str = "\u{3b1}\u{345}\u{300}.txt";
+    // The same string, canonically ordered, and written in capitals so the
+    // fold is exercised at the same time.
+    const ORDERED_UPPER: &str = "\u{391}\u{300}\u{345}.txt";
+
+    assert_ne!(
+        UNORDERED, ORDERED_UPPER,
+        "the two spellings must be different byte strings, or this case proves nothing"
     );
 
-    let kept = walk_with_masks(&["\u{dc}bung.txt", "notes.txt"], false, &["\u{fc}BUNG.TXT"]);
+    let rules = WalkRules::none()
+        .with_masks(vec![ORDERED_UPPER.to_string()])
+        .unwrap();
+    assert!(
+        rules.masks().matches(UNORDERED),
+        "a canonically ordered mask did not match an unordered name — the inner NFD is gone"
+    );
+
+    let rules = WalkRules::none()
+        .with_masks(vec![UNORDERED.to_string()])
+        .unwrap();
+    assert!(
+        rules.masks().matches(ORDERED_UPPER),
+        "an unordered mask did not match a canonically ordered name — the inner NFD is gone"
+    );
+    assert!(
+        !rules.masks().matches("\u{3b2}\u{300}.txt"),
+        "the mask matched a different Greek name, so the two assertions above say nothing"
+    );
+}
+
+/// 🔴 **The second hole Task 9 measured, closed: case folding is no longer
+/// ASCII-only.** `globset` compiles to a non-Unicode regex — `ÜBUNG.TXT` became
+/// `(?-u)(?i)^\xc3\x9cBUNG\.TXT$` — so its `(?i)` folded the ASCII bytes and
+/// left the two bytes of `Ü` alone. A person writing a mask in their own
+/// alphabet got a rule that did not fire.
+///
+/// Three pairs, each a different alphabet and each asserted in both directions
+/// so that a one-sided fold would be visible: `Ü`/`ü` (the pair Task 9
+/// measured), Cyrillic `Копія`/`КОПІЯ`, and Greek final `ς` against `Σ` — the
+/// last one is the pair that tells full case folding apart from
+/// `str::to_lowercase`, which lowercases `Σ` to `σ` and leaves `ς` as `ς`.
+///
+/// The Cyrillic half carries a surviving neighbour, because a fold that
+/// removed everything would satisfy a one-sided assertion just as well.
+#[test]
+fn a_mask_folds_case_outside_ascii() {
+    let kept = walk_with_masks(&["\u{fc}bung.txt", "notes.txt"], false, &["\u{dc}BUNG.TXT"]);
     assert_eq!(
         kept,
-        // Sorted by path bytes, and `n` (0x6e) precedes the first byte of
-        // `Ü` (0xc3) — the surviving file is the one this case is about.
-        ["notes.txt", "\u{dc}bung.txt"],
-        "non-ASCII case folding happened after all — the measurement this case pins has changed"
+        ["notes.txt"],
+        "an uppercase mask did not remove the lowercase name"
+    );
+
+    let kept = walk_with_masks(&["\u{dc}BUNG.TXT", "notes.txt"], false, &["\u{fc}bung.txt"]);
+    assert_eq!(
+        kept,
+        ["notes.txt"],
+        "a lowercase mask did not remove the uppercase name"
+    );
+
+    // `Копія*` against `КОПІЯ звіту.docx`: the exact pair the plan named.
+    // Sorted by path bytes — `n` (0x6e) precedes the first byte of `К` (0xd0).
+    let kept = walk_with_masks(
+        &[
+            "\u{41a}\u{41e}\u{41f}\u{406}\u{42f} \u{437}\u{432}\u{456}\u{442}\u{443}.docx",
+            "\u{41a}\u{43e}\u{43d}\u{442}\u{440}\u{430}\u{43a}\u{442}.docx",
+            "notes.txt",
+        ],
+        false,
+        &["\u{41a}\u{43e}\u{43f}\u{456}\u{44f}*"],
+    );
+    assert_eq!(
+        kept,
+        [
+            "notes.txt",
+            "\u{41a}\u{43e}\u{43d}\u{442}\u{440}\u{430}\u{43a}\u{442}.docx"
+        ],
+        "a Cyrillic mask either missed the file it names or took its neighbour with it"
+    );
+
+    // Greek final sigma. `str::to_lowercase` maps `Σ` to `σ` and leaves `ς`
+    // alone, so under it this mask misses; full case folding maps both to `σ`.
+    let kept = walk_with_masks(
+        &["\u{3bb}\u{3bf}\u{3b3}\u{3bf}\u{3c2}.txt", "notes.txt"],
+        false,
+        &["\u{39b}\u{39f}\u{393}\u{39f}\u{3a3}.txt"],
+    );
+    assert_eq!(
+        kept,
+        ["notes.txt"],
+        "final sigma did not fold to sigma — this is `to_lowercase`, not case folding"
+    );
+}
+
+/// 🔴 **`.` and `..` are the two names no file can have**, so a mask spelling
+/// one of them is a rule that stores fine, compiles fine, and can never fire —
+/// the under-exclusion shape, arriving as a rule a person believes they wrote.
+/// Refused with a sentence, the same way `validate_prefix` refuses a `.` path
+/// component.
+///
+/// **Both directions, and the second one is the whole reason this is a check on
+/// two exact names rather than on a leading dot.** `.hidden` and `..чернетка`
+/// are ordinary file names — the walk sets `hidden(false)` precisely because a
+/// dotfile in a watched folder is an ordinary document — so they stay legal, and
+/// they are shown to *actually remove a file*, not merely to be accepted.
+#[test]
+fn a_mask_that_can_never_name_a_file_is_refused() {
+    for mask in [".", ".."] {
+        // Matched rather than `expect_err`, whose panic prints the whole
+        // compiled `WalkRules` and buries the thing that went wrong.
+        let sentence = match WalkRules::none().with_masks(vec![mask.to_string()]) {
+            Ok(_) => panic!("the mask {mask:?} was accepted, and no file can be named that"),
+            Err(refusal) => refusal.to_string(),
+        };
+        assert!(
+            sentence.contains(mask),
+            "the refusal does not name the mask that was typed: {sentence:?}"
+        );
+        assert!(
+            sentence.contains("no file"),
+            "the refusal does not say why the mask can never fire: {sentence:?}"
+        );
+    }
+
+    let kept = walk_with_masks(
+        &[
+            ".hidden",
+            "..\u{447}\u{435}\u{440}\u{43d}\u{435}\u{442}\u{43a}\u{430}",
+            "notes.txt",
+        ],
+        false,
+        &[".hidden"],
+    );
+    assert_eq!(
+        kept,
+        [
+            "..\u{447}\u{435}\u{440}\u{43d}\u{435}\u{442}\u{43a}\u{430}",
+            "notes.txt"
+        ],
+        "`.hidden` is a legal mask and must remove the file of that name"
+    );
+
+    let kept = walk_with_masks(
+        &[
+            ".hidden",
+            "..\u{447}\u{435}\u{440}\u{43d}\u{435}\u{442}\u{43a}\u{430}",
+            "notes.txt",
+        ],
+        false,
+        &["..\u{447}\u{435}\u{440}\u{43d}\u{435}\u{442}\u{43a}\u{430}"],
+    );
+    assert_eq!(
+        kept,
+        [".hidden", "notes.txt"],
+        "`..чернетка` is a legal mask and must remove the file of that name"
+    );
+}
+
+/// 🔴 **A mask's glob metacharacters have to survive the transform as
+/// metacharacters.** Case folding and normalisation rewrite the mask before it
+/// is compiled, so the question is not academic: a transform that turned `*`
+/// into a literal would leave every wildcard mask matching nothing, and one that
+/// *manufactured* a `[` would turn a literal name into a malformed pattern.
+/// Measured over every Unicode scalar value before this was written: no scalar
+/// transforms into any of `* ? [ ] { } ! , - \ /`, and the transform never
+/// empties a non-empty string.
+///
+/// Each metacharacter is asserted in both directions — the thing it must match
+/// and the thing it must not — because a `*` that had become a literal would
+/// satisfy "keep.txt survives" perfectly well.
+///
+/// The `[A-Z]` half is the one that shows the class content folding *with* the
+/// mask rather than around it: it is compiled as `[a-z]` and asked of a folded
+/// name, which is what makes an uppercase-written class mean the same rule as a
+/// lowercase-written one.
+#[test]
+fn a_masks_glob_metacharacters_survive_the_transform() {
+    let kept = walk_with_masks(&["a.tmp", "keep.txt"], false, &["*.tmp"]);
+    assert_eq!(kept, ["keep.txt"], "`*` stopped being a wildcard");
+
+    let kept = walk_with_masks(&["a.txt", "ab.txt"], false, &["?.txt"]);
+    assert_eq!(
+        kept,
+        ["ab.txt"],
+        "`?` matched either nothing or more than one character"
+    );
+
+    let kept = walk_with_masks(&["Alpha.txt", "9.txt"], false, &["[a-z]*.txt"]);
+    assert_eq!(
+        kept,
+        ["9.txt"],
+        "`[a-z]` stopped being a class: it must match the folded `Alpha.txt` and not `9.txt`"
+    );
+
+    let kept = walk_with_masks(&["Alpha.txt", "9.txt"], false, &["[A-Z]*.txt"]);
+    assert_eq!(
+        kept,
+        ["9.txt"],
+        "a class written in uppercase must be the same rule as the same class in lowercase"
+    );
+}
+
+/// ⚠️ **A limitation this task does NOT close, pinned so a later session finds
+/// it written down instead of discovering it.** `globset` compiles with Unicode
+/// off (`(?-u)`, hardcoded at `globset-0.4.19/src/glob.rs:675`), so a character
+/// class is a class of **bytes**: `[Гґ]` compiles to a class over the four bytes
+/// of those two letters and can only ever match a single byte, which no
+/// well-formed UTF-8 name offers there. The class matches nothing.
+///
+/// Measured identical before and after this commit's transform — the transform
+/// folds the class content (`[ГҐ]` becomes `[гґ]`) and changes the answer not at
+/// all, because the byte semantics were never about case. Booked for Task 11:
+/// the editor is where a person could be told, and `mask_preview` will show a
+/// zero.
+///
+/// Both directions, so this is a statement about the class rather than about
+/// the walk finding nothing: the file the class names survives, and a plain
+/// literal mask over the same non-ASCII letter removes it.
+#[test]
+fn a_character_class_of_non_ascii_letters_still_matches_nothing() {
+    let kept = walk_with_masks(
+        &["\u{413}file.txt", "notes.txt"],
+        false,
+        &["[\u{413}\u{490}]file.txt"],
+    );
+    assert_eq!(
+        kept,
+        ["notes.txt", "\u{413}file.txt"],
+        "a non-ASCII character class started matching — `globset`'s byte-class semantics have \
+         changed and this limitation can be lifted"
+    );
+
+    let kept = walk_with_masks(
+        &["\u{413}file.txt", "notes.txt"],
+        false,
+        &["\u{433}file.txt"],
+    );
+    assert_eq!(
+        kept,
+        ["notes.txt"],
+        "the same letter as a literal must still remove the file, or the case above is only \
+         saying the mask was broken some other way"
     );
 }
 
@@ -1265,6 +1631,21 @@ fn a_mask_containing_a_backslash_is_refused() {
 /// tells the two readings apart, since `sub/report.pdf` does not start with
 /// `report` and its name does. `other/REPORT2.PDF` sits in a folder of its own
 /// because macOS's default filesystem could not hold it beside `report.pdf`.
+///
+/// 🔴 **Four of the names exist to make the fold-and-normalise transform part of
+/// what this guard checks.** The walk hands the predicate a bare file name and a
+/// caller hands it a relative path; both must be transformed by the *same* call,
+/// and a fixture of ASCII names would prove nothing about that, because on ASCII
+/// the transform is plain lowercasing and any second copy of it would agree.
+/// So: `sub/ÜBUNG.TXT` (a fold that crosses out of ASCII),
+/// `sub/КОПІЯ звіту.docx` (Cyrillic, matched by a lowercase-Cyrillic mask),
+/// `sub/cafe\u{301}.pdf` (a decomposed name matched by a composed mask) and
+/// `Контракт.docx` (the non-matching Cyrillic neighbour).
+///
+/// The loop runs over **the paths the walk reported**, not over the ones this
+/// case asked for: a filesystem that normalises hands back a different byte
+/// string than it was given, and the guard would then be asking the predicate
+/// about a path that does not exist.
 #[test]
 fn the_mask_predicate_and_the_walk_agree_on_regular_files() {
     let paths = [
@@ -1277,6 +1658,10 @@ fn the_mask_predicate_and_the_walk_agree_on_regular_files() {
         "#literal.txt",
         "sub/deep/a.tmp",
         "sub/deep/keep.md",
+        "sub/\u{dc}BUNG.TXT",
+        "sub/\u{41a}\u{41e}\u{41f}\u{406}\u{42f} \u{437}\u{432}\u{456}\u{442}\u{443}.docx",
+        "sub/cafe\u{301}.pdf",
+        "\u{41a}\u{43e}\u{43d}\u{442}\u{440}\u{430}\u{43a}\u{442}.docx",
     ];
 
     let root = tempfile::tempdir().unwrap();
@@ -1290,8 +1675,23 @@ fn the_mask_predicate_and_the_walk_agree_on_regular_files() {
             "report*.pdf".to_string(),
             "*.tmp".to_string(),
             "#literal.txt".to_string(),
+            "\u{fc}bung.txt".to_string(),
+            "\u{41a}\u{43e}\u{43f}\u{456}\u{44f}*".to_string(),
+            "caf\u{e9}.pdf".to_string(),
         ])
         .unwrap();
+
+    let on_disk: Vec<String> = enumerate(root.path(), &WalkRules::none())
+        .found
+        .iter()
+        .map(|f| f.relative.clone())
+        .collect();
+    assert_eq!(
+        on_disk.len(),
+        paths.len(),
+        "the fixture did not land on disk as {} separate files: {on_disk:?}",
+        paths.len()
+    );
 
     let kept: Vec<String> = enumerate(root.path(), &rules)
         .found
@@ -1299,26 +1699,31 @@ fn the_mask_predicate_and_the_walk_agree_on_regular_files() {
         .map(|f| f.relative.clone())
         .collect();
 
-    for path in paths {
+    for path in &on_disk {
         let predicate_says_removed = rules.masks().matches(path);
-        let walk_removed = !kept.contains(&path.to_string());
+        let walk_removed = !kept.contains(path);
         assert_eq!(
             predicate_says_removed, walk_removed,
             "the predicate and the walk disagree about {path:?}: {predicate_says_removed} vs \
              {walk_removed}"
         );
     }
-    // Both answers really occur, so the loop is not nine trivial agreements on
-    // one side.
-    assert_eq!(
-        kept,
-        [
-            "notes.txt",
-            "sub/deep/keep.md",
-            "sub/myreport.pdf",
-            "sub/notes.txt"
-        ]
-    );
+    // Both answers really occur, so the loop is not thirteen trivial agreements
+    // on one side — and the count pins that the four non-ASCII names were
+    // *removed*, rather than agreed about by both sides saying "kept".
+    assert_eq!(kept.len(), 5, "kept = {kept:?}");
+    for survivor in [
+        "notes.txt",
+        "sub/deep/keep.md",
+        "sub/myreport.pdf",
+        "sub/notes.txt",
+        "\u{41a}\u{43e}\u{43d}\u{442}\u{440}\u{430}\u{43a}\u{442}.docx",
+    ] {
+        assert!(
+            kept.contains(&survivor.to_string()),
+            "{survivor:?} should have survived; kept = {kept:?}"
+        );
+    }
 }
 
 /// 🔴 **The "what disappears" question, asked of this layer.** A mask removes

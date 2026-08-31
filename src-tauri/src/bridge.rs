@@ -122,7 +122,10 @@ pub struct StoredExclusion {
 /// the joined path to the filesystem's own lookup, which is case-INSENSITIVE
 /// on APFS (macOS, the default) and on Windows, while `ignore`'s override
 /// matcher is case-sensitive (`WalkRules::builder` never calls
-/// `case_insensitive`, `mnema-walk/src/rules.rs:383-467`). A stored prefix
+/// `case_insensitive`, `mnema-walk/src/rules.rs:673-784` — and PR 8b's mask
+/// folding is deliberately confined to the mask layer, so it does not reach
+/// the override either: `a_user_prefix_is_still_byte_exact_beside_a_mask` and
+/// `a_user_prefix_is_not_normalised_beside_a_mask`). A stored prefix
 /// `private` against a folder actually spelled `Private` would otherwise
 /// report `existsOnDisk: true` while excluding nothing — a dead rule reading
 /// as live (review round 1, Important 2, measured: `WalkRules::new(true,

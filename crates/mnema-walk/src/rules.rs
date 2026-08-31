@@ -199,6 +199,90 @@ pub enum RulesError {
     /// layer has no aggregate failure to disclose.
     #[error("file mask {mask:?} could not be compiled: {reason}")]
     InvalidMask { mask: String, reason: String },
+    /// 🔴 The two names no file can have. A mask is compared against a file's
+    /// **own name**, and no directory entry is ever named exactly `.` or `..` —
+    /// those are the folder itself and its parent, and the walk never hands
+    /// either to the mask layer. So the rule compiles, stores, and can never
+    /// fire: the under-exclusion shape, arriving as a rule the person believes
+    /// they wrote. The mirror of [`RulesError::DotComponent`] for a prefix,
+    /// which refuses the same two tokens for a different reason.
+    ///
+    /// **Only those two exact names.** `.hidden` and `..чернетка` are ordinary
+    /// file names — the walk sets `hidden(false)` because a dotfile in a watched
+    /// folder is an ordinary document — and they stay legal
+    /// (`a_mask_that_can_never_name_a_file_is_refused` shows both halves).
+    #[error(
+        "file mask {mask:?} can never match — no file is named `.` or `..`; those are the \
+         folder itself and its parent"
+    )]
+    MaskCanNeverNameAFile { mask: String },
+}
+
+/// 🔴 **The one comparison rule, and the only place case or normalisation is
+/// decided.** Both sides go through this: each mask once when it is compiled
+/// (`validate_mask`), each file name once per entry ([`MaskLayer::matches`]).
+/// It is one function rather than two so that a mask and a name cannot be
+/// transformed differently — the defect class review Important 4.1 caught once
+/// already, where the predicate and the walk answered different questions.
+///
+/// **`NFC(fold(NFD(x)))`, and the order was measured rather than assumed.**
+/// Unicode's canonical caseless matching (Unicode 16.0 §3.13, D145) is
+/// `NFD(toCasefold(NFD(x)))`; the outer form is free — NFC and NFD are in
+/// bijection, so either gives the same equivalence — and NFC is taken because a
+/// composed pattern is shorter and closer to what the person typed. **The inner
+/// NFD is not free**, and the measurement is the reason it is here: `U+0345`
+/// COMBINING GREEK YPOGEGRAMMENI has combining class 240 and case-folds to
+/// `U+03B9` GREEK SMALL LETTER IOTA, which has class 0, so folding *destroys*
+/// the ordering information a later normalisation needs. Run on
+/// `α U+0345 U+0300` against its own canonical ordering `α U+0300 U+0345`:
+/// `NFC(fold(x))` gives `U+03B1 U+1F76` for one and `U+1F70 U+03B9` for the
+/// other, while `NFC(fold(NFD(x)))` gives `U+1F70 U+03B9` for both.
+///
+/// **Full case folding, not `str::to_lowercase`**, and that too was measured.
+/// They are different operations and the difference is not exotic: Greek final
+/// sigma `ς` lowercases to itself while `Σ` lowercases to `σ`, so
+/// `to_lowercase` leaves `ΛΟΓΟΣ` and `λογος` unequal; and `ß` lowercases to
+/// itself while it folds to `ss`. They agree on Cyrillic, on `ı` and on `İ`.
+/// Case folding is the operation caseless matching is defined in terms of;
+/// lowercasing only resembles it.
+///
+/// **Three properties this relies on, each measured over every Unicode scalar
+/// value before the code was written**, because each of them would be a defect
+/// nothing else here would catch:
+///
+/// - it never produces any of `* ? [ ] { } ! , - \ /`, so a literal in a mask
+///   cannot become a metacharacter and `validate_mask` may check the mask
+///   **before** transforming it;
+/// - it never empties a non-empty string, so the empty mask stays the only
+///   `Ok(None)`;
+/// - it is idempotent, so a name transformed twice is the name transformed
+///   once — which is what lets a mask be transformed at build time and compared
+///   against a name transformed at walk time.
+///
+/// On ASCII it is exactly `to_ascii_lowercase` (measured over all 128), so
+/// `*.PDF` still matches `report.pdf` — the common case, and the whole reason
+/// the case-insensitivity ruling exists.
+///
+/// ⚠️ **It transforms the inside of a character class too, and that is the one
+/// place this widens nothing and can narrow.** The mask is one string; nothing
+/// here parses `[...]` and steps around it. Usually that is exactly right —
+/// `[А-Я]` becomes `[а-я]` and so means the same rule as its lowercase spelling.
+/// Two shapes where it is not, both measured: a range that crosses ASCII
+/// punctuation (`[A-z]` becomes `[a-z]`, so a mask that removed `_x.txt` no
+/// longer does — the only narrowing this commit introduces), and a letter whose
+/// fold is more than one character (`[ß]` becomes `[ss]`, a class of one `s`).
+/// Both are rare enough to be recorded rather than fixed; fixing them means not
+/// folding inside `[...]`, which is a parser this layer does not have.
+///
+/// **Cost**, measured on this machine over 300 000 names: 572 ns for a mixed
+/// Cyrillic name, 315 ns for a plain ASCII one. An ASCII fast path was
+/// considered and dropped: it would be a second implementation of the rule for
+/// a saving that a walk of hundreds of thousands of files spends on one `stat`.
+fn caseless_form(name: &str) -> String {
+    use caseless::Caseless;
+    use unicode_normalization::UnicodeNormalization;
+
+    name.chars().nfd().default_case_fold().nfc().collect()
 }
 
 /// The user's file masks, compiled: a **file-only** layer that lives inside
@@ -252,6 +336,9 @@ pub enum RulesError {
 pub struct MaskLayer {
     /// One compiled matcher per mask, in the order given. Empty is the common
     /// case and is what `default()` produces.
+    ///
+    /// Each was compiled from `caseless_form(mask)` — the transform is paid
+    /// **once, here, at build time**, never once per name per mask.
     globs: Vec<globset::GlobMatcher>,
 }
 
@@ -262,9 +349,12 @@ impl MaskLayer {
     /// public.** The walk asks it, and Task 10's `mask_preview` counts with it;
     /// a preview standing on a second copy of the rule would disagree with the
     /// walk at exactly the edges this layer's cases pin down — the `.gitignore`
-    /// parser edges, the ASCII-only case folding, the normalisation forms.
+    /// parser edges, and now the case folding and the normalisation form, both
+    /// of which are decided by [`caseless_form`] on this side of `globset`
+    /// rather than by a flag inside it.
     /// `the_mask_predicate_and_the_walk_agree_on_regular_files` is the guard
-    /// that they stay one answer.
+    /// that they stay one answer, and four of its names are non-ASCII precisely
+    /// so that the transform is part of what it checks.
     ///
     /// 🔴 **It answers about the name, not about the entry, and the walk asks it
     /// SECOND.** The walk's condition is `is_file() && matches(name)`, so on a
@@ -282,9 +372,25 @@ impl MaskLayer {
     /// apply at every depth without any pattern-level anchoring: the walk hands
     /// it a bare file name, a caller holding an indexed relative path hands it
     /// `Work/report.pdf`, and both are asking about `report.pdf`.
+    ///
+    /// 🔴 **The name is folded and normalised here and nowhere else, once per
+    /// call.** The walk hands over the raw `file_name()` and does no folding of
+    /// its own, so there is exactly one site at which a name meets
+    /// [`caseless_form`] and exactly one at which a mask does — which makes "the
+    /// walk and the predicate compare the same way" true by construction rather
+    /// than by a matching pair of edits that a later session could break one
+    /// half of. The transform is paid once per entry, not once per entry per
+    /// mask, which is why the loop is inside it and not around it.
     pub fn matches(&self, relative_path: &str) -> bool {
+        // The common case is no masks at all, and it should not pay for a
+        // transform. `any` over an empty slice is `false` either way, so this
+        // is a cost guard and not a rule.
+        if self.globs.is_empty() {
+            return false;
+        }
         let name = relative_path.rsplit('/').next().unwrap_or(relative_path);
-        self.globs.iter().any(|glob| glob.is_match(name))
+        let name = caseless_form(name);
+        self.globs.iter().any(|glob| glob.is_match(&name))
     }
 }
 
@@ -831,32 +937,55 @@ fn validate_prefix(prefix: &str) -> Result<Option<String>, RulesError> {
 /// except [`MaskLayer::matches`].
 ///
 /// **Case-insensitive, and only here** (owner's ruling, 2026-08-31). The reason
-/// is the failure direction, not simplicity: case-sensitive is `globset`'s
-/// default and costs nothing, so this flag is the extra line. Case-sensitive
-/// would mean a person writes `*.pdf`, `REPORT.PDF` is indexed anyway, and
-/// under D29 its text goes to a third-party provider — D-a's under-exclusion
-/// hole, arriving through a typed rule. Case-insensitive errs toward excluding
-/// too much, which a person can see and undo. The prefix layer keeps `globset`'s
-/// default, because its rules come from disk and need no help.
+/// is the failure direction, not simplicity: a case-sensitive mask would mean a
+/// person writes `*.pdf`, `REPORT.PDF` is indexed anyway, and under D29 its text
+/// goes to a third-party provider — D-a's under-exclusion hole, arriving through
+/// a typed rule. Erring toward excluding too much is the direction a person can
+/// see and undo. The prefix layer keeps `globset`'s default, because its rules
+/// come from disk and need no help.
 ///
-/// ⚠️ **Two things that ruling does NOT close, measured rather than assumed.**
+/// 🔴 **How that ruling is delivered, and why it is not `case_insensitive(true)`
+/// any more.** Task 9 set that flag and measured what it actually bought:
+/// `globset` compiles with Unicode **off** — `(?-u)` is hardcoded at
+/// `globset-0.4.19/src/glob.rs:675` and `GlobBuilder` offers no switch — so its
+/// `(?i)` folded ASCII bytes and nothing else. `ÜBUNG.TXT` became
+/// `(?-u)(?i)^\xc3\x9cBUNG\.TXT$`, `Копія*` did not match `КОПІЯ звіту.docx`,
+/// and normalisation was not bridged in either direction. The ruling had shipped
+/// narrower than it was worded, in the under-exclusion direction.
 ///
-/// - **Unicode normalisation is a separate axis.** `caf\u{e9}.pdf` (NFC) and
-///   `cafe\u{301}.pdf` (NFD, the form macOS hands out) are different byte
-///   strings under any case folding, and measured here they do not match each
-///   other in either direction. Nothing normalises anything.
-/// - **The folding is ASCII only.** `globset` compiles a case-insensitive glob
-///   to a non-Unicode regex and then asks for case insensitivity — measured,
-///   `ÜBUNG.TXT` compiles to `(?-u)(?i)^\xc3\x9cBUNG\.TXT$` — so `(?i)` folds
-///   the ASCII bytes and leaves the two bytes of `Ü` alone. `É.txt` does not
-///   match `é.txt`.
+/// So the folding happens **outside** the library instead: both the mask here
+/// and the file name in [`MaskLayer::matches`] go through [`caseless_form`], and
+/// the glob itself is compiled **case-sensitive** — `globset`'s default, so
+/// there is no flag to see. 🔴 **Exactly one folding mechanism is live.** The
+/// flag came off in the same commit that added the transform, deliberately: two
+/// of them coexisting would let a bug in the new one be hidden by the old one on
+/// every ASCII input, which is most of them.
 ///
-/// Both are pinned by cases (`a_mask_does_not_bridge_unicode_normalisation`,
-/// `mask_case_folding_is_ascii_only`) so that a later session finds the answer
-/// written down instead of discovering it.
+/// Ordering, and it is safe rather than lucky: the checks above run on the mask
+/// **as typed**, and the transform runs after. Measured over every Unicode
+/// scalar value, `caseless_form` produces none of `* ? [ ] { } ! , - \ /` and
+/// never empties a string, so nothing it does can turn a mask that passed these
+/// checks into one that should not have.
+///
+/// The pair of cases that pin the two closed holes are
+/// `a_mask_bridges_unicode_normalisation_in_both_directions` and
+/// `a_mask_folds_case_outside_ascii`; `a_mask_matches_a_file_name_whatever_its_ascii_case`
+/// is the guard on the common case they must not cost —
+/// `*.PDF` still removing `report.pdf`.
+///
+/// ⚠️ **One thing this does NOT close**, pinned by
+/// `a_character_class_of_non_ascii_letters_still_matches_nothing`: because the
+/// compiled regex is byte-oriented, a character class of non-ASCII letters
+/// (`[Гґ]`) is a class of **bytes** and matches nothing. Folding its contents
+/// changes that not at all, since the byte semantics were never about case.
 fn validate_mask(mask: &str) -> Result<Option<globset::GlobMatcher>, RulesError> {
     if mask.is_empty() {
         return Ok(None);
+    }
+    if mask == "." || mask == ".." {
+        return Err(RulesError::MaskCanNeverNameAFile {
+            mask: mask.to_string(),
+        });
     }
     if mask.contains('/') {
         return Err(RulesError::MaskContainsSlash {
@@ -883,8 +1012,11 @@ fn validate_mask(mask: &str) -> Result<Option<globset::GlobMatcher>, RulesError>
             mask: mask.to_string(),
         });
     }
-    globset::GlobBuilder::new(mask)
-        .case_insensitive(true)
+    // Case-sensitive — `globset`'s default — because the folding is done by
+    // `caseless_form` on both sides instead. The mask pays for it once, here.
+    // The error still names the mask **as the person typed it**, never the
+    // transformed form, which they never saw.
+    globset::GlobBuilder::new(&caseless_form(mask))
         .build()
         .map(|glob| Some(glob.compile_matcher()))
         .map_err(|err| RulesError::InvalidMask {
