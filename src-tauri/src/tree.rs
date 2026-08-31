@@ -135,6 +135,114 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
     state.with_index(|db| db.read_snapshot(build_tree_listing))
 }
 
+/// What a mask would take, as of now — two numbers with **different
+/// subjects** (D-d).
+///
+/// `paths` and `documents` are not two ways of saying the same thing, and
+/// conflating them overstates the loss. A document is destroyed only when its
+/// **last** path goes (`forget_if_unnamed`, inside phase 3's transaction;
+/// `deleting_one_copy_keeps_the_document` in `crates/mnema-ingest/tests/walk.rs`
+/// pins it), so a mask that takes one of two copies of a file removes a path
+/// and destroys nothing. Reporting that as a lost document is a claim a person
+/// acts on — and an overstated disclosure is worse than none.
+///
+/// When `documents` is 0 and `paths` is not, that is a real state and the
+/// editor says so plainly: the paths go, the documents stay findable through
+/// their other copies.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskPreview {
+    /// Every indexed path the mask matches, across **all** watched roots.
+    pub paths: i64,
+    /// The `documentId`s for which **every** indexed path matches — the ones
+    /// that stop being findable at all.
+    pub documents: i64,
+}
+
+/// What `pattern` would remove, counted over the index. Read-only.
+///
+/// 🔴 **Counted over indexed relative paths, never over a disk listing, and
+/// this is the whole reason the command exists on this side of the wire.**
+/// [`mnema_walk::MaskLayer::matches`] answers about a *name* and nothing about
+/// the entry, while the walk asks `is_file() && matches(name)` — so on a
+/// symlink, a FIFO, or an entry whose `file_type()` cannot be read, the
+/// predicate says "removed" where the walk removes nothing. The skew is
+/// one-directional: everything the walk takes, the predicate also calls taken,
+/// never the reverse. Over `path` rows it is unreachable, because those are
+/// regular files the walk already indexed; over a `read_dir` it is reachable,
+/// and the preview would show a person more files than the next walk takes.
+///
+/// 🔴 **Through `WalkRules`, never a second matcher.** The window has no glob
+/// library (`ui/package.json`), and a count derived there would be a second
+/// implementation of the rule that disagrees with the walk at exactly the
+/// edges Task 9 spent its cases pinning: the `.gitignore` parser edges, the
+/// case folding, and the normalisation form. This is that plan's review round
+/// 1, P1.
+///
+/// **It validates first, so previewing a malformed mask gives the same
+/// sentence saving it would** — not a count of zero, which reads as "this rule
+/// would remove nothing" and is the opposite of true for a rule that cannot be
+/// stored at all.
+///
+/// **The literal empty string is not malformed and previews as two zeros.** It
+/// is `validate_mask`'s one non-error, meaning "no rule" — the blank row in an
+/// editor before anything is typed — and zero is the honest answer for it.
+/// [`crate::bridge::add_mask`] is where it is refused, because storing it is
+/// the harm.
+///
+/// **Grouping, and why it is complete.** `documents` counts the ids for which
+/// every one of the document's indexed paths matches, over all roots at once —
+/// a mask is global, so a document with a copy under a second watched folder
+/// must be seen whole. `Db::indexed_files_under_root` returns the paths of
+/// `status = 'indexed'` documents only, and status is a property of the
+/// *document*: either all of a document's paths are in this set or none are.
+/// So a document that appears here appears with **all** of its paths, and the
+/// "every path matches" test is asked of the whole set rather than of a
+/// visible fragment of it.
+///
+/// **"As of now".** The disk can change between this reply and the scan that
+/// acts on it, and the removal happens on each root's own next scan — which is
+/// two halves of one sentence the editor owes a person (Task 11), not
+/// something this count can carry.
+#[tauri::command(async)]
+pub fn mask_preview(state: State<'_, AppState>, pattern: String) -> Result<MaskPreview, Error> {
+    // Before the index is touched: a refusal is about the pattern and is the
+    // same whether the index holds one file or a million.
+    let rules = WalkRules::none().with_masks(vec![pattern])?;
+    let masks = rules.masks();
+
+    // One snapshot, for `list_tree`'s reason: an indexing job commits on its
+    // own connection, outside this mutex, so roots read before it and files
+    // read after it would be two different states of the index — and this
+    // reply is a single claim about one of them.
+    state.with_index(|db| {
+        db.read_snapshot(|db| {
+            let mut paths = 0i64;
+            // documentId -> (indexed paths seen, of those, matched)
+            let mut per_document: std::collections::HashMap<String, (i64, i64)> =
+                std::collections::HashMap::new();
+
+            for root in db.list_watched_roots()? {
+                for file in db.indexed_files_under_root(root.id)? {
+                    let entry = per_document.entry(file.document_id).or_insert((0, 0));
+                    entry.0 += 1;
+                    if masks.matches(&file.relative_path) {
+                        entry.1 += 1;
+                        paths += 1;
+                    }
+                }
+            }
+
+            let documents = per_document
+                .values()
+                .filter(|(seen, matched)| seen == matched && *matched > 0)
+                .count() as i64;
+
+            Ok(MaskPreview { paths, documents })
+        })
+    })
+}
+
 /// What the launcher's right card paints around a cited passage, or the
 /// refusal that says the passage is no longer there.
 ///

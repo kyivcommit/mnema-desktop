@@ -627,3 +627,190 @@ fn removing_a_watched_root_takes_its_exclusions_with_it() {
     assert_eq!(remaining, 1, "only the surviving root's rule may remain");
     assert_eq!(db.list_path_exclusions(kept).unwrap(), vec!["Photos"]);
 }
+
+// --------------------------------------------------------------------- masks
+
+/// A mask is stored once however many times it is added, and the second add
+/// says so rather than failing. The caller is a window and a person pressing
+/// "add" again is not an error state; `false` is the whole signal that nothing
+/// was written.
+///
+/// `pattern` is the table's PRIMARY KEY, so this is the schema's rule and not
+/// the writer's — which is what lets `add_mask` be a bare `ON CONFLICT DO
+/// NOTHING` with no target to keep in step with an index predicate.
+#[test]
+fn adding_the_same_mask_twice_writes_one_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+
+    assert!(db.add_mask("*.pdf").unwrap());
+    assert!(
+        !db.add_mask("*.pdf").unwrap(),
+        "the second add must report that it wrote nothing"
+    );
+
+    assert_eq!(db.list_masks().unwrap(), vec!["*.pdf"]);
+}
+
+/// 🔴 `*.PDF` and `*.pdf` are ONE rule to the mask layer, which folds case
+/// (`caseless_form`, `mnema-walk/src/rules.rs`), and TWO rows to this table,
+/// whose primary key compares bytes.
+///
+/// Both halves are asserted because both are the decision. Storing both is
+/// harmless — they match exactly the same files — and deduplicating here would
+/// mean rewriting or discarding what a person typed at the layer furthest from
+/// them, with nothing on screen to say it happened. Telling them the two are
+/// equivalent belongs to the editor (Task 11), which can say it in words.
+#[test]
+fn two_masks_differing_only_in_case_are_two_rows_and_neither_is_rewritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+
+    assert!(db.add_mask("*.pdf").unwrap());
+    assert!(
+        db.add_mask("*.PDF").unwrap(),
+        "the key compares bytes, so the second spelling is a second row"
+    );
+
+    assert_eq!(
+        db.list_masks().unwrap(),
+        vec!["*.PDF", "*.pdf"],
+        "both spellings must come back exactly as they were typed"
+    );
+}
+
+/// Removing reports whether a row actually went — the same split the exclusion
+/// trio makes, and for the same reason: "removed" and "there was nothing there"
+/// are different sentences, and the second one is what a window shows after
+/// another window removed the rule first.
+#[test]
+fn removing_a_mask_reports_whether_a_row_went() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    db.add_mask("*.pdf").unwrap();
+
+    assert!(db.remove_mask("*.pdf").unwrap());
+    assert!(
+        !db.remove_mask("*.pdf").unwrap(),
+        "removing a mask that is not there is not an error, and not a removal"
+    );
+    assert!(db.list_masks().unwrap().is_empty());
+}
+
+/// Removing one mask leaves the others alone. A `DELETE` that lost its `WHERE`
+/// clause empties the whole table, and every test above would still pass:
+/// each of them holds exactly one mask at the moment it removes one.
+#[test]
+fn removing_one_mask_leaves_the_others_standing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    db.add_mask("*.pdf").unwrap();
+    db.add_mask("*.tmp").unwrap();
+
+    assert!(db.remove_mask("*.pdf").unwrap());
+
+    assert_eq!(
+        db.list_masks().unwrap(),
+        vec!["*.tmp"],
+        "the mask that was not named must still be there"
+    );
+}
+
+/// Several masks come back in a stable order, so a window renders the same list
+/// twice running.
+///
+/// ⚠️ **This test cannot fail from the `ORDER BY` going, and saying so is the
+/// point.** It was written believing it could — `file_mask` is a rowid table, so
+/// insertion order looked like the alternative — and the probe said otherwise:
+/// deleting the clause left all 18 tests in this file green. `pattern` is the
+/// PRIMARY KEY, SQLite builds an implicit unique index for it, and the query is
+/// answered from that index already sorted. The masks are still inserted out of
+/// order, because the test is about the promise to the window and not about the
+/// clause; what the promise actually rests on is asserted by
+/// `the_mask_listing_is_answered_from_the_index_that_sorts_it` below.
+#[test]
+fn masks_come_back_sorted() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+
+    db.add_mask("*.tmp").unwrap();
+    db.add_mask("*.pdf").unwrap();
+    db.add_mask("*.log").unwrap();
+
+    assert_eq!(
+        db.list_masks().unwrap(),
+        vec!["*.log", "*.pdf", "*.tmp"],
+        "insertion order would put *.tmp first"
+    );
+}
+
+/// 🔴 The premise `masks_come_back_sorted` silently rests on: the listing is
+/// answered from the primary key's own index, which is what makes it sorted
+/// with or without the `ORDER BY`.
+///
+/// This is here because the equivalence is conditional and the condition is
+/// invisible. `exclusions_come_back_sorted_with_no_index_left_to_walk` can drop
+/// its index and watch the two orders come apart; `sqlite_autoindex_file_mask_1`
+/// is implicit and cannot be dropped, so the premise is read off the plan
+/// instead. A migration that gave `file_mask` a surrogate `id` key, or reordered
+/// a composite one, would make the clause load-bearing again — and this line is
+/// what would say so, rather than the ordering quietly becoming insertion order
+/// on somebody's screen.
+///
+/// `SCAN`, not merely "an index is mentioned": a plan that used the index for a
+/// lookup and then sorted would say `USE TEMP B-TREE FOR ORDER BY`, and that is
+/// the plan in which the clause is doing the work.
+#[test]
+fn the_mask_listing_is_answered_from_the_index_that_sorts_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+
+    let plan: String = db
+        .conn()
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT pattern FROM file_mask ORDER BY pattern",
+            [],
+            |r| r.get(3),
+        )
+        .unwrap();
+
+    assert!(
+        plan.contains("SCAN file_mask USING COVERING INDEX sqlite_autoindex_file_mask_1"),
+        "the listing must be answered from the primary key's own index, which is \
+         why the ORDER BY is redundant: {plan}"
+    );
+    assert!(
+        !plan.contains("TEMP B-TREE"),
+        "a plan that sorts separately means the ORDER BY is load-bearing after \
+         all, and masks_come_back_sorted is then the only thing holding it: {plan}"
+    );
+}
+
+/// 🔴 A mask belongs to no watched root, and removing a root takes none with
+/// it. This is D-c's storage half: `file_mask` carries no `watched_root_id`, so
+/// there is no cascade to fire — and a person who removes one watched folder
+/// keeps the rule that was hiding their temporary files everywhere else.
+///
+/// Both directions: the exclusion on the removed root goes (the cascade that
+/// does exist still works), and the mask stays.
+#[test]
+fn removing_a_watched_root_leaves_the_masks_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let doomed = db.insert_watched_root("/tmp/alpha").unwrap();
+    db.add_path_exclusion(doomed, "Photos").unwrap();
+    db.add_mask("*.pdf").unwrap();
+
+    db.delete_watched_root(doomed).unwrap();
+
+    let rules: i64 = db
+        .conn()
+        .query_row("SELECT count(*) FROM ignore_rule", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rules, 0, "the root's own exclusion must go with it");
+    assert_eq!(
+        db.list_masks().unwrap(),
+        vec!["*.pdf"],
+        "a mask is global: it survives the removal of any one watched folder"
+    );
+}

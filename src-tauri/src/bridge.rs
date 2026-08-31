@@ -499,6 +499,91 @@ pub fn include_subfolder(
     state.with_index(|db| db.remove_path_exclusion(root_id, &relative_path))
 }
 
+/// Every stored file mask, sorted. Off the main thread for the reason given
+/// on [`open_index`].
+///
+/// **No `root_id`, and that is the whole difference from
+/// [`list_exclusions`]** (D-c). A mask is a glob over a file's *name*: it
+/// applies at every depth under **every** watched folder, so there is no
+/// per-root list to ask for and no root to check the availability of. That
+/// also means this command has no `RootUnavailable` guard and needs none —
+/// there is no filesystem question here at all, unlike `existsOnDisk`.
+///
+/// **`Vec<String>`, not a wire struct.** [`StoredExclusion`] exists because a
+/// stored prefix carries a second fact the window cannot derive (whether its
+/// folder is still on disk). A mask carries no such fact: it names no path, so
+/// nothing about it can go stale against the filesystem. A struct with one
+/// field would be a place for a second field to be invented.
+#[tauri::command(async)]
+pub fn list_masks(state: State<'_, AppState>) -> Result<Vec<String>, Error> {
+    state.with_index(|db| db.list_masks())
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// **The rule this command exists to enforce: a mask is validated before it is
+/// stored**, and a refusal reaches the person as `RulesError`'s own sentence.
+/// A stored mask the walk later refuses is worse than no mask at all: under
+/// [`crate::walk_job::start_walk_job`] it stops the whole walk, and until
+/// somebody runs one it sits in the editor looking like protection.
+///
+/// **The candidate alone, in a throwaway `WalkRules`** —
+/// `WalkRules::none().with_masks(vec![candidate])` both validates and compiles
+/// it, which is why no `check_mask` twin of `WalkRules::check_prefix` was
+/// added: `check_prefix` exists because `WalkRules::new` would have needed the
+/// whole prefix vector, and `with_masks` takes a vector this command can make
+/// one element long. A second entry point would be a second thing to keep in
+/// step with `validate_mask`.
+///
+/// Not the stored set plus the candidate, for the same reason
+/// [`exclude_subfolder`] gives: there is no aggregate compile step to fail
+/// here at all. Each mask compiles into its own `GlobMatcher`
+/// (`MaskLayer::globs`), so a set that refuses to combine is not a state this
+/// layer can be in — which is also why the mask layer does not feed
+/// `Walked::rules_applied` and why "narrow the probe to the candidate" is not
+/// a mutation case for this file.
+///
+/// 🔴 **The empty check comes FIRST and does not trim.** `validate_mask`
+/// answers `Ok(None)` for the literal empty string only; `"   "` is a refusal
+/// with a sentence of its own (`RulesError::MaskSurroundingWhitespace`). A
+/// command that trimmed before comparing would hand a person who typed spaces
+/// the wrong one of those two sentences, and a command that skipped the check
+/// entirely would store a rule that removes nothing — the same P2 the
+/// exclusion side already paid for.
+#[tauri::command(async)]
+pub fn add_mask(state: State<'_, AppState>, pattern: String) -> Result<(), Error> {
+    if pattern.is_empty() {
+        return Err(Error::BlankMask);
+    }
+    mnema_walk::WalkRules::none().with_masks(vec![pattern.clone()])?;
+    state.with_index(|db| db.add_mask(&pattern))?;
+    Ok(())
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// `Db::remove_mask` already answers whether a row went, and this is a thin
+/// pass-through for the same reason [`include_subfolder`] is one: a second
+/// window may have removed the same mask first, and "there was nothing there"
+/// is a different sentence from "removed".
+///
+/// **No validation on the way out**, deliberately, and the argument is
+/// [`Error::InvalidExclusionRule`]'s: removing a rule must always work,
+/// including one an older build stored before this validator existed. A guard
+/// here would strand exactly the rows a person needs to be able to delete.
+///
+/// 🔴 **This is the inverse move, and it has a cost of its own that this
+/// layer cannot state.** Removing a mask makes every file it was holding back
+/// eligible again on each watched root's next scan, and under D29 an indexed
+/// file is a file whose text goes to a third-party provider. Saying so before
+/// the click is the editor's job (Task 11, the "what disappears" pass's fourth
+/// hiding place); this command is the one place that makes it happen, so the
+/// obligation is recorded here rather than only in a plan.
+#[tauri::command(async)]
+pub fn remove_mask(state: State<'_, AppState>, pattern: String) -> Result<bool, Error> {
+    state.with_index(|db| db.remove_mask(&pattern))
+}
+
 /// The window needs a citation, not a chunk id. `mnema-index` already
 /// re-exports `Citation` and it is `Serialize` (its derive in `write.rs`), so this
 /// crosses the seam without touching the dependency graph — the seam was

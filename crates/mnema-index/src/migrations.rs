@@ -4,7 +4,7 @@ use rusqlite_migration::{M, Migrations};
 use crate::Error;
 
 /// Bumped whenever the DDL changes. Stored in PRAGMA user_version.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Which reader made the document at each path, and which version of it.
 ///
@@ -91,6 +91,43 @@ CREATE UNIQUE INDEX ux_ignore_rule_path
     ON ignore_rule(watched_root_id, path_prefix)
  WHERE path_prefix IS NOT NULL;";
 
+/// The user's file masks, global to the index rather than per watched root.
+///
+/// **Its own migration, never appended to [`ADD_IGNORE_RULE_UNIQUE`] above**
+/// (D-b). Migration 3 shipped in PR 8a, so indexes on disk are already at
+/// `user_version = 3` and `to_latest` runs nothing on them for a migration they
+/// are already past — the table would exist only on machines installed after
+/// this commit, with every fresh-database test still green. The list's own rule
+/// below says the same thing positively: the index of each migration is the
+/// `user_version` it produces, so new DDL means a new entry, always.
+/// `file_mask_reaches_a_database_that_is_already_at_version_three` is what holds
+/// this to it, and it asserts the table is ABSENT at version 3 first, because
+/// that half is the one the appended form fails.
+///
+/// **No `watched_root_id`, and that is the decision rather than an omission**
+/// (D-c). A mask is a glob over a file's *name* and applies at every depth under
+/// every watched folder; `WalkRules` carries no root either
+/// (`mnema-walk/src/rules.rs`, `MaskLayer`). A per-root column would be a claim
+/// the walk cannot honour.
+///
+/// **`pattern` is the primary key rather than a surrogate `id`**: nothing reads
+/// a mask by id, and a key nobody uses is a column that has to be kept honest
+/// for no one. It also makes "added twice is one row" the table's own rule
+/// rather than the writer's, which is what lets `Db::add_mask` be a bare
+/// `ON CONFLICT DO NOTHING`.
+///
+/// ⚠️ **The key compares BYTES, and the mask layer compares caselessly**
+/// (`caseless_form`, `rules.rs`). So `*.PDF` and `*.pdf` are two rows and one
+/// rule: both store, and both behave identically. That is harmless and it is
+/// deliberately not deduplicated here — folding at the storage layer would
+/// silently rewrite what a person typed. Telling them the two are equivalent is
+/// the editor's job (Task 11).
+const ADD_FILE_MASK: &str = "\
+CREATE TABLE file_mask (
+    pattern    TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);";
+
 /// The migrations in order; the index of each is the `user_version` it produces.
 ///
 /// **`schema.sql` is migration 1 and is now frozen.** It is not a description of
@@ -105,6 +142,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("schema.sql")),
         M::up(ADD_PATH_READER),
         M::up(ADD_IGNORE_RULE_UNIQUE),
+        M::up(ADD_FILE_MASK),
     ])
 }
 
@@ -247,6 +285,84 @@ mod tests {
             "ix_path_document is what `forget_if_unnamed` counts through; a \
              rebuild that drops it costs a table scan per deleted path"
         );
+    }
+
+    /// `file_mask` arrives as its own migration, so a database that is already
+    /// at `user_version = 3` gets it.
+    ///
+    /// 🔴 **This is the test a fresh database cannot be.** PR 8a shipped
+    /// migration 3, so real indexes are sitting at version 3 right now. Had
+    /// `file_mask` been appended to `ADD_IGNORE_RULE_UNIQUE` instead of taking a
+    /// migration of its own, `rusqlite_migration` would see those databases as
+    /// already up to date and run nothing on them — the table would exist on
+    /// every machine that installed after this commit and on none that installed
+    /// before it, with every fresh-database test in this repository still green.
+    /// That is the shape D-b was rewritten to forbid, and the migration list's
+    /// own doc comment states the rule it breaks: the index of each migration is
+    /// the `user_version` it produces.
+    ///
+    /// **Both directions, and the first one is the whole point.** Asserting only
+    /// that `file_mask` is there after `apply` passes under exactly the defect
+    /// above, because `to_version(.., 3)` runs *this* build's migration 3 rather
+    /// than the one that shipped. Asserting it is ABSENT at version 3 first is
+    /// what makes the appended form fail here: the table would already exist
+    /// before `apply` was ever called.
+    #[test]
+    fn file_mask_reaches_a_database_that_is_already_at_version_three() {
+        register_vector_extension().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations()
+            .to_version(&mut conn, 3)
+            .expect("version 3 is what PR 8a shipped");
+
+        let before: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                  WHERE type = 'table' AND name = 'file_mask'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            before, 0,
+            "`file_mask` must not be part of migration 3: an index already at \
+             version 3 would never be given it, and every fresh-database test \
+             would stay green while it happened"
+        );
+
+        apply(&mut conn).expect("a version-3 database migrates to the current version");
+
+        let after: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                  WHERE type = 'table' AND name = 'file_mask'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            after, 1,
+            "a database already at version 3 must be given `file_mask` by a \
+             migration of its own"
+        );
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version, SCHEMA_VERSION,
+            "the migration that adds `file_mask` must bump SCHEMA_VERSION with it"
+        );
+
+        // The table is usable, not merely present: a `CREATE TABLE` that
+        // migrated cleanly and refuses the only INSERT anyone will ever run
+        // against it is the failure this line exists to see.
+        conn.execute("INSERT INTO file_mask (pattern) VALUES ('*.pdf')", [])
+            .expect("the migrated table takes the row the commands will write");
+        let stored: String = conn
+            .query_row("SELECT pattern FROM file_mask", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, "*.pdf");
     }
 
     /// The DDL a version-1 database ends up with, comments removed and

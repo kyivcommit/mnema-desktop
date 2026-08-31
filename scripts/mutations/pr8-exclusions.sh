@@ -259,8 +259,8 @@ case_ "include_subfolder must report false when there was nothing to remove" \
 # at the row in the database.
 case_ "the walk must build its rules from the stored prefixes, not from an empty list" \
   src-tauri/src/walk_job.rs \
-  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?;}{    let rules = WalkRules::new(true, true, Vec::new())?;}' \
-  'let rules = WalkRules::new(true, true, Vec::new())?;' \
+  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?\.with_masks\(masks\)\?;}{    let rules = WalkRules::new(true, true, Vec::new())?.with_masks(masks)?;}' \
+  'let rules = WalkRules::new(true, true, Vec::new())?.with_masks(masks)?;' \
   mnema-desktop 'a_walk_applies_a_stored_exclusion_and_removes_what_it_now_covers' --test commands
 
 # Task 3, and the risk the brief names as the whole risk of the task. The
@@ -274,8 +274,8 @@ case_ "the walk must build its rules from the stored prefixes, not from an empty
 # can tell either from a working walk.
 case_ "a stored prefix that cannot become a rule must refuse the job, not be walked around" \
   src-tauri/src/walk_job.rs \
-  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?;}{    let rules = WalkRules::new(true, true, user_prefixes).unwrap_or_default();}' \
-  'let rules = WalkRules::new(true, true, user_prefixes).unwrap_or_default();' \
+  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?\.with_masks\(masks\)\?;}{    let rules = WalkRules::new(true, true, user_prefixes).unwrap_or_default().with_masks(masks)?;}' \
+  'let rules = WalkRules::new(true, true, user_prefixes).unwrap_or_default().with_masks(masks)?;' \
   mnema-desktop 'a_stored_exclusion_that_no_longer_validates_refuses_the_walk' --test commands
 
 # Review round 1, B1, and it is the case the set was missing: the vector
@@ -289,8 +289,8 @@ case_ "a stored prefix that cannot become a rule must refuse the job, not be wal
 # cannot see it: one prefix is enough to kill both of them.
 case_ "every stored prefix must reach WalkRules::new, not only the first" \
   src-tauri/src/walk_job.rs \
-  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?;}{    let rules = WalkRules::new(true, true, user_prefixes.into_iter().take(1).collect())?;}' \
-  'let rules = WalkRules::new(true, true, user_prefixes.into_iter().take(1).collect())?;' \
+  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?\.with_masks\(masks\)\?;}{    let rules = WalkRules::new(true, true, user_prefixes.into_iter().take(1).collect())?.with_masks(masks)?;}' \
+  'let rules = WalkRules::new(true, true, user_prefixes.into_iter().take(1).collect())?.with_masks(masks)?;' \
   mnema-desktop 'a_walk_applies_every_stored_exclusion_not_only_the_first' --test commands
 
 # Review round 2, N5. The one behaviour this feature turns on whose guard

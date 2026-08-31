@@ -42,6 +42,7 @@ case_ "the migration is registered, not merely written" \
   's~        M::up\(ADD_PATH_READER\),\n~~' \
   '        M::up(include_str!("schema.sql")),
         M::up(ADD_IGNORE_RULE_UNIQUE),
+        M::up(ADD_FILE_MASK),
     ])' \
   mnema-index \
   'migrations::tests::an_existing_database_keeps_its_rows_and_the_migration_credits_them_all_to_text' --lib
