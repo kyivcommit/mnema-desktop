@@ -417,6 +417,6 @@ case_ "a rejected re-read for a rule removal must not refuse silently" \
 
 case_ "a rejected re-read for a rule removal must not raise the question anyway" \
   ui/src/settings/Folders.svelte \
-  "s{      // cannot be undone — the folder's text is at the provider after the next\n      // scan\. §10 — what crossed is a sentence, so the sentence is what appears\.\n      patch\(rootId, \{ pending: null, actionError: message\(e\) \}\);}{      // cannot be undone — the folder's text is at the provider after the next\n      // scan. §10 — what crossed is a sentence, so the sentence is what appears.\n      patch(rootId, { pending: \{ kind: 'include', path, existsOnDisk, heldBelow: false, heldAbove: null \} \}); /* mutant: raises the removal question anyway */}" \
+  "s{      // cannot be undone — the folder's text is at the provider after the next\n      // scan\. §10 — what crossed is a sentence, so the sentence is what appears\.\n      patch\(rootId, \{ pending: null, actionError: message\(e\) \}\);}{      // cannot be undone — the folder's text is at the provider after the next\n      // scan. §10 — what crossed is a sentence, so the sentence is what appears.\n      patch(rootId, { pending: { kind: 'include', path, existsOnDisk, heldBelow: false, heldAbove: null } }); /* mutant: raises the removal question anyway */}" \
   "/* mutant: raises the removal question anyway */" \
   src/settings/Folders.test.ts 'a rejected re-read for a rule removal removes nothing and shows the backend sentence, but a later successful re-read still removes it' runner=vitest
