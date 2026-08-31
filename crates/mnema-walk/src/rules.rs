@@ -227,9 +227,15 @@ pub enum RulesError {
 ///
 /// **`NFC(fold(NFD(x)))`, and the order was measured rather than assumed.**
 /// Unicode's canonical caseless matching (Unicode 16.0 §3.13, D145) is
-/// `NFD(toCasefold(NFD(x)))`; the outer form is free — NFC and NFD are in
-/// bijection, so either gives the same equivalence — and NFC is taken because a
-/// composed pattern is shorter and closer to what the person typed. **The inner
+/// `NFD(toCasefold(NFD(x)))`; the outer form is free **for the equivalence
+/// relation** — NFC and NFD are in bijection, so either gives the same answer
+/// to "are these two names the same" — and NFC is taken because a composed
+/// pattern is shorter and closer to what the person typed. **It is not free
+/// for the matcher**: `globset` compares bytes, `?` counts bytes, and a
+/// composed name is shorter than its decomposed spelling, so the outer form
+/// decides what `?` — and the contents of `[...]` — see, pinned by
+/// `a_mask_compares_names_in_composed_form` (independent review, Important 2).
+/// **The inner
 /// NFD is not free**, and the measurement is the reason it is here: `U+0345`
 /// COMBINING GREEK YPOGEGRAMMENI has combining class 240 and case-folds to
 /// `U+03B9` GREEK SMALL LETTER IOTA, which has class 0, so folding *destroys*
@@ -263,16 +269,29 @@ pub enum RulesError {
 /// `*.PDF` still matches `report.pdf` — the common case, and the whole reason
 /// the case-insensitivity ruling exists.
 ///
-/// ⚠️ **It transforms the inside of a character class too, and that is the one
-/// place this widens nothing and can narrow.** The mask is one string; nothing
-/// here parses `[...]` and steps around it. Usually that is exactly right —
-/// `[А-Я]` becomes `[а-я]` and so means the same rule as its lowercase spelling.
-/// Two shapes where it is not, both measured: a range that crosses ASCII
-/// punctuation (`[A-z]` becomes `[a-z]`, so a mask that removed `_x.txt` no
-/// longer does — the only narrowing this commit introduces), and a letter whose
-/// fold is more than one character (`[ß]` becomes `[ss]`, a class of one `s`).
-/// Both are rare enough to be recorded rather than fixed; fixing them means not
-/// folding inside `[...]`, which is a parser this layer does not have.
+/// ⚠️ **It transforms the inside of a character class too, and that is not the
+/// only place this can narrow — see the paragraph below for a second, separate
+/// shape.** The mask is one string; nothing here parses `[...]` and steps
+/// around it. Usually that is exactly right — `[А-Я]` becomes `[а-я]` and so
+/// means the same rule as its lowercase spelling. Two shapes where it is not,
+/// both measured: a range that crosses ASCII punctuation (`[A-z]` becomes
+/// `[a-z]`, so a mask that removed `_x.txt` no longer does — one of several
+/// measured narrowing shapes, not the only one this commit introduces), and a
+/// letter whose fold is more than one character (`[ß]` becomes `[ss]`, a class
+/// of one `s`). Both are rare enough to be recorded rather than fixed; fixing
+/// them means not folding inside `[...]`, which is a parser this layer does
+/// not have.
+///
+/// **A second, unrelated narrowing shape lives on the name side, in the outer
+/// `.nfc()`: composition can swallow the literal a mask is looking for.**
+/// Measured: `cafe*` matches `cafe\u{0301}.pdf` before this commit and does not
+/// after, because `.nfc()` composes `e\u{0301}` into `é` before the literal
+/// `cafe` gets to match it; `caf\u{e9}*` still matches the same name, because
+/// both sides fold to the same composed form. Unlike the class-content case
+/// above, this one narrows in an ordinary literal, outside any `[...]`.
+/// Pinned by `a_mask_literal_can_be_swallowed_by_a_following_combining_mark`
+/// (independent review, Important 1). Neither list here is claimed to be
+/// exhaustive — each is what has been measured so far, not a closed count.
 ///
 /// **Cost**, measured on this machine over 300 000 names: 572 ns for a mixed
 /// Cyrillic name, 315 ns for a plain ASCII one. An ASCII fast path was
@@ -1014,8 +1033,13 @@ fn validate_mask(mask: &str) -> Result<Option<globset::GlobMatcher>, RulesError>
     }
     // Case-sensitive — `globset`'s default — because the folding is done by
     // `caseless_form` on both sides instead. The mask pays for it once, here.
-    // The error still names the mask **as the person typed it**, never the
-    // transformed form, which they never saw.
+    // The `mask` field on `RulesError::InvalidMask` names the mask as the
+    // person typed it. `reason` does not: it is `globset`'s own
+    // `err.to_string()`, and quotes the *folded* pattern it tried to
+    // compile — someone who typed `[A-_]x.txt` reads about `'[a-_]x.txt'`.
+    // Booked to Task 11, which owns the localisation catalogue and can give
+    // `reason` its own wording instead of passing it through raw (review,
+    // Important 4).
     globset::GlobBuilder::new(&caseless_form(mask))
         .build()
         .map(|glob| Some(glob.compile_matcher()))

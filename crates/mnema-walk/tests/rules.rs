@@ -823,6 +823,17 @@ fn walk_with_masks(files: &[&str], builtin: bool, masks: &[&str]) -> Vec<String>
         .collect::<Vec<_>>()
 }
 
+/// One mask, one name, straight through `MaskLayer::matches` — for cases
+/// that assert on the match itself rather than on what a walk keeps or
+/// removes, and so need no filesystem at all.
+fn m(mask: &str, name: &str) -> bool {
+    WalkRules::none()
+        .with_masks(vec![mask.to_string()])
+        .unwrap()
+        .masks()
+        .matches(name)
+}
+
 /// A mask is a glob over a file's **name**, at every depth — asserted, not
 /// inherited from `ignore`'s override parser, which stops being the thing that
 /// matches a mask the moment the directory rule below evicts masks from the
@@ -1362,6 +1373,83 @@ fn a_mask_folds_case_outside_ascii() {
         kept,
         ["notes.txt"],
         "final sigma did not fold to sigma — this is `to_lowercase`, not case folding"
+    );
+}
+
+/// 🔴 **`case_insensitive(true)` is not behaviour-neutral to remove — it acts
+/// on the *pattern*, not only on the subject.** A character-class range with
+/// uncased endpoints spanning ASCII upper case folds under `(?i)` to also
+/// accept lower case; `caseless_form` folds a mask's literal characters but
+/// never its range syntax, so this is the one shape where the flag stays
+/// observable even though both sides already went through `caseless_form`.
+/// Measured: 54 differing scalars for `[@-a]x.txt` alone, and upward of a
+/// million once a `*` is present (independent review, Important 3). This is
+/// what makes "exactly one folding mechanism is live"
+/// (`validate_mask`'s doc comment) a behavioural guarantee rather than a
+/// maintenance wish.
+#[test]
+fn a_mask_glob_is_compiled_case_sensitive() {
+    // `[@-a]` has uncased endpoints spanning ASCII upper case, so `(?i)` — and
+    // only `(?i)` — folds the class to also accept b..z. The name side is
+    // already folded, so this is the one shape where the flag is still visible.
+    assert!(
+        m("[@-a]x.txt", "ax.txt"),
+        "the class stopped matching its own member"
+    );
+    assert!(
+        !m("[@-a]x.txt", "Bx.txt"),
+        "`case_insensitive(true)` is live again"
+    );
+    assert!(
+        !m("[@-a]x.txt", "bx.txt"),
+        "`case_insensitive(true)` is live again"
+    );
+}
+
+/// 🔴 **The outer `.nfc()` in `caseless_form` is observable, and it is not an
+/// equivalent mutant.** The doc comment on `caseless_form` calls the outer
+/// form "free" — true of the *equivalence relation* (NFC and NFD are in
+/// bijection, so either gives the same answer to "are these two names the
+/// same"), false of the *matcher*: `globset` compares bytes and `?` counts
+/// bytes, so a composed name is shorter than its decomposed spelling and the
+/// outer form decides what `?` — and the contents of `[...]` — see
+/// (independent review, Important 2).
+#[test]
+fn a_mask_compares_names_in_composed_form() {
+    // `?` is one byte to `globset`; composed `é` is two bytes, decomposed is three.
+    assert!(m("??.txt", "\u{e9}.txt"), "the outer NFC is gone");
+    assert!(
+        m("??.txt", "e\u{301}.txt"),
+        "the decomposed name must give the same answer"
+    );
+    assert!(
+        !m("?.txt", "\u{e9}.txt"),
+        "one `?` is one byte, not one character"
+    );
+}
+
+/// 🔴 **A second, independent narrowing shape, distinct from the character-class
+/// folding `caseless_form`'s doc comment already names: the same outer `.nfc()`
+/// composes a combining mark into the base letter a mask's literal was
+/// matching, so a mask that ends right where the mark begins loses the
+/// literal it was looking for.** Not a regression — it is the direct cost of
+/// the fix for the opposite gap (`café*` now matches a decomposed name it used
+/// to miss) — but a decision, pinned here so the direction is a fact the next
+/// session can check rather than rediscover (independent review, Important 1).
+#[test]
+fn a_mask_literal_can_be_swallowed_by_a_following_combining_mark() {
+    // `cafe` + COMBINING ACUTE ACCENT composes to `café`, so the ASCII literal
+    // `cafe*` no longer prefixes the folded name.
+    assert!(
+        !m("cafe*", "cafe\u{301}.pdf"),
+        "an ASCII literal survived composition with the mark that follows it"
+    );
+    // The already-composed spelling in the mask still matches the same name,
+    // because both sides fold to the same composed form — this is the gap the
+    // commit closed.
+    assert!(
+        m("caf\u{e9}*", "cafe\u{301}.pdf"),
+        "a mask already spelled in composed form must still match the decomposed name"
     );
 }
 
