@@ -35,6 +35,8 @@
 #   the blank row         — the empty string is not pressable; whitespace is
 #   the announced wait    — the press is answered before the numbers arrive
 #   the mounted editor    — the folders panel really holds `Masks.svelte`
+#   the add outcome       — "already stored" reaches the screen, not the floor
+#   the case note         — decided by the mask, not by any uppercase in the answer
 #
 # ⚠️ Every case here is `runner=vitest`, so both of that runner's traps apply
 # (see `pr8-ui-folders.sh`'s header): `-t` matches as a substring, and a mutant
@@ -259,12 +261,16 @@ case_ "the refusal frame must follow a language switch" \
 
 # ── Task 11 fix round 2 additions ────────────────────────────────────────────
 #
-# Three more cases, for the two guards this round added to the screen. Measured
-# the same way as everything above: each mutated alone in a copy of
-# `Masks.svelte`, the copy restored between runs, never `git checkout --`. All
-# three went red, none crashed its oracle. See
+# FOUR cases now: three from fix round 2, and one from the review of round 3
+# that found the case-note guard could be replaced by a locator ignoring the
+# mask entirely with the whole suite still green. The count is corrected here
+# rather than left standing, because an inventory that no longer matches its
+# section is read as "the last one was never measured". Measured the same way as
+# everything above: each mutated alone in a copy of `Masks.svelte`, the copy
+# restored between runs, never `git checkout --`. All four went red, none
+# crashed its oracle. See
 # `docs/private/sdd/2026-08-31-desktop-pr8b-masks/task-11-fix-round-2-report.md`
-# for the failure text each one produced.
+# and `…-fix-round-3-review.md` for the failure text each one produced.
 
 # 🔴 F3. The outcome discarded — which is exactly the state the live run found,
 # with `add_mask` still returning `()`: a person types `*.PDF` over a stored

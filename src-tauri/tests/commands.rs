@@ -8661,12 +8661,16 @@ fn a_mask_that_is_already_stored_under_another_spelling_is_not_stored_again() {
     // live run found (independent review, Minor 2).
     //
     // ⚠️ **It is a regression pin, not a guard, and saying so is the point.**
-    // No mutant kills this line alone: the byte-identical duplicate is caught
-    // by the same `find` as `*.PDF` below, so anything that removes the check
-    // fails both, and with the check gone the store's own `ON CONFLICT DO
-    // NOTHING` would answer this case correctly anyway. It is here because the
-    // live run's example belongs in the file named after it — not because it
-    // adds coverage.
+    // No mutant kills this line alone. Measured, because an earlier wording of
+    // this comment reasoned it out and got the mechanism backwards: deleting
+    // the equivalence `find` fails `*.PDF` below and **leaves this line
+    // green**, since `Db::add_mask` is `INSERT … ON CONFLICT DO NOTHING` over a
+    // BINARY-collated primary key and still answers a byte-identical duplicate
+    // correctly on its own. And with the `find` in place the only wrong answer
+    // available is a wrong `stored` value, which is right for an identical
+    // string and wrong for `*.PDF` — so that mutant kills the neighbour, not
+    // this line. It is here because the live run's example belongs in the file
+    // named after it, not because it adds coverage.
     assert_eq!(
         call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected"),
         json!({ "kind": "alreadyStored", "stored": "*.pdf" }),

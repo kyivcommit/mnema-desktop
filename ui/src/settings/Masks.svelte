@@ -230,11 +230,23 @@
   // called the failure harmless; independent review falsified both halves by
   // measurement, so what follows is what has been measured, never a count.
   //
-  // Silent where it would have helped, two mechanisms so far: a fold that
-  // changes length (`Straße*` echoes as `strasse*`), and a fold that
-  // normalises — `caseless_form` ends in `.nfc()`, so a mask typed decomposed
-  // (`[Ré`, the form macOS puts on disk) echoes composed, and `toLowerCase`
-  // does not normalise, so neither is found by a lowercase search.
+  // Silent where it would have helped, two mechanisms so far, and BOTH
+  // examples below were run rather than reasoned — an earlier draft of this
+  // paragraph named two that do not reproduce, one of which reproduces the
+  // opposite (independent review). A mask only ever reaches this function
+  // through a refusal, so an illustration has to be a mask that is actually
+  // REFUSED; `Straße*` is accepted and echoed nowhere.
+  //
+  // A fold that changes length: `[Straße` is refused, and `globset` answers
+  // about `'[strasse'` — `ß` folds to two characters, so the answer is longer
+  // than what was typed and a lowercase search for `[straße` finds nothing.
+  //
+  // A fold that normalises: `caseless_form` ends in `.nfc()`, so a mask typed
+  // DECOMPOSED — `[`, `R`, `e`, U+0301, the form macOS puts on disk — is
+  // answered about as `'[ré'` composed, and `toLowerCase` does not normalise,
+  // so it finds nothing either. Written as codepoints on purpose: the composed
+  // spelling of the same name is the case where the caveat IS drawn, correctly,
+  // and a bare `[Ré` in a comment cannot say which of the two it is.
   //
   // And loud where nothing was respelled: the shell's own sentence opens
   // `file mask "<typed>" …`, so the words `file ` and `mask ` stand in the
