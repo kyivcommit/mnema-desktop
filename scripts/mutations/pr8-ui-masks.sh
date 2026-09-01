@@ -346,3 +346,42 @@ case_ "the explainer must disclose that \`?\` counts bytes rather than letters" 
   "s{ And \\? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: \\?\\.txt does not match й\\.txt, and \\?\\?\\.txt does\\.'}{'}" \
   "neither does the way a name happens to store its accents.'," \
   src/settings/Masks.test.ts 'the whole section reads as one screen' runner=vitest
+
+# 🔴 Fix round 5, F4. The same clause, dropped from the UKRAINIAN half.
+# The case above mutates the English string and is killed by a component test
+# that reads English only, so until this one existed the Ukrainian half of the
+# disclosure had a test and no mutant — and it is the half most of this
+# product's people read. Killed by the catalogue test that asserts the clause
+# in both locales — `the mask explainer discloses that \`?\` counts bytes, in
+# both locales`, selected here by a prefix of its name because `-t` is a REGEX
+# and the name itself carries a `?`.
+case_ "the explainer must disclose that \`?\` counts bytes in Ukrainian too" \
+  ui/src/i18n/catalog.ts \
+  "s{ А «\\?» замінює один байт, а не одну літеру, тож для літер поза латиницею його треба ставити кілька: «\\?\\.txt» не збігається з «й\\.txt», а «\\?\\?\\.txt» збігається\\.'}{'}" \
+  "записані на диску літери з діакритичними знаками.'," \
+  src/i18n/i18n.test.ts 'the mask explainer discloses that' runner=vitest
+
+# 🔴 Fix round 5, F3, owner's ruling. The floor word put back, in English.
+# `mask_preview.paths` is a bound in NEITHER direction: it understates, because
+# only `status = 'indexed'` rows are counted while the walk's reconcile set is
+# status-agnostic; and it overstates, because the in-tree `.gitignore` stack is
+# in neither rule set (so a path it already covers counts as surviving and this
+# press is charged for it), and because a rule set that does not compile answers
+# as an empty override, after which `walk_root` stops before phase 2 and removes
+# nothing at all. "At least N" would then be said about a scan that removes
+# zero. Killed by the `not.toContain('at least')` on the screen test.
+case_ "the add-cost sentence must not claim a floor, in English" \
+  ui/src/i18n/catalog.ts \
+  "s~already take, and \\{documents~already take, at least, and \\{documents~" \
+  "already take, at least, and {documents" \
+  src/settings/Masks.test.ts 'the file count is not stated as a floor' runner=vitest
+
+# The same ruling, the Ukrainian half — the half most of this product's people
+# read, and the one round 4's own regression was written in first. Killed by the
+# language-switch test, which is where the Ukrainian sentence is read off the
+# screen rather than out of the catalogue.
+case_ "the add-cost sentence must not claim a floor, in Ukrainian" \
+  ui/src/i18n/catalog.ts \
+  "s~ця маска забирає \\{paths~ця маска забирає щонайменше \\{paths~" \
+  "ця маска забирає щонайменше {paths" \
+  src/settings/Masks.test.ts 'every sentence on the section follows a language switch' runner=vitest

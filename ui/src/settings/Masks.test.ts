@@ -123,10 +123,10 @@ test('adding asks the preview first and shows both its numbers before anything i
 
   const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
   expect(cost).toBe(
-    'As of now this mask takes at least 4 files beyond what your rules already take, and 2'
+    'As of now this mask takes 4 files beyond what your rules already take, and 2'
     + ' documents stop being findable: no other path will be left naming them. The next scan of'
-    + ' each folder can remove more than that: files that never finished indexing are not'
-    + ' counted here.',
+    + ' each folder can remove more than that or fewer: files that never finished indexing are'
+    + ' not counted here, and a file something else already removes may be counted here.',
   );
 });
 
@@ -219,11 +219,21 @@ test('the older of two overlapping mask previews writes nothing', async () => {
   expect(confirmAdd('*.tmp')).toBeTruthy();
 });
 
-// 🔴 `mask_preview.paths` counts `status = 'indexed'` rows only, while the
-// walk's reconcile set is status-agnostic — so the walk's `removed` can exceed
-// it, and "4 files will be removed" followed by `removed: 6` reads as a lie.
-// The sentence states a floor and names the remainder instead.
-test('the file count is stated as a floor, and the sentence names what it leaves out', async () => {
+// 🔴 Fix round 5, F3, owner's ruling, read off the SCREEN rather than out of
+// the catalogue. The sentence used to claim a floor — "at least 4 files" — and
+// the number is a bound in neither direction. It understates, because
+// `mask_preview.paths` counts `status = 'indexed'` rows only while the walk's
+// reconcile set is status-agnostic, so `removed: 6` can follow "4 files". And
+// it overstates, because the in-tree `.gitignore` stack is in neither rule set
+// (`src-tauri/src/tree.rs`, `crates/mnema-walk/src/rules.rs`), so a path it
+// already covers counts as surviving and this press is charged for it — and
+// because a rule set that does not compile answers as an empty override, after
+// which `walk_root` stops before phase 2 and removes nothing at all.
+//
+// So the floor word had to go and one clause has to hedge BOTH directions.
+// `not.toContain('at least')` is the assertion that pins the removal: every
+// other line here would still pass with the word back in.
+test('the file count is not stated as a floor, and one clause hedges both directions', async () => {
   maskPreview.mockResolvedValue({ paths: 4, documents: 2 });
   await mount([]);
 
@@ -232,9 +242,11 @@ test('the file count is stated as a floor, and the sentence names what it leaves
 
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
   const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
-  expect(cost).toContain('at least 4 files');
-  expect(cost).toContain('can remove more than that');
+  expect(cost).toContain('takes 4 files beyond what your rules already take');
+  expect(cost).not.toContain('at least');
+  expect(cost).toContain('can remove more than that or fewer');
   expect(cost).toContain('files that never finished indexing are not counted here');
+  expect(cost).toContain('a file something else already removes may be counted here');
 });
 
 // 🔴 The state the two numbers exist to tell apart: every matched path has a
@@ -250,12 +262,12 @@ test('zero documents beside a non-zero file count says the documents stay findab
 
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
   const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
-  expect(cost).toContain('at least 4 files');
+  expect(cost).toContain('takes 4 files beyond what your rules already take');
   expect(cost).toContain('no document stops being findable — each one keeps another path this rule does not take');
   // The direction a swap of the two numbers would produce, and the one an
   // overstated disclosure reads as.
   expect(cost).not.toContain('4 documents');
-  expect(cost).not.toContain('at least 0 files');
+  expect(cost).not.toContain('takes 0 files');
 });
 
 // A preview of two zeros is not "this rule would remove nothing": since fix
@@ -794,14 +806,19 @@ test('every sentence on the section follows a language switch, the standing ques
   await type('*.tmp');
   await fireEvent.click(addButton());
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
-  expect(visibleText(container)).toContain('As of now this mask takes at least 4 files');
+  expect(visibleText(container)).toContain('As of now this mask takes 4 files');
 
   setLocale('uk');
   await waitFor(() => expect(screen.getByText('Маски файлів')).toBeTruthy());
 
   const text = visibleText(container);
   expect(text).toContain(t('settings_masks_explainer'));
-  expect(text).toContain('Станом на зараз ця маска забирає щонайменше 4 файли');
+  expect(text).toContain('Станом на зараз ця маска забирає 4 файли');
+  // Fix round 5, F3: the Ukrainian half of the ruling, off the screen. The
+  // floor word is gone and the one clause hedges both directions here too.
+  expect(text).not.toContain('щонайменше');
+  expect(text).toContain('може прибрати і більше, і менше');
+  expect(text).toContain('а файл, який уже прибирає щось інше, тут порахований');
   expect(text).toContain(t('settings_masks_confirm_add_heading', { mask: '*.tmp' }));
   // The accessible names follow the switch too, and they are what tells two
   // otherwise identical controls apart.

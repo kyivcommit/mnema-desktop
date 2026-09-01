@@ -1291,18 +1291,33 @@ fn validate_mask(mask: &str) -> Result<Option<globset::GlobMatcher>, RulesError>
 /// ever relaxed, this function is one of the places that has to learn about it.
 ///
 /// The two positions `globset` treats specially inside a class are stepped
-/// over: a leading `!` is its negation, and a `]` immediately after the opening
-/// (or after that `!`) is a literal `]` rather than the end of the class. An
-/// unterminated `[` is scanned to the end of the mask, so `[Г` is refused here
-/// rather than by the compile probe — either sentence is about the same broken
-/// class, and this one names the reason a person can act on.
+/// over. The first is the negation, and it is **either `!` or `^`** —
+/// `globset-0.4.19/src/glob.rs:984-990` matches `Some(&'!') | Some(&'^')`. A
+/// scan that knows only about `!` has a hole rather than a nearly-right
+/// answer: `[^]` opens a class whose first member is a literal `]`, so such a
+/// scan takes that `]` for the END of the class and reads the rest of the mask
+/// as being outside one. `[^]Г]file.txt` was accepted that way, and `*[^]Г]*`
+/// then matched `авто.txt` by byte — this refusal's own harm, through the
+/// shape it exists to refuse. The second position is a `]` immediately after
+/// the opening, or after either negation character (`:997-1002`), which is a
+/// literal `]` rather than the end of the class. An unterminated `[` is
+/// scanned to the end of the mask, so `[Г` is refused here rather than by the
+/// compile probe — either sentence is about the same broken class, and this
+/// one names the reason a person can act on.
+///
+/// Nothing else inside a class is special to this scan, and one shape that
+/// looks as though it should be is not: `globset` has no POSIX classes
+/// (`glob.rs:962-1050` treats `[` and `:` as ordinary members and breaks on
+/// the first non-first `]`), so the class in `[[:alpha:]Г].txt` really ends at
+/// that `]` and the `Г` really is a literal outside it. Accepted, because the
+/// scan and the library agree about where the class stops.
 fn holds_non_ascii_character_class(mask: &str) -> bool {
     let mut chars = mask.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '[' {
             continue;
         }
-        if chars.peek() == Some(&'!') {
+        if matches!(chars.peek(), Some('!' | '^')) {
             chars.next();
         }
         if chars.peek() == Some(&']') {

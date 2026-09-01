@@ -135,8 +135,8 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
     state.with_index(|db| db.read_snapshot(build_tree_listing))
 }
 
-/// What a mask would take, as of now — two numbers with **different
-/// subjects** (D-d).
+/// What a mask would take **beyond the rules already stored**, as of now — two
+/// numbers with **different subjects** (D-d).
 ///
 /// `paths` and `documents` are not two ways of saying the same thing, and
 /// conflating them overstates the loss. A document is destroyed only when its
@@ -146,15 +146,24 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
 /// and destroys nothing. Reporting that as a lost document is a claim a person
 /// acts on — and an overstated disclosure is worse than none.
 ///
+/// 🔴 **Both numbers are a difference between two rule sets, never a property
+/// of one mask.** [`mask_preview`] defines the current set and the new set and
+/// carries the reason; these field docs quote that definition and must not
+/// outlive it. Fix round 4 is what it costs when they do: the definition moved
+/// there and these four sentences stayed behind, still describing a number
+/// that had stopped existing.
+///
 /// When `documents` is 0 and `paths` is not, that is a real state and the
-/// editor says so plainly: the paths go, the documents stay findable through
-/// their other copies.
+/// editor says so plainly: the paths go, and each of those documents stays
+/// findable through another path **this rule does not take**.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaskPreview {
-    /// Every indexed path the mask matches, across **all** watched roots.
+    /// Indexed paths that survive the current rule set and do **not** survive
+    /// the new one, across **all** watched roots.
     pub paths: i64,
-    /// The `documentId`s for which **every** indexed path matches — the ones
+    /// The `documentId`s findable under the current rule set — at least one
+    /// surviving path — that are **not** findable under the new one: the ones
     /// that stop being findable at all.
     pub documents: i64,
 }

@@ -517,12 +517,29 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_load_failed: 'Не вдалося прочитати список масок.',
     settings_masks_confirm_add_heading: 'Додати маску {mask}?',
     settings_masks_confirm_remove_heading: 'Видалити маску {mask}?',
-    // 🔴 «Щонайменше», і це не обережність, а вимір. `mask_preview.paths`
-    // рахує лише рядки зі `status = 'indexed'` (`write.rs`), а множина, яку
-    // звіряє прохід, статусу не питає — тож файл документа в стані `pending`,
-    // `failed` чи `skipped` прохід прибере, а прев'ю його не показало. Точне
-    // число тут стало б обіцянкою, яку `removed: 5` після «3 файли» зробило б
-    // неправдою. Остання фраза називає саме той залишок.
+    // 🔴 Fix round 5, F3, рішення власника: слово «щонайменше» пішло.
+    // Воно обіцяло НИЖНЮ межу, а власні коментарі цього ж коду називають два
+    // стани, у яких число завищене. `.gitignore` у самій теці не входить у
+    // жоден із двох наборів правил (`src-tauri/src/tree.rs`,
+    // `crates/mnema-walk/src/rules.rs`), тож файл, який він і так виключає,
+    // рахується тут як «уцілілий» і це натискання платить за нього; а набір
+    // правил, який не скомпілювався, відповідає ПОРОЖНІМ перекриттям, після
+    // чого `walk_root` спиняється перед фазою 2 і не прибирає нічого взагалі —
+    // екран сказав би «щонайменше N» про сканування, яке прибирає нуль.
+    //
+    // 🔴 І це не залишок, успадкований від попереднього речення, а
+    // регресія, яку внесла fix round 4. Фраза «під цю маску підпадає
+    // щонайменше N файлів» була правдою і при `.gitignore`: виключений файл
+    // усе одно підпадає під маску. Нове речення каже про різницю ПРОТИ
+    // ПРАВИЛ — а `.gitignore` є одним із правил, які застосовує прохід, — тож
+    // його `.gitignore` спростувати може, а попереднє не міг.
+    //
+    // 🔴 Занижує число теж, і це той самий вимір, що й раніше:
+    // `mask_preview.paths` рахує лише рядки зі `status = 'indexed'`
+    // (`write.rs`), а множина, яку звіряє прохід, статусу не питає — тож файл
+    // документа в стані `pending`, `failed` чи `skipped` прохід прибере, а
+    // прев'ю його не показало. Тому остання фраза застерігає в ОБИДВА боки
+    // одним реченням: число не межа ні знизу, ні згори.
     //
     // 🔴 Fix round 4, F1: змінилося САМЕ ЧИСЛО, тому мусило змінитися й
     // речення. `mask_preview` більше не рахує «скільки файлів підпадає під цю
@@ -533,13 +550,20 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // для документів: інший шлях мусить не просто існувати в індексі, а
     // пережити наявні правила — саме цього не сказала фраза, яку живий прогін
     // спростував.
-    settings_masks_add_cost: 'Станом на зараз ця маска забирає щонайменше {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} понад те, що вже забирають ваші правила, і {documents, plural, =0 {жоден документ не перестане знаходитися — на кожен із них веде ще й інший шлях, якого це правило не забирає} one {# документ більше не знайдеться: жодного іншого шляху на нього не залишиться} few {# документи більше не знайдуться: жодного іншого шляху на них не залишиться} many {# документів більше не знайдуться: жодного іншого шляху на них не залишиться} other {# документа більше не знайдуться}}. Наступне сканування кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.',
+    settings_masks_add_cost: 'Станом на зараз ця маска забирає {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} понад те, що вже забирають ваші правила, і {documents, plural, =0 {жоден документ не перестане знаходитися — на кожен із них веде ще й інший шлях, якого це правило не забирає} one {# документ більше не знайдеться: жодного іншого шляху на нього не залишиться} few {# документи більше не знайдуться: жодного іншого шляху на них не залишиться} many {# документів більше не знайдуться: жодного іншого шляху на них не залишиться} other {# документа більше не знайдуться}}. Наступне сканування кожної теки може прибрати і більше, і менше: файли, які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось інше, тут порахований.',
     // Нуль має власне речення: у спільному з ненульовим випадком гілка
     // `=0` для документів каже про «інший шлях», а коли це натискання не
     // забирає жодного шляху, казати нема про кого. І нуль тут тепер означає
     // «нічого понад те, що вже забирають ваші правила», а не «під цю маску не
     // підпадає жоден файл»: додати «*.txt» там, де вже збережено «*», дає
     // саме цей нуль, а файли під маску підпадають.
+    //
+    // Fix round 5, F3: тут «щонайменше» не було й нема чого знімати, і
+    // застереження свідомо лишається ОДНОБІЧНИМ. Завищення, через яке сусіднє
+    // речення хеджує в обидва боки, може зробити число лише більшим за правду,
+    // а тут число — нуль: менше воно не буває. Обидва речення читаються як одне
+    // й те саме твердження про той самий залишок, тільки це не обіцяє
+    // напрямку, якого не існує.
     settings_masks_add_cost_none: 'Станом на зараз ця маска не забирає нічого понад те, що вже забирають ваші правила. Наступне сканування кожної теки все одно може щось прибрати: файли, які так і не проіндексувалися, тут не враховані.',
     // 🔴 Fix round 4, F3. Речення обіцяло те, чого екран знати не може: з
     // «*.pdf» і «report.*» у сховищі видалення будь-якої з них лишає
@@ -822,7 +846,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_load_failed: 'The list of masks could not be read.',
     settings_masks_confirm_add_heading: 'Add the mask {mask}?',
     settings_masks_confirm_remove_heading: 'Remove the mask {mask}?',
-    settings_masks_add_cost: 'As of now this mask takes at least {paths, plural, one {# file} other {# files}} beyond what your rules already take, and {documents, plural, =0 {no document stops being findable — each one keeps another path this rule does not take} one {# document stops being findable: no other path will be left naming it} other {# documents stop being findable: no other path will be left naming them}}. The next scan of each folder can remove more than that: files that never finished indexing are not counted here.',
+    settings_masks_add_cost: 'As of now this mask takes {paths, plural, one {# file} other {# files}} beyond what your rules already take, and {documents, plural, =0 {no document stops being findable — each one keeps another path this rule does not take} one {# document stops being findable: no other path will be left naming it} other {# documents stop being findable: no other path will be left naming them}}. The next scan of each folder can remove more than that or fewer: files that never finished indexing are not counted here, and a file something else already removes may be counted here.',
     settings_masks_add_cost_none: 'As of now this mask takes nothing beyond what your rules already take. The next scan of each folder can still remove files: those that never finished indexing are not counted here.',
     settings_masks_remove_cost: 'From the next scan of each folder on, this mask stops holding anything back: each file it was excluding is indexed again — unless another of your rules still excludes it — and its text is sent to the model provider.',
     settings_masks_confirm: 'Confirm',

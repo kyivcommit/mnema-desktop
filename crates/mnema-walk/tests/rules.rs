@@ -1700,6 +1700,70 @@ fn a_character_class_of_non_ascii_letters_is_refused() {
         "an ASCII character class must still be a character class"
     );
 }
+/// 🔴 **`^` is `globset`'s other negation, and this scan has to step over it
+/// exactly where it steps over `!`.** `globset-0.4.19/src/glob.rs:984-990`
+/// takes `Some(&'!') | Some(&'^')` as the negation, and `:997-1002` makes a
+/// `]` a literal first member after **either** of them. So `[^]` opens a class
+/// whose first member is a literal `]`; a scan that knows only about `!` reads
+/// that `]` as the END of the class and everything after it as being outside
+/// one. `[^]Г]file.txt` was accepted for that reason, and once accepted it
+/// behaved exactly like the class this refusal exists to close: measured
+/// through `MaskLayer::matches`, `[^]Г]x.txt` matched `ax.txt` and not
+/// `Гx.txt`, and `*[^]Г]*` matched `авто.txt` — a name holding no such letter.
+///
+/// **Both directions, because refusing everything non-ASCII would be as wrong
+/// as the hole.** Three masks that must stay accepted are asserted beside the
+/// one that must be refused, and each of them moves under a different bad fix:
+///
+/// - `[^]a]x.txt` — the same shape with an ASCII member. It moves only if the
+///   fix treats `^` itself as the thing to refuse.
+/// - `[[:alpha:]Г].txt` — `globset` has no POSIX classes (`glob.rs:962-1050`'s
+///   `parse_class` treats `[` and `:` as ordinary members and breaks on the
+///   first non-first `]`), so the class there really is `[[:alpha:]` and the
+///   `Г` really is a literal outside it. The scan and the library agree, so
+///   there is nothing to refuse; it moves if the fix starts refusing a
+///   non-ASCII character that merely follows a `]`.
+/// - `Копія[0-9].txt` — a non-ASCII literal beside an ASCII class, which must
+///   keep matching `Копія1.txt` and `КОПІЯ7.TXT` with folding intact. It moves
+///   if the fix refuses on non-ASCII anywhere in a mask that holds a class.
+#[test]
+fn a_caret_negated_character_class_of_non_ascii_letters_is_refused() {
+    let refused = WalkRules::none().with_masks(vec!["[^]\u{413}]file.txt".to_string()]);
+    assert!(
+        matches!(refused, Err(RulesError::MaskNonAsciiCharacterClass { .. })),
+        "`[^]Г]` is a `^`-negated class whose first member is a literal `]`, so the non-ASCII \
+         letter is INSIDE it — the mask must be refused, not compiled into a class of bytes"
+    );
+
+    let accepted = WalkRules::none().with_masks(vec!["[^]a]x.txt".to_string()]);
+    assert!(
+        accepted.is_ok(),
+        "`[^]a]x.txt` holds no non-ASCII character at all and must stay accepted: the refusal \
+         is about what is inside the class, not about `^`"
+    );
+
+    let accepted = WalkRules::none().with_masks(vec!["[[:alpha:]\u{413}].txt".to_string()]);
+    assert!(
+        accepted.is_ok(),
+        "`globset` has no POSIX classes, so `[[:alpha:]Г].txt` closes its class at the `]` and \
+         the `Г` is a literal outside it — the scan must agree with the library and accept it"
+    );
+
+    // `Копія[0-9].txt` against `Копія1.txt`, `КОПІЯ7.TXT` and `Копіяx.txt`.
+    let mask = "\u{41a}\u{43e}\u{43f}\u{456}\u{44f}[0-9].txt";
+    assert!(
+        m(mask, "\u{41a}\u{43e}\u{43f}\u{456}\u{44f}1.txt"),
+        "an ASCII class beside a non-ASCII literal must still match the name it names"
+    );
+    assert!(
+        m(mask, "\u{41a}\u{41e}\u{41f}\u{406}\u{42f}7.TXT"),
+        "the folding must survive beside the class: the uppercase name must still match"
+    );
+    assert!(
+        !m(mask, "\u{41a}\u{43e}\u{43f}\u{456}\u{44f}x.txt"),
+        "the class must still be a class: `x` is not `[0-9]`"
+    );
+}
 
 /// A `.gitignore` parser edge, decided rather than inherited: a mask never
 /// reaches `GitignoreBuilder::add_line`, so a leading `#` is an ordinary

@@ -116,56 +116,65 @@ describe('i18n', () => {
     setLocale('uk');
     const uk = (paths: number, documents: number) => t('settings_masks_add_cost', { paths, documents });
     expect(uk(1, 1)).toBe(
-      'Станом на зараз ця маска забирає щонайменше 1 файл понад те, що вже забирають ваші '
+      'Станом на зараз ця маска забирає 1 файл понад те, що вже забирають ваші '
       + 'правила, і 1 документ більше не знайдеться: жодного іншого шляху на нього не '
-      + 'залишиться. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
-      + 'проіндексувалися, тут не враховані.');
+      + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
+      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось '
+      + 'інше, тут порахований.');
     expect(uk(2, 2)).toBe(
-      'Станом на зараз ця маска забирає щонайменше 2 файли понад те, що вже забирають ваші '
+      'Станом на зараз ця маска забирає 2 файли понад те, що вже забирають ваші '
       + 'правила, і 2 документи більше не знайдуться: жодного іншого шляху на них не '
-      + 'залишиться. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
-      + 'проіндексувалися, тут не враховані.');
+      + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
+      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось '
+      + 'інше, тут порахований.');
     expect(uk(5, 5)).toBe(
-      'Станом на зараз ця маска забирає щонайменше 5 файлів понад те, що вже забирають ваші '
+      'Станом на зараз ця маска забирає 5 файлів понад те, що вже забирають ваші '
       + 'правила, і 5 документів більше не знайдуться: жодного іншого шляху на них не '
-      + 'залишиться. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
-      + 'проіндексувалися, тут не враховані.');
+      + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
+      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось '
+      + 'інше, тут порахований.');
     expect(uk(21, 21)).toBe(
-      'Станом на зараз ця маска забирає щонайменше 21 файл понад те, що вже забирають ваші '
+      'Станом на зараз ця маска забирає 21 файл понад те, що вже забирають ваші '
       + 'правила, і 21 документ більше не знайдеться: жодного іншого шляху на нього не '
-      + 'залишиться. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
-      + 'проіндексувалися, тут не враховані.');
+      + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
+      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось '
+      + 'інше, тут порахований.');
     expect(uk(22, 22)).toBe(
-      'Станом на зараз ця маска забирає щонайменше 22 файли понад те, що вже забирають ваші '
+      'Станом на зараз ця маска забирає 22 файли понад те, що вже забирають ваші '
       + 'правила, і 22 документи більше не знайдуться: жодного іншого шляху на них не '
-      + 'залишиться. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
-      + 'проіндексувалися, тут не враховані.');
+      + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
+      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось '
+      + 'інше, тут порахований.');
     // The `=0` arm for `documents`, against a non-zero `paths`.
     expect(uk(2, 0)).toBe(
-      'Станом на зараз ця маска забирає щонайменше 2 файли понад те, що вже забирають ваші '
+      'Станом на зараз ця маска забирає 2 файли понад те, що вже забирають ваші '
       + 'правила, і жоден документ не перестане знаходитися — на кожен із них веде ще й інший '
-      + 'шлях, якого це правило не забирає. Наступне сканування кожної теки може прибрати '
-      + 'більше: файли, які так і не проіндексувалися, тут не враховані.');
+      + 'шлях, якого це правило не забирає. Наступне сканування кожної теки може прибрати і '
+      + 'більше, і менше: файли, які так і не проіндексувалися, тут не враховані, а файл, '
+      + 'який уже прибирає щось інше, тут порахований.');
 
     setLocale('en');
     const en = (paths: number, documents: number) => t('settings_masks_add_cost', { paths, documents });
     // The count this bug actually shipped at: `paths: 1` reaches the `one` arm,
     // and the fix moves the verb ("matches") inside it.
     expect(en(1, 1)).toBe(
-      'As of now this mask takes at least 1 file beyond what your rules already take, and 1'
+      'As of now this mask takes 1 file beyond what your rules already take, and 1'
       + ' document stops being findable: no other path will be left naming it. The next scan of'
-      + ' each folder can remove more than that: files that never finished indexing are not'
-      + ' counted here.');
+      + ' each folder can remove more than that or fewer: files that never finished indexing'
+      + ' are not counted here, and a file something else already removes may be counted'
+      + ' here.');
     expect(en(2, 2)).toBe(
-      'As of now this mask takes at least 2 files beyond what your rules already take, and 2'
+      'As of now this mask takes 2 files beyond what your rules already take, and 2'
       + ' documents stop being findable: no other path will be left naming them. The next scan of'
-      + ' each folder can remove more than that: files that never finished indexing are not'
-      + ' counted here.');
+      + ' each folder can remove more than that or fewer: files that never finished indexing'
+      + ' are not counted here, and a file something else already removes may be counted'
+      + ' here.');
     expect(en(5, 0)).toBe(
-      'As of now this mask takes at least 5 files beyond what your rules already take, and no'
+      'As of now this mask takes 5 files beyond what your rules already take, and no'
       + ' document stops being findable — each one keeps another path this rule does not take.'
-      + ' The next scan of each folder can remove more than that: files that never finished'
-      + ' indexing are not counted here.');
+      + ' The next scan of each folder can remove more than that or fewer: files that never'
+      + ' finished indexing are not counted here, and a file something else already removes'
+      + ' may be counted here.');
 
     // `settings_masks_add_cost_none` carries no plural argument — a fixed
     // sentence for the `paths === 0` arm the component picks itself

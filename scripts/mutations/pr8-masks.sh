@@ -265,6 +265,19 @@ case_ "the refusal is scoped to the inside of a character class, not to non-ASCI
   'if mask.chars().any(|c| !c.is_ascii()) { /* mutant: every non-ASCII mask refused */' \
   mnema-walk 'a_character_class_of_non_ascii_letters_is_refused' --test rules
 
+# 🔴 Fix round 5, F1. The negation narrowed back to `!` alone — the hole the
+# refusal shipped with. `globset-0.4.19/src/glob.rs:984-990` takes `^` as a
+# negation too, and `:997-1002` makes a `]` a literal first member after it, so
+# under the mutant the scan reads the `]` in `[^]Г]file.txt` as the END of the
+# class and the `Г` as being outside one: the mask is accepted, and `*[^]Г]*`
+# then matches `авто.txt` by byte — this refusal's own harm, through the
+# shape it exists to refuse.
+case_ "a caret is globset's other negation, so the scan must step over it too" \
+  crates/mnema-walk/src/rules.rs \
+  's{        if matches!\(chars\.peek\(\), Some\('"'"'!'"'"' \| '"'"'\^'"'"'\)\) \{}{        if chars.peek() == Some(\&'"'"'!'"'"') \{ /* mutant: only `!` is a negation */}' \
+  'if chars.peek() == Some(&'"'"'!'"'"') { /* mutant: only `!` is a negation */' \
+  mnema-walk 'a_caret_negated_character_class_of_non_ascii_letters_is_refused' --test rules
+
 # ── The walk ──────────────────────────────────────────────────────────────────
 
 # The mask read in `walk_job`, replaced by an empty set. The walk then runs
