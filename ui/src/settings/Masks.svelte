@@ -40,9 +40,16 @@
   // sentence is shown verbatim under it, and a third line says why the two can
   // differ in case.
   //
-  // `of` is carried because the same two lines serve both commands, and "was
-  // not added" is false of a removal that failed.
-  let refused = $state<{ mask: string; of: 'add' | 'remove' } | null>(null);
+  // `of` is carried because the same two lines serve all three failures, and
+  // each is a different sentence: "was not added" is false of a removal that
+  // failed, and a failure from `add_mask` itself is not what "the check
+  // answered" — the check passed, or there would be no question to confirm.
+  // `add-check`: `mask_preview` (inside `askAdd`) rejected — nothing was ever
+  //   asked to store the mask.
+  // `add-store`: the check passed, the question was answered, and `add_mask`
+  //   (inside `answer`) rejected.
+  // `remove`: `remove_mask` (inside `answer`) rejected.
+  let refused = $state<{ mask: string; of: 'add-check' | 'add-store' | 'remove' } | null>(null);
   let actionError = $state<string | null>(null);
   let alreadyGone = $state(false);
 
@@ -52,6 +59,15 @@
   // to answer first. The older answer would otherwise land behind the newer one
   // and draw a list that has been superseded.
   let reads = 0;
+
+  // Not `$state`, same reason as `reads`: nothing renders from it. `askAdd` is
+  // the only caller of `mask_preview`, but the reply can still land after the
+  // question it was answering has stopped being the one on screen — a press on
+  // Remove, a Cancel, or a second Add before the first reply arrives all move
+  // `pending` on without waiting for it. Bumped by every one of those, so a
+  // reply whose generation has gone stale is dropped rather than overwriting
+  // whatever question replaced it.
+  let previews = 0;
 
   function message(e: unknown) {
     return e instanceof Error ? e.message : String(e);
@@ -87,13 +103,16 @@
     const mask = draft;
     if (mask === '') return;
     forget();
+    const n = ++previews;
     pending = { kind: 'checking', mask };
     try {
       const preview = await maskPreview(mask);
+      if (n !== previews) return; // a newer question has replaced this one
       pending = { kind: 'add', mask, paths: preview.paths, documents: preview.documents };
     } catch (e) {
+      if (n !== previews) return;
       pending = null;
-      refused = { mask, of: 'add' };
+      refused = { mask, of: 'add-check' };
       actionError = message(e);
     }
   }
@@ -104,11 +123,13 @@
   // looked at. The cost is stated in words instead, because no count here would
   // be the count of that.
   function askRemove(mask: string) {
+    ++previews; // a standing add-preview reply must not land on this question
     forget();
     pending = { kind: 'remove', mask };
   }
 
   function dismiss() {
+    ++previews; // a standing add-preview reply must not resurrect the question just dismissed
     pending = null;
   }
 
@@ -126,7 +147,9 @@
         alreadyGone = !(await removeMask(p.mask));
       }
     } catch (e) {
-      refused = { mask: p.mask, of: p.kind === 'add' ? 'add' : 'remove' };
+      // The check already passed by the time this runs — this is `answer`, not
+      // `askAdd` — so a failure here is the STORE's, never the check's.
+      refused = { mask: p.mask, of: p.kind === 'add' ? 'add-store' : 'remove' };
       actionError = message(e);
     }
     // After a refusal too: what the person is looking at then is the index as
@@ -170,12 +193,21 @@
     void $locale;
     const r = refused;
     if (r === null || actionError === null) return null;
+    // Branches on WHICH COMMAND WAS CALLED — state this component already
+    // holds — never on the error's shape: nothing here may inspect what an
+    // error looks like to decide what it means.
+    const heading = t(
+      r.of === 'add-check' ? 'settings_masks_refused_add'
+        : r.of === 'add-store' ? 'settings_masks_refused_store'
+        : 'settings_masks_refused_remove',
+      { mask: r.mask },
+    );
     return {
-      heading: t(r.of === 'add' ? 'settings_masks_refused_add' : 'settings_masks_refused_remove', { mask: r.mask }),
-      // The case note belongs to the add path only: it explains a folded
-      // pattern quoted inside a compile refusal, and nothing on the removal
-      // path folds anything.
-      note: r.of === 'add' ? t('settings_masks_refused_case_note') : null,
+      heading,
+      // The case note belongs to the check only: it explains a folded pattern
+      // quoted inside a COMPILE refusal, and neither the add-store path (the
+      // check already passed) nor the removal path folds anything.
+      note: r.of === 'add-check' ? t('settings_masks_refused_case_note') : null,
     };
   });
 
@@ -256,5 +288,10 @@
   {/if}
   <label class="fl" for="mask-draft-input">{inputLabel}</label>
   <input id="mask-draft-input" type="text" bind:value={draft} />
-  <button type="button" disabled={draft === ''} onclick={askAdd}>{addLabel}</button>
+  <!-- Also disabled while `checking`: closes the OTHER route to the same guard
+       — nothing stopped a second Add before the first reply landed, queuing
+       two `mask_preview` calls on the mutex with no order guarantee between
+       them. The generation guard above is what makes either route safe; this
+       is what keeps the second call from being placed at all. -->
+  <button type="button" disabled={draft === '' || pending?.kind === 'checking'} onclick={askAdd}>{addLabel}</button>
 </div>

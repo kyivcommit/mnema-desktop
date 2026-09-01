@@ -71,7 +71,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_masks_confirm' | 'settings_masks_confirm_cancel'
   | 'settings_masks_confirm_add_named' | 'settings_masks_confirm_remove_named'
   | 'settings_masks_confirm_cancel_named'
-  | 'settings_masks_refused_add' | 'settings_masks_refused_remove'
+  | 'settings_masks_refused_add' | 'settings_masks_refused_store' | 'settings_masks_refused_remove'
   | 'settings_masks_refused_case_note' | 'settings_masks_already_gone'
   | 'indexing_walk_starting' | 'indexing_walk_running'
   | 'indexing_embed_starting' | 'indexing_embed_running'
@@ -518,6 +518,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // читає про «[a-_]x.txt». Тому маску як її ввели називає ця рамка, а
     // наступний рядок пояснює, звідки інший регістр у відповіді.
     settings_masks_refused_add: 'Маску {mask} не додано. Ось що відповіла перевірка:',
+    settings_masks_refused_store: 'Маску {mask} не збережено. Ось що відповів індекс:',
     settings_masks_refused_remove: 'Маску {mask} не видалено. Ось що відповів індекс:',
     settings_masks_refused_case_note: 'У цій відповіді маска може бути записана іншим регістром, ніж ви ввели: маски порівнюються без урахування регістру.',
     settings_masks_already_gone: 'Такої маски вже не було. Список перечитано.',
@@ -771,7 +772,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_load_failed: 'The list of masks could not be read.',
     settings_masks_confirm_add_heading: 'Add the mask {mask}?',
     settings_masks_confirm_remove_heading: 'Remove the mask {mask}?',
-    settings_masks_add_cost: 'As of now, at least {paths, plural, one {# file} other {# files}} already indexed match this mask, and {documents, plural, =0 {no document stops being findable — each one is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}. The next scan of each folder can remove more than that: files that never finished indexing are not counted here.',
+    settings_masks_add_cost: 'As of now, at least {paths, plural, one {# file already indexed matches} other {# files already indexed match}} this mask, and {documents, plural, =0 {no document stops being findable — each one is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}. The next scan of each folder can remove more than that: files that never finished indexing are not counted here.',
     settings_masks_add_cost_none: 'As of now, no file that is already indexed matches this mask. The next scan of each folder can still remove files: those that never finished indexing are not counted here.',
     settings_masks_remove_cost: 'From the next scan of each folder on, the files this mask was holding back are indexed again, and their text is sent to the model provider.',
     settings_masks_confirm: 'Confirm',
@@ -780,6 +781,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_confirm_remove_named: 'Confirm removing the mask {mask}',
     settings_masks_confirm_cancel_named: 'Leave {mask} as it is',
     settings_masks_refused_add: 'The mask {mask} was not added. This is what the check answered:',
+    settings_masks_refused_store: 'The mask {mask} was not stored. This is what the index answered:',
     settings_masks_refused_remove: 'The mask {mask} was not removed. This is what the index answered:',
     settings_masks_refused_case_note: 'The answer above can quote your mask in a different letter case than the one you typed: masks are compared with letter case ignored.',
     settings_masks_already_gone: 'There was no such mask left to remove. The list has been re-read.',

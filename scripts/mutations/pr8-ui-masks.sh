@@ -148,7 +148,7 @@ case_ "whitespace is not the blank row, and must reach the shell as typed" \
 case_ "the wait must be announced, not answered with an empty screen" \
   ui/src/settings/Masks.svelte \
   "s{    pending = \{ kind: 'checking', mask \};}{    pending = null;}" \
-  "    forget();
+  "    const n = ++previews;
     pending = null;" \
   src/settings/Masks.test.ts 'the press says it is checking, and the numbers replace that sentence rather than joining it' runner=vitest
 
@@ -160,3 +160,92 @@ case_ "the folders panel must really hold the mask editor, not just its heading"
   "s{        <Masks />}{        <!-- Masks -->}" \
   "        <!-- Masks -->" \
   src/settings/Settings.test.ts 'clicking Folders shows the Folders heading and removes the Models heading' runner=vitest
+
+# ── Task 11 fix round 1 additions ────────────────────────────────────────────
+#
+# Eight more cases, one per guard the fix round added or changed. Measured the
+# same way as the twelve above: each mutated alone in a copy of
+# `Masks.svelte`, the copy restored between runs, never `git checkout --`. All
+# eight went red, none crashed its oracle. See
+# `docs/private/sdd/2026-08-31-desktop-pr8b-masks/task-11-fix-round-1-report.md`
+# for the failure text each one produced.
+
+# F1, blocking: `askAdd` had no generation guard on its OWN reply, though
+# `reads` above already has one for the list read. This drops the guard on the
+# success arm; the older of two overlapping previews then wins if it answers
+# last, exactly the shape `the list generation` case above reproduces for
+# `listMasks`.
+case_ "the older of two overlapping mask previews must write nothing" \
+  ui/src/settings/Masks.svelte \
+  "s{      const preview = await maskPreview\(mask\);\n      if \(n !== previews\) return; // a newer question has replaced this one\n}{      const preview = await maskPreview(mask);\n}" \
+  "      const preview = await maskPreview(mask);
+      pending = { kind: 'add', mask, paths: preview.paths, documents: preview.documents };" \
+  src/settings/Masks.test.ts 'the older of two overlapping mask previews writes nothing' runner=vitest
+
+# F5. `refresh` writes `masks = list; loadError = null;` together. Dropping the
+# second half leaves a read that once failed stuck forever: `{#if loadError}`
+# wins over the list branch, so a later successful read never reaches the
+# screen.
+case_ "a read that succeeds must clear an earlier read's failure" \
+  ui/src/settings/Masks.svelte \
+  "s{      masks = list;\n      loadError = null;}{      masks = list;}" \
+  "      masks = list;
+    } catch (e) {" \
+  src/settings/Masks.test.ts 'a read that fails is not the last word: a later successful read replaces it' runner=vitest
+
+# F5. `<label for="mask-draft-input">` names the field's accessible name;
+# `screen.getByRole('textbox')` finds the one input on the page whether or not
+# the id actually matches, so no test before round 1 would have noticed this
+# going stale.
+case_ "the mask input's label must really point at the field" \
+  ui/src/settings/Masks.svelte \
+  's{<label class="fl" for="mask-draft-input">}{<label class="fl" for="mask-draft-inpuXX">}' \
+  '<label class="fl" for="mask-draft-inpuXX">' \
+  src/settings/Masks.test.ts 'the mask input is really named by its own label, not just found by being the only textbox' runner=vitest
+
+# F3. `refusal.heading` picks one of three catalogue keys from `r.of`; nothing
+# forced the REMOVE case off the ADD key it shares no test with before round 1.
+case_ "the refusal heading must not default to the add key" \
+  ui/src/settings/Masks.svelte \
+  "s{    const heading = t\(\n      r\.of === 'add-check' \? 'settings_masks_refused_add'\n        : r\.of === 'add-store' \? 'settings_masks_refused_store'\n        : 'settings_masks_refused_remove',\n      \{ mask: r\.mask \},\n    \);}{    const heading = t('settings_masks_refused_add', { mask: r.mask });}" \
+  "    const heading = t('settings_masks_refused_add', { mask: r.mask });" \
+  src/settings/Masks.test.ts 'a refusal from removing a mask names the removal, not the add, and carries no case note' runner=vitest
+
+# F3's other half. The case note belongs to the check only — it explains a
+# folded pattern quoted inside a compile refusal, and neither other path folds
+# anything. This forces it onto every refusal; the same test above catches it.
+case_ "the case note must not follow a removal refusal" \
+  ui/src/settings/Masks.svelte \
+  "s{      note: r\.of === 'add-check' \? t\('settings_masks_refused_case_note'\) : null,}{      note: t('settings_masks_refused_case_note'),}" \
+  "      note: t('settings_masks_refused_case_note')," \
+  src/settings/Masks.test.ts 'a refusal from removing a mask names the removal, not the add, and carries no case note' runner=vitest
+
+# F4. A failure from `add_mask` inside `answer` is the STORE's, never the
+# check's — the check already passed, or there would be no question to
+# confirm. This files it under the check's key instead, reusing the frame that
+# says "This is what the check answered" for a call the check never made.
+case_ "a store refusal on the add path must not be filed as a check refusal" \
+  ui/src/settings/Masks.svelte \
+  "s{      refused = \{ mask: p\.mask, of: p\.kind === 'add' \? 'add-store' : 'remove' \};}{      refused = { mask: p.mask, of: p.kind === 'add' ? 'add-check' : 'remove' };}" \
+  "      refused = { mask: p.mask, of: p.kind === 'add' ? 'add-check' : 'remove' };" \
+  src/settings/Masks.test.ts 'a refusal from the store itself is shown too, and the list is read again' runner=vitest
+
+# F5. `void $locale` dropped from `alreadyGoneLabel`: the string stops
+# following a language switch, the precise failure D130's rule exists for.
+case_ "the already-gone note must follow a language switch" \
+  ui/src/settings/Masks.svelte \
+  "s{    void \\\$locale;\n    return alreadyGone \? t\('settings_masks_already_gone'\) : null;}{    return alreadyGone ? t('settings_masks_already_gone') : null;}" \
+  "    return alreadyGone ? t('settings_masks_already_gone') : null;" \
+  src/settings/Masks.test.ts 'the refusal frame and the already-gone note also follow a language switch' runner=vitest
+
+# F5, separately from the one above: `void $locale` dropped from `refusal`
+# itself. Two different derived values, the same failure. Delimited `s{}[]`
+# rather than `s{}{}` because the replacement's own unmatched `{` (the arrow
+# function body `Masks.svelte` never closes within this snippet) would
+# otherwise be read as nested delimiter, not literal text.
+case_ "the refusal frame must follow a language switch" \
+  ui/src/settings/Masks.svelte \
+  "s{  const refusal = \\\$derived\.by\(\(\) => \{\n    void \\\$locale;\n    const r = refused;}[  const refusal = \\\$derived.by(() => {\n    const r = refused;]" \
+  "  const refusal = \$derived.by(() => {
+    const r = refused;" \
+  src/settings/Masks.test.ts 'the refusal frame and the already-gone note also follow a language switch' runner=vitest

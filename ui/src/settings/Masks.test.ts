@@ -22,8 +22,9 @@ vi.mock('../lib/ipc', async (real) => ({
 // this is the guard on that: `mask_preview` is the ONLY thing that may answer
 // "how much goes", so nothing in this component may reach the wire on its own.
 // The raw `invoke` is mocked here for the reason `Folders.test.ts:51-55` gives
-// — a wrapper renamed in a later task must not quietly retire the guard —
-// and every test below asserts it was never called.
+// — a wrapper renamed in a later task must not quietly retire the guard — and
+// the shared `afterEach` below asserts it was never called, for every test in
+// this file rather than one.
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...a: unknown[]) => invoke(...a),
@@ -39,6 +40,7 @@ beforeEach(() => {
   listMasks.mockResolvedValue([]);
 });
 afterEach(() => {
+  expect(invoke).not.toHaveBeenCalled();
   cleanup();
   setLocale('en'); // the store outlives the component; leave it as found
 });
@@ -87,7 +89,6 @@ test('the list renders every stored mask, not the first of them', async () => {
   await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
   expect(screen.getByText('Копія*')).toBeTruthy();
   expect(visibleText(container)).not.toContain('No file mask has been added yet.');
-  expect(invoke).not.toHaveBeenCalled();
 });
 
 test('an empty list says so rather than showing a heading with nothing under it', async () => {
@@ -144,6 +145,72 @@ test('the press says it is checking, and the numbers replace that sentence rathe
   release({ paths: 4, documents: 2 });
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
   expect(screen.queryByText('Checking what this mask removes…')).toBeNull();
+});
+
+// Task 11 fix round 1, F1. A late `mask_preview` reply has no generation guard
+// of its own, although the list read three lines below (`reads`) has exactly
+// this one. The ordinary route: type a mask, press Add, get impatient before
+// the mutex-bound preview answers, press Remove on a stored mask, and read
+// ITS question — the control under the finger has to still mean "remove",
+// not silently become "confirm adding" once the late reply lands.
+test('a late add-preview must not replace a standing removal question', async () => {
+  let releaseAdd: (v: { paths: number; documents: number }) => void = () => {};
+  maskPreview.mockReturnValue(new Promise((resolve) => { releaseAdd = resolve; }));
+  await mount(['*.tmp']);
+  await waitFor(() => expect(screen.getByText('*.tmp')).toBeTruthy());
+
+  await type('*.pdf');
+  await fireEvent.click(addButton());
+  await waitFor(() => expect(screen.getByText('Checking what this mask removes…')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.tmp' }));
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  expect(visibleText(screen.getByTestId('mask-confirm'))).toContain('Remove the mask *.tmp?');
+  expect(confirmRemove('*.tmp')).toBeTruthy();
+
+  // The add preview answers only now, after the question on screen changed.
+  // A real timer tick, not `Promise.resolve()`: Svelte 5's effect flush after
+  // this promise's continuation needs more than the microtask queue alone.
+  releaseAdd({ paths: 4, documents: 2 });
+  await new Promise((r) => setTimeout(r, 0));
+
+  // Both directions: the removal question is still the one standing, and the
+  // late reply did not put the add question up in its place.
+  expect(visibleText(screen.getByTestId('mask-confirm'))).toContain('Remove the mask *.tmp?');
+  expect(screen.queryByText('Add the mask *.pdf?')).toBeNull();
+  expect(confirmRemove('*.tmp')).toBeTruthy();
+});
+
+// Task 11 fix round 1, F1, second route to the same missing guard: nothing
+// disabled Add while a check was on the wire, so two `mask_preview` calls could
+// queue on the index mutex with no order guarantee between them. Mirrors
+// `the older of two overlapping list reads writes nothing` below, for `reads`.
+test('the older of two overlapping mask previews writes nothing', async () => {
+  let releaseFirst: (v: { paths: number; documents: number }) => void = () => {};
+  let releaseSecond: (v: { paths: number; documents: number }) => void = () => {};
+  maskPreview
+    .mockReturnValueOnce(new Promise((resolve) => { releaseFirst = resolve; }))
+    .mockReturnValueOnce(new Promise((resolve) => { releaseSecond = resolve; }));
+  await mount([]);
+
+  await type('*.pdf');
+  await fireEvent.click(addButton());
+  await type('*.tmp');
+  await fireEvent.click(addButton());
+  expect(maskPreview).toHaveBeenCalledTimes(2);
+
+  // The newer (second) preview answers first.
+  releaseSecond({ paths: 1, documents: 1 });
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  expect(visibleText(screen.getByTestId('mask-confirm'))).toContain('Add the mask *.tmp?');
+
+  // The older (first) preview answers last and must not overwrite it.
+  releaseFirst({ paths: 9, documents: 9 });
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(visibleText(screen.getByTestId('mask-confirm'))).toContain('Add the mask *.tmp?');
+  expect(screen.queryByText('Add the mask *.pdf?')).toBeNull();
+  expect(confirmAdd('*.tmp')).toBeTruthy();
 });
 
 // 🔴 `mask_preview.paths` counts `status = 'indexed'` rows only, while the
@@ -298,10 +365,50 @@ test('a refusal from the store itself is shown too, and the list is read again',
 
   await waitFor(() => expect(screen.getByTestId('mask-refused-reason')).toBeTruthy());
   expect(screen.getByTestId('mask-refused-reason').textContent).toBe('the index is not open');
+  // Task 11 fix round 1, F4. The check already passed — that is why a question
+  // was on screen to confirm — so this failure is the STORE's, not the
+  // check's, and the frame must say so rather than reusing the check's words.
   expect(screen.getByTestId('mask-refused-heading').textContent)
-    .toBe('The mask *.pdf was not added. This is what the check answered:');
+    .toBe('The mask *.pdf was not stored. This is what the index answered:');
+  // The case note explains a folded pattern quoted inside a COMPILE refusal;
+  // the check already passed here, so nothing folded anything.
+  expect(screen.queryByText(
+    'The answer above can quote your mask in a different letter case than the one you typed:'
+    + ' masks are compared with letter case ignored.',
+  )).toBeNull();
   // The screen after a refusal is a fresh read, not the array from before it.
   expect(listMasks).toHaveBeenCalledTimes(2);
+});
+
+// Task 11 fix round 1, F3. The `of: 'add' | 'remove'` decision behind
+// `refusal.heading` and `refusal.note` (`Masks.svelte:183-193`) had no test on
+// its removal half: a `remove_mask` that throws is reachable — the same
+// failure the add path's own test above simulates with "the index is not
+// open" — and nothing here forced the heading to say "removed" rather than
+// "added", or the case note to stay off a path that folds nothing.
+test('a refusal from removing a mask names the removal, not the add, and carries no case note', async () => {
+  removeMask.mockRejectedValue(new Error('the index is not open'));
+  await mount(['*.pdf']);
+  await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.pdf' }));
+  await fireEvent.click(confirmRemove('*.pdf'));
+
+  await waitFor(() => expect(screen.getByTestId('mask-refused-reason')).toBeTruthy());
+  expect(screen.getByTestId('mask-refused-reason').textContent).toBe('the index is not open');
+  // Verbatim, and the class this repository names: a screen must not state
+  // what the data contradicts. Nothing was added, so "was not added" here
+  // would be exactly that.
+  expect(screen.getByTestId('mask-refused-heading').textContent)
+    .toBe('The mask *.pdf was not removed. This is what the index answered:');
+  // The case note explains a FOLDED pattern quoted inside a compile refusal;
+  // nothing on the removal path folds anything, so it must not appear here.
+  expect(screen.queryByText(
+    'The answer above can quote your mask in a different letter case than the one you typed:'
+    + ' masks are compared with letter case ignored.',
+  )).toBeNull();
+  // The mask is still stored: the failed removal did not silently succeed.
+  expect(screen.getByText('*.pdf')).toBeTruthy();
 });
 
 // 🔴 Removal is a disclosure, not a tidy-up: it is the one press on this screen
@@ -368,6 +475,16 @@ test('a mask another window removed first says so, and one this window removed d
 
   await waitFor(() => expect(screen.queryByText('*.tmp')).toBeNull());
   expect(screen.queryByTestId('mask-already-gone')).toBeNull();
+});
+
+// Task 11 fix round 1, F5. `<label for="mask-draft-input">` names the field's
+// accessible name; `screen.getByRole('textbox')` (what `type()` above uses)
+// finds the one input on the page regardless of whether the `for` actually
+// points at it, so no existing test would notice the id going stale. This
+// finds it by the LABEL, which only works if the association is real.
+test('the mask input is really named by its own label, not just found by being the only textbox', async () => {
+  await mount([]);
+  expect(screen.getByLabelText('New mask:')).toBe(screen.getByRole('textbox'));
 });
 
 // The empty string is `validate_mask`'s one deliberate non-error: it previews
@@ -442,6 +559,34 @@ test('a list that cannot be read says so, and does not claim there are no masks'
   expect(visibleText(container)).not.toContain('No file mask has been added yet.');
 });
 
+// Task 11 fix round 1, F5. `refresh` writes `masks = list; loadError = null;`
+// together (`Masks.svelte:69-70`) — if the second half regressed, a failed
+// first read leaves `loadError` set forever, because `{#if loadError}` wins
+// over the list branch and a LATER successful read has no way back onto the
+// screen. Provoked here through the add flow's own `await refresh()`, the
+// only other caller besides `onMount`.
+test('a read that fails is not the last word: a later successful read replaces it', async () => {
+  setLocale('en'); // seed, do not inherit
+  listMasks.mockRejectedValueOnce(new Error('the index is not open'));
+  maskPreview.mockResolvedValue({ paths: 1, documents: 1 });
+  addMask.mockResolvedValue(undefined);
+
+  render(Masks);
+  await waitFor(() => expect(screen.getByTestId('masks-load-reason')).toBeTruthy());
+
+  listMasks.mockResolvedValue(['*.pdf']);
+  await type('*.pdf');
+  await fireEvent.click(addButton());
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  await fireEvent.click(confirmAdd('*.pdf'));
+
+  await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
+  // Both directions: the error message is gone AND the list it was blocking is
+  // now the thing on screen.
+  expect(screen.queryByTestId('masks-load-reason')).toBeNull();
+  expect(screen.queryByText('The list of masks could not be read.')).toBeNull();
+});
+
 // 🔴 The whole section, read as a person reads it. Everything below is one
 // screen: the heading, the sentence that a mask is global and lands on each
 // folder's own next scan, the case ruling, the stored masks, and the controls.
@@ -505,4 +650,46 @@ test('every sentence on the section follows a language switch, the standing ques
   expect(screen.getByRole('button', { name: 'Видалити маску *.pdf' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Додати маску' })).toBeTruthy();
   expect(text).not.toContain('As of now');
+});
+
+// Task 11 fix round 1, F5. Two more `$derived`s the switch test above never
+// reached: `alreadyGoneLabel` (`:176-179`) and `refusal` (`:196-210`). Each is
+// checked in its OWN mount rather than one shared screen: `forget()` clears
+// `refused`/`actionError`/`alreadyGone` TOGETHER at the start of every new
+// `askAdd`/`askRemove`, and setting either one always requires a `pending`
+// that is `null` by then — so a refusal and an already-gone note, or either of
+// them alongside a standing question, can never be on screen at once. (The
+// review that asked for this test suggested reading both off a single screen;
+// probing the running component first showed that state is unreachable, so
+// this covers the same two derived values across two mounts instead.)
+test('the refusal frame and the already-gone note also follow a language switch', async () => {
+  maskPreview.mockRejectedValue(new Error('the index is not open'));
+  const { container } = await mount([]);
+
+  await type('*.pdf');
+  await fireEvent.click(addButton());
+  await waitFor(() => expect(screen.getByTestId('mask-refused-reason')).toBeTruthy());
+  expect(visibleText(container)).toContain(t('settings_masks_refused_add', { mask: '*.pdf' }));
+
+  setLocale('uk');
+  await waitFor(() => expect(screen.getByText('Маски файлів')).toBeTruthy());
+  expect(screen.getByTestId('mask-refused-heading').textContent)
+    .toBe(t('settings_masks_refused_add', { mask: '*.pdf' }));
+  expect(visibleText(container)).not.toContain('was not added');
+
+  cleanup();
+  setLocale('en');
+  removeMask.mockResolvedValue(false); // the row was already gone
+  const { container: container2 } = await mount(['*.tmp']);
+  await waitFor(() => expect(screen.getByText('*.tmp')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.tmp' }));
+  await fireEvent.click(confirmRemove('*.tmp'));
+  await waitFor(() => expect(screen.getByTestId('mask-already-gone')).toBeTruthy());
+  expect(visibleText(container2)).toContain(t('settings_masks_already_gone'));
+
+  setLocale('uk');
+  await waitFor(() => expect(screen.getByText('Маски файлів')).toBeTruthy());
+  expect(screen.getByTestId('mask-already-gone').textContent).toBe(t('settings_masks_already_gone'));
+  expect(visibleText(container2)).not.toContain('There was no such mask');
 });

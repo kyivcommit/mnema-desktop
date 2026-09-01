@@ -92,6 +92,79 @@ describe('i18n', () => {
       + 'and no document stops being findable — each is also indexed under another path.');
   });
 
+  // Task 11 fix round 1, F2. `settings_masks_add_cost`'s English string put the
+  // verb OUTSIDE the `paths` plural ("... already indexed match this mask"),
+  // fixed at the plural form while `# file` was not — so at `paths: 1` the
+  // sentence read "1 file already indexed match this mask". It survived
+  // because no component fixture ever rendered `paths: 1`
+  // (`Masks.test.ts` reaches 4 and 0 only). Pinned here at the same five counts
+  // `settings_folders_exclude_cost` above uses, for the same reason the
+  // sibling's comment gives: the component only ever reaches 1 and 2.
+  // `uk` was already correct — its plural already carries the verb form — and
+  // is pinned here too so a future edit cannot reintroduce the English bug's
+  // shape on this side.
+  it('the mask add-cost sentence counts both paths and documents through CLDR plural, in both locales', () => {
+    setLocale('uk');
+    const uk = (paths: number, documents: number) => t('settings_masks_add_cost', { paths, documents });
+    expect(uk(1, 1)).toBe(
+      'Станом на зараз під цю маску підпадає щонайменше 1 файл з уже проіндексованих, '
+      + 'і 1 документ більше не знайдеться: інші шляхи на нього не ведуть. Наступне сканування '
+      + 'кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
+    expect(uk(2, 2)).toBe(
+      'Станом на зараз під цю маску підпадає щонайменше 2 файли з уже проіндексованих, '
+      + 'і 2 документи більше не знайдуться: інші шляхи на них не ведуть. Наступне сканування '
+      + 'кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
+    expect(uk(5, 5)).toBe(
+      'Станом на зараз під цю маску підпадає щонайменше 5 файлів з уже проіндексованих, '
+      + 'і 5 документів більше не знайдуться: інші шляхи на них не ведуть. Наступне сканування '
+      + 'кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
+    expect(uk(21, 21)).toBe(
+      'Станом на зараз під цю маску підпадає щонайменше 21 файл з уже проіндексованих, '
+      + 'і 21 документ більше не знайдеться: інші шляхи на нього не ведуть. Наступне сканування '
+      + 'кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
+    expect(uk(22, 22)).toBe(
+      'Станом на зараз під цю маску підпадає щонайменше 22 файли з уже проіндексованих, '
+      + 'і 22 документи більше не знайдуться: інші шляхи на них не ведуть. Наступне сканування '
+      + 'кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
+    // The `=0` arm for `documents`, against a non-zero `paths`.
+    expect(uk(2, 0)).toBe(
+      'Станом на зараз під цю маску підпадає щонайменше 2 файли з уже проіндексованих, '
+      + 'і жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим '
+      + 'шляхом. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
+      + 'проіндексувалися, тут не враховані.');
+
+    setLocale('en');
+    const en = (paths: number, documents: number) => t('settings_masks_add_cost', { paths, documents });
+    // The count this bug actually shipped at: `paths: 1` reaches the `one` arm,
+    // and the fix moves the verb ("matches") inside it.
+    expect(en(1, 1)).toBe(
+      'As of now, at least 1 file already indexed matches this mask, and 1 document stops being'
+      + ' findable: no other path names it. The next scan of each folder can remove more than'
+      + ' that: files that never finished indexing are not counted here.');
+    expect(en(2, 2)).toBe(
+      'As of now, at least 2 files already indexed match this mask, and 2 documents stop being'
+      + ' findable: no other path names them. The next scan of each folder can remove more than'
+      + ' that: files that never finished indexing are not counted here.');
+    expect(en(5, 0)).toBe(
+      'As of now, at least 5 files already indexed match this mask, and no document stops being'
+      + ' findable — each one is also indexed under another path. The next scan of each folder can'
+      + ' remove more than that: files that never finished indexing are not counted here.');
+
+    // `settings_masks_add_cost_none` carries no plural argument — a fixed
+    // sentence for the `paths === 0` arm the component picks itself
+    // (`Masks.svelte`, F2's sibling finding) — pinned here beside its neighbour
+    // rather than left unread by any test in the catalogue.
+    setLocale('uk');
+    expect(t('settings_masks_add_cost_none')).toBe(
+      'Станом на зараз під цю маску не підпадає жоден із уже проіндексованих файлів. Наступне '
+      + 'сканування кожної теки все одно може щось прибрати: файли, які так і не проіндексувалися, '
+      + 'тут не враховані.');
+    setLocale('en');
+    expect(t('settings_masks_add_cost_none')).toBe(
+      'As of now, no file that is already indexed matches this mask. The next scan of each folder'
+      + ' can still remove files: those that never finished indexing are not counted here.');
+  });
+
   // Fix round 1. PR 8a Task 5 added a four-arm Ukrainian plural and the only
   // counts anything reached were 1 and 2 (`Folders.test.ts:629`, `:1174`) —
   // which `one` and `few` alone answer, so `many` and `other` crossed
