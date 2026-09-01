@@ -575,6 +575,43 @@ impl WalkRules {
         validate_prefix(prefix).map(|_| ())
     }
 
+    /// Whether two masks are **the same rule**: whether the matcher can tell
+    /// them apart at all.
+    ///
+    /// **What a caller may conclude from `true`.** That the two are
+    /// interchangeable, everywhere, for every name — not that they look alike.
+    /// Every mask's glob is compiled from `caseless_form(mask)`
+    /// ([`validate_mask`]), so two masks with the same comparison form compile
+    /// to the **identical** `GlobMatcher` and there is no name, on any
+    /// platform, that one accepts and the other refuses. Storing both is
+    /// therefore two rows and one rule.
+    ///
+    /// **What a caller may NOT conclude from `false`.** Not that the two remove
+    /// different files. `*.pdf` and `*.[pP][dD][fF]` are different rules by
+    /// this comparison and take the same files; so do `*.pdf` and `*`, on every
+    /// name the first one names. This answers "are these the same rule", never
+    /// "do these overlap" — nothing here computes what a glob matches.
+    ///
+    /// **A wrapper over [`caseless_form`], never a second copy of it**, and the
+    /// reason is [`WalkRules::check_prefix`]'s, one layer over: the transform
+    /// is `nfd → default_case_fold → nfc`, three steps a caller reaching for
+    /// `to_lowercase` gets wrong in two separate ways at once — `ß`/`SS` folds
+    /// to more than one character, and an accented name spelled NFD on disk
+    /// never composes. A caller standing on its own copy of this would
+    /// disagree with the walk silently, at exactly the edges the mask layer was
+    /// built to pin.
+    ///
+    /// 🔴 **It is deliberately not a way to get the folded spelling.** The
+    /// comparison form is not something to store, echo or offer for editing:
+    /// the storage layer keeps what a person typed, byte for byte
+    /// (`migrations.rs`, `file_mask.pattern`), and folding at that layer would
+    /// silently rewrite it. A predicate is the whole of what a caller needs to
+    /// say "you already have this rule", and it cannot be misused to say it in
+    /// a spelling nobody entered.
+    pub fn same_mask_rule(a: &str, b: &str) -> bool {
+        caseless_form(a) == caseless_form(b)
+    }
+
     /// The override patterns the built-in layers contribute, in the order
     /// `builder()` adds them.
     ///

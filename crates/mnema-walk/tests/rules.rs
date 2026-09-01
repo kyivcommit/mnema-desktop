@@ -1376,6 +1376,84 @@ fn a_mask_folds_case_outside_ascii() {
     );
 }
 
+/// 🔴 **`WalkRules::same_mask_rule` must answer with the transform the matcher
+/// uses, not with one that merely looks like it.**
+///
+/// The predicate exists so an editor can say "you already have this rule"
+/// instead of storing a second row for it: `file_mask.pattern` is a `TEXT
+/// PRIMARY KEY`, so rows are distinguished BYTE-wise, while masks are compared
+/// caselessly — measured live, `*.PDF` beside `*.pdf` is two rows under a
+/// sentence saying they are one rule, and removing either one gives no files
+/// back.
+///
+/// Three pairs, and the third is the one that matters. A `to_lowercase`-shaped
+/// implementation passes the first two and fails it: `Résumé.txt` spelled NFD
+/// never composes, so the two spellings stay different strings under any
+/// amount of lowercasing. `Straße*`/`STRASSE*` is the second shape the same
+/// wrong implementation gets wrong, for an unrelated reason — a fold that is
+/// longer than what it folds.
+///
+/// Both directions throughout, and the `true` half is asserted **against the
+/// matcher** rather than against the predicate alone: a predicate that answered
+/// `true` for everything would satisfy three `assert!`s and be worthless, so
+/// each pair is also shown to accept and refuse the same names.
+#[test]
+fn two_masks_are_the_same_rule_exactly_when_the_matcher_cannot_tell_them_apart() {
+    // Case, the pair the live run produced.
+    assert!(
+        WalkRules::same_mask_rule("*.PDF", "*.pdf"),
+        "two spellings that compile to the identical glob are one rule"
+    );
+    assert!(
+        WalkRules::same_mask_rule("*.pdf", "*.PDF"),
+        "the question does not depend on which spelling is asked about first"
+    );
+    assert_eq!(m("*.PDF", "report.pdf"), m("*.pdf", "report.pdf"));
+    assert!(m("*.PDF", "report.pdf"), "neither spelling matched at all");
+
+    // The other direction, and it is what keeps the predicate from being
+    // `true`: two masks that really are different rules.
+    assert!(
+        !WalkRules::same_mask_rule("*.pdf", "*.txt"),
+        "two masks that take different files are not one rule"
+    );
+    assert_ne!(m("*.pdf", "report.pdf"), m("*.txt", "report.pdf"));
+
+    // 🔴 Normalisation, not case. `Résumé.txt` spelled NFD — the form macOS
+    // stores it in, verified on disk during the live run — against the NFC
+    // spelling a person types. Nothing here is lowercased, so an
+    // implementation built on `to_lowercase` answers `false` and stores a
+    // second row for a rule that already exists.
+    const RESUME_NFC: &str = "R\u{e9}sum\u{e9}.txt";
+    const RESUME_NFD: &str = "Re\u{301}sume\u{301}.txt";
+    assert_ne!(
+        RESUME_NFC, RESUME_NFD,
+        "the two spellings must really be different strings, or this case pins nothing"
+    );
+    assert!(
+        WalkRules::same_mask_rule(RESUME_NFC, RESUME_NFD),
+        "the same accented mask in two normal forms is one rule"
+    );
+    assert_eq!(m(RESUME_NFC, RESUME_NFC), m(RESUME_NFD, RESUME_NFC));
+    assert!(m(RESUME_NFD, RESUME_NFC), "neither spelling matched at all");
+
+    // The second shape `to_lowercase` gets wrong: a fold longer than what it
+    // folds. `ß` folds to `ss`, so these two are one rule and no lowercasing
+    // makes them one.
+    assert!(
+        WalkRules::same_mask_rule("Stra\u{df}e*", "STRASSE*"),
+        "a fold that is longer than the character it folds is still a fold"
+    );
+    assert_eq!(
+        m("Stra\u{df}e*", "STRASSE.txt"),
+        m("STRASSE*", "STRASSE.txt")
+    );
+    assert!(
+        m("Stra\u{df}e*", "STRASSE.txt"),
+        "neither spelling matched at all"
+    );
+}
+
 /// 🔴 **`case_insensitive(true)` is not behaviour-neutral to remove — it acts
 /// on the *pattern*, not only on the subject.** A character-class range with
 /// uncased endpoints spanning ASCII upper case folds under `(?i)` to also

@@ -221,3 +221,45 @@ case_ "remove_mask must report whether a row actually went, not always true" \
   's{    state\.with_index\(\|db\| db\.remove_mask\(&pattern\)\)\n\}}{    state.with_index(|db| db.remove_mask(&pattern))?;\n    Ok(true) /* mutant: removal always reports a row */\n\}}' \
   'Ok(true) /* mutant: removal always reports a row */' \
   mnema-desktop 'the_mask_commands_store_list_and_remove_through_the_ipc' --test commands
+
+# ── Task 11 fix round 2 additions ────────────────────────────────────────────
+#
+# Three cases for the obligation `migrations.rs:119-124` books to the editor:
+# `*.PDF` beside `*.pdf` is two rows and one rule, and the layer that has to
+# say so is this one. Measured the same way as everything above — each mutated
+# alone in a copy of its file, the copy restored between runs, never
+# `git checkout --`. See
+# `docs/private/sdd/2026-08-31-desktop-pr8b-masks/task-11-fix-round-2-report.md`
+# for the failure text each one produced.
+
+# 🔴 F1. The predicate rewritten as the thing an implementer reaches for. It is
+# not merely "less correct": `to_lowercase` answers the CASE pair correctly and
+# gets both of the other two wrong, so a suite that only ever asked about
+# `*.PDF`/`*.pdf` would keep this mutant alive. `Résumé.txt` spelled NFD never
+# composes under any amount of lowercasing, and `ß` folds to two characters.
+case_ "the same-rule predicate must use the matcher's own transform, not a lowercase lookalike" \
+  crates/mnema-walk/src/rules.rs \
+  's{        caseless_form\(a\) == caseless_form\(b\)}{        a.to_lowercase() == b.to_lowercase()}' \
+  '        a.to_lowercase() == b.to_lowercase()' \
+  mnema-walk 'two_masks_are_the_same_rule_exactly_when_the_matcher_cannot_tell_them_apart' --test rules
+
+# 🔴 F2. The equivalence check deleted outright — the state the live run found,
+# where `*.PDF` typed over a stored `*.pdf` is accepted and stored as a second
+# row. The insert below it is untouched, so the mutant stores exactly what this
+# round exists to stop storing.
+case_ "an equivalent spelling must be caught before the insert, not stored beside it" \
+  src-tauri/src/bridge.rs \
+  's{        if let Some\(stored\) = db\n            \.list_masks\(\)\?\n            \.into_iter\(\)\n            \.find\(\|stored\| mnema_walk::WalkRules::same_mask_rule\(stored, &pattern\)\)\n        \{\n            return Ok\(MaskAdded::AlreadyStored \{ stored \}\);\n        \}\n}{        /* mutant: the equivalence check is gone */\n}' \
+  '        /* mutant: the equivalence check is gone */' \
+  mnema-desktop 'a_mask_that_is_already_stored_under_another_spelling_is_not_stored_again' --test commands
+
+# 🔴 F2, the half the case above cannot catch: the check runs, nothing is
+# stored, and the answer names the spelling the person TYPED rather than the row
+# standing in its way. That is the whole reason the variant carries a field —
+# someone told "you already have `*.PDF`" goes looking for `*.PDF` in a list
+# that holds `*.pdf`, which is the screen-contradicts-its-data class again.
+case_ "the already-stored answer must name the stored spelling, not the typed one" \
+  src-tauri/src/bridge.rs \
+  's{            return Ok\(MaskAdded::AlreadyStored \{ stored \}\);}{            let _ = stored;\n            return Ok(MaskAdded::AlreadyStored { stored: pattern.clone() });}' \
+  '            return Ok(MaskAdded::AlreadyStored { stored: pattern.clone() });' \
+  mnema-desktop 'a_mask_that_is_already_stored_under_another_spelling_is_not_stored_again' --test commands

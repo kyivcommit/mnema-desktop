@@ -8609,6 +8609,92 @@ fn the_mask_commands_store_list_and_remove_through_the_ipc() {
     );
 }
 
+/// 🔴 **The obligation `migrations.rs:119-124` books to this layer, discharged:
+/// an equivalent spelling is not stored, and the answer names the spelling that
+/// is already there.**
+///
+/// `file_mask.pattern` is a `TEXT PRIMARY KEY`, so the store separates rows
+/// BYTE-wise while the walk compares masks caselessly. That is a decision, not
+/// a defect — folding at the storage layer would rewrite what a person typed —
+/// and it is pinned on the storage side by
+/// `two_masks_differing_only_in_case_are_two_rows_and_neither_is_rewritten`.
+/// What it leaves this command owing is the sentence. Measured on the running
+/// application: with `*.pdf` stored, typing `*.PDF` was accepted and appeared
+/// as a second row, and removing `*.pdf` afterwards gave no files back because
+/// the second row was still holding them.
+///
+/// **The list after each add is what makes this a test rather than an echo.** A
+/// command that answered `alreadyStored` and inserted anyway would satisfy the
+/// answer assertions alone, and the harm here is entirely in the row.
+///
+/// Three states, and the third is the one a `to_lowercase`-shaped comparison
+/// gets wrong: case (`*.PDF` over `*.pdf`), a genuinely new mask (which must
+/// still be stored — a command that answered `alreadyStored` for everything
+/// would pass the first state twice), and **normalisation** — `Résumé.txt`
+/// typed composed against the decomposed spelling already stored, which is the
+/// form macOS puts on disk and which no amount of lowercasing brings together.
+#[test]
+fn a_mask_that_is_already_stored_under_another_spelling_is_not_stored_again() {
+    // NFD, the form the live run verified on disk (`65 cc81`), stored first;
+    // NFC is what a person types.
+    const RESUME_NFD: &str = "Re\u{301}sume\u{301}.txt";
+    const RESUME_NFC: &str = "R\u{e9}sum\u{e9}.txt";
+    assert_ne!(
+        RESUME_NFD, RESUME_NFC,
+        "the two spellings must really be different strings, or this case pins nothing"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    assert_eq!(
+        call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected"),
+        json!({ "kind": "stored" }),
+        "the first add of a mask nothing matches must report that a row was written"
+    );
+
+    assert_eq!(
+        call(&webview, "add_mask", json!({ "pattern": "*.PDF" })).expect("add_mask was rejected"),
+        json!({ "kind": "alreadyStored", "stored": "*.pdf" }),
+        "an equivalent spelling must be refused storage AND name the row standing in its way"
+    );
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!(["*.pdf"]),
+        "the equivalent spelling must not have been stored as a second row"
+    );
+
+    // A genuinely different rule still stores, so the arm above is not simply
+    // "adding never works".
+    assert_eq!(
+        call(&webview, "add_mask", json!({ "pattern": "*.tmp" })).expect("add_mask was rejected"),
+        json!({ "kind": "stored" }),
+        "a mask that is not an equivalent spelling of a stored one must still be stored"
+    );
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!(["*.pdf", "*.tmp"])
+    );
+
+    // Normalisation, not case: nothing here differs in letter case at all.
+    call(&webview, "add_mask", json!({ "pattern": RESUME_NFD }))
+        .expect("add_mask(NFD) was rejected");
+    assert_eq!(
+        call(&webview, "add_mask", json!({ "pattern": RESUME_NFC }))
+            .expect("add_mask was rejected"),
+        json!({ "kind": "alreadyStored", "stored": RESUME_NFD }),
+        "the same accented mask in two normal forms is one rule, and the stored spelling \
+         is the decomposed one that is actually in the index"
+    );
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!(["*.pdf", "*.tmp", RESUME_NFD]),
+        "the composed spelling must not have been stored beside the decomposed one"
+    );
+}
+
 /// 🔴 The rule `add_mask` exists to enforce: the candidate is validated before
 /// it is stored, and the refusal is `RulesError`'s own sentence.
 ///

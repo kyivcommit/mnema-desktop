@@ -314,14 +314,21 @@ test('maskPreview sends the pattern under the name the command declares', async 
 });
 
 test('addMask sends the pattern exactly as typed, untrimmed', async () => {
-  invoke.mockResolvedValue(undefined);
+  invoke.mockResolvedValue({ kind: 'stored' });
 
   // The surrounding space is the point: `validate_mask` refuses it with a
   // sentence of its own, and a wrapper that trimmed would hand the shell a
   // different rule from the one the person typed and looked at.
-  await ipc.addMask(' *.pdf ');
+  await expect(ipc.addMask(' *.pdf ')).resolves.toEqual({ kind: 'stored' });
 
   expect(invoke).toHaveBeenCalledWith('add_mask', { pattern: ' *.pdf ' });
+
+  // Task 11 fix round 2, F2. The other outcome, and the spelling it carries:
+  // `add_mask` no longer answers "nothing", so a wrapper that swallowed the
+  // reply would leave the editor unable to tell a stored mask from one that
+  // was already there under another spelling.
+  invoke.mockResolvedValue({ kind: 'alreadyStored', stored: '*.pdf' });
+  await expect(ipc.addMask('*.PDF')).resolves.toEqual({ kind: 'alreadyStored', stored: '*.pdf' });
 });
 
 test('removeMask carries back whether a row actually went', async () => {

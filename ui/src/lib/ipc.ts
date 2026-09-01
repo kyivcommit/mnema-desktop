@@ -158,7 +158,16 @@ export type MaskPreview = { paths: number; documents: number };
 // per-root list to ask for.
 export const listMasks = () => invoke<string[]>('list_masks');
 export const maskPreview = (pattern: string) => invoke<MaskPreview>('mask_preview', { pattern });
-export const addMask = (pattern: string) => invoke<void>('add_mask', { pattern });
+// Which of the two things happened, because there are two and they are
+// different sentences — the same reason `removeMask` below carries a boolean.
+// `alreadyStored` means nothing was written: an equivalent spelling is already
+// in the index, and `stored` is that spelling, which may not be the one that
+// was typed. `*.PDF` and `*.pdf` are one rule and two possible rows (the store
+// keys on the bytes, the walk compares caselessly), so a person who is told
+// only "you already have this" would be looking for the spelling they typed
+// and not finding it in the list.
+export type MaskAdded = { kind: 'stored' } | { kind: 'alreadyStored'; stored: string };
+export const addMask = (pattern: string) => invoke<MaskAdded>('add_mask', { pattern });
 // Answers whether a row actually went, for `includeSubfolder`'s reason: a
 // second window may have removed the same mask first, and "the mask is gone
 // now" and "there was no mask left to remove" are different things to say.

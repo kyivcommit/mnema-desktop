@@ -214,9 +214,16 @@ case_ "the refusal heading must not default to the add key" \
 # F3's other half. The case note belongs to the check only — it explains a
 # folded pattern quoted inside a compile refusal, and neither other path folds
 # anything. This forces it onto every refusal; the same test above catches it.
+#
+# ⚠️ **Re-quoted in fix round 2**, which rewrote the very line this case
+# substitutes (the note is now asked of the answer as well as of the path).
+# Left as it was, the pattern matched nothing and the harness reported BROKEN
+# CASE — caught by a run, not by reading. The mutation it produces is
+# byte-identical to the one it always produced; only the text it is cut out of
+# has moved.
 case_ "the case note must not follow a removal refusal" \
   ui/src/settings/Masks.svelte \
-  "s{      note: r\.of === 'add-check' \? t\('settings_masks_refused_case_note'\) : null,}{      note: t('settings_masks_refused_case_note'),}" \
+  "s{      note:\n        r\.of === 'add-check' && answerSpellsItDifferently\(actionError, r\.mask\)\n          \? t\('settings_masks_refused_case_note'\)\n          : null,}{      note: t('settings_masks_refused_case_note'),}" \
   "      note: t('settings_masks_refused_case_note')," \
   src/settings/Masks.test.ts 'a refusal from removing a mask names the removal, not the add, and carries no case note' runner=vitest
 
@@ -248,4 +255,45 @@ case_ "the refusal frame must follow a language switch" \
   "s{  const refusal = \\\$derived\.by\(\(\) => \{\n    void \\\$locale;\n    const r = refused;}[  const refusal = \\\$derived.by(() => {\n    const r = refused;]" \
   "  const refusal = \$derived.by(() => {
     const r = refused;" \
+  src/settings/Masks.test.ts 'the refusal frame and the already-gone note also follow a language switch' runner=vitest
+
+# ── Task 11 fix round 2 additions ────────────────────────────────────────────
+#
+# Three more cases, for the two guards this round added to the screen. Measured
+# the same way as everything above: each mutated alone in a copy of
+# `Masks.svelte`, the copy restored between runs, never `git checkout --`. All
+# three went red, none crashed its oracle. See
+# `docs/private/sdd/2026-08-31-desktop-pr8b-masks/task-11-fix-round-2-report.md`
+# for the failure text each one produced.
+
+# 🔴 F3. The outcome discarded — which is exactly the state the live run found,
+# with `add_mask` still returning `()`: a person types `*.PDF` over a stored
+# `*.pdf`, answers the question, and the screen says nothing at all. The
+# discarded value is the ONE thing that can tell them the rule they just typed
+# is already there under a spelling they are not looking for.
+case_ "the add outcome must reach the screen, not be discarded" \
+  ui/src/settings/Masks.svelte \
+  "s{        const added = await addMask\(p\.mask\);\n        alreadyStored = added\.kind === 'alreadyStored' \? added\.stored : null;}{        await addMask(p.mask);}" \
+  "        await addMask(p.mask);
+        draft = '';" \
+  src/settings/Masks.test.ts 'a rule that is already stored under another spelling is not added, and the sentence names the stored spelling' runner=vitest
+
+# 🔴 F5. The caveat back to unconditional — the state the live run saw, where it
+# stood under `sub/*.txt` and `!notes.txt` and explained a re-spelling that had
+# not happened. Most of the check's refusals quote the mask exactly as typed;
+# only the compile refusal carries `globset`'s folded pattern.
+case_ "the case note must not stand where the answer spells the mask as it was typed" \
+  ui/src/settings/Masks.svelte \
+  "s{      note:\n        r\.of === 'add-check' && answerSpellsItDifferently\(actionError, r\.mask\)\n          \? t\('settings_masks_refused_case_note'\)\n          : null,}{      note: r.of === 'add-check' ? t('settings_masks_refused_case_note') : null,}" \
+  "      note: r.of === 'add-check' ? t('settings_masks_refused_case_note') : null," \
+  src/settings/Masks.test.ts 'the case note stands only where the answer really spells the mask differently' runner=vitest
+
+# F3, D130's rule at the third derived value of this shape: `void $locale`
+# dropped from `alreadyStoredLabel`, so the sentence keeps the language it was
+# first read in. The siblings above cover `alreadyGoneLabel` and `refusal`.
+case_ "the already-stored sentence must follow a language switch" \
+  ui/src/settings/Masks.svelte \
+  "s{  const alreadyStoredLabel = \\\$derived\.by\(\(\) => \{\n    void \\\$locale;\n    const stored = alreadyStored;}[  const alreadyStoredLabel = \\\$derived.by(() => {\n    const stored = alreadyStored;]" \
+  "  const alreadyStoredLabel = \$derived.by(() => {
+    const stored = alreadyStored;" \
   src/settings/Masks.test.ts 'the refusal frame and the already-gone note also follow a language switch' runner=vitest

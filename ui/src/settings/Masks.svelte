@@ -52,6 +52,13 @@
   let refused = $state<{ mask: string; of: 'add-check' | 'add-store' | 'remove' } | null>(null);
   let actionError = $state<string | null>(null);
   let alreadyGone = $state(false);
+  // 🔴 The stored SPELLING, not a flag, and that is the difference between this
+  // and `alreadyGone` above. The store keys masks on their bytes while the walk
+  // compares them caselessly, so `*.PDF` and `*.pdf` are one rule and two
+  // possible rows; the sentence has to name the row that is already there, or a
+  // person told "you already have this" looks for what they typed and does not
+  // find it in the list above.
+  let alreadyStored = $state<string | null>(null);
 
   // Not `$state`: nothing renders from it. The list read is reachable from
   // three places — mount, an add and a remove — so two `list_masks` calls can
@@ -92,6 +99,7 @@
     refused = null;
     actionError = null;
     alreadyGone = false;
+    alreadyStored = null;
   }
 
   async function askAdd() {
@@ -139,7 +147,13 @@
     pending = null;
     try {
       if (p.kind === 'add') {
-        await addMask(p.mask);
+        // `add_mask` answers WHICH of the two things happened, for the reason
+        // `remove_mask` answers its own pair below: "nothing was written
+        // because this rule is already here" is a different sentence from
+        // "stored", and before this round the command returned neither — the
+        // question simply vanished and the screen looked exactly as it had.
+        const added = await addMask(p.mask);
+        alreadyStored = added.kind === 'alreadyStored' ? added.stored : null;
         draft = '';
       } else {
         // `remove_mask` answers whether a row actually went: a second window may
@@ -177,6 +191,11 @@
     void $locale;
     return alreadyGone ? t('settings_masks_already_gone') : null;
   });
+  const alreadyStoredLabel = $derived.by(() => {
+    void $locale;
+    const stored = alreadyStored;
+    return stored === null ? null : t('settings_masks_already_stored', { stored });
+  });
 
   const rows = $derived.by(() => {
     void $locale;
@@ -188,6 +207,38 @@
       removeAriaLabel: t('settings_masks_remove_named', { mask }),
     }));
   });
+
+  // 🔴 Whether `answer` spells `mask` some way other than the way it was typed
+  // — the question `settings_masks_refused_case_note` exists to explain, asked
+  // rather than assumed. Measured live: the note rendered under `sub/*.txt` and
+  // under `!notes.txt`, where the answer echoed the mask byte for byte and
+  // there was nothing to explain; a caveat shown where nothing changed hints at
+  // a change that did not happen.
+  //
+  // 🔴 **This is a LOCATOR, not the rule, and the difference is the whole
+  // reason the line below is allowed to exist here.** `caseless_form`
+  // (`mnema-walk`) is the only thing that decides what a mask folds to, and a
+  // second copy of it in this file would disagree with the walk at exactly the
+  // edges the mask layer was built to pin. So this never folds anything and
+  // never decides what a mask matches: it looks for the mask inside a sentence
+  // the shell already wrote, ignoring case, and reports whether what it found
+  // there is byte-identical to what the person typed. `toLowerCase` is fit for
+  // finding and unfit for deciding.
+  //
+  // Its one blind spot, named rather than discovered: a fold that changes the
+  // length of what it folds — `Straße*` echoes as `strasse*` — is not found by
+  // a lowercase search, so the note stays off. That is the harmless direction
+  // (an explanation missing where it would have helped, never a claim about a
+  // change that did not happen), and it is why this decides a caveat and
+  // nothing else.
+  function answerSpellsItDifferently(answer: string, mask: string): boolean {
+    const inAnswer = answer.toLowerCase();
+    const wanted = mask.toLowerCase();
+    for (let at = inAnswer.indexOf(wanted); at !== -1; at = inAnswer.indexOf(wanted, at + 1)) {
+      if (answer.slice(at, at + mask.length) !== mask) return true;
+    }
+    return false;
+  }
 
   const refusal = $derived.by(() => {
     void $locale;
@@ -206,8 +257,14 @@
       heading,
       // The case note belongs to the check only: it explains a folded pattern
       // quoted inside a COMPILE refusal, and neither the add-store path (the
-      // check already passed) nor the removal path folds anything.
-      note: r.of === 'add-check' ? t('settings_masks_refused_case_note') : null,
+      // check already passed) nor the removal path folds anything. And within
+      // the check, only where the answer really carries a second spelling —
+      // most of the check's refusals (`/`, a leading `!`, whitespace) quote the
+      // mask exactly as typed and have nothing for this sentence to explain.
+      note:
+        r.of === 'add-check' && answerSpellsItDifferently(actionError, r.mask)
+          ? t('settings_masks_refused_case_note')
+          : null,
     };
   });
 
@@ -278,6 +335,7 @@
     </div>
   {/if}
   {#if alreadyGoneLabel}<p data-testid="mask-already-gone">{alreadyGoneLabel}</p>{/if}
+  {#if alreadyStoredLabel}<p data-testid="mask-already-stored">{alreadyStoredLabel}</p>{/if}
   {#if refusal}
     <p data-testid="mask-refused-heading">{refusal.heading}</p>
     <!-- Verbatim, and it is the whole of the rejection: nothing here branches on

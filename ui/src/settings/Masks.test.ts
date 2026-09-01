@@ -38,6 +38,11 @@ beforeEach(() => {
   removeMask.mockReset();
   invoke.mockReset();
   listMasks.mockResolvedValue([]);
+  // The ordinary outcome, so a test about something else does not have to
+  // restate it. `add_mask` answers which of two things happened and every
+  // press has to read that answer, so a bare `vi.fn()` returning `undefined`
+  // would fail every add flow for a reason unrelated to its subject.
+  addMask.mockResolvedValue({ kind: 'stored' });
 });
 afterEach(() => {
   expect(invoke).not.toHaveBeenCalled();
@@ -277,7 +282,7 @@ test('a preview of zero asks the question anyway, in a sentence of its own', asy
 
 test('confirming stores the mask as typed and re-reads the list', async () => {
   maskPreview.mockResolvedValue({ paths: 4, documents: 2 });
-  addMask.mockResolvedValue(undefined);
+  addMask.mockResolvedValue({ kind: 'stored' });
   await mount([]);
 
   await type('*.pdf');
@@ -411,6 +416,102 @@ test('a refusal from removing a mask names the removal, not the add, and carries
   expect(screen.getByText('*.pdf')).toBeTruthy();
 });
 
+// 🔴 Task 11 fix round 2, F2/F3. The state the live run found: with `*.pdf`
+// stored, typing `*.PDF` was accepted, appeared as a second row, and the screen
+// said nothing — two lines under the section's own sentence that the two are
+// one rule. The harm is the removal that follows: `*.pdf` removed gives no
+// files back, because `*.PDF` is still holding them.
+//
+// 🔴 The list is asserted as well as the sentence, and that is what makes this
+// a test rather than an echo: a screen that printed the sentence and added the
+// row anyway would satisfy the sentence assertions alone, and the row is where
+// the whole cost is.
+test('a rule that is already stored under another spelling is not added, and the sentence names the stored spelling', async () => {
+  maskPreview.mockResolvedValue({ paths: 4, documents: 2 });
+  addMask.mockResolvedValue({ kind: 'alreadyStored', stored: '*.pdf' });
+  await mount(['*.pdf']);
+  await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
+
+  await type('*.PDF');
+  await fireEvent.click(addButton());
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  await fireEvent.click(confirmAdd('*.PDF'));
+
+  await waitFor(() => expect(screen.getByTestId('mask-already-stored')).toBeTruthy());
+  // The stored spelling by name, not "you already have this": the person typed
+  // `*.PDF` and has to be able to find `*.pdf` in the list above.
+  expect(screen.getByTestId('mask-already-stored').textContent)
+    .toBe('You already have this rule — it is stored as *.pdf. Nothing was added.');
+  // Exactly one row, by count and not by "the one we know about is there": a
+  // second row would leave the first assertion green.
+  expect(screen.getAllByRole('button', { name: /^Remove the mask/ }).length).toBe(1);
+  expect(screen.getByRole('button', { name: 'Remove the mask *.pdf' })).toBeTruthy();
+  expect(screen.queryByText('*.PDF')).toBeNull();
+
+  // The other direction, on a mask that really is new: the sentence must not
+  // stand on a press it does not describe, and the add must still happen.
+  cleanup();
+  addMask.mockResolvedValue({ kind: 'stored' });
+  await mount([]);
+  listMasks.mockResolvedValue(['*.tmp']);
+
+  await type('*.tmp');
+  await fireEvent.click(addButton());
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  await fireEvent.click(confirmAdd('*.tmp'));
+
+  await waitFor(() => expect(screen.getByText('*.tmp')).toBeTruthy());
+  expect(addMask).toHaveBeenLastCalledWith('*.tmp');
+  expect(screen.queryByTestId('mask-already-stored')).toBeNull();
+});
+
+// Task 11 fix round 2, F5. The caveat rendered under BOTH refusals in the live
+// run — `sub/*.txt` and `!notes.txt` — where the answer echoed the mask byte
+// for byte and there was nothing for it to explain. It is needed for the real
+// case and only there.
+//
+// One test, both directions, because a caveat that never renders and a caveat
+// that always renders are the two failures and a one-sided assertion is
+// satisfied by one of them.
+test('the case note stands only where the answer really spells the mask differently', async () => {
+  const CASE_NOTE =
+    'The answer above can quote your mask in a different letter case than the one you typed:'
+    + ' masks are compared with letter case ignored.';
+
+  // The answer quotes `[a-_]x.txt` — the FOLDED pattern `globset` was handed,
+  // which the person never typed. This is what the note is for.
+  maskPreview.mockRejectedValue(new Error(
+    'file mask "[A-_]x.txt" could not be compiled: error parsing glob \'[a-_]x.txt\':'
+    + ' unclosed character class; missing \']\'',
+  ));
+  await mount([]);
+  await type('[A-_]x.txt');
+  await fireEvent.click(addButton());
+
+  await waitFor(() => expect(screen.getByTestId('mask-refused-reason')).toBeTruthy());
+  expect(screen.getByText(CASE_NOTE)).toBeTruthy();
+
+  // The same refusal frame, from the same command, over an answer that spells
+  // the mask exactly as it was typed. Live: `file mask "sub/*.txt" cannot
+  // contain `/` — …`, and the caveat stood under it explaining a change that
+  // had not happened.
+  cleanup();
+  maskPreview.mockRejectedValue(new Error(
+    'file mask "sub/*.txt" cannot contain `/` — a mask names a file, and a folder is'
+    + ' excluded with an exclusion rule instead',
+  ));
+  await mount([]);
+  await type('sub/*.txt');
+  await fireEvent.click(addButton());
+
+  await waitFor(() => expect(screen.getByTestId('mask-refused-reason')).toBeTruthy());
+  // The frame and the shell's sentence are still there — this is not a screen
+  // that lost its refusal, it is one that lost a caveat it did not need.
+  expect(screen.getByTestId('mask-refused-heading').textContent)
+    .toBe('The mask sub/*.txt was not added. This is what the check answered:');
+  expect(screen.queryByText(CASE_NOTE)).toBeNull();
+});
+
 // 🔴 Removal is a disclosure, not a tidy-up: it is the one press on this screen
 // that sends more text to a third party.
 test('removing states the inverse cost before it removes anything', async () => {
@@ -519,7 +620,7 @@ test('the older of two overlapping list reads writes nothing', async () => {
   setLocale('en'); // seed, do not inherit
   listMasks.mockReturnValueOnce(mountRead); // still in flight for the whole test
   maskPreview.mockResolvedValue({ paths: 1, documents: 1 });
-  addMask.mockResolvedValue(undefined);
+  addMask.mockResolvedValue({ kind: 'stored' });
 
   render(Masks);
   await waitFor(() => expect(listMasks).toHaveBeenCalledTimes(1));
@@ -569,7 +670,7 @@ test('a read that fails is not the last word: a later successful read replaces i
   setLocale('en'); // seed, do not inherit
   listMasks.mockRejectedValueOnce(new Error('the index is not open'));
   maskPreview.mockResolvedValue({ paths: 1, documents: 1 });
-  addMask.mockResolvedValue(undefined);
+  addMask.mockResolvedValue({ kind: 'stored' });
 
   render(Masks);
   await waitFor(() => expect(screen.getByTestId('masks-load-reason')).toBeTruthy());
@@ -598,7 +699,8 @@ test('the whole section reads as one screen', async () => {
     'File masks'
     + ' A mask applies to every watched folder at once: it is compared with a file name, at any'
     + ' depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF'
-    + ' and *.pdf are one and the same rule.'
+    + ' and *.pdf are one and the same rule; neither does the way a name happens to store its'
+    + ' accents.'
     + ' *.pdf Remove'
     + ' *.tmp Remove'
     + ' New mask: Add a mask',
@@ -692,4 +794,27 @@ test('the refusal frame and the already-gone note also follow a language switch'
   await waitFor(() => expect(screen.getByText('Маски файлів')).toBeTruthy());
   expect(screen.getByTestId('mask-already-gone').textContent).toBe(t('settings_masks_already_gone'));
   expect(visibleText(container2)).not.toContain('There was no such mask');
+
+  // Task 11 fix round 2, F3. The third `$derived` of the same shape, in its own
+  // mount for the reason above: `forget()` clears this one together with the
+  // other two, so it can never share a screen with either.
+  cleanup();
+  setLocale('en');
+  maskPreview.mockResolvedValue({ paths: 1, documents: 1 });
+  addMask.mockResolvedValue({ kind: 'alreadyStored', stored: '*.pdf' });
+  const { container: container3 } = await mount(['*.pdf']);
+  await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
+
+  await type('*.PDF');
+  await fireEvent.click(addButton());
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  await fireEvent.click(confirmAdd('*.PDF'));
+  await waitFor(() => expect(screen.getByTestId('mask-already-stored')).toBeTruthy());
+  expect(visibleText(container3)).toContain(t('settings_masks_already_stored', { stored: '*.pdf' }));
+
+  setLocale('uk');
+  await waitFor(() => expect(screen.getByText('Маски файлів')).toBeTruthy());
+  expect(screen.getByTestId('mask-already-stored').textContent)
+    .toBe(t('settings_masks_already_stored', { stored: '*.pdf' }));
+  expect(visibleText(container3)).not.toContain('You already have this rule');
 });

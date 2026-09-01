@@ -73,6 +73,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_masks_confirm_cancel_named'
   | 'settings_masks_refused_add' | 'settings_masks_refused_store' | 'settings_masks_refused_remove'
   | 'settings_masks_refused_case_note' | 'settings_masks_already_gone'
+  | 'settings_masks_already_stored'
   | 'indexing_walk_starting' | 'indexing_walk_running'
   | 'indexing_embed_starting' | 'indexing_embed_running'
   | 'indexing_counts_ratio' | 'indexing_counts_counting'
@@ -442,7 +443,15 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // документами означає завищити втрату. Гілка `=0` — не порожній випадок:
     // це стан, у якому індекс втрачає шлях і не втрачає жодного документа, і
     // сказати про це треба словами, а не нулем.
-    settings_folders_exclude_cost: 'Станом на зараз: при наступному скануванні індекс втратить {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} із цієї теки, а {documents, plural, =0 {жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим шляхом} one {# документ більше не знайдеться: інші шляхи на нього не ведуть} few {# документи більше не знайдуться: інші шляхи на них не ведуть} many {# документів більше не знайдуться: інші шляхи на них не ведуть} other {# документа більше не знайдуться}}.',
+    // 🔴 Fix round 2, F4. Обидва числа беруться з читання, обмеженого
+    // `status = 'indexed'` — того самого обмеження, про яке маска-побратим
+    // (`settings_masks_add_cost` нижче) чесно попереджає, а це речення
+    // називало своє число без жодного застереження. Додано одну фразу, за
+    // зразком маски й у тій самій її частині: наступне сканування може забрати
+    // більше, бо файли, які так і не проіндексувалися, тут не враховані.
+    // Підмет інший — тека, не маска, — тож формулювання не переписане
+    // дослівно: «кожної теки» тут не було б правдою.
+    settings_folders_exclude_cost: 'Станом на зараз: при наступному скануванні індекс втратить {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} із цієї теки, а {documents, plural, =0 {жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим шляхом} one {# документ більше не знайдеться: інші шляхи на нього не ведуть} few {# документи більше не знайдуться: інші шляхи на них не ведуть} many {# документів більше не знайдуться: інші шляхи на них не ведуть} other {# документа більше не знайдуться}}. Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.',
     // Зворотний бік — і свідомо БЕЗ числа: це вікно не знає, що лежить на диску
     // в теці, яку досі оминали, і вигадане там число було б тим самим
     // завищенням, тільки в інший бік. Зате наслідок відомий точно (D29): текст
@@ -485,7 +494,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // тому одне сканування нічого не завершує; і регістр не має значення —
     // Task 9b згортає регістр та нормалізує обидві сторони порівняння, тож
     // «*.PDF» і «*.pdf» це одне правило, збережене двома рядками.
-    settings_masks_explainer: 'Маска стосується одразу всіх ваших тек: вона порівнюється з іменем файлу на будь-якій глибині. Кожна тека застосує її під час свого наступного сканування. Регістр літер не має значення, тож «*.PDF» і «*.pdf» — це одне й те саме правило.',
+    //
+    // 🔴 Fix round 2, F6. Речення обіцяло менше, ніж робить правило: воно
+    // говорило лише про регістр, а живий прогін зіставив «RÉSUMÉ.TXT» з іменем,
+    // записаним на диску В РОЗКЛАДЕНІЙ формі — це нормалізація, а не регістр.
+    // Додано одне підрядне про це. Звуження діапазонів ASCII (`[A-z]` → `[a-z]`)
+    // сюди свідомо НЕ додано: це запис для леджера, а не для екрана.
+    settings_masks_explainer: 'Маска стосується одразу всіх ваших тек: вона порівнюється з іменем файлу на будь-якій глибині. Кожна тека застосує її під час свого наступного сканування. Регістр літер не має значення, тож «*.PDF» і «*.pdf» — це одне й те саме правило; так само не має значення, як саме записані на диску літери з діакритичними знаками.',
     settings_masks_none: 'Жодної маски ще не додано.',
     settings_masks_add: 'Додати маску',
     settings_masks_input_label: 'Нова маска:',
@@ -522,6 +537,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_refused_remove: 'Маску {mask} не видалено. Ось що відповів індекс:',
     settings_masks_refused_case_note: 'У цій відповіді маска може бути записана іншим регістром, ніж ви ввели: маски порівнюються без урахування регістру.',
     settings_masks_already_gone: 'Такої маски вже не було. Список перечитано.',
+    // 🔴 Близнюк рядка вище, і той самий клас: «нічого не додано» — це окреме
+    // речення, а не мовчання. Сховище розрізняє рядки побайтово, а прохід
+    // порівнює маски згорнуто, тож «*.PDF» і «*.pdf» — це два можливі рядки й
+    // одне правило. Тому тут названо ЗБЕРЕЖЕНЕ написання: людина, якій сказали
+    // лише «таке правило вже є», шукала б у переліку те, що щойно ввела, і не
+    // знайшла б його.
+    settings_masks_already_stored: 'Таке правило у вас уже є — воно записане як «{stored}». Нічого не додано.',
     indexing_walk_starting: 'Читання теки починається…',
     indexing_walk_running: 'Триває читання теки.',
     // The embedding pass takes no root and covers the whole index
@@ -750,7 +772,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // it was. The re-read claim was false in the one state this banner exists
     // for.
     settings_folders_folder_changed: 'This folder is no longer the one that was on screen: another folder has taken its place. Nothing was changed.',
-    settings_folders_exclude_cost: 'As of now: on the next scan the index loses {paths, plural, one {# file} other {# files}} from this folder, and {documents, plural, =0 {no document stops being findable — each is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}.',
+    settings_folders_exclude_cost: 'As of now: on the next scan the index loses {paths, plural, one {# file} other {# files}} from this folder, and {documents, plural, =0 {no document stops being findable — each is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}. The scan can remove more than that: files that never finished indexing are not counted here.',
     settings_folders_include_cost: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider.',
     settings_folders_include_cost_held_below: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider — except what your other rules further down this path still exclude.',
     settings_folders_include_cost_gone: 'There is no folder at this path right now, so nothing is being indexed today. If a folder appears there later, it is indexed and its text is sent to the model provider.',
@@ -762,7 +784,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_include_named: 'Confirm not excluding {path}',
     settings_folders_confirm_cancel_named: 'Leave {path} as it is',
     settings_masks_heading: 'File masks',
-    settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule.',
+    settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents.',
     settings_masks_none: 'No file mask has been added yet.',
     settings_masks_add: 'Add a mask',
     settings_masks_input_label: 'New mask:',
@@ -785,6 +807,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_refused_remove: 'The mask {mask} was not removed. This is what the index answered:',
     settings_masks_refused_case_note: 'The answer above can quote your mask in a different letter case than the one you typed: masks are compared with letter case ignored.',
     settings_masks_already_gone: 'There was no such mask left to remove. The list has been re-read.',
+    settings_masks_already_stored: 'You already have this rule — it is stored as {stored}. Nothing was added.',
     indexing_walk_starting: 'Reading the folder is starting…',
     indexing_walk_running: 'The folder is being read.',
     indexing_embed_starting: 'Embedding the whole index is starting…',

@@ -59,37 +59,46 @@ describe('i18n', () => {
     const uk = (paths: number, documents: number) => t('settings_folders_exclude_cost', { paths, documents });
     expect(uk(1, 1)).toBe(
       'Станом на зараз: при наступному скануванні індекс втратить 1 файл із цієї теки, '
-      + 'а 1 документ більше не знайдеться: інші шляхи на нього не ведуть.');
+      + 'а 1 документ більше не знайдеться: інші шляхи на нього не ведуть.'
+      + ' Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
     expect(uk(2, 2)).toBe(
       'Станом на зараз: при наступному скануванні індекс втратить 2 файли із цієї теки, '
-      + 'а 2 документи більше не знайдуться: інші шляхи на них не ведуть.');
+      + 'а 2 документи більше не знайдуться: інші шляхи на них не ведуть.'
+      + ' Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
     expect(uk(5, 5)).toBe(
       'Станом на зараз: при наступному скануванні індекс втратить 5 файлів із цієї теки, '
-      + 'а 5 документів більше не знайдуться: інші шляхи на них не ведуть.');
+      + 'а 5 документів більше не знайдуться: інші шляхи на них не ведуть.'
+      + ' Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
     expect(uk(21, 21)).toBe(
       'Станом на зараз: при наступному скануванні індекс втратить 21 файл із цієї теки, '
-      + 'а 21 документ більше не знайдеться: інші шляхи на нього не ведуть.');
+      + 'а 21 документ більше не знайдеться: інші шляхи на нього не ведуть.'
+      + ' Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
     expect(uk(22, 22)).toBe(
       'Станом на зараз: при наступному скануванні індекс втратить 22 файли із цієї теки, '
-      + 'а 22 документи більше не знайдуться: інші шляхи на них не ведуть.');
+      + 'а 22 документи більше не знайдуться: інші шляхи на них не ведуть.'
+      + ' Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
     // The `=0` arm for `documents`, against a `paths` count that is itself
     // non-zero — the state Folders.svelte review comment "🔴 ДВА числа..."
     // exists for: a path is lost and no document is.
     expect(uk(2, 0)).toBe(
       'Станом на зараз: при наступному скануванні індекс втратить 2 файли із цієї теки, '
-      + 'а жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим шляхом.');
+      + 'а жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим шляхом.'
+      + ' Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
 
     setLocale('en');
     const en = (paths: number, documents: number) => t('settings_folders_exclude_cost', { paths, documents });
     expect(en(1, 1)).toBe(
       'As of now: on the next scan the index loses 1 file from this folder, '
-      + 'and 1 document stops being findable: no other path names it.');
+      + 'and 1 document stops being findable: no other path names it.'
+      + ' The scan can remove more than that: files that never finished indexing are not counted here.');
     expect(en(2, 2)).toBe(
       'As of now: on the next scan the index loses 2 files from this folder, '
-      + 'and 2 documents stop being findable: no other path names them.');
+      + 'and 2 documents stop being findable: no other path names them.'
+      + ' The scan can remove more than that: files that never finished indexing are not counted here.');
     expect(en(5, 0)).toBe(
       'As of now: on the next scan the index loses 5 files from this folder, '
-      + 'and no document stops being findable — each is also indexed under another path.');
+      + 'and no document stops being findable — each is also indexed under another path.'
+      + ' The scan can remove more than that: files that never finished indexing are not counted here.');
   });
 
   // Task 11 fix round 1, F2. `settings_masks_add_cost`'s English string put the

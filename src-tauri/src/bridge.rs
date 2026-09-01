@@ -550,14 +550,115 @@ pub fn list_masks(state: State<'_, AppState>) -> Result<Vec<String>, Error> {
 /// the wrong one of those two sentences, and a command that skipped the check
 /// entirely would store a rule that removes nothing — the same P2 the
 /// exclusion side already paid for.
+/// **The outcome, because there are two of them and the person has to be told
+/// which one happened.** Not a `bool`: the already-stored arm carries the
+/// spelling that is standing in the way, which `true`/`false` cannot.
+///
+/// The stored spelling is the whole reason this variant has a field. A person
+/// who types `*.PDF` over a stored `*.pdf` gets told about a row they can then
+/// find in the list above; told only "you already have this rule", they would
+/// be looking for `*.PDF` and not seeing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum MaskAdded {
+    /// A row was written for the mask exactly as it was typed.
+    Stored,
+    /// Nothing was written: this rule is already in the index, under the
+    /// spelling carried here — which may not be the one that was typed.
+    AlreadyStored { stored: String },
+}
+
+/// Off the main thread for the reason given on [`open_index`].
+///
+/// **The rule this command exists to enforce: a mask is validated before it is
+/// stored**, and a refusal reaches the person as `RulesError`'s own sentence.
+/// A stored mask the walk later refuses is worse than no mask at all: under
+/// [`crate::walk_job::start_walk_job`] it stops the whole walk, and until
+/// somebody runs one it sits in the editor looking like protection.
+///
+/// **The candidate alone, in a throwaway `WalkRules`** —
+/// `WalkRules::none().with_masks(vec![candidate])` both validates and compiles
+/// it, which is why no `check_mask` twin of `WalkRules::check_prefix` was
+/// added: `check_prefix` exists because `WalkRules::new` would have needed the
+/// whole prefix vector, and `with_masks` takes a vector this command can make
+/// one element long. A second entry point would be a second thing to keep in
+/// step with `validate_mask`.
+///
+/// Not the stored set plus the candidate, for the same reason
+/// [`exclude_subfolder`] gives: there is no aggregate compile step to fail
+/// here at all. Each mask compiles into its own `GlobMatcher`
+/// (`MaskLayer::globs`), so a set that refuses to combine is not a state this
+/// layer can be in — which is also why the mask layer does not feed
+/// `Walked::rules_applied` and why "narrow the probe to the candidate" is not
+/// a mutation case for this file.
+///
+/// 🔴 **The empty check comes FIRST and does not trim.** `validate_mask`
+/// answers `Ok(None)` for the literal empty string only; `"   "` is a refusal
+/// with a sentence of its own (`RulesError::MaskSurroundingWhitespace`). A
+/// command that trimmed before comparing would hand a person who typed spaces
+/// the wrong one of those two sentences, and a command that skipped the check
+/// entirely would store a rule that removes nothing — the same P2 the
+/// exclusion side already paid for.
+///
+/// 🔴 **An equivalent spelling is not stored, and this is where that is
+/// decided.** `file_mask.pattern` is a `TEXT PRIMARY KEY`, so the store
+/// distinguishes rows BYTE-wise while the walk compares masks caselessly:
+/// `*.PDF` and `*.pdf` are two rows and one rule, and the storage layer
+/// deliberately does not deduplicate them — folding there would silently
+/// rewrite what a person typed (`migrations.rs`, and
+/// `two_masks_differing_only_in_case_are_two_rows_and_neither_is_rewritten`
+/// pins both halves). Saying the two are the same is this layer's job, and
+/// measured live it is a job worth doing: with both rows stored, removing
+/// `*.pdf` gives no files back, because `*.PDF` is still holding them, and
+/// nothing on screen connects the two.
+///
+/// Nothing is rewritten here either. The candidate is compared, not folded;
+/// what is refused is refused whole, and what is stored is stored exactly as
+/// typed.
+///
+/// 🔴 **The comparison and the insert are ONE `with_index` closure, and that
+/// is not tidiness.** `with_index` takes the index mutex for the length of the
+/// closure. A check in one closure followed by an insert in another releases
+/// the lock between them, and two settings windows are a real shape in this
+/// application — both would read a list without the mask, both would insert,
+/// and the second row this command exists to prevent is exactly what gets
+/// stored.
+///
+/// The equivalence is asked of [`mnema_walk::WalkRules::same_mask_rule`], the
+/// transform the matcher itself compiles with. A copy of it here would be a
+/// second implementation of the rule, disagreeing with the walk at the edges
+/// the mask layer was built to pin — see that function for what `true` and
+/// `false` may be read to mean.
 #[tauri::command(async)]
-pub fn add_mask(state: State<'_, AppState>, pattern: String) -> Result<(), Error> {
+pub fn add_mask(state: State<'_, AppState>, pattern: String) -> Result<MaskAdded, Error> {
     if pattern.is_empty() {
         return Err(Error::BlankMask);
     }
     mnema_walk::WalkRules::none().with_masks(vec![pattern.clone()])?;
-    state.with_index(|db| db.add_mask(&pattern))?;
-    Ok(())
+    state.with_index(|db| {
+        if let Some(stored) = db
+            .list_masks()?
+            .into_iter()
+            .find(|stored| mnema_walk::WalkRules::same_mask_rule(stored, &pattern))
+        {
+            return Ok(MaskAdded::AlreadyStored { stored });
+        }
+        // `Db::add_mask`'s `bool` is read rather than discarded, which is the
+        // point its neighbour [`remove_mask`] already argues: "there was
+        // nothing there" is a different sentence from "stored". Under the
+        // check above this arm needs a row that the same lock's `list_masks`
+        // did not report — a state nothing can reach today, since a mask has
+        // its own comparison form and so is always equivalent to itself. It is
+        // wired through anyway: a discarded `bool` is one that cannot start
+        // being wrong loudly.
+        if db.add_mask(&pattern)? {
+            Ok(MaskAdded::Stored)
+        } else {
+            Ok(MaskAdded::AlreadyStored {
+                stored: pattern.clone(),
+            })
+        }
+    })
 }
 
 /// Off the main thread for the reason given on [`open_index`].
