@@ -174,9 +174,9 @@ case_ "mask_preview must validate the candidate itself, rather than preview it a
 
 # The current set loses the stored masks: the preview is back to answering about
 # the candidate alone. With `*.pdf` stored and `copy.pdf`/`copy.txt` naming one
-# document, previewing `*.txt` then says "no document stops being findable —
-# each one keeps another path this rule does not take" about a document the next
-# scan takes.
+# document, previewing `*.txt` then says "no document loses its last remaining
+# path to this rule: each of them keeps a path this rule does not take" about a
+# document the next scan takes.
 case_ "the current rule set must hold every stored mask" \
   src-tauri/src/tree.rs \
   's{            \.with_masks\(stored\.clone\(\)\)\?}{.with_masks(Vec::new())? /* mutant: current set has no masks */}' \

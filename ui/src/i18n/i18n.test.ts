@@ -119,39 +119,39 @@ describe('i18n', () => {
       'Станом на зараз ця маска забирає 1 файл понад те, що вже забирають ваші '
       + 'правила, і 1 документ більше не знайдеться: жодного іншого шляху на нього не '
       + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
-      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось '
-      + 'інше, тут порахований.');
+      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже виключає '
+      + '«.gitignore» у самій теці, тут може бути порахований.');
     expect(uk(2, 2)).toBe(
       'Станом на зараз ця маска забирає 2 файли понад те, що вже забирають ваші '
       + 'правила, і 2 документи більше не знайдуться: жодного іншого шляху на них не '
       + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
-      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось '
-      + 'інше, тут порахований.');
+      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже виключає '
+      + '«.gitignore» у самій теці, тут може бути порахований.');
     expect(uk(5, 5)).toBe(
       'Станом на зараз ця маска забирає 5 файлів понад те, що вже забирають ваші '
       + 'правила, і 5 документів більше не знайдуться: жодного іншого шляху на них не '
       + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
-      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось '
-      + 'інше, тут порахований.');
+      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже виключає '
+      + '«.gitignore» у самій теці, тут може бути порахований.');
     expect(uk(21, 21)).toBe(
       'Станом на зараз ця маска забирає 21 файл понад те, що вже забирають ваші '
       + 'правила, і 21 документ більше не знайдеться: жодного іншого шляху на нього не '
       + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
-      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось '
-      + 'інше, тут порахований.');
+      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже виключає '
+      + '«.gitignore» у самій теці, тут може бути порахований.');
     expect(uk(22, 22)).toBe(
       'Станом на зараз ця маска забирає 22 файли понад те, що вже забирають ваші '
       + 'правила, і 22 документи більше не знайдуться: жодного іншого шляху на них не '
       + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
-      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже прибирає щось '
-      + 'інше, тут порахований.');
+      + 'які так і не проіндексувалися, тут не враховані, а файл, який уже виключає '
+      + '«.gitignore» у самій теці, тут може бути порахований.');
     // The `=0` arm for `documents`, against a non-zero `paths`.
     expect(uk(2, 0)).toBe(
       'Станом на зараз ця маска забирає 2 файли понад те, що вже забирають ваші '
-      + 'правила, і жоден документ не перестане знаходитися — на кожен із них веде ще й інший '
-      + 'шлях, якого це правило не забирає. Наступне сканування кожної теки може прибрати і '
-      + 'більше, і менше: файли, які так і не проіндексувалися, тут не враховані, а файл, '
-      + 'який уже прибирає щось інше, тут порахований.');
+      + 'правила, і жоден документ не втрачає через це правило останній шлях: у кожного '
+      + 'лишається шлях, якого це правило не забирає. Наступне сканування кожної теки може '
+      + 'прибрати і більше, і менше: файли, які так і не проіндексувалися, тут не враховані, '
+      + 'а файл, який уже виключає «.gitignore» у самій теці, тут може бути порахований.');
 
     setLocale('en');
     const en = (paths: number, documents: number) => t('settings_masks_add_cost', { paths, documents });
@@ -161,20 +161,20 @@ describe('i18n', () => {
       'As of now this mask takes 1 file beyond what your rules already take, and 1'
       + ' document stops being findable: no other path will be left naming it. The next scan of'
       + ' each folder can remove more than that or fewer: files that never finished indexing'
-      + ' are not counted here, and a file something else already removes may be counted'
-      + ' here.');
+      + ' are not counted here, and a file a .gitignore in the folder itself already excludes'
+      + ' may be counted here.');
     expect(en(2, 2)).toBe(
       'As of now this mask takes 2 files beyond what your rules already take, and 2'
       + ' documents stop being findable: no other path will be left naming them. The next scan of'
       + ' each folder can remove more than that or fewer: files that never finished indexing'
-      + ' are not counted here, and a file something else already removes may be counted'
-      + ' here.');
+      + ' are not counted here, and a file a .gitignore in the folder itself already excludes'
+      + ' may be counted here.');
     expect(en(5, 0)).toBe(
       'As of now this mask takes 5 files beyond what your rules already take, and no'
-      + ' document stops being findable — each one keeps another path this rule does not take.'
-      + ' The next scan of each folder can remove more than that or fewer: files that never'
-      + ' finished indexing are not counted here, and a file something else already removes'
-      + ' may be counted here.');
+      + ' document loses its last remaining path to this rule: each of them keeps a path this'
+      + ' rule does not take. The next scan of each folder can remove more than that or fewer:'
+      + ' files that never finished indexing are not counted here, and a file a .gitignore in'
+      + ' the folder itself already excludes may be counted here.');
 
     // `settings_masks_add_cost_none` carries no plural argument — a fixed
     // sentence for the `paths === 0` arm the component picks itself

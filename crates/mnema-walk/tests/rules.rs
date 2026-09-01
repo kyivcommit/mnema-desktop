@@ -826,10 +826,18 @@ fn walk_with_masks(files: &[&str], builtin: bool, masks: &[&str]) -> Vec<String>
 /// One mask, one name, straight through `MaskLayer::matches` — for cases
 /// that assert on the match itself rather than on what a walk keeps or
 /// removes, and so need no filesystem at all.
+///
+/// The `.expect` is load-bearing and not decoration: several callers pass a
+/// mask that must stay ACCEPTED, so an over-refusing fix reaches this line
+/// rather than an assertion, and the panic is the whole failure text a later
+/// session gets. It names the reason as well as the mask (fix round 6).
 fn m(mask: &str, name: &str) -> bool {
     WalkRules::none()
         .with_masks(vec![mask.to_string()])
-        .unwrap()
+        .expect(
+            "this mask must stay ACCEPTED: a refusal here is the over-refusing fix the \
+                 caller's control exists to catch, not a broken fixture",
+        )
         .masks()
         .matches(name)
 }
@@ -1723,9 +1731,13 @@ fn a_character_class_of_non_ascii_letters_is_refused() {
 ///   `Г` really is a literal outside it. The scan and the library agree, so
 ///   there is nothing to refuse; it moves if the fix starts refusing a
 ///   non-ASCII character that merely follows a `]`.
-/// - `Копія[0-9].txt` — a non-ASCII literal beside an ASCII class, which must
-///   keep matching `Копія1.txt` and `КОПІЯ7.TXT` with folding intact. It moves
-///   if the fix refuses on non-ASCII anywhere in a mask that holds a class.
+/// - `Копія[0-9].txt` — a non-ASCII literal beside an ASCII class. What it
+///   adds is that **the folding still works beside a class**, asserted both
+///   ways: `КОПІЯ7.TXT` matches and `Копіяx.txt` does not. It does NOT
+///   discriminate "a fix that refuses non-ASCII anywhere in a mask holding a
+///   class" — `[[:alpha:]Г].txt` four lines above holds a class and a
+///   non-ASCII character too, so such a fix dies there and never reaches this
+///   block. The bullet claimed that until fix round 6.
 #[test]
 fn a_caret_negated_character_class_of_non_ascii_letters_is_refused() {
     let refused = WalkRules::none().with_masks(vec!["[^]\u{413}]file.txt".to_string()]);

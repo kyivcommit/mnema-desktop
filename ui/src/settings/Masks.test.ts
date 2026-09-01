@@ -126,7 +126,8 @@ test('adding asks the preview first and shows both its numbers before anything i
     'As of now this mask takes 4 files beyond what your rules already take, and 2'
     + ' documents stop being findable: no other path will be left naming them. The next scan of'
     + ' each folder can remove more than that or fewer: files that never finished indexing are'
-    + ' not counted here, and a file something else already removes may be counted here.',
+    + ' not counted here, and a file a .gitignore in the folder itself already excludes may be'
+    + ' counted here.',
   );
 });
 
@@ -246,14 +247,24 @@ test('the file count is not stated as a floor, and one clause hedges both direct
   expect(cost).not.toContain('at least');
   expect(cost).toContain('can remove more than that or fewer');
   expect(cost).toContain('files that never finished indexing are not counted here');
-  expect(cost).toContain('a file something else already removes may be counted here');
+  expect(cost).toContain('a file a .gitignore in the folder itself already excludes may be counted here');
 });
 
 // 🔴 The state the two numbers exist to tell apart: every matched path has a
-// second copy elsewhere, so paths go and no document stops being findable. A
-// person told "0 documents" beside a folder they know holds files needs the
-// first number to make sense of it.
-test('zero documents beside a non-zero file count says the documents stay findable', async () => {
+// second copy elsewhere, so paths go and this rule takes no document's last
+// one. A person told "0 documents" beside a folder they know holds files needs
+// the first number to make sense of it.
+//
+// 🔴 Fix round 6, F1. The zero arm says what THIS RULE takes and stops there.
+// It used to promise findability — "no document stops being findable" — and
+// `mask_preview` cannot carry that promise: an in-tree `.gitignore` is outside
+// both of its rule sets, so a path it covers counts as SURVIVING, suppresses
+// the document, and the next scan takes it anyway — measured in
+// `mask_preview_understates_documents_behind_an_in_tree_gitignore`
+// (`src-tauri/tests/commands.rs`). `not.toContain('stops being findable')` is
+// the assertion that pins the removal: every other line here still passes with
+// the old sentence back.
+test('zero documents says what the rule takes and does not promise findability', async () => {
   maskPreview.mockResolvedValue({ paths: 4, documents: 0 });
   await mount([]);
 
@@ -263,7 +274,11 @@ test('zero documents beside a non-zero file count says the documents stay findab
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
   const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
   expect(cost).toContain('takes 4 files beyond what your rules already take');
-  expect(cost).toContain('no document stops being findable — each one keeps another path this rule does not take');
+  expect(cost).toContain('no document loses its last remaining path to this rule: each of them keeps a path this rule does not take');
+  // The promise the arithmetic cannot carry, and the reason this test was
+  // rewritten. It is asserted on the WHOLE zero arm rather than on the words
+  // above, so a sentence that says both would still fail here.
+  expect(cost).not.toContain('stops being findable');
   // The direction a swap of the two numbers would produce, and the one an
   // overstated disclosure reads as.
   expect(cost).not.toContain('4 documents');
@@ -292,7 +307,7 @@ test('a preview of zero asks the question anyway, in a sentence of its own', asy
   );
   // The zero arm of the shared sentence would say this, and it has nobody to
   // say it about when no path matched at all.
-  expect(cost).not.toContain('keeps another path');
+  expect(cost).not.toContain('keeps a path this rule does not take');
   expect(addMask).not.toHaveBeenCalled();
 });
 
@@ -818,7 +833,7 @@ test('every sentence on the section follows a language switch, the standing ques
   // floor word is gone and the one clause hedges both directions here too.
   expect(text).not.toContain('щонайменше');
   expect(text).toContain('може прибрати і більше, і менше');
-  expect(text).toContain('а файл, який уже прибирає щось інше, тут порахований');
+  expect(text).toContain('а файл, який уже виключає «.gitignore» у самій теці, тут може бути порахований');
   expect(text).toContain(t('settings_masks_confirm_add_heading', { mask: '*.tmp' }));
   // The accessible names follow the switch too, and they are what tells two
   // otherwise identical controls apart.

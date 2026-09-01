@@ -949,9 +949,22 @@ impl WalkRules {
     /// state `builder()` answers `rules_applied = false` and `walk_root` stops
     /// before phase 2, so the walk removes nothing at all — and a caller
     /// computing a difference between two rule sets gets the same override on
-    /// both sides, which can only make a marginal count larger, never smaller.
-    /// Overstating is the direction a person can see and undo; understating is
-    /// the one this whole entry point exists to close.
+    /// both sides.
+    ///
+    /// 🔴 **Which way that leans depends on what the caller counts, and it is
+    /// not one way.** For a count of PATHS in the difference it can only run
+    /// larger: a path this set would have removed is left surviving on both
+    /// sides and gets charged to the caller's own candidate, which is the
+    /// overstating direction a person can see and undo. For a count of
+    /// DOCUMENTS whose *every* surviving path is taken, the same extra
+    /// surviving path **suppresses** the document, so the count runs SMALLER —
+    /// the understating direction this entry point exists to close. The same
+    /// arithmetic falsifies the same claim for the one layer named above that
+    /// this method never covers, the in-tree `.gitignore` stack; measured in
+    /// `mask_preview_understates_documents_behind_an_in_tree_gitignore`
+    /// (`src-tauri/tests/commands.rs`). Until fix round 6 these lines said "can
+    /// only make a marginal count larger, never smaller", stating the safe
+    /// direction where the unsafe one is also true.
     pub fn applied_to(&self, root: &Path) -> AppliedRules {
         AppliedRules {
             root: root.to_path_buf(),

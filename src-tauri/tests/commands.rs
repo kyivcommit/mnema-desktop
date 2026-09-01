@@ -9071,6 +9071,134 @@ fn mask_preview_answers_the_difference_against_the_stored_masks() {
     );
 }
 
+/// 🔴 **`documents` errs in the UNDERSTATING direction, and an ordinary
+/// in-tree `.gitignore` is what reaches it.** This is the fixture nobody had
+/// built, and it is why the editor's zero arm now says what this rule takes
+/// instead of promising that no document stops being findable (fix round 6).
+///
+/// [`mnema_walk::AppliedRules`] deliberately does not cover the in-tree
+/// `.gitignore` stack, while the walk applies it with **no git repository
+/// present**. So for a path a `.gitignore` covers, `current.removes_file` is
+/// `false`: the path counts as SURVIVING and is not taken, `surviving != taken`
+/// holds, and the document is not counted — while the next scan drops that path
+/// anyway and the document loses its last one. An extra surviving path makes
+/// `paths` larger and `documents` **smaller**, and smaller is the direction
+/// this whole screen exists to close.
+///
+/// **The state is asserted rather than assumed.** The same root is walked
+/// twice: without the mask the walk already drops `copy.txt`, which is what
+/// says the `.gitignore` is really in force here; with the mask it keeps
+/// neither of the document's paths. That pair is the loss the number denies.
+///
+/// **Both directions, on the same fixture, one press apart.** Replace the
+/// invisible mechanism with one the preview CAN see — a stored `*.txt` — and
+/// the same document, the same candidate and the same real outcome answer
+/// `documents: 1`. So the `0` above comes from the mechanism being invisible,
+/// not from a preview that has stopped counting. Which half kills what was
+/// measured, not reasoned: a filter of `taken > 0` in place of
+/// `surviving == taken` is killed by the FIRST `mask_preview` assertion
+/// (`documents: 1` where 0 is asserted) and the second survives it; a filter
+/// that counts no document at all is killed by the SECOND (`documents: 0`
+/// where 1 is asserted) and the first survives it. Neither half stands on the
+/// other, and neither stands on `paths`.
+///
+/// ⚠️ **The variable between the two states is the MECHANISM'S VISIBILITY to
+/// [`mnema_walk::AppliedRules`], not the presence of a file.** Deleting the
+/// `.gitignore` would change nothing here — the preview never reads it either
+/// way, so the first assertion would still be `documents: 0` and the fixture
+/// would build one state and call it two. Do not "simplify" the second half
+/// into a run without the `.gitignore`; the stored `*.txt` is the point,
+/// because it removes the same path through a rule the preview can see.
+///
+/// ⚠️ **This pins a measured limitation, not a wanted behaviour.** Covering the
+/// `.gitignore` stack means compiling it per directory from files inside the
+/// tree, and this command reads the index rather than the disk by design; the
+/// ruling was to correct what is claimed about the number, not the number. A
+/// change that makes the preview see the `.gitignore` turns the `documents: 0`
+/// assertion red — read this comment then, and the editor's zero arm with it
+/// (`settings_masks_add_cost` in `ui/src/i18n/catalog.ts`).
+#[test]
+fn mask_preview_understates_documents_behind_an_in_tree_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join(".gitignore"), "copy.txt\n").unwrap();
+    std::fs::write(fixture.path().join("report.pdf"), "a").unwrap();
+    std::fs::write(fixture.path().join("copy.txt"), "a").unwrap();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, root, "pair", "report.pdf");
+            seed_second_copy(db, root, "pair", "copy.txt");
+            Ok(())
+        })
+        .expect("seeding the index");
+
+    // What the NEXT SCAN keeps, through the walk itself rather than through the
+    // preview's view of the rules — the two are the whole finding.
+    let kept = |masks: Vec<String>| {
+        let rules = mnema_walk::WalkRules::new(true, true, Vec::new())
+            .expect("the built-in layers must compile")
+            .with_masks(masks)
+            .expect("the fixture's masks must compile");
+        let mut names = mnema_walk::enumerate(fixture.path(), &rules)
+            .found
+            .into_iter()
+            .map(|f| f.relative)
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+
+    assert_eq!(
+        kept(Vec::new()),
+        [".gitignore", "report.pdf"],
+        "the in-tree `.gitignore` applies with no git repository present, so `copy.txt` is \
+         already going on the next scan before any mask is added — this is the state the \
+         preview cannot see"
+    );
+    assert_eq!(
+        kept(vec!["*.pdf".to_string()]),
+        [".gitignore"],
+        "with the candidate applied, NEITHER of `pair`'s paths survives the next scan: the \
+         document really does stop being findable"
+    );
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.pdf" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 0 }),
+        "`copy.txt` is invisible to `AppliedRules`, so it counts as a surviving path and \
+         suppresses a document the two walks above show losing its last one: `documents` is \
+         0 where the honest answer is 1, which is the UNDERSTATING direction"
+    );
+
+    // The other direction, one press apart: the same document, the same
+    // candidate and the same real outcome, with the second path taken by a rule
+    // the preview can see.
+    call(&webview, "add_mask", json!({ "pattern": "*.txt" })).expect("add_mask was rejected");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.pdf" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 1 }),
+        "a stored `*.txt` takes `copy.txt` where the `.gitignore` did, and this one the \
+         preview sees: `report.pdf` is the document's last surviving path and this press is \
+         what takes it"
+    );
+}
+
 /// 🔴 **Both halves of the rule set, and this is the other half.** A stored
 /// path exclusion is per-root and is applied by the very same walk
 /// (`walk_job.rs` reads prefixes and masks under one lock, as one question), so

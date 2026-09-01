@@ -369,7 +369,10 @@ case_ "the explainer must disclose that \`?\` counts bytes in Ukrainian too" \
 # press is charged for it), and because a rule set that does not compile answers
 # as an empty override, after which `walk_root` stops before phase 2 and removes
 # nothing at all. "At least N" would then be said about a scan that removes
-# zero. Killed by the `not.toContain('at least')` on the screen test.
+# zero. Killed by the `not.toContain('at least')` on the screen test — probed
+# in fix round 6 the way its Ukrainian sibling below had to be: with that one
+# assertion deleted the mutant SURVIVES, so the guard is the sole killer and
+# `at least, and {documents` really is past every positive assertion here.
 case_ "the add-cost sentence must not claim a floor, in English" \
   ui/src/i18n/catalog.ts \
   "s~already take, and \\{documents~already take, at least, and \\{documents~" \
@@ -380,8 +383,26 @@ case_ "the add-cost sentence must not claim a floor, in English" \
 # read, and the one round 4's own regression was written in first. Killed by the
 # language-switch test, which is where the Ukrainian sentence is read off the
 # screen rather than out of the catalogue.
+#
+# 🔴 **The insertion point is the case, and only a probe finds it.** Fix round 5
+# put the floor word at `ця маска забирає {paths`, inside the region the
+# language-switch test's own POSITIVE assertion
+# (`toContain('Станом на зараз ця маска забирає 4 файли')`) reads — so the case
+# died there, on a line that fires for ANY edit to that region, and
+# `not.toContain('щонайменше')` below it never ran. Deleting that guard changed
+# no mutation number: it was unpinned.
+#
+# The word now goes between the plural's closing `}}` and `понад те`, which is
+# the ONE spot in this sentence no positive assertion in that test covers:
+# `забирає 4 файли` ends before it, `може прибрати і більше, і менше` and the
+# `.gitignore` clause both start after it. Measured rather than reasoned — with
+# the mutation applied and `not.toContain('щонайменше')` deleted, the test
+# PASSES, and with the guard back it fails on that line alone. An insertion at
+# `може прибрати і більше` was tried first and rejected for exactly the round-5
+# defect one clause over: the neighbouring `toContain('може прибрати і більше,
+# і менше')` kills it and the guard never runs (fix round 6, F3).
 case_ "the add-cost sentence must not claim a floor, in Ukrainian" \
   ui/src/i18n/catalog.ts \
-  "s~ця маска забирає \\{paths~ця маска забирає щонайменше \\{paths~" \
-  "ця маска забирає щонайменше {paths" \
+  "s~\\}\\} понад те, що вже забирають~\\}\\} щонайменше понад те, що вже забирають~" \
+  "}} щонайменше понад те, що вже забирають" \
   src/settings/Masks.test.ts 'every sentence on the section follows a language switch' runner=vitest

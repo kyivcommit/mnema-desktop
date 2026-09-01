@@ -135,8 +135,12 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
     state.with_index(|db| db.read_snapshot(build_tree_listing))
 }
 
-/// What a mask would take **beyond the rules already stored**, as of now — two
-/// numbers with **different subjects** (D-d).
+/// What a mask would take **beyond the rules the next scan already applies** —
+/// the built-in layers, that root's stored path exclusions and every stored
+/// mask, not the stored ones alone — as of now, in two numbers with
+/// **different subjects** (D-d). [`mask_preview`] defines that set; the
+/// built-in layers are in it and are not stored, which is why this sentence
+/// does not say "already stored" (fix round 6).
 ///
 /// `paths` and `documents` are not two ways of saying the same thing, and
 /// conflating them overstates the loss. A document is destroyed only when its
@@ -153,18 +157,44 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
 /// there and these four sentences stayed behind, still describing a number
 /// that had stopped existing.
 ///
-/// When `documents` is 0 and `paths` is not, that is a real state and the
-/// editor says so plainly: the paths go, and each of those documents stays
-/// findable through another path **this rule does not take**.
+/// 🔴 **`documents == 0` is a statement about this rule, not a promise about
+/// findability**, and the editor says exactly that much. It means no document
+/// has its last surviving path taken *by this rule*; it does **not** mean no
+/// document stops being findable, because a second mechanism can take the path
+/// this one leaves. The mechanism is the in-tree `.gitignore` stack, which is
+/// outside both rule sets ([`mnema_walk::WalkRules::applied_to`] names it as
+/// what `AppliedRules` does not cover) while the walk applies it with no git
+/// repository present — so a path it covers counts as SURVIVING and not taken,
+/// and the document is suppressed. `mask_preview` is where the direction of
+/// that residue is written down: **larger for `paths`, smaller for
+/// `documents`**. Measured rather than reasoned, in
+/// `mask_preview_understates_documents_behind_an_in_tree_gitignore`
+/// (`tests/commands.rs`): a two-path document, `documents: 0`, and a next scan
+/// that leaves it with no path at all.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaskPreview {
-    /// Indexed paths that survive the current rule set and do **not** survive
-    /// the new one, across **all** watched roots.
+    /// Paths of `status = 'indexed'` DOCUMENTS that survive the current rule
+    /// set and do **not** survive the new one, across **all** watched roots.
+    ///
+    /// Not "indexed paths": the population is `Db::indexed_files_under_root`
+    /// (`crates/mnema-index/src/write.rs`, `WHERE … d.status = 'indexed'`), and
+    /// status is a property of the document — a `pending` or `failed`
+    /// document's paths are in the `path` table and are **not** here, while the
+    /// walk's reconcile set does not ask about status at all. That is one of
+    /// the two reasons the next scan can remove more than this number says, and
+    /// the editor's sentence carries it. [`mask_preview`] holds the definition;
+    /// this quotes it (fix round 6).
     pub paths: i64,
     /// The `documentId`s findable under the current rule set — at least one
     /// surviving path — that are **not** findable under the new one: the ones
-    /// that stop being findable at all.
+    /// whose last surviving path this rule takes.
+    ///
+    /// "Findable" is meant against those two rule sets and **nothing wider**,
+    /// which is the whole of the arm above: a document this number does not
+    /// count can still stop being findable, through a mechanism neither set
+    /// represents. It used to say "the ones that stop being findable at all"
+    /// (fix round 6).
     pub documents: i64,
 }
 
@@ -299,8 +329,19 @@ pub fn mask_preview(state: State<'_, AppState>, pattern: String) -> Result<MaskP
         // (`walk_job.rs`, `bridge.rs`) and `AppliedRules` is documented as
         // assuming the built-in layers are on. The `.gitignore` half is not
         // representable here and is disclosed rather than approximated: a path
-        // an in-tree `.gitignore` covers counts as surviving, which can only
-        // make this difference larger.
+        // an in-tree `.gitignore` covers counts as surviving on BOTH sides.
+        //
+        // 🔴 That residue runs in two directions, not one. It makes `paths`
+        // LARGER — a path already going is charged to this press — and it makes
+        // `documents` SMALLER, because a document is only counted when EVERY
+        // surviving path of it is taken, and an extra surviving path that
+        // nothing here takes suppresses it. Smaller is the understating
+        // direction, the one this whole entry point exists to close, so the
+        // editor's zero arm claims only what this rule takes and never that a
+        // document stays findable. Measured in
+        // `mask_preview_understates_documents_behind_an_in_tree_gitignore`
+        // (`tests/commands.rs`); until fix round 6 these lines said "can only
+        // make this difference larger", which is true of `paths` alone.
         let current = WalkRules::new(true, true, prefixes.clone())?
             .with_masks(stored.clone())?
             .applied_to(root_path);
