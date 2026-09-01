@@ -125,7 +125,7 @@ case_ "the blank check must not trim: whitespace is the validator's refusal, not
 # none, because it is a claim a person acts on.
 case_ "mask_preview must count documents by grouping, not by counting paths" \
   src-tauri/src/tree.rs \
-  's~            let documents = per_document\n                \.values\(\)\n                \.filter\(\|\(seen, matched\)\| seen == matched\)\n                \.count\(\) as i64;~            /* mutant: paths counted as documents */\n            let documents = paths;~' \
+  's~    let documents = per_document\n        \.values\(\)\n        \.filter\(\|\(surviving, taken\)\| surviving == taken\)\n        \.count\(\) as i64;~    /* mutant: paths counted as documents */\n    let documents = paths;~' \
   '/* mutant: paths counted as documents */' \
   mnema-desktop 'mask_preview_counts_paths_and_documents_apart' --test commands
 
@@ -138,7 +138,7 @@ case_ "mask_preview must count documents by grouping, not by counting paths" \
 # way only: the preview shows a person MORE files than the next walk will take.
 case_ "mask_preview must count indexed paths, never a disk listing" \
   src-tauri/src/tree.rs \
-  's~                for file in db\.indexed_files_under_root\(root\.id\)\? \{\n                    let entry = per_document\.entry\(file\.document_id\)\.or_insert\(\(0, 0\)\);\n                    entry\.0 \+= 1;\n                    if masks\.matches\(&file\.relative_path\) \{\n                        entry\.1 \+= 1;\n                        paths \+= 1;\n                    \}\n                \}~                /* mutant: counted over a disk listing */\n                for found in std::fs::read_dir(\&root.absolute_path).into_iter().flatten().flatten() {\n                    let name = found.file_name().to_string_lossy().into_owned();\n                    let entry = per_document.entry(name.clone()).or_insert((0, 0));\n                    entry.0 += 1;\n                    if masks.matches(\&name) {\n                        entry.1 += 1;\n                        paths += 1;\n                    }\n                }~' \
+  's~        for file in files \{~        /* mutant: counted over a disk listing */\n        for file in std::fs::read_dir(\&absolute_path).into_iter().flatten().flatten().map(|found| mnema_index::IndexedFileRow { relative_path: found.file_name().to_string_lossy().into_owned(), document_id: found.file_name().to_string_lossy().into_owned() }) {~' \
   '/* mutant: counted over a disk listing */' \
   mnema-desktop 'mask_preview_counts_the_index_and_not_the_disk' --test commands
 
@@ -155,11 +155,115 @@ case_ "mask_preview must count across every watched root, not the first" \
 # `paths: 0, documents: 0` — which reads as "this rule would remove nothing",
 # the opposite of true for a rule that cannot be stored at all, and the person
 # finds out only when the save they were encouraged to make is refused.
-case_ "mask_preview must validate the pattern rather than preview it as zero" \
+case_ "mask_preview must validate the candidate itself, rather than preview it as zero" \
   src-tauri/src/tree.rs \
-  's{    let rules = WalkRules::none\(\)\.with_masks\(vec!\[pattern\]\)\?;}{    let rules = WalkRules::none().with_masks(vec![pattern]).unwrap_or_default(); /* mutant: preview does not validate */}' \
-  '/* mutant: preview does not validate */' \
+  's{    WalkRules::none\(\)\.with_masks\(vec!\[pattern\.clone\(\)\]\)\?;}{    let _ = WalkRules::none().with_masks(vec![pattern.clone()]); /* mutant: candidate not validated */}' \
+  '/* mutant: candidate not validated */' \
   mnema-desktop 'mask_preview_refuses_a_malformed_pattern_rather_than_answering_zero' --test commands
+
+# ── The preview, fix round 4 ─────────────────────────────────────────────────
+#
+# 🔴 F1. The preview answers the DIFFERENCE this press makes against the whole
+# rule set the next scan will apply. Four cases, one per half of that sentence:
+# the stored masks, the root's stored prefixes, "already going anyway", and the
+# one edge where the difference must NOT grow (a stored mask does not prune a
+# directory). The defect they encode is the one that shipped: the preview asked
+# `WalkRules::none().with_masks(vec![candidate])` while `walk_job.rs` asks
+# `WalkRules::new(true, true, prefixes)?.with_masks(masks)?`, so it UNDERSTATED
+# the loss — the direction the screen exists to prevent.
+
+# The current set loses the stored masks: the preview is back to answering about
+# the candidate alone. With `*.pdf` stored and `copy.pdf`/`copy.txt` naming one
+# document, previewing `*.txt` then says "no document stops being findable —
+# each one keeps another path this rule does not take" about a document the next
+# scan takes.
+case_ "the current rule set must hold every stored mask" \
+  src-tauri/src/tree.rs \
+  's{            \.with_masks\(stored\.clone\(\)\)\?}{.with_masks(Vec::new())? /* mutant: current set has no masks */}' \
+  '/* mutant: current set has no masks */' \
+  mnema-desktop 'mask_preview_answers_the_difference_against_the_stored_masks' --test commands
+
+# The other half of the set, and it was ignored for the same reason with the
+# same effect: a root's stored path exclusions. `walk_job.rs` reads prefixes and
+# masks under one lock, as one question; a preview that reads one of them
+# answers about a walk that will never run.
+case_ "the current rule set must hold that root's stored path exclusions" \
+  src-tauri/src/tree.rs \
+  's{        let current = WalkRules::new\(true, true, prefixes\.clone\(\)\)\?}{        let current = WalkRules::new(true, true, Vec::new())? /* mutant: current set has no prefixes */}' \
+  '/* mutant: current set has no prefixes */' \
+  mnema-desktop 'mask_preview_counts_a_roots_stored_path_exclusions_too' --test commands
+
+# The skip, removed: a path a stored rule already takes gets charged to this
+# press. That is the OVERSTATING direction — a person is told cancelling saves a
+# file that cancelling does not save — and it is what "a difference between two
+# rule sets" means in one line.
+case_ "a path the current rule set already removes is not this press's cost" \
+  src-tauri/src/tree.rs \
+  's{            if current\.removes_file\(&file\.relative_path\) \{}{            if false \{ /* mutant: nothing is already going */}' \
+  'if false { /* mutant: nothing is already going */' \
+  mnema-desktop 'mask_preview_does_not_charge_this_press_for_what_a_stored_rule_already_takes' --test commands
+
+# 🔴 D-c from the preview's side. The masks asked of EVERY component rather than
+# of the file name, so a stored `*.pdf` makes the preview treat
+# `archive.pdf/keep.txt` as already gone and the candidate `*.txt` answers "this
+# mask takes nothing" about the one file it takes. The walk asks
+# `is_file() && matches(name)` and never prunes a directory on a mask.
+case_ "a stored mask must not make the preview treat a directory as already pruned" \
+  crates/mnema-walk/src/rules.rs \
+  's{        self\.masks\.matches\(relative_path\)}{        relative_path.split(\x27/\x27).any(|c| self.masks.matches(c)) /* mutant: masks asked per component */}' \
+  '/* mutant: masks asked per component */' \
+  mnema-desktop 'mask_preview_does_not_let_a_stored_mask_prune_a_directory' --test commands
+
+# A stored rule that no longer validates, swallowed rather than refused — the
+# preview's twin of `walk_job.rs`'s "must refuse the job, not be walked around".
+# Under the mutant the preview puts a confident number on a scan that is going
+# to stop before phase 2, and the broken rule is never named.
+#
+# ⚠️ **BOTH rule sets in one substitution, and that is not tidiness.** Mutating
+# the candidate set alone leaves this case STILL GREEN — measured, first run of
+# fix round 4 — because the CURRENT set is built first and its own `?` refuses
+# before the second build is reached. A mutant that a neighbouring `?` kills is
+# a mutant this case never sees.
+case_ "a stored rule that no longer validates must refuse the preview, not be counted around" \
+  src-tauri/src/tree.rs \
+  's~        let current = WalkRules::new\(true, true, prefixes\.clone\(\)\)\?\n            \.with_masks\(stored\.clone\(\)\)\?\n            \.applied_to\(root_path\);\n        let with_candidate = WalkRules::new\(true, true, prefixes\)\?\n            \.with_masks\(proposed\.clone\(\)\)\?\n            \.applied_to\(root_path\);~        /* mutant: a broken stored rule is walked around */\n        let current = WalkRules::new(true, true, prefixes.clone())\n            .and_then(|r| r.with_masks(stored.clone()))\n            .unwrap_or_default()\n            .applied_to(root_path);\n        let with_candidate = WalkRules::new(true, true, prefixes)\n            .and_then(|r| r.with_masks(proposed.clone()))\n            .unwrap_or_default()\n            .applied_to(root_path);~' \
+  '/* mutant: a broken stored rule is walked around */' \
+  mnema-desktop 'mask_preview_refuses_when_a_stored_rule_no_longer_validates' --test commands
+
+# The last component asked as a DIRECTORY. `builder()`'s `filter_entry` says a
+# file called `target` has "nothing to anchor against", so a file of that name
+# beside a `Cargo.toml` is indexed and a mask can still take it. Under the
+# mutant the preview calls it already pruned and answers "this mask takes
+# nothing" about the only file there is.
+case_ "the last component of an indexed path is asked about as a file, not a directory" \
+  crates/mnema-walk/src/rules.rs \
+  's{        let is_dir = last_is_dir \|\| components\.peek\(\)\.is_some\(\);}{        let is_dir = true; /* mutant: the file asked about as a directory */}' \
+  'let is_dir = true; /* mutant: the file asked about as a directory */' \
+  mnema-desktop 'mask_preview_does_not_treat_a_file_named_like_a_build_directory_as_pruned' --test commands
+
+# ── The validator, fix round 4 ───────────────────────────────────────────────
+
+# 🔴 F2. The refusal disarmed. `globset` compiles with Unicode off, so `[Гґ]` is
+# a class of BYTES: anchored it matches nothing, and wrapped in `*` it matches
+# by byte and takes names holding no such letter — `*[Г]*` matches `авто.txt`,
+# measured. Under D29 that is a rule a person believes holds text back while the
+# walk sends something else to a provider.
+case_ "a character class holding a character outside ASCII must be refused" \
+  crates/mnema-walk/src/rules.rs \
+  's{    if holds_non_ascii_character_class\(mask\) \{}{    if false \{ /* mutant: non-ASCII class accepted */}' \
+  'if false { /* mutant: non-ASCII class accepted */' \
+  mnema-walk 'a_character_class_of_non_ascii_letters_is_refused' --test rules
+
+# The same refusal, widened to the whole mask rather than the inside of a class.
+# `Копія*` matches `КОПІЯ звіту.docx` since Task 9b and must keep working: a
+# non-ASCII LITERAL is fine, and refusing it would cut through the case Task 9b
+# exists for. Killed by the second half of the same test, which walks a literal
+# non-ASCII mask.
+case_ "the refusal is scoped to the inside of a character class, not to non-ASCII" \
+  crates/mnema-walk/src/rules.rs \
+  's{    if holds_non_ascii_character_class\(mask\) \{}{    if mask.chars().any(|c| !c.is_ascii()) \{ /* mutant: every non-ASCII mask refused */}' \
+  'if mask.chars().any(|c| !c.is_ascii()) { /* mutant: every non-ASCII mask refused */' \
+  mnema-walk 'a_character_class_of_non_ascii_letters_is_refused' --test rules
 
 # ── The walk ──────────────────────────────────────────────────────────────────
 

@@ -80,7 +80,14 @@ pub enum Error {
     ///   `WalkRules::none().with_masks(vec![candidate])`. `mask_preview`
     ///   validates for a reason of its own: previewing a malformed mask must
     ///   give the same sentence saving it would, not a count of zero that reads
-    ///   as "this rule would remove nothing".
+    ///   as "this rule would remove nothing". Since fix round 4 it then builds
+    ///   the whole rule set the next scan will apply — that root's stored
+    ///   prefixes and every stored mask — so it can refuse for a **stored**
+    ///   rule too, the same refusal `start_walk_job` gives one bullet up and
+    ///   for the same reason: a preview cannot put a number on a scan that is
+    ///   going to stop before it starts. The candidate is validated first, so a
+    ///   malformed candidate still gets its own sentence rather than another
+    ///   rule's.
     ///
     /// `#[from]` carries `RulesError`'s own sentence unchanged, which is
     /// already safe to show: every variant names the rule the person typed

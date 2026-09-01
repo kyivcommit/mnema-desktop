@@ -216,6 +216,42 @@ pub enum RulesError {
          folder itself and its parent"
     )]
     MaskCanNeverNameAFile { mask: String },
+    /// 🔴 A character class holding a character outside ASCII. `globset`
+    /// compiles with Unicode **off** — `(?-u)`, hardcoded at
+    /// `globset-0.4.19/src/glob.rs:675`, with no switch on `GlobBuilder` — so
+    /// `[...]` is a class of **bytes**, and a letter outside ASCII is two or
+    /// more of them. The rule that compiles is not the rule that was typed, and
+    /// measurement says it goes wrong in **both** directions, not one:
+    ///
+    /// - anchored, it matches nothing — `[Г]file.txt` does not match
+    ///   `Гfile.txt`, because the class matches one byte where the letter is
+    ///   two;
+    /// - wrapped in `*`, it matches by byte and takes names that hold no such
+    ///   letter at all — `*[Г]*` matches `авто.txt`, because the folded `г` is
+    ///   `D0 B3` and `а` begins `D0`.
+    ///
+    /// Both measured on the pinned `globset 0.4.19` and pinned by
+    /// `a_character_class_of_non_ascii_letters_is_refused`. Under D29 that is a
+    /// rule a person believes holds text back while the walk indexes something
+    /// else and sends it to a third-party provider — so this is refused with a
+    /// sentence rather than accepted and disclosed. A privacy control that
+    /// silently does something else is worse than no control.
+    ///
+    /// **Scoped to the inside of a class, and nowhere else.** A non-ASCII
+    /// **literal** is fine and must keep working — `Копія*` matches
+    /// `КОПІЯ звіту.docx` since Task 9b, because [`caseless_form`] bridges case
+    /// and normalisation on both sides of a byte comparison of whole letters.
+    /// `?` is not refused either: its breakage is a property of the **name**,
+    /// not of the mask (`?.txt` fails to match `й.txt` in an all-ASCII mask,
+    /// and `??.txt` matches it — measured), so refusing every `?` would cut
+    /// through the healthy case. That one is disclosed in the editor's
+    /// explainer instead.
+    #[error(
+        "file mask {mask:?} has a character class holding a character outside ASCII — a class \
+         is compared byte by byte, so it can never mean what it says; add one mask per name \
+         instead"
+    )]
+    MaskNonAsciiCharacterClass { mask: String },
 }
 
 /// 🔴 **The one comparison rule, and the only place case or normalisation is
@@ -278,9 +314,16 @@ pub enum RulesError {
 /// `[a-z]`, so a mask that removed `_x.txt` no longer does — one of several
 /// measured narrowing shapes, not the only one this commit introduces), and a
 /// letter whose fold is more than one character (`[ß]` becomes `[ss]`, a class
-/// of one `s`). Both are rare enough to be recorded rather than fixed; fixing
-/// them means not folding inside `[...]`, which is a parser this layer does
-/// not have.
+/// of one `s`, so `[ß]x.txt` matches `sx.txt` — measured).
+///
+/// ⚠️ **Since Task 11 the second of those, and the `[А-Я]` example above, can
+/// no longer be stored at all**: `validate_mask` refuses a class holding any
+/// character outside ASCII ([`RulesError::MaskNonAsciiCharacterClass`]) before
+/// this transform ever runs, so those sentences describe what the transform
+/// WOULD do rather than a rule anybody can save. The `[A-z]` narrowing is
+/// unaffected and is still recorded rather than fixed — it is all ASCII, and
+/// fixing it means not folding inside `[...]`, which is a parser this layer
+/// does not have.
 ///
 /// **A second, unrelated narrowing shape lives on the name side, in the outer
 /// `.nfc()`: composition can swallow the literal a mask is looking for.**
@@ -824,6 +867,31 @@ impl WalkRules {
             true
         });
 
+        match self.compiled_override(root) {
+            Ok(built) => {
+                b.overrides(built);
+                (b, true)
+            }
+            // Every override-based layer silently stops applying — the
+            // built-in list included, since it shares this one `Override`
+            // with the user prefixes. `filter_entry`'s anchored layer is
+            // unaffected: it does not go through the pattern engine.
+            Err(_) => (b, false),
+        }
+    }
+
+    /// The override this rule set compiles for one root: the built-in layers
+    /// when they are on, then the user's prefixes, in `builder()`'s own order.
+    ///
+    /// **One function, two readers**, the same argument
+    /// [`WalkRules::builtin_override_patterns`] carries one level down and for
+    /// the same measured reason. [`WalkRules::builder`] hands the result to the
+    /// walker; [`WalkRules::applied_to`] hands it to the predicate that answers
+    /// what the walk will remove without running one. Two loops over the same
+    /// two sources is exactly the shape that had already drifted once on the
+    /// built-in half, and the drift was invisible until a folder named
+    /// `.DS_Store` was offered as ordinary.
+    fn compiled_override(&self, root: &Path) -> Result<Override, ignore::Error> {
         let mut over = OverrideBuilder::new(root);
         if self.builtin {
             // Through the one function that produces these patterns, never a
@@ -840,17 +908,89 @@ impl WalkRules {
         for prefix in &self.user_prefixes {
             let _ = over.add(&anchored_pattern(prefix));
         }
-        match over.build() {
-            Ok(built) => {
-                b.overrides(built);
-                (b, true)
-            }
-            // Every override-based layer silently stops applying — the
-            // built-in list included, since it shares this one `Override`
-            // with the user prefixes. `filter_entry`'s anchored layer is
-            // unaffected: it does not go through the pattern engine.
-            Err(_) => (b, false),
+        over.build()
+    }
+
+    /// **The WHOLE rule set, compiled for one watched root, so a caller can ask
+    /// what the next walk will remove from a path the index already holds.**
+    ///
+    /// 🔴 **Why this exists at all, and it is a defect report rather than a
+    /// convenience.** [`WalkRules::masks`] answers about the mask layer alone,
+    /// and Task 10's `mask_preview` counted with it — so the preview reasoned
+    /// about ONE rule while the next walk applies the whole set. With `*.pdf`
+    /// already stored and no scan run yet, previewing `*.txt` over a document
+    /// indexed at both `copy.pdf` and `copy.txt` answered "no document stops
+    /// being findable — each is also indexed under another path", and the next
+    /// scan applied both masks and took the document. The direction of that
+    /// error is the worst available: it **understates** the loss, on the one
+    /// screen whose job is to state it.
+    ///
+    /// **What it covers**, and it is the walk's own layers, asked through the
+    /// walk's own compiled matchers rather than re-read here:
+    ///
+    /// - the **masks**, through [`MaskLayer::matches`] — asked of the last
+    ///   component only, because a mask is file-only (D-c) and the walk never
+    ///   prunes a directory on one;
+    /// - the **override layers** — the built-in list and the user's path
+    ///   prefixes — from [`WalkRules::compiled_override`], the same function
+    ///   `builder()` gives the walker, asked per component for
+    ///   [`BuiltinLayers::prunes`]'s reason: those patterns prune a directory
+    ///   and the walker then never descends;
+    /// - the **anchored build-output layer**, looked up the way `filter_entry`
+    ///   looks it up.
+    ///
+    /// **What it deliberately does NOT cover** is exactly
+    /// [`WalkRules::builtin_layers`]'s list, and for the same reasons: the
+    /// in-tree `.gitignore` stack, and symlinks. `false` means "no rule in this
+    /// set removes it", never "it will be indexed".
+    ///
+    /// ⚠️ **A pattern set that does not compile answers as an EMPTY override
+    /// here**, rather than as "everything is removed" or as a refusal. In that
+    /// state `builder()` answers `rules_applied = false` and `walk_root` stops
+    /// before phase 2, so the walk removes nothing at all — and a caller
+    /// computing a difference between two rule sets gets the same override on
+    /// both sides, which can only make a marginal count larger, never smaller.
+    /// Overstating is the direction a person can see and undo; understating is
+    /// the one this whole entry point exists to close.
+    pub fn applied_to(&self, root: &Path) -> AppliedRules {
+        AppliedRules {
+            root: root.to_path_buf(),
+            over: self
+                .compiled_override(root)
+                .unwrap_or_else(|_| Override::empty()),
+            masks: self.masks.clone(),
         }
+    }
+}
+
+/// One watched root's whole rule set, compiled — built by
+/// [`WalkRules::applied_to`], whose doc comment carries the argument for every
+/// part of it.
+pub struct AppliedRules {
+    root: std::path::PathBuf,
+    over: Override,
+    masks: MaskLayer,
+}
+
+impl AppliedRules {
+    /// Whether this rule set removes the **file** at `relative_path`.
+    ///
+    /// 🔴 **A file**, and the word is load-bearing in both directions. The
+    /// masks are asked of the last component only, because the walk's condition
+    /// is `is_file() && matches(name)` and a mask must never prune a directory
+    /// that shares its name (D-c, `a_mask_never_prunes_a_directory`) — so a
+    /// stored `*.pdf` does not make this answer `true` for
+    /// `archive.pdf/keep.txt`. The override and anchored layers are asked of
+    /// every component, because those DO prune directories and the walker then
+    /// never descends.
+    ///
+    /// Meant for a caller holding an indexed relative path — a regular file the
+    /// walk already took. Over a **disk listing** it inherits
+    /// [`MaskLayer::matches`]'s one-directional skew, which is that function's
+    /// own doc comment to read, not a second thing to remember.
+    pub fn removes_file(&self, relative_path: &str) -> bool {
+        self.masks.matches(relative_path)
+            || prunes_a_component(&self.root, &self.over, relative_path, false)
     }
 }
 
@@ -871,22 +1011,53 @@ impl BuiltinLayers {
     /// Per component, because the layers prune a directory and the walker then
     /// never descends: the whole path is never what matched.
     pub fn prunes(&self, relative_path: &str) -> bool {
-        let mut parent = self.root.clone();
-        for component in relative_path.split('/') {
-            let path = parent.join(component);
-            if self.over.matched(&path, true).is_ignore() {
-                return true;
-            }
-            let anchored = WalkRules::ANCHORED_DIRS.iter().any(|(dir, markers)| {
+        prunes_a_component(&self.root, &self.over, relative_path, true)
+    }
+}
+
+/// Whether any component of `relative_path` is pruned by `over` or by the
+/// anchored build-output layer — the one component walk, shared by
+/// [`BuiltinLayers::prunes`], which is given a directory, and
+/// [`AppliedRules::removes_file`], which is given a file.
+///
+/// **Per component**, because both layers prune a directory and the walker then
+/// never descends: the whole path is never what matched, so `.git/hooks` is
+/// pruned because `.git` is.
+///
+/// `last_is_dir` is the only thing the two callers disagree about, and it says
+/// what the LAST component is: a directory for the folder listing, a file for
+/// an indexed path. Every component before it is a directory either way.
+/// Nothing in this repository currently answers differently for the two —
+/// `builtin_override_patterns` emits no directory-only pattern (none carries a
+/// trailing `/`) and `anchored_pattern` emits none either — so today this is a
+/// truthful argument rather than a load-bearing one. It becomes load-bearing
+/// the moment a directory-only pattern is added, which is why it is asked
+/// rather than assumed: the anchored layer is already gated on it here, exactly
+/// as `filter_entry` gates it on `entry.file_type().is_dir()`.
+fn prunes_a_component(
+    root: &Path,
+    over: &Override,
+    relative_path: &str,
+    last_is_dir: bool,
+) -> bool {
+    let mut parent = root.to_path_buf();
+    let mut components = relative_path.split('/').peekable();
+    while let Some(component) = components.next() {
+        let is_dir = last_is_dir || components.peek().is_some();
+        let path = parent.join(component);
+        if over.matched(&path, is_dir).is_ignore() {
+            return true;
+        }
+        let anchored = is_dir
+            && WalkRules::ANCHORED_DIRS.iter().any(|(dir, markers)| {
                 *dir == component && markers.iter().any(|marker| parent.join(marker).is_file())
             });
-            if anchored {
-                return true;
-            }
-            parent = path;
+        if anchored {
+            return true;
         }
-        false
+        parent = path;
     }
+    false
 }
 
 /// A prefix is a path the user typed, not a glob pattern: escaped so that a
@@ -1029,11 +1200,18 @@ fn validate_prefix(prefix: &str) -> Result<Option<String>, RulesError> {
 /// is the guard on the common case they must not cost —
 /// `*.PDF` still removing `report.pdf`.
 ///
-/// ⚠️ **One thing this does NOT close**, pinned by
-/// `a_character_class_of_non_ascii_letters_still_matches_nothing`: because the
-/// compiled regex is byte-oriented, a character class of non-ASCII letters
-/// (`[Гґ]`) is a class of **bytes** and matches nothing. Folding its contents
-/// changes that not at all, since the byte semantics were never about case.
+/// ⚠️ **The one thing folding cannot reach, and Task 11's answer to it.**
+/// Because the compiled regex is byte-oriented, a character class of non-ASCII
+/// letters (`[Гґ]`) is a class of **bytes**, and folding its contents changes
+/// that not at all — the byte semantics were never about case. It was booked
+/// here as a disclosure and is now a **refusal**:
+/// [`RulesError::MaskNonAsciiCharacterClass`], checked by
+/// `holds_non_ascii_character_class` and pinned by
+/// `a_character_class_of_non_ascii_letters_is_refused`. The measurement that
+/// booked it turned out to understate the harm — such a class does not only
+/// match nothing when anchored, it matches by BYTE when wrapped in `*` and
+/// takes names the person never named — which is what turned a note into a
+/// refusal.
 fn validate_mask(mask: &str) -> Result<Option<globset::GlobMatcher>, RulesError> {
     if mask.is_empty() {
         return Ok(None);
@@ -1068,6 +1246,11 @@ fn validate_mask(mask: &str) -> Result<Option<globset::GlobMatcher>, RulesError>
             mask: mask.to_string(),
         });
     }
+    if holds_non_ascii_character_class(mask) {
+        return Err(RulesError::MaskNonAsciiCharacterClass {
+            mask: mask.to_string(),
+        });
+    }
     // Case-sensitive — `globset`'s default — because the folding is done by
     // `caseless_form` on both sides instead. The mask pays for it once, here.
     // The `mask` field on `RulesError::InvalidMask` names the mask as the
@@ -1084,6 +1267,57 @@ fn validate_mask(mask: &str) -> Result<Option<globset::GlobMatcher>, RulesError>
             mask: mask.to_string(),
             reason: err.to_string(),
         })
+}
+
+/// Whether any `[...]` in `mask` holds a character outside ASCII — the whole of
+/// [`RulesError::MaskNonAsciiCharacterClass`]'s question, and deliberately not
+/// one character more.
+///
+/// **Asked of the mask as TYPED, before [`caseless_form`], and that is a
+/// decision with a measured cost.** Folding first would accept one shape this
+/// refuses: `U+212A` KELVIN SIGN folds to an ordinary ASCII `k`, so
+/// `[\u{212A}].txt` really does match both `k.txt` and `K.txt` (measured), and
+/// it is refused here anyway. Asking as typed also refuses one shape folding
+/// would let through, and that one is the reason the trade goes this way:
+/// `[ß]` folds to `[ss]` — a class of a single `s`, so `[ß]x.txt` matches
+/// `sx.txt` (measured) — which is the same "not the rule that was typed"
+/// failure by a different mechanism. Refusing a compatibility character almost
+/// nobody types costs less than accepting a rule that quietly means something
+/// else.
+///
+/// **No escape handling, and it is not an omission.** `validate_mask` refuses a
+/// `\` anywhere before this runs ([`RulesError::MaskContainsBackslash`]), so
+/// there is no escaped `[` or `]` for this scan to misread. If that refusal is
+/// ever relaxed, this function is one of the places that has to learn about it.
+///
+/// The two positions `globset` treats specially inside a class are stepped
+/// over: a leading `!` is its negation, and a `]` immediately after the opening
+/// (or after that `!`) is a literal `]` rather than the end of the class. An
+/// unterminated `[` is scanned to the end of the mask, so `[Г` is refused here
+/// rather than by the compile probe — either sentence is about the same broken
+/// class, and this one names the reason a person can act on.
+fn holds_non_ascii_character_class(mask: &str) -> bool {
+    let mut chars = mask.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '[' {
+            continue;
+        }
+        if chars.peek() == Some(&'!') {
+            chars.next();
+        }
+        if chars.peek() == Some(&']') {
+            chars.next();
+        }
+        for inside in chars.by_ref() {
+            if inside == ']' {
+                break;
+            }
+            if !inside.is_ascii() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// One component of a `/`-split prefix against the whitelist described on

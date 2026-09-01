@@ -317,3 +317,32 @@ case_ "the case note must be decided by the mask, not by any uppercase in the an
   "    void mask;
     return answer.toLowerCase() !== answer;" \
   src/settings/Masks.test.ts 'the case note stands only where the answer really spells the mask differently' runner=vitest
+
+# ── Task 11 fix round 4 additions ────────────────────────────────────────────
+#
+# Two catalogue cases rather than component ones, because both findings ARE the
+# wording: the component renders whatever string it is given, so the guard that
+# matters is the one that reads the rendered sentence.
+
+# 🔴 F3. The removal sentence, put back to the promise it used to make. With
+# `*.pdf` and `report.*` both stored, removing either leaves `report.pdf`
+# excluded — so "the files this mask was holding back are indexed again" is
+# false about the files it names. It cannot be fixed by counting: those files
+# are NOT in the index, which is why this side has no preview at all. The mutant
+# is the exact string that shipped.
+case_ "the removal sentence must not promise that every held-back file comes back" \
+  ui/src/i18n/catalog.ts \
+  "s{    settings_masks_remove_cost: 'From the next scan of each folder on, this mask stops holding anything back: each file it was excluding is indexed again — unless another of your rules still excludes it — and its text is sent to the model provider.',}{    settings_masks_remove_cost: 'From the next scan of each folder on, the files this mask was holding back are indexed again, and their text is sent to the model provider.',}" \
+  "the files this mask was holding back are indexed again" \
+  src/settings/Masks.test.ts 'removing states the inverse cost before it removes anything, in both locales' runner=vitest
+
+# 🔴 F2's disclosed half, dropped from the explainer. `?` is deliberately NOT
+# refused — its breakage is a property of the NAME, not of the mask, so refusing
+# every `?` would cut through the healthy case — which makes this clause the
+# only place a person is told. Measured: `?.txt` does not match `й.txt`,
+# `??.txt` does.
+case_ "the explainer must disclose that \`?\` counts bytes rather than letters" \
+  ui/src/i18n/catalog.ts \
+  "s{ And \\? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: \\?\\.txt does not match й\\.txt, and \\?\\?\\.txt does\\.'}{'}" \
+  "neither does the way a name happens to store its accents.'," \
+  src/settings/Masks.test.ts 'the whole section reads as one screen' runner=vitest

@@ -123,14 +123,15 @@ test('adding asks the preview first and shows both its numbers before anything i
 
   const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
   expect(cost).toBe(
-    'As of now, at least 4 files already indexed match this mask, and 2 documents stop being'
-    + ' findable: no other path names them. The next scan of each folder can remove more than'
-    + ' that: files that never finished indexing are not counted here.',
+    'As of now this mask takes at least 4 files beyond what your rules already take, and 2'
+    + ' documents stop being findable: no other path will be left naming them. The next scan of'
+    + ' each folder can remove more than that: files that never finished indexing are not'
+    + ' counted here.',
   );
 });
 
 // 🔴 The wait is not instant and must not be silent. `mask_preview` holds the
-// index mutex across a scan of every indexed path of every root, so a press
+// index mutex across a READ of every indexed path of every root, so a press
 // made while a walk is running waits on that lock — and a screen that answers a
 // press with nothing is a screen that invites a second press.
 test('the press says it is checking, and the numbers replace that sentence rather than joining it', async () => {
@@ -250,17 +251,19 @@ test('zero documents beside a non-zero file count says the documents stay findab
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
   const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
   expect(cost).toContain('at least 4 files');
-  expect(cost).toContain('no document stops being findable — each one is also indexed under another path');
+  expect(cost).toContain('no document stops being findable — each one keeps another path this rule does not take');
   // The direction a swap of the two numbers would produce, and the one an
   // overstated disclosure reads as.
   expect(cost).not.toContain('4 documents');
   expect(cost).not.toContain('at least 0 files');
 });
 
-// A preview of two zeros is not "this rule would remove nothing": it is "the
-// indexed set holds nothing that matches, today". The next scan can still take
-// files that never finished indexing, so the question is asked anyway — there
-// is no `paths === 0` shortcut past it.
+// A preview of two zeros is not "this rule would remove nothing": since fix
+// round 4 it is "this rule takes nothing your rules do not already take, out of
+// what is indexed today" — which is also what a person adding `*.txt` over a
+// stored `*` sees. The next scan can still take files that never finished
+// indexing, so the question is asked anyway: there is no `paths === 0` shortcut
+// past it.
 test('a preview of zero asks the question anyway, in a sentence of its own', async () => {
   maskPreview.mockResolvedValue({ paths: 0, documents: 0 });
   await mount([]);
@@ -271,12 +274,13 @@ test('a preview of zero asks the question anyway, in a sentence of its own', asy
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
   const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
   expect(cost).toBe(
-    'As of now, no file that is already indexed matches this mask. The next scan of each folder'
-    + ' can still remove files: those that never finished indexing are not counted here.',
+    'As of now this mask takes nothing beyond what your rules already take. The next scan of'
+    + ' each folder can still remove files: those that never finished indexing are not counted'
+    + ' here.',
   );
   // The zero arm of the shared sentence would say this, and it has nobody to
   // say it about when no path matched at all.
-  expect(cost).not.toContain('also indexed under another path');
+  expect(cost).not.toContain('keeps another path');
   expect(addMask).not.toHaveBeenCalled();
 });
 
@@ -543,16 +547,39 @@ test('the case note stands only where the answer really spells the mask differen
 
 // 🔴 Removal is a disclosure, not a tidy-up: it is the one press on this screen
 // that sends more text to a third party.
-test('removing states the inverse cost before it removes anything', async () => {
+//
+// 🔴 Fix round 4, F3. The sentence used to promise that "the files this mask was
+// holding back are indexed again" — which with `*.pdf` and `report.*` both
+// stored is false of `report.pdf` whichever of the two is removed. It cannot be
+// fixed by counting: the files a mask holds back are NOT in the index, so no
+// index read can enumerate them, which is why this side has no preview at all.
+// One sentence, unconditionally honest, rather than two arms chosen by "does
+// another rule exist" — that question is not "does another rule match the same
+// files", and the editor cannot know the second without the file names.
+//
+// Both locales, rendered rather than read out of the catalogue: the clause is
+// the whole finding and a `$derived` without `void $locale` would keep the
+// English one through the switch.
+test('removing states the inverse cost before it removes anything, in both locales', async () => {
   await mount(['*.pdf']);
   await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.pdf' }));
 
   expect(visibleText(screen.getByTestId('mask-confirm-cost'))).toBe(
-    'From the next scan of each folder on, the files this mask was holding back are indexed'
-    + ' again, and their text is sent to the model provider.',
+    'From the next scan of each folder on, this mask stops holding anything back: each file it'
+    + ' was excluding is indexed again — unless another of your rules still excludes it — and'
+    + ' its text is sent to the model provider.',
   );
+
+  setLocale('uk');
+  await waitFor(() => expect(screen.getByText('Маски файлів')).toBeTruthy());
+  expect(visibleText(screen.getByTestId('mask-confirm-cost'))).toBe(
+    'Від наступного сканування кожної теки ця маска більше нічого не стримує: кожен файл, який'
+    + ' вона виключала, індексується знову — якщо його не виключає ще якесь ваше правило, — і'
+    + ' його текст надсилається провайдеру моделі.',
+  );
+
   expect(removeMask).not.toHaveBeenCalled();
   // No count is asked for a removal: `mask_preview` answers what a mask REMOVES
   // and would be the wrong number entirely for what removing it releases.
@@ -730,6 +757,8 @@ test('the whole section reads as one screen', async () => {
     + ' depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF'
     + ' and *.pdf are one and the same rule; neither does the way a name happens to store its'
     + ' accents.'
+    + ' And ? stands for a single byte rather than a single letter, so a letter outside the basic'
+    + ' Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.'
     + ' *.pdf Remove'
     + ' *.tmp Remove'
     + ' New mask: Add a mask',
@@ -765,14 +794,14 @@ test('every sentence on the section follows a language switch, the standing ques
   await type('*.tmp');
   await fireEvent.click(addButton());
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
-  expect(visibleText(container)).toContain('As of now, at least 4 files');
+  expect(visibleText(container)).toContain('As of now this mask takes at least 4 files');
 
   setLocale('uk');
   await waitFor(() => expect(screen.getByText('Маски файлів')).toBeTruthy());
 
   const text = visibleText(container);
   expect(text).toContain(t('settings_masks_explainer'));
-  expect(text).toContain('Станом на зараз під цю маску підпадає щонайменше 4 файли');
+  expect(text).toContain('Станом на зараз ця маска забирає щонайменше 4 файли');
   expect(text).toContain(t('settings_masks_confirm_add_heading', { mask: '*.tmp' }));
   // The accessible names follow the switch too, and they are what tells two
   // otherwise identical controls apart.

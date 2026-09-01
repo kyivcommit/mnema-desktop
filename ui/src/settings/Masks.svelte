@@ -12,10 +12,11 @@
   // `ui/package.json` and none is wanted.
   //
   // 🔴 And the preview is called on an explicit press, never per keystroke.
-  // `mask_preview` holds the index mutex across a scan of every indexed path of
-  // every root (`tree.rs`), so a call per character would contend with a
-  // running walk. A debounce would only make the contention later; an explicit
-  // press makes it once, and the person is already pressing something.
+  // `mask_preview` holds the index mutex across a READ of every indexed path of
+  // every root, of every root's stored exclusions and of the mask list
+  // (`tree.rs`), so a call per character would contend with a running walk. A
+  // debounce would only make the contention later; an explicit press makes it
+  // once, and the person is already pressing something.
   type Pending =
     // Numbers, not a sentence, for `Folders.svelte`'s reason: a sentence frozen
     // at the press keeps its language through a switch. And read ONCE, from one
@@ -130,6 +131,13 @@
   // every file the mask was holding back, including the ones no scan has ever
   // looked at. The cost is stated in words instead, because no count here would
   // be the count of that.
+  //
+  // 🔴 Fix round 4, F3: those files are not in the index, so the sentence
+  // cannot promise they all come back either. With `*.pdf` and `report.*` both
+  // stored, removing either leaves `report.pdf` excluded — and "another rule
+  // exists" is not "another rule matches the same files", which is why
+  // `settings_masks_remove_cost` is one unconditionally hedged sentence rather
+  // than two arms this component would have to choose between.
   function askRemove(mask: string) {
     ++previews; // a standing add-preview reply must not land on this question
     forget();
@@ -312,11 +320,13 @@
       cost:
         p.kind === 'add'
           // 🔴 The zero has a sentence of its own. The shared one's `=0` arm for
-          // documents says "each one is also indexed under another path", and
-          // when no path matched at all there is nobody to say that about.
-          // There is no shortcut past the question either: a preview of zero
-          // means the INDEXED set holds nothing that matches today, and the next
-          // scan can still take files that never finished indexing.
+          // documents speaks of another path this rule does not take, and when
+          // this press takes no path at all there is nobody to say that about.
+          // There is no shortcut past the question either: since fix round 4 a
+          // preview of zero means this mask takes nothing BEYOND what the
+          // stored rules already take — which is also what adding `*.txt` over
+          // a stored `*` answers — and the next scan can still take files that
+          // never finished indexing.
           ? p.paths === 0
             ? t('settings_masks_add_cost_none')
             : t('settings_masks_add_cost', { paths: p.paths, documents: p.documents })

@@ -13,7 +13,7 @@ mod rules;
 // returns it, and a caller with a save dialog in front of a person needs to
 // match on it or put it in a signature, not just observe that `new` failed
 // (review fix round 2, Critical finding — this line was the whole gap).
-pub use rules::{BuiltinLayers, MaskLayer, RulesError, WalkRules};
+pub use rules::{AppliedRules, BuiltinLayers, MaskLayer, RulesError, WalkRules};
 
 // Defined in the shared-types crate, re-exported here so a caller that only
 // deals with the walk can name it without a second dependency.

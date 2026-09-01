@@ -159,10 +159,47 @@ pub struct MaskPreview {
     pub documents: i64,
 }
 
-/// What `pattern` would remove, counted over the index. Read-only.
+/// What adding `pattern` would remove **that your rules do not already
+/// remove** — the difference this press makes, counted over the index.
+/// Read-only.
 ///
-/// 🔴 **Counted over indexed relative paths, never over a disk listing, and
-/// this is the whole reason the command exists on this side of the wire.**
+/// 🔴 **A difference between two rule sets, never a property of one mask, and
+/// this is the whole of what the command is for.** Until fix round 4 it built
+/// `WalkRules::none().with_masks(vec![pattern])` and counted with that, while
+/// `walk_job.rs:149` builds `WalkRules::new(true, true, user_prefixes)?
+/// .with_masks(masks)?` — so the preview answered a question the next scan was
+/// not going to be asked. The reproduction is ordinary rather than contrived:
+/// `*.pdf` stored, no scan run yet, a document indexed at both `copy.pdf` and
+/// `copy.txt`. Previewing `*.txt` answered `documents: 0`, and the editor said
+/// *"no document stops being findable — each is also indexed under another
+/// path"*; the next scan applied both masks and the document was gone. The
+/// direction of the error is the worst available — it **understates** the loss,
+/// on the one screen whose job is to state it.
+///
+/// So the two numbers are defined against two sets:
+///
+/// - the **current set** is what the next scan would apply today: the built-in
+///   layers, that root's stored path exclusions, and every stored mask;
+/// - the **new set** is the current set plus the candidate;
+/// - `paths` counts indexed paths that survive the current set and do not
+///   survive the new one;
+/// - `documents` counts documents findable under the current set — at least one
+///   surviving path — that are not findable under the new one.
+///
+/// A path a stored rule already takes is therefore charged to that rule and not
+/// to this press: it is going on the next scan whether this question is
+/// confirmed or cancelled, and telling a person that cancelling saves it would
+/// be a second false promise in the other direction.
+///
+/// 🔴 **Through [`mnema_walk::AppliedRules`], never a second matcher.** The
+/// window has no glob library (`ui/package.json`), and a count derived there
+/// would be a second implementation of the rule that disagrees with the walk at
+/// exactly the edges Task 9 spent its cases pinning: the `.gitignore` parser
+/// edges, the case folding, the normalisation form. This is that plan's review
+/// round 1, P1 — and fix round 4 is what happens when a preview stands not on a
+/// second copy of the rule but on a *subset* of it.
+///
+/// 🔴 **Counted over indexed relative paths, never over a disk listing.**
 /// [`mnema_walk::MaskLayer::matches`] answers about a *name* and nothing about
 /// the entry, while the walk asks `is_file() && matches(name)` — so on a
 /// symlink, a FIFO, or an entry whose `file_type()` cannot be read, the
@@ -172,17 +209,15 @@ pub struct MaskPreview {
 /// regular files the walk already indexed; over a `read_dir` it is reachable,
 /// and the preview would show a person more files than the next walk takes.
 ///
-/// 🔴 **Through `WalkRules`, never a second matcher.** The window has no glob
-/// library (`ui/package.json`), and a count derived there would be a second
-/// implementation of the rule that disagrees with the walk at exactly the
-/// edges Task 9 spent its cases pinning: the `.gitignore` parser edges, the
-/// case folding, and the normalisation form. This is that plan's review round
-/// 1, P1.
-///
-/// **It validates first, so previewing a malformed mask gives the same
-/// sentence saving it would** — not a count of zero, which reads as "this rule
+/// **It validates the candidate first, alone, before the index is touched** —
+/// so previewing a malformed mask gives the same sentence saving it would, and
+/// so that sentence is about the mask being typed rather than about some other
+/// rule already in storage. Not a count of zero, which reads as "this rule
 /// would remove nothing" and is the opposite of true for a rule that cannot be
-/// stored at all.
+/// stored at all. A **stored** rule that no longer validates is a different
+/// answer and a deliberate one: it refuses here, exactly as it refuses the walk
+/// (`walk_job.rs`), because a preview cannot honestly put a number on a scan
+/// that is going to stop before it starts.
 ///
 /// **The literal empty string is not malformed and previews as two zeros.** It
 /// is `validate_mask`'s one non-error, meaning "no rule" — the blank row in an
@@ -191,62 +226,106 @@ pub struct MaskPreview {
 /// the harm.
 ///
 /// **Grouping, and why it is complete.** `documents` counts the ids for which
-/// every one of the document's indexed paths matches, over all roots at once —
-/// a mask is global, so a document with a copy under a second watched folder
-/// must be seen whole. `Db::indexed_files_under_root` returns the paths of
-/// `status = 'indexed'` documents only, and status is a property of the
-/// *document*: either all of a document's paths are in this set or none are.
-/// So a document that appears here appears with **all** of its paths, and the
-/// "every path matches" test is asked of the whole set rather than of a
-/// visible fragment of it.
+/// every surviving path is taken, over all roots at once — a mask is global, so
+/// a document with a copy under a second watched folder must be seen whole.
+/// `Db::indexed_files_under_root` returns the paths of `status = 'indexed'`
+/// documents only, and status is a property of the *document*: either all of a
+/// document's paths are in this set or none are. So a document that appears
+/// here appears with **all** of its paths, and "every surviving path is taken"
+/// is asked of the whole set rather than of a visible fragment of it.
+///
+/// ⚠️ **The lock is held across the READS and nothing else.** The rule sets are
+/// compiled and the paths matched **after** `with_index` returns, so evaluating
+/// four layers per path instead of one costs the mutex nothing — this holds it
+/// for strictly less than the previous version did, which matched inside it.
+/// The cost that moved is memory: every root's indexed paths are in hand at
+/// once rather than one root at a time. That is [`list_tree`]'s own shape
+/// (`build_tree_listing` holds the same rows), so it is a cost this command
+/// already pays elsewhere and not a new one.
 ///
 /// **"As of now".** The disk can change between this reply and the scan that
 /// acts on it, and the removal happens on each root's own next scan — which is
-/// two halves of one sentence the editor owes a person (Task 11), not
-/// something this count can carry.
+/// two halves of one sentence the editor owes a person (Task 11), not something
+/// this count can carry.
 #[tauri::command(async)]
 pub fn mask_preview(state: State<'_, AppState>, pattern: String) -> Result<MaskPreview, Error> {
-    // Before the index is touched: a refusal is about the pattern and is the
-    // same whether the index holds one file or a million.
-    let rules = WalkRules::none().with_masks(vec![pattern])?;
-    let masks = rules.masks();
+    // The candidate, alone and first: before the index is touched, and before
+    // any stored rule can answer in its place. A refusal here is about the
+    // pattern and is the same whether the index holds one file or a million.
+    WalkRules::none().with_masks(vec![pattern.clone()])?;
 
     // One snapshot, for `list_tree`'s reason: an indexing job commits on its
     // own connection, outside this mutex, so roots read before it and files
     // read after it would be two different states of the index — and this
-    // reply is a single claim about one of them.
-    state.with_index(|db| {
+    // reply is a single claim about one of them. The masks and each root's
+    // prefixes join the same snapshot for `walk_job.rs`'s reason: they are all
+    // "the rules this walk runs under", and a set assembled from two moments
+    // describes no scan that will ever run.
+    let (stored, roots) = state.with_index(|db| {
         db.read_snapshot(|db| {
-            let mut paths = 0i64;
-            // documentId -> (indexed paths seen, of those, matched)
-            let mut per_document: std::collections::HashMap<String, (i64, i64)> =
-                std::collections::HashMap::new();
-
+            let stored = db.list_masks()?;
+            let mut roots = Vec::new();
             for root in db.list_watched_roots()? {
-                for file in db.indexed_files_under_root(root.id)? {
-                    let entry = per_document.entry(file.document_id).or_insert((0, 0));
-                    entry.0 += 1;
-                    if masks.matches(&file.relative_path) {
-                        entry.1 += 1;
-                        paths += 1;
-                    }
-                }
+                roots.push((
+                    root.absolute_path,
+                    db.list_path_exclusions(root.id)?,
+                    db.indexed_files_under_root(root.id)?,
+                ));
             }
-
-            // No `&& *matched > 0`: every entry is created immediately before
-            // `entry.0 += 1` two lines up, so `seen >= 1` always, and
-            // `seen == matched` already implies `matched >= 1`. The second
-            // conjunct could never be false where the first was true —
-            // reviewed and confirmed unreachable rather than assumed
-            // (fix round 1, M3) — so it read as a check that could not fire.
-            let documents = per_document
-                .values()
-                .filter(|(seen, matched)| seen == matched)
-                .count() as i64;
-
-            Ok(MaskPreview { paths, documents })
+            Ok((stored, roots))
         })
-    })
+    })?;
+
+    let mut proposed = stored.clone();
+    proposed.push(pattern);
+
+    let mut paths = 0i64;
+    // documentId -> (paths surviving the current set, of those, taken by the new one)
+    let mut per_document: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
+
+    for (absolute_path, prefixes, files) in roots {
+        let root_path = Path::new(&absolute_path);
+        // Both flags `true`, because both production callers pass `true`
+        // (`walk_job.rs`, `bridge.rs`) and `AppliedRules` is documented as
+        // assuming the built-in layers are on. The `.gitignore` half is not
+        // representable here and is disclosed rather than approximated: a path
+        // an in-tree `.gitignore` covers counts as surviving, which can only
+        // make this difference larger.
+        let current = WalkRules::new(true, true, prefixes.clone())?
+            .with_masks(stored.clone())?
+            .applied_to(root_path);
+        let with_candidate = WalkRules::new(true, true, prefixes)?
+            .with_masks(proposed.clone())?
+            .applied_to(root_path);
+
+        for file in files {
+            // Already going on the next scan, whatever this press decides. Not
+            // this mask's cost, and not a path cancelling would save.
+            if current.removes_file(&file.relative_path) {
+                continue;
+            }
+            let entry = per_document.entry(file.document_id).or_insert((0, 0));
+            entry.0 += 1;
+            if with_candidate.removes_file(&file.relative_path) {
+                entry.1 += 1;
+                paths += 1;
+            }
+        }
+    }
+
+    // No `&& *taken > 0`: every entry is created immediately before
+    // `entry.0 += 1` two lines up, so `surviving >= 1` always, and
+    // `surviving == taken` already implies `taken >= 1`. The second conjunct
+    // could never be false where the first was true — reviewed and confirmed
+    // unreachable rather than assumed (fix round 1, M3) — so it read as a check
+    // that could not fire.
+    let documents = per_document
+        .values()
+        .filter(|(surviving, taken)| surviving == taken)
+        .count() as i64;
+
+    Ok(MaskPreview { paths, documents })
 }
 
 /// What the launcher's right card paints around a cited passage, or the

@@ -116,48 +116,56 @@ describe('i18n', () => {
     setLocale('uk');
     const uk = (paths: number, documents: number) => t('settings_masks_add_cost', { paths, documents });
     expect(uk(1, 1)).toBe(
-      'Станом на зараз під цю маску підпадає щонайменше 1 файл з уже проіндексованих, '
-      + 'і 1 документ більше не знайдеться: інші шляхи на нього не ведуть. Наступне сканування '
-      + 'кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
+      'Станом на зараз ця маска забирає щонайменше 1 файл понад те, що вже забирають ваші '
+      + 'правила, і 1 документ більше не знайдеться: жодного іншого шляху на нього не '
+      + 'залишиться. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
+      + 'проіндексувалися, тут не враховані.');
     expect(uk(2, 2)).toBe(
-      'Станом на зараз під цю маску підпадає щонайменше 2 файли з уже проіндексованих, '
-      + 'і 2 документи більше не знайдуться: інші шляхи на них не ведуть. Наступне сканування '
-      + 'кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
+      'Станом на зараз ця маска забирає щонайменше 2 файли понад те, що вже забирають ваші '
+      + 'правила, і 2 документи більше не знайдуться: жодного іншого шляху на них не '
+      + 'залишиться. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
+      + 'проіндексувалися, тут не враховані.');
     expect(uk(5, 5)).toBe(
-      'Станом на зараз під цю маску підпадає щонайменше 5 файлів з уже проіндексованих, '
-      + 'і 5 документів більше не знайдуться: інші шляхи на них не ведуть. Наступне сканування '
-      + 'кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
+      'Станом на зараз ця маска забирає щонайменше 5 файлів понад те, що вже забирають ваші '
+      + 'правила, і 5 документів більше не знайдуться: жодного іншого шляху на них не '
+      + 'залишиться. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
+      + 'проіндексувалися, тут не враховані.');
     expect(uk(21, 21)).toBe(
-      'Станом на зараз під цю маску підпадає щонайменше 21 файл з уже проіндексованих, '
-      + 'і 21 документ більше не знайдеться: інші шляхи на нього не ведуть. Наступне сканування '
-      + 'кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
+      'Станом на зараз ця маска забирає щонайменше 21 файл понад те, що вже забирають ваші '
+      + 'правила, і 21 документ більше не знайдеться: жодного іншого шляху на нього не '
+      + 'залишиться. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
+      + 'проіндексувалися, тут не враховані.');
     expect(uk(22, 22)).toBe(
-      'Станом на зараз під цю маску підпадає щонайменше 22 файли з уже проіндексованих, '
-      + 'і 22 документи більше не знайдуться: інші шляхи на них не ведуть. Наступне сканування '
-      + 'кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.');
+      'Станом на зараз ця маска забирає щонайменше 22 файли понад те, що вже забирають ваші '
+      + 'правила, і 22 документи більше не знайдуться: жодного іншого шляху на них не '
+      + 'залишиться. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
+      + 'проіндексувалися, тут не враховані.');
     // The `=0` arm for `documents`, against a non-zero `paths`.
     expect(uk(2, 0)).toBe(
-      'Станом на зараз під цю маску підпадає щонайменше 2 файли з уже проіндексованих, '
-      + 'і жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим '
-      + 'шляхом. Наступне сканування кожної теки може прибрати більше: файли, які так і не '
-      + 'проіндексувалися, тут не враховані.');
+      'Станом на зараз ця маска забирає щонайменше 2 файли понад те, що вже забирають ваші '
+      + 'правила, і жоден документ не перестане знаходитися — на кожен із них веде ще й інший '
+      + 'шлях, якого це правило не забирає. Наступне сканування кожної теки може прибрати '
+      + 'більше: файли, які так і не проіндексувалися, тут не враховані.');
 
     setLocale('en');
     const en = (paths: number, documents: number) => t('settings_masks_add_cost', { paths, documents });
     // The count this bug actually shipped at: `paths: 1` reaches the `one` arm,
     // and the fix moves the verb ("matches") inside it.
     expect(en(1, 1)).toBe(
-      'As of now, at least 1 file already indexed matches this mask, and 1 document stops being'
-      + ' findable: no other path names it. The next scan of each folder can remove more than'
-      + ' that: files that never finished indexing are not counted here.');
+      'As of now this mask takes at least 1 file beyond what your rules already take, and 1'
+      + ' document stops being findable: no other path will be left naming it. The next scan of'
+      + ' each folder can remove more than that: files that never finished indexing are not'
+      + ' counted here.');
     expect(en(2, 2)).toBe(
-      'As of now, at least 2 files already indexed match this mask, and 2 documents stop being'
-      + ' findable: no other path names them. The next scan of each folder can remove more than'
-      + ' that: files that never finished indexing are not counted here.');
+      'As of now this mask takes at least 2 files beyond what your rules already take, and 2'
+      + ' documents stop being findable: no other path will be left naming them. The next scan of'
+      + ' each folder can remove more than that: files that never finished indexing are not'
+      + ' counted here.');
     expect(en(5, 0)).toBe(
-      'As of now, at least 5 files already indexed match this mask, and no document stops being'
-      + ' findable — each one is also indexed under another path. The next scan of each folder can'
-      + ' remove more than that: files that never finished indexing are not counted here.');
+      'As of now this mask takes at least 5 files beyond what your rules already take, and no'
+      + ' document stops being findable — each one keeps another path this rule does not take.'
+      + ' The next scan of each folder can remove more than that: files that never finished'
+      + ' indexing are not counted here.');
 
     // `settings_masks_add_cost_none` carries no plural argument — a fixed
     // sentence for the `paths === 0` arm the component picks itself
@@ -165,13 +173,39 @@ describe('i18n', () => {
     // rather than left unread by any test in the catalogue.
     setLocale('uk');
     expect(t('settings_masks_add_cost_none')).toBe(
-      'Станом на зараз під цю маску не підпадає жоден із уже проіндексованих файлів. Наступне '
-      + 'сканування кожної теки все одно може щось прибрати: файли, які так і не проіндексувалися, '
-      + 'тут не враховані.');
+      'Станом на зараз ця маска не забирає нічого понад те, що вже забирають ваші правила. '
+      + 'Наступне сканування кожної теки все одно може щось прибрати: файли, які так і не '
+      + 'проіндексувалися, тут не враховані.');
     setLocale('en');
     expect(t('settings_masks_add_cost_none')).toBe(
-      'As of now, no file that is already indexed matches this mask. The next scan of each folder'
-      + ' can still remove files: those that never finished indexing are not counted here.');
+      'As of now this mask takes nothing beyond what your rules already take. The next scan of'
+      + ' each folder can still remove files: those that never finished indexing are not counted'
+      + ' here.');
+  });
+
+  // 🔴 Fix round 4, F2's disclosed half. `?` is NOT refused by `validate_mask`,
+  // and the reason it is not is that its breakage is a property of the NAME
+  // rather than of the mask: `?.txt` fails to match `й.txt` because `й` is two
+  // bytes, in a mask that is all ASCII. Refusing every `?` would cut through
+  // the healthy case, so the explainer says it instead — one clause, both
+  // locales, and both examples measured through `MaskLayer::matches` rather
+  // than reasoned from the regex.
+  it('the mask explainer discloses that `?` counts bytes, in both locales', () => {
+    setLocale('uk');
+    expect(t('settings_masks_explainer')).toContain(
+      'А «?» замінює один байт, а не одну літеру, тож для літер поза латиницею його треба '
+      + 'ставити кілька: «?.txt» не збігається з «й.txt», а «??.txt» збігається.');
+    setLocale('en');
+    expect(t('settings_masks_explainer')).toContain(
+      'And ? stands for a single byte rather than a single letter, so a letter outside the basic'
+      + ' Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt'
+      + ' does.');
+    // The other direction: the clause is an ADDITION, not a replacement — the
+    // case and normalisation halves the live run confirmed must still be there.
+    setLocale('uk');
+    expect(t('settings_masks_explainer')).toContain('«*.PDF» і «*.pdf» — це одне й те саме правило');
+    setLocale('en');
+    expect(t('settings_masks_explainer')).toContain('*.PDF and *.pdf are one and the same rule');
   });
 
   // Fix round 1. PR 8a Task 5 added a four-arm Ukrainian plural and the only

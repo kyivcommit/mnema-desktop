@@ -500,7 +500,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // записаним на диску В РОЗКЛАДЕНІЙ формі — це нормалізація, а не регістр.
     // Додано одне підрядне про це. Звуження діапазонів ASCII (`[A-z]` → `[a-z]`)
     // сюди свідомо НЕ додано: це запис для леджера, а не для екрана.
-    settings_masks_explainer: 'Маска стосується одразу всіх ваших тек: вона порівнюється з іменем файлу на будь-якій глибині. Кожна тека застосує її під час свого наступного сканування. Регістр літер не має значення, тож «*.PDF» і «*.pdf» — це одне й те саме правило; так само не має значення, як саме записані на диску літери з діакритичними знаками.',
+    //
+    // 🔴 Fix round 4, F2. Останнє підрядне — про «?», і воно тут, а не серед
+    // відмов, саме тому, що ця вада є властивістю ІМЕНІ, а не маски: «?.txt»
+    // не збігається з «й.txt» через те, що «й» це два байти, і сама маска при
+    // цьому суто латинська. Відмовляти на кожен «?» означало б різати по
+    // здоровому випадку, тож це сказано словами. Обидва приклади виміряні,
+    // не виведені.
+    settings_masks_explainer: 'Маска стосується одразу всіх ваших тек: вона порівнюється з іменем файлу на будь-якій глибині. Кожна тека застосує її під час свого наступного сканування. Регістр літер не має значення, тож «*.PDF» і «*.pdf» — це одне й те саме правило; так само не має значення, як саме записані на диску літери з діакритичними знаками. А «?» замінює один байт, а не одну літеру, тож для літер поза латиницею його треба ставити кілька: «?.txt» не збігається з «й.txt», а «??.txt» збігається.',
     settings_masks_none: 'Жодної маски ще не додано.',
     settings_masks_add: 'Додати маску',
     settings_masks_input_label: 'Нова маска:',
@@ -516,12 +523,33 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `failed` чи `skipped` прохід прибере, а прев'ю його не показало. Точне
     // число тут стало б обіцянкою, яку `removed: 5` після «3 файли» зробило б
     // неправдою. Остання фраза називає саме той залишок.
-    settings_masks_add_cost: 'Станом на зараз під цю маску підпадає щонайменше {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} з уже проіндексованих, і {documents, plural, =0 {жоден документ не перестане знаходитися — кожен із них проіндексовано ще й за іншим шляхом} one {# документ більше не знайдеться: інші шляхи на нього не ведуть} few {# документи більше не знайдуться: інші шляхи на них не ведуть} many {# документів більше не знайдуться: інші шляхи на них не ведуть} other {# документа більше не знайдуться}}. Наступне сканування кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.',
+    //
+    // 🔴 Fix round 4, F1: змінилося САМЕ ЧИСЛО, тому мусило змінитися й
+    // речення. `mask_preview` більше не рахує «скільки файлів підпадає під цю
+    // маску» — воно рахує РІЗНИЦЮ, яку робить це натискання проти всього
+    // набору правил, що його застосує наступне сканування. Файл, який уже
+    // забирає збережене правило, у число не входить, тож стара фраза «під цю
+    // маску підпадає N файлів» стала б меншою за правду. Так само гілка `=0`
+    // для документів: інший шлях мусить не просто існувати в індексі, а
+    // пережити наявні правила — саме цього не сказала фраза, яку живий прогін
+    // спростував.
+    settings_masks_add_cost: 'Станом на зараз ця маска забирає щонайменше {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} понад те, що вже забирають ваші правила, і {documents, plural, =0 {жоден документ не перестане знаходитися — на кожен із них веде ще й інший шлях, якого це правило не забирає} one {# документ більше не знайдеться: жодного іншого шляху на нього не залишиться} few {# документи більше не знайдуться: жодного іншого шляху на них не залишиться} many {# документів більше не знайдуться: жодного іншого шляху на них не залишиться} other {# документа більше не знайдуться}}. Наступне сканування кожної теки може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.',
     // Нуль має власне речення: у спільному з ненульовим випадком гілка
-    // `=0` для документів каже «кожен із них проіндексовано ще й за іншим
-    // шляхом», а коли не підпав жоден шлях, казати нема про кого.
-    settings_masks_add_cost_none: 'Станом на зараз під цю маску не підпадає жоден із уже проіндексованих файлів. Наступне сканування кожної теки все одно може щось прибрати: файли, які так і не проіндексувалися, тут не враховані.',
-    settings_masks_remove_cost: 'Від наступного сканування кожної теки файли, які стримувала ця маска, індексуються знову, а їхній текст надсилається провайдеру моделі.',
+    // `=0` для документів каже про «інший шлях», а коли це натискання не
+    // забирає жодного шляху, казати нема про кого. І нуль тут тепер означає
+    // «нічого понад те, що вже забирають ваші правила», а не «під цю маску не
+    // підпадає жоден файл»: додати «*.txt» там, де вже збережено «*», дає
+    // саме цей нуль, а файли під маску підпадають.
+    settings_masks_add_cost_none: 'Станом на зараз ця маска не забирає нічого понад те, що вже забирають ваші правила. Наступне сканування кожної теки все одно може щось прибрати: файли, які так і не проіндексувалися, тут не враховані.',
+    // 🔴 Fix round 4, F3. Речення обіцяло те, чого екран знати не може: з
+    // «*.pdf» і «report.*» у сховищі видалення будь-якої з них лишає
+    // `report.pdf` виключеним. Полічити це неможливо, і це не обмеження, яке
+    // треба обійти — файли, які маска стримувала, В ІНДЕКСІ ВІДСУТНІ, тож
+    // жодне читання індексу їх не перелічить (тому на цьому боці й немає
+    // прев'ю). Одне речення, безумовно чесне, а не дві гілки за ознакою «чи є
+    // ще правило»: «є ще правило» — це не «є правило, що бере ті самі файли»,
+    // а другого без імен файлів не знати.
+    settings_masks_remove_cost: 'Від наступного сканування кожної теки ця маска більше нічого не стримує: кожен файл, який вона виключала, індексується знову — якщо його не виключає ще якесь ваше правило, — і його текст надсилається провайдеру моделі.',
     settings_masks_confirm: 'Підтвердити',
     settings_masks_confirm_cancel: 'Скасувати',
     settings_masks_confirm_add_named: 'Підтвердити додавання маски {mask}',
@@ -784,7 +812,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_include_named: 'Confirm not excluding {path}',
     settings_folders_confirm_cancel_named: 'Leave {path} as it is',
     settings_masks_heading: 'File masks',
-    settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents.',
+    settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
     settings_masks_none: 'No file mask has been added yet.',
     settings_masks_add: 'Add a mask',
     settings_masks_input_label: 'New mask:',
@@ -794,9 +822,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_load_failed: 'The list of masks could not be read.',
     settings_masks_confirm_add_heading: 'Add the mask {mask}?',
     settings_masks_confirm_remove_heading: 'Remove the mask {mask}?',
-    settings_masks_add_cost: 'As of now, at least {paths, plural, one {# file already indexed matches} other {# files already indexed match}} this mask, and {documents, plural, =0 {no document stops being findable — each one is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}. The next scan of each folder can remove more than that: files that never finished indexing are not counted here.',
-    settings_masks_add_cost_none: 'As of now, no file that is already indexed matches this mask. The next scan of each folder can still remove files: those that never finished indexing are not counted here.',
-    settings_masks_remove_cost: 'From the next scan of each folder on, the files this mask was holding back are indexed again, and their text is sent to the model provider.',
+    settings_masks_add_cost: 'As of now this mask takes at least {paths, plural, one {# file} other {# files}} beyond what your rules already take, and {documents, plural, =0 {no document stops being findable — each one keeps another path this rule does not take} one {# document stops being findable: no other path will be left naming it} other {# documents stop being findable: no other path will be left naming them}}. The next scan of each folder can remove more than that: files that never finished indexing are not counted here.',
+    settings_masks_add_cost_none: 'As of now this mask takes nothing beyond what your rules already take. The next scan of each folder can still remove files: those that never finished indexing are not counted here.',
+    settings_masks_remove_cost: 'From the next scan of each folder on, this mask stops holding anything back: each file it was excluding is indexed again — unless another of your rules still excludes it — and its text is sent to the model provider.',
     settings_masks_confirm: 'Confirm',
     settings_masks_confirm_cancel: 'Cancel',
     settings_masks_confirm_add_named: 'Confirm adding the mask {mask}',

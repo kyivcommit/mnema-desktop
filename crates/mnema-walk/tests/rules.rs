@@ -1639,34 +1639,46 @@ fn a_masks_glob_metacharacters_survive_the_transform() {
     );
 }
 
-/// ⚠️ **A limitation this task does NOT close, pinned so a later session finds
-/// it written down instead of discovering it.** `globset` compiles with Unicode
-/// off (`(?-u)`, hardcoded at `globset-0.4.19/src/glob.rs:675`), so a character
-/// class is a class of **bytes**: `[Гґ]` compiles to a class over the four bytes
-/// of those two letters and can only ever match a single byte, which no
-/// well-formed UTF-8 name offers there. The class matches nothing.
+/// 🔴 **A character class holding a character outside ASCII is REFUSED.** This
+/// case used to pin the limitation as a limitation — the walk kept the file and
+/// the note said the editor would one day tell somebody. Task 11 is that day,
+/// and the answer is refusal rather than disclosure, so the mask no longer
+/// reaches the walk at all.
 ///
-/// Measured identical before and after this commit's transform — the transform
-/// folds the class content (`[ГҐ]` becomes `[гґ]`) and changes the answer not at
-/// all, because the byte semantics were never about case. Booked for Task 11:
-/// the editor is where a person could be told, and `mask_preview` will show a
-/// zero.
+/// **The measurement is unchanged and is still the reason.** `globset` compiles
+/// with Unicode off (`(?-u)`, hardcoded at `globset-0.4.19/src/glob.rs:675`),
+/// so `[Гґ]` is a class of the **bytes** of those letters. What has changed is
+/// how much of that measurement is written down: "matches nothing" was only
+/// half of it, and the other half is the worse one. Measured through `m()` on
+/// the pinned version:
 ///
-/// Both directions, so this is a statement about the class rather than about
-/// the walk finding nothing: the file the class names survives, and a plain
-/// literal mask over the same non-ASCII letter removes it.
+/// - anchored, the class matches nothing — `[Г]file.txt` does not match
+///   `Гfile.txt`, because the class matches ONE byte and the letter is two;
+/// - wrapped in `*`, it matches BY BYTE and takes names that hold no such
+///   letter — `*[Г]*` matches `авто.txt`, because the folded `г` is `D0 B3` and
+///   `а` begins `D0`; `[а-я]*.txt` matches `яблуко.txt` for the same reason,
+///   while `[а-я].txt` does not match `я.txt`.
+///
+/// So the accepted rule was never the typed rule, in either direction, and
+/// under D29 that is text a person believes is held back and is not.
+///
+/// Both directions here too, so this stays a statement about the CLASS rather
+/// than about non-ASCII: the same letter as a plain literal is still accepted
+/// and still removes the file (Task 9b), and an ASCII class is still a class.
 #[test]
-fn a_character_class_of_non_ascii_letters_still_matches_nothing() {
-    let kept = walk_with_masks(
-        &["\u{413}file.txt", "notes.txt"],
-        false,
-        &["[\u{413}\u{490}]file.txt"],
+fn a_character_class_of_non_ascii_letters_is_refused() {
+    let refused = WalkRules::none().with_masks(vec!["[\u{413}\u{490}]file.txt".to_string()]);
+    assert!(
+        matches!(refused, Err(RulesError::MaskNonAsciiCharacterClass { .. })),
+        "a character class of non-ASCII letters must be refused, not compiled into a class of \
+         bytes that means something else"
     );
     assert_eq!(
-        kept,
-        ["notes.txt", "\u{413}file.txt"],
-        "a non-ASCII character class started matching — `globset`'s byte-class semantics have \
-         changed and this limitation can be lifted"
+        refused.expect_err("the refusal above").to_string(),
+        "file mask \"[\u{413}\u{490}]file.txt\" has a character class holding a character \
+         outside ASCII — a class is compared byte by byte, so it can never mean what it says; \
+         add one mask per name instead",
+        "the refusal must name the mask as it was typed and say what to type instead"
     );
 
     let kept = walk_with_masks(
@@ -1677,8 +1689,15 @@ fn a_character_class_of_non_ascii_letters_still_matches_nothing() {
     assert_eq!(
         kept,
         ["notes.txt"],
-        "the same letter as a literal must still remove the file, or the case above is only \
-         saying the mask was broken some other way"
+        "the same letter as a literal must still remove the file — the refusal is about the \
+         character class, not about non-ASCII"
+    );
+
+    let kept = walk_with_masks(&["a1.txt", "b1.txt"], false, &["[a]1.txt"]);
+    assert_eq!(
+        kept,
+        ["b1.txt"],
+        "an ASCII character class must still be a character class"
     );
 }
 
