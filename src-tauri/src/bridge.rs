@@ -519,37 +519,6 @@ pub fn list_masks(state: State<'_, AppState>) -> Result<Vec<String>, Error> {
     state.with_index(|db| db.list_masks())
 }
 
-/// Off the main thread for the reason given on [`open_index`].
-///
-/// **The rule this command exists to enforce: a mask is validated before it is
-/// stored**, and a refusal reaches the person as `RulesError`'s own sentence.
-/// A stored mask the walk later refuses is worse than no mask at all: under
-/// [`crate::walk_job::start_walk_job`] it stops the whole walk, and until
-/// somebody runs one it sits in the editor looking like protection.
-///
-/// **The candidate alone, in a throwaway `WalkRules`** —
-/// `WalkRules::none().with_masks(vec![candidate])` both validates and compiles
-/// it, which is why no `check_mask` twin of `WalkRules::check_prefix` was
-/// added: `check_prefix` exists because `WalkRules::new` would have needed the
-/// whole prefix vector, and `with_masks` takes a vector this command can make
-/// one element long. A second entry point would be a second thing to keep in
-/// step with `validate_mask`.
-///
-/// Not the stored set plus the candidate, for the same reason
-/// [`exclude_subfolder`] gives: there is no aggregate compile step to fail
-/// here at all. Each mask compiles into its own `GlobMatcher`
-/// (`MaskLayer::globs`), so a set that refuses to combine is not a state this
-/// layer can be in — which is also why the mask layer does not feed
-/// `Walked::rules_applied` and why "narrow the probe to the candidate" is not
-/// a mutation case for this file.
-///
-/// 🔴 **The empty check comes FIRST and does not trim.** `validate_mask`
-/// answers `Ok(None)` for the literal empty string only; `"   "` is a refusal
-/// with a sentence of its own (`RulesError::MaskSurroundingWhitespace`). A
-/// command that trimmed before comparing would hand a person who typed spaces
-/// the wrong one of those two sentences, and a command that skipped the check
-/// entirely would store a rule that removes nothing — the same P2 the
-/// exclusion side already paid for.
 /// **The outcome, because there are two of them and the person has to be told
 /// which one happened.** Not a `bool`: the already-stored arm carries the
 /// spelling that is standing in the way, which `true`/`false` cannot.
