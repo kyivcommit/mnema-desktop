@@ -297,3 +297,17 @@ case_ "the already-stored sentence must follow a language switch" \
   "  const alreadyStoredLabel = \$derived.by(() => {
     const stored = alreadyStored;" \
   src/settings/Masks.test.ts 'the refusal frame and the already-gone note also follow a language switch' runner=vitest
+
+# 🔴 F5, the guard the round-1 fixtures did not have. Independent review replaced
+# the whole locator with a version that never looks at the mask — "does this
+# sentence contain any uppercase character" — and the entire UI suite stayed
+# green, 570 of 570, because both existing fixtures moved two variables at once:
+# `[A-_]x.txt` has an uppercase letter AND a respelling, `sub/*.txt` has neither.
+# The discriminating state is an UPPERCASE mask the answer quotes exactly as
+# typed, and it is now in the test above as `SUB/*.txt`.
+case_ "the case note must be decided by the mask, not by any uppercase in the answer" \
+  ui/src/settings/Masks.svelte \
+  "s{    const inAnswer = answer\.toLowerCase\(\);\n    const wanted = mask\.toLowerCase\(\);\n    for \(let at = inAnswer\.indexOf\(wanted\); at !== -1; at = inAnswer\.indexOf\(wanted, at \+ 1\)\) \{\n      if \(answer\.slice\(at, at \+ mask\.length\) !== mask\) return true;\n    \}\n    return false;}{    void mask;\n    return answer.toLowerCase() !== answer;}" \
+  "    void mask;
+    return answer.toLowerCase() !== answer;" \
+  src/settings/Masks.test.ts 'the case note stands only where the answer really spells the mask differently' runner=vitest

@@ -423,9 +423,13 @@ test('a refusal from removing a mask names the removal, not the add, and carries
 // files back, because `*.PDF` is still holding them.
 //
 // 🔴 The list is asserted as well as the sentence, and that is what makes this
-// a test rather than an echo: a screen that printed the sentence and added the
-// row anyway would satisfy the sentence assertions alone, and the row is where
-// the whole cost is.
+// a test rather than an echo. Say what it guards precisely, because an earlier
+// wording claimed more than it can see: `addMask` here is a mock and the list
+// comes from the `listMasks` mock, so whether a ROW WAS STORED is not
+// observable from this file at all — that guarantee lives in
+// `src-tauri/tests/commands.rs`. What the count assertion below catches is the
+// component appending the draft to the list optimistically, on a press that
+// stored nothing.
 test('a rule that is already stored under another spelling is not added, and the sentence names the stored spelling', async () => {
   maskPreview.mockResolvedValue({ paths: 4, documents: 2 });
   addMask.mockResolvedValue({ kind: 'alreadyStored', stored: '*.pdf' });
@@ -509,6 +513,31 @@ test('the case note stands only where the answer really spells the mask differen
   // that lost its refusal, it is one that lost a caveat it did not need.
   expect(screen.getByTestId('mask-refused-heading').textContent)
     .toBe('The mask sub/*.txt was not added. This is what the check answered:');
+  expect(screen.queryByText(CASE_NOTE)).toBeNull();
+
+  // 🔴 The state the two fixtures above do not build, and the reason this
+  // block exists. Both of them move two variables at once: `[A-_]x.txt` has an
+  // uppercase letter AND a respelling, `sub/*.txt` has neither — so a locator
+  // that ignored the mask entirely and answered "does this sentence contain any
+  // uppercase character" satisfies both. Measured by independent review: with
+  // the whole function replaced by `void mask; return answer.toLowerCase() !==
+  // answer;` the entire UI suite stayed green, 570 of 570.
+  //
+  // This is that mutant's fixture: an UPPERCASE mask the answer quotes exactly
+  // as it was typed. The caveat must stay off, and only a locator that actually
+  // compares the mask can keep it off.
+  cleanup();
+  maskPreview.mockRejectedValue(new Error(
+    'file mask "SUB/*.txt" cannot contain `/` — a mask names a file, and a folder is'
+    + ' excluded with an exclusion rule instead',
+  ));
+  await mount([]);
+  await type('SUB/*.txt');
+  await fireEvent.click(addButton());
+
+  await waitFor(() => expect(screen.getByTestId('mask-refused-reason')).toBeTruthy());
+  expect(screen.getByTestId('mask-refused-heading').textContent)
+    .toBe('The mask SUB/*.txt was not added. This is what the check answered:');
   expect(screen.queryByText(CASE_NOTE)).toBeNull();
 });
 

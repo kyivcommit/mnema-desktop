@@ -8655,6 +8655,24 @@ fn a_mask_that_is_already_stored_under_another_spelling_is_not_stored_again() {
         "the first add of a mask nothing matches must report that a row was written"
     );
 
+    // The live run's own example, and the commonest duplicate there is: the
+    // SAME string twice. Every other case below differs in case or in normal
+    // form, so a fixture named after the live run did not build the state the
+    // live run found (independent review, Minor 2).
+    //
+    // ⚠️ **It is a regression pin, not a guard, and saying so is the point.**
+    // No mutant kills this line alone: the byte-identical duplicate is caught
+    // by the same `find` as `*.PDF` below, so anything that removes the check
+    // fails both, and with the check gone the store's own `ON CONFLICT DO
+    // NOTHING` would answer this case correctly anyway. It is here because the
+    // live run's example belongs in the file named after it — not because it
+    // adds coverage.
+    assert_eq!(
+        call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected"),
+        json!({ "kind": "alreadyStored", "stored": "*.pdf" }),
+        "adding the identical string twice must report the row already there, not a second write"
+    );
+
     assert_eq!(
         call(&webview, "add_mask", json!({ "pattern": "*.PDF" })).expect("add_mask was rejected"),
         json!({ "kind": "alreadyStored", "stored": "*.pdf" }),

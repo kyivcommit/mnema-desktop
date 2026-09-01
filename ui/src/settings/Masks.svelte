@@ -225,12 +225,30 @@
   // there is byte-identical to what the person typed. `toLowerCase` is fit for
   // finding and unfit for deciding.
   //
-  // Its one blind spot, named rather than discovered: a fold that changes the
-  // length of what it folds — `Straße*` echoes as `strasse*` — is not found by
-  // a lowercase search, so the note stays off. That is the harmless direction
-  // (an explanation missing where it would have helped, never a claim about a
-  // change that did not happen), and it is why this decides a caveat and
-  // nothing else.
+  // 🔴 **It is wrong in BOTH directions, and the list below is open, not
+  // closed.** An earlier version of this comment named one blind spot and
+  // called the failure harmless; independent review falsified both halves by
+  // measurement, so what follows is what has been measured, never a count.
+  //
+  // Silent where it would have helped, two mechanisms so far: a fold that
+  // changes length (`Straße*` echoes as `strasse*`), and a fold that
+  // normalises — `caseless_form` ends in `.nfc()`, so a mask typed decomposed
+  // (`[Ré`, the form macOS puts on disk) echoes composed, and `toLowerCase`
+  // does not normalise, so neither is found by a lowercase search.
+  //
+  // And loud where nothing was respelled: the shell's own sentence opens
+  // `file mask "<typed>" …`, so the words `file ` and `mask ` stand in the
+  // answer before the mask is ever quoted, and a refused mask whose lowercase
+  // form is one of them — `Mask ` with a stray trailing space, which
+  // `MaskSurroundingWhitespace` refuses — matches the boilerplate instead of
+  // the quotation and draws the caveat.
+  //
+  // Anchoring the search inside the quoted mask would close that, and it would
+  // mean this file reading the shape of the shell's sentence, which is the one
+  // thing a locator here must not do. The real fix is the shell answering with
+  // the folded spelling instead of the editor guessing at it; booked in the
+  // ledger, not attempted here. Until then this decides one caveat and nothing
+  // else, which is the whole reason a fallible locator is allowed to exist.
   function answerSpellsItDifferently(answer: string, mask: string): boolean {
     const inAnswer = answer.toLowerCase();
     const wanted = mask.toLowerCase();
