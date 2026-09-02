@@ -1,5 +1,6 @@
-# §15.4 A — the preview-versus-walk differential harness. Three mutants of the
-# product and one of the harness itself; the harness is the only test named.
+# §15.4 A — the preview-versus-walk differential harness. Four mutants of the
+# product — three of the preview, one of the walk — and one of the harness
+# itself; the harness is the only test named.
 # The harness runs 12 seeds, so every case below must be one the DEFAULT run
 # reaches — proven by hand when the harness was written, and re-proven here.
 
