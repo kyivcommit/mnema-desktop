@@ -47,6 +47,9 @@ cd "$(dirname "$0")/.."
 # (`check-booked.sh`) and a citation whose line is past the end of its file
 # (`check-citations.sh`). `ci.yml` runs the same two in its `mutations` job.
 scripts/check-booked.sh
-scripts/check-citations.sh > /dev/null
+# The citation sweep prints every citation it checked (2 700 lines) and its
+# problem list last; only that list is worth a screen, and only on failure.
+cit="$(mktemp)"; trap 'rm -f "$cit"' EXIT
+scripts/check-citations.sh > "$cit" || { sed -n '/mechanical problem/,$p' "$cit"; exit 1; }
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/clippy"
 exec cargo clippy --workspace --all-targets "$@" -- -D warnings

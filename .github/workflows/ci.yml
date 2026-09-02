@@ -425,11 +425,15 @@ jobs:
       # it could not be wired in because a stale citation would make it red was
       # withdrawn there: it exits 0 over the whole tree, and this is the line
       # that keeps it so. Its output is the sweep's own reading matter and is
-      # long, so only its exit code is kept here.
+      # long (2 700 lines), so only the problem list it prints last is shown,
+      # and only when it fails — a red step with no output would send whoever
+      # reads it back to a local run to learn which citation moved.
       - name: Check that no obligation is still written into the code
         run: scripts/check-booked.sh
       - name: Check that every source citation lands inside its file
-        run: scripts/check-citations.sh > /dev/null
+        run: |
+          scripts/check-citations.sh > citations.txt \
+            || { sed -n '/mechanical problem/,$p' citations.txt; exit 1; }
       - name: Check that every mutation case still applies
         run: scripts/mutation-staleness.sh
       - name: Provision the toolchain named in rust-toolchain.toml
