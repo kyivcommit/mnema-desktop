@@ -445,9 +445,18 @@ jobs:
         run: scripts/mutation-staleness.sh
       - name: Provision the toolchain named in rust-toolchain.toml
         run: rustup toolchain install
+      # Restores `target/` of this checkout between runs, the same way `check`
+      # has it — and the harness step below is told to build there rather
+      # than in a throwaway directory of its own, or the cache would be
+      # restoring a directory nothing in this job reads. Nothing else in this
+      # job runs cargo in the checkout, so the directory is the harness's
+      # alone. The dependencies are what the cache keeps (it drops the
+      # workspace's own artefacts before saving); the workspace crates are
+      # rebuilt against each file's worktree either way.
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # The harness's own worktree only carries vendor/ and
       # src-tauri/binaries/ if this checkout already has them
-      # (mutation-check.sh:159, :177-178) — both are git-ignored, so a case
+      # (mutation-check.sh:177, :195-196) — both are git-ignored, so a case
       # touching mnema-desktop needs the same setup `check` uses to build it
       # at all.
       - name: Linux system dependencies
@@ -505,7 +514,19 @@ jobs:
       # a case whose runner is not installed fails its baseline for a reason
       # that is not the mutation, which is the same defect the vendored
       # libraries and the staged sidecar are copied into the worktree to avoid.
+      #
+      # One target directory for all six invocations, not six. Measured on run
+      # 33671866360 (`main` 076ff14) before this line existed: the step took
+      # 24m07s, of which 16m05s was the six baselines — 3:02, 3:23, 3:02, 3:03,
+      # 2:41 and 0:54 — each a cold build of the same workspace in a fresh
+      # `CARGO_TARGET_DIR`, and 8m02s was the cases themselves. The one-case
+      # file `pr8-subfolders-linux.sh` paid 2:41 of build for three seconds
+      # of harness. `mutation-check.sh` keeps its throwaway worktree; only
+      # where cargo puts artefacts changes. The first run after this change
+      # is the measurement; the number above is what it is measured against.
       - name: Run the mutation cases named below
+        env:
+          MNEMA_MUTATION_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           scripts/mutation-check.sh scripts/mutations/source.sh
           scripts/mutation-check.sh scripts/mutations/embedding.sh

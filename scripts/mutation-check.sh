@@ -18,9 +18,19 @@
 #   scripts/mutation-check.sh <case-file>
 #
 # A case file is a series of `case` calls; see scripts/mutations/task-8.sh.
-# Everything runs in a throwaway git worktree at HEAD with its own
-# CARGO_TARGET_DIR, so an interrupted run cannot leave a mutation in the tree
-# you are working in.
+# Everything runs in a throwaway git worktree at HEAD, so an interrupted run
+# cannot leave a mutation in the tree you are working in. By default the
+# worktree also gets a throwaway CARGO_TARGET_DIR, which is the honest cold
+# measurement and the slow one: every invocation builds the workspace from
+# nothing. Set MNEMA_MUTATION_TARGET_DIR to a directory to keep the artefacts
+# between invocations instead — the worktree is still thrown away, the target
+# directory is not. CI sets it once for its six case files, which used to pay
+# six cold builds in a row: measured on run 33671866360, 16m05s of the step's
+# 24m07s was those builds, 2m41s of it in front of one three-second case.
+# Locally, point it somewhere `cargo test` in the checkout does not use
+# (`target/mutations`, say): the worktree lives at a different path each run,
+# so cargo rebuilds the workspace crates against it anyway, but the
+# dependencies — the bulk of a cold build — are reused as they are.
 #
 # ── Two runners, and why there had to be a second ─────────────────────────────
 #
@@ -138,7 +148,15 @@ CASES=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 REPO=$(git rev-parse --show-toplevel)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/mnema-mutation.XXXXXX")
 TREE="$WORK/tree"
-export CARGO_TARGET_DIR="$WORK/target"
+# Absolute, because cargo runs inside $TREE below and a relative path would
+# resolve there — into the worktree the trap deletes.
+if [ -n "${MNEMA_MUTATION_TARGET_DIR:-}" ]; then
+  mkdir -p "$MNEMA_MUTATION_TARGET_DIR" || exit 1
+  CARGO_TARGET_DIR=$(cd "$MNEMA_MUTATION_TARGET_DIR" && pwd)
+else
+  CARGO_TARGET_DIR="$WORK/target"
+fi
+export CARGO_TARGET_DIR
 
 cleanup() {
   git -C "$REPO" worktree remove --force "$TREE" >/dev/null 2>&1
