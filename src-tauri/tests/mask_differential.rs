@@ -414,6 +414,15 @@ fn draw_world(seed: u64) -> World {
 /// what `bridge::add_mask` itself asks, so the two cannot drift apart — and it
 /// is a predicate over two strings, not an assembled rule set, so the harness
 /// still builds no `WalkRules` of its own.
+///
+/// ⚠️ **The coupling runs one way and can go quiet.** If `same_mask_rule` ever
+/// widened — folding whitespace, say, or `?` against `*` — this call would
+/// silently shrink every drawn mask set, and the equivalence asserts would
+/// still pass because the store would shrink by the same rule. The harness
+/// would go on being green while testing a smaller world than it reports. The
+/// guard against that is not here: it is `mnema-walk`'s own cases for what the
+/// predicate calls equal, and Task 4's edge report, which counts what each
+/// seed actually reached rather than what it drew.
 fn already_stored(masks: &[String], pattern: &str) -> bool {
     masks
         .iter()
@@ -638,8 +647,12 @@ fn store_rules(built: &Built, world: &World) {
             .expect("storing a path exclusion");
     }
     for mask in &world.masks {
+        // `Ok` here means the pattern was ACCEPTED, not that a row was written:
+        // `add_mask` answers `AlreadyStored` inside `Ok` for a mask equivalent
+        // to one already there. What the store ended up holding is a separate
+        // question, asked of `stored_rules` by the caller.
         call(&built.webview, "add_mask", json!({ "pattern": mask }))
-            .expect("a stored mask was refused");
+            .expect("add_mask rejected a drawn mask outright");
     }
 }
 
@@ -758,6 +771,21 @@ fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
         persisted.0, drawn_masks,
         "seed {seed}: the store holds other masks than drawn"
     );
+    // The other half of S, and it needs asking separately: three worlds that
+    // all failed to store a prefix agree with each other, so the equality above
+    // would pass over a rule set nobody has.
+    //
+    // Compared as typed. `Db::add_path_exclusion` inserts the prefix verbatim —
+    // it neither validates nor rewrites it, and says so
+    // (`crates/mnema-index/src/write.rs`) — and `list_path_exclusions` orders by
+    // `path_prefix` within one root, so the drawn pairs are sorted into the
+    // same shape: root ordinal first, then the prefix text.
+    let mut drawn_prefixes = world.prefixes.clone();
+    drawn_prefixes.sort();
+    assert_eq!(
+        persisted.1, drawn_prefixes,
+        "seed {seed}: the store holds other prefixes than drawn"
+    );
 
     // World 0 — the preview.
     let preview = call(
@@ -778,12 +806,40 @@ fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
     let (removed_a, gone_a) = removed_and_gone(&a);
 
     // World B — the walk under S + m.
-    call(
+    //
+    // ⚠️ **`Ok` does not mean a row was written.** `bridge::add_mask` answers
+    // `AlreadyStored` for a candidate equivalent to a stored mask under
+    // `WalkRules::same_mask_rule`, and the generator draws exactly that on
+    // purpose: `CaseTwinOfStored`, `FormTwinOfStored`, and any `Extension` that
+    // collides with the stored pool. Read back which of the two happened, and
+    // assert what world B actually holds — otherwise those seeds pass as
+    // `0 == 0` under a message that says the walk ran with the candidate.
+    let added = call(
         &b.webview,
         "add_mask",
         json!({ "pattern": world.candidate.pattern() }),
     )
     .expect("add_mask refused a candidate the generator drew as valid");
+    let kind = added["kind"].as_str().expect("add_mask answered no kind");
+    assert!(
+        kind == "stored" || kind == "alreadyStored",
+        "seed {seed}: add_mask answered an unknown outcome {added}"
+    );
+    let candidate_was_stored_already = kind == "alreadyStored";
+    let (b_masks, b_prefixes) = stored_rules(&b);
+    let mut expected_masks = drawn_masks.clone();
+    if !candidate_was_stored_already {
+        expected_masks.push(world.candidate.pattern().to_string());
+        expected_masks.sort();
+    }
+    assert_eq!(
+        b_masks, expected_masks,
+        "seed {seed}: after add_mask answered {kind:?}, world B holds masks that are neither S nor S+m"
+    );
+    assert_eq!(
+        b_prefixes, drawn_prefixes,
+        "seed {seed}: add_mask changed world B's prefixes"
+    );
     let (removed_b, gone_b) = removed_and_gone(&b);
 
     let preview = preview.expect("mask_preview refused a candidate the generator drew as valid");
@@ -797,6 +853,7 @@ fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
         removed_b,
         gone_a,
         gone_b,
+        candidate_was_stored_already,
     })
 }
 
@@ -810,6 +867,11 @@ struct Outcome {
     removed_b: BTreeSet<Key>,
     gone_a: BTreeSet<String>,
     gone_b: BTreeSet<String>,
+    /// Whether `add_mask` answered `AlreadyStored` for the candidate, so world
+    /// B walked under S rather than S+m. Not a defect and not a skipped seed:
+    /// it is the one state in which the preview MUST say nothing disappears,
+    /// which the test asserts. Task 4 counts it as a reached edge.
+    candidate_was_stored_already: bool,
 }
 
 /// Which drawn shapes the run actually reached. Empty here on purpose: Task 4
@@ -826,6 +888,9 @@ fn the_preview_and_the_walk_agree_on_every_seed() {
     let base = setting("MNEMA_FUZZ_BASE", 0x5EED_0000) as u64;
     let mut reached = Reached::default();
     for seed in base..base + runs {
+        // Drawn twice per seed, here and inside `run_seed`, and the two draws
+        // are the same world: `draw_world` is a pure function of the seed, and
+        // `Rng` is written out in this file precisely so it stays one.
         let world = draw_world(seed);
         let Some(o) = run_seed(seed, &mut reached) else {
             continue;
@@ -860,6 +925,21 @@ fn the_preview_and_the_walk_agree_on_every_seed() {
             "{context}\n  documents gone only under S+m: {docs_only_in_b}, preview promised {}",
             o.preview_documents
         );
+        // A candidate the store already holds under another spelling is a
+        // drawn edge, not an accident: `CaseTwinOfStored` and
+        // `FormTwinOfStored` exist to reach it. The two equalities above are
+        // satisfied by zero on both sides there, so the claim that makes those
+        // seeds mean something is this one — the preview must promise nothing,
+        // because nothing is what the walk will do.
+        if o.candidate_was_stored_already {
+            assert_eq!(
+                (o.preview_paths, o.preview_documents),
+                (0, 0),
+                "{context}\n  the candidate was already stored under another spelling, so nothing can disappear, but the preview promised {} paths and {} documents",
+                o.preview_paths,
+                o.preview_documents
+            );
+        }
     }
 }
 
