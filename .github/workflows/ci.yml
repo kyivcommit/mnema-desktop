@@ -483,11 +483,14 @@ jobs:
     # Thirty was a guess when this leg was written, and it stayed one until the
     # leg first executed: pull request #7, 6m17s on 119 cases; later 9m52s on
     # run 33235659149, 24m07s on 33671866360 with six files in one job, and
-    # 13m42s on 33684364310 with the target directory shared. Now one file per
-    # job, the longest about four minutes of harness on the last of those runs
-    # plus setup; the limit is kept where it was until that run has a
-    # number, and is to be lowered from the number, not from this sentence.
-    timeout-minutes: 30
+    # 13m42s on 33684364310 with the target directory shared. One file per
+    # job, measured on run 33687863920 with the cache warm: the longest legs
+    # were `embedding` at 4m12s (3:06 of harness) and `source` at 4m09s, the
+    # shortest `pr8-subfolders-linux` at 1m33s. Fifteen is `check`'s margin
+    # for the same reason, about three and a half times the slowest leg —
+    # and a cold key adds one cold dependency build to every leg (3:02–3:23
+    # on 33671866360), which still fits.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Provision the toolchain named in rust-toolchain.toml
