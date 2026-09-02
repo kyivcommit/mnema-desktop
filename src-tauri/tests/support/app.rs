@@ -20,9 +20,15 @@ use tauri::test::{INVOKE_KEY, MockRuntime, mock_builder, mock_context, noop_asse
 use tauri::webview::InvokeRequest;
 use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
 
-/// A provider address with nothing behind it. Nothing in this file calls the
-/// provider, and a base that refuses instantly is how a future test that starts
-/// to finds out at once rather than by reaching the real one.
+// This file is compiled into every binary that pulls it in, so an item only
+// one of them uses is dead code in the others and `-D warnings` refuses the
+// build. Each `#[allow(dead_code)]` below marks an item `commands.rs` uses and
+// `mask_differential.rs` does not: the attribute says "another binary wants
+// this", never "nobody does".
+
+/// A provider address with nothing behind it. Nothing in `commands.rs` calls
+/// the provider, and a base that refuses instantly is how a future test that
+/// starts to finds out at once rather than by reaching the real one.
 pub const NO_PROVIDER: &str = "http://127.0.0.1:1";
 
 /// A credential reference that cannot reach a store at all — the same trick
@@ -33,8 +39,10 @@ pub const NO_PROVIDER: &str = "http://127.0.0.1:1";
 /// `Error::EmptyReference`. It refuses because of the macOS keychain, where
 /// an empty attribute is a wildcard matching another configuration's key.
 ///
-/// Kept only for the two fixtures that build `AppState` directly and never
-/// call `search` or a model command; `app_in` below wants a real store.
+/// Kept only for the two fixtures in `commands.rs` that build `AppState`
+/// directly and never call `search` or a model command; `app_in` below wants a
+/// real store.
+#[allow(dead_code)]
 pub const NO_CREDENTIAL: &str = "";
 
 /// An application whose data directory is a temporary one.
@@ -81,9 +89,10 @@ pub fn main_webview(app: &tauri::App<MockRuntime>) -> WebviewWindow<MockRuntime>
 /// which names neither the origin nor the ACL.
 ///
 /// Measured on a Windows 11 stand on 2026-07-29, where the macOS constant these
-/// two call sites used to hold turned into **six** failures across this file,
-/// including one that looked unrelated: `the_commands_that_touch_the_database_
-/// leave_the_main_thread` compared a thread id against itself, because a refusal
+/// two call sites used to hold turned into **six** failures across
+/// `commands.rs`, including one that looked unrelated: `the_commands_that_
+/// touch_the_database_leave_the_main_thread` compared a thread id against
+/// itself, because a refusal
 /// answers inline and never reaches a worker. One constant, six red tests, and
 /// no message pointing at it.
 pub(crate) fn local_origin() -> &'static str {
@@ -132,7 +141,7 @@ pub fn job_channel() -> (Channel<JobEvent>, mpsc::Receiver<Value>) {
 /// `tauri::ipc::Channel`, built from a callback this test can read, and the
 /// raw-IPC path (`"__CHANNEL__:N"`) has nothing on the other end for that
 /// callback to be. IPC *reachability* is a separate question, asked by
-/// `the_walk_job_is_reachable_through_the_ipc` below.
+/// `the_walk_job_is_reachable_through_the_ipc` in `commands.rs`.
 pub fn run_walk_and_capture_ending(app: &tauri::App<MockRuntime>, root_id: i64) -> Value {
     let state = app.state::<AppState>();
     let (channel, events) = job_channel();
@@ -149,6 +158,7 @@ pub fn run_walk_and_capture_ending(app: &tauri::App<MockRuntime>, root_id: i64) 
 
 /// The common case: a walk over a fixture with nothing ambiguous in it must
 /// simply finish.
+#[allow(dead_code)]
 pub fn run_walk_to_completion(app: &tauri::App<MockRuntime>, root_id: i64) {
     let ending = run_walk_and_capture_ending(app, root_id);
     assert_eq!(
@@ -163,8 +173,9 @@ pub fn run_walk_to_completion(app: &tauri::App<MockRuntime>, root_id: i64) {
 ///
 /// `Ended::removed` is a number and this is the fact behind it: a walk that
 /// reported `removed: 1` and a walk that reported `removed: 1` while deleting
-/// the wrong row are the same number. Every exclusion test below asserts on
-/// both.
+/// the wrong row are the same number. Every exclusion test in `commands.rs`
+/// asserts on both.
+#[allow(dead_code)]
 pub fn indexed_paths(app: &tauri::App<MockRuntime>, root_id: i64) -> Vec<String> {
     app.state::<AppState>()
         .with_index(|db| db.paths_under_root(root_id))
