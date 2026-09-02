@@ -445,9 +445,33 @@ jobs:
         run: scripts/mutation-staleness.sh
       - name: Provision the toolchain named in rust-toolchain.toml
         run: rustup toolchain install
+      # Restores `target/` of this checkout between runs, the same way `check`
+      # has it. Two things build there in this job: `stage-sidecar.sh` below,
+      # which is a plain `cargo build` of the checkout's own `mnema-extract`
+      # (scripts/stage-sidecar.sh:63-66, and it was already building there
+      # before this cache existed), and the harness step, which is told to
+      # build there rather than in a throwaway directory per case file. The
+      # dependencies are what the cache keeps — the action drops the
+      # workspace's own artefacts before saving — and they are the same
+      # dependencies for both; the workspace crates are rebuilt against each
+      # file's worktree either way, because a path dependency's package id
+      # carries the worktree path.
+      #
+      # ⚠️ The action also exports `CARGO_INCREMENTAL=0` for the rest of the
+      # job (its README says so). That is right for a one-shot build and
+      # wrong for the harness, which rebuilds a mutated crate once per case
+      # — the 8m02s the cases took on the old run includes those rebuilds,
+      # unseparated from the test runs — so the harness step sets it back to
+      # 1 for itself. Without that, the first run of this change would be
+      # measuring three changes at once, two speedups (the shared directory,
+      # the cache) and one slowdown, against a baseline that had none of
+      # them. The incremental artefacts it writes are dropped by the action
+      # before saving, so they never reach the cache — and do add to the
+      # directory's size on disk, measured below.
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # The harness's own worktree only carries vendor/ and
       # src-tauri/binaries/ if this checkout already has them
-      # (mutation-check.sh:159, :177-178) — both are git-ignored, so a case
+      # (mutation-check.sh:208, :226-227) — both are git-ignored, so a case
       # touching mnema-desktop needs the same setup `check` uses to build it
       # at all.
       - name: Linux system dependencies
@@ -505,7 +529,28 @@ jobs:
       # a case whose runner is not installed fails its baseline for a reason
       # that is not the mutation, which is the same defect the vendored
       # libraries and the staged sidecar are copied into the worktree to avoid.
+      #
+      # One target directory for all six invocations, not six. Measured on run
+      # 33671866360 (`main` 076ff14) before this line existed: the step took
+      # 24m07s, of which 16m05s was the six baselines — 3:02, 3:23, 3:02, 3:03,
+      # 2:41 for the five files that compile Rust, each a cold build of the
+      # same workspace in a fresh `CARGO_TARGET_DIR`, and 0:54 for
+      # `pr8-ui-folders.sh`, which runs vitest and compiles nothing — and
+      # 8m02s was the cases themselves. The one-case file
+      # `pr8-subfolders-linux.sh` paid 2:41 of build for three seconds of
+      # harness. `mutation-check.sh` keeps its throwaway worktree; only where
+      # cargo puts artefacts changes. What is NOT measured: how much disk five
+      # invocations' artefacts add up to on the runner, now that nothing
+      # removes them between files — `du -sh target/mutations` after the two
+      # local invocations named in `mutation-check.sh`'s header read 3.2 GB
+      # on an Apple M2 Max, most of it the dependencies every file shares.
+      # The step after this one prints the runner's size and headroom
+      # whatever happened here; the first run after this change is the
+      # measurement, and the numbers above are what it is measured against.
       - name: Run the mutation cases named below
+        env:
+          MNEMA_MUTATION_TARGET_DIR: ${{ github.workspace }}/target
+          CARGO_INCREMENTAL: 1
         run: |
           scripts/mutation-check.sh scripts/mutations/source.sh
           scripts/mutation-check.sh scripts/mutations/embedding.sh
@@ -513,6 +558,14 @@ jobs:
           scripts/mutation-check.sh scripts/mutations/pr8-subfolders.sh
           scripts/mutation-check.sh scripts/mutations/pr8-subfolders-linux.sh
           scripts/mutation-check.sh scripts/mutations/pr8-ui-folders.sh
+      # `if: always()`, because the run that fills the disk is the one whose
+      # harness step fails, and a `run:` under GitHub's default `bash -e`
+      # would never reach a `du` placed after the failing line.
+      - name: Disk the shared target directory took, and what was left
+        if: always()
+        run: |
+          du -sh "$GITHUB_WORKSPACE/target"
+          df -h "$GITHUB_WORKSPACE"
 
   bundle:
     # One architecture per package rather than a universal binary: a universal
