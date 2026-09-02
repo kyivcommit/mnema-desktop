@@ -431,7 +431,7 @@ pub fn list_exclusions(
 ///
 /// **Not `include_subfolder`'s problem, deliberately.** Removing a rule must
 /// always work, including one an older build stored before this guard existed
-/// (`Error::InvalidExclusionRule`'s doc makes the same argument for the
+/// (`Error::InvalidRule`'s doc makes the same argument for the
 /// validator). A guard on removal would strand exactly the rows this guard
 /// exists to stop being created.
 ///
@@ -638,7 +638,7 @@ pub fn add_mask(state: State<'_, AppState>, pattern: String) -> Result<MaskAdded
 /// is a different sentence from "removed".
 ///
 /// **No validation on the way out**, deliberately, and the argument is
-/// [`Error::InvalidExclusionRule`]'s: removing a rule must always work,
+/// [`Error::InvalidRule`]'s: removing a rule must always work,
 /// including one an older build stored before this validator existed. A guard
 /// here would strand exactly the rows a person needs to be able to delete.
 ///

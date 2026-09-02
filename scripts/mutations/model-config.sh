@@ -408,7 +408,7 @@ case_ "redaction runs before stripping, so the key reassembles afterwards" \
 # ─────────────────────────────────────────────────────────────────────────────
 # The one provider failure that is not about the provider's answer.
 #
-# `http.rs:104` builds `Error::Transport` from ureq's own text, `error.rs:144`
+# `http.rs:104` builds `Error::Transport` from ureq's own text, `error.rs:401`
 # carries that payload verbatim into `ProviderUnreachable`, and `Serialize` for
 # that type is `serialize_str(&self.to_string())` — so it crosses to the window.
 # Until review round 1 there was no test anywhere on that path: `http.rs`'s own

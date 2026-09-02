@@ -42,5 +42,11 @@
 # profile's artifacts, and the next `cargo test` pays for it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The two checks that read comments rather than code, first because they cost
+# about a second and compile nothing: an obligation written into a comment
+# (`check-booked.sh`) and a citation whose line is past the end of its file
+# (`check-citations.sh`). `ci.yml` runs the same two in its `mutations` job.
+scripts/check-booked.sh
+scripts/check-citations.sh > /dev/null
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/clippy"
 exec cargo clippy --workspace --all-targets "$@" -- -D warnings

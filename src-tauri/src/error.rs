@@ -52,12 +52,10 @@ pub enum Error {
     #[error("no watched folder with id {0}")]
     UnknownWatchedRoot(i64),
     /// A rule `mnema-walk` refuses — a folder prefix or, since PR 8b, a file
-    /// mask. **The name says "exclusion" and the type is `RulesError`, which
-    /// carries both**; it is kept because nothing branches on an error kind
-    /// here (every rejection is serialised as `to_string()`) and because the
-    /// sentence a person reads is `RulesError`'s own either way, never this
-    /// variant's name. Booked to Task 12 as a naming residual rather than
-    /// renamed inside a task that is about masks.
+    /// mask. `RulesError` carries both, and nothing branches on the kind here:
+    /// every rejection is serialised as `to_string()`, so the sentence a person
+    /// reads is `RulesError`'s own, never this variant's name. (It was
+    /// `InvalidExclusionRule` until masks arrived and made the name a lie.)
     ///
     /// **Three producers**, and the second is why the first's guarantee is not
     /// one:
@@ -94,19 +92,20 @@ pub enum Error {
     /// and nothing else.
     ///
     /// ⚠️ One exception to "the rule the person typed", inherited from
-    /// `validate_mask` and booked to Task 11: `RulesError::InvalidMask`'s
-    /// `reason` is `globset`'s own message about the **folded** pattern, so
-    /// someone who typed `[A-_]x.txt` reads about `'[a-_]x.txt'`. The `mask`
-    /// field beside it is what they typed. Not made worse here, and not
-    /// redesigned here either.
+    /// `validate_mask`: `RulesError::InvalidMask`'s `reason` is `globset`'s
+    /// own message about the **folded** pattern, so someone who typed
+    /// `[A-_]x.txt` reads about `'[a-_]x.txt'`. The `mask` field beside it is
+    /// what they typed. Giving `reason` wording of its own is localisation
+    /// work, and it is recorded in the ledger's §15.4 rather than promised
+    /// here — a promise in a comment is what PR 8b paid for twice.
     #[error("{0}")]
-    InvalidExclusionRule(#[from] mnema_walk::RulesError),
+    InvalidRule(#[from] mnema_walk::RulesError),
     /// `exclude_subfolder` was handed the empty string. `validate_prefix`
     /// answers `Ok(None)` for it — deliberately not a `RulesError`, since a
     /// blank row is not a malformed one (`rules.rs:546-555`) — but storing it
     /// would add a rule that excludes nothing and sits in the list looking
     /// like protection (review round 1, P2). Kept apart from
-    /// [`Error::InvalidExclusionRule`], which is what `WalkRules::new` itself
+    /// [`Error::InvalidRule`], which is what `WalkRules::new` itself
     /// can produce and this case never reaches.
     #[error("an exclusion rule cannot be empty")]
     BlankExclusionRule,
@@ -118,7 +117,7 @@ pub enum Error {
     ///
     /// 🔴 **Only the LITERAL empty string reaches this.** A whitespace-only
     /// mask (`"   "`) is a `RulesError::MaskSurroundingWhitespace` and arrives
-    /// as [`Error::InvalidExclusionRule`] carrying that sentence — so this
+    /// as [`Error::InvalidRule`] carrying that sentence — so this
     /// command must not trim before it checks, or a person who typed spaces
     /// would get "a file mask cannot be empty" for a mask the validator has a
     /// better sentence about.

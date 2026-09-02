@@ -981,7 +981,7 @@ pub struct Subfolder {
 ///    (Reaching both at once takes a rule this build's `exclude_subfolder`
 ///    would not write, since it runs the same validator — but that is not the
 ///    same as impossible: a prefix stored **by an older build whose whitelist
-///    was narrower** reaches it, which is the path `Error::InvalidExclusionRule`
+///    was narrower** reaches it, which is the path `Error::InvalidRule`
 ///    already names for the walk, and a row written straight into the database
 ///    reaches it too.)
 /// 6. `Open` — none of the above.

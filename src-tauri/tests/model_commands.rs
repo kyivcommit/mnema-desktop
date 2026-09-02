@@ -375,7 +375,7 @@ fn removing_a_key_that_is_not_there_says_so_rather_than_reporting_a_removal() {
 /// The sibling of the test below, on the one provider failure that is not about
 /// the provider's answer — and the path that had nothing at all.
 ///
-/// `http.rs:104` is the only place `Error::Transport` is built, `error.rs:144`
+/// `http.rs:104` is the only place `Error::Transport` is built, `error.rs:401`
 /// carries its payload verbatim into `ProviderUnreachable`, and `Serialize` for
 /// `Error` is `serialize_str(&self.to_string())`, so that payload is what
 /// crosses the IPC. Between those three lines and the window there was no test:

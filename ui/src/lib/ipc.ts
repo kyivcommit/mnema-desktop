@@ -184,7 +184,7 @@ export type SourceAround =
   | { kind: 'gone'; reason: { kind: 'noSuchChunk' } | { kind: 'idReused' } };
 
 // Typed invoke wrappers. A rejected command rejects the promise with the
-// backend `Error`'s Display string (error.rs:362-366) — callers branch on the
+// backend `Error`'s Display string (error.rs:407-411) — callers branch on the
 // command, not on parsed error shape.
 export const ask = (query: string) => invoke<AskAnswer>('ask', { query });
 export const setSearchArms = (text: boolean, content: boolean) =>

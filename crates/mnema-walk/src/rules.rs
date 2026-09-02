@@ -1290,9 +1290,8 @@ fn validate_mask(mask: &str) -> Result<Option<globset::GlobMatcher>, RulesError>
     // person typed it. `reason` does not: it is `globset`'s own
     // `err.to_string()`, and quotes the *folded* pattern it tried to
     // compile — someone who typed `[A-_]x.txt` reads about `'[a-_]x.txt'`.
-    // Booked to Task 11, which owns the localisation catalogue and can give
-    // `reason` its own wording instead of passing it through raw (review,
-    // Important 4).
+    // Wording of its own for `reason` is localisation work (PR 8b review,
+    // Important 4) and lives in the ledger's §15.4, not in a promise here.
     globset::GlobBuilder::new(&caseless_form(mask))
         .build()
         .map(|glob| Some(glob.compile_matcher()))
