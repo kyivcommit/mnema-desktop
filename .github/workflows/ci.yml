@@ -60,6 +60,12 @@ jobs:
     # **six hours** before anything says so — burning billed minutes and, worse,
     # reporting nothing at all in the meantime. A wedged job that never
     # concludes is not a slow job; it is a job with no result.
+    #
+    # Those 1.5–3.2 minutes are warm-cache runs. The toolchain prune below
+    # changes this job's cache key once, so its first run after that lands
+    # is a cold `target/` on both arms — unmeasured here; the nearest figure
+    # is `mutations`' 3:02–3:23 per leg for the same dependencies — and the
+    # limit has to hold that run too.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,7 +77,9 @@ jobs:
         run: rustup toolchain install
       # Before the cache step, because its key hashes every toolchain rustup
       # lists, the image's own `stable` included — the script's header has
-      # the two runs that showed it, and the 6–8 minutes it cost `bundle`.
+      # the two runs that showed it, what a moving key costs now that the
+      # tauri-cli install no longer depends on it, and the one-time full
+      # miss this causes on every job's first run after it lands.
       - name: Drop the image's own toolchains, so the cache key is the pinned one's
         run: scripts/prune-toolchains.sh
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -603,6 +611,12 @@ jobs:
     # reason as the one on `check`, and it matters slightly more: this job is the
     # one that produces the download, so a wedged run leaves someone waiting on
     # an artefact that is never coming, with the job still showing as running.
+    #
+    # Those minutes are warm-cache runs. The toolchain prune below changes
+    # this job's cache key once, so its first run after that lands is a cold
+    # `cargo tauri build` — never observed on its own here: every cold run
+    # so far also compiled tauri-cli, which the pinned download below no
+    # longer does — and the limit has to hold that run too.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -615,9 +629,12 @@ jobs:
       # `stable` was 1.96.0 and 1.98.0 — beside the pinned 1.97.1 on both —
       # and a pull request restores only its own branch's caches and
       # `main`'s (GitHub's cache reference, "Restrictions for accessing a
-      # cache"). With `main`'s key not matching, the step below was a build
-      # from source: 6m12s on PR #29's first run, 8m04s on PR #31's, 1 s on
-      # a hit.
+      # cache"). With `main`'s key not matching, the tauri-cli install that
+      # used to follow was a build from source: 6m12s on PR #29's first run,
+      # 8m04s on PR #31's, 1 s on a hit. The pinned download below removed
+      # that cost whatever the key does; what a moving key costs this job
+      # now is a cold `cargo tauri build`, which the prune keeps from
+      # happening on every image update.
       - name: Drop the image's own toolchains, so the cache key is the pinned one's
         run: scripts/prune-toolchains.sh
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -625,11 +642,14 @@ jobs:
       # `cargo install tauri-cli --version "^2" --locked`. The install
       # compiled the CLI from source whenever the cache missed (see above),
       # and a download does not depend on any key. It is also not kept by
-      # the cache: the action's save step removes from `~/.cargo/bin` every
-      # binary that `.crates2.json` does not list, and an unzip writes that
-      # file no more than it writes a lockfile — so the CLI is fetched on
-      # every run, hit or miss, and no stale copy can ever be restored. The
-      # first run of this step is what says how long the fetch takes.
+      # the cache: the action's save step removes from `~/.cargo/bin`
+      # everything except binaries cargo installed during this job (listed
+      # in `.crates2.json`, and not already listed when the action's own
+      # step ran — src/cleanup.ts, `cleanBin`), and an unzip is not a cargo
+      # install — so the CLI is fetched on every run, hit or miss, and no
+      # stale copy can ever be restored. The old `cargo install` WAS kept
+      # that way, which is why a hit cost 1 s. The first run of this step is
+      # what says how long the fetch takes.
       #
       # Exact version rather than the old `^2`: a binary cannot be a range.
       # The CLI still has to agree with the `tauri` crate the workspace
@@ -637,9 +657,9 @@ jobs:
       # on that last run (Cargo.lock has `tauri` 2.11.5) and the newest
       # `tauri-cli` release as this is written, so this pins the version the
       # workflow was already using. docs/BUILD.md names the same version for
-      # a local install; bumping means all three — the two lines below and
-      # that one — and the checksum comes from the downloaded file with
-      # `shasum -a 256`, never from a page.
+      # a local install; bumping means every `2.11.4` in this file and that
+      # one, and the checksum beside the version here — from the downloaded
+      # file with `shasum -a 256`, never from a page.
       #
       # `aarch64-apple-darwin`, because `runs-on: macos-14` is arm64 (this
       # job's header comment, above `runs-on`); a runner change means an
