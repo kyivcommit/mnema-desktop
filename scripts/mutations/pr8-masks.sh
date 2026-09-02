@@ -174,9 +174,17 @@ case_ "mask_preview must validate the candidate itself, rather than preview it a
 
 # The current set loses the stored masks: the preview is back to answering about
 # the candidate alone. With `*.pdf` stored and `copy.pdf`/`copy.txt` naming one
-# document, previewing `*.txt` then says "no document loses its last remaining
-# path to this rule: each of them keeps a path this rule does not take" about a
-# document the next scan takes.
+# document, previewing `*.txt` then answers `documents: 0` where the truth is
+# `1` — the press really does take that document's last surviving path, and the
+# mutant reports it as costing none.
+#
+# 🔴 Until fix round 7 this comment quoted the editor's `documents == 0`
+# sentence as what the mutant would wrongly SAY. That was a faithful quotation
+# of a claim which was false for the un-mutated code as well, so it argued from
+# the wrong place; the ruling deleted the sentence, and what a person is not
+# told at zero is now nothing at all. The defect this case pins is the NUMBER,
+# and the assertion that dies is the numeric one in
+# `mask_preview_answers_the_difference_against_the_stored_masks`.
 case_ "the current rule set must hold every stored mask" \
   src-tauri/src/tree.rs \
   's{            \.with_masks\(stored\.clone\(\)\)\?}{.with_masks(Vec::new())? /* mutant: current set has no masks */}' \

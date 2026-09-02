@@ -319,9 +319,12 @@
       ),
       cost:
         p.kind === 'add'
-          // 🔴 The zero has a sentence of its own. The shared one's `=0` arm for
-          // documents speaks of another path this rule does not take, and when
-          // this press takes no path at all there is nobody to say that about.
+          // 🔴 The zero has a sentence of its own, and after fix round 7 the
+          // reason is the HEDGE rather than the documents clause, which no
+          // longer exists: the shared sentence hedges both ways because its
+          // number can be too high (a path an in-tree `.gitignore` already
+          // covers is charged to this press), and this number is zero and
+          // cannot be, so its warning runs one way only.
           // There is no shortcut past the question either: since fix round 4 a
           // preview of zero means this mask takes nothing BEYOND what the
           // stored rules already take — which is also what adding `*.txt` over

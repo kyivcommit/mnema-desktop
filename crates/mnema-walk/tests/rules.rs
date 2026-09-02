@@ -1735,9 +1735,11 @@ fn a_character_class_of_non_ascii_letters_is_refused() {
 ///   adds is that **the folding still works beside a class**, asserted both
 ///   ways: `КОПІЯ7.TXT` matches and `Копіяx.txt` does not. It does NOT
 ///   discriminate "a fix that refuses non-ASCII anywhere in a mask holding a
-///   class" — `[[:alpha:]Г].txt` four lines above holds a class and a
-///   non-ASCII character too, so such a fix dies there and never reaches this
-///   block. The bullet claimed that until fix round 6.
+///   class" — `[[:alpha:]Г].txt` earlier in the same function holds a class
+///   and a non-ASCII character too, so such a fix dies there and never reaches
+///   this block. The bullet claimed that until fix round 6; it said "four lines
+///   above" until fix round 7, a distance inherited from a brief rather than
+///   measured, and the positional argument never needed a number.
 #[test]
 fn a_caret_negated_character_class_of_non_ascii_letters_is_refused() {
     let refused = WalkRules::none().with_masks(vec!["[^]\u{413}]file.txt".to_string()]);

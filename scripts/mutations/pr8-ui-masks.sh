@@ -84,9 +84,16 @@ case_ "the refusal must name the mask as it was typed, beside the folded one" \
   src/settings/Masks.test.ts 'a refused mask shows the backend sentence verbatim, names the mask as typed, and stores nothing' runner=vitest
 
 # A preview of two zeros is not "this rule removes nothing": it is "the indexed
-# set holds nothing that matches today". The shared sentence's `=0` arm says
-# "each one is also indexed under another path", which has nobody to be about
-# when no path matched at all.
+# set holds nothing that matches today", and it gets a sentence of its own.
+#
+# 🔴 Fix round 7. This comment used to argue from the shared sentence's `=0` arm
+# ("each one is also indexed under another path"), a wording that had already
+# been rewritten twice and that F1 has now deleted outright — so the argument
+# named a string that no longer exists. What actually separates the two strings
+# is the HEDGE: the shared one hedges both ways because its number can be too
+# high, and this number is zero and cannot be, so `_none` warns one way only.
+# The mutant sends `paths === 0` down the shared branch and the named test's
+# whole-sentence `toBe` is what dies.
 case_ "a preview of zero must not borrow the sentence written for a non-zero one" \
   ui/src/settings/Masks.svelte \
   "s{          \? p\.paths === 0}{          ? p.paths < 0}" \
@@ -371,12 +378,22 @@ case_ "the explainer must disclose that \`?\` counts bytes in Ukrainian too" \
 # nothing at all. "At least N" would then be said about a scan that removes
 # zero. Killed by the `not.toContain('at least')` on the screen test — probed
 # in fix round 6 the way its Ukrainian sibling below had to be: with that one
-# assertion deleted the mutant SURVIVES, so the guard is the sole killer and
-# `at least, and {documents` really is past every positive assertion here.
+# assertion deleted the mutant SURVIVES, so the guard is the sole killer and the
+# insertion point really is past every positive assertion here.
+#
+# 🔴 Fix round 7 moved the insertion point by one clause, because F1 deleted the
+# `documents == 0` arm and moved the `, and ` INSIDE the non-zero arms — so
+# `already take, and {documents` no longer exists in the catalogue and the old
+# expression would have matched nothing. The word now goes between
+# `already take` and the `{documents` plural. That is still the one spot the
+# named test's positive assertions do not span: its
+# `toContain('takes 4 files beyond what your rules already take')` ends exactly
+# at the insertion point, and `can remove more than that or fewer` and the
+# `.gitignore` clause both start after it.
 case_ "the add-cost sentence must not claim a floor, in English" \
   ui/src/i18n/catalog.ts \
-  "s~already take, and \\{documents~already take, at least, and \\{documents~" \
-  "already take, at least, and {documents" \
+  "s~already take\\{documents~already take, at least\\{documents~" \
+  "already take, at least{documents" \
   src/settings/Masks.test.ts 'the file count is not stated as a floor' runner=vitest
 
 # The same ruling, the Ukrainian half — the half most of this product's people

@@ -255,16 +255,34 @@ test('the file count is not stated as a floor, and one clause hedges both direct
 // one. A person told "0 documents" beside a folder they know holds files needs
 // the first number to make sense of it.
 //
-// 🔴 Fix round 6, F1. The zero arm says what THIS RULE takes and stops there.
-// It used to promise findability — "no document stops being findable" — and
-// `mask_preview` cannot carry that promise: an in-tree `.gitignore` is outside
-// both of its rule sets, so a path it covers counts as SURVIVING, suppresses
-// the document, and the next scan takes it anyway — measured in
-// `mask_preview_understates_documents_behind_an_in_tree_gitignore`
-// (`src-tauri/tests/commands.rs`). `not.toContain('stops being findable')` is
-// the assertion that pins the removal: every other line here still passes with
-// the old sentence back.
-test('zero documents says what the rule takes and does not promise findability', async () => {
+// 🔴 Fix round 7, F1, owner's ruling. At zero the sentence says NOTHING about
+// documents. Three consecutive rounds shipped a clause here claiming more than
+// the arithmetic supports, about loss, in the understating direction, each time
+// in prose that round had just written — so this round stops making the claim
+// rather than phrasing it again. `mask_preview` counts a DIFFERENCE between two
+// rule sets, and two mechanisms take a document's last path from outside both:
+// an in-tree `.gitignore`, which neither set represents, so a path it covers
+// counts as SURVIVING and the next scan takes it anyway
+// (`mask_preview_understates_documents_behind_an_in_tree_gitignore`,
+// `src-tauri/tests/commands.rs`); and `d.status = 'indexed'` in
+// `Db::indexed_files_under_root` (`crates/mnema-index/src/write.rs`), which puts
+// a `pending`, `failed` or `skipped` document's only path outside the counted
+// population entirely.
+//
+// 🔴 The guard is STRUCTURAL, not lexical, and that is the whole point of this
+// round. Round 6's `not.toContain('stops being findable')` pinned the deleted
+// PHRASE; the promise moved into a different verb (`keeps`) and walked straight
+// past it. The `toBe` below is the guard that cannot be walked past: it admits
+// no clause here in any wording.
+//
+// `not.toContain('document')` is strictly weaker, and MEASURED to be weaker —
+// probed with a re-added `=0` arm reading "and every one of them still answers
+// under some other name", it passed and only the `toBe` failed. It is kept for
+// the one thing it does better: when a re-added clause does use the word, it
+// fails FIRST and its message names the property and prints the clause, where
+// the `toBe` prints a paragraph diff. It is not a second killer and must not be
+// read as one.
+test('at zero documents the sentence is the file count and the hedge, and says nothing about documents', async () => {
   maskPreview.mockResolvedValue({ paths: 4, documents: 0 });
   await mount([]);
 
@@ -273,16 +291,13 @@ test('zero documents says what the rule takes and does not promise findability',
 
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
   const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
-  expect(cost).toContain('takes 4 files beyond what your rules already take');
-  expect(cost).toContain('no document loses its last remaining path to this rule: each of them keeps a path this rule does not take');
-  // The promise the arithmetic cannot carry, and the reason this test was
-  // rewritten. It is asserted on the WHOLE zero arm rather than on the words
-  // above, so a sentence that says both would still fail here.
-  expect(cost).not.toContain('stops being findable');
-  // The direction a swap of the two numbers would produce, and the one an
-  // overstated disclosure reads as.
-  expect(cost).not.toContain('4 documents');
-  expect(cost).not.toContain('takes 0 files');
+  expect(cost).not.toContain('document');
+  expect(cost).toBe(
+    'As of now this mask takes 4 files beyond what your rules already take. The next scan of'
+    + ' each folder can remove more than that or fewer: files that never finished indexing are'
+    + ' not counted here, and a file a .gitignore in the folder itself already excludes may be'
+    + ' counted here.',
+  );
 });
 
 // A preview of two zeros is not "this rule would remove nothing": since fix
@@ -305,9 +320,15 @@ test('a preview of zero asks the question anyway, in a sentence of its own', asy
     + ' each folder can still remove files: those that never finished indexing are not counted'
     + ' here.',
   );
-  // The zero arm of the shared sentence would say this, and it has nobody to
-  // say it about when no path matched at all.
-  expect(cost).not.toContain('keeps a path this rule does not take');
+  // Fix round 7. This line used to pin `'keeps a path this rule does not take'`
+  // — a phrase F1 has now deleted from the catalogue, which would have left a
+  // guard that cannot fail by construction. What actually separates the two
+  // strings is the HEDGE: the shared sentence hedges both ways ("more than that
+  // or fewer") because its number can be too high, and `_none`'s number is zero
+  // and cannot be, so it warns one way only. That is the property, and it
+  // survives any rewording of either sentence's documents half.
+  expect(cost).not.toContain('can remove more than that or fewer');
+  expect(cost).not.toContain('document');
   expect(addMask).not.toHaveBeenCalled();
 });
 
@@ -834,6 +855,20 @@ test('every sentence on the section follows a language switch, the standing ques
   expect(text).not.toContain('щонайменше');
   expect(text).toContain('може прибрати і більше, і менше');
   expect(text).toContain('а файл, який уже виключає «.gitignore» у самій теці, тут може бути порахований');
+  // Fix round 7, F1: the Ukrainian half of the ruling, read off the SCREEN at
+  // the `documents: 0` this fixture already renders. Scoped to the cost element
+  // so no neighbouring sentence can satisfy it or break it.
+  //
+  // ⚠️ This line is the on-screen echo, not the claim guard. The Ukrainian
+  // claim guard is the whole-sentence `toBe` on `uk(2, 0)` in
+  // `src/i18n/i18n.test.ts`, because a clause avoiding the word «документ»
+  // walks past a `not.toContain` — measured, see the English sibling above. A
+  // `toBe` here instead would be stronger and is deliberately NOT written: this
+  // test is the named killer of the Ukrainian floor case in
+  // `scripts/mutations/pr8-ui-masks.sh`, which depends on
+  // `not.toContain('щонайменше')` above being its SOLE killer, and a `toBe`
+  // would kill that mutant first and unpin the guard.
+  expect(visibleText(screen.getByTestId('mask-confirm-cost'))).not.toContain('документ');
   expect(text).toContain(t('settings_masks_confirm_add_heading', { mask: '*.tmp' }));
   // The accessible names follow the switch too, and they are what tells two
   // otherwise identical controls apart.

@@ -951,20 +951,40 @@ impl WalkRules {
     /// computing a difference between two rule sets gets the same override on
     /// both sides.
     ///
-    /// 🔴 **Which way that leans depends on what the caller counts, and it is
-    /// not one way.** For a count of PATHS in the difference it can only run
-    /// larger: a path this set would have removed is left surviving on both
-    /// sides and gets charged to the caller's own candidate, which is the
-    /// overstating direction a person can see and undo. For a count of
-    /// DOCUMENTS whose *every* surviving path is taken, the same extra
-    /// surviving path **suppresses** the document, so the count runs SMALLER —
-    /// the understating direction this entry point exists to close. The same
-    /// arithmetic falsifies the same claim for the one layer named above that
-    /// this method never covers, the in-tree `.gitignore` stack; measured in
+    /// 🔴 **Which way that leans depends on what the caller counts — and on
+    /// WHICH of the two states above it is asking about. They do not lean the
+    /// same way, and fix round 6 ran them together.**
+    ///
+    /// **For a layer this method never covers** — the in-tree `.gitignore`
+    /// stack, named above — the residue is a path left surviving on *both*
+    /// sides of the difference. A count of PATHS then runs LARGER: the path
+    /// gets charged to the caller's own candidate, the overstating direction a
+    /// person can see and undo. A count of DOCUMENTS whose *every* surviving
+    /// path is taken runs SMALLER, because that same extra surviving path
+    /// **suppresses** the document — the understating direction, and the one
+    /// this entry point exists to close. Measured in
     /// `mask_preview_understates_documents_behind_an_in_tree_gitignore`
-    /// (`src-tauri/tests/commands.rs`). Until fix round 6 these lines said "can
-    /// only make a marginal count larger, never smaller", stating the safe
-    /// direction where the unsafe one is also true.
+    /// (`src-tauri/tests/commands.rs`).
+    ///
+    /// **For the empty-override state described just above, BOTH counts
+    /// overstate**, and the arithmetic of the paragraph before this one does
+    /// not apply to it. `builder()` answers `rules_applied = false`, `walk_root`
+    /// returns `StopReason::RulesNotApplied` before phase 2
+    /// (`crates/mnema-ingest/src/walk.rs`), and the scan removes nothing at all
+    /// — so *any* non-zero difference, of either kind, is a number about a walk
+    /// that will not remove a byte. Nothing is understated when nothing is
+    /// lost. The state is reachable and already built by two committed tests,
+    /// `rules_applied_is_false_when_the_combined_rule_set_is_too_large` and
+    /// `rules_applied_is_false_at_a_realistic_prefix_count` (`tests/rules.rs`),
+    /// through the same `compiled_override` `Err` that
+    /// `unwrap_or_else(|_| Override::empty())` below swallows. This is the
+    /// direction `scripts/mutations/pr8-ui-masks.sh` already argues for the same
+    /// state; the two now agree.
+    ///
+    /// Until fix round 6 these lines said "can only make a marginal count
+    /// larger, never smaller", stating the safe direction where the unsafe one
+    /// is also true; fix round 7 split off the state where the safe direction is
+    /// the only one.
     pub fn applied_to(&self, root: &Path) -> AppliedRules {
         AppliedRules {
             root: root.to_path_buf(),

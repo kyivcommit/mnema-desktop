@@ -145,11 +145,22 @@ describe('i18n', () => {
       + 'залишиться. Наступне сканування кожної теки може прибрати і більше, і менше: файли, '
       + 'які так і не проіндексувалися, тут не враховані, а файл, який уже виключає '
       + '«.gitignore» у самій теці, тут може бути порахований.');
-    // The `=0` arm for `documents`, against a non-zero `paths`.
+    // 🔴 Fix round 7, F1, owner's ruling. The `=0` arm for `documents`, against a
+    // non-zero `paths`, is now EMPTY: at zero the sentence is the file count and
+    // the two-way hedge and says nothing about documents at all. `mask_preview`
+    // counts a difference between two rule sets, and a zero from it cannot carry
+    // a claim about the world — an in-tree `.gitignore` (outside both sets) or a
+    // document that never reached `status = 'indexed'` takes the last path this
+    // count says is kept. The `, і` moved INSIDE the non-zero arms so the empty
+    // arm leaves a whole sentence rather than a dangling conjunction.
+    //
+    // The `not.toContain` runs before the `toBe` deliberately: it is the weaker
+    // assertion, but a re-added clause in ANY wording fails it first and names
+    // the property, where the `toBe` would only print a paragraph diff.
+    expect(uk(2, 0)).not.toContain('документ');
     expect(uk(2, 0)).toBe(
       'Станом на зараз ця маска забирає 2 файли понад те, що вже забирають ваші '
-      + 'правила, і жоден документ не втрачає через це правило останній шлях: у кожного '
-      + 'лишається шлях, якого це правило не забирає. Наступне сканування кожної теки може '
+      + 'правила. Наступне сканування кожної теки може '
       + 'прибрати і більше, і менше: файли, які так і не проіндексувалися, тут не враховані, '
       + 'а файл, який уже виключає «.gitignore» у самій теці, тут може бути порахований.');
 
@@ -169,10 +180,12 @@ describe('i18n', () => {
       + ' each folder can remove more than that or fewer: files that never finished indexing'
       + ' are not counted here, and a file a .gitignore in the folder itself already excludes'
       + ' may be counted here.');
+    // The same deletion, the English half — pinned in both locales because the
+    // clause was written in both and removed from both.
+    expect(en(5, 0)).not.toContain('document');
     expect(en(5, 0)).toBe(
-      'As of now this mask takes 5 files beyond what your rules already take, and no'
-      + ' document loses its last remaining path to this rule: each of them keeps a path this'
-      + ' rule does not take. The next scan of each folder can remove more than that or fewer:'
+      'As of now this mask takes 5 files beyond what your rules already take.'
+      + ' The next scan of each folder can remove more than that or fewer:'
       + ' files that never finished indexing are not counted here, and a file a .gitignore in'
       + ' the folder itself already excludes may be counted here.');
 

@@ -136,7 +136,7 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
 }
 
 /// What a mask would take **beyond the rules the next scan already applies** —
-/// the built-in layers, that root's stored path exclusions and every stored
+/// the built-in layers, each root's stored path exclusions and every stored
 /// mask, not the stored ones alone — as of now, in two numbers with
 /// **different subjects** (D-d). [`mask_preview`] defines that set; the
 /// built-in layers are in it and are not stored, which is why this sentence
@@ -157,20 +157,32 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
 /// there and these four sentences stayed behind, still describing a number
 /// that had stopped existing.
 ///
-/// 🔴 **`documents == 0` is a statement about this rule, not a promise about
-/// findability**, and the editor says exactly that much. It means no document
-/// has its last surviving path taken *by this rule*; it does **not** mean no
-/// document stops being findable, because a second mechanism can take the path
-/// this one leaves. The mechanism is the in-tree `.gitignore` stack, which is
-/// outside both rule sets ([`mnema_walk::WalkRules::applied_to`] names it as
-/// what `AppliedRules` does not cover) while the walk applies it with no git
-/// repository present — so a path it covers counts as SURVIVING and not taken,
-/// and the document is suppressed. `mask_preview` is where the direction of
-/// that residue is written down: **larger for `paths`, smaller for
-/// `documents`**. Measured rather than reasoned, in
-/// `mask_preview_understates_documents_behind_an_in_tree_gitignore`
-/// (`tests/commands.rs`): a two-path document, `documents: 0`, and a next scan
-/// that leaves it with no path at all.
+/// 🔴 **`documents == 0` is a statement about this rule, and the editor says
+/// nothing about documents at all when it reads one** (fix round 7, owner's
+/// ruling; `settings_masks_add_cost`'s `=0` arm is empty, and the sentence is
+/// the file count and the two-way hedge). A zero means no document has its last
+/// surviving path taken *by this rule*; it does **not** mean no document stops
+/// being findable, and three rounds of trying to say the narrow version on
+/// screen each shipped the wide one. Two mechanisms falsify it, and neither is
+/// visible to this count:
+///
+/// - the in-tree `.gitignore` stack, outside both rule sets
+///   ([`mnema_walk::WalkRules::applied_to`] names it as what `AppliedRules` does
+///   not cover) while the walk applies it with no git repository present — so a
+///   path it covers counts as SURVIVING and not taken, and the document is
+///   suppressed. Measured rather than reasoned, in
+///   `mask_preview_understates_documents_behind_an_in_tree_gitignore`
+///   (`tests/commands.rs`): a two-path document, `documents: 0`, and a next scan
+///   that leaves it with no path at all;
+/// - **status.** `Db::indexed_files_under_root`
+///   (`crates/mnema-index/src/write.rs`) selects `WHERE … d.status = 'indexed'`
+///   while `document.status` defaults to `'pending'`
+///   (`crates/mnema-index/src/schema.sql`) and `path` rows are written
+///   independently, so a `pending`, `failed` or `skipped` document's only path
+///   is outside this population entirely and the next walk removes it.
+///
+/// `mask_preview` is where the direction of the first residue is written down:
+/// **larger for `paths`, smaller for `documents`**.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaskPreview {

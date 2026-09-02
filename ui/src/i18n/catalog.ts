@@ -546,14 +546,25 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // маску» — воно рахує РІЗНИЦЮ, яку робить це натискання проти всього
     // набору правил, що його застосує наступне сканування. Файл, який уже
     // забирає збережене правило, у число не входить, тож стара фраза «під цю
-    // маску підпадає N файлів» стала б меншою за правду. Так само гілка `=0`
-    // для документів: інший шлях мусить не просто існувати в індексі, а
-    // пережити наявні правила — саме цього не сказала фраза, яку живий прогін
-    // спростував.
-    settings_masks_add_cost: 'Станом на зараз ця маска забирає {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} понад те, що вже забирають ваші правила, і {documents, plural, =0 {жоден документ не втрачає через це правило останній шлях: у кожного лишається шлях, якого це правило не забирає} one {# документ більше не знайдеться: жодного іншого шляху на нього не залишиться} few {# документи більше не знайдуться: жодного іншого шляху на них не залишиться} many {# документів більше не знайдуться: жодного іншого шляху на них не залишиться} other {# документа більше не знайдуться}}. Наступне сканування кожної теки може прибрати і більше, і менше: файли, які так і не проіндексувалися, тут не враховані, а файл, який уже виключає «.gitignore» у самій теці, тут може бути порахований.',
-    // Нуль має власне речення: у спільному з ненульовим випадком гілка
-    // `=0` для документів каже про «інший шлях», а коли це натискання не
-    // забирає жодного шляху, казати нема про кого. І нуль тут тепер означає
+    // маску підпадає N файлів» стала б меншою за правду.
+    //
+    // 🔴 Fix round 7, F1, рішення власника: гілка `=0` для документів ПОРОЖНЯ.
+    // Три кола поспіль ставили сюди твердження, яке не витримує арифметики, і
+    // щоразу воно применшувало втрату. Причина не в словах: `mask_preview`
+    // рахує РІЗНИЦЮ між двома наборами правил, а людина питає про світ, і два
+    // механізми поза обома наборами забирають у документа останній шлях, який
+    // це число називає збереженим — `.gitignore` у самій теці (шлях під ним
+    // рахується як «уцілілий») і статус: `Db::indexed_files_under_root`
+    // (`crates/mnema-index/src/write.rs`) бере лише `d.status = 'indexed'`, тож
+    // єдиний шлях документа в стані `pending`, `failed` чи `skipped` узагалі
+    // поза цією множиною. Тому при нулі речення — це число файлів і
+    // двобічне застереження, і про документи воно не каже нічого. Кому «і»
+    // винесено ВСЕРЕДИНУ ненульових гілок, щоб порожня лишала ціле речення.
+    settings_masks_add_cost: 'Станом на зараз ця маска забирає {paths, plural, one {# файл} few {# файли} many {# файлів} other {# файла}} понад те, що вже забирають ваші правила{documents, plural, =0 {} one {, і # документ більше не знайдеться: жодного іншого шляху на нього не залишиться} few {, і # документи більше не знайдуться: жодного іншого шляху на них не залишиться} many {, і # документів більше не знайдуться: жодного іншого шляху на них не залишиться} other {, і # документа більше не знайдуться}}. Наступне сканування кожної теки може прибрати і більше, і менше: файли, які так і не проіндексувалися, тут не враховані, а файл, який уже виключає «.gitignore» у самій теці, тут може бути порахований.',
+    // Нуль має власне речення, і після fix round 7 причина цьому одна —
+    // ЗАСТЕРЕЖЕННЯ, а не гілка `=0` для документів, якої більше немає. Сусіднє
+    // речення хеджує в обидва боки, бо його число буває завищеним; тут число —
+    // нуль, і завищеним воно не буває. І нуль тут тепер означає
     // «нічого понад те, що вже забирають ваші правила», а не «під цю маску не
     // підпадає жоден файл»: додати «*.txt» там, де вже збережено «*», дає
     // саме цей нуль, а файли під маску підпадають.
@@ -846,7 +857,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_load_failed: 'The list of masks could not be read.',
     settings_masks_confirm_add_heading: 'Add the mask {mask}?',
     settings_masks_confirm_remove_heading: 'Remove the mask {mask}?',
-    settings_masks_add_cost: 'As of now this mask takes {paths, plural, one {# file} other {# files}} beyond what your rules already take, and {documents, plural, =0 {no document loses its last remaining path to this rule: each of them keeps a path this rule does not take} one {# document stops being findable: no other path will be left naming it} other {# documents stop being findable: no other path will be left naming them}}. The next scan of each folder can remove more than that or fewer: files that never finished indexing are not counted here, and a file a .gitignore in the folder itself already excludes may be counted here.',
+    settings_masks_add_cost: 'As of now this mask takes {paths, plural, one {# file} other {# files}} beyond what your rules already take{documents, plural, =0 {} one {, and # document stops being findable: no other path will be left naming it} other {, and # documents stop being findable: no other path will be left naming them}}. The next scan of each folder can remove more than that or fewer: files that never finished indexing are not counted here, and a file a .gitignore in the folder itself already excludes may be counted here.',
     settings_masks_add_cost_none: 'As of now this mask takes nothing beyond what your rules already take. The next scan of each folder can still remove files: those that never finished indexing are not counted here.',
     settings_masks_remove_cost: 'From the next scan of each folder on, this mask stops holding anything back: each file it was excluding is indexed again — unless another of your rules still excludes it — and its text is sent to the model provider.',
     settings_masks_confirm: 'Confirm',
