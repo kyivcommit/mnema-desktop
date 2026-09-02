@@ -26,9 +26,10 @@ use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
 // `mask_differential.rs` does not: the attribute says "another binary wants
 // this", never "nobody does".
 
-/// A provider address with nothing behind it. Nothing in `commands.rs` calls
-/// the provider, and a base that refuses instantly is how a future test that
-/// starts to finds out at once rather than by reaching the real one.
+/// A provider address with nothing behind it. Nothing in the binaries that
+/// pull this file calls the provider, and a base that refuses instantly is
+/// how a future test that starts to finds out at once rather than by
+/// reaching the real one.
 pub const NO_PROVIDER: &str = "http://127.0.0.1:1";
 
 /// A credential reference that cannot reach a store at all — the same trick
@@ -62,7 +63,7 @@ pub fn app_in(dir: &std::path::Path) -> tauri::App<MockRuntime> {
             dir.to_path_buf(),
             super::support::worker().to_path_buf(),
             NO_PROVIDER.to_string(),
-            format!("mnema-desktop-commands-test-{}", dir.display()),
+            format!("mnema-desktop-test-{}", dir.display()),
         ))
         .invoke_handler(mnema_desktop::invoke_handler())
         .build(mock_context(noop_assets()))

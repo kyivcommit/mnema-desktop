@@ -60,10 +60,13 @@
 //! **What the run must have built, and what it cost.** `Reached` counts the
 //! shapes each seed actually reached and `required` says which of them a
 //! default run owes, so a generator that quietly stopped drawing something
-//! fails the run instead of passing it more cheaply. Twelve seeds, measured on
-//! an Apple-silicon laptop: 2.6 s inside the test binary, 3.2 s wall for
-//! `cargo test` over a warm target. `MNEMA_FUZZ_RUNS=200` takes 34 s and is
-//! green, so the invariant is not a property of the default twelve.
+//! fails the run instead of passing it more cheaply. Twelve seeds: 2.6 s
+//! inside the test binary, 3.2 s wall for `cargo test` over a warm target.
+//! `MNEMA_FUZZ_RUNS=200` takes 34 s and is green, so the invariant is not a
+//! property of the default twelve. Measured 2026-09-02 on an Apple M2 Max
+//! with `cargo test -p mnema-desktop --test mask_differential` and
+//! `MNEMA_FUZZ_RUNS=200 cargo test -p mnema-desktop --test mask_differential`;
+//! the Linux CI leg is unmeasured.
 //!
 //! Two generator weights were changed to make twelve seeds enough, both
 //! measured rather than guessed, and neither of them the seed count — the run
@@ -137,10 +140,12 @@ impl Rng {
 const LATIN: &[&str] = &["invoice", "parcel", "route", "manifest", "courier", "depot"];
 const CYRILLIC: &[&str] = &["накладна", "посилка", "маршрут", "кур'єр", "склад", "звіт"];
 const EXTENSIONS: &[&str] = &["txt", "md"];
-/// A FILE called `target` with no `Cargo.toml` beside it: the anchored layer
-/// asks `is_dir` before it prunes (`rules.rs`'s `prunes_a_component`), so it
-/// leaves this alone, the file is indexed, and both sides must take it only
-/// for a literal candidate.
+/// A FILE called `target` with no `Cargo.toml` beside it: on the walk side,
+/// `filter_entry`'s anchored-dir branch (`rules.rs:854-857`, "Named like an
+/// anchored dir but not one") asks `is_dir` before it prunes, and a file
+/// isn't one, so the walk leaves this alone and the file is indexed. On the
+/// preview side, `prunes_a_component` (`rules.rs`) makes the same `is_dir`
+/// check, so both sides must take it only for a literal candidate.
 ///
 /// Not `node_modules`, and not `.git` either: both are in
 /// `WalkRules::BUILTIN_DIRS`, which compiles to `!**/<name>` carrying no
@@ -624,8 +629,9 @@ fn materialise(world: &World) -> Built {
 /// population the oracle reads. Returns the sum of `Ended.removed` over the
 /// roots.
 /// Every message names the seed and the root's ORDINAL in the world. The
-/// `root_id` a message used to carry is a different number in each of a seed's
-/// three worlds and names nothing a reader can find in the draw.
+/// ordinal is the draw's own index and is equal across worlds by
+/// construction, whereas `root_id` (`watched_root.id`, an `INTEGER PRIMARY
+/// KEY`) would be equal only by accident of insert order.
 fn walk_all(built: &Built) -> u64 {
     let mut removed = 0;
     for (ordinal, &root) in built.root_ids.iter().enumerate() {
@@ -662,7 +668,8 @@ fn walk_all(built: &Built) -> u64 {
 }
 
 /// One row per indexed path, keyed by the root's ORDINAL in the world (not its
-/// `root_id`, which differs between the worlds of different seeds), the
+/// `root_id`, which is equal across worlds only by accident of insert order —
+/// the ordinal is the draw's own index and is equal by construction), the
 /// relative path, and the document id — the triple is what makes a path unique
 /// across roots and copies.
 type Key = (usize, String, String);
@@ -868,8 +875,11 @@ fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
     // normalisation form these bytes do not spell — and the shape it was drawn
     // as was therefore not reached, whatever the generator intended.
     //
-    // The document id is kept, not dropped: four of the eight shapes are not
-    // states of one path at all, and presence alone cannot see them.
+    // The document id is kept, not dropped: the two copy shapes are not
+    // states of one path at all, they are a relation between two paths, and
+    // presence alone cannot see them. The two twin shapes are still states of
+    // one path each; for them presence of both spellings (the check below)
+    // suffices, and the document id is unused.
     let indexed0: BTreeMap<(usize, String), String> = manifest
         .iter()
         .map(|(o, p, id)| ((*o, p.clone()), id.clone()))
@@ -1322,6 +1332,14 @@ fn an_invalid_candidate_is_refused_alike_by_preview_and_save() {
         candidate: Candidate::Invalid("*[Г]*".into()),
     };
     let built = materialise(&world);
+    let before = snapshot(&built);
+    let document_id = before
+        .iter()
+        .find(|(ordinal, path, _)| *ordinal == 0 && path == "звіт.txt")
+        .map(|(_, _, id)| id.clone())
+        .expect("the fixture's one file must be indexed before the refusal");
+    let expected: BTreeSet<Key> = [(0, "звіт.txt".to_string(), document_id)].into_iter().collect();
+    assert_eq!(before, expected, "a refusal must not touch the index");
     let previewed = call(
         &built.webview,
         "mask_preview",
@@ -1334,7 +1352,7 @@ fn an_invalid_candidate_is_refused_alike_by_preview_and_save() {
         previewed, saved,
         "the preview and the save must refuse with one sentence"
     );
-    assert_eq!(snapshot(&built).len(), 1, "a refusal must not touch the index");
+    assert_eq!(snapshot(&built), expected, "a refusal must not touch the index");
 }
 
 /// The blank string is the one named exception: not malformed, previewed as two
@@ -1358,9 +1376,23 @@ fn the_blank_candidate_previews_as_zeros_and_is_refused_on_save() {
         }],
         prefixes: vec![],
         masks: vec![],
+        // Unused below: `materialise` never reads `World::candidate`, and this
+        // test sends the blank string directly rather than through it. Kept
+        // only because the struct requires a value.
         candidate: Candidate::Miss,
     };
     let built = materialise(&world);
+    let before = snapshot(&built);
+    let document_id = before
+        .iter()
+        .find(|(ordinal, path, _)| *ordinal == 0 && path == "звіт.txt")
+        .map(|(_, _, id)| id.clone())
+        .expect("the fixture's one file must be indexed before the calls");
+    let expected: BTreeSet<Key> = [(0, "звіт.txt".to_string(), document_id)].into_iter().collect();
+    assert_eq!(
+        before, expected,
+        "neither the preview nor the refused save may touch the index"
+    );
     assert_eq!(
         call(&built.webview, "mask_preview", json!({ "pattern": "" }))
             .expect("the blank mask is not malformed"),
@@ -1369,8 +1401,8 @@ fn the_blank_candidate_previews_as_zeros_and_is_refused_on_save() {
     call(&built.webview, "add_mask", json!({ "pattern": "" }))
         .expect_err("storing a blank mask must be refused");
     assert_eq!(
-        snapshot(&built).len(),
-        1,
+        snapshot(&built),
+        expected,
         "neither the preview nor the refused save may touch the index"
     );
 }

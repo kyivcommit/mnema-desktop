@@ -32,7 +32,10 @@ case_ "the harness must catch documents counted by any taken path rather than by
 # `assert_eq!(persisted, a_rules, "world A holds different rules")` at line
 # 938 fires before the preview/walk comparison is ever reached. Still a red
 # this mutant earns, and the one that proves the harness checks its own
-# fixture rather than only the product under test.
+# fixture rather than only the product under test. Measured follow-up: with
+# that assert temporarily removed, the invariant itself killed the mutant
+# ("the S+m walk removed 4 paths the S walk did not, the preview promised
+# 1" — task-4-report.md, the Step 5 mutant).
 case_ "the harness must go red on its own when world A forgets to store the rules" \
   src-tauri/tests/mask_differential.rs \
   's~    store_rules\(&a, &world\); // world A stores S~    /* mutant: world A never stores S */~' \
