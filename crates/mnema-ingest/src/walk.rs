@@ -171,6 +171,20 @@ pub struct WalkProgress {
     /// away, even though `done` already counts them: the bar would be in the
     /// right place and the label next to it would be lying.
     pub refused: u64,
+    /// Files whose every busy retry found the index locked by another writer
+    /// (`ingest_with_busy_retry`). Counted — and reported, in a callback of
+    /// its own — **the moment the last retry is refused, before the skip is
+    /// journalled**: a caller that wanted to show "the index is busy" (none
+    /// in this repository does yet) would learn it then, rather than after
+    /// the skip write has spent a further `busy_timeout` of its own meeting
+    /// the same lock. In that one event the file is already in `contended`
+    /// and not yet in `skipped`; in every per-file event afterwards
+    /// `contended <= skipped`. Because that callback runs *before* the skip
+    /// write, a slow sink there delays the write towards the same lock —
+    /// one more reason the callback must not block. Never counts a worker
+    /// refusal: contention is evidence about whoever holds the lock, not
+    /// about the file or the worker.
+    pub contended: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,11 +434,13 @@ pub fn walk_root(
     // files are already accounted for, and a window drawing a bar from this
     // callback needs that reflected immediately, or it would show 0/`total`
     // even though `refused` of `total` is already behind it.
+    let mut contended: u64 = 0;
     on_progress(WalkProgress {
         done: report.refused,
         total,
         skipped: report.skipped,
         refused: report.refused,
+        contended,
     });
 
     for found in &walked.found {
@@ -433,7 +449,22 @@ pub fn walk_root(
             return Ok(report);
         }
 
-        match ingest_with_busy_retry(pool, db, root_id, found, cancel, &manifest)? {
+        let outcome =
+            ingest_with_busy_retry(pool, db, root_id, found, cancel, &manifest, &mut || {
+                // Every retry refused, skip not yet journalled — the one event
+                // a caller gets before the skip write, which may itself still
+                // meet the lock and end the walk with `Err(Busy)`; see the
+                // field's doc.
+                contended += 1;
+                on_progress(WalkProgress {
+                    done: report.indexed + report.unchanged + report.skipped + report.refused,
+                    total,
+                    skipped: report.skipped,
+                    refused: report.refused,
+                    contended,
+                });
+            })?;
+        match outcome {
             Retried::Cancelled => {
                 report.stopped = StopReason::Cancelled;
                 return Ok(report);
@@ -480,6 +511,7 @@ pub fn walk_root(
             total,
             skipped: report.skipped,
             refused: report.refused,
+            contended,
         });
     }
 
@@ -926,6 +958,12 @@ enum Retried {
 /// `BUSY_RETRIES` is sized for; surfacing it as an explicit error the caller
 /// can retry the whole walk over is more honest than a second unbounded retry
 /// loop layered on the first.
+///
+/// `exhausted` runs once, after the last attempt has been refused and
+/// **before** the skip is journalled — the walk's one chance to tell whoever
+/// is listening that the index is busy before the skip write spends a window
+/// of its own on it (`WalkProgress::contended`). Never runs on any other
+/// path: not on a settled file, not on a cancel, not on a non-`Busy` error.
 fn ingest_with_busy_retry(
     pool: &Pool,
     db: &Db,
@@ -933,6 +971,7 @@ fn ingest_with_busy_retry(
     found: &Found,
     cancel: &AtomicBool,
     manifest: &Manifest,
+    exhausted: &mut dyn FnMut(),
 ) -> Result<Retried, IngestError> {
     let mut last_busy = None;
     for attempt in 1..=BUSY_RETRIES {
@@ -960,6 +999,7 @@ fn ingest_with_busy_retry(
     }
     let last_busy = last_busy
         .expect("the loop above only runs out of attempts by taking the Busy arm every time");
+    exhausted();
     let reason = format!(
         "the index was still busy after {BUSY_RETRIES} attempts to write to it: {last_busy}"
     );

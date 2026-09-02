@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use mnema_index::{Db, open};
-use mnema_ingest::{FrozenReason, IngestError, StopReason, WalkReport, walk_root};
+use mnema_ingest::{FrozenReason, IngestError, StopReason, WalkProgress, WalkReport, walk_root};
 use mnema_pool::{Pool, PoolConfig};
 use mnema_walk::WalkRules;
 use sha2::{Digest, Sha256};
@@ -149,29 +149,34 @@ impl Fixture {
     /// Spawns the pool's worker processes before the caller does anything
     /// timing-sensitive, and returns once they have answered.
     ///
-    /// The three write-contention tests below race a lock held for a fixed
-    /// number of seconds against the walk reaching its first write. Everything
-    /// between those two points is meant to be the retry budget under test —
-    /// but a pool that has never run pays a first-execution cost there too,
-    /// and on a fresh macOS CI runner that cost is large: the worker binary
-    /// was just built, is unsigned, and the system checks it on its first
-    /// exec. Measured on `macos-14`, that pushed the walk past an 18-second
-    /// window and inverted all three assertions at once — the contended file
-    /// was simply reached after the lock had already been released, so it
-    /// behaved like any other file.
+    /// The write-contention tests below take a lock on a second connection
+    /// and then walk into it. Everything after the lock is taken is meant to
+    /// be the walk's own retry behaviour — but a pool that has never run
+    /// pays a first-execution cost there too, and on a fresh macOS CI runner
+    /// that cost is large: the worker binary was just built, is unsigned,
+    /// and the system checks it on its first exec. Back when the lock was
+    /// released on a clock, that cost alone once inverted all three tests at
+    /// once on `macos-14`: the contended file was reached after the lock had
+    /// already been released and behaved like any other file. Two of the
+    /// three now release on the walk's own signal and cannot be inverted
+    /// that way; the cancellation test still bounds elapsed time against a
+    /// measured timeout, and a worker spawn inside that window would count
+    /// against the bound.
     ///
     /// `extract` on a path that does not exist is the cheapest way to pay it:
     /// a worker starts, answers `Unreadable`, and nothing is written to the
     /// index. Doing this **before** the lock is taken puts the variance
-    /// outside the window instead of inside it, which is what makes the
-    /// number under test the retry budget rather than the runner's mood.
+    /// outside the window instead of inside it.
     fn warm_pool(&self) {
         let _ = self.pool.extract(&self.dir().join("no-such-file-warmup"));
     }
 
-    /// Proves the precondition all three write-contention tests rest on and
-    /// none of them used to state: that a second connection really is refused
-    /// the write lock right now.
+    /// Proves the precondition a write-contention test rests on and none of
+    /// them used to state: that a second connection really is refused the
+    /// write lock right now. Only the cancellation test calls this now; the
+    /// two tests that release the lock from the walk's own signal check the
+    /// same premise differently (`walk_releasing_on_contention` panics if
+    /// the signal never comes) and need no timeout.
     ///
     /// Every one of those tests asserts a *consequence* of contention — a walk
     /// that gave up, a skip that was journalled, a cancellation noticed
@@ -186,16 +191,16 @@ impl Fixture {
     /// exact question the walk will ask, on the exact connection it will use,
     /// and it answers within the index's busy timeout rather than hanging.
     fn measured_busy_timeout(&self) -> Duration {
-        // The elapsed time is printed, not asserted. It is the index's own
-        // `busy_timeout` as this machine actually applies it, and the
-        // contention tests' whole arithmetic is built on that number being
-        // five seconds. `macos-14` fails those tests while this machine passes
-        // them, with contention present on both, so the number is the first
-        // thing worth seeing rather than assuming. Rust prints a failing
-        // test's stdout, which is where this is meant to be read.
+        // The elapsed time is printed and returned. It is the index's own
+        // `busy_timeout` as this machine actually applies it — five seconds
+        // configured; 7.0 s and 7.4 s on a hosted `macos-14` runner (CI run
+        // 33668886783, attempt 1) — and the cancellation test's bound is
+        // relative to it rather than to a number of seconds. Rust prints a
+        // failing test's stdout, which is where this is meant to be read.
         let started = Instant::now();
         let refused = self.db.conn().execute_batch("BEGIN IMMEDIATE").is_err();
         let waited = started.elapsed();
+        println!("MEASURE busy_timeout as this machine applies it: {waited:?}");
         if !refused {
             let _ = self.db.conn().execute_batch("ROLLBACK");
         }
@@ -207,28 +212,58 @@ impl Fixture {
         waited
     }
 
-    /// How long to hold the write lock so that the walk exhausts every retry
-    /// and still gets to journal its skip.
+    /// Runs the walk while `window` holds the write lock, and releases that
+    /// lock at the one moment the test wants it released: when the walk
+    /// itself reports, through `WalkProgress::contended`, that every busy
+    /// retry on a file has been refused and the skip is about to be
+    /// journalled. The `COMMIT` runs inside the walk's own progress callback,
+    /// on the walk's thread, so the ordering is not a matter of timing at
+    /// all — every attempt has already been refused, and the skip write has
+    /// not started and takes the lock at once.
     ///
-    /// **Computed, not chosen, because no constant is right on two machines.**
-    /// Measured here: three retries of a five-second timeout end at ~15.9 s,
-    /// and the walk then blocks another ~2.1 s on the skip write before the
-    /// hold releases at 18 s — inside that write's own five-second window, so
-    /// it lands. The corridor is therefore `(3·T, 4·T)` for a machine whose
-    /// timeout is `T`: below it the third retry is still waiting when the lock
-    /// frees and the write the test wants refused succeeds; above it the skip
-    /// write exhausts a window of its own and the walk returns `Err(Busy)`
-    /// instead of a report.
+    /// **This replaces a hold computed from a measured timeout, and the
+    /// corridor that came with it.** A sleep of `3.5 × T` had to land inside
+    /// `(3T, 4T)`: shorter and the third retry succeeded, longer and the skip
+    /// write exhausted a window of its own. But an attempt costs `T` plus
+    /// its own overhead, and three attempts pay that overhead three times,
+    /// so the lower edge was really `3T + 3c` — and on a hosted `macos-14`
+    /// runner it crossed the hold: with `T` measured at 7.0 s and 7.4 s,
+    /// holds of 24.6 s and 25.8 s ended while the third attempt was still
+    /// waiting, that attempt's write landed (`indexed: 1` in one test, a
+    /// crash skip that tipped `BrokenWorker` in the other), and the walks
+    /// ended 0.1–0.3 s after their holds (CI run 33668886783, attempt 1,
+    /// `check (macos-14)`). No constant, computed or not, is right on two
+    /// machines; a signal is.
     ///
-    /// The old constant was 18 s with a comment claiming retries end at 15 s.
-    /// The walk measured 18.014 s against an 18 s hold — it was passing by
-    /// fourteen milliseconds. `macos-14` failed all three deterministically,
-    /// which puts its `T` above six seconds, moving its corridor past 18
-    /// entirely. `T` is what the probe above already measures, so this takes
-    /// the middle of that machine's own corridor instead of the middle of
-    /// this one's.
-    fn hold_for(timeout: Duration) -> Duration {
-        timeout.mul_f64(3.5)
+    /// Returns the report and every progress event. Panics if the walk never
+    /// reported a contended file: then the lock was never released and the
+    /// premise — that the window's `BEGIN IMMEDIATE` shuts the walk out —
+    /// did not hold, so no assertion downstream would be measuring contention.
+    fn walk_releasing_on_contention(&self, window: &Db) -> (WalkReport, Vec<WalkProgress>) {
+        let mut events = Vec::new();
+        let mut released = false;
+        let report = walk_root(
+            &self.pool,
+            &self.db,
+            self.root,
+            self.dir(),
+            &WalkRules::none(),
+            &AtomicBool::new(false),
+            &mut |p| {
+                if p.contended == 1 && !released {
+                    window.conn().execute_batch("COMMIT").unwrap();
+                    released = true;
+                }
+                events.push(p);
+            },
+        )
+        .unwrap();
+        assert!(
+            released,
+            "the walk never reported a contended file, so the window's lock was never \
+             released and nothing in this test measured contention: {events:?}"
+        );
+        (report, events)
     }
 
     /// Writes raw bytes at `relative` with a chosen modification time.
@@ -700,7 +735,8 @@ fn a_run_of_oversized_files_does_not_look_like_a_broken_worker() {
 /// Twenty files, not the brief's fifty: `broken_after` is 8 for this
 /// fixture's default two-worker pool, so twenty clears it comfortably
 /// without paying for thirty files' worth of worker round-trips the suite
-/// does not need — this file already runs to about 18 s.
+/// does not need — this file's contention tests already hold it to three
+/// busy timeouts or more.
 #[test]
 fn a_run_of_unsupported_files_does_not_look_like_a_broken_worker() {
     let f = Fixture::new();
@@ -828,20 +864,8 @@ fn a_busy_exhausted_file_does_not_count_toward_the_broken_worker_threshold() {
     let window = open(&f.index_path).unwrap();
     window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
     window.insert_watched_root("/Volumes/Second").unwrap();
-    // Before the hold begins, not inside it: the probe waits out a full
-    // busy-timeout window of its own, and spending that from the margin is
-    // what reproduced the CI failure here.
-    let hold = Fixture::hold_for(f.measured_busy_timeout());
-    let holder = std::thread::spawn(move || {
-        std::thread::sleep(hold);
-        window.conn().execute_batch("COMMIT").unwrap();
-    });
 
-    let walk_started = Instant::now();
-    let report = f.walk();
-    let walk_took = walk_started.elapsed();
-    println!("MEASURE walk took {walk_took:?} against a {hold:?} hold. report = {report:?}");
-    holder.join().unwrap();
+    let (report, events) = f.walk_releasing_on_contention(&window);
 
     assert_eq!(report.stopped, StopReason::Completed);
     assert_eq!(
@@ -849,6 +873,11 @@ fn a_busy_exhausted_file_does_not_count_toward_the_broken_worker_threshold() {
         "the contended file plus seven genuine crashes"
     );
     assert_eq!(report.indexed, 0);
+    assert_eq!(
+        events.last().unwrap().contended,
+        1,
+        "one contended file, and the seven crashes must not be counted as contention: {events:?}"
+    );
 }
 
 // --------------------------------------------------------------- write contention
@@ -860,12 +889,9 @@ fn a_busy_exhausted_file_does_not_count_toward_the_broken_worker_threshold() {
 /// file's absence from `indexed` has a reason, instead of just being a gap
 /// between `found` and every other counter that nothing explains.
 ///
-/// The window holds the write lock for eighteen seconds. Three retry
-/// attempts each wait out the index's own `busy_timeout` before `ingest_file`
-/// answers `Busy` again, and the walk's next act — journalling the skip — is
-/// itself a write that gets one such window of its own. `Fixture::hold_for`
-/// carries the arithmetic that follows from those two facts and why the hold
-/// is computed from a measured timeout rather than written down as a number.
+/// The window holds the write lock until the walk itself says every retry
+/// has been refused — `Fixture::walk_releasing_on_contention` carries why
+/// that is a signal and not a computed hold, and what the hold used to cost.
 #[test]
 fn a_file_still_busy_after_every_retry_is_skipped_not_lost() {
     let f = Fixture::new();
@@ -874,26 +900,14 @@ fn a_file_still_busy_after_every_retry_is_skipped_not_lost() {
     // The window's connection, holding the write lock the way `open_index` +
     // a folder being added would (mirrors
     // `a_walk_that_meets_the_window_holding_the_write_lock_is_told_to_retry`
-    // in `tests/slice.rs`, held for long enough to exhaust every retry
+    // in `tests/slice.rs`, held until the walk has exhausted every retry
     // instead of just the first one).
     f.warm_pool();
     let window = open(&f.index_path).unwrap();
     window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
     window.insert_watched_root("/Volumes/Second").unwrap();
-    // Before the hold begins, not inside it: the probe waits out a full
-    // busy-timeout window of its own, and spending that from the margin is
-    // what reproduced the CI failure here.
-    let hold = Fixture::hold_for(f.measured_busy_timeout());
-    let holder = std::thread::spawn(move || {
-        std::thread::sleep(hold);
-        window.conn().execute_batch("COMMIT").unwrap();
-    });
 
-    let walk_started = Instant::now();
-    let report = f.walk();
-    let walk_took = walk_started.elapsed();
-    println!("MEASURE walk took {walk_took:?} against a {hold:?} hold. report = {report:?}");
-    holder.join().unwrap();
+    let (report, events) = f.walk_releasing_on_contention(&window);
 
     assert_eq!(
         report.indexed, 0,
@@ -912,24 +926,48 @@ fn a_file_still_busy_after_every_retry_is_skipped_not_lost() {
     assert_eq!(skips.len(), 1);
     assert_eq!(skips[0].relative_path, "contract.txt");
     assert_eq!(skips[0].rule, "unreadable");
+    // That the skip landed at all is the proof the event came BEFORE the
+    // skip write: emitted after it, the lock would still have been held
+    // and the walk would have returned `Err(Busy)` instead of a report.
+    // The last event counts the file in both.
+    let last = events.last().unwrap();
+    assert_eq!((last.contended, last.skipped), (1, 1), "{events:?}");
 }
 
 /// Cancellation is checked between busy retries too, not only between files
 /// in the outer loop — a single contended file can span up to three
-/// five-second attempts, and a cancel that arrives partway through must not
+/// busy-timeout attempts, and a cancel that arrives partway through must not
 /// have to wait out every remaining one first.
 ///
-/// Two assertions, because one mutation each catches and the other misses.
-/// `stopped == Cancelled` is what actually fails when the per-attempt check
-/// is removed: without it, the retry that runs once the lock is released at
-/// 8 s just succeeds — the file gets indexed, the walk finishes normally,
-/// and it does so in ~8.16 s, comfortably under the 10 s bound below, so
-/// elapsed time alone would have missed this exact regression (measured).
-/// The elapsed bound exists for the other shape of the same bug: a check
-/// that is present but only runs somewhere infrequent — after every attempt
-/// is exhausted, say — would still eventually report `Cancelled`, just after
-/// the full ~15 s three attempts need, which `stopped` alone would not
-/// notice and the bound below would.
+/// The window holds the write lock for the WHOLE walk and releases it only
+/// after `walk_root` has returned, so there is no moment at which a retry
+/// could succeed: a walk that does not notice the cancel between attempts
+/// exhausts all three, then meets the same lock on the skip write and comes
+/// back `Err(Busy)` — which `expect` turns into the failure. That is the
+/// mutation the old shape of this test (a lock released on a clock at 8 s)
+/// could only catch through `stopped`, because the released lock let the
+/// third attempt succeed instead.
+///
+/// The other shape of the same bug is a check that is present but only runs
+/// after every attempt is exhausted. Placed after the walk has reported the
+/// file as contended, it is caught without a clock: no file may have had
+/// its retries exhausted in a walk cancelled during the first attempt, so
+/// no event may carry `contended > 0`. Placed before that report, only time
+/// tells — so the elapsed bound stays, relative to the measured timeout
+/// rather than to a number of seconds. One attempt costs `T` plus its own
+/// overhead, so three cost more than `3T`; the bound is `2T`. `T` here is
+/// the probe's wait on the walk's own connection, and the walk's attempts
+/// are never shorter than it, by construction: the walk's writes open
+/// `BEGIN IMMEDIATE` transactions on that same connection under the same
+/// `busy_timeout`, and every attempt re-enters `ingest_file` from the top,
+/// paying the worker round trip before the write. Measured the same way:
+/// on `macos-14` three attempts were still under way when holds of 24.6 s
+/// and 25.8 s ended — over 8.1 s each even with phase 1 inside that
+/// interval — against a probe of 7.0–7.4 s (CI run 33668886783, attempt 1).
+/// So the bound can only loosen toward the mutant if the probe alone
+/// over-measures by half.
+/// The cancel fires at `T / 2` for the same reason: inside the first
+/// attempt, wherever that attempt's end is.
 #[test]
 fn cancellation_is_checked_between_busy_retries_not_only_between_files() {
     let f = Fixture::new();
@@ -939,48 +977,42 @@ fn cancellation_is_checked_between_busy_retries_not_only_between_files() {
     let window = open(&f.index_path).unwrap();
     window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
     window.insert_watched_root("/Volumes/Second").unwrap();
-    let hold = Fixture::hold_for(f.measured_busy_timeout());
+    let timeout = f.measured_busy_timeout();
     let cancel = AtomicBool::new(false);
+    let mut events = Vec::new();
 
-    // Held past the point cancellation should already have stopped the walk
-    // (one busy-timeout window, ~5 s) and released well short of what
-    // exhausting all three retries would need (~15 s) — see the two
-    // assertions below for what each half of that window is for.
-    let elapsed = std::thread::scope(|scope| {
-        scope.spawn(move || {
-            // Long enough that the lock is certainly still held when the
-            // walk's first attempt is refused, which is all this test needs —
-            // it asserts the cancel is noticed after that first refusal
-            // rather than after all three, and the elapsed bound below is
-            // what separates those two.
-            std::thread::sleep(hold);
-            window.conn().execute_batch("COMMIT").unwrap();
-        });
+    let (result, elapsed) = std::thread::scope(|scope| {
         scope.spawn(|| {
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(timeout / 2);
             cancel.store(true, Ordering::SeqCst);
         });
 
         let started = Instant::now();
-        let report = walk_root(
+        let result = walk_root(
             &f.pool,
             &f.db,
             f.root,
             f.dir(),
             &WalkRules::none(),
             &cancel,
-            &mut |_| {},
-        )
-        .unwrap();
-        let elapsed = started.elapsed();
-        assert_eq!(report.stopped, StopReason::Cancelled);
-        elapsed
+            &mut |p| events.push(p),
+        );
+        (result, started.elapsed())
     });
+    // Released only now — after the walk, whatever it returned.
+    window.conn().execute_batch("COMMIT").unwrap();
+    println!("MEASURE cancelled walk took {elapsed:?} against a {timeout:?} timeout");
 
+    let report = result.expect("a walk cancelled between retries never reaches the skip write");
+    assert_eq!(report.stopped, StopReason::Cancelled);
     assert!(
-        elapsed < Duration::from_secs(10),
-        "cancellation should be noticed after the first exhausted retry attempt (~5 s), \
-         not only after all three (~15 s); took {elapsed:?}"
+        events.iter().all(|p| p.contended == 0),
+        "cancelled during the first attempt, so no file may have had its retries exhausted: {events:?}"
+    );
+    assert!(
+        elapsed < timeout * 2,
+        "cancellation should be noticed after the first refused attempt (~{timeout:?}), \
+         not only after all three; took {elapsed:?}"
     );
 }
 

@@ -3676,7 +3676,8 @@ fn an_excluded_subfolder_that_still_holds_its_files_is_reconciled_not_frozen() {
 /// one-file fixture cannot see the difference — throttled or not, one file
 /// produces at most two events. Thirty can: an unthrottled walk sends one
 /// progress event per file handled in phase 2 (plus one before the loop, for
-/// phase-1 refusals), so thirty files with none refused make thirty-one:
+/// phase-1 refusals, and one more per file whose busy retries were all
+/// refused — none here), so thirty files with none refused make thirty-one:
 /// `job::REPORT_INTERVAL`'s own doc comment names exactly this shape. A
 /// throttled walk instead sends however many 250 ms windows the whole walk
 /// actually spans — bounded by wall-clock time, not by file count, so it
