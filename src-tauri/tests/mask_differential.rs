@@ -276,26 +276,21 @@ fn draw_world(seed: u64) -> World {
     let roots = 1 + rng.below(3);
     let mut files = Vec::new();
     let mut counter = 0u64;
-    let mut fresh = |rng: &mut Rng,
-                     root: usize,
-                     dir: &str,
-                     stem: &str,
-                     ext: &str,
-                     kind: NameKind|
-     -> Planned {
-        counter += 1;
-        let relative = if dir.is_empty() {
-            format!("{stem}.{ext}")
-        } else {
-            format!("{dir}/{stem}.{ext}")
+    let mut fresh =
+        |rng: &mut Rng, root: usize, dir: &str, stem: &str, ext: &str, kind: NameKind| -> Planned {
+            counter += 1;
+            let relative = if dir.is_empty() {
+                format!("{stem}.{ext}")
+            } else {
+                format!("{dir}/{stem}.{ext}")
+            };
+            Planned {
+                root,
+                relative,
+                bytes: format!("{stem} {counter} {}", rng.next()).into_bytes(),
+                kind,
+            }
         };
-        Planned {
-            root,
-            relative,
-            bytes: format!("{stem} {counter} {}", rng.next()).into_bytes(),
-            kind,
-        }
-    };
     for root in 0..roots {
         let n = 3 + rng.below(6);
         for _ in 0..n {
@@ -310,12 +305,40 @@ fn draw_world(seed: u64) -> World {
         }
         if rng.chance(60) {
             // Report.TXT beside report.txt — kept apart or folded by the volume.
-            files.push(fresh(&mut rng, root, "", "report", "txt", NameKind::CaseTwin));
-            files.push(fresh(&mut rng, root, "", "Report", "TXT", NameKind::CaseTwin));
+            files.push(fresh(
+                &mut rng,
+                root,
+                "",
+                "report",
+                "txt",
+                NameKind::CaseTwin,
+            ));
+            files.push(fresh(
+                &mut rng,
+                root,
+                "",
+                "Report",
+                "TXT",
+                NameKind::CaseTwin,
+            ));
         }
         if rng.chance(60) {
-            files.push(fresh(&mut rng, root, "", FORM_NFC, "txt", NameKind::FormTwin));
-            files.push(fresh(&mut rng, root, "", FORM_NFD, "txt", NameKind::FormTwin));
+            files.push(fresh(
+                &mut rng,
+                root,
+                "",
+                FORM_NFC,
+                "txt",
+                NameKind::FormTwin,
+            ));
+            files.push(fresh(
+                &mut rng,
+                root,
+                "",
+                FORM_NFD,
+                "txt",
+                NameKind::FormTwin,
+            ));
         }
         if rng.chance(50) {
             // A DIRECTORY named like a file, with a file inside it.
@@ -380,7 +403,14 @@ fn draw_world(seed: u64) -> World {
             }
         }
     }
-    let stored_pool = ["*.md", "*.txt", "report.txt", "*звіт*", "manifest.*", "*.TXT"];
+    let stored_pool = [
+        "*.md",
+        "*.txt",
+        "report.txt",
+        "*звіт*",
+        "manifest.*",
+        "*.TXT",
+    ];
     let mut masks: Vec<String> = Vec::new();
     for _ in 0..rng.below(4) {
         let m = (*rng.pick(&stored_pool)).to_string();
@@ -928,9 +958,8 @@ fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
     // only invalid once both commands have refused it. Those are counted
     // below, where the answer is in hand.
     match &world.candidate {
-        Candidate::CaseTwinOfStored(_)
-        | Candidate::FormTwinOfStored(_)
-        | Candidate::Invalid(_) => {}
+        Candidate::CaseTwinOfStored(_) | Candidate::FormTwinOfStored(_) | Candidate::Invalid(_) => {
+        }
         sent => {
             reached.candidates.insert(sent.label());
         }
@@ -945,7 +974,10 @@ fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
     // against the prefixes world A really holds, not against the ones the
     // generator drew.
     let a_rules = stored_rules(&a);
-    assert_eq!(persisted, a_rules, "seed {seed}: world A holds different rules");
+    assert_eq!(
+        persisted, a_rules,
+        "seed {seed}: world A holds different rules"
+    );
     assert_eq!(
         persisted,
         stored_rules(&b),
@@ -1338,7 +1370,9 @@ fn an_invalid_candidate_is_refused_alike_by_preview_and_save() {
         .find(|(ordinal, path, _)| *ordinal == 0 && path == "звіт.txt")
         .map(|(_, _, id)| id.clone())
         .expect("the fixture's one file must be indexed before the refusal");
-    let expected: BTreeSet<Key> = [(0, "звіт.txt".to_string(), document_id)].into_iter().collect();
+    let expected: BTreeSet<Key> = [(0, "звіт.txt".to_string(), document_id)]
+        .into_iter()
+        .collect();
     assert_eq!(before, expected, "a refusal must not touch the index");
     let previewed = call(
         &built.webview,
@@ -1352,7 +1386,11 @@ fn an_invalid_candidate_is_refused_alike_by_preview_and_save() {
         previewed, saved,
         "the preview and the save must refuse with one sentence"
     );
-    assert_eq!(snapshot(&built), expected, "a refusal must not touch the index");
+    assert_eq!(
+        snapshot(&built),
+        expected,
+        "a refusal must not touch the index"
+    );
 }
 
 /// The blank string is the one named exception: not malformed, previewed as two
@@ -1388,7 +1426,9 @@ fn the_blank_candidate_previews_as_zeros_and_is_refused_on_save() {
         .find(|(ordinal, path, _)| *ordinal == 0 && path == "звіт.txt")
         .map(|(_, _, id)| id.clone())
         .expect("the fixture's one file must be indexed before the calls");
-    let expected: BTreeSet<Key> = [(0, "звіт.txt".to_string(), document_id)].into_iter().collect();
+    let expected: BTreeSet<Key> = [(0, "звіт.txt".to_string(), document_id)]
+        .into_iter()
+        .collect();
     assert_eq!(
         before, expected,
         "neither the preview nor the refused save may touch the index"
