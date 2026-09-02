@@ -174,12 +174,14 @@ pub struct WalkProgress {
     /// Files whose every busy retry found the index locked by another writer
     /// (`ingest_with_busy_retry`). Counted — and reported, in a callback of
     /// its own — **the moment the last retry is refused, before the skip is
-    /// journalled**: a window drawing "the index is busy" from this learns it
-    /// then, rather than after the skip write has spent a further
-    /// `busy_timeout` of its own meeting the same lock. So in that one event
-    /// `contended` runs one ahead of what `skipped` already counts — the
-    /// file being journalled right now — and in every per-file event
-    /// afterwards `contended <= skipped` again. Never counts a worker
+    /// journalled**: a caller that wanted to show "the index is busy" (none
+    /// in this repository does yet) would learn it then, rather than after
+    /// the skip write has spent a further `busy_timeout` of its own meeting
+    /// the same lock. In that one event the file is already in `contended`
+    /// and not yet in `skipped`; in every per-file event afterwards
+    /// `contended <= skipped`. Because that callback runs *before* the skip
+    /// write, a slow sink there delays the write towards the same lock —
+    /// one more reason the callback must not block. Never counts a worker
     /// refusal: contention is evidence about whoever holds the lock, not
     /// about the file or the worker.
     pub contended: u64,
@@ -449,8 +451,10 @@ pub fn walk_root(
 
         let outcome =
             ingest_with_busy_retry(pool, db, root_id, found, cancel, &manifest, &mut || {
-                // Every retry refused, skip not yet journalled: the one event a
-                // caller gets between those two moments — see the field's doc.
+                // Every retry refused, skip not yet journalled — the one event
+                // a caller gets before the skip write, which may itself still
+                // meet the lock and end the walk with `Err(Busy)`; see the
+                // field's doc.
                 contended += 1;
                 on_progress(WalkProgress {
                     done: report.indexed + report.unchanged + report.skipped + report.refused,

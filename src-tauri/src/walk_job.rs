@@ -208,7 +208,9 @@ pub fn start_walk_job(
                     let done = progress.done;
                     let total = progress.total;
 
-                    // `walk_root` calls this once per file — `job::
+                    // `walk_root` calls this once per file (twice for a
+                    // file whose busy retries were all refused, and once
+                    // before the loop) — `job::
                     // REPORT_INTERVAL`'s own doc comment names this exact
                     // shape: "a folder of a hundred thousand files would put
                     // a hundred thousand messages through the IPC to move a
