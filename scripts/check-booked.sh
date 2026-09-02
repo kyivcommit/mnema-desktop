@@ -87,9 +87,20 @@ sweep() {
 }
 
 if [ "${1:-}" = "--self-test" ]; then
+  # The self-test runs copies of this file, and a copy must never run the
+  # self-test again: with the argument check below deleted, `--self-test bogus`
+  # on the copy recursed without end and left 944 temporary repositories
+  # behind before it was killed (fix round 2, measured). The copies are run
+  # with this variable set, and a nested self-test stops here with 3 — after
+  # the argument check, so that a bad argument is still 2 from inside. No
+  # mutant of this guard is run on purpose: deleting it recurses.
   if [ $# -ne 1 ]; then
     echo "unknown option: $2" >&2
     exit 2
+  fi
+  if [ -n "${CHECK_BOOKED_INNER:-}" ]; then
+    echo "check-booked: refusing to run the self-test from inside itself" >&2
+    exit 3
   fi
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -127,11 +138,14 @@ if [ "${1:-}" = "--self-test" ]; then
   # plain substring match and does not try to be clever about word boundaries:
   # a marker glued to a prefix is still a marker, so no row here tests that.
   green="$(mk green "// booked to Task 6 and now paid
-// ${WORD} as a word, no parenthesis")"
+// ${WORD} as a word, no parenthesis
+// ${WORD} (a space before the parenthesis)
+// ${WORD}
+// (split across two lines)")"
   out="$(sweep "$green")"; status=$?
   if [ "$status" -ne 0 ]; then
     bad=$((bad + 1))
-    echo "SELF-TEST FAILURE: prose and the bare word must exit 0; got $status:"
+    echo "SELF-TEST FAILURE: prose, the bare word, a space and a line break must exit 0; got $status:"
     printf '%s\n' "$out" | sed 's/^/  /'
   fi
 
@@ -155,6 +169,17 @@ if [ "${1:-}" = "--self-test" ]; then
     printf '%s\n' "$out" | sed 's/^/  /'
   fi
 
+  # An existing directory that is no repository is `git grep`'s own failure
+  # (128), which must come back as 2 and not as "nothing found" — the guard
+  # above the found branch had no test until this row (fix round 2).
+  mkdir -p "$tmp/plain"
+  out="$(sweep "$tmp/plain" 2>/dev/null)"; status=$?
+  if [ "$status" -ne 2 ]; then
+    bad=$((bad + 1))
+    echo "SELF-TEST FAILURE: a directory that is not a repository must exit 2; got $status:"
+    printf '%s\n' "$out" | sed 's/^/  /'
+  fi
+
   # The script itself, not only the function: CI reads the exit status of
   # the last line of this file, and a self-test that stops at `sweep` leaves
   # that line unguarded — `sweep "$REPO" || exit 0` survived the first version
@@ -165,11 +190,21 @@ if [ "${1:-}" = "--self-test" ]; then
     dir="$tmp/${pair%%:*}"; want="${pair##*:}"
     mkdir -p "$dir/scripts"
     cp "${BASH_SOURCE[0]}" "$dir/scripts/check-booked.sh"
-    out="$(bash "$dir/scripts/check-booked.sh")"; status=$?
+    out="$(CHECK_BOOKED_INNER=1 bash "$dir/scripts/check-booked.sh")"; status=$?
     if [ "$status" -ne "$want" ]; then
       bad=$((bad + 1))
       echo "SELF-TEST FAILURE: the script run on the ${pair%%:*} repository must exit $want; got $status:"
       printf '%s\n' "$out" | sed 's/^/  /'
+    fi
+  done
+  # An argument the script does not know is refused with 2, in both spellings;
+  # without this row the refusal stood on `set -u` alone (fix round 2).
+  for args in "bogus" "--self-test bogus"; do
+    # shellcheck disable=SC2086
+    CHECK_BOOKED_INNER=1 bash "$tmp/green/scripts/check-booked.sh" $args > /dev/null 2>&1; status=$?
+    if [ "$status" -ne 2 ]; then
+      bad=$((bad + 1))
+      echo "SELF-TEST FAILURE: \`$args\` must be refused with 2; got $status"
     fi
   done
 
@@ -177,7 +212,7 @@ if [ "${1:-}" = "--self-test" ]; then
     echo "--- self-test: $bad failure(s) ---"
     exit 1
   fi
-  echo "--- self-test: red on committed markers, green on prose, the bare word and an untracked file; the script's own exit status checked both ways ---"
+  echo "--- self-test: red on committed markers; green on every non-match the header names and an untracked file; 2 on a missing root, a non-repository and a bad argument; the script's own exit status checked both ways ---"
   exit 0
 fi
 

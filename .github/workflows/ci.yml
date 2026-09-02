@@ -419,9 +419,10 @@ jobs:
       # out here, because this file is swept too — the first draft of this
       # comment was the sweep's first finding): PR 8b shipped two promises that
       # lived only in a comment and were never done, and this is what makes
-      # such a promise a red line instead of a note. The second is `check-citations.sh`, which proves every
-      # `file:line` written in a comment lands inside its file — never that it
-      # names the right line, which is a reader's call. Its ruling in D137 that
+      # such a promise a red line instead of a note. The second is
+      # `check-citations.sh`, which proves every `file:line` written in a comment
+      # lands inside its file — never that it names the right line, which is a
+      # reader's call. Its ruling in D137 that
       # it could not be wired in because a stale citation would make it red was
       # withdrawn there: it exits 0 over the whole tree, and this is the line
       # that keeps it so. Its output is the sweep's own reading matter and is
@@ -432,8 +433,9 @@ jobs:
         run: scripts/check-booked.sh
       - name: Check that every source citation lands inside its file
         run: |
-          scripts/check-citations.sh > citations.txt \
-            || { sed -n '/mechanical problem/,$p' citations.txt; exit 1; }
+          scripts/check-citations.sh > "$RUNNER_TEMP/citations.txt" \
+            || { grep -A 200 'mechanical problem' "$RUNNER_TEMP/citations.txt" \
+                 || tail -n 20 "$RUNNER_TEMP/citations.txt"; exit 1; }
       - name: Check that every mutation case still applies
         run: scripts/mutation-staleness.sh
       - name: Provision the toolchain named in rust-toolchain.toml
