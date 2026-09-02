@@ -46,9 +46,10 @@
 # marker — and runs the SAME function this script runs on the real tree, not a
 # copy of the pattern, asserting red on the first and green on the second.
 # Then it copies this file into each repository's `scripts/` and runs it there
-# as CI would, asserting the exit status of the whole script and not only of
-# the function. A self-test that only checks the pattern against strings would
-# say nothing about the exit code, which is the only thing CI reads.
+# as CI runs it (plus a nesting depth CI never sets), asserting the exit
+# status of the whole script and not only of the function. A self-test that
+# only checks the pattern against strings would say nothing about the exit
+# code, which is the only thing CI reads.
 
 set -u
 
@@ -92,17 +93,21 @@ if [ "${1:-}" = "--self-test" ]; then
     exit 2
   fi
   # The self-test runs copies of this file, and a copy must never run the
-  # self-test again: with the argument check above deleted, `--self-test bogus`
-  # on a copy recursed without end and left 944 temporary repositories behind
-  # before it was killed (fix round 2, measured; and `perl -e alarm` does not
-  # contain it — it kills the top process and orphans the children, which
-  # went on multiplying). Every copy is run with `CHECK_BOOKED_DEPTH` one
-  # higher than its parent's, and a nested self-test stops here with 3. The
-  # second `if` is the first one's backstop: with the first deleted, a nested
-  # run reaches depth 3 and exits 4 instead of running forever, so the probe
-  # below (which asserts 3) can kill a mutant of the first guard in finite
-  # time. Deleting BOTH recurses; that pair is the one mutant not to run.
-  # Both sit after the argument check, so a bad argument is 2 from inside too.
+  # self-test again. Every copy is run with `CHECK_BOOKED_DEPTH` one higher
+  # than its parent's; a nested self-test stops here with 3, and the second
+  # `if` is the first one's backstop — with the first deleted, a nested run
+  # reaches depth 3 and exits 4 instead of running forever, so the probe
+  # below (which asserts 3) kills a mutant of the first guard in finite time,
+  # and a second probe claims depth 3 outright and asserts 4.
+  # ⚠️ **Any mutation that stops the depth from growing recurses without end**
+  # — both guards deleted, or the `+ 1` dropped from the increment — and no
+  # such mutant is to be run: the property, not a list, is what to check a
+  # candidate mutant against. (History, for the size of the hazard: before
+  # the depth existed, a copy that reached the self-test again left 944
+  # temporary repositories behind before it was killed, and `perl -e alarm`
+  # did not contain it — it kills the top process and orphans the children.)
+  # Both guards sit after the argument check, so a bad argument is 2 from
+  # inside too.
   depth="${CHECK_BOOKED_DEPTH:-0}"
   if [ "$depth" -ge 3 ]; then
     echo "check-booked: self-test nested $depth deep, stopping" >&2
@@ -197,7 +202,8 @@ if [ "${1:-}" = "--self-test" ]; then
   # that line unguarded — `sweep "$REPO" || exit 0` survived the first version
   # of this self-test (review of PR #28, Important 2). A copy of this file is
   # placed under `scripts/` of each throwaway repository, where `REPO` resolves
-  # to that repository, and run as CI would run it.
+  # to that repository, and run as CI would run it — with one variable CI
+  # never sets, the nesting depth, so a copy cannot start a self-test of its own.
   for pair in "red:1" "green:0"; do
     dir="$tmp/${pair%%:*}"; want="${pair##*:}"
     mkdir -p "$dir/scripts"
@@ -227,12 +233,19 @@ if [ "${1:-}" = "--self-test" ]; then
     bad=$((bad + 1))
     echo "SELF-TEST FAILURE: a nested self-test must stop with 3; got $status"
   fi
+  # The backstop, reached directly by claiming depth 3, so its mutant is red
+  # without any nesting at all (review of round 3, question 1b).
+  CHECK_BOOKED_DEPTH=3 bash "$tmp/green/scripts/check-booked.sh" --self-test > /dev/null 2>&1; status=$?
+  if [ "$status" -ne 4 ]; then
+    bad=$((bad + 1))
+    echo "SELF-TEST FAILURE: a self-test at depth 3 must stop with 4; got $status"
+  fi
 
   if [ "$bad" -ne 0 ]; then
     echo "--- self-test: $bad failure(s) ---"
     exit 1
   fi
-  echo "--- self-test: red on committed markers; green on every non-match the header names and an untracked file; 2 on a missing root, a non-repository and a bad argument; the script's own exit status checked both ways ---"
+  echo "--- self-test: red on committed markers; green on every non-match the header names and an untracked file; 2 on a missing root, a non-repository and a bad argument; 3 on a nested self-test and 4 at depth 3; the script's own exit status checked both ways ---"
   exit 0
 fi
 

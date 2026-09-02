@@ -430,11 +430,13 @@ jobs:
       # and only when it fails — a red step with no output would send whoever
       # reads it back to a local run to learn which citation moved.
       - name: Check that no obligation is still written into the code
-        run: scripts/check-booked.sh
+        run: |
+          scripts/check-booked.sh --self-test > /dev/null
+          scripts/check-booked.sh
       - name: Check that every source citation lands inside its file
         run: |
           scripts/check-citations.sh > "$RUNNER_TEMP/citations.txt" \
-            || { awk '/mechanical problem/ {p = 1} p' "$RUNNER_TEMP/citations.txt" | grep . \
+            || { awk '/^--- [0-9]+ mechanical problem/ {p = 1} p' "$RUNNER_TEMP/citations.txt" | grep . \
                  || tail -n 20 "$RUNNER_TEMP/citations.txt"; exit 1; }
       - name: Check that every mutation case still applies
         run: scripts/mutation-staleness.sh

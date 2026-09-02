@@ -44,8 +44,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # The two checks that read comments rather than code, first because they cost
 # about a second and compile nothing: an obligation written into a comment
-# (`check-booked.sh`) and a citation whose line is past the end of its file
-# (`check-citations.sh`). `ci.yml` runs the same two in its `mutations` job.
+# (`check-booked.sh`, its own self-test first, so the sweep is not trusted on
+# a broken script) and a citation whose line is past the end of its file
+# (`check-citations.sh`). `ci.yml` runs the same in its `mutations` job.
+scripts/check-booked.sh --self-test > /dev/null
 scripts/check-booked.sh
 # The citation sweep prints every citation it checked (2 700 lines) and its
 # problem list last; only that list is worth a screen, and only on failure.
@@ -56,7 +58,7 @@ scripts/check-booked.sh
 # never runs an EXIT trap (review of PR #28, fix round 1, Minor 2).
 cit="$(mktemp)"; trap 'rm -f "$cit"' EXIT
 scripts/check-citations.sh > "$cit" \
-  || { awk '/mechanical problem/ {p = 1} p' "$cit" | grep . || tail -n 20 "$cit"; exit 1; }
+  || { awk '/^--- [0-9]+ mechanical problem/ {p = 1} p' "$cit" | grep . || tail -n 20 "$cit"; exit 1; }
 rm -f "$cit"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/clippy"
 exec cargo clippy --workspace --all-targets "$@" -- -D warnings
