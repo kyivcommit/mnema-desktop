@@ -1711,6 +1711,7 @@ test('excluding a folder that holds two documents names two paths AND two docume
     'Exclude drop?',
     'As of now: on the next scan the index loses 2 files from this folder,',
     'and 2 documents stop being findable: no other path names them.',
+    'The scan can remove more than that: files that never finished indexing are not counted here.',
     'Confirm Cancel',
   ].join(' '));
   // The question is a question: nothing is stored while it is on screen.
@@ -1733,6 +1734,7 @@ test('a second copy inside the same root keeps the document, so the count is one
     'Exclude drop?',
     'As of now: on the next scan the index loses 1 file from this folder,',
     'and no document stops being findable — each is also indexed under another path.',
+    'The scan can remove more than that: files that never finished indexing are not counted here.',
     'Confirm Cancel',
   ].join(' '));
 });
@@ -1749,6 +1751,7 @@ test('a second copy under a DIFFERENT watched folder keeps the document too', as
     'Exclude drop?',
     'As of now: on the next scan the index loses 1 file from this folder,',
     'and no document stops being findable — each is also indexed under another path.',
+    'The scan can remove more than that: files that never finished indexing are not counted here.',
     'Confirm Cancel',
   ].join(' '));
 });
@@ -1799,6 +1802,7 @@ test('a sibling whose name merely starts with the prefix is not counted', async 
     'Exclude drop?',
     'As of now: on the next scan the index loses 1 file from this folder,',
     'and 1 document stops being findable: no other path names it.',
+    'The scan can remove more than that: files that never finished indexing are not counted here.',
     'Confirm Cancel',
   ].join(' '));
 });
@@ -2119,6 +2123,7 @@ test('a question already on screen switches language with everything else', asyn
     'Виключити drop?',
     'Станом на зараз: при наступному скануванні індекс втратить 2 файли із цієї теки,',
     'а 2 документи більше не знайдуться: інші шляхи на них не ведуть.',
+    'Сканування може прибрати більше: файли, які так і не проіндексувалися, тут не враховані.',
     'Підтвердити Скасувати',
   ].join(' '));
   // The two aria-labels `visibleText` cannot see: `confirmAriaLabel` and
@@ -2164,6 +2169,7 @@ test('the wait for the fresh reply says what is being checked', async () => {
     'Exclude drop?',
     'As of now: on the next scan the index loses 1 file from this folder,',
     'and 1 document stops being findable: no other path names it.',
+    'The scan can remove more than that: files that never finished indexing are not counted here.',
     'Confirm Cancel',
   ].join(' ')));
 });
@@ -2627,6 +2633,7 @@ test('an exclude question is asked as before when this folder\'s id and path sti
     'Exclude Work?',
     'As of now: on the next scan the index loses 2 files from this folder,',
     'and 2 documents stop being findable: no other path names them.',
+    'The scan can remove more than that: files that never finished indexing are not counted here.',
     'Confirm Cancel',
   ].join(' '));
   expect(screen.queryByTestId('folders-root-changed')).toBeNull();

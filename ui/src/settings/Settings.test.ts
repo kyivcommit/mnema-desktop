@@ -27,6 +27,15 @@ vi.mock('../lib/ipc', () => ({
   providerModels: () => Promise.resolve({ entries: [], unreadable: 0, unreadableRecords: [] }),
   setChatModel: vi.fn(),
   listTree: () => Promise.resolve({ roots: [], recents: [] }),
+  // Task 11 mounts `Masks` into the same panel, and it reads the mask list on
+  // mount. Left out of this mock the wrapper is `undefined`, the call throws,
+  // and every test in this file would run beside an unhandled rejection —
+  // `jobStatus` below is the same lesson. An empty list is enough: nothing
+  // here exercises the editor's own behaviour, that lives in Masks.test.ts.
+  listMasks: () => Promise.resolve([]),
+  maskPreview: vi.fn(),
+  addMask: vi.fn(),
+  removeMask: vi.fn(),
   addWatchedFolder: vi.fn(),
   removeWatchedFolder: vi.fn(),
   // The window creates the job controller on mount and asks `job_status`
@@ -76,6 +85,14 @@ test('clicking Folders shows the Folders heading and removes the Models heading'
   await waitFor(() =>
     expect(within(panel()!).getByText('No folder has been added yet.')).toBeTruthy(),
   );
+  // And the same claim for the mask editor, which shares this panel: a mask is
+  // global, so it is drawn beside the folder list rather than inside a folder
+  // row. This is text only `Masks.svelte` renders, so deleting `<Masks />`
+  // fails here rather than passing quietly on the <h2> above.
+  await waitFor(() =>
+    expect(within(panel()!).getByText('No file mask has been added yet.')).toBeTruthy(),
+  );
+  expect(within(panel()!).getByRole('heading', { name: 'File masks' })).toBeTruthy();
 });
 
 // Owner's ruling: `aria-disabled` came off these buttons. They are fully

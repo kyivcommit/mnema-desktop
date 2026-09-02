@@ -8521,3 +8521,1287 @@ fn excluding_a_folder_the_walk_already_prunes_is_refused_and_stores_nothing() {
         "the refusals must leave nothing stored and the acceptances exactly themselves"
     );
 }
+
+// --------------------------------------------------------------- file masks
+
+/// The three shapes a mask has to tell apart in one walk, all with plain-text
+/// bytes so `classify` reads every one of them as text (D41: the extension
+/// only decides between text formats, and `%PDF-` magic is what makes a PDF).
+///
+/// - `report.pdf` — the file a `*.pdf` mask is written to remove;
+/// - `notes.txt` — the file it must leave alone, so "the mask fired" and "the
+///   walk indexed nothing" are different results;
+/// - `archive.pdf/keep.txt` — 🔴 a FOLDER whose name matches the mask, holding
+///   a file whose name does not. `ignore`'s override parser matches a
+///   non-directory-only pattern against directories too
+///   (`ignore-0.4.31/src/gitignore.rs:273`), and with masks in that layer this
+///   whole subtree disappeared on a rule a person wrote about files —
+///   measured, in the plan's D-c. Task 9 moved masks out of the `Override` for
+///   it and closed it at the enumeration level; this fixture is what closes it
+///   end to end, through a real walk and the index.
+fn mask_fixture_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the mask fixture");
+    std::fs::create_dir(dir.path().join("archive.pdf")).expect("creating archive.pdf/");
+    std::fs::write(
+        dir.path().join("archive.pdf/keep.txt"),
+        "the file inside the folder named like the mask mentions herons",
+    )
+    .expect("writing archive.pdf/keep.txt");
+    std::fs::write(
+        dir.path().join("report.pdf"),
+        "the masked file mentions herons",
+    )
+    .expect("writing report.pdf");
+    std::fs::write(
+        dir.path().join("notes.txt"),
+        "the kept file mentions herons",
+    )
+    .expect("writing notes.txt");
+    dir
+}
+
+/// The three commands, through the IPC — which is also what proves they are
+/// registered and that `remove_mask`'s boolean survives the crossing.
+///
+/// Both directions on the removal: `true` the first time and `false` the
+/// second. A pass-through that answered `true` unconditionally would satisfy
+/// the first half alone, and the window renders the two as different sentences.
+#[test]
+fn the_mask_commands_store_list_and_remove_through_the_ipc() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!([]),
+        "a fresh index holds no masks"
+    );
+
+    for pattern in ["*.tmp", "*.pdf"] {
+        call(&webview, "add_mask", json!({ "pattern": pattern }))
+            .unwrap_or_else(|e| panic!("add_mask({pattern}) was rejected: {e}"));
+    }
+    // Sorted, and inserted out of order so the list is not merely echoing the
+    // order it was given.
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!(["*.pdf", "*.tmp"])
+    );
+
+    assert_eq!(
+        call(&webview, "remove_mask", json!({ "pattern": "*.pdf" }))
+            .expect("remove_mask was rejected"),
+        json!(true),
+        "removing a stored mask must report that a row went"
+    );
+    assert_eq!(
+        call(&webview, "remove_mask", json!({ "pattern": "*.pdf" }))
+            .expect("remove_mask was rejected"),
+        json!(false),
+        "removing a mask that is not there is not an error, and not a removal"
+    );
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!(["*.tmp"]),
+        "the mask that was not named must still be there"
+    );
+}
+
+/// 🔴 **The obligation `migrations.rs:119-124` books to this layer, discharged:
+/// an equivalent spelling is not stored, and the answer names the spelling that
+/// is already there.**
+///
+/// `file_mask.pattern` is a `TEXT PRIMARY KEY`, so the store separates rows
+/// BYTE-wise while the walk compares masks caselessly. That is a decision, not
+/// a defect — folding at the storage layer would rewrite what a person typed —
+/// and it is pinned on the storage side by
+/// `two_masks_differing_only_in_case_are_two_rows_and_neither_is_rewritten`.
+/// What it leaves this command owing is the sentence. Measured on the running
+/// application: with `*.pdf` stored, typing `*.PDF` was accepted and appeared
+/// as a second row, and removing `*.pdf` afterwards gave no files back because
+/// the second row was still holding them.
+///
+/// **The list after each add is what makes this a test rather than an echo.** A
+/// command that answered `alreadyStored` and inserted anyway would satisfy the
+/// answer assertions alone, and the harm here is entirely in the row.
+///
+/// Three states, and the third is the one a `to_lowercase`-shaped comparison
+/// gets wrong: case (`*.PDF` over `*.pdf`), a genuinely new mask (which must
+/// still be stored — a command that answered `alreadyStored` for everything
+/// would pass the first state twice), and **normalisation** — `Résumé.txt`
+/// typed composed against the decomposed spelling already stored, which is the
+/// form macOS puts on disk and which no amount of lowercasing brings together.
+#[test]
+fn a_mask_that_is_already_stored_under_another_spelling_is_not_stored_again() {
+    // NFD, the form the live run verified on disk (`65 cc81`), stored first;
+    // NFC is what a person types.
+    const RESUME_NFD: &str = "Re\u{301}sume\u{301}.txt";
+    const RESUME_NFC: &str = "R\u{e9}sum\u{e9}.txt";
+    assert_ne!(
+        RESUME_NFD, RESUME_NFC,
+        "the two spellings must really be different strings, or this case pins nothing"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    assert_eq!(
+        call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected"),
+        json!({ "kind": "stored" }),
+        "the first add of a mask nothing matches must report that a row was written"
+    );
+
+    // The live run's own example, and the commonest duplicate there is: the
+    // SAME string twice. Every other case below differs in case or in normal
+    // form, so a fixture named after the live run did not build the state the
+    // live run found (independent review, Minor 2).
+    //
+    // ⚠️ **It is a regression pin, not a guard, and saying so is the point.**
+    // No mutant kills this line alone. Measured, because an earlier wording of
+    // this comment reasoned it out and got the mechanism backwards: deleting
+    // the equivalence `find` fails `*.PDF` below and **leaves this line
+    // green**, since `Db::add_mask` is `INSERT … ON CONFLICT DO NOTHING` over a
+    // BINARY-collated primary key and still answers a byte-identical duplicate
+    // correctly on its own. And with the `find` in place the only wrong answer
+    // available is a wrong `stored` value, which is right for an identical
+    // string and wrong for `*.PDF` — so that mutant kills the neighbour, not
+    // this line. It is here because the live run's example belongs in the file
+    // named after it, not because it adds coverage.
+    assert_eq!(
+        call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected"),
+        json!({ "kind": "alreadyStored", "stored": "*.pdf" }),
+        "adding the identical string twice must report the row already there, not a second write"
+    );
+
+    assert_eq!(
+        call(&webview, "add_mask", json!({ "pattern": "*.PDF" })).expect("add_mask was rejected"),
+        json!({ "kind": "alreadyStored", "stored": "*.pdf" }),
+        "an equivalent spelling must be refused storage AND name the row standing in its way"
+    );
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!(["*.pdf"]),
+        "the equivalent spelling must not have been stored as a second row"
+    );
+
+    // A genuinely different rule still stores, so the arm above is not simply
+    // "adding never works".
+    assert_eq!(
+        call(&webview, "add_mask", json!({ "pattern": "*.tmp" })).expect("add_mask was rejected"),
+        json!({ "kind": "stored" }),
+        "a mask that is not an equivalent spelling of a stored one must still be stored"
+    );
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!(["*.pdf", "*.tmp"])
+    );
+
+    // Normalisation, not case: nothing here differs in letter case at all.
+    call(&webview, "add_mask", json!({ "pattern": RESUME_NFD }))
+        .expect("add_mask(NFD) was rejected");
+    assert_eq!(
+        call(&webview, "add_mask", json!({ "pattern": RESUME_NFC }))
+            .expect("add_mask was rejected"),
+        json!({ "kind": "alreadyStored", "stored": RESUME_NFD }),
+        "the same accented mask in two normal forms is one rule, and the stored spelling \
+         is the decomposed one that is actually in the index"
+    );
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!(["*.pdf", "*.tmp", RESUME_NFD]),
+        "the composed spelling must not have been stored beside the decomposed one"
+    );
+}
+
+/// 🔴 The rule `add_mask` exists to enforce: the candidate is validated before
+/// it is stored, and the refusal is `RulesError`'s own sentence.
+///
+/// `logs/*.tmp` is the case that matters, and not because it fails to compile
+/// — it compiles fine. `MaskLayer` asks about a file's NAME, so a mask holding
+/// `/` would be stored, would sit in the editor looking like a rule, and would
+/// match nothing for the life of the index; under D29 every file it was
+/// supposed to hold back keeps going to a third-party provider. That is the
+/// exact shape `./Photos` had on the exclusion side.
+///
+/// The stored list is asserted afterwards, not just the refusal: a command
+/// that refused AND stored would pass on the error alone.
+#[test]
+fn adding_a_malformed_mask_is_refused_and_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let refused = match call(&webview, "add_mask", json!({ "pattern": "logs/*.tmp" })) {
+        Ok(answered) => panic!("a mask holding `/` must be refused, not answered {answered}"),
+        Err(refused) => refused,
+    };
+    assert_eq!(
+        refused,
+        json!(
+            "file mask \"logs/*.tmp\" cannot contain `/` — a mask names a file, and a folder \
+             is excluded with an exclusion rule instead"
+        ),
+        "the refusal must be RulesError's own sentence, whole"
+    );
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!([]),
+        "a refused mask must leave nothing stored"
+    );
+}
+
+/// 🔴 The empty string and a whitespace-only mask are DIFFERENT refusals, and
+/// this test exists because the obvious implementation makes them one.
+///
+/// `validate_mask` answers `Ok(None)` — no error — for the literal empty string
+/// alone; `"   "` is `RulesError::MaskSurroundingWhitespace`. So a command that
+/// trimmed before its blank check would hand a person who typed spaces "a file
+/// mask cannot be empty" instead of the sentence that tells them what to do,
+/// and a command with no blank check at all would store a rule that removes
+/// nothing.
+///
+/// Both sentences are asserted in full, and the list after both, because the
+/// failure that costs something is the one where a refusal is reported and a
+/// row is written anyway.
+#[test]
+fn a_blank_and_a_whitespace_only_mask_are_refused_with_their_own_sentences() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let blank = match call(&webview, "add_mask", json!({ "pattern": "" })) {
+        Ok(answered) => panic!("the empty string must be refused, not answered {answered}"),
+        Err(refused) => refused,
+    };
+    assert_eq!(
+        blank,
+        json!("a file mask cannot be empty"),
+        "the empty string is not a RulesError at all, so it needs its own sentence"
+    );
+
+    let spaces = match call(&webview, "add_mask", json!({ "pattern": "   " })) {
+        Ok(answered) => panic!("a whitespace-only mask must be refused, not answered {answered}"),
+        Err(refused) => refused,
+    };
+    assert_eq!(
+        spaces,
+        json!("file mask \"   \" begins or ends with whitespace — remove it"),
+        "a whitespace-only mask is a validator refusal, not the blank one"
+    );
+    assert_ne!(
+        spaces, blank,
+        "the two must not collapse into one sentence: only one of them tells the \
+         person what to change"
+    );
+
+    assert_eq!(
+        call(&webview, "list_masks", json!({})).expect("list_masks was rejected"),
+        json!([]),
+        "neither refusal may leave a row behind"
+    );
+}
+
+/// Seeds a second indexed path for a document that already has one — the state
+/// `mask_preview` has to tell apart from two documents, and the state a fixture
+/// with one path per document cannot build.
+fn seed_second_copy(db: &mnema_index::Db, root: i64, id: &str, relative_path: &str) {
+    use mnema_core::OnDisk;
+    db.insert_path(
+        root,
+        relative_path,
+        id,
+        OnDisk {
+            size_bytes: 1,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .expect("seed: a second path for the same document");
+}
+
+/// 🔴 `paths` and `documents` are different numbers, and this fixture is built
+/// so that a preview counting one as the other is wrong rather than lucky.
+///
+/// Two documents, three indexed paths, mask `*.pdf`:
+///
+/// - `solo` at `solo.pdf` — its only path matches, so it stops being findable;
+/// - `twin` at `twin.pdf` AND `twin.txt` — one path matches, and the document
+///   survives through the other copy.
+///
+/// So `paths: 2, documents: 1`. Counting paths as documents gives 2 and
+/// **overstates the loss**, which is the direction D-d was rewritten to
+/// forbid: a person told they will lose a document they will not lose acts on
+/// a claim that is false. `deleting_one_copy_keeps_the_document`
+/// (`crates/mnema-ingest/tests/walk.rs`) is what makes `twin` a real state and
+/// not a contrivance — a document dies when its LAST path goes.
+///
+/// Both numbers are asserted. `paths` alone is satisfied by a preview that
+/// never groups at all, and `documents` alone by one that returns a constant.
+#[test]
+fn mask_preview_counts_paths_and_documents_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, root, "solo", "solo.pdf");
+            seed_indexed_file(db, root, "twin", "twin.pdf");
+            seed_second_copy(db, root, "twin", "twin.txt");
+            Ok(())
+        })
+        .expect("seeding the index");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.pdf" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 2, "documents": 1 }),
+        "two paths match, and only the document whose every path matches goes"
+    );
+
+    // The other direction, on the same fixture: a mask that takes only the
+    // second copy removes a path and destroys nothing.
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.txt" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 0 }),
+        "the paths go and the document stays findable through its other copy"
+    );
+}
+
+/// 🔴 The preview counts over INDEXED PATHS, never over a disk listing, and
+/// this is the fixture that can tell those apart.
+///
+/// `MaskLayer::matches` answers about a name and nothing about the entry, while
+/// the walk asks `is_file() && matches(name)`. Over `path` rows the difference
+/// is unreachable — those are regular files a walk already took. Over a
+/// `read_dir` it is not, and the error runs one way only: the preview would
+/// show a person MORE files than the next walk will take. `ghost.pdf` here is
+/// on disk and not in the index; a disk-counting preview answers 1.
+///
+/// The second half is the guard on the first: with the same file seeded into
+/// the index, the same mask answers 1. Without it, a preview hard-coded to zero
+/// would pass.
+#[test]
+fn mask_preview_counts_the_index_and_not_the_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("ghost.pdf"), "never indexed").unwrap();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.pdf" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 0, "documents": 0 }),
+        "a file the index does not hold is not one the next walk removes from it"
+    );
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, root, "ghost", "ghost.pdf");
+            Ok(())
+        })
+        .expect("seeding the index");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.pdf" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 1 }),
+        "the same file, now indexed, is one the next walk removes"
+    );
+}
+
+/// A mask is global, so the preview is too: it counts across every watched
+/// folder, not the one a window happens to be showing.
+///
+/// 🔴 I1 — `documents` is the number this fixture exists to guard, and an
+/// earlier version of it did not: `shared`'s second copy matched too
+/// (`there.pdf`), so `documents` was `1` whether or not the second root was
+/// ever visited and the whole kill of the root-narrowing mutant
+/// (`db.list_watched_roots()?.into_iter().take(1)`) came from `paths` alone
+/// (`paths: 1, documents: 1` under the mutant vs. `paths: 2, documents: 1`
+/// correct — `documents` never moved). Here `shared`'s second copy
+/// (`there.txt`, under root 1) does **not** match `*.pdf`, so the document
+/// stays findable through it and the correct answer is `documents: 0`. A
+/// preview that only ever reaches root 0 — the mutant above, or a naive "stop
+/// at the first root" implementation — sees `shared` with every path it
+/// visited matching and answers `documents: 1`, overstating a loss that is not
+/// real. `paths` is `1` either way (only `here.pdf` ever matches), so this is
+/// the fixture in which `documents`, not `paths`, is what fails. Verified
+/// against `tree.rs:222-243`: `per_document["shared"]` ends at `(seen: 2,
+/// matched: 1)` when both roots are read, so `seen == matched` is false and the
+/// entry is excluded; under the mutant root 1 is never read, so the entry ends
+/// at `(1, 1)` and is included.
+#[test]
+fn mask_preview_counts_across_every_watched_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let mut roots = Vec::new();
+    for fixture in [&first, &second] {
+        roots.push(
+            call(
+                &webview,
+                "add_watched_folder",
+                json!({ "path": fixture.path().display().to_string() }),
+            )
+            .expect("add_watched_folder was rejected")
+            .as_i64()
+            .expect("add_watched_folder did not return an id"),
+        );
+    }
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, roots[0], "shared", "here.pdf");
+            seed_second_copy(db, roots[1], "shared", "there.txt");
+            seed_indexed_file(db, roots[1], "other", "other.txt");
+            Ok(())
+        })
+        .expect("seeding the index");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.pdf" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 0 }),
+        "`here.pdf` matches and `there.txt` does not, so `shared` is not fully \
+         matched and must not be counted as a document that stops being findable"
+    );
+}
+
+/// 🔴 **The preview answers the DIFFERENCE this press makes against the whole
+/// rule set the next scan will apply — not a property of the candidate mask
+/// alone.**
+///
+/// The state is ordinary rather than contrived: it is what you are in every
+/// time you add a second mask before scanning. `*.pdf` is stored and no scan
+/// has run, so the index still holds what that mask will take; a document is
+/// indexed at both `copy.pdf` and `copy.txt`.
+///
+/// **The pair is the whole finding, and one half alone passes on the broken
+/// code.** With nothing stored, `*.txt` takes one of the document's two paths
+/// and the document survives through the other — `documents: 0`, and that is
+/// true. With `*.pdf` stored, `copy.pdf` is already going on the next scan
+/// whatever happens here, so the only path this document has left is
+/// `copy.txt`, and this press is what takes it: `documents: 1`. A preview that
+/// counts the candidate against the index instead of against the rule set
+/// answers `0` for both and tells a person "no document stops being findable —
+/// each is also indexed under another path" about a document that is about to
+/// go. That is the **understating** direction, on the one screen whose job is
+/// to state the loss.
+///
+/// `paths` is `1` in both states and is asserted in both: it is the number that
+/// does NOT move here, so `documents` is what the fixture is built to fail on,
+/// and asserting the pair is what says the fix did not simply inflate `paths`.
+#[test]
+fn mask_preview_answers_the_difference_against_the_stored_masks() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, root, "copy", "copy.pdf");
+            seed_second_copy(db, root, "copy", "copy.txt");
+            Ok(())
+        })
+        .expect("seeding the index");
+
+    // The negation first, on the same fixture and the same candidate: with no
+    // rule stored, the document really does survive through its other copy.
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.txt" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 0 }),
+        "with nothing stored, `copy.pdf` still names the document and it stays findable"
+    );
+
+    call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.txt" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 1 }),
+        "`*.pdf` is already taking `copy.pdf` on the next scan, so `copy.txt` is the document's \
+         last surviving path and this press is what takes it"
+    );
+}
+
+/// 🔴 **`documents` errs in the UNDERSTATING direction, and an ordinary
+/// in-tree `.gitignore` is what reaches it.** This is the fixture nobody had
+/// built, and it is why the editor's zero arm now says what this rule takes
+/// instead of promising that no document stops being findable (fix round 6).
+///
+/// [`mnema_walk::AppliedRules`] deliberately does not cover the in-tree
+/// `.gitignore` stack, while the walk applies it with **no git repository
+/// present**. So for a path a `.gitignore` covers, `current.removes_file` is
+/// `false`: the path counts as SURVIVING and is not taken, `surviving != taken`
+/// holds, and the document is not counted — while the next scan drops that path
+/// anyway and the document loses its last one. An extra surviving path makes
+/// `paths` larger and `documents` **smaller**, and smaller is the direction
+/// this whole screen exists to close.
+///
+/// **The state is asserted rather than assumed.** The same root is walked
+/// twice: without the mask the walk already drops `copy.txt`, which is what
+/// says the `.gitignore` is really in force here; with the mask it keeps
+/// neither of the document's paths. That pair is the loss the number denies.
+///
+/// **Both directions, on the same fixture, one press apart.** Replace the
+/// invisible mechanism with one the preview CAN see — a stored `*.txt` — and
+/// the same document, the same candidate and the same real outcome answer
+/// `documents: 1`. So the `0` above comes from the mechanism being invisible,
+/// not from a preview that has stopped counting. Which half kills what was
+/// measured, not reasoned: a filter of `taken > 0` in place of
+/// `surviving == taken` is killed by the FIRST `mask_preview` assertion
+/// (`documents: 1` where 0 is asserted) and the second survives it; a filter
+/// that counts no document at all is killed by the SECOND (`documents: 0`
+/// where 1 is asserted) and the first survives it. Neither half stands on the
+/// other, and neither stands on `paths`.
+///
+/// ⚠️ **The variable between the two states is the MECHANISM'S VISIBILITY to
+/// [`mnema_walk::AppliedRules`], not the presence of a file.** Deleting the
+/// `.gitignore` would change nothing here — the preview never reads it either
+/// way, so the first assertion would still be `documents: 0` and the fixture
+/// would build one state and call it two. Do not "simplify" the second half
+/// into a run without the `.gitignore`; the stored `*.txt` is the point,
+/// because it removes the same path through a rule the preview can see.
+///
+/// ⚠️ **This pins a measured limitation, not a wanted behaviour.** Covering the
+/// `.gitignore` stack means compiling it per directory from files inside the
+/// tree, and this command reads the index rather than the disk by design; the
+/// ruling was to correct what is claimed about the number, not the number. A
+/// change that makes the preview see the `.gitignore` turns the `documents: 0`
+/// assertion red — read this comment then, and the editor's zero arm with it
+/// (`settings_masks_add_cost` in `ui/src/i18n/catalog.ts`).
+#[test]
+fn mask_preview_understates_documents_behind_an_in_tree_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join(".gitignore"), "copy.txt\n").unwrap();
+    std::fs::write(fixture.path().join("report.pdf"), "a").unwrap();
+    std::fs::write(fixture.path().join("copy.txt"), "a").unwrap();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, root, "pair", "report.pdf");
+            seed_second_copy(db, root, "pair", "copy.txt");
+            Ok(())
+        })
+        .expect("seeding the index");
+
+    // What the NEXT SCAN keeps, through the walk itself rather than through the
+    // preview's view of the rules — the two are the whole finding.
+    let kept = |masks: Vec<String>| {
+        let rules = mnema_walk::WalkRules::new(true, true, Vec::new())
+            .expect("the built-in layers must compile")
+            .with_masks(masks)
+            .expect("the fixture's masks must compile");
+        let mut names = mnema_walk::enumerate(fixture.path(), &rules)
+            .found
+            .into_iter()
+            .map(|f| f.relative)
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+
+    assert_eq!(
+        kept(Vec::new()),
+        [".gitignore", "report.pdf"],
+        "the in-tree `.gitignore` applies with no git repository present, so `copy.txt` is \
+         already going on the next scan before any mask is added — this is the state the \
+         preview cannot see"
+    );
+    assert_eq!(
+        kept(vec!["*.pdf".to_string()]),
+        [".gitignore"],
+        "with the candidate applied, NEITHER of `pair`'s paths survives the next scan: the \
+         document really does stop being findable"
+    );
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.pdf" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 0 }),
+        "`copy.txt` is invisible to `AppliedRules`, so it counts as a surviving path and \
+         suppresses a document the two walks above show losing its last one: `documents` is \
+         0 where the honest answer is 1, which is the UNDERSTATING direction"
+    );
+
+    // The other direction, one press apart: the same document, the same
+    // candidate and the same real outcome, with the second path taken by a rule
+    // the preview can see.
+    call(&webview, "add_mask", json!({ "pattern": "*.txt" })).expect("add_mask was rejected");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.pdf" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 1 }),
+        "a stored `*.txt` takes `copy.txt` where the `.gitignore` did, and this one the \
+         preview sees: `report.pdf` is the document's last surviving path and this press is \
+         what takes it"
+    );
+}
+
+/// 🔴 **Both halves of the rule set, and this is the other half.** A stored
+/// path exclusion is per-root and is applied by the very same walk
+/// (`walk_job.rs` reads prefixes and masks under one lock, as one question), so
+/// a preview that reads only the masks understates the loss in exactly the way
+/// the sibling above pins for masks.
+///
+/// `pair` is indexed at `Archive/report.txt` and at `report.md`. With `Archive`
+/// excluded for this root, `Archive/report.txt` is already going on the next
+/// scan, so `report.md` is the document's last surviving path and `*.md` takes
+/// it.
+///
+/// The negation runs first on the same fixture: without the exclusion the same
+/// candidate leaves the document findable under `Archive/report.txt`. `paths`
+/// is `1` in both states — only `report.md` ever matches `*.md` — so
+/// `documents` is the number that moves, and a preview that ignores prefixes
+/// answers `0` twice.
+#[test]
+fn mask_preview_counts_a_roots_stored_path_exclusions_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, root, "pair", "report.md");
+            seed_second_copy(db, root, "pair", "Archive/report.txt");
+            Ok(())
+        })
+        .expect("seeding the index");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.md" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 0 }),
+        "with no exclusion stored, `Archive/report.txt` still names the document"
+    );
+
+    // Straight through `Db`: `exclude_subfolder` wants the folder on disk and
+    // this fixture is about the rule, not about the listing that offers it.
+    app.state::<AppState>()
+        .with_index(|db| {
+            db.add_path_exclusion(root, "Archive")?;
+            Ok(())
+        })
+        .expect("storing the exclusion");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.md" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 1 }),
+        "the stored exclusion is already taking `Archive/report.txt` on the next scan, so \
+         `report.md` is the document's last surviving path"
+    );
+}
+
+/// A path the CURRENT rule set already removes is not part of the difference
+/// this press makes, and must not be counted into `paths` either.
+///
+/// `*.pdf` is stored and `report.pdf` is indexed under it. Previewing `*` — the
+/// widest mask there is — must answer `1`, for `notes.txt` alone: `report.pdf`
+/// is going on the next scan whether this press happens or not, so charging it
+/// to this press would tell a person that cancelling saves a file it does not
+/// save.
+///
+/// Both directions on the same fixture: with nothing stored the same `*`
+/// answers `2`, which is what says the `1` above is a difference and not a
+/// preview that has simply stopped counting.
+#[test]
+fn mask_preview_does_not_charge_this_press_for_what_a_stored_rule_already_takes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, root, "report", "report.pdf");
+            seed_indexed_file(db, root, "notes", "notes.txt");
+            Ok(())
+        })
+        .expect("seeding the index");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 2, "documents": 2 }),
+        "with nothing stored, `*` takes both indexed paths and both documents"
+    );
+
+    call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 1 }),
+        "`report.pdf` is already going on the next scan, so only `notes.txt` is what this \
+         press adds"
+    );
+}
+
+/// 🔴 A stored mask must not make the preview treat a DIRECTORY that shares its
+/// name as already gone. D-c end to end, from the preview's side: the walk asks
+/// `is_file() && matches(name)`, so `archive.pdf/keep.txt` survives a stored
+/// `*.pdf` and is still a path this press can take.
+///
+/// Under a rule set that asked the masks about every component, `keep.txt`
+/// would count as already removed and the candidate `*.txt` would answer
+/// `paths: 0, documents: 0` — "this mask takes nothing" about the one file it
+/// actually takes.
+#[test]
+fn mask_preview_does_not_let_a_stored_mask_prune_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, root, "kept", "archive.pdf/keep.txt");
+            Ok(())
+        })
+        .expect("seeding the index");
+
+    call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.txt" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 1 }),
+        "a stored mask never prunes the folder that shares its name, so the file inside it is \
+         still there for this press to take"
+    );
+
+    // The other direction: the stored mask is genuinely inert over this
+    // fixture, so a candidate that matches nothing answers zero rather than
+    // inheriting the count above.
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.pdf" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 0, "documents": 0 }),
+        "`*.pdf` takes nothing here beyond what is already stored — the folder is not a file"
+    );
+}
+
+/// A FILE named like an anchored build directory is not an anchored directory,
+/// and the preview has to agree with the walk about that.
+///
+/// `builder()`'s `filter_entry` says so in as many words — *"Named like an
+/// anchored dir but not one — e.g. a file called `target` — nothing to anchor
+/// against"* — so a file called `target` beside a `Cargo.toml` is indexed and is
+/// a path a mask can still take. A rule set that asked the anchored layer of the
+/// last component too would call it already pruned and answer "this mask takes
+/// nothing" about the only file there is.
+///
+/// Both directions: the marker really is there (so the anchored layer is live
+/// over this fixture, not merely absent), and a second document under an actual
+/// `target/` directory beside it is the path the layer DOES take, which is why
+/// this fixture can tell "asked of directories" from "asked of nothing".
+#[test]
+fn mask_preview_does_not_treat_a_file_named_like_a_build_directory_as_pruned() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("Cargo.toml"), b"[package]").unwrap();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, root, "named", "target");
+            seed_indexed_file(db, root, "output", "target/build.log");
+            Ok(())
+        })
+        .expect("seeding the index");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 1 }),
+        "the file called `target` is still there for a mask to take, while the path under the \
+         `target/` DIRECTORY beside its `Cargo.toml` is already pruned by the anchored layer"
+    );
+}
+
+/// The preview refuses on a **stored** rule that no longer validates, exactly as
+/// `start_walk_job` refuses the walk on one — because it now builds the same
+/// rule set that walk would build, and a preview cannot honestly put a number
+/// on a scan that is going to stop before it starts.
+///
+/// Both stored halves, and both are reachable the same one way: `Db::add_mask`
+/// and `Db::add_path_exclusion` deliberately do not validate, because
+/// validation belongs at the command where a person is standing there to fix
+/// it — which is also how a rule written by an older build with a narrower
+/// validator arrives.
+///
+/// The negation is the third assertion: with both bad rows gone the same
+/// candidate previews a number again, so this is a statement about the stored
+/// rule and not about a preview that has started refusing everything.
+#[test]
+fn mask_preview_refuses_when_a_stored_rule_no_longer_validates() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            seed_indexed_file(db, root, "notes", "notes.txt");
+            db.add_mask("logs/*.tmp")?;
+            Ok(())
+        })
+        .expect("writing a mask the command layer would have refused");
+
+    let refused = match call(&webview, "mask_preview", json!({ "pattern": "*.txt" })) {
+        Ok(answered) => {
+            panic!("a broken stored mask must refuse the preview, not answer {answered}")
+        }
+        Err(refused) => refused,
+    };
+    assert_eq!(
+        refused,
+        json!(
+            "file mask \"logs/*.tmp\" cannot contain `/` — a mask names a file, and a folder \
+             is excluded with an exclusion rule instead"
+        ),
+        "the refusal must carry the stored rule's own sentence, naming the rule to fix"
+    );
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            db.remove_mask("logs/*.tmp")?;
+            db.add_path_exclusion(root, "../escape")?;
+            Ok(())
+        })
+        .expect("writing a prefix the command layer would have refused");
+
+    let refused = match call(&webview, "mask_preview", json!({ "pattern": "*.txt" })) {
+        Ok(answered) => {
+            panic!("a broken stored exclusion must refuse the preview, not answer {answered}")
+        }
+        Err(refused) => refused,
+    };
+    assert_eq!(
+        refused,
+        json!(
+            "exclusion rule \"../escape\" has a `..` path component — name the folder \
+             directly, not `.` or `..`"
+        ),
+        "the other stored half refuses too, with its own sentence"
+    );
+
+    app.state::<AppState>()
+        .with_index(|db| {
+            db.remove_path_exclusion(root, "../escape")?;
+            Ok(())
+        })
+        .expect("clearing the exclusion");
+
+    assert_eq!(
+        call(&webview, "mask_preview", json!({ "pattern": "*.txt" }))
+            .expect("mask_preview was rejected"),
+        json!({ "paths": 1, "documents": 1 }),
+        "with nothing broken stored, the same candidate previews a number again"
+    );
+}
+
+/// A malformed pattern is refused rather than previewed as zero, and it is
+/// refused with the same sentence saving it would give.
+///
+/// Zero is the answer that costs something here: it reads as "this rule would
+/// remove nothing", which a person can act on by saving it — and the save then
+/// fails with a sentence they were given no reason to expect.
+#[test]
+fn mask_preview_refuses_a_malformed_pattern_rather_than_answering_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let refused = match call(&webview, "mask_preview", json!({ "pattern": "logs/*.tmp" })) {
+        Ok(answered) => panic!("a malformed mask must be refused, not previewed as {answered}"),
+        Err(refused) => refused,
+    };
+    assert_eq!(
+        refused,
+        json!(
+            "file mask \"logs/*.tmp\" cannot contain `/` — a mask names a file, and a folder \
+             is excluded with an exclusion rule instead"
+        ),
+        "previewing a malformed mask must give the same sentence saving it would"
+    );
+
+    // The other half of "the same sentence": the command that stores it agrees.
+    let on_save = match call(&webview, "add_mask", json!({ "pattern": "logs/*.tmp" })) {
+        Ok(answered) => panic!("a malformed mask must be refused, not answered {answered}"),
+        Err(refused) => refused,
+    };
+    assert_eq!(refused, on_save);
+}
+
+/// 🔴 The whole point of the task: a stored mask actually removes files from
+/// the index, on the next walk, and takes nothing else with it.
+///
+/// Three assertions rather than one, because they are three different facts.
+/// The first walk's contents say the fixture was indexable at all — without it
+/// the rest is a claim about a walk that indexed nothing. `removed` says the
+/// walk reconciled, and the contents afterwards say it reconciled the RIGHT
+/// row: a walk that removed one path and a walk that removed the wrong one
+/// report the same number.
+///
+/// `archive.pdf/keep.txt` surviving is the directory case, end to end. With
+/// masks in the shared `Override` this file would go with `report.pdf` —
+/// measured in the plan's D-c, where `kept` came back as `["notes.txt"]`
+/// alone.
+#[test]
+fn a_walk_applies_a_stored_mask_and_keeps_the_folder_that_shares_its_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = mask_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec![
+            "archive.pdf/keep.txt".to_string(),
+            "notes.txt".to_string(),
+            "report.pdf".to_string(),
+        ],
+        "the first walk did not index all three files, so nothing below is about the mask"
+    );
+
+    call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected");
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(1),
+        "the walk did not reconcile away the newly masked file: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["archive.pdf/keep.txt".to_string(), "notes.txt".to_string()],
+        "the mask took the wrong file, or took a whole folder that merely shares its name"
+    );
+}
+
+/// 🔴 A mask is GLOBAL: one rule removes matching files under every watched
+/// folder, each on its own next scan.
+///
+/// Both halves are asserted, and the second is the one a per-root
+/// implementation would fail: after the first root is walked its PDF is gone
+/// and the second root's is still there — *because nothing has walked it yet*,
+/// not because the mask does not reach it. Then the second root is walked and
+/// its PDF goes too. That middle state is exactly what the editor must not let
+/// a person read as "the mask only applied to one folder", and it is why the
+/// sentence Task 11 owes has two halves.
+#[test]
+fn a_mask_removes_matching_files_under_every_watched_root_on_that_roots_next_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let first = mask_fixture_dir();
+    let second = mask_fixture_dir();
+    let mut roots = Vec::new();
+    for fixture in [&first, &second] {
+        let root = call(
+            &webview,
+            "add_watched_folder",
+            json!({ "path": fixture.path().display().to_string() }),
+        )
+        .expect("add_watched_folder was rejected")
+        .as_i64()
+        .expect("add_watched_folder did not return an id");
+        run_walk_to_completion(&app, root);
+        roots.push(root);
+    }
+    for root in &roots {
+        assert!(
+            indexed_paths(&app, *root).contains(&"report.pdf".to_string()),
+            "both roots must start out holding the file the mask will take"
+        );
+    }
+
+    call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected");
+
+    run_walk_to_completion(&app, roots[0]);
+    assert!(
+        !indexed_paths(&app, roots[0]).contains(&"report.pdf".to_string()),
+        "the walked root must have lost its masked file"
+    );
+    assert!(
+        indexed_paths(&app, roots[1]).contains(&"report.pdf".to_string()),
+        "the root nothing has walked yet must be untouched: a mask takes effect \
+         on each root's own next scan, and the window must not imply one scan \
+         settles it"
+    );
+
+    run_walk_to_completion(&app, roots[1]);
+    assert!(
+        !indexed_paths(&app, roots[1]).contains(&"report.pdf".to_string()),
+        "the second root's own scan must apply the same global mask"
+    );
+    assert!(
+        indexed_paths(&app, roots[1]).contains(&"archive.pdf/keep.txt".to_string()),
+        "and must still leave the folder that merely shares the mask's name alone"
+    );
+}
+
+/// A stored mask that no longer validates refuses the walk rather than letting
+/// it run with the rule silently absent — the same answer, and for the same
+/// reason under D29, that a stored prefix gets.
+///
+/// The state is reachable one way only: `Db::add_mask` deliberately does not
+/// validate, because validation belongs at the command where a person is
+/// standing there to fix it. That is also how a mask written by an older build
+/// with a narrower validator arrives.
+#[test]
+fn a_stored_mask_that_no_longer_validates_refuses_the_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = mask_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    app.state::<AppState>()
+        .with_index(|db| db.add_mask("logs/*.tmp"))
+        .expect("writing a mask the command layer would have refused");
+
+    let (channel, _events) = job_channel();
+    let refused = walk_job::start_walk_job(app.state::<AppState>(), root, channel)
+        .expect_err("a walk under an invalid stored mask must be refused");
+    assert_eq!(
+        refused.to_string(),
+        "file mask \"logs/*.tmp\" cannot contain `/` — a mask names a file, and a folder \
+         is excluded with an exclusion rule instead",
+        "the refusal must carry RulesError's own sentence"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        Vec::<String>::new(),
+        "the refusal must come before anything is indexed"
+    );
+}
+
+/// 🔴 B1 — a walk is never exercised with more than one stored mask. The call
+/// at `walk_job.rs:149` passes the whole vector to a single `.with_masks(masks)`
+/// and that is correct, but every OTHER walk fixture in this file stores
+/// exactly one mask, so a mutant that truncates the stored set to its first
+/// element (`db.list_masks()?.into_iter().take(1).collect::<Vec<_>>()`) leaves
+/// the entire package green. This is the exact twin of the exclusion side's
+/// "every stored prefix must reach `WalkRules::new`, not only the first"
+/// (`scripts/mutations/pr8-exclusions.sh`), and the mask layer inherited the
+/// code shape without inheriting the guard.
+///
+/// **Deliberately `*.pdf` and `*.tmp`, not `*.pdf` and `*.txt`.**
+/// `MaskLayer::matches` asks about the file's LAST path component
+/// (`rules.rs:410`), so a `*.txt` mask would also take `archive.pdf/keep.txt`
+/// by its basename `keep.txt` — folding the directory-name-collision case into
+/// this one and making "the folder that shares its name survives" false for a
+/// reason that has nothing to do with the set-truncation defect this test
+/// exists to catch. `*.tmp` matches nothing already in `mask_fixture_dir()`,
+/// so `draft.tmp` is written into a copy of it here, and it is the ONLY file
+/// the second mask can take.
+///
+/// **The masks are added in an order that makes the mutant's `take(1)` bite.**
+/// `Db::list_masks` returns patterns sorted (pinned by
+/// `the_mask_commands_store_list_and_remove_through_the_ipc`), and `"*.pdf"` <
+/// `"*.tmp"` byte-for-byte, so `take(1)` keeps `*.pdf` and drops `*.tmp`
+/// regardless of the order `add_mask` was called in. Under the mutant
+/// `report.pdf` still goes and `draft.tmp` does not — the walk reports
+/// `completed` and `removed: 1` where two masks were stored.
+#[test]
+fn a_walk_applies_every_stored_mask_not_only_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = mask_fixture_dir();
+    std::fs::write(
+        fixture.path().join("draft.tmp"),
+        "the second masked file mentions herons",
+    )
+    .expect("writing draft.tmp");
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    run_walk_to_completion(&app, root);
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec![
+            "archive.pdf/keep.txt".to_string(),
+            "draft.tmp".to_string(),
+            "notes.txt".to_string(),
+            "report.pdf".to_string(),
+        ],
+        "the first walk did not index all four files, so nothing below is about the masks"
+    );
+
+    for pattern in ["*.pdf", "*.tmp"] {
+        call(&webview, "add_mask", json!({ "pattern": pattern }))
+            .unwrap_or_else(|e| panic!("add_mask({pattern}) was rejected: {e}"));
+    }
+
+    let ending = run_walk_and_capture_ending(&app, root);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the second walk did not finish, so its counts prove nothing: {ending}"
+    );
+    assert_eq!(
+        ending["removed"],
+        json!(2),
+        "the walk did not reconcile away both masked files, only truncating to \
+         the first stored mask would leave one of them behind: {ending}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        vec!["archive.pdf/keep.txt".to_string(), "notes.txt".to_string()],
+        "both stored masks must apply — a set truncated to the first would leave \
+         draft.tmp indexed, and the folder sharing the mask's name must still survive"
+    );
+}

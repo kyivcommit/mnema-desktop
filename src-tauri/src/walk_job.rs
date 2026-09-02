@@ -58,7 +58,8 @@ pub fn start_walk_job(
     root_id: i64,
     on_progress: Channel<JobEvent>,
 ) -> Result<(), Error> {
-    // The root's path and the exclusion rules for that root, read under one
+    // The root's path, the exclusion rules for that root and the file masks,
+    // read under one
     // `with_index` lock rather than two. They are one question — what is
     // being walked, and with which rules — and every writer in this crate
     // reaches the index through the same mutex, so two acquisitions leave a
@@ -68,10 +69,19 @@ pub fn start_walk_job(
     // `ignore_rule` rows away with it (`write.rs:757-784`), so a path read
     // before it and an exclusion list read after it describe two different
     // states of the index. One lock makes the pair one answer.
-    let (root, user_prefixes) = state.with_index(|db| {
+    //
+    // The masks join the same read for the same reason and not because they
+    // are related to the prefixes — they are not: a mask belongs to no root
+    // (D-c) and `Db::list_masks` takes no `root_id`. What makes them one
+    // question is that they are all "the rules this walk runs under", and a
+    // mask committed by a second window between two acquisitions would produce
+    // a walk that applied the exclusions of one moment and the masks of
+    // another.
+    let (root, user_prefixes, masks) = state.with_index(|db| {
         Ok((
             db.watched_root_path(root_id)?,
             db.list_path_exclusions(root_id)?,
+            db.list_masks()?,
         ))
     })?;
     let root = PathBuf::from(root.ok_or(Error::UnknownWatchedRoot(root_id))?);
@@ -125,7 +135,18 @@ pub fn start_walk_job(
     // would have left this comment claiming a pin that was gone (review
     // round 2, N4). A later change to that `Ok(None)` cannot now quietly
     // turn this line into a refusal.
-    let rules = WalkRules::new(true, true, user_prefixes)?;
+    // 🔴 `with_masks` REPLACES the mask set rather than adding to it, so the
+    // whole stored set goes in ONE call. Two successive calls would leave the
+    // walk applying only the second one's masks, silently — every file the
+    // first call named would stay indexed and, under D29, keep going to the
+    // provider, with the walk reporting `completed`.
+    //
+    // A refusal here stops the walk for the reason the paragraph above gives
+    // for prefixes, and a stored mask CAN fail: `Db::add_mask` deliberately
+    // does not validate, and `validate_mask` may grow. The one non-error is
+    // the same one — `Ok(None)` for the literal empty string — so a blank
+    // stored row drops out and the walk runs with the masks it does have.
+    let rules = WalkRules::new(true, true, user_prefixes)?.with_masks(masks)?;
 
     // `Pool::new` never touches the worker path — it opens the diagnostics
     // file, if any, and allocates empty slots. A worker that does not exist

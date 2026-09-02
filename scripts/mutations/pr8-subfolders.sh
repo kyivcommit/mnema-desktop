@@ -276,7 +276,7 @@ case_ "Subfolder crosses the wire in camelCase" \
 # `exclude_subfolder` writes a rule the walk ignores.
 case_ "the built-in question is asked of every component, not the last one" \
   crates/mnema-walk/src/rules.rs \
-  's~            if self\.over\.matched\(&path, true\)\.is_ignore\(\) \{~            if self.over.matched(\&path, true).is_ignore()\n                \&\& path == self.root.join(relative_path)\n            { /* mutant: last component only */~' \
+  's~        if over\.matched\(&path, is_dir\)\.is_ignore\(\) \{~        if over.matched(\&path, is_dir).is_ignore()\n            \&\& path == root.join(relative_path)\n        { /* mutant: last component only */~' \
   '{ /* mutant: last component only */' \
   mnema-desktop 'everything_under_a_built_in_directory_is_built_in_too' --test commands
 
@@ -306,7 +306,7 @@ case_ "the walker compiles the same built-in patterns the predicate does" \
 # it.
 case_ "the anchored build-output layer is visible in the listing" \
   crates/mnema-walk/src/rules.rs \
-  's~            let anchored = WalkRules::ANCHORED_DIRS\.iter\(\)\.any\(\|\(dir, markers\)\| \{\n                \*dir == component && markers\.iter\(\)\.any\(\|marker\| parent\.join\(marker\)\.is_file\(\)\)\n            \}\);~            let anchored = false; /* mutant: anchored layer invisible */~' \
+  's~        let anchored = is_dir\n            && WalkRules::ANCHORED_DIRS\.iter\(\)\.any\(\|\(dir, markers\)\| \{\n                \*dir == component && markers\.iter\(\)\.any\(\|marker\| parent\.join\(marker\)\.is_file\(\)\)\n            \}\);~        let anchored = false; /* mutant: anchored layer invisible */~' \
   'let anchored = false; /* mutant: anchored layer invisible */' \
   mnema-desktop 'an_anchored_build_directory_is_built_in_only_beside_its_marker' --test commands
 

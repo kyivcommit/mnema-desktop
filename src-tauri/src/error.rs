@@ -51,8 +51,16 @@ pub enum Error {
     /// the path it names.
     #[error("no watched folder with id {0}")]
     UnknownWatchedRoot(i64),
-    /// A prefix `WalkRules::new` refuses. **Two producers**, and the second
-    /// is why the first's guarantee is not one:
+    /// A rule `mnema-walk` refuses — a folder prefix or, since PR 8b, a file
+    /// mask. **The name says "exclusion" and the type is `RulesError`, which
+    /// carries both**; it is kept because nothing branches on an error kind
+    /// here (every rejection is serialised as `to_string()`) and because the
+    /// sentence a person reads is `RulesError`'s own either way, never this
+    /// variant's name. Booked to Task 12 as a naming residual rather than
+    /// renamed inside a task that is about masks.
+    ///
+    /// **Three producers**, and the second is why the first's guarantee is not
+    /// one:
     ///
     /// - `exclude_subfolder` runs the validator before the row is written,
     ///   so nothing the commands store is ever a prefix the walk would then
@@ -67,10 +75,30 @@ pub enum Error {
     ///   validate. There the refusal stops the whole job rather than one
     ///   save, which is the conservative direction under D29 — see that call
     ///   site's own comment.
+    /// - `bridge::add_mask` and `tree::mask_preview` run the mask half of the
+    ///   same validator over one candidate mask, through
+    ///   `WalkRules::none().with_masks(vec![candidate])`. `mask_preview`
+    ///   validates for a reason of its own: previewing a malformed mask must
+    ///   give the same sentence saving it would, not a count of zero that reads
+    ///   as "this rule would remove nothing". Since fix round 4 it then builds
+    ///   the whole rule set the next scan will apply — that root's stored
+    ///   prefixes and every stored mask — so it can refuse for a **stored**
+    ///   rule too, the same refusal `start_walk_job` gives one bullet up and
+    ///   for the same reason: a preview cannot put a number on a scan that is
+    ///   going to stop before it starts. The candidate is validated first, so a
+    ///   malformed candidate still gets its own sentence rather than another
+    ///   rule's.
     ///
     /// `#[from]` carries `RulesError`'s own sentence unchanged, which is
     /// already safe to show: every variant names the rule the person typed
     /// and nothing else.
+    ///
+    /// ⚠️ One exception to "the rule the person typed", inherited from
+    /// `validate_mask` and booked to Task 11: `RulesError::InvalidMask`'s
+    /// `reason` is `globset`'s own message about the **folded** pattern, so
+    /// someone who typed `[A-_]x.txt` reads about `'[a-_]x.txt'`. The `mask`
+    /// field beside it is what they typed. Not made worse here, and not
+    /// redesigned here either.
     #[error("{0}")]
     InvalidExclusionRule(#[from] mnema_walk::RulesError),
     /// `exclude_subfolder` was handed the empty string. `validate_prefix`
@@ -82,6 +110,24 @@ pub enum Error {
     /// can produce and this case never reaches.
     #[error("an exclusion rule cannot be empty")]
     BlankExclusionRule,
+    /// `add_mask` was handed the empty string. Exactly the same shape as
+    /// [`Error::BlankExclusionRule`] one layer up — `validate_mask` answers
+    /// `Ok(None)` for the literal empty string, which is not an error, and a
+    /// command reading "no error" as "store it" would write a mask that removes
+    /// nothing and sits in the editor looking like a rule.
+    ///
+    /// 🔴 **Only the LITERAL empty string reaches this.** A whitespace-only
+    /// mask (`"   "`) is a `RulesError::MaskSurroundingWhitespace` and arrives
+    /// as [`Error::InvalidExclusionRule`] carrying that sentence — so this
+    /// command must not trim before it checks, or a person who typed spaces
+    /// would get "a file mask cannot be empty" for a mask the validator has a
+    /// better sentence about.
+    ///
+    /// Its own variant rather than reusing the exclusion one, because the
+    /// sentence is what reaches a person and "exclusion rule" is the wrong noun
+    /// in a mask editor.
+    #[error("a file mask cannot be empty")]
+    BlankMask,
     /// `list_exclusions` stat'd the watched root itself and it was not
     /// there — an unmounted external drive, a network volume down, the
     /// folder moved. Refusing the whole call is the conservative direction:

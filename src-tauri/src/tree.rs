@@ -135,6 +135,262 @@ pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
     state.with_index(|db| db.read_snapshot(build_tree_listing))
 }
 
+/// What a mask would take **beyond the rules the next scan already applies** —
+/// the built-in layers, each root's stored path exclusions and every stored
+/// mask, not the stored ones alone — as of now, in two numbers with
+/// **different subjects** (D-d). [`mask_preview`] defines that set; the
+/// built-in layers are in it and are not stored, which is why this sentence
+/// does not say "already stored" (fix round 6).
+///
+/// `paths` and `documents` are not two ways of saying the same thing, and
+/// conflating them overstates the loss. A document is destroyed only when its
+/// **last** path goes (`forget_if_unnamed`, inside phase 3's transaction;
+/// `deleting_one_copy_keeps_the_document` in `crates/mnema-ingest/tests/walk.rs`
+/// pins it), so a mask that takes one of two copies of a file removes a path
+/// and destroys nothing. Reporting that as a lost document is a claim a person
+/// acts on — and an overstated disclosure is worse than none.
+///
+/// 🔴 **Both numbers are a difference between two rule sets, never a property
+/// of one mask.** [`mask_preview`] defines the current set and the new set and
+/// carries the reason; these field docs quote that definition and must not
+/// outlive it. Fix round 4 is what it costs when they do: the definition moved
+/// there and these four sentences stayed behind, still describing a number
+/// that had stopped existing.
+///
+/// 🔴 **`documents == 0` is a statement about this rule, and the editor says
+/// nothing about documents at all when it reads one** (fix round 7, owner's
+/// ruling; `settings_masks_add_cost`'s `=0` arm is empty, and the sentence is
+/// the file count and the two-way hedge). A zero means no document has its last
+/// surviving path taken *by this rule*; it does **not** mean no document stops
+/// being findable, and three rounds of trying to say the narrow version on
+/// screen each shipped the wide one. Two mechanisms falsify it, and neither is
+/// visible to this count:
+///
+/// - the in-tree `.gitignore` stack, outside both rule sets
+///   ([`mnema_walk::WalkRules::applied_to`] names it as what `AppliedRules` does
+///   not cover) while the walk applies it with no git repository present — so a
+///   path it covers counts as SURVIVING and not taken, and the document is
+///   suppressed. Measured rather than reasoned, in
+///   `mask_preview_understates_documents_behind_an_in_tree_gitignore`
+///   (`tests/commands.rs`): a two-path document, `documents: 0`, and a next scan
+///   that leaves it with no path at all;
+/// - **status.** `Db::indexed_files_under_root`
+///   (`crates/mnema-index/src/write.rs`) selects `WHERE … d.status = 'indexed'`
+///   while `document.status` defaults to `'pending'`
+///   (`crates/mnema-index/src/schema.sql`) and `path` rows are written
+///   independently, so a `pending`, `failed` or `skipped` document's only path
+///   is outside this population entirely and the next walk removes it.
+///
+/// `mask_preview` is where the direction of the first residue is written down:
+/// **larger for `paths`, smaller for `documents`**.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskPreview {
+    /// Paths of `status = 'indexed'` DOCUMENTS that survive the current rule
+    /// set and do **not** survive the new one, across **all** watched roots.
+    ///
+    /// Not "indexed paths": the population is `Db::indexed_files_under_root`
+    /// (`crates/mnema-index/src/write.rs`, `WHERE … d.status = 'indexed'`), and
+    /// status is a property of the document — a `pending` or `failed`
+    /// document's paths are in the `path` table and are **not** here, while the
+    /// walk's reconcile set does not ask about status at all. That is one of
+    /// the two reasons the next scan can remove more than this number says, and
+    /// the editor's sentence carries it. [`mask_preview`] holds the definition;
+    /// this quotes it (fix round 6).
+    pub paths: i64,
+    /// The `documentId`s findable under the current rule set — at least one
+    /// surviving path — that are **not** findable under the new one: the ones
+    /// whose last surviving path this rule takes.
+    ///
+    /// "Findable" is meant against those two rule sets and **nothing wider**,
+    /// which is the whole of the arm above: a document this number does not
+    /// count can still stop being findable, through a mechanism neither set
+    /// represents. It used to say "the ones that stop being findable at all"
+    /// (fix round 6).
+    pub documents: i64,
+}
+
+/// What adding `pattern` would remove **that your rules do not already
+/// remove** — the difference this press makes, counted over the index.
+/// Read-only.
+///
+/// 🔴 **A difference between two rule sets, never a property of one mask, and
+/// this is the whole of what the command is for.** Until fix round 4 it built
+/// `WalkRules::none().with_masks(vec![pattern])` and counted with that, while
+/// `walk_job.rs:149` builds `WalkRules::new(true, true, user_prefixes)?
+/// .with_masks(masks)?` — so the preview answered a question the next scan was
+/// not going to be asked. The reproduction is ordinary rather than contrived:
+/// `*.pdf` stored, no scan run yet, a document indexed at both `copy.pdf` and
+/// `copy.txt`. Previewing `*.txt` answered `documents: 0`, and the editor said
+/// *"no document stops being findable — each is also indexed under another
+/// path"*; the next scan applied both masks and the document was gone. The
+/// direction of the error is the worst available — it **understates** the loss,
+/// on the one screen whose job is to state it.
+///
+/// So the two numbers are defined against two sets:
+///
+/// - the **current set** is what the next scan would apply today: the built-in
+///   layers, each root's own stored path exclusions, and every stored mask;
+/// - the **new set** is the current set plus the candidate;
+/// - `paths` counts indexed paths that survive the current set and do not
+///   survive the new one;
+/// - `documents` counts documents findable under the current set — at least one
+///   surviving path — that are not findable under the new one.
+///
+/// A path a stored rule already takes is therefore charged to that rule and not
+/// to this press: it is going on the next scan whether this question is
+/// confirmed or cancelled, and telling a person that cancelling saves it would
+/// be a second false promise in the other direction.
+///
+/// 🔴 **Through [`mnema_walk::AppliedRules`], never a second matcher.** The
+/// window has no glob library (`ui/package.json`), and a count derived there
+/// would be a second implementation of the rule that disagrees with the walk at
+/// exactly the edges Task 9 spent its cases pinning: the `.gitignore` parser
+/// edges, the case folding, the normalisation form. This is that plan's review
+/// round 1, P1 — and fix round 4 is what happens when a preview stands not on a
+/// second copy of the rule but on a *subset* of it.
+///
+/// 🔴 **Counted over indexed relative paths, never over a disk listing.**
+/// [`mnema_walk::MaskLayer::matches`] answers about a *name* and nothing about
+/// the entry, while the walk asks `is_file() && matches(name)` — so on a
+/// symlink, a FIFO, or an entry whose `file_type()` cannot be read, the
+/// predicate says "removed" where the walk removes nothing. The skew is
+/// one-directional: everything the walk takes, the predicate also calls taken,
+/// never the reverse. Over `path` rows it is unreachable, because those are
+/// regular files the walk already indexed; over a `read_dir` it is reachable,
+/// and the preview would show a person more files than the next walk takes.
+///
+/// **It validates the candidate first, alone, before the index is touched** —
+/// so previewing a malformed mask gives the same sentence saving it would, and
+/// so that sentence is about the mask being typed rather than about some other
+/// rule already in storage. Not a count of zero, which reads as "this rule
+/// would remove nothing" and is the opposite of true for a rule that cannot be
+/// stored at all. A **stored** rule that no longer validates is a different
+/// answer and a deliberate one: it refuses here, exactly as it refuses the walk
+/// (`walk_job.rs`), because a preview cannot honestly put a number on a scan
+/// that is going to stop before it starts.
+///
+/// **The literal empty string is not malformed and previews as two zeros.** It
+/// is `validate_mask`'s one non-error, meaning "no rule" — the blank row in an
+/// editor before anything is typed — and zero is the honest answer for it.
+/// [`crate::bridge::add_mask`] is where it is refused, because storing it is
+/// the harm.
+///
+/// **Grouping, and why it is complete.** `documents` counts the ids for which
+/// every surviving path is taken, over all roots at once — a mask is global, so
+/// a document with a copy under a second watched folder must be seen whole.
+/// `Db::indexed_files_under_root` returns the paths of `status = 'indexed'`
+/// documents only, and status is a property of the *document*: either all of a
+/// document's paths are in this set or none are. So a document that appears
+/// here appears with **all** of its paths, and "every surviving path is taken"
+/// is asked of the whole set rather than of a visible fragment of it.
+///
+/// ⚠️ **The lock is held across the READS and nothing else.** The rule sets are
+/// compiled and the paths matched **after** `with_index` returns, so evaluating
+/// four layers per path instead of one costs the mutex nothing — this holds it
+/// for strictly less than the previous version did, which matched inside it.
+/// The cost that moved is memory: every root's indexed paths are in hand at
+/// once rather than one root at a time. That is [`list_tree`]'s own shape
+/// (`build_tree_listing` holds the same rows), so it is a cost this command
+/// already pays elsewhere and not a new one.
+///
+/// **"As of now".** The disk can change between this reply and the scan that
+/// acts on it, and the removal happens on each root's own next scan — which is
+/// two halves of one sentence the editor owes a person (Task 11), not something
+/// this count can carry.
+#[tauri::command(async)]
+pub fn mask_preview(state: State<'_, AppState>, pattern: String) -> Result<MaskPreview, Error> {
+    // The candidate, alone and first: before the index is touched, and before
+    // any stored rule can answer in its place. A refusal here is about the
+    // pattern and is the same whether the index holds one file or a million.
+    WalkRules::none().with_masks(vec![pattern.clone()])?;
+
+    // One snapshot, for `list_tree`'s reason: an indexing job commits on its
+    // own connection, outside this mutex, so roots read before it and files
+    // read after it would be two different states of the index — and this
+    // reply is a single claim about one of them. The masks and each root's
+    // prefixes join the same snapshot for `walk_job.rs`'s reason: they are all
+    // "the rules this walk runs under", and a set assembled from two moments
+    // describes no scan that will ever run.
+    let (stored, roots) = state.with_index(|db| {
+        db.read_snapshot(|db| {
+            let stored = db.list_masks()?;
+            let mut roots = Vec::new();
+            for root in db.list_watched_roots()? {
+                roots.push((
+                    root.absolute_path,
+                    db.list_path_exclusions(root.id)?,
+                    db.indexed_files_under_root(root.id)?,
+                ));
+            }
+            Ok((stored, roots))
+        })
+    })?;
+
+    let mut proposed = stored.clone();
+    proposed.push(pattern);
+
+    let mut paths = 0i64;
+    // documentId -> (paths surviving the current set, of those, taken by the new one)
+    let mut per_document: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
+
+    for (absolute_path, prefixes, files) in roots {
+        let root_path = Path::new(&absolute_path);
+        // Both flags `true`, because both production callers pass `true`
+        // (`walk_job.rs`, `bridge.rs`) and `AppliedRules` is documented as
+        // assuming the built-in layers are on. The `.gitignore` half is not
+        // representable here and is disclosed rather than approximated: a path
+        // an in-tree `.gitignore` covers counts as surviving on BOTH sides.
+        //
+        // 🔴 That residue runs in two directions, not one. It makes `paths`
+        // LARGER — a path already going is charged to this press — and it makes
+        // `documents` SMALLER, because a document is only counted when EVERY
+        // surviving path of it is taken, and an extra surviving path that
+        // nothing here takes suppresses it. Smaller is the understating
+        // direction, the one this whole entry point exists to close — which
+        // is why the editor's zero arm was deleted outright rather than
+        // narrowed: at `documents == 0` the screen now says nothing about
+        // documents at all. Measured in
+        // `mask_preview_understates_documents_behind_an_in_tree_gitignore`
+        // (`tests/commands.rs`); until fix round 6 these lines said "can only
+        // make this difference larger", which is true of `paths` alone.
+        let current = WalkRules::new(true, true, prefixes.clone())?
+            .with_masks(stored.clone())?
+            .applied_to(root_path);
+        let with_candidate = WalkRules::new(true, true, prefixes)?
+            .with_masks(proposed.clone())?
+            .applied_to(root_path);
+
+        for file in files {
+            // Already going on the next scan, whatever this press decides. Not
+            // this mask's cost, and not a path cancelling would save.
+            if current.removes_file(&file.relative_path) {
+                continue;
+            }
+            let entry = per_document.entry(file.document_id).or_insert((0, 0));
+            entry.0 += 1;
+            if with_candidate.removes_file(&file.relative_path) {
+                entry.1 += 1;
+                paths += 1;
+            }
+        }
+    }
+
+    // No `&& *taken > 0`: every entry is created immediately before
+    // `entry.0 += 1` two lines up, so `surviving >= 1` always, and
+    // `surviving == taken` already implies `taken >= 1`. The second conjunct
+    // could never be false where the first was true — reviewed and confirmed
+    // unreachable rather than assumed (fix round 1, M3) — so it read as a check
+    // that could not fire.
+    let documents = per_document
+        .values()
+        .filter(|(surviving, taken)| surviving == taken)
+        .count() as i64;
+
+    Ok(MaskPreview { paths, documents })
+}
+
 /// What the launcher's right card paints around a cited passage, or the
 /// refusal that says the passage is no longer there.
 ///

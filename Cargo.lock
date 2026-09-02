@@ -2863,11 +2863,13 @@ dependencies = [
 name = "mnema-walk"
 version = "0.0.0"
 dependencies = [
+ "caseless",
  "globset",
  "ignore",
  "mnema-core",
  "tempfile",
  "thiserror 2.0.19",
+ "unicode-normalization",
 ]
 
 [[package]]

@@ -3,6 +3,7 @@
   import { locale, t } from '../i18n';
   import Models from './Models.svelte';
   import Folders from './Folders.svelte';
+  import Masks from './Masks.svelte';
   import Indexing from './Indexing.svelte';
   import { createJobController } from './jobs';
 
@@ -101,6 +102,11 @@
       {:else if section === 'folders'}
         <h2>{foldersLabel}</h2>
         <Folders {jobs} />
+        <!-- Beside the folder list, never inside a folder row (§9.2, D-c): a
+             mask is global to the index, so drawing it under one root would
+             say it belongs to that root. It takes no `jobs` — nothing here
+             starts a job. -->
+        <Masks />
       {:else if section === 'indexing'}
         <h2>{indexingLabel}</h2>
         <p id={NOT_READY_ID}>{notReadyLabel}</p>

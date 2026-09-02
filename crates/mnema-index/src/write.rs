@@ -624,6 +624,81 @@ impl Db {
         Ok(changed > 0)
     }
 
+    /// Every file mask the person has stored, sorted so a window renders the
+    /// same list twice running.
+    ///
+    /// **No root argument, and that is the decision** (D-c): a mask is a glob
+    /// over a file's *name*, it applies at every depth under every watched
+    /// folder, and `file_mask` carries no `watched_root_id` for a per-root query
+    /// to filter on. `WalkRules` carries no root either, so this is the same
+    /// scope the walk actually applies.
+    ///
+    /// ⚠️ **The `ORDER BY` is redundant today and is kept anyway** — the same
+    /// state [`Db::list_path_exclusions`] is in, measured rather than assumed
+    /// after the first draft of this comment claimed the opposite. `pattern` is
+    /// the PRIMARY KEY of a rowid table, so SQLite builds
+    /// `sqlite_autoindex_file_mask_1` for it and answers this query with
+    /// `SCAN file_mask USING COVERING INDEX sqlite_autoindex_file_mask_1` —
+    /// sorted whether the clause is there or not. Deleting the clause leaves the
+    /// whole workspace green.
+    ///
+    /// The equivalence is **conditional on the table keeping that shape**: a
+    /// migration giving `file_mask` a surrogate `id` primary key, or making it
+    /// `WITHOUT ROWID` with a different key order, makes this clause
+    /// load-bearing again with no test noticing. Unlike the exclusion index,
+    /// this one is implicit and cannot be dropped, so the premise is asserted
+    /// directly instead — `the_mask_listing_is_answered_from_the_index_that_
+    /// sorts_it` reads the query plan.
+    pub fn list_masks(&self) -> Result<Vec<String>, Error> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT pattern FROM file_mask ORDER BY pattern")?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Stores `pattern`. `Ok(true)` when a row was written, `Ok(false)` when the
+    /// mask was already there — adding the same mask twice is one rule, and the
+    /// second add is not an error.
+    ///
+    /// **Does not validate `pattern`**, for the reason
+    /// [`Db::add_path_exclusion`] gives at length: `mnema-walk` owns that
+    /// question (`validate_mask`, reached through
+    /// `WalkRules::none().with_masks(..)`), and a second validator here is a
+    /// second place that can disagree with the one the walk applies. The command
+    /// layer probes the candidate through `WalkRules` before calling this.
+    ///
+    /// **Does not fold case either.** `*.PDF` and `*.pdf` are one rule to the
+    /// mask layer and two rows here, deliberately — see [`ADD_FILE_MASK`]'s own
+    /// doc comment (`migrations.rs`) and
+    /// `two_masks_differing_only_in_case_are_two_rows_and_neither_is_rewritten`.
+    ///
+    /// `ON CONFLICT DO NOTHING` with no target: the constraint it leans on is
+    /// the table's PRIMARY KEY, so an untargeted clause cannot drift out of step
+    /// with a predicate the way a targeted one against a partial index can
+    /// ([`Db::add_path_exclusion`] records that trap).
+    pub fn add_mask(&self, pattern: &str) -> Result<bool, Error> {
+        let changed = self.conn().execute(
+            "INSERT INTO file_mask (pattern) VALUES (?1)
+             ON CONFLICT DO NOTHING",
+            params![pattern],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Removes the mask, reporting whether one was there. The window needs the
+    /// two apart for the same reason [`Db::remove_path_exclusion`] does: after a
+    /// second window removed the same rule, "there was nothing there" is a
+    /// different sentence from "removed".
+    pub fn remove_mask(&self, pattern: &str) -> Result<bool, Error> {
+        let changed = self
+            .conn()
+            .execute("DELETE FROM file_mask WHERE pattern = ?1", params![pattern])?;
+        Ok(changed > 0)
+    }
+
     pub fn insert_document(
         &self,
         content_hash: &str,

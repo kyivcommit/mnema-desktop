@@ -17,6 +17,16 @@ ignore = "0.4.31"
 # a user-typed path prefix into a literal pattern instead of a glob (review
 # fix round 1, Critical finding).
 globset = "0.4.19"
+# The mask layer's one comparison rule, `caseless_form`: full Unicode case
+# folding and canonical normalisation, applied to a mask once at build time and
+# to a file name once per entry. Neither is a new download — both were already
+# in `Cargo.lock` transitively — and both of these are the latest release on
+# crates.io as of 2026-08-31. `globset` cannot do this job: it compiles with
+# Unicode off (`(?-u)`, hardcoded at `globset-0.4.19/src/glob.rs:675`) and
+# `GlobBuilder` has no switch for it, so its `case_insensitive` only ever folded
+# ASCII bytes.
+caseless = "0.2.2"
+unicode-normalization = "0.1.25"
 thiserror = { workspace = true }
 # `OnDisk` only. It lives in the shared-types crate because `mnema-index` and
 # `mnema-ingest` both read it, and a storage crate must not depend on a walk
