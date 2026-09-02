@@ -25,10 +25,11 @@
 # nothing. Set MNEMA_MUTATION_TARGET_DIR to a directory (absolute, or relative
 # to the repository root) to keep the artefacts between invocations instead —
 # the worktree is still thrown away, the target directory is not. CI sets it
-# once for its six case files, five of which compile Rust and used to pay a
-# cold build each: measured on run 33671866360, 15m11s of the step's 24m07s
-# was those five builds (3:02, 3:23, 3:02, 3:03, 2:41), 2m41s of it in front
-# of one three-second case; the sixth file runs vitest and compiles nothing.
+# in each of its six per-file jobs to the checkout's `target/`, which its
+# cache restores; five of the six compile Rust and used to pay a cold build
+# each: measured on run 33671866360, 15m11s of the step's 24m07s was those
+# five builds (3:02, 3:23, 3:02, 3:03, 2:41), 2m41s of it in front of one
+# three-second case; the sixth file runs vitest and compiles nothing.
 # Locally, point it somewhere `cargo test` in the checkout does not use
 # (`target/mutations`, say). The worktree lives at a different path each run
 # and a path dependency's package id carries that path, so cargo rebuilds the

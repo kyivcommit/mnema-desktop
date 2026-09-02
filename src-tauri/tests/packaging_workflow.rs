@@ -343,7 +343,7 @@ fn every_job_declares_a_time_limit() {
     // Zero is rejected explicitly. GitHub reads `timeout-minutes: 0` as a job
     // that may never run to completion, so it is the one written value that is
     // worse than the missing line this test is here to catch.
-    for name in ["check", "bundle"] {
+    for name in ["check", "sweeps", "mutations", "bundle"] {
         let body = named_job(name);
         let limit = declared_timeout(&body).unwrap_or_else(|| {
             panic!(
