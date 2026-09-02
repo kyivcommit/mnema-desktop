@@ -61,5 +61,9 @@ cit="$(mktemp)"; trap 'rm -f "$cit"' EXIT
 scripts/check-citations.sh > "$cit" \
   || { awk '/^--- [0-9]+ mechanical problem/ {p = 1} p' "$cit" | grep . || tail -n 20 "$cit"; exit 1; }
 rm -f "$cit"
+# Formatting, before clippy: it compiles nothing and `ci.yml`'s `check` job
+# runs the same line first. PR #29 reached CI with eight rustfmt differences in
+# a file every local gate had passed, because nothing here asked.
+cargo fmt --all -- --check
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/clippy"
 exec cargo clippy --workspace --all-targets "$@" -- -D warnings
