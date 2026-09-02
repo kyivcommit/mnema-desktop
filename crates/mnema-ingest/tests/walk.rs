@@ -227,11 +227,13 @@ impl Fixture {
     /// write exhausted a window of its own. But an attempt costs `T` plus
     /// its own overhead, and three attempts pay that overhead three times,
     /// so the lower edge was really `3T + 3c` — and on a hosted `macos-14`
-    /// runner it crossed the hold: with `T` measured at 7.0 s and 7.4 s the
-    /// walks ran 24.7 s and 26.1 s against holds of 24.6 s and 25.8 s, the
-    /// lock freed 0.1–0.3 s before the third refusal, and the write landed
-    /// (CI run 33668886783, attempt 1, `check (macos-14)`). No constant,
-    /// computed or not, is right on two machines; a signal is.
+    /// runner it crossed the hold: with `T` measured at 7.0 s and 7.4 s,
+    /// holds of 24.6 s and 25.8 s ended while the third attempt was still
+    /// waiting, that attempt's write landed (`indexed: 1` in one test, a
+    /// crash skip that tipped `BrokenWorker` in the other), and the walks
+    /// ended 0.1–0.3 s after their holds (CI run 33668886783, attempt 1,
+    /// `check (macos-14)`). No constant, computed or not, is right on two
+    /// machines; a signal is.
     ///
     /// Returns the report and every progress event. Panics if the walk never
     /// reported a contended file: then the lock was never released and the
@@ -733,7 +735,8 @@ fn a_run_of_oversized_files_does_not_look_like_a_broken_worker() {
 /// Twenty files, not the brief's fifty: `broken_after` is 8 for this
 /// fixture's default two-worker pool, so twenty clears it comfortably
 /// without paying for thirty files' worth of worker round-trips the suite
-/// does not need — this file already runs to about 18 s.
+/// does not need — this file's contention tests already hold it to three
+/// busy timeouts or more.
 #[test]
 fn a_run_of_unsupported_files_does_not_look_like_a_broken_worker() {
     let f = Fixture::new();
@@ -954,10 +957,15 @@ fn a_file_still_busy_after_every_retry_is_skipped_not_lost() {
 /// rather than to a number of seconds. One attempt costs `T` plus its own
 /// overhead, so three cost more than `3T`; the bound is `2T`. `T` here is
 /// the probe's wait on the walk's own connection, and the walk's attempts
-/// are never shorter than it — on `macos-14` three of them were still under
-/// way when holds of 24.6 s and 25.8 s ended, so at least 8.2 s each against
-/// a probe of 7.0–7.4 s (CI run 33668886783, attempt 1) — so the bound can
-/// only loosen toward the mutant if the probe alone over-measures by half.
+/// are never shorter than it, by construction: the walk's writes open
+/// `BEGIN IMMEDIATE` transactions on that same connection under the same
+/// `busy_timeout`, and every attempt re-enters `ingest_file` from the top,
+/// paying the worker round trip before the write. Measured the same way:
+/// on `macos-14` three attempts were still under way when holds of 24.6 s
+/// and 25.8 s ended — over 8.1 s each even with phase 1 inside that
+/// interval — against a probe of 7.0–7.4 s (CI run 33668886783, attempt 1).
+/// So the bound can only loosen toward the mutant if the probe alone
+/// over-measures by half.
 /// The cancel fires at `T / 2` for the same reason: inside the first
 /// attempt, wherever that attempt's end is.
 #[test]

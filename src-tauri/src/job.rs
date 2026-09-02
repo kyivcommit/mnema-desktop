@@ -368,8 +368,9 @@ pub fn seconds_left(done: u64, total: u64, elapsed: Duration) -> Option<u64> {
 ///
 /// Shared by [`run_probe`]'s own loop, `walk_job::start_walk_job`'s progress
 /// closure and `embed_job::start_embed_job`'s. `walk_root` (`mnema-ingest`)
-/// calls its progress callback once per file — twice for a file whose busy
-/// retries were all refused, once before the loop — with no throttle of its own —
+/// calls its progress callback once per file (twice for a file whose busy
+/// retries were all refused, and once before the loop) with no throttle of
+/// its own —
 /// [`REPORT_INTERVAL`]'s own doc comment names the shape that produces: "a
 /// folder of a hundred thousand files would put a hundred thousand messages
 /// through the IPC" — so whoever owns the channel on the other end of that
