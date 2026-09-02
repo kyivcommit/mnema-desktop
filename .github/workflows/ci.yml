@@ -69,6 +69,13 @@ jobs:
       # drift from it silently.
       - name: Provision the toolchain named in rust-toolchain.toml
         run: rustup toolchain install
+      # The inputs of the cache key below, printed so a changed key can be
+      # read back to the variable that changed it — the paragraph on the
+      # same step in `bundle` has the case that made this worth a line.
+      - name: What rust-cache hashes into its key
+        run: |
+          rustc -vV
+          { env | grep -E '^(CARGO|CC|CFLAGS|CXX|CMAKE|RUST)' || true; } | sort
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # macOS gets WebKit from the OS; on Linux it is a package, and without its
       # headers the `tauri` crate does not build at all. librsvg and patchelf
@@ -599,13 +606,54 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Provision the toolchain named in rust-toolchain.toml
         run: rustup toolchain install
+      # Printed before the cache step, because this is what its key is made
+      # of: `rustc -vV` and every environment variable whose name starts with
+      # CARGO, CC, CFLAGS, CXX, CMAKE or RUST (rust-cache v2.9.1,
+      # src/config.ts, `envPrefixes`). On 2026-09-02 the same commit's
+      # `check (macos-14)` and `bundle` got different keys on `main` and on
+      # a pull request — `…-5e642cdd-…` against `…-c3c8feb3-…`, Linux
+      # unchanged — and the jobs API shows why: the two runs drew different
+      # `macos-14` images from the pool (`20260629.0180.1` and
+      # `20260831.0302.1`), and something in this list differs between them.
+      # Which variable is the first thing to read here the next time a key
+      # changes; a value that carries an image path or version is the
+      # suspect, and `env-vars` on the action can only ADD prefixes, so the
+      # remedy, if one is wanted, is an exact key of one's own.
+      - name: What rust-cache hashes into its key
+        run: |
+          rustc -vV
+          { env | grep -E '^(CARGO|CC|CFLAGS|CXX|CMAKE|RUST)' || true; } | sort
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      # A version range rather than a pinned build: the CLI has to agree with the
-      # `tauri` crate the workspace compiles, and that agreement is a major
-      # version on both sides. `--locked` keeps the CLI's own dependency
-      # resolution from drifting between runs.
-      - name: Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+      # The release binary, pinned by version and checksum, instead of
+      # `cargo install tauri-cli --version "^2" --locked`. The install
+      # compiled the CLI from source whenever the cache missed, and the cache
+      # missed on the first run of every new branch: a pull request reads
+      # only its own caches and `main`'s, and `main`'s key did not match
+      # (see the step above) — 6m12s on PR #29's first run, 8m04s on PR
+      # #31's, against a 1 s cache hit and a 2m12s job otherwise. A download
+      # is a few seconds and does not depend on any key.
+      #
+      # Exact version rather than the old `^2`: a binary cannot be a range.
+      # The CLI still has to agree with the `tauri` crate the workspace
+      # compiles at the major version, and 2.11.4 is what `^2` resolved to
+      # on that last run (Cargo.lock has `tauri` 2.11.5), so this pins the
+      # version the workflow was already using. Bumping it means changing
+      # both lines below, and the checksum comes from the downloaded file —
+      # `shasum -a 256` on the zip, never from a page.
+      #
+      # `aarch64-apple-darwin`, because `runs-on: macos-14` is arm64 (the
+      # paragraph above says so); a runner change means an asset change.
+      - name: Tauri CLI, the release binary for this runner
+        env:
+          TAURI_CLI_VERSION: 2.11.4
+          TAURI_CLI_SHA256: 82bdcb9ae7f407882321680ae50750f11623fae22445f8b00b096e10f815d604
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/cargo-tauri.zip" \
+            "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v${TAURI_CLI_VERSION}/cargo-tauri-aarch64-apple-darwin.zip"
+          echo "${TAURI_CLI_SHA256}  $RUNNER_TEMP/cargo-tauri.zip" | shasum -a 256 -c -
+          unzip -o -q "$RUNNER_TEMP/cargo-tauri.zip" cargo-tauri -d "$HOME/.cargo/bin"
+          chmod +x "$HOME/.cargo/bin/cargo-tauri"
+          cargo tauri --version
       # This step used to be absent, with a comment explaining that the bundle
       # linked Pdfium and loaded it nowhere. A reader lands and that inverts: the
       # library is now `bundle.resources` in tauri.conf.json, so `cargo tauri
