@@ -36,22 +36,24 @@
 #
 # Usage:
 #   scripts/check-booked.sh              # every tracked file; exit 1 if any
-#   scripts/check-booked.sh --self-test  # the sweep against a throwaway
-#                                        # repository, in both directions;
-#                                        # failures go to stderr, so a caller
-#                                        # may silence stdout and still see them
+#   scripts/check-booked.sh --self-test  # the sweep and the script itself
+#                                        # against throwaway repositories, in
+#                                        # both directions; failures go to
+#                                        # stderr, so a caller may silence
+#                                        # stdout and still see them
 #
 # `--self-test` builds two temporary git repositories — one committing two
 # markers in files of two extensions, one committing every non-match the
 # paragraph above names (the prose form, the bare word in capitals, a space
-# before the parenthesis, the word split across lines) plus an untracked
-# marker — and runs the SAME function this script runs on the real tree, not a
-# copy of the pattern, asserting red on the first and green on the second.
-# Then it copies this file into each repository's `scripts/` and runs it there
-# as CI runs it (plus a nesting depth CI never sets), asserting the exit
-# status of the whole script and not only of the function. A self-test that
-# only checks the pattern against strings would say nothing about the exit
-# code, which is the only thing CI reads.
+# before the parenthesis, the word split across lines), to which one marker
+# is added UNcommitted after the commit — and runs the SAME function this
+# script runs on the real tree, not a copy of the pattern, asserting red on
+# the first and green on the second. Then it copies this file into each
+# repository's `scripts/` and runs it there as CI runs it (plus a nesting
+# depth CI never sets), asserting the exit status of the whole script and not
+# only of the function. A self-test that only checks the pattern against
+# strings would say nothing about the exit code, which is the only thing CI
+# reads.
 
 set -u
 
@@ -103,11 +105,12 @@ if [ "${1:-}" = "--self-test" ]; then
   # mutant in finite time; another probe claims depth 3 outright and asserts
   # 4, so the backstop's own mutant is red without any nesting.
   # ⚠️ **A copy is contained only while the depth both grows AND is checked
-  # before the copy can copy itself again. Any mutation that breaks either
-  # half recurses without end** — the `+ 1` dropped from the increment breaks
-  # the growing; both guards deleted breaks the checking — and no such
+  # and stopped on, before the copy can copy itself again. Any mutation that
+  # breaks either half recurses without end** — the `+ 1` dropped from the
+  # increment breaks the growing; both guards disarmed (deleted, emptied, or
+  # their thresholds raised out of reach) breaks the stopping — and no such
   # mutant is to be run. Check a candidate mutant against that property, not
-  # against these two examples. (History, for the size of the hazard: before
+  # against these examples. (History, for the size of the hazard: before
   # the depth existed, a copy that reached the self-test again left 944
   # temporary repositories behind before it was killed, and `perl -e alarm`
   # did not contain it — it kills the top process and orphans the children.)
@@ -163,7 +166,10 @@ if [ "${1:-}" = "--self-test" ]; then
   # Green: every non-match the header names, none of which is a promise. The
   # check is a plain substring match and does not try to be clever about word
   # boundaries: a marker glued to a prefix is still a marker, so no row here
-  # tests that.
+  # tests that. The split-across-lines row has no mutant of its own: the
+  # mutation that makes its first half match (the pattern reduced to the bare
+  # word) is already caught by the bare-word row above it, so this row
+  # exercises the header's claim rather than defends it.
   green="$(mk green "// booked to Task 6 and now paid
 // ${WORD} as a word, no parenthesis
 // ${WORD} (a space before the parenthesis)

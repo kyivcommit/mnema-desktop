@@ -428,11 +428,14 @@ jobs:
       # that keeps it so. Its output is the sweep's own reading matter and is
       # long (2 700 lines), so only the problem list it prints last is shown,
       # and only when it fails — a red step with no output would send whoever
-      # reads it back to a local run to learn which citation moved.
+      # reads it back to a local run to learn which citation moved. The sweep's
+      # own self-test runs as a step of its own first, so a red line names
+      # the thing that failed: the self-test writes its failures to stderr,
+      # and only its success line is silenced.
+      - name: Self-test the obligation sweep
+        run: scripts/check-booked.sh --self-test > /dev/null
       - name: Check that no obligation is still written into the code
-        run: |
-          scripts/check-booked.sh --self-test > /dev/null
-          scripts/check-booked.sh
+        run: scripts/check-booked.sh
       - name: Check that every source citation lands inside its file
         run: |
           scripts/check-citations.sh > "$RUNNER_TEMP/citations.txt" \
