@@ -32,9 +32,10 @@
 # Locally, point it somewhere `cargo test` in the checkout does not use
 # (`target/mutations`, say). The worktree lives at a different path each run
 # and a path dependency's package id carries that path, so cargo rebuilds the
-# workspace crates against it anyway — which is also why an artefact built
-# from an earlier invocation's mutated source can never be served as fresh —
-# but the dependencies, the bulk of a cold build, are reused as they are.
+# workspace crates against it anyway — which is also why no compilation unit
+# of a workspace crate, built from an earlier invocation's mutated source,
+# can be served as fresh: its name carries the other path's hash — but the
+# dependencies, the bulk of a cold build, are reused as they are.
 # Measured on an Apple M2 Max with the one-case `pr8-exclusions-macos.sh`:
 # throwaway directory 41.3 s, shared and cold 40.0 s, shared and warm 13.8 s,
 # and the two-case `citation-identity.sh` warm on the same directory 15.4 s.
@@ -157,16 +158,23 @@ if [ $# -ne 1 ]; then
   exit 2
 fi
 
-CASES=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-REPO=$(git rev-parse --show-toplevel)
+CASES=$(cd "$(dirname "$1")" && pwd)/$(basename "$1") || exit 1
+REPO=$(git rev-parse --show-toplevel) || exit 1
+[ -n "$REPO" ] || exit 1
 # Resolved before anything is created, so a bad setting exits with nothing
 # to clean up. Absolute, because cargo runs inside $TREE below and a relative
 # path would resolve there — into the worktree the trap deletes; a relative
 # setting is taken against the repository root, not the invocation directory,
 # or `target/mutations` from `crates/` would silently become
-# `crates/target/mutations`. Every step has its `|| exit`: there is no `set -e`
-# here, and a `cd` that fails inside `$(...)` would otherwise export an EMPTY
-# target directory, which is the relative case again.
+# `crates/target/mutations`. Every `$(...)` here and above has its `|| exit`:
+# there is no `set -e` in this script, and a `cd` or `git rev-parse` that
+# fails inside a substitution would otherwise leave an EMPTY value — an
+# empty `REPO` turns `target/mutations` into `/target/mutations`, an empty
+# target directory is the relative case again. Unset, the throwaway
+# directory is assigned unconditionally, as it always was: a
+# `CARGO_TARGET_DIR` inherited from the caller's environment is deliberately
+# NOT honoured, because that is most likely the checkout's live `target/`,
+# the one place the paragraph above says not to build in.
 if [ -n "${MNEMA_MUTATION_TARGET_DIR:-}" ]; then
   shared="$MNEMA_MUTATION_TARGET_DIR"
   case "$shared" in /*) ;; *) shared="$REPO/$shared" ;; esac
@@ -174,9 +182,11 @@ if [ -n "${MNEMA_MUTATION_TARGET_DIR:-}" ]; then
   CARGO_TARGET_DIR=$(cd "$shared" && pwd) || exit 1
   [ -n "$CARGO_TARGET_DIR" ] || exit 1
 fi
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/mnema-mutation.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/mnema-mutation.XXXXXX") || exit 1
 TREE="$WORK/tree"
-: "${CARGO_TARGET_DIR:=$WORK/target}"
+if [ -z "${MNEMA_MUTATION_TARGET_DIR:-}" ]; then
+  CARGO_TARGET_DIR="$WORK/target"
+fi
 export CARGO_TARGET_DIR
 
 cleanup() {
@@ -377,7 +387,7 @@ vitest_read() {
 run_named_test() {
   case "$runner" in
     cargo)
-      cargo test -p "$pkg" "$@" -- --exact "$test" 2>&1
+      CARGO_TERM_COLOR=never cargo test -p "$pkg" "$@" -- --exact "$test" 2>&1
       ;;
     vitest)
       if [ ! -x "$VITEST" ]; then
@@ -578,17 +588,29 @@ case_() {
       echo "   BROKEN CASE: the mutation does not compile, so $test never ran"
       printf '%s' "$out" | grep -E 'error\[E[0-9]+\]|^error' | head -3 | sed 's/^/     /'
       broken=$((broken + 1))
-    elif [ $status -ne 0 ] && ! printf '%s' "$out" | grep -q 'test result: FAILED'; then
-      # Non-zero without a test having failed is cargo failing, not the test:
-      # a full disk, a target directory it cannot write, a binary that could
-      # not be spawned. The same rule the vitest branch below has carried
-      # since round 7b — a crashed oracle is not a kill — and the cargo half
-      # lacked it until the target directory became something that outlives
-      # one invocation and can fill up. Demonstrated by construction: a
-      # `cargo` shim ahead of PATH that fails with `No space left on device`
-      # only once the worktree is dirty printed "red" here before this line
-      # existed, and BROKEN CASE after.
-      echo "   BROKEN CASE: cargo failed without $test having run"
+    elif [ $status -ne 0 ] \
+      && ! printf '%s' "$out" | grep -qE 'test result: FAILED|^error: test failed'; then
+      # Non-zero with neither libtest's summary nor cargo's own `error: test
+      # failed` is cargo failing before the test binary ran, not the test:
+      # a target directory it cannot write, a full disk, a binary it could
+      # not spawn. Either of the two lines is evidence the binary ran against
+      # the mutant — cargo prints the second whenever the test process exits
+      # non-zero, including when the mutant takes the process down with a
+      # signal (an FFI abort in `mnema-extract`'s Pdfium tests has that
+      # shape), and a test that died is still a test that went red. The
+      # cargo half lacked any such distinction until the target directory
+      # became something that outlives one invocation and can fill up.
+      # Demonstrated by construction with a `cargo` shim ahead of PATH that
+      # prints only `error: failed to write …: No space left on device` and
+      # exits 101 once the worktree is dirty: "red" before this branch
+      # existed, BROKEN CASE after. What the shim does not show is where a
+      # REAL disk-full lands — cargo then usually also prints `could not
+      # compile`, which the branch above takes first, to the same verdict.
+      # Both patterns are matched uncoloured: `out=$(...)` is no tty, so
+      # libtest does not colour its summary, and `CARGO_TERM_COLOR=never` on
+      # the invocation keeps cargo's own line plain whatever the environment
+      # says — the vitest branch documents the same exposure at length.
+      echo "   BROKEN CASE: cargo failed before $test ran"
       printf '%s' "$out" | grep -E '^error|^warning: .*fail|denied|No space' | head -3 | sed 's/^/     /'
       broken=$((broken + 1))
     elif [ $status -ne 0 ]; then

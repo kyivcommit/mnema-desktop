@@ -460,13 +460,18 @@ jobs:
       # ⚠️ The action also exports `CARGO_INCREMENTAL=0` for the rest of the
       # job (its README says so). That is right for a one-shot build and
       # wrong for the harness, which rebuilds a mutated crate once per case
-      # — 8m02s of the old 24m07s was those rebuilds — so the harness step
-      # sets it back to 1 for itself. Without that, the first run of this
-      # change would be measuring two changes of opposite sign as one.
+      # — the 8m02s the cases took on the old run includes those rebuilds,
+      # unseparated from the test runs — so the harness step sets it back to
+      # 1 for itself. Without that, the first run of this change would be
+      # measuring three changes at once, two speedups (the shared directory,
+      # the cache) and one slowdown, against a baseline that had none of
+      # them. The incremental artefacts it writes are dropped by the action
+      # before saving, so they never reach the cache — and do add to the
+      # directory's size on disk, measured below.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # The harness's own worktree only carries vendor/ and
       # src-tauri/binaries/ if this checkout already has them
-      # (mutation-check.sh:177, :195-196) — both are git-ignored, so a case
+      # (mutation-check.sh:208, :226-227) — both are git-ignored, so a case
       # touching mnema-desktop needs the same setup `check` uses to build it
       # at all.
       - name: Linux system dependencies
@@ -536,9 +541,11 @@ jobs:
       # harness. `mutation-check.sh` keeps its throwaway worktree; only where
       # cargo puts artefacts changes. What is NOT measured: how much disk five
       # invocations' artefacts add up to on the runner, now that nothing
-      # removes them between files — locally two invocations left 3.2 GB,
-      # most of it the dependencies every file shares. The `du` at the end
-      # prints the runner's number; the first run after this change is the
+      # removes them between files — `du -sh target/mutations` after the two
+      # local invocations named in `mutation-check.sh`'s header read 3.2 GB
+      # on an Apple M2 Max, most of it the dependencies every file shares.
+      # The step after this one prints the runner's size and headroom
+      # whatever happened here; the first run after this change is the
       # measurement, and the numbers above are what it is measured against.
       - name: Run the mutation cases named below
         env:
@@ -551,7 +558,14 @@ jobs:
           scripts/mutation-check.sh scripts/mutations/pr8-subfolders.sh
           scripts/mutation-check.sh scripts/mutations/pr8-subfolders-linux.sh
           scripts/mutation-check.sh scripts/mutations/pr8-ui-folders.sh
-          du -sh "$MNEMA_MUTATION_TARGET_DIR"
+      # `if: always()`, because the run that fills the disk is the one whose
+      # harness step fails, and a `run:` under GitHub's default `bash -e`
+      # would never reach a `du` placed after the failing line.
+      - name: Disk the shared target directory took, and what was left
+        if: always()
+        run: |
+          du -sh "$GITHUB_WORKSPACE/target"
+          df -h "$GITHUB_WORKSPACE"
 
   bundle:
     # One architecture per package rather than a universal binary: a universal
