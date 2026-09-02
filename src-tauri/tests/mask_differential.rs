@@ -26,8 +26,9 @@
 //! folding one — which matters because the NFC/NFD pair is only two files
 //! there. `mnema_walk::relative_string` copies each component's `OsStr`
 //! verbatim, and the crate's one normalisation, `rules.rs`'s `caseless_form`
-//! (`nfd → case fold → nfc`), builds a comparison key for the mask and prefix
-//! layers and never reaches the path that is written down.
+//! (`nfd → case fold → nfc`), builds a comparison key for the mask layer alone
+//! — a prefix is matched as typed — and never reaches the path that is written
+//! down.
 //!
 //! **What the generator never draws**, so that a disagreement is always about
 //! the mask and never about one of these:
@@ -186,9 +187,6 @@ enum Candidate {
     Invalid(String),
 }
 
-/// Task 3 asks the preview with `pattern` and reports with `label`; `is_invalid`
-/// is what tells a refusal apart from a wrong number. None is read here.
-#[allow(dead_code)]
 impl Candidate {
     fn pattern(&self) -> &str {
         match self {
@@ -203,6 +201,9 @@ impl Candidate {
         }
     }
 
+    /// Task 4's edge report names the drawn candidate by this string; nothing
+    /// in this file's own assertion reads it, which is what the attribute says.
+    #[allow(dead_code)]
     fn label(&self) -> &'static str {
         match self {
             Candidate::Literal(_) => "literal",
@@ -222,21 +223,21 @@ impl Candidate {
 }
 
 struct World {
+    /// The number this world is a pure function of, carried so that every
+    /// failure raised deep inside `materialise` or `walk_all` prints the one
+    /// value that reproduces it.
+    seed: u64,
     roots: usize,
     files: Vec<Planned>,
-    /// The stored rules S. Drawn here and applied by Task 3, which is the
-    /// task that needs a world with rules already in force; `materialise`
-    /// deliberately writes none of them, so this task's walk sees the whole
-    /// draw.
-    #[allow(dead_code)]
+    /// The stored rules S. Drawn here and applied by `store_rules`, which is
+    /// what needs a world with rules already in force; `materialise`
+    /// deliberately writes none of them, so the first walk sees the whole draw.
     prefixes: Vec<(usize, String)>,
-    /// The other half of the stored rules S, and Task 3's consumer is the
-    /// same: it stores these before it takes the before-picture.
-    #[allow(dead_code)]
+    /// The other half of the stored rules S, stored before the before-picture
+    /// is taken.
     masks: Vec<String>,
-    /// The one mask under test. Task 3 asks the preview about it and then
-    /// runs the walk with it; Task 4 counts which edge it reached.
-    #[allow(dead_code)]
+    /// The one mask under test: the preview is asked about it and world B is
+    /// then walked with it. Task 4 counts which edge it reached.
     candidate: Candidate,
 }
 
@@ -337,7 +338,15 @@ fn draw_world(seed: u64) -> World {
                 .filter_map(|f| f.relative.split_once('/').map(|(d, _)| d.to_string()))
                 .collect();
             if let Some(d) = dirs.get(rng.below(dirs.len().max(1))) {
-                prefixes.push((root, d.clone()));
+                // The same directory can be drawn twice for the same root, and
+                // the store folds the second write into the first
+                // (`Db::add_path_exclusion`'s `ON CONFLICT DO NOTHING`). What
+                // the generator claims to have drawn would then not be what any
+                // world holds, so the draw is deduplicated here rather than the
+                // read-back being loosened.
+                if !prefixes.contains(&(root, d.clone())) {
+                    prefixes.push((root, d.clone()));
+                }
             }
         }
     }
@@ -345,7 +354,7 @@ fn draw_world(seed: u64) -> World {
     let mut masks: Vec<String> = Vec::new();
     for _ in 0..rng.below(4) {
         let m = (*rng.pick(&stored_pool)).to_string();
-        if !masks.contains(&m) {
+        if !already_stored(&masks, &m) {
             masks.push(m);
         }
     }
@@ -377,7 +386,7 @@ fn draw_world(seed: u64) -> World {
     match &candidate {
         Candidate::FormTwinOfStored(_) => {
             let twinned = format!("*{FORM_NFC}*");
-            if !masks.contains(&twinned) {
+            if !already_stored(&masks, &twinned) {
                 masks.push(twinned);
             }
         }
@@ -387,12 +396,28 @@ fn draw_world(seed: u64) -> World {
         _ => {}
     }
     World {
+        seed,
         roots,
         files,
         prefixes,
         masks,
         candidate,
     }
+}
+
+/// Whether `add_mask` would answer `AlreadyStored` for `pattern` given `masks`.
+///
+/// The product's own predicate, not a `to_lowercase` of this file's own: the
+/// stored pool holds `*.txt` and `*.TXT`, which are ONE rule to the mask layer
+/// and would be one row in the store, so a generator that called them two drawn
+/// masks would claim a draw no world ever holds. `WalkRules::same_mask_rule` is
+/// what `bridge::add_mask` itself asks, so the two cannot drift apart — and it
+/// is a predicate over two strings, not an assembled rule set, so the harness
+/// still builds no `WalkRules` of its own.
+fn already_stored(masks: &[String], pattern: &str) -> bool {
+    masks
+        .iter()
+        .any(|stored| mnema_walk::WalkRules::same_mask_rule(stored, pattern))
 }
 
 /// What the volume does with two names that differ only by case, and with two
@@ -426,11 +451,13 @@ fn probe_regime() -> Regime {
 
 struct Built {
     app: tauri::App<MockRuntime>,
-    /// Task 3 asks `mask_preview` through this window, the way the settings
-    /// screen does.
-    #[allow(dead_code)]
+    /// `mask_preview` and `add_mask` are asked through this window, the way the
+    /// settings screen asks them.
     webview: WebviewWindow<MockRuntime>,
     root_ids: Vec<i64>,
+    /// The seed the world was drawn from, so a failure inside a walk prints the
+    /// number that reproduces it rather than only what it saw.
+    seed: u64,
     _index: TempDir,
     _roots: Vec<TempDir>,
 }
@@ -469,11 +496,16 @@ fn materialise(world: &World) -> Built {
         app,
         webview,
         root_ids,
+        seed: world.seed,
         _index: index,
         _roots: roots,
     };
     let removed = walk_all(&built);
-    assert_eq!(removed, 0, "the first walk over a fresh index removed something");
+    assert_eq!(
+        removed, 0,
+        "seed {}: the first walk over a fresh index removed something",
+        world.seed
+    );
     built
 }
 
@@ -482,19 +514,39 @@ fn materialise(world: &World) -> Built {
 /// `Ended::complete`) and would silently shrink the `status = 'indexed'`
 /// population the oracle reads. Returns the sum of `Ended.removed` over the
 /// roots.
+/// Every message names the seed and the root's ORDINAL in the world. The
+/// `root_id` a message used to carry is a different number in each of a seed's
+/// three worlds and names nothing a reader can find in the draw.
 fn walk_all(built: &Built) -> u64 {
     let mut removed = 0;
-    for &root in &built.root_ids {
+    for (ordinal, &root) in built.root_ids.iter().enumerate() {
+        let seed = built.seed;
         let ending = run_walk_and_capture_ending(&built.app, root);
-        assert_eq!(ending["reason"], json!("completed"), "root {root}: {ending}");
+        assert_eq!(
+            ending["reason"],
+            json!("completed"),
+            "seed {seed}, root #{ordinal}: {ending}"
+        );
         assert_eq!(
             ending["complete"],
             json!(true),
-            "root {root}: an incomplete walk: {ending}"
+            "seed {seed}, root #{ordinal}: an incomplete walk: {ending}"
         );
-        assert_eq!(ending["skipped"], json!(0), "root {root}: {ending}");
-        assert_eq!(ending["refused"], json!(0), "root {root}: {ending}");
-        assert_eq!(ending["frozen"], json!([]), "root {root}: {ending}");
+        assert_eq!(
+            ending["skipped"],
+            json!(0),
+            "seed {seed}, root #{ordinal}: {ending}"
+        );
+        assert_eq!(
+            ending["refused"],
+            json!(0),
+            "seed {seed}, root #{ordinal}: {ending}"
+        );
+        assert_eq!(
+            ending["frozen"],
+            json!([]),
+            "seed {seed}, root #{ordinal}: {ending}"
+        );
         removed += ending["removed"].as_u64().expect("Ended.removed");
     }
     removed
@@ -572,3 +624,248 @@ fn listed_files(built: &Built) -> BTreeSet<(usize, String)> {
     out
 }
 
+/// Puts the world's stored rules S into the store the way the product does:
+/// prefixes straight through `Db::add_path_exclusion`, which is what
+/// `bridge::exclude_subfolder` reaches for, and masks through the real IPC
+/// `add_mask`, which is the only thing that validates one.
+fn store_rules(built: &Built, world: &World) {
+    for (r, prefix) in &world.prefixes {
+        let root = built.root_ids[*r];
+        built
+            .app
+            .state::<AppState>()
+            .with_index(|db| db.add_path_exclusion(root, prefix).map(|_| ()))
+            .expect("storing a path exclusion");
+    }
+    for mask in &world.masks {
+        call(&built.webview, "add_mask", json!({ "pattern": mask }))
+            .expect("a stored mask was refused");
+    }
+}
+
+/// What the store really holds, read back rather than assumed from the writes
+/// having returned `Ok`: the masks, and each root's prefixes under that root's
+/// ORDINAL.
+fn stored_rules(built: &Built) -> (Vec<String>, Vec<(usize, String)>) {
+    let state = built.app.state::<AppState>();
+    let masks = state
+        .with_index(|db| db.list_masks())
+        .expect("listing the stored masks");
+    let mut prefixes = Vec::new();
+    for (ordinal, &root) in built.root_ids.iter().enumerate() {
+        for p in state
+            .with_index(|db| db.list_path_exclusions(root))
+            .expect("listing the stored prefixes")
+        {
+            prefixes.push((ordinal, p));
+        }
+    }
+    (masks, prefixes)
+}
+
+/// Walks every root under whatever the store holds and answers with SETS:
+/// the paths the index no longer lists, and the documents that no longer
+/// exist. `Ended.removed` is checked against the set it should describe —
+/// a cheap, independent reading of the same fact, not a substitute for it.
+fn removed_and_gone(built: &Built) -> (BTreeSet<Key>, BTreeSet<String>) {
+    let before = snapshot(built);
+    let reported = walk_all(built);
+    let after = snapshot(built);
+    let removed: BTreeSet<Key> = before.difference(&after).cloned().collect();
+    assert_eq!(
+        reported,
+        removed.len() as u64,
+        "seed {}: Ended.removed disagrees with the index listing: {removed:?}",
+        built.seed
+    );
+    let ids: BTreeSet<String> = before.iter().map(|(_, _, id)| id.clone()).collect();
+    let gone = ids
+        .into_iter()
+        .filter(|id| {
+            !built
+                .app
+                .state::<AppState>()
+                .with_index(|db| db.document_exists(id))
+                .expect("asking whether a document still exists")
+        })
+        .collect();
+    (removed, gone)
+}
+
+/// One seed, three worlds: world 0 is asked for the preview, world A is walked
+/// under S, world B is walked under S plus the candidate.
+fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
+    // Nothing is counted yet — `Reached` is empty until Task 4 fills it, and
+    // this discard is what Task 4's first `reached.states` line replaces.
+    let _ = &reached;
+    let world = draw_world(seed);
+
+    // Steps 1–3 are the same in all three worlds, and that is CHECKED: the
+    // three indexes are equal as sets of (ordinal, path, document id) before
+    // any rule is stored, and each store holds exactly S afterwards.
+    let w0 = materialise(&world);
+    let a = materialise(&world);
+    let b = materialise(&world);
+    let manifest = snapshot(&w0);
+    assert_eq!(
+        manifest,
+        snapshot(&a),
+        "seed {seed}: world A was not indexed like world 0"
+    );
+    assert_eq!(
+        manifest,
+        snapshot(&b),
+        "seed {seed}: world B was not indexed like world 0"
+    );
+    // No directory is shared between any two of the three worlds — index or
+    // watched root. One in common would make two of the walks the same walk,
+    // and the invariant would be comparing a state against itself. The brief's
+    // two `assert_ne!` lines checked the indexes of world 0 against A and A
+    // against B, which leaves 0 against B and every root unasked.
+    let mut dirs: Vec<&Path> = Vec::new();
+    for built in [&w0, &a, &b] {
+        dirs.push(built._index.path());
+        dirs.extend(built._roots.iter().map(|d| d.path()));
+    }
+    let distinct: BTreeSet<&Path> = dirs.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        dirs.len(),
+        "seed {seed}: two of the three worlds share a directory: {dirs:?}"
+    );
+
+    store_rules(&w0, &world); // world 0 stores S
+    store_rules(&a, &world); // world A stores S
+    store_rules(&b, &world); // world B stores S
+    let persisted = stored_rules(&w0);
+    assert_eq!(
+        persisted,
+        stored_rules(&a),
+        "seed {seed}: world A holds different rules"
+    );
+    assert_eq!(
+        persisted,
+        stored_rules(&b),
+        "seed {seed}: world B holds different rules"
+    );
+    // `Db::list_masks` answers in `pattern` order, and the draw is in draw
+    // order, so the drawn list is sorted to be compared against it — the
+    // question here is which masks the store holds, not in what order it
+    // hands them back.
+    let mut drawn_masks = world.masks.clone();
+    drawn_masks.sort();
+    assert_eq!(
+        persisted.0, drawn_masks,
+        "seed {seed}: the store holds other masks than drawn"
+    );
+
+    // World 0 — the preview.
+    let preview = call(
+        &w0.webview,
+        "mask_preview",
+        json!({ "pattern": world.candidate.pattern() }),
+    );
+
+    // Task 4 inserts the refusal branch here.
+    // Until it does, an invalid candidate simply ends the seed: this task
+    // asserts nothing about a refusal, and `expect`ing a preview on one would
+    // fail on a pattern the generator drew as unacceptable on purpose.
+    if world.candidate.is_invalid() {
+        return None;
+    }
+
+    // World A — the walk under S.
+    let (removed_a, gone_a) = removed_and_gone(&a);
+
+    // World B — the walk under S + m.
+    call(
+        &b.webview,
+        "add_mask",
+        json!({ "pattern": world.candidate.pattern() }),
+    )
+    .expect("add_mask refused a candidate the generator drew as valid");
+    let (removed_b, gone_b) = removed_and_gone(&b);
+
+    let preview = preview.expect("mask_preview refused a candidate the generator drew as valid");
+    let preview_paths = preview["paths"].as_i64().unwrap();
+    let preview_documents = preview["documents"].as_i64().unwrap();
+    // Task 4 inserts the `reached.states` lines here, on these names.
+    Some(Outcome {
+        preview_paths,
+        preview_documents,
+        removed_a,
+        removed_b,
+        gone_a,
+        gone_b,
+    })
+}
+
+/// What one seed's three worlds produced: the preview's two numbers, and the
+/// two walks read back as SETS. Sets rather than counts because a mask that
+/// resurrects one path while taking another leaves every count untouched.
+struct Outcome {
+    preview_paths: i64,
+    preview_documents: i64,
+    removed_a: BTreeSet<Key>,
+    removed_b: BTreeSet<Key>,
+    gone_a: BTreeSet<String>,
+    gone_b: BTreeSet<String>,
+}
+
+/// Which drawn shapes the run actually reached. Empty here on purpose: Task 4
+/// fills it and asserts on it, and an empty struct is what keeps this task's
+/// `run_seed` signature the one that task extends.
+#[derive(Default)]
+struct Reached {}
+
+/// The whole point: what the preview promises equals what the walk does,
+/// as a difference between two real walks over two identical worlds.
+#[test]
+fn the_preview_and_the_walk_agree_on_every_seed() {
+    let runs = setting("MNEMA_FUZZ_RUNS", 12) as u64;
+    let base = setting("MNEMA_FUZZ_BASE", 0x5EED_0000) as u64;
+    let mut reached = Reached::default();
+    for seed in base..base + runs {
+        let world = draw_world(seed);
+        let Some(o) = run_seed(seed, &mut reached) else {
+            continue;
+        };
+        let context = format!(
+            "seed {seed}: candidate {:?} over stored masks {:?} and prefixes {:?}",
+            world.candidate, world.masks, world.prefixes
+        );
+        // Sets with inclusion, not counts: a mask that resurrected one path and
+        // took another would keep the counts equal.
+        let resurrected: Vec<&Key> = o.removed_a.difference(&o.removed_b).collect();
+        assert!(
+            resurrected.is_empty(),
+            "{context}\n  adding the mask KEPT paths the S walk removed: {resurrected:?}"
+        );
+        let revived: Vec<&String> = o.gone_a.difference(&o.gone_b).collect();
+        assert!(
+            revived.is_empty(),
+            "{context}\n  adding the mask KEPT documents the S walk lost: {revived:?}"
+        );
+        let only_in_b: Vec<&Key> = o.removed_b.difference(&o.removed_a).collect();
+        assert_eq!(
+            only_in_b.len() as i64,
+            o.preview_paths,
+            "{context}\n  the S+m walk removed {} paths the S walk did not: {only_in_b:?}\n  the preview promised {}",
+            only_in_b.len(),
+            o.preview_paths
+        );
+        let docs_only_in_b = o.gone_b.difference(&o.gone_a).count() as i64;
+        assert_eq!(
+            docs_only_in_b, o.preview_documents,
+            "{context}\n  documents gone only under S+m: {docs_only_in_b}, preview promised {}",
+            o.preview_documents
+        );
+    }
+}
+
+fn setting(name: &str, fallback: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(fallback)
+}
