@@ -21,6 +21,14 @@
 //! `snapshot` and `listed_files` read, and why the generator's `NameKind` is
 //! a label for a report rather than an input to an assertion.
 //!
+//! **The walk stores the name the filesystem hands it, unnormalised**, so the
+//! index-versus-disk equality holds on a form-sensitive volume as well as a
+//! folding one — which matters because the NFC/NFD pair is only two files
+//! there. `mnema_walk::relative_string` copies each component's `OsStr`
+//! verbatim, and the crate's one normalisation, `rules.rs`'s `caseless_form`
+//! (`nfd → case fold → nfc`), builds a comparison key for the mask and prefix
+//! layers and never reaches the path that is written down.
+//!
 //! **What the generator never draws**, so that a disagreement is always about
 //! the mask and never about one of these:
 //!
@@ -34,10 +42,15 @@
 //!   that failure, and here it would only make an incomplete walk.
 //! - **Any change to the tree between the preview and the walk**: the whole
 //!   claim under test is that two readings of the *same* state agree.
-//! - **`target/`, `node_modules/` or `.git/` as directories**: those are
-//!   pruned by the built-in layers, so a file under one is in neither the
-//!   index nor the oracle's population. A *file* named `target` is drawn, and
-//!   that is a different thing — see `BUILTIN_NAMES`.
+//! - **`target/`, `node_modules/` or `.git/` as directories**, for two
+//!   different mechanisms. `node_modules` and `.git` are in `BUILTIN_DIRS`
+//!   and always pruned, so a file under either is in neither the index nor
+//!   the oracle's population. `target` is the anchored layer instead
+//!   (`rules.rs`'s `ANCHORED_DIRS`, keyed on `Cargo.toml`), which prunes it
+//!   only when that marker sits beside it — a `target/` drawn here would be
+//!   walked or not depending on a file the generator does not draw. A *file*
+//!   named `target` is drawn, and that is a different thing — see
+//!   `BUILTIN_NAMES`.
 //!
 //! The harness never assembles `WalkRules` itself. Every walk goes through
 //! `walk_job::start_walk_job`, which is what the window calls, so the rules
@@ -101,10 +114,15 @@ const EXTENSIONS: &[&str] = &["txt", "md"];
 /// A FILE called `target` with no `Cargo.toml` beside it: the anchored layer
 /// asks `is_dir` before it prunes (`rules.rs`'s `prunes_a_component`), so it
 /// leaves this alone, the file is indexed, and both sides must take it only
-/// for a literal candidate. Not `node_modules` or `.git`: the built-in
-/// override layer matches a *file* of that name too, and the hidden layer
-/// hides a dotfile — neither would ever be indexed, so the oracle could not
-/// see them.
+/// for a literal candidate.
+///
+/// Not `node_modules`, and not `.git` either: both are in
+/// `WalkRules::BUILTIN_DIRS`, which compiles to `!**/<name>` carrying no
+/// trailing `/`, so that override layer prunes a *file* of either name as
+/// readily as a directory. Neither would ever be indexed, so the oracle could
+/// not see one. Being a dotfile is **not** what keeps `.git` out: the walk
+/// sets `hidden(false)` (`rules.rs`) because a dotfile in a watched folder is
+/// an ordinary document, and `.hidden` is a legal file mask.
 const BUILTIN_NAMES: &[&str] = &["target"];
 const DIRS: &[&str] = &["Archive", "Work", "old", "Вхідні"];
 
