@@ -90,11 +90,10 @@ pub fn main_webview(app: &tauri::App<MockRuntime>) -> WebviewWindow<MockRuntime>
 ///
 /// Measured on a Windows 11 stand on 2026-07-29, where the macOS constant these
 /// two call sites used to hold turned into **six** failures across
-/// `commands.rs`, including one that looked unrelated: `the_commands_that_
-/// touch_the_database_leave_the_main_thread` compared a thread id against
-/// itself, because a refusal
-/// answers inline and never reaches a worker. One constant, six red tests, and
-/// no message pointing at it.
+/// `commands.rs`, including one that looked unrelated: `the_commands_that_touch_
+/// the_database_leave_the_main_thread` compared a thread id against itself,
+/// because a refusal answers inline and never reaches a worker. One constant,
+/// six red tests, and no message pointing at it.
 pub(crate) fn local_origin() -> &'static str {
     if cfg!(windows) {
         "http://tauri.localhost"

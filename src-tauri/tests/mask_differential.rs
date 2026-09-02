@@ -230,8 +230,12 @@ struct World {
     /// draw.
     #[allow(dead_code)]
     prefixes: Vec<(usize, String)>,
+    /// The other half of the stored rules S, and Task 3's consumer is the
+    /// same: it stores these before it takes the before-picture.
     #[allow(dead_code)]
     masks: Vec<String>,
+    /// The one mask under test. Task 3 asks the preview about it and then
+    /// runs the walk with it; Task 4 counts which edge it reached.
     #[allow(dead_code)]
     candidate: Candidate,
 }
