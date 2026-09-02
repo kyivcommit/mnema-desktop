@@ -40,8 +40,9 @@
 #                                        # repository, in both directions
 #
 # `--self-test` builds two temporary git repositories — one committing two
-# markers in files of two extensions, one committing the two near-misses (the
-# prose form, and the word in capitals with no parenthesis) plus an untracked
+# markers in files of two extensions, one committing every non-match the
+# paragraph above names (the prose form, the bare word in capitals, a space
+# before the parenthesis, the word split across lines) plus an untracked
 # marker — and runs the SAME function this script runs on the real tree, not a
 # copy of the pattern, asserting red on the first and green on the second.
 # Then it copies this file into each repository's `scripts/` and runs it there
@@ -67,11 +68,10 @@ sweep() {
   # not exist returns 1, which is also grep's "no match" — review of PR #28
   # showed `sweep /no/such/dir` answering "no open obligation".
   cd "$root" || return 2
-  hits="$(git grep -n -I -F -- "$MARK" 2>&1)"
+  hits="$(git grep -n -I -F -- "$MARK")"
   status=$?
   if [ "$status" -gt 1 ]; then
     echo "check-booked: git grep failed ($status) in $root" >&2
-    echo "$hits" >&2
     return 2
   fi
   if [ "$status" -eq 0 ]; then
@@ -87,18 +87,28 @@ sweep() {
 }
 
 if [ "${1:-}" = "--self-test" ]; then
-  # The self-test runs copies of this file, and a copy must never run the
-  # self-test again: with the argument check below deleted, `--self-test bogus`
-  # on the copy recursed without end and left 944 temporary repositories
-  # behind before it was killed (fix round 2, measured). The copies are run
-  # with this variable set, and a nested self-test stops here with 3 — after
-  # the argument check, so that a bad argument is still 2 from inside. No
-  # mutant of this guard is run on purpose: deleting it recurses.
   if [ $# -ne 1 ]; then
     echo "unknown option: $2" >&2
     exit 2
   fi
-  if [ -n "${CHECK_BOOKED_INNER:-}" ]; then
+  # The self-test runs copies of this file, and a copy must never run the
+  # self-test again: with the argument check above deleted, `--self-test bogus`
+  # on a copy recursed without end and left 944 temporary repositories behind
+  # before it was killed (fix round 2, measured; and `perl -e alarm` does not
+  # contain it — it kills the top process and orphans the children, which
+  # went on multiplying). Every copy is run with `CHECK_BOOKED_DEPTH` one
+  # higher than its parent's, and a nested self-test stops here with 3. The
+  # second `if` is the first one's backstop: with the first deleted, a nested
+  # run reaches depth 3 and exits 4 instead of running forever, so the probe
+  # below (which asserts 3) can kill a mutant of the first guard in finite
+  # time. Deleting BOTH recurses; that pair is the one mutant not to run.
+  # Both sit after the argument check, so a bad argument is 2 from inside too.
+  depth="${CHECK_BOOKED_DEPTH:-0}"
+  if [ "$depth" -ge 3 ]; then
+    echo "check-booked: self-test nested $depth deep, stopping" >&2
+    exit 4
+  fi
+  if [ "$depth" -ge 1 ]; then
     echo "check-booked: refusing to run the self-test from inside itself" >&2
     exit 3
   fi
@@ -128,15 +138,17 @@ if [ "${1:-}" = "--self-test" ]; then
   git -C "$red" commit -q -m probe-ts
   out="$(sweep "$red")"; status=$?
   if [ "$status" -ne 1 ] || ! printf '%s\n' "$out" | grep -q 'note.rs:1:' \
-     || ! printf '%s\n' "$out" | grep -q 'note.ts:1:'; then
+     || ! printf '%s\n' "$out" | grep -q 'note.ts:1:' \
+     || ! printf '%s\n' "$out" | grep -q '^--- 2 open obligation'; then
     bad=$((bad + 1))
-    echo "SELF-TEST FAILURE: two committed markers must exit 1 and name note.rs:1 and note.ts:1; got $status:"
+    echo "SELF-TEST FAILURE: two committed markers must exit 1, name note.rs:1 and note.ts:1 and count 2; got $status:"
     printf '%s\n' "$out" | sed 's/^/  /'
   fi
 
-  # Green: the two near-misses, neither of which is a promise. The check is a
-  # plain substring match and does not try to be clever about word boundaries:
-  # a marker glued to a prefix is still a marker, so no row here tests that.
+  # Green: every non-match the header names, none of which is a promise. The
+  # check is a plain substring match and does not try to be clever about word
+  # boundaries: a marker glued to a prefix is still a marker, so no row here
+  # tests that.
   green="$(mk green "// booked to Task 6 and now paid
 // ${WORD} as a word, no parenthesis
 // ${WORD} (a space before the parenthesis)
@@ -190,7 +202,7 @@ if [ "${1:-}" = "--self-test" ]; then
     dir="$tmp/${pair%%:*}"; want="${pair##*:}"
     mkdir -p "$dir/scripts"
     cp "${BASH_SOURCE[0]}" "$dir/scripts/check-booked.sh"
-    out="$(CHECK_BOOKED_INNER=1 bash "$dir/scripts/check-booked.sh")"; status=$?
+    out="$(CHECK_BOOKED_DEPTH=$((depth + 1)) bash "$dir/scripts/check-booked.sh")"; status=$?
     if [ "$status" -ne "$want" ]; then
       bad=$((bad + 1))
       echo "SELF-TEST FAILURE: the script run on the ${pair%%:*} repository must exit $want; got $status:"
@@ -201,12 +213,20 @@ if [ "${1:-}" = "--self-test" ]; then
   # without this row the refusal stood on `set -u` alone (fix round 2).
   for args in "bogus" "--self-test bogus"; do
     # shellcheck disable=SC2086
-    CHECK_BOOKED_INNER=1 bash "$tmp/green/scripts/check-booked.sh" $args > /dev/null 2>&1; status=$?
+    CHECK_BOOKED_DEPTH=$((depth + 1)) bash "$tmp/green/scripts/check-booked.sh" $args > /dev/null 2>&1; status=$?
     if [ "$status" -ne 2 ]; then
       bad=$((bad + 1))
       echo "SELF-TEST FAILURE: \`$args\` must be refused with 2; got $status"
     fi
   done
+  # A copy asked for the self-test from inside one must stop with 3. This is
+  # the row that reaches the nesting guard; without it the guard was dead
+  # code with a sentence claiming otherwise (review of round 2, Blocking 1).
+  CHECK_BOOKED_DEPTH=$((depth + 1)) bash "$tmp/green/scripts/check-booked.sh" --self-test > /dev/null 2>&1; status=$?
+  if [ "$status" -ne 3 ]; then
+    bad=$((bad + 1))
+    echo "SELF-TEST FAILURE: a nested self-test must stop with 3; got $status"
+  fi
 
   if [ "$bad" -ne 0 ]; then
     echo "--- self-test: $bad failure(s) ---"

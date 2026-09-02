@@ -49,13 +49,14 @@ cd "$(dirname "$0")/.."
 scripts/check-booked.sh
 # The citation sweep prints every citation it checked (2 700 lines) and its
 # problem list last; only that list is worth a screen, and only on failure.
-# On failure the list is printed from its own heading; should that heading
-# ever be reworded, the tail of the output is printed instead of nothing.
+# On failure the list is printed from its own heading to the end, whatever
+# its length; should that heading ever be reworded, the tail of the output is
+# printed instead of nothing.
 # The file is removed by hand before `exec`, which replaces this shell and so
 # never runs an EXIT trap (review of PR #28, fix round 1, Minor 2).
 cit="$(mktemp)"; trap 'rm -f "$cit"' EXIT
 scripts/check-citations.sh > "$cit" \
-  || { grep -A 200 'mechanical problem' "$cit" || tail -n 20 "$cit"; exit 1; }
+  || { awk '/mechanical problem/ {p = 1} p' "$cit" | grep . || tail -n 20 "$cit"; exit 1; }
 rm -f "$cit"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/clippy"
 exec cargo clippy --workspace --all-targets "$@" -- -D warnings

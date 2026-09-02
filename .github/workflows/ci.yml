@@ -434,7 +434,7 @@ jobs:
       - name: Check that every source citation lands inside its file
         run: |
           scripts/check-citations.sh > "$RUNNER_TEMP/citations.txt" \
-            || { grep -A 200 'mechanical problem' "$RUNNER_TEMP/citations.txt" \
+            || { awk '/mechanical problem/ {p = 1} p' "$RUNNER_TEMP/citations.txt" | grep . \
                  || tail -n 20 "$RUNNER_TEMP/citations.txt"; exit 1; }
       - name: Check that every mutation case still applies
         run: scripts/mutation-staleness.sh
