@@ -413,6 +413,34 @@ jobs:
       # What it needs on the runner: `perl`, `head`, `basename` and `mktemp`, all
       # of which the harness step below already depends on, plus `cmp` — the one
       # addition, from diffutils, present on every image this workflow uses.
+      # Two more that need nothing provisioned, for the same reason. The
+      # first fails on any obligation written into a comment as the word BOOKED
+      # in capitals followed by an opening parenthesis (the form is not spelled
+      # out here, because this file is swept too — the first draft of this
+      # comment was the sweep's first finding): PR 8b shipped two promises that
+      # lived only in a comment and were never done, and this is what makes
+      # such a promise a red line instead of a note. The second is
+      # `check-citations.sh`, which proves every `file:line` written in a comment
+      # lands inside its file — never that it names the right line, which is a
+      # reader's call. Its ruling in D137 that
+      # it could not be wired in because a stale citation would make it red was
+      # withdrawn there: it exits 0 over the whole tree, and this is the line
+      # that keeps it so. Its output is the sweep's own reading matter and is
+      # long (2 700 lines), so only the problem list it prints last is shown,
+      # and only when it fails — a red step with no output would send whoever
+      # reads it back to a local run to learn which citation moved. The sweep's
+      # own self-test runs as a step of its own first, so a red line names
+      # the thing that failed: the self-test writes its failures to stderr,
+      # and only its success line is silenced.
+      - name: Self-test the obligation sweep
+        run: scripts/check-booked.sh --self-test > /dev/null
+      - name: Check that no obligation is still written into the code
+        run: scripts/check-booked.sh
+      - name: Check that every source citation lands inside its file
+        run: |
+          scripts/check-citations.sh > "$RUNNER_TEMP/citations.txt" \
+            || { awk '/^--- [0-9]+ mechanical problem/ {p = 1} p' "$RUNNER_TEMP/citations.txt" | grep . \
+                 || tail -n 20 "$RUNNER_TEMP/citations.txt"; exit 1; }
       - name: Check that every mutation case still applies
         run: scripts/mutation-staleness.sh
       - name: Provision the toolchain named in rust-toolchain.toml

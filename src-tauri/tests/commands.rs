@@ -3093,7 +3093,7 @@ fn excluding_dotdot_is_refused_and_stores_nothing() {
     // input sent WAS "..", so `.contains("..")` is satisfied by any refusal
     // that merely echoes the input, including a future refusal for an
     // unrelated reason. `RulesError::DotComponent`'s own sentence
-    // (`rules.rs:68-71`), unchanged across the `Error::InvalidExclusionRule`
+    // (`rules.rs:68-71`), unchanged across the `Error::InvalidRule`
     // seam (`#[error("{0}")]`).
     assert_eq!(
         error_text(&rejected),
@@ -3634,9 +3634,10 @@ fn a_stored_exclusion_that_no_longer_validates_refuses_the_walk() {
     // proves "some `RulesError` about `..`" rather than which one — the same
     // weakening `excluding_dotdot_is_refused_and_stores_nothing` already
     // carries a round-1 note about. The sentence crosses the
-    // `Error::InvalidExclusionRule` seam unchanged (`#[error("{0}")]`,
-    // `error.rs:74` — it was cited as `:60` by the same commit that pushed
-    // it down fourteen lines, review round 2, N2), so equality costs nothing
+    // `Error::InvalidRule` seam unchanged (`#[error("{0}")]`,
+    // `error.rs:101` — it was cited as `:60` by the same commit that pushed
+    // it down fourteen lines, review round 2, N2, and PR 8b's doc growth moved
+    // it again without the citation following), so equality costs nothing
     // here either.
     assert_eq!(
         refusal.to_string(),

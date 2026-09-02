@@ -1583,16 +1583,16 @@ mod tests {
     /// renders these discriminants keeps its own hand-made copy of the list
     /// below and asserts its tables against it, and nothing ties the two
     /// languages together — tying them would need the cross-language artefact
-    /// D39 withdrew. **There is no such copy today**: none of the launcher
-    /// components consumes `mnema_provider::Refusal`, `Balance` or `RecordId`.
-    /// The crate is named because `ui/src/lib/ipc.ts:15` exports a `Refusal` of
-    /// its own — the *ask* refusal, `noCandidates` / `emptyCompletion`, read
-    /// through `launcher/state.ts:1` — which is a different type wearing the
-    /// same name. The mirror is booked to PR 7, which owns the settings
-    /// surfaces. So a variant added here still has to be carried across by a
-    /// person; what this buys is that the person is *told*, by a build that
-    /// stops, instead of finding out from a fallback sentence in front of a
-    /// user.
+    /// D39 withdrew. **That copy exists since PR 7**, in
+    /// `ui/src/settings/Models.test.ts:1141` — and it is derived rather than
+    /// hand-made: the test walks `catalogue.rs` at run time for the variant
+    /// list, fails on a variant it has no fixture for, and fails again on one
+    /// `Models.svelte`'s `refusalReason` has no arm for. The launcher's
+    /// `ui/src/lib/ipc.ts:15` `Refusal` is a different type wearing the same
+    /// name — the *ask* refusal, `noCandidates` / `emptyCompletion`. So a
+    /// variant added here still has to be carried across by a person; what
+    /// this pin buys is that the person is *told*, by a build that stops,
+    /// instead of finding out from a fallback sentence in front of a user.
     ///
     /// `Balance::Unreadable` takes a [`mnema_provider::ProviderMessage`], whose
     /// `Text` variant is unconstructible outside `probe.rs` — `SanitisedText`
