@@ -99,7 +99,7 @@ jobs:
       #   error: failed to run custom build command for `mnema-desktop v0.0.0`
       #     resource path `binaries/mnema-extract-worker-<triple>` doesn't exist
       #
-      # Both `cargo clippy --workspace --all-targets` and `cargo test --workspace`
+      # Both the clippy step (`scripts/lint.sh`) and `cargo test --workspace`
       # below end there, on both matrix arms. Measured by moving the staged file
       # aside and watching `cargo check -p mnema-desktop` fail, then pass — not
       # predicted from the configuration.
@@ -149,7 +149,20 @@ jobs:
       # compiles nothing and still runs first.
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # 🔴 `scripts/lint.sh`, not `cargo clippy` directly, and the reason is
+      # measured. Clippy and `cargo test` compile the same crates with different
+      # rustc invocations, so sharing one `CARGO_TARGET_DIR` makes each
+      # invalidate what the other just built — and this job runs both. The
+      # script gives clippy `target/clippy` of its own; the lint is identical,
+      # `-D warnings` included.
+      #
+      # This step was first left alone on the belief that every CI job starts
+      # cold, which would have made the second build free to give up. That is
+      # false: `Swatinem/rust-cache` above restores `target/` between runs, so
+      # this job was paying the same double build the local gate was. Measured
+      # locally on a fully built tree: clippy 172s -> 2s, and the
+      # `cargo test --workspace` after it 1783s -> 492s.
+      - run: scripts/lint.sh
       # The Svelte frontend's own gate: it builds and runs its unit tests here.
       # Gated to one leg of the matrix, the reasoning the old vanilla suite gave
       # and it still holds — this is plain TypeScript and JS with nothing

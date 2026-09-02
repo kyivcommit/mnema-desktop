@@ -80,11 +80,16 @@ case_ "workflow: the matrix must actually run the tests" \
       # `cargo test --workspace` above' \
   mnema-desktop 'the_check_job_keeps_the_lines_whose_loss_would_not_show' --test packaging_workflow
 
+# ⚠️ The anchor after the deleted line is `- run: scripts/lint.sh`, not
+# `- run: cargo clippy`: the check job moved onto that script once it was
+# measured that `Swatinem/rust-cache` restores `target/`, so clippy and
+# `cargo test` had been invalidating each other on CI too. The mutation this
+# case produces is unchanged — the vendoring step is still what disappears.
 case_ "workflow: the tests need the library vendored first" \
   .github/workflows/ci.yml \
-  's{        run: scripts/fetch-pdfium\.sh\n(      - run: cargo clippy)}{$1}' \
+  's{        run: scripts/fetch-pdfium\.sh\n(      # 🔴 `scripts/lint\.sh`)}{$1}' \
   'which src-tauri now needs to compile
-      - run: cargo clippy' \
+      # 🔴 `scripts/lint.sh`' \
   mnema-desktop 'the_check_job_keeps_the_lines_whose_loss_would_not_show' --test packaging_workflow
 
 # The line moves out of `check` and into `bundle`, where it does nothing for the
