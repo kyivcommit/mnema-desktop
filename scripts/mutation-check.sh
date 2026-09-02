@@ -22,15 +22,28 @@
 # cannot leave a mutation in the tree you are working in. By default the
 # worktree also gets a throwaway CARGO_TARGET_DIR, which is the honest cold
 # measurement and the slow one: every invocation builds the workspace from
-# nothing. Set MNEMA_MUTATION_TARGET_DIR to a directory to keep the artefacts
-# between invocations instead — the worktree is still thrown away, the target
-# directory is not. CI sets it once for its six case files, which used to pay
-# six cold builds in a row: measured on run 33671866360, 16m05s of the step's
-# 24m07s was those builds, 2m41s of it in front of one three-second case.
+# nothing. Set MNEMA_MUTATION_TARGET_DIR to a directory (absolute, or relative
+# to the repository root) to keep the artefacts between invocations instead —
+# the worktree is still thrown away, the target directory is not. CI sets it
+# once for its six case files, five of which compile Rust and used to pay a
+# cold build each: measured on run 33671866360, 15m11s of the step's 24m07s
+# was those five builds (3:02, 3:23, 3:02, 3:03, 2:41), 2m41s of it in front
+# of one three-second case; the sixth file runs vitest and compiles nothing.
 # Locally, point it somewhere `cargo test` in the checkout does not use
-# (`target/mutations`, say): the worktree lives at a different path each run,
-# so cargo rebuilds the workspace crates against it anyway, but the
-# dependencies — the bulk of a cold build — are reused as they are.
+# (`target/mutations`, say). The worktree lives at a different path each run
+# and a path dependency's package id carries that path, so cargo rebuilds the
+# workspace crates against it anyway — which is also why an artefact built
+# from an earlier invocation's mutated source can never be served as fresh —
+# but the dependencies, the bulk of a cold build, are reused as they are.
+# Measured on an Apple M2 Max with the one-case `pr8-exclusions-macos.sh`:
+# throwaway directory 41.3 s, shared and cold 40.0 s, shared and warm 13.8 s,
+# and the two-case `citation-identity.sh` warm on the same directory 15.4 s.
+# One uplifted artefact is NOT namespaced by package id —
+# `<target>/debug/mnema-extract-worker`, which `tauri-build` overwrites with
+# the staged sidecar on every `mnema-desktop` build and which
+# `CARGO_BIN_EXE_mnema-extract-worker` resolves to (`scripts/stage-sidecar.sh`
+# records the incident). A shared directory does not add a writer to it, but
+# it does keep the last one's copy around between files.
 #
 # ── Two runners, and why there had to be a second ─────────────────────────────
 #
@@ -146,16 +159,24 @@ fi
 
 CASES=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 REPO=$(git rev-parse --show-toplevel)
+# Resolved before anything is created, so a bad setting exits with nothing
+# to clean up. Absolute, because cargo runs inside $TREE below and a relative
+# path would resolve there — into the worktree the trap deletes; a relative
+# setting is taken against the repository root, not the invocation directory,
+# or `target/mutations` from `crates/` would silently become
+# `crates/target/mutations`. Every step has its `|| exit`: there is no `set -e`
+# here, and a `cd` that fails inside `$(...)` would otherwise export an EMPTY
+# target directory, which is the relative case again.
+if [ -n "${MNEMA_MUTATION_TARGET_DIR:-}" ]; then
+  shared="$MNEMA_MUTATION_TARGET_DIR"
+  case "$shared" in /*) ;; *) shared="$REPO/$shared" ;; esac
+  mkdir -p "$shared" || exit 1
+  CARGO_TARGET_DIR=$(cd "$shared" && pwd) || exit 1
+  [ -n "$CARGO_TARGET_DIR" ] || exit 1
+fi
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/mnema-mutation.XXXXXX")
 TREE="$WORK/tree"
-# Absolute, because cargo runs inside $TREE below and a relative path would
-# resolve there — into the worktree the trap deletes.
-if [ -n "${MNEMA_MUTATION_TARGET_DIR:-}" ]; then
-  mkdir -p "$MNEMA_MUTATION_TARGET_DIR" || exit 1
-  CARGO_TARGET_DIR=$(cd "$MNEMA_MUTATION_TARGET_DIR" && pwd)
-else
-  CARGO_TARGET_DIR="$WORK/target"
-fi
+: "${CARGO_TARGET_DIR:=$WORK/target}"
 export CARGO_TARGET_DIR
 
 cleanup() {
@@ -556,6 +577,19 @@ case_() {
     if printf '%s' "$out" | grep -qE 'error\[E[0-9]+\]|could not compile'; then
       echo "   BROKEN CASE: the mutation does not compile, so $test never ran"
       printf '%s' "$out" | grep -E 'error\[E[0-9]+\]|^error' | head -3 | sed 's/^/     /'
+      broken=$((broken + 1))
+    elif [ $status -ne 0 ] && ! printf '%s' "$out" | grep -q 'test result: FAILED'; then
+      # Non-zero without a test having failed is cargo failing, not the test:
+      # a full disk, a target directory it cannot write, a binary that could
+      # not be spawned. The same rule the vitest branch below has carried
+      # since round 7b — a crashed oracle is not a kill — and the cargo half
+      # lacked it until the target directory became something that outlives
+      # one invocation and can fill up. Demonstrated by construction: a
+      # `cargo` shim ahead of PATH that fails with `No space left on device`
+      # only once the worktree is dirty printed "red" here before this line
+      # existed, and BROKEN CASE after.
+      echo "   BROKEN CASE: cargo failed without $test having run"
+      printf '%s' "$out" | grep -E '^error|^warning: .*fail|denied|No space' | head -3 | sed 's/^/     /'
       broken=$((broken + 1))
     elif [ $status -ne 0 ]; then
       echo "   red"
