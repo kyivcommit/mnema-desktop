@@ -230,7 +230,7 @@ pub struct MaskPreview {
 /// So the two numbers are defined against two sets:
 ///
 /// - the **current set** is what the next scan would apply today: the built-in
-///   layers, that root's stored path exclusions, and every stored mask;
+///   layers, each root's own stored path exclusions, and every stored mask;
 /// - the **new set** is the current set plus the candidate;
 /// - `paths` counts indexed paths that survive the current set and do not
 ///   survive the new one;
@@ -348,9 +348,10 @@ pub fn mask_preview(state: State<'_, AppState>, pattern: String) -> Result<MaskP
         // `documents` SMALLER, because a document is only counted when EVERY
         // surviving path of it is taken, and an extra surviving path that
         // nothing here takes suppresses it. Smaller is the understating
-        // direction, the one this whole entry point exists to close, so the
-        // editor's zero arm claims only what this rule takes and never that a
-        // document stays findable. Measured in
+        // direction, the one this whole entry point exists to close — which
+        // is why the editor's zero arm was deleted outright rather than
+        // narrowed: at `documents == 0` the screen now says nothing about
+        // documents at all. Measured in
         // `mask_preview_understates_documents_behind_an_in_tree_gitignore`
         // (`tests/commands.rs`); until fix round 6 these lines said "can only
         // make this difference larger", which is true of `paths` alone.

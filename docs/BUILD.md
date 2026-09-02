@@ -68,6 +68,15 @@ cargo install tauri-cli --version "^2" --locked
 # checkout cannot build the shell" below for what it says when it stops, and for
 # why the dev hook is not a substitute.
 scripts/stage-sidecar.sh debug     # or release; either satisfies the declaration
+
+# Lint with this rather than `cargo clippy` directly. It is the same lint, with
+# `-D warnings`, in a target directory of its own — because clippy and
+# `cargo test` compile the same crates with different rustc invocations, so
+# sharing one `CARGO_TARGET_DIR` makes each invalidate what the other just
+# built. Measured on a fully built tree: clippy 172s -> 2s, and the
+# `cargo test --workspace` that follows it 1783s -> 492s. The script's own
+# header carries the numbers and what was measured and rejected.
+scripts/lint.sh
 scripts/fetch-pdfium.sh            # bundle.resources names it; see "Pdfium in the bundle"
 
 # The package.

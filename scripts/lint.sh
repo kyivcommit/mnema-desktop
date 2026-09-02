@@ -23,12 +23,19 @@
 # `target/clippy` sits inside `target/`, which `.gitignore` already covers, so
 # this costs one more build cache on disk and nothing in the repository.
 #
-# **`ci.yml` deliberately does NOT use this**, and that is not an oversight.
-# Every CI job starts from a bare checkout with a cold cache, so there is no
-# second build to save there — the win is entirely local, in a tree that is
-# already built. Changing the workflow would also break a mutation case that
-# quotes its `- run: cargo clippy` line (`scripts/mutations/branch-review.sh`)
-# and the test that case names, for no measured gain.
+# ⚠️ **`ci.yml` does not use this yet, and the reason first written here was
+# WRONG.** It said every CI job starts from a bare checkout with a cold cache,
+# so there was no second build to save. `.github/workflows/ci.yml` runs
+# `Swatinem/rust-cache`, which restores `target/` between runs — so the `check`
+# job pays the same double build this script exists to remove. Independent
+# review caught the false premise; it is left here rather than quietly deleted
+# because a reason that turned out to be wrong is the thing a later session
+# would otherwise re-derive.
+#
+# What is true is only the cost: the workflow's `- run: cargo clippy` line is
+# quoted by a mutation case (`scripts/mutations/branch-review.sh`) and asserted
+# by the test that case names, so moving CI onto this script means moving those
+# too. Whether that trade is worth it is an open decision, not a settled no.
 #
 # ⚠️ Use this instead of calling `cargo clippy` directly. A bare `cargo clippy`
 # still works and still lints correctly — it just silently throws away the test

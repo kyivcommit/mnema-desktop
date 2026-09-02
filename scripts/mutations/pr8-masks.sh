@@ -173,18 +173,28 @@ case_ "mask_preview must validate the candidate itself, rather than preview it a
 # the loss — the direction the screen exists to prevent.
 
 # The current set loses the stored masks: the preview is back to answering about
-# the candidate alone. With `*.pdf` stored and `copy.pdf`/`copy.txt` naming one
-# document, previewing `*.txt` then answers `documents: 0` where the truth is
-# `1` — the press really does take that document's last surviving path, and the
-# mutant reports it as costing none.
+# the candidate alone.
 #
-# 🔴 Until fix round 7 this comment quoted the editor's `documents == 0`
-# sentence as what the mutant would wrongly SAY. That was a faithful quotation
-# of a claim which was false for the un-mutated code as well, so it argued from
-# the wrong place; the ruling deleted the sentence, and what a person is not
-# told at zero is now nothing at all. The defect this case pins is the NUMBER,
-# and the assertion that dies is the numeric one in
-# `mask_preview_answers_the_difference_against_the_stored_masks`.
+# 🔴 **What this case pins is `paths`, and nothing about `documents`.** Measured
+# by applying the mutation below and reading the failure, rather than reasoned
+# from what the fixture was built for:
+#
+#     left:  {"documents": 1, "paths": 2}
+#     right: {"documents": 1, "paths": 1}
+#
+# `documents` is 1 on BOTH sides. Emptying only the *current* set stops
+# `copy.pdf` being charged to the stored rule, so both copies count against this
+# press and `paths` moves; the document is counted either way. A reader who
+# credits this case with pinning the `documents` half would be wrong, and if
+# `documents` stopped being computed for that state the case would still go red
+# — for the `paths` reason.
+#
+# Two earlier versions of this comment were wrong in the same place. The first
+# quoted the editor's `documents == 0` sentence as what the mutant would wrongly
+# SAY — a faithful quotation of a claim false for the un-mutated code too. The
+# second (fix round 7) replaced it with `documents: 0 where the truth is 1`,
+# which the run above shows the mutant never produces. Both asserted something
+# about documents that no run supports; this one asserts only what one does.
 case_ "the current rule set must hold every stored mask" \
   src-tauri/src/tree.rs \
   's{            \.with_masks\(stored\.clone\(\)\)\?}{.with_masks(Vec::new())? /* mutant: current set has no masks */}' \

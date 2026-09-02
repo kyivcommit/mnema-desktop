@@ -290,6 +290,17 @@ test('at zero documents the sentence is the file count and the hedge, and says n
   await fireEvent.click(addButton());
 
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+
+  // 🔴 The WHOLE question, not just the cost paragraph. Independent review of
+  // fix round 7 measured that a claim smuggled into a sibling element of
+  // `mask-confirm-cost` dies in `i18n/guard.test.ts` if it is a literal, and is
+  // seen by nothing at all if it arrives as a new catalogue key rendered into a
+  // new element. This family's entire history is a claim surviving in a place
+  // nobody looked, so the assertion is scoped to the container.
+  const whole = visibleText(screen.getByTestId('mask-confirm'));
+  expect(whole).not.toContain('document');
+  expect(whole).not.toContain('документ');
+
   const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
   expect(cost).not.toContain('document');
   expect(cost).toBe(
