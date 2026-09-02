@@ -50,14 +50,14 @@ packager needs and is bound to it by a test so the repetition cannot go stale.
 | Architecture | arm64 or x86-64. A package is per architecture — see below. |
 | Xcode command line tools | for the linker, `codesign` and `hdiutil`. |
 | Rust | whatever `rust-toolchain.toml` names; `rustup toolchain install` provisions it. |
-| Tauri CLI | major version 2. |
+| Tauri CLI | 2.11.4 — the version CI installs as a release binary (`.github/workflows/ci.yml`, the `bundle` job, pinned there by version and checksum). A newer one is bumped in both places at once. |
 | Pdfium | `scripts/fetch-pdfium.sh`, before `cargo test` **and** before `cargo tauri build` — the bundle ships it. |
 
 ## The commands
 
 ```sh
 # Once per machine.
-cargo install tauri-cli --version "^2" --locked
+cargo install tauri-cli --version 2.11.4 --locked
 
 # Once per clone, before anything else. `src-tauri` declares both of these as
 # files that must exist, and `tauri-build` checks them from inside the build
