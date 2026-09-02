@@ -89,7 +89,7 @@ mod support;
 #[path = "support/app.rs"]
 mod app;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use app::{app_in, call, main_webview, run_walk_and_capture_ending};
@@ -453,12 +453,26 @@ fn draw_world(seed: u64) -> World {
             // the `case-twin-of-stored` edge is reported as reached without a
             // single letter having changed case (Task 2 review, minor 5).
             //
-            // So the base is the first stored mask that HAS another spelling,
-            // and if the draw left none — no masks at all, or only `*.TXT` —
+            // So the base is the first stored mask whose upper case satisfies
+            // BOTH halves of what the edge claims, and each half is asked of
+            // the authority on it. Different by bytes: the draw is compared
+            // against itself. One rule to the store: `already_stored`, which
+            // is `WalkRules::same_mask_rule` — the predicate `bridge::add_mask`
+            // itself asks. A `to_uppercase() != m` test would answer the second
+            // half by proxy and be wrong the day the fold stops covering
+            // Cyrillic, since `*ЗВІТ*` differs by bytes either way.
+            //
+            // If the draw left no such mask — none at all, or only `*.TXT` —
             // one is backfilled. `*.md` is the backfill because it is the one
             // pool entry that cannot fold into `*.TXT`; `*.txt` would be
             // refused as already stored and leave the same hole.
-            let base = masks.iter().find(|m| m.to_uppercase() != **m).cloned();
+            let base = masks
+                .iter()
+                .find(|m| {
+                    let upper = m.to_uppercase();
+                    !masks.contains(&upper) && already_stored(&masks, &upper)
+                })
+                .cloned();
             let base = base.unwrap_or_else(|| {
                 let backfill = "*.md".to_string();
                 if !already_stored(&masks, &backfill) {
@@ -853,10 +867,20 @@ fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
     // could see — the volume folded it into another name, or stored it in a
     // normalisation form these bytes do not spell — and the shape it was drawn
     // as was therefore not reached, whatever the generator intended.
-    let indexed0: BTreeSet<(usize, String)> =
-        manifest.iter().map(|(o, p, _)| (*o, p.clone())).collect();
+    //
+    // The document id is kept, not dropped: four of the eight shapes are not
+    // states of one path at all, and presence alone cannot see them.
+    let indexed0: BTreeMap<(usize, String), String> = manifest
+        .iter()
+        .map(|(o, p, id)| ((*o, p.clone()), id.clone()))
+        .collect();
     for f in &world.files {
-        let twin_kept = match f.kind {
+        // The path itself, first: nothing below can be true of a file the
+        // index does not hold.
+        let Some(document) = indexed0.get(&(f.root, f.relative.clone())) else {
+            continue;
+        };
+        let counted = match f.kind {
             // A twin counts only if BOTH spellings are in the index — one
             // entry means the volume folded them, and that is the regime, not
             // a pair of names to compare a mask against.
@@ -864,10 +888,26 @@ fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
                 .files
                 .iter()
                 .filter(|g| g.kind == f.kind && g.root == f.root)
-                .all(|g| indexed0.contains(&(g.root, g.relative.clone()))),
+                .all(|g| indexed0.contains_key(&(g.root, g.relative.clone()))),
+            // A copy is not a path, it is a RELATION: two paths, one document.
+            // Presence of this one path says nothing about it — the second
+            // write could have landed on the same name, or the index could
+            // have given the two files separate documents — so the state is
+            // read as the index states it, by asking for another path whose
+            // document id is this one's. Same two-element shape as the twins,
+            // keyed by document instead of by spelling.
+            NameKind::CopyWithinRoot | NameKind::CopyAcrossRoots => {
+                let across = f.kind == NameKind::CopyAcrossRoots;
+                world.files.iter().any(|g| {
+                    g.bytes == f.bytes
+                        && (g.root, &g.relative) != (f.root, &f.relative)
+                        && (g.root == f.root) != across
+                        && indexed0.get(&(g.root, g.relative.clone())) == Some(document)
+                })
+            }
             _ => true,
         };
-        if indexed0.contains(&(f.root, f.relative.clone())) && twin_kept {
+        if counted {
             reached.names.insert(f.kind.label());
         }
     }
@@ -891,7 +931,7 @@ fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
     store_rules(&b, &world); // world B stores S
     let persisted = stored_rules(&w0);
     // Bound rather than compared in place, because the prefix half of it is
-    // read again further down: the `already-taken-by-prefix` edge is counted
+    // read again further down: the `removed-under-a-stored-prefix` edge is counted
     // against the prefixes world A really holds, not against the ones the
     // generator drew.
     let a_rules = stored_rules(&a);
@@ -1019,18 +1059,19 @@ fn run_seed(seed: u64, reached: &mut Reached) -> Option<Outcome> {
     }
     // A path removed under S that sits beneath a prefix world A really holds.
     // This is what proves a drawn prefix was not inert — the line above is
-    // satisfied by the masks alone. It reads as "a prefix could have done
-    // this", not "a prefix did": nothing here can tell which rule removed a
-    // row, and a mask that happens to take a file under an excluded folder
-    // would count too. The state it is watching for is a prefix that matches
-    // real indexed paths at all, and that is what it answers.
+    // satisfied by the masks alone. The NAME is the whole claim: a path was
+    // removed and it lay under a stored prefix. It does not say the prefix
+    // removed it, because nothing here can tell which rule took a row, and a
+    // mask that happens to catch a file under an excluded folder counts the
+    // same. The state worth reaching is a stored prefix that matches real
+    // indexed paths at all, and that is what this answers.
     let under_a_prefix = removed_a.iter().any(|(ordinal, path, _)| {
         a_rules.1.iter().any(|(o, prefix)| {
             o == ordinal && (path == prefix || path.starts_with(&format!("{prefix}/")))
         })
     });
     if under_a_prefix {
-        reached.states.insert("already-taken-by-prefix");
+        reached.states.insert("removed-under-a-stored-prefix");
     }
     if gone_b.len() > gone_a.len() {
         reached.states.insert("documents-gone");
@@ -1148,7 +1189,7 @@ fn required(regime: &Regime) -> Reached {
         // that stored the folder in the other would match nothing, and the
         // combined state would still be reached by the masks (Task 3
         // re-review).
-        "already-taken-by-prefix",
+        "removed-under-a-stored-prefix",
         // The candidate cost a document its last path.
         "documents-gone",
         // …and the opposite: a path went, the document stayed, because a copy
