@@ -333,7 +333,9 @@ jobs:
     # sidecar, no Pdfium; 0 s, 0 s, 1 s and 12 s on run 33671866360 — in a job of
     # their own, so a case file that has stopped applying or a promise left
     # in a comment goes red fifteen seconds in, on its own line, rather than
-    # inside whichever mutation job happened to run it. They used to open the
+    # inside whichever mutation job happened to run it. The three after the
+    # self-test carry `if: always()`, so two findings on one commit are two
+    # red lines and not the first one hiding the second. They used to open the
     # `mutations` job for exactly that reason ("first, and before anything is
     # provisioned"); when that job became a matrix they would have run six
     # times, and six green lines about the same directory are no more
@@ -355,10 +357,11 @@ jobs:
       # any other and was clean while they rotted.
       #
       # ⚠️ **This line used to say "all twenty-four", and no number belongs
-      # here** (fix round 2, B7): the directory holds 41 `.sh` files and the
-      # sweep reports 34 of them as case files, the other 7 being stand-in
-      # workers that declare an interpreter — both figures as of fix round 2 of
-      # PR 8a, both moving, and neither worth trusting from a comment. The run's
+      # here** (fix round 2, B7): the directory held 41 `.sh` files at fix
+      # round 2 of PR 8a and holds 44 as this sentence is moved, the sweep
+      # reporting 37 of them as case files and the other 7 being stand-in
+      # workers that declare an interpreter — figures that move, and none
+      # worth trusting from a comment. The run's
       # own last two lines print the second one every time, and the first is
       # `ls scripts/mutations/*.sh | wc -l`.
       #
@@ -393,13 +396,16 @@ jobs:
       - name: Self-test the obligation sweep
         run: scripts/check-booked.sh --self-test > /dev/null
       - name: Check that no obligation is still written into the code
+        if: always()
         run: scripts/check-booked.sh
       - name: Check that every source citation lands inside its file
+        if: always()
         run: |
           scripts/check-citations.sh > "$RUNNER_TEMP/citations.txt" \
             || { awk '/^--- [0-9]+ mechanical problem/ {p = 1} p' "$RUNNER_TEMP/citations.txt" | grep . \
                  || tail -n 20 "$RUNNER_TEMP/citations.txt"; exit 1; }
       - name: Check that every mutation case still applies
+        if: always()
         run: scripts/mutation-staleness.sh
 
   mutations:
@@ -419,11 +425,18 @@ jobs:
     # 33671866360, and 13m42s on run 33684364310 once they shared one target
     # directory — 5m38s of baselines and 8m04s of cases, and the cases are
     # what is left. A file's cases depend on nothing another file does, so
-    # six runners make the step as long as its slowest file rather than the
-    # sum of all six: on that run `source.sh` (2:25 + 1:45) and
-    # `embedding.sh` (0:59 + 2:02) were the two longest, four minutes each,
-    # against roughly two minutes of setup that every job now pays for
-    # itself. The first run of this matrix is the measurement.
+    # six runners make the job as long as its slowest file plus that leg's
+    # own setup, rather than the sum of all six: on that run `source.sh`
+    # (2:25 + 1:45 = 4:10) and `embedding.sh` (0:59 + 2:02 = 3:01) were the
+    # two longest. What every leg now pays for itself: `apt-get`, the
+    # Pdfium download and the sidecar build — `mnema-extract` is a
+    # workspace crate, which the cache never holds — about two minutes on
+    # that run with the dependencies restored. On a COLD key (a
+    # `Cargo.lock`, `rust-toolchain.toml` or rustc change) the six legs build
+    # the dependencies at the same time and none can see another's: six
+    # times the compute of one cold build, 3:02–3:23 each on run
+    # 33671866360, in front of the slowest file. The warm case is the steady
+    # state; the first run of this matrix is the measurement of it.
     #
     # ⚠️ **This list is not every case file, and the omission is a decision
     # rather than an oversight.** `mutation-staleness.sh` in `sweeps` proves
@@ -463,6 +476,9 @@ jobs:
           - pr8-subfolders
           - pr8-subfolders-linux
           - pr8-ui-folders
+        include:
+          - file: pr8-ui-folders
+            node: true
     runs-on: ubuntu-24.04
     # Thirty was a guess when this leg was written, and it stayed one until the
     # leg first executed: pull request #7, 6m17s on 119 cases; later 9m52s on
@@ -484,14 +500,17 @@ jobs:
       # build there rather than in a throwaway directory of its own. The
       # dependencies are what the cache keeps — the action drops the
       # workspace's own artefacts before saving — and they are the same
-      # dependencies for every leg of the matrix, which is what `shared-key`
-      # says: one cache for the six jobs instead of six caches of the same
-      # bytes (the action's automatic key would otherwise carry each leg's
-      # matrix value). The first leg to finish saves it; the others find the
-      # key taken and skip, which the action reports as a warning, not a
-      # failure. The workspace crates are rebuilt against each file's
-      # worktree either way, because a path dependency's package id carries
-      # the worktree path.
+      # dependencies for every leg of the matrix, and one cache serves all
+      # six: the action's automatic key carries the job id (`mutations`),
+      # the rustc version and a hash of the manifests, lockfile and
+      # toolchain file, and NOT the matrix value — its README says
+      # "keyed by the github job_id", and `GITHUB_JOB` is the same in every
+      # leg. On a warm exact hit no leg saves anything; on a cold key the
+      # first leg to finish saves and the others find the key taken, which
+      # the action logs as an error while the step still exits 0. The
+      # workspace crates are rebuilt against each file's worktree either
+      # way, because a path dependency's package id carries the worktree
+      # path.
       #
       # ⚠️ The action also exports `CARGO_INCREMENTAL=0` for the rest of the
       # job (its README says so). That is right for a one-shot build and
@@ -502,15 +521,14 @@ jobs:
       # dropped by the action before saving, so they never reach the cache —
       # and do add to the directory's size on disk, measured below.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          shared-key: mutations
       # The harness's own worktree only carries vendor/ and
       # src-tauri/binaries/ if this checkout already has them
       # (mutation-check.sh:209, :227-228) — both are git-ignored, so a case
       # touching mnema-desktop needs the same setup `check` uses to build it
       # at all.
+      # No `if: runner.os` here, unlike `check`: every leg of this matrix is
+      # the one Linux image named above.
       - name: Linux system dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
@@ -519,21 +537,23 @@ jobs:
         run: scripts/stage-sidecar.sh debug
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
-      # For the `pr8-ui-folders` leg and no other: its cases run vitest, and
-      # `mutation-check.sh` links `ui/node_modules` into its worktree rather
-      # than installing there, so the directory has to exist in this checkout
-      # first. Same `lts/*` and same `npm ci` as `check` — the lockfile, not a
-      # fresh resolution. `npm run build` and `npm run test` are deliberately
-      # NOT repeated here: `check` already runs both, and this leg needs the
-      # dependency tree, not a second opinion about the frontend. Measured on
-      # run 33684364310: setup-node 2s, `npm ci` 3s.
+      # For the leg whose matrix entry says `node: true` and no other —
+      # `pr8-ui-folders` today, and the flag lives on the entry so a renamed
+      # file cannot leave the gate pointing at the old name: its cases run
+      # vitest, and `mutation-check.sh` links `ui/node_modules` into its
+      # worktree rather than installing there, so the directory has to exist
+      # in this checkout first. Same `lts/*` and same `npm ci` as `check` —
+      # the lockfile, not a fresh resolution. `npm run build` and `npm run
+      # test` are deliberately NOT repeated here: `check` already runs both,
+      # and this leg needs the dependency tree, not a second opinion about
+      # the frontend. Measured on run 33684364310: setup-node 2s, `npm ci` 3s.
       - name: Node.js, for the mutation cases that run vitest
-        if: matrix.file == 'pr8-ui-folders'
+        if: matrix.node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 'lts/*'
       - name: Install the frontend dependencies the vitest cases run against
-        if: matrix.file == 'pr8-ui-folders'
+        if: matrix.node
         run: npm ci --prefix ui
       # The target directory is the checkout's own, shared with the sidecar
       # build above and restored by the cache; `mutation-check.sh` keeps its
@@ -541,8 +561,9 @@ jobs:
       # the shared directory each file built the workspace from nothing:
       # 16m05s of 24m07s on run 33671866360, 2m41s of it in front of the
       # one-case `pr8-subfolders-linux.sh`. With it, 5m38s of baselines on
-      # run 33684364310 — and 6.2 GB on disk after six files, against 79 GB
-      # free, which one file per job can only lower. The step after this one
+      # run 33684364310, whose disk step read 6.2 GB in `target/` after six
+      # files against 79 GB free — which one file per job can only lower.
+      # The step after this one
       # prints each leg's size and headroom whatever happened here.
       - name: Run the mutation cases in scripts/mutations/${{ matrix.file }}.sh
         env:
