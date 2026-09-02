@@ -37,7 +37,9 @@
 # Usage:
 #   scripts/check-booked.sh              # every tracked file; exit 1 if any
 #   scripts/check-booked.sh --self-test  # the sweep against a throwaway
-#                                        # repository, in both directions
+#                                        # repository, in both directions;
+#                                        # failures go to stderr, so a caller
+#                                        # may silence stdout and still see them
 #
 # `--self-test` builds two temporary git repositories — one committing two
 # markers in files of two extensions, one committing every non-match the
@@ -94,15 +96,18 @@ if [ "${1:-}" = "--self-test" ]; then
   fi
   # The self-test runs copies of this file, and a copy must never run the
   # self-test again. Every copy is run with `CHECK_BOOKED_DEPTH` one higher
-  # than its parent's; a nested self-test stops here with 3, and the second
-  # `if` is the first one's backstop — with the first deleted, a nested run
-  # reaches depth 3 and exits 4 instead of running forever, so the probe
-  # below (which asserts 3) kills a mutant of the first guard in finite time,
-  # and a second probe claims depth 3 outright and asserts 4.
-  # ⚠️ **Any mutation that stops the depth from growing recurses without end**
-  # — both guards deleted, or the `+ 1` dropped from the increment — and no
-  # such mutant is to be run: the property, not a list, is what to check a
-  # candidate mutant against. (History, for the size of the hazard: before
+  # than its parent's, and two guards read it: the exit-3 guard stops a
+  # nested self-test at depth 1, and the exit-4 guard is its backstop — with
+  # the exit-3 guard deleted, a nested run reaches depth 3 and exits 4
+  # instead of running forever, so the probe below that asserts 3 kills that
+  # mutant in finite time; another probe claims depth 3 outright and asserts
+  # 4, so the backstop's own mutant is red without any nesting.
+  # ⚠️ **A copy is contained only while the depth both grows AND is checked
+  # before the copy can copy itself again. Any mutation that breaks either
+  # half recurses without end** — the `+ 1` dropped from the increment breaks
+  # the growing; both guards deleted breaks the checking — and no such
+  # mutant is to be run. Check a candidate mutant against that property, not
+  # against these two examples. (History, for the size of the hazard: before
   # the depth existed, a copy that reached the self-test again left 944
   # temporary repositories behind before it was killed, and `perl -e alarm`
   # did not contain it — it kills the top process and orphans the children.)
@@ -136,8 +141,13 @@ if [ "${1:-}" = "--self-test" ]; then
 
   # Red: the marker, as it would be written in a doc comment — and a second
   # one in a file of another extension, so a pathspec narrowing the sweep to
-  # `*.rs` is a mutant this catches (review of PR #28, Minor).
-  red="$(mk red "/// ${MARK}Task 11: give reason its own wording)")"
+  # `*.rs` is a mutant this catches (review of PR #28, Minor). The first is
+  # spelled INDEPENDENTLY of `$MARK`, with one letter as an octal escape (the
+  # literal must still not appear in this file): a fixture built from the
+  # same variable the sweep uses cannot tell a right pattern from a wrong
+  # one — `MARK="${WORD}["` passed every row (review of round 4, Important 2).
+  spelled="$(printf 'BO\117KED(')"
+  red="$(mk red "/// ${spelled}Task 11: give reason its own wording)")"
   printf '%s\n' "// ${MARK}Task 12: the same, in the interface)" > "$red/note.ts"
   git -C "$red" add note.ts
   git -C "$red" commit -q -m probe-ts
@@ -146,8 +156,8 @@ if [ "${1:-}" = "--self-test" ]; then
      || ! printf '%s\n' "$out" | grep -q 'note.ts:1:' \
      || ! printf '%s\n' "$out" | grep -q '^--- 2 open obligation'; then
     bad=$((bad + 1))
-    echo "SELF-TEST FAILURE: two committed markers must exit 1, name note.rs:1 and note.ts:1 and count 2; got $status:"
-    printf '%s\n' "$out" | sed 's/^/  /'
+    echo "SELF-TEST FAILURE: two committed markers must exit 1, name note.rs:1 and note.ts:1 and count 2; got $status:" >&2
+    printf '%s\n' "$out" | sed 's/^/  /' >&2
   fi
 
   # Green: every non-match the header names, none of which is a promise. The
@@ -162,8 +172,8 @@ if [ "${1:-}" = "--self-test" ]; then
   out="$(sweep "$green")"; status=$?
   if [ "$status" -ne 0 ]; then
     bad=$((bad + 1))
-    echo "SELF-TEST FAILURE: prose, the bare word, a space and a line break must exit 0; got $status:"
-    printf '%s\n' "$out" | sed 's/^/  /'
+    echo "SELF-TEST FAILURE: prose, the bare word, a space and a line break must exit 0; got $status:" >&2
+    printf '%s\n' "$out" | sed 's/^/  /' >&2
   fi
 
   # Untracked: a marker in a file git does not track must not make it red.
@@ -171,8 +181,8 @@ if [ "${1:-}" = "--self-test" ]; then
   out="$(sweep "$green")"; status=$?
   if [ "$status" -ne 0 ]; then
     bad=$((bad + 1))
-    echo "SELF-TEST FAILURE: an untracked file must not count; got $status:"
-    printf '%s\n' "$out" | sed 's/^/  /'
+    echo "SELF-TEST FAILURE: an untracked file must not count; got $status:" >&2
+    printf '%s\n' "$out" | sed 's/^/  /' >&2
   fi
 
   # A root that does not exist must be an error (2), not "nothing found" (0):
@@ -182,8 +192,8 @@ if [ "${1:-}" = "--self-test" ]; then
   out="$(sweep "$tmp/absent" 2>/dev/null)"; status=$?
   if [ "$status" -ne 2 ]; then
     bad=$((bad + 1))
-    echo "SELF-TEST FAILURE: a root that does not exist must exit 2; got $status:"
-    printf '%s\n' "$out" | sed 's/^/  /'
+    echo "SELF-TEST FAILURE: a root that does not exist must exit 2; got $status:" >&2
+    printf '%s\n' "$out" | sed 's/^/  /' >&2
   fi
 
   # An existing directory that is no repository is `git grep`'s own failure
@@ -193,8 +203,8 @@ if [ "${1:-}" = "--self-test" ]; then
   out="$(sweep "$tmp/plain" 2>/dev/null)"; status=$?
   if [ "$status" -ne 2 ]; then
     bad=$((bad + 1))
-    echo "SELF-TEST FAILURE: a directory that is not a repository must exit 2; got $status:"
-    printf '%s\n' "$out" | sed 's/^/  /'
+    echo "SELF-TEST FAILURE: a directory that is not a repository must exit 2; got $status:" >&2
+    printf '%s\n' "$out" | sed 's/^/  /' >&2
   fi
 
   # The script itself, not only the function: CI reads the exit status of
@@ -211,18 +221,18 @@ if [ "${1:-}" = "--self-test" ]; then
     out="$(CHECK_BOOKED_DEPTH=$((depth + 1)) bash "$dir/scripts/check-booked.sh")"; status=$?
     if [ "$status" -ne "$want" ]; then
       bad=$((bad + 1))
-      echo "SELF-TEST FAILURE: the script run on the ${pair%%:*} repository must exit $want; got $status:"
-      printf '%s\n' "$out" | sed 's/^/  /'
+      echo "SELF-TEST FAILURE: the script run on the ${pair%%:*} repository must exit $want; got $status:" >&2
+      printf '%s\n' "$out" | sed 's/^/  /' >&2
     fi
   done
   # An argument the script does not know is refused with 2, in both spellings;
-  # without this row the refusal stood on `set -u` alone (fix round 2).
+  # without this row nothing asserted the refusal (fix round 2).
   for args in "bogus" "--self-test bogus"; do
     # shellcheck disable=SC2086
     CHECK_BOOKED_DEPTH=$((depth + 1)) bash "$tmp/green/scripts/check-booked.sh" $args > /dev/null 2>&1; status=$?
     if [ "$status" -ne 2 ]; then
       bad=$((bad + 1))
-      echo "SELF-TEST FAILURE: \`$args\` must be refused with 2; got $status"
+      echo "SELF-TEST FAILURE: \`$args\` must be refused with 2; got $status" >&2
     fi
   done
   # A copy asked for the self-test from inside one must stop with 3. This is
@@ -231,18 +241,18 @@ if [ "${1:-}" = "--self-test" ]; then
   CHECK_BOOKED_DEPTH=$((depth + 1)) bash "$tmp/green/scripts/check-booked.sh" --self-test > /dev/null 2>&1; status=$?
   if [ "$status" -ne 3 ]; then
     bad=$((bad + 1))
-    echo "SELF-TEST FAILURE: a nested self-test must stop with 3; got $status"
+    echo "SELF-TEST FAILURE: a nested self-test must stop with 3; got $status" >&2
   fi
   # The backstop, reached directly by claiming depth 3, so its mutant is red
   # without any nesting at all (review of round 3, question 1b).
   CHECK_BOOKED_DEPTH=3 bash "$tmp/green/scripts/check-booked.sh" --self-test > /dev/null 2>&1; status=$?
   if [ "$status" -ne 4 ]; then
     bad=$((bad + 1))
-    echo "SELF-TEST FAILURE: a self-test at depth 3 must stop with 4; got $status"
+    echo "SELF-TEST FAILURE: a self-test at depth 3 must stop with 4; got $status" >&2
   fi
 
   if [ "$bad" -ne 0 ]; then
-    echo "--- self-test: $bad failure(s) ---"
+    echo "--- self-test: $bad failure(s) ---" >&2
     exit 1
   fi
   echo "--- self-test: red on committed markers; green on every non-match the header names and an untracked file; 2 on a missing root, a non-repository and a bad argument; 3 on a nested self-test and 4 at depth 3; the script's own exit status checked both ways ---"

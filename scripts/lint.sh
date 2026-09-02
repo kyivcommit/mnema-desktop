@@ -44,9 +44,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # The two checks that read comments rather than code, first because they cost
 # about a second and compile nothing: an obligation written into a comment
-# (`check-booked.sh`, its own self-test first, so the sweep is not trusted on
-# a broken script) and a citation whose line is past the end of its file
-# (`check-citations.sh`). `ci.yml` runs the same in its `mutations` job.
+# (`check-booked.sh`, its own self-test first — it writes failures to stderr,
+# so silencing its stdout hides only the success line) and a citation whose
+# line is past the end of its file (`check-citations.sh`). `ci.yml` runs the
+# same in its `mutations` job.
 scripts/check-booked.sh --self-test > /dev/null
 scripts/check-booked.sh
 # The citation sweep prints every citation it checked (2 700 lines) and its
