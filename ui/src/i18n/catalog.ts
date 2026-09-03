@@ -90,7 +90,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_frozen_unreadable_directory'
   | 'indexing_note_no_key' | 'indexing_note_no_model' | 'indexing_note_rejected'
   | 'indexing_unobserved' | 'indexing_cancel'
-  | 'indexing_index_files' | 'indexing_index_updated' | 'indexing_index_never'
+  | 'indexing_index_files' | 'indexing_index_updated' | 'indexing_index_updated_ago'
+  | 'indexing_index_never'
   | 'indexing_index_unreadable_not_open' | 'indexing_index_unreadable_read_failed'
   | 'indexing_index_unreadable_reason' | 'indexing_index_load_failed'
   | 'indexing_index_failed_chunks' | 'indexing_index_refused_run'
@@ -734,6 +735,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // date is what a person compares against the file they edited this
     // morning, the phrase is what they feel. `formatIndexedDate` fills {date}.
     indexing_index_updated: 'Останнє оновлення: {date}.',
+    // The phrase gets a subject and a full stop of its own. `formatIndexedAt`
+    // returns «1 годину тому», which the Recents card can render bare because a
+    // filename sits beside it supplying the subject; last on this panel, with
+    // nothing beside it, it read as an orphan fragment (review, Minor 4).
+    indexing_index_updated_ago: 'Це було {ago}.',
     // `lastIndexedAt: null` is the backend's own statement that nothing has
     // ever finished indexing. Never a blank, never an epoch date.
     indexing_index_never: 'Ще нічого не проіндексовано.',
@@ -970,6 +976,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_cancel: 'Stop',
     indexing_index_files: '{count, plural, one {The index holds # file} other {The index holds # files}}.',
     indexing_index_updated: 'Last updated: {date}.',
+    indexing_index_updated_ago: 'That was {ago}.',
     indexing_index_never: 'Nothing has been indexed yet.',
     indexing_index_unreadable_not_open: 'The index could not be read: it is not open.',
     indexing_index_unreadable_read_failed: 'The index could not be read: the attempt to read it failed.',

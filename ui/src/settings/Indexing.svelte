@@ -127,10 +127,15 @@
     if (lastIndexedAt === null) return null;
     return t('indexing_index_updated', { date: formatIndexedDate(lastIndexedAt, $locale) });
   });
+  // Wrapped in a catalogue sentence rather than rendered bare. `formatIndexedAt`
+  // answers "how long ago" and nothing else — the Recents card can print it
+  // alone because a filename sits beside it supplying the subject. Last on this
+  // panel it had neither subject nor full stop while every line above it had
+  // both, and read as a fragment somebody forgot to finish.
   const agoLine = $derived.by(() => {
     void $locale;
     if (lastIndexedAt === null) return null;
-    return formatIndexedAt(lastIndexedAt, Date.now());
+    return t('indexing_index_updated_ago', { ago: formatIndexedAt(lastIndexedAt, Date.now()) });
   });
   const neverLine = $derived.by(() => {
     void $locale;
@@ -178,6 +183,17 @@
   // is written only by `embed_job.rs` and is always `0` for a walk (`job.rs:25`),
   // so a non-zero value already names the pass this sentence names — a
   // `pass === 'embed'` beside it would be a condition that cannot be false.
+  //
+  // 🔴 And deliberately NOT gated on `read`, which is a decision rather than an
+  // omission (review, Minor 5). The pass really did refuse those chunks, and
+  // that fact does not stop being true when the next read of the index fails.
+  // The sequence is a real one and not a contrived pairing: a pass ends, the
+  // ending triggers the re-read, and the re-read comes back `Unreadable`. Gated
+  // on `read`, the window would answer "the index could not be read" and delete,
+  // in the same breath, the only surviving report of what the pass just did.
+  // The subject is a pass, not the index, so the sentence stands on its own —
+  // and the cumulative sentence beside it does not, because that one IS about
+  // the index and has no arm to be read from.
   const refusedRunLine = $derived.by(() => {
     void $locale;
     const phase = $jobState.phase;
@@ -188,9 +204,14 @@
   const loadFailedLabel = $derived.by(() => { void $locale; return t('indexing_index_load_failed'); });
 </script>
 
-<!-- The failed read comes first and stands alone: nothing below it is drawn,
-     because every line down there is a number and a read that failed produced
-     none. -->
+<!-- The failed read leads, and it does NOT gate what follows: this is an `{#if}`,
+     not an `{:else}`. On the FIRST read's rejection there is nothing below it
+     anyway, because `settings` is still null. On a refused RE-read the previous
+     answer is still there and stays on screen — the ruling recorded beside
+     `refresh()` above — so the sentence sits over the numbers it could not
+     confirm, which is the whole of what it is for. Do not turn this into a
+     gate: blanking the panel would take away a count that was true a moment ago
+     and probably still is. -->
 {#if loadError}
   <p data-testid="indexing-index-load-failed">{loadFailedLabel}</p>
   <p data-testid="indexing-index-load-error">{loadError}</p>

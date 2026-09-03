@@ -63,6 +63,21 @@ export function formatIndexedAt(indexedAt: number, nowMs: number): string {
  * writes `formatIndexedDate(at, $locale)` inside its `$derived.by` and the
  * string re-derives on a language switch — the same anchoring every other
  * reactive string on that screen needs.
+ *
+ * ⚠️ **This is the first `Intl` call in this project, and it brings a platform
+ * dependency nothing else here has** (review, Minor 7). Every user-visible
+ * string until now came from the hand-written catalogue; this one comes from
+ * the runtime's CLDR data. `Loc` is `'uk' | 'en'`, and both are BCP-47 language
+ * tags that `Intl.DateTimeFormat` accepts directly — no mapping table, and the
+ * union is deliberately not widened to anything that would need one. What the
+ * runtime must supply is the DATA behind those tags: on a Node built with
+ * small-ICU only `en-US` is present, `uk` silently falls back to it, and the
+ * two locales format identically. The tests that assert `uk` differs from `en`
+ * (`recency.test.ts` and `Indexing.test.ts`) are exactly the ones that go red
+ * there, and they will read as a bug in this function rather than as a build of
+ * Node without its locale data. Official Node builds have shipped full-ICU
+ * since v13 and CI uses `actions/setup-node` with `lts/*`, so this is a note
+ * for whoever hits it on a distro-packaged Node, not a known failure.
  */
 export function formatIndexedDate(indexedAt: number, locale: Loc): string {
   return new Intl.DateTimeFormat(locale, { dateStyle: 'long' }).format(new Date(indexedAt * 1000));

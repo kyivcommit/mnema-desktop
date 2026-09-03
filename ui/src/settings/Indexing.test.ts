@@ -160,8 +160,11 @@ test('a filled index says how many files it holds, the date it last grew, and ho
   expect(visible(screen.getByTestId('indexing-index-date')))
     .toBe(`Останнє оновлення: ${dateIn('uk', at)}.`);
   // …and the relative phrase beside it. Two lines, because they answer two
-  // different questions and one cannot stand in for the other.
-  expect(visible(screen.getByTestId('indexing-index-ago'))).toBe('1 годину тому');
+  // different questions and one cannot stand in for the other. A sentence with
+  // its own subject and its own full stop, not the bare phrase: the Recents
+  // card can render «1 годину тому» alone because a filename sits beside it
+  // supplying the subject, and nothing here does.
+  expect(visible(screen.getByTestId('indexing-index-ago'))).toBe('Це було 1 годину тому.');
   expect(screen.queryByTestId('indexing-index-never')).toBeNull();
 });
 
@@ -182,6 +185,7 @@ test('the date follows the language, not the machine', async () => {
   expect(visible(screen.getByTestId('indexing-index-date')))
     .toBe(`Last updated: ${dateIn('en', at)}.`);
   expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 12 files.');
+  expect(visible(screen.getByTestId('indexing-index-ago'))).toBe('That was 1 hour ago.');
   expect(dateIn('en', at)).not.toBe(dateIn('uk', at));
 });
 
@@ -298,6 +302,32 @@ test('a run that gave up on chunks and an index that already had some show two s
   expect(visible(screen.getByTestId('indexing-index-failed-chunks'))).toBe(SPACE_SENTENCE);
   // Two different sentences, not one key drawn twice with two counts.
   expect(RUN_SENTENCE).not.toBe(SPACE_SENTENCE);
+});
+
+// 🔴 The pairing the two sentences have to survive apart, decided rather than
+// left undecided (review, Minor 5). The sequence is the ordinary one: a pass
+// ends, the ending triggers the re-read, and the re-read comes back
+// `Unreadable`. The run's report is then the only surviving account of what
+// just happened, so it stays; the cumulative sentence goes, because that one is
+// about the index and there is no `read` arm to take it from.
+test('an index that stops being readable still says what the pass that just ended gave up on', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, failedChunks: 3 }));
+  const { jobs } = renderSection();
+  await waitFor(() => expect(screen.getByTestId('indexing-index-failed-chunks')).toBeTruthy());
+  const send = await embedChannel(jobs);
+
+  // What the ending's own re-read finds.
+  modelSettings.mockResolvedValue(settings({
+    index: { kind: 'unreadable', cause: 'notOpen', reason: `gone mid-pass: ${TOKEN}` },
+  }));
+  await send(ended({ reason: 'completed', complete: true, refused: 1 }));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-index-unreadable')).toBeTruthy());
+  // Kept: its subject is the pass, and the pass really did refuse them.
+  expect(visible(screen.getByTestId('indexing-index-refused-run'))).toBe(RUN_SENTENCE);
+  // Gone: its subject is the index, and the index no longer answers.
+  expect(screen.queryByTestId('indexing-index-failed-chunks')).toBeNull();
+  expect(screen.queryByTestId('indexing-index-files')).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
@@ -482,7 +512,7 @@ test('a person who opens Indexing in the settings window reads what the index ho
   expect(visible(panel())).toBe(
     'Індексація В індексі 12 файлів.'
     + ` Останнє оновлення: ${dateIn('uk', at)}.`
-    + ' 1 годину тому'
+    + ' Це було 1 годину тому.'
     + ` ${SPACE_SENTENCE}`,
   );
   // The section replaced the placeholder rather than joining it.

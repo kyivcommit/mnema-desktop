@@ -17,6 +17,8 @@
 #                            the phrase does not stand in for the date
 #   the two scopes       — the index's cumulative count and the run's own get
 #                            two keys, because they name two subjects
+#   the run's own scope   — and the run's sentence outlives a read that fails,
+#                            because its subject is the pass, not the index
 #   the refresh trigger  — an ENDING re-reads the index; an emission does not
 #   the generation stamp — the older of two reads in flight writes nothing,
 #                            whether it resolves or is refused
@@ -35,6 +37,15 @@
 # what eleven inline fixtures missing Task 3's three required fields did to this
 # suite before they were annotated. The mutant below branches on the WRONG kind
 # instead, which renders and is judged.
+#
+# ⚠️ **Read the discriminant case's title narrowly: it covers ONE of the two
+# arms** (review, Minor 6). `Indexing.svelte:105` — `const read` — has no case
+# here, and cannot have one for the same measured reason: pointing it at the
+# `unreadable` arm is the crashing mutant described above. That line is defended
+# by the `notOpen` test all the same (its `queryByTestId(...).toBeNull()`
+# assertions fail, or the render throws and the test fails with it) — just not by
+# anything this harness can score. Named so a reader does not take the summary
+# line above for coverage of both arms.
 
 # The one place the union is discriminated. Everything below it reads `read` or
 # `unreadable`, each null on the other arm — so a section that picks the wrong
@@ -96,6 +107,18 @@ case_ "the re-read must follow an ending, not every emission of the job store" \
   "s~      if \(phase\.kind === 'ended'\) void refresh\(\);~      void refresh(); // mutant: every emission re-reads~" \
   "      void refresh(); // mutant: every emission re-reads" \
   src/settings/Indexing.test.ts 'a progress report is not an ending and re-reads nothing' runner=vitest
+
+# 🔴 The decision that the two scope sentences do NOT share a fate. A pass ends,
+# the ending triggers the re-read, and the re-read comes back `Unreadable` — an
+# ordinary sequence, not a contrived pairing. Gated on `read`, the window would
+# answer "the index could not be read" and delete, in the same breath, the only
+# surviving report of what the pass just did. The mutant is the tidier-looking
+# guard and the lossy one.
+case_ "the run's own report must outlive a read of the index that fails" \
+  ui/src/settings/Indexing.svelte \
+  "s~    if \(phase\.kind !== 'ended' \|\| phase\.ending\.refused === 0\) return null;~    if (read === null || phase.kind !== 'ended' || phase.ending.refused === 0) return null; // mutant: the run's report dies with the index~" \
+  "if (read === null || phase.kind !== 'ended' || phase.ending.refused === 0) return null; // mutant: the run's report dies with the index" \
+  src/settings/Indexing.test.ts 'an index that stops being readable still says what the pass that just ended gave up on' runner=vitest
 
 # 🔴 Two reads can be in flight here whenever endings arrive faster than the IPC
 # answers, and they may settle in either order. Without the stamp the older

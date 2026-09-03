@@ -250,24 +250,39 @@ test('labels stay correct across a language switch after mount', async () => {
   // $derived missing `void $locale` still caches an English value here — the
   // mutant only dies if the read after the switch is a genuinely later one.
   // Application rather than Indexing since Task 6: it is the placeholder that
-  // is left.
+  // is left. This one belongs to `Settings.svelte` itself, which stays mounted
+  // across every nav click, so the cached value really does survive to be
+  // re-read after the switch.
   await fireEvent.click(screen.getByRole('button', { name: 'Application' }));
   expect(screen.getByText('This section is not ready yet.')).toBeTruthy();
   await fireEvent.click(screen.getByRole('button', { name: 'Models' }));
 
+  // 🔴 The same lesson for the BUILT section, and it needs a different shape
+  // (review, Important 2). `Indexing.svelte`'s strings come from that
+  // component's own `$derived.by`, and the component is destroyed by every nav
+  // change — so a version of this that clicked Індексація AFTER the switch
+  // would mount it fresh under `uk` and read Ukrainian whether or not the
+  // anchor is there. The section is opened here, under 'en', and left mounted
+  // ACROSS `setLocale` so the read below is genuinely a later read of the same
+  // derived. Measured: with `void $locale` deleted from `filesLine`, this test
+  // fails on the Ukrainian assertion below and the English one still resolves.
+  await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));
+  await waitFor(() => expect(screen.getByText('The index holds 0 files.')).toBeTruthy());
+  expect(screen.getByText('Nothing has been indexed yet.')).toBeTruthy();
+
   setLocale('uk');
-  await Promise.resolve(); // let the $derived reactions flush
+  await waitFor(() => expect(screen.getByText('В індексі 0 файлів.')).toBeTruthy());
+  expect(screen.getByText('Ще нічого не проіндексовано.')).toBeTruthy();
+  // Both directions: the English strings are gone from the same mount, not
+  // merely joined by Ukrainian ones.
+  expect(screen.queryByText('The index holds 0 files.')).toBeNull();
+  expect(screen.queryByText('Nothing has been indexed yet.')).toBeNull();
+
   const nav = screen.getByRole('navigation');
   expect(nav.textContent).toBe('МоделіТекиІндексаціяЗастосунок');
+  await fireEvent.click(screen.getByRole('button', { name: 'Моделі' }));
   expect(screen.getByRole('heading', { name: 'Моделі' })).toBeTruthy();
 
   await fireEvent.click(screen.getByRole('button', { name: 'Застосунок' }));
   expect(screen.getByText('Ця секція ще не готова.')).toBeTruthy();
-
-  // …and the built section's own strings follow the switch too, which is the
-  // half a placeholder can never show: this text comes from `Indexing.svelte`'s
-  // `$derived.by`, not from the window's.
-  await fireEvent.click(screen.getByRole('button', { name: 'Індексація' }));
-  await waitFor(() => expect(screen.getByText('В індексі 0 файлів.')).toBeTruthy());
-  expect(screen.getByText('Ще нічого не проіндексовано.')).toBeTruthy();
 });
