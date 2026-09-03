@@ -976,6 +976,11 @@ case_ "embed_job: a live report must carry the refusals as well as the count (T8
   's{        skipped: 0,\n        refused: progress\.failed,}{        skipped: 0,\n        refused: 0,}' \
   '        skipped: 0,
         refused: 0,
+        // `0` contended: an embedding pass takes the index'"'"'s write lock for its
+        // own writes and can wait on it, but it has no per-file retry budget to
+        // exhaust and nothing to report when it does — `contended` is a walk'"'"'s
+        // fact about the files it could not write.
+        contended: 0,
         seconds_left:' \
   mnema-desktop 'embed_job::tests::a_report_carries_the_refusals_as_well_as_the_count' --lib
 
