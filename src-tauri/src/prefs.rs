@@ -551,6 +551,42 @@ fn set_test_hook(hook: Option<Hook>) {
     *TEST_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
 }
 
+/// Turn on [`TEST_HOOK`]. The slot is one per binary, so two tests that
+/// install a hook cannot overlap: otherwise one's teardown clears the
+/// other's hook before that other's writer has had a chance to read it.
+#[cfg(test)]
+static HOOK_TURN: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+#[must_use = "the hook is cleared when this is dropped"]
+#[allow(dead_code)] // held for its `Drop`, the guard itself is never read
+struct HookTurn(std::sync::MutexGuard<'static, ()>);
+
+#[cfg(test)]
+impl HookTurn {
+    /// Clear the hook without giving up the turn: writer A may still be
+    /// parked inside its own clone, and writer B must not park in it too.
+    fn clear(&self) {
+        set_test_hook(None);
+    }
+}
+
+#[cfg(test)]
+impl Drop for HookTurn {
+    fn drop(&mut self) {
+        set_test_hook(None); // idempotent; covers the panic path
+    }
+}
+
+#[cfg(test)]
+fn take_hook_turn(hook: Hook) -> HookTurn {
+    // Poisoning is absorbed: a test that panicked must not also poison the
+    // next one's turn.
+    let turn = HOOK_TURN.lock().unwrap_or_else(|e| e.into_inner());
+    set_test_hook(Some(hook));
+    HookTurn(turn)
+}
+
 /// Cloned out of its mutex before it is called, so the hook may park for as
 /// long as it likes without holding anything but [`PREFS_LOCK`].
 #[cfg(test)]
@@ -817,7 +853,7 @@ mod tests {
             parked_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
         });
-        set_test_hook(Some(hook));
+        let _turn = take_hook_turn(hook);
 
         let a_dir = dir_path.clone();
         let a = std::thread::spawn(move || write_key(&a_dir, "hotkey", json!("Ctrl+Space")));
@@ -827,7 +863,7 @@ mod tests {
         // Cleared while the first writer is still parked in it: the hook was
         // cloned out of the mutex before it was called, and from here on no
         // other test in this binary can be parked by it.
-        set_test_hook(None);
+        _turn.clear();
 
         let b_dir = dir_path.clone();
         let b = std::thread::spawn(move || {
@@ -955,7 +991,7 @@ mod tests {
             parked_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
         });
-        set_test_hook(Some(hook));
+        let _turn = take_hook_turn(hook);
 
         let a_state = state.clone();
         let a = std::thread::spawn(move || change_hotkey(&a_state, "Ctrl+Alt+Space".to_string()));
@@ -964,7 +1000,7 @@ mod tests {
             .expect("the first change never reached the persist");
         // Cleared while the first is still parked in it, so no other test in
         // this binary can be caught by it.
-        set_test_hook(None);
+        _turn.clear();
 
         let b_state = state.clone();
         let b = std::thread::spawn(move || change_hotkey(&b_state, "Ctrl+Shift+Space".to_string()));
