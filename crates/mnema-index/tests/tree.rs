@@ -939,9 +939,10 @@ fn a_document_reachable_from_two_folders_counts_once_for_each_folder_row() {
 /// Only `indexed` counts: a pending document has nothing searchable in it yet
 /// and a failed one never will, and neither is drawn under a folder.
 ///
-/// Both directions, because "the count is 1" alone is satisfied by a query that
-/// lost two rows for some unrelated reason: the count is 1, and it is not the 3
-/// that dropping the status filter would give.
+/// Two assertions, because "the count is 1" alone is also satisfied by a
+/// fixture that never inserted the two rows the filter is supposed to remove.
+/// So the count of path rows is asserted first, and it can fail on its own: the
+/// index holds 3, and the helper answers 1.
 #[test]
 fn a_pending_or_failed_document_is_not_an_indexed_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -970,14 +971,27 @@ fn a_pending_or_failed_document_is_not_an_indexed_file() {
         .unwrap();
     }
 
-    let count = db.indexed_file_count().unwrap();
+    // The fixture really holds the state this test is about, asserted before the
+    // number is: three path rows, of which the status filter must keep two out.
+    // `assert_ne!(count, 3)` stood here and could not fail while the equality
+    // below passed — it named the wrong answer without discriminating anything,
+    // and a fixture whose two extra rows had silently failed to insert would
+    // have satisfied it. This one goes red on that, which is the direction the
+    // brief was asking for.
+    let path_rows: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM path", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(
-        count, 1,
-        "only the indexed document is a file on the screen"
+        path_rows, 3,
+        "the fixture must hold three path rows for the filter to have work to do"
     );
-    assert_ne!(
-        count, 3,
-        "three path rows exist; two of them are not indexed"
+
+    assert_eq!(
+        db.indexed_file_count().unwrap(),
+        1,
+        "only the indexed document is a file on the screen, and the pending and \
+         failed rows beside it are the other two of the {path_rows} path rows"
     );
 }
 
@@ -1049,8 +1063,9 @@ fn an_indexed_document_that_never_recorded_a_completion_names_no_moment() {
 /// the settings line must not report its newer `updated_at` as the moment the
 /// index was last brought up to date.
 ///
-/// Both directions: the moment is the completed document's 1000, and it is NOT
-/// the rebuilding document's 3000.
+/// Two assertions, and the first can fail on its own: the rebuilding stage
+/// really stands at 3000, so it was the newest moment available, and the helper
+/// answers the completed document's 1000 anyway.
 #[test]
 fn a_rebuild_in_flight_is_not_a_completion() {
     let dir = tempfile::tempdir().unwrap();
@@ -1068,11 +1083,29 @@ fn a_rebuild_in_flight_is_not_a_completion() {
         )
         .unwrap();
 
-    let last = db.last_indexed_at().unwrap();
-    assert_eq!(last, Some(1000), "the finished document's completion");
-    assert_ne!(
-        last,
-        Some(3000),
-        "a rebuild that has not finished is not a moment the index was up to date"
+    // The rebuilding stage really carries the newer moment, asserted before the
+    // helper is asked anything. `assert_ne!(last, Some(3000))` stood here and
+    // could not fail while the equality below passed; worse, it read as a guard
+    // against a 3000 that a fixture whose UPDATE had quietly matched no row
+    // would never have held in the first place. This assertion is the one that
+    // goes red on that, and it is what makes the equality below mean "the newer
+    // moment was there to be picked and was not picked".
+    let rebuilding_at: i64 = db
+        .conn()
+        .query_row(
+            "SELECT updated_at FROM ingest_stage WHERE content_hash = ?1 AND stage = 'chunk'",
+            [&rebuilding],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rebuilding_at, 3000,
+        "the rebuild in flight must be the NEWEST stage row, or this test proves nothing"
+    );
+
+    assert_eq!(
+        db.last_indexed_at().unwrap(),
+        Some(1000),
+        "the finished document's completion, not the rebuild's newer {rebuilding_at}"
     );
 }

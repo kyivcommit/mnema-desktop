@@ -10621,6 +10621,20 @@ fn the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment() {
         "the settings line and the top of Recents must name one moment: {after} / {listing}"
     );
 
+    // The third field the window's read arm now requires, and the only one of
+    // the three with no other Rust test naming its spelling: `embeddedChunks`
+    // and `totalChunks` have been on the wire since PR 6 with nothing but
+    // `rename_all` standing behind them, and `failedChunks` was made REQUIRED on
+    // `IndexSettings` here on the strength of that same rename. `0` is the value
+    // it must carry after this walk — no provider was asked for anything — so
+    // the assertion is about the spelling arriving at all, which is what a
+    // `serde` attribute lost or renamed would take away.
+    assert_eq!(
+        after["index"]["failedChunks"],
+        json!(0),
+        "the refusal count must reach the window under its camelCase name: {after}"
+    );
+
     // Wire shape, both directions: the camelCase spellings above are present and
     // Rust's pre-serialization names are not (guards `rename_all`).
     assert!(after["index"].get("indexed_files").is_none(), "{after}");

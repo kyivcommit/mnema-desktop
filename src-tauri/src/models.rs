@@ -1187,11 +1187,16 @@ fn index_settings(state: &AppState) -> IndexSettings {
     }
 }
 
-/// The seven values the settings screen draws, read from one index.
+/// The values the settings screen draws, read from one index.
+///
+/// No count of them, deliberately. This sentence said "seven" while `IndexRead`
+/// carried twelve fields, so the number was already a definition that had gone
+/// stale and could only go staler — the fields are added one task at a time and
+/// nothing makes a total in prose move with them.
 ///
 /// A named function rather than a closure inside [`index_settings`] for a reason
 /// that is not style: it is passed to `Db::read_snapshot`, which is what makes
-/// the seven one moment, and nesting the body in a second closure would have
+/// them one moment, and nesting the body in a second closure would have
 /// shifted every line of it four columns to the right. Two mutation cases quote
 /// this code with its indentation — measured, they broke — and a case file that
 /// has to be re-indented every time a wrapper appears is a case file that will

@@ -312,7 +312,7 @@ impl Db {
     /// dropped, and the equality is the definition rather than an
     /// implementation detail.** The Folders section draws one row per watched
     /// folder carrying that helper's row count (`root.files.length`,
-    /// `ui/src/settings/Folders.svelte:1240`), one click from this number, so
+    /// `ui/src/settings/Folders.svelte:1242`), one click from this number, so
     /// this must be those numbers added up or the two halves of one screen
     /// contradict each other.
     ///
