@@ -81,7 +81,7 @@ function settings(overrides: Partial<ModelSettings> = {}): ModelSettings {
     // conjuncts of the degraded rule are then distinguishable on the base
     // fixture — an index with nothing in it would satisfy the rule's absence
     // for the wrong reason, and no test could tell which half was read.
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 6, embeddingModel: null, searchTextArm: true, searchContentArm: false },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 6, embeddingModel: null, searchTextArm: true, searchContentArm: false },
     platform: 'linux',
     ...overrides,
   };
@@ -130,7 +130,7 @@ test('index Unreadable/readFailed renders its own, different sentence, never the
 
 test('index Read renders no failure sentence at all', async () => {
   await renderWith(settings({
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
   }));
   expect(screen.queryByText('The index is not open yet.')).toBeNull();
   expect(screen.queryByText('The index could not be read — this is a defect in this build.')).toBeNull();
@@ -364,7 +364,7 @@ test('entering a key calls set_key, and no trace of it survives the round', asyn
 test('reads as a person: everything configured, nothing alarming shown', async () => {
   const { container } = await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true },
     platform: 'linux',
   }));
   const text = container.textContent ?? '';
@@ -740,7 +740,7 @@ test('the same model id in both catalogues does not leak a selection across tabs
   await renderWith(settings({
     key: { kind: 'present' },
     index: {
-      kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'shared-model', chatModel: 'other-model',
+      kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'shared-model', chatModel: 'other-model',
       searchTextArm: true, searchContentArm: true,
     },
   }));
@@ -804,7 +804,7 @@ test('two provider records sharing one id render two rows and leave the section 
 test('the status dot is ready when provider, key and a chosen embedding model are all set', async () => {
   await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   const dot = screen.getByTestId('model-status-dot');
   expect(dot.getAttribute('data-active')).toBe('true');
@@ -824,7 +824,7 @@ test('the status dot is not ready when the index cannot be read', async () => {
 test('the status dot is not ready when there is no key', async () => {
   await renderWith(settings({
     key: { kind: 'absent' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('false');
 });
@@ -832,7 +832,7 @@ test('the status dot is not ready when there is no key', async () => {
 test('the status dot is not ready when no embedding model is chosen', async () => {
   await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: null, chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: null, chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('false');
 });
@@ -890,7 +890,7 @@ test('the shown selection does not change until set_chat_model AND its re-read b
   mockCatalogues({ chat: catalogueOf([entry('gpt-a'), entry('gpt-b')]) });
   modelSettings.mockResolvedValueOnce(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
   const setChatModelCall = deferredPromise<void>();
   setChatModel.mockImplementation(() => setChatModelCall.promise);
@@ -907,7 +907,7 @@ test('the shown selection does not change until set_chat_model AND its re-read b
 
   modelSettings.mockResolvedValueOnce(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
   setChatModelCall.resolve();
 
@@ -931,14 +931,14 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
   // The fresh call — issued by the choice — settles first, with the new model.
   queue[1].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
 
   // The mount's OLDER call settles late, with the old model. It must lose.
   queue[0].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
   // Not `await Promise.resolve()` twice: that gave the mutant that deletes
   // the sequence guard enough of a head start to look passing, because two
@@ -972,7 +972,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
   // changed yet.
   queue[0].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true'));
 
@@ -981,7 +981,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
   await waitFor(() => expect(queue.length).toBe(2));
   queue[1].resolve(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
 
   await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
@@ -1083,7 +1083,7 @@ test('a rejected set_chat_model shows the backends sentence and leaves the selec
   await renderWith(settings({
     key: { kind: 'present' },
     index: {
-      kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a',
+      kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a',
       searchTextArm: true, searchContentArm: true,
     },
   }));
@@ -1445,7 +1445,7 @@ test('a language switch after mount reaches the not-ready status dot sentence', 
 test('a language switch after mount reaches the ready status dot sentence', async () => {
   const { container } = await renderWith(settings({
     key: { kind: 'present' },
-    index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
+    index: { kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: null, searchTextArm: true, searchContentArm: true },
   }));
   expect((container.textContent ?? '')).toContain('Connected — OpenRouter');
 
@@ -1544,7 +1544,7 @@ function onModel(everywhere: number, active = everywhere, total = 12) {
   return settings({
     key: { kind: 'present' },
     index: {
-      kind: 'read', embeddingModel: 'emb-1', chatModel: null,
+      kind: 'read', failedChunks: 0, indexedFiles: 0, lastIndexedAt: null, embeddingModel: 'emb-1', chatModel: null,
       embeddedChunks: active, embeddedChunksEverywhere: everywhere, totalChunks: total,
       searchTextArm: true, searchContentArm: true,
     },

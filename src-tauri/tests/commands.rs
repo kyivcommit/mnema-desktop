@@ -10536,3 +10536,93 @@ fn set_autostart_reports_unknown_when_the_read_fails() {
         "the reason must be the service's own sentence: {reply}"
     );
 }
+
+/// A fixture with TWO files in it, so the count the settings window reports can
+/// be told from the 1 a single-file fixture makes indistinguishable from
+/// "returned the first row" and from the 0 an empty index makes
+/// indistinguishable from "returned nothing".
+fn two_file_fixture_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the two-file fixture");
+    std::fs::write(dir.path().join("first.txt"), "the quick brown fox").expect("writing first.txt");
+    std::fs::write(dir.path().join("second.txt"), "jumps over the lazy dog")
+        .expect("writing second.txt");
+    dir
+}
+
+/// §9.3's two numbers cross the IPC in the spellings the window reads, carrying
+/// what a real walk left behind.
+///
+/// **Walked, not hand-built.** An `IndexRead` assembled in this test would pin
+/// serde's renaming and nothing else; the fields exist to describe an index
+/// somebody filled, and the states a hand-built struct cannot reach — a
+/// document that never recorded a completion, a status that is not `indexed` —
+/// are exactly where the two helpers earn their filters. So the fixture is
+/// `add_watched_folder` plus the real walk job, and the assertions are against
+/// `list_tree`, the listing the same window draws one click away: a number
+/// agreeing with itself proves nothing, and a number agreeing with the folder
+/// rows and the recents row is the whole property D-e chose.
+///
+/// The spelling half matters on its own: a hand-written TypeScript type and a
+/// hand-written fixture can carry the same mistake and pass together, which is
+/// the lesson `ui/src/lib/ipc.ts` records for the job events. Both directions,
+/// so a `rename_all` that stopped applying is caught as well.
+#[test]
+fn the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    // Before the walk: an index nobody has filled says so, rather than failing
+    // or inventing a moment.
+    let before = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(before["index"]["indexedFiles"], json!(0));
+    assert_eq!(before["index"]["lastIndexedAt"], json!(null));
+
+    let fixture = two_file_fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    run_walk_to_completion(&app, root);
+
+    let after = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    let listing = call(&webview, "list_tree", json!({})).expect("list_tree was rejected");
+
+    let files = listing["roots"][0]["files"]
+        .as_array()
+        .expect("the walked root draws a files array");
+    assert_eq!(
+        files.len(),
+        2,
+        "the walk indexed both fixture files: {listing}"
+    );
+    assert_eq!(
+        after["index"]["indexedFiles"],
+        json!(2),
+        "the whole-index count is what the walk left: {after}"
+    );
+    assert_eq!(
+        after["index"]["indexedFiles"].as_i64().unwrap(),
+        files.len() as i64,
+        "the settings count and the folder row's own file list must agree: {after} / {listing}"
+    );
+
+    let recent = listing["recents"][0]["indexedAt"]
+        .as_i64()
+        .expect("the walked root draws a recents row with a moment");
+    assert_eq!(
+        after["index"]["lastIndexedAt"].as_i64(),
+        Some(recent),
+        "the settings line and the top of Recents must name one moment: {after} / {listing}"
+    );
+
+    // Wire shape, both directions: the camelCase spellings above are present and
+    // Rust's pre-serialization names are not (guards `rename_all`).
+    assert!(after["index"].get("indexed_files").is_none(), "{after}");
+    assert!(after["index"].get("last_indexed_at").is_none(), "{after}");
+}

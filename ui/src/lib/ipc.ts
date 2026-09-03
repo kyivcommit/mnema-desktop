@@ -262,9 +262,27 @@ export type UnreadableCause = 'notOpen' | 'readFailed';
 // class this file already refuses elsewhere — and the two copies would
 // eventually be read as though they could disagree. `embeddingModel !== null`
 // is how "there is an active space" is spelled on this side.
+//
+// PR 9's Indexing section (§9.3) widens the subset by three, and all three are
+// REQUIRED for the argument `totalChunks` above already makes: the only
+// substitute for a missing count is `0`, and `0` in front of a person reads as
+// a measured claim this build has not made. `indexedFiles` says how many files
+// the index holds — `models.rs` counts `path` rows, so a file in two watched
+// folders counts twice, which is what makes it agree with the Folders rows
+// rather than with a tidier definition. `failedChunks` is the third of
+// `models.rs`'s counts and the one §9.3's refusal sentence is written from;
+// it was left out while nothing rendered it, and `?? 0` for it would say "the
+// provider refused nothing" about a run nobody measured.
+//
+// `lastIndexedAt` is `number | null` and required, which is not the same as
+// optional: `null` is the backend's own statement that nothing has ever
+// finished indexing, and the section renders a sentence for it. An absent
+// field would collapse that into whatever the reader defaulted to — an epoch
+// date, or a blank where a sentence belongs.
 export type IndexSettings =
   | { kind: 'read'; embeddingModel: string | null; chatModel?: string | null;
       embeddedChunks: number; embeddedChunksEverywhere: number; totalChunks: number;
+      failedChunks: number; indexedFiles: number; lastIndexedAt: number | null;
       searchTextArm: boolean; searchContentArm: boolean }
   | { kind: 'unreadable'; cause: UnreadableCause; reason: string };
 

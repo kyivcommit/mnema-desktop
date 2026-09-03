@@ -1120,6 +1120,27 @@ pub struct IndexRead {
     /// the arm that actually ran on the next search cannot disagree.
     pub search_text_arm: bool,
     pub search_content_arm: bool,
+    /// How many indexed files the whole index holds, and when it last finished
+    /// indexing anything — §9.3's two numbers, `null` for the second when
+    /// nothing ever has.
+    ///
+    /// Read from [`mnema_index::Db::indexed_file_count`] and
+    /// [`mnema_index::Db::last_indexed_at`], each of which is one of the tree
+    /// listing's own queries with a filter dropped. That is what keeps this
+    /// section from contradicting the Folders and Recents lists the same
+    /// window draws one click away, and both doc comments over there say so.
+    ///
+    /// ⚠️ **`indexed_files` counts `path` rows.** One file present in two
+    /// watched folders counts twice, because it draws two folder rows each
+    /// claiming a file. The alternative is a number that is defensible on its
+    /// own and disagrees with the rows beside it.
+    ///
+    /// Read inside the same snapshot as the chunk counts above, for the reason
+    /// the comment on `failed_chunks` gives: a job committing between two
+    /// reads would leave this section describing a state the index never held.
+    pub indexed_files: i64,
+    /// Unix seconds. See [`IndexRead::indexed_files`].
+    pub last_indexed_at: Option<i64>,
 }
 
 /// The index half, read or refused — and never an `Err`, which is the whole
@@ -1217,6 +1238,11 @@ fn read_settings(db: &mnema_index::Db) -> Result<IndexSettings, mnema_index::Err
         search_content_arm: crate::bridge::arm_is_on(
             db.meta_get(mnema_index::META_SEARCH_CONTENT_ARM)?,
         ),
+        // Inside this snapshot with everything above, so the Indexing section's
+        // two numbers and the Models section's three counts describe one state
+        // of the index rather than five.
+        indexed_files: db.indexed_file_count()?,
+        last_indexed_at: db.last_indexed_at()?,
     }))
 }
 
@@ -1325,6 +1351,8 @@ mod tests {
             chat_model: None,
             search_text_arm: true,
             search_content_arm: true,
+            indexed_files: 0,
+            last_indexed_at: None,
         }
     }
 

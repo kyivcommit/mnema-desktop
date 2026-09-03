@@ -4,7 +4,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ipc from './ipc';
 import { camelOf, rustEnumVariants } from './rust-enum';
-import type { SourceAround, StoredExclusion, SubfolderListing, SubfolderState } from './ipc';
+import type {
+  IndexSettings,
+  SourceAround,
+  StoredExclusion,
+  SubfolderListing,
+  SubfolderState,
+} from './ipc';
 import {
   generated,
   generatedArchived,
@@ -418,4 +424,79 @@ test('the subfolder wire types reject Rust snake_case spellings', () => {
 
   expect(listing.entries[0].relativePath).toBe('Work/private');
   expect(rule.existsOnDisk).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// The Indexing section's own fields on `model_settings`' index read arm
+// (`src-tauri/src/models.rs`, §9.3). The Rust side pins that the wire carries
+// them, against a really walked index, in
+// `the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment`
+// (`src-tauri/tests/commands.rs`); this side pins that this module asks for
+// them and asks for them in the spelling serde sends. Neither half closes the
+// gap alone — a hand-written type and a hand-written fixture can carry the
+// same mistake and pass together.
+
+type IndexRead = Extract<IndexSettings, { kind: 'read' }>;
+
+test('the index read arm carries the file count, the moment, and the refusal count', () => {
+  const read: IndexRead = {
+    kind: 'read', embeddingModel: 'emb-1', chatModel: null,
+    embeddedChunks: 3, embeddedChunksEverywhere: 3, totalChunks: 4,
+    failedChunks: 1, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
+    searchTextArm: true, searchContentArm: true,
+  };
+
+  expect(read.indexedFiles).toBe(2);
+  expect(read.lastIndexedAt).toBe(1_700_000_000);
+  expect(read.failedChunks).toBe(1);
+});
+
+test('an index that has never finished indexing states that as null, not as an absence', () => {
+  const read: IndexRead = {
+    kind: 'read', embeddingModel: null, chatModel: null,
+    embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+    failedChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+    searchTextArm: true, searchContentArm: true,
+  };
+
+  // `null` is the backend's own statement, and it is a value this arm holds —
+  // not the same thing as the field being missing, which the test below pins.
+  expect(read.lastIndexedAt).toBeNull();
+  expect('lastIndexedAt' in read).toBe(true);
+});
+
+// 🔴 Each of the three omitted on its own, because "the object is missing
+// something" is satisfied by any one of them and would not notice the other
+// two turning optional. Required and not optional for the reason `ipc.ts`
+// gives over the type: the only substitute for a missing count is `0`, and `0`
+// in front of a person reads as a measured claim this build has not made —
+// a fail-quiet field is a number that is silently always wrong.
+test('the three counts are required, so no fixture can leave one to a default', () => {
+  const rest = {
+    kind: 'read' as const, embeddingModel: null, chatModel: null,
+    embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+    searchTextArm: true, searchContentArm: true,
+  };
+
+  // @ts-expect-error `indexedFiles` is required.
+  const noFiles: IndexRead = { ...rest, failedChunks: 0, lastIndexedAt: null };
+  // @ts-expect-error `lastIndexedAt` is required.
+  const noMoment: IndexRead = { ...rest, failedChunks: 0, indexedFiles: 0 };
+  // @ts-expect-error `failedChunks` is required.
+  const noRefusals: IndexRead = { ...rest, indexedFiles: 0, lastIndexedAt: null };
+
+  expect([noFiles.kind, noMoment.kind, noRefusals.kind]).toEqual(['read', 'read', 'read']);
+});
+
+test('the index read arm rejects Rust snake_case spellings', () => {
+  const read: IndexRead = {
+    kind: 'read', embeddingModel: null, chatModel: null,
+    embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+    failedChunks: 0, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
+    searchTextArm: true, searchContentArm: true,
+    // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
+    indexed_files: 2,
+  };
+
+  expect(read.indexedFiles).toBe(2);
 });
