@@ -122,6 +122,20 @@
       : t('indexing_counts_counting', common);
   });
 
+  // Drawn only when the walk actually met the lock. `contended` counts files
+  // that are journalled as skips a moment later, so this line EXPLAINS part of
+  // the skipped number on the counts line above it and adds nothing to it —
+  // that line is left exactly as it was.
+  //
+  // It promises the next scan and says nothing about the file having been
+  // recorded, because the skip write meets the same lock and can fail too
+  // (`job::Progress::contended`, and `mnema-ingest`'s two contention fixtures).
+  const contendedLabel = $derived.by(() => {
+    void $locale;
+    if (phase.kind !== 'running' || phase.counts.contended === 0) return null;
+    return t('indexing_counts_contended');
+  });
+
   const etaLabel = $derived.by(() => {
     void $locale;
     if (phase.kind !== 'running') return null;
@@ -181,6 +195,7 @@
     {/if}
     {#if passLabel}<p data-testid="indexing-pass">{passLabel}</p>{/if}
     {#if countsLabel}<p data-testid="indexing-counts">{countsLabel}</p>{/if}
+    {#if contendedLabel}<p data-testid="indexing-contended">{contendedLabel}</p>{/if}
     {#if etaLabel}<p data-testid="indexing-eta">{etaLabel}</p>{/if}
     {#if cancellable}
       <button type="button" data-testid="indexing-cancel" onclick={() => jobs.cancel()}>{cancelLabel}</button>

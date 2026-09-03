@@ -115,7 +115,7 @@ const FROZEN = [
 const endedEvent = (over: Partial<JobEnded> = {}): JobEvent =>
   ({ event: 'ended', data: { ...WALK, ...over } });
 const progressEvent = (over: Partial<JobProgress> = {}): JobEvent =>
-  ({ event: 'progress', data: { done: 3, total: 8, skipped: 1, refused: 0, secondsLeft: null, ...over } });
+  ({ event: 'progress', data: { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null, ...over } });
 
 // ---------------------------------------------------------------------------
 // The exhaustive visible-state matrix. Nine rows, no wildcard, both locales.
@@ -334,6 +334,66 @@ test('the running line reads as words, with the counts in them', async () => {
   // "залишилось null" here.
   expect(text).toContain('Скільки ще лишилось часу, поки не відомо.');
   expect(text).not.toContain('null');
+});
+
+// ---------------------------------------------------------------------------
+// The busy index. `contended` counts files whose every retry found the index
+// locked by another writer (`job::Progress::contended`), and the sentence it
+// draws makes exactly one promise — the next scan — because the skip write can
+// meet the same lock and leave the file recorded nowhere at all.
+// ---------------------------------------------------------------------------
+
+const CONTENDED_UK =
+  'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав. Наступне сканування спробує їх знову.';
+const CONTENDED_EN =
+  'The index is busy with another write, so this scan did not write some files. The next scan will try them again.';
+
+test('a scan that met a busy index says so, in both languages, without touching the counts', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(progressEvent({ contended: 2 }));
+  await tick();
+
+  expect(visible(container)).toContain(CONTENDED_UK);
+  // 🔴 The number the sentence explains, unchanged. `contended <= skipped`
+  // once the file is journalled, so a strip adding the two would count one
+  // file twice — and the sentence would then be describing a number that
+  // already contains it.
+  expect(screen.getByTestId('indexing-counts').textContent)
+    .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
+
+  // The derived rebuilds on a live switch, like every other line here.
+  setLocale('en');
+  await tick();
+
+  expect(visible(container)).toContain(CONTENDED_EN);
+  expect(visible(container)).not.toContain(CONTENDED_UK);
+});
+
+// The other direction, and the one an unconditional line satisfies: an
+// ordinary scan met no lock and must say nothing about one.
+test('a scan that met no busy index says nothing about one', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(progressEvent({ contended: 0 }));
+  await tick();
+
+  // The rendered text first, and it is what an unconditionally drawn line
+  // fails on: a testid asserted ahead of it would be the thing that caught the
+  // mutant, and a testid is not what a person reads.
+  expect(visible(container)).not.toContain(CONTENDED_UK);
+  expect(visible(container)).not.toContain('зайнятий');
+
+  setLocale('en');
+  await tick();
+
+  expect(visible(container)).not.toContain(CONTENDED_EN);
+  expect(visible(container)).not.toContain('busy');
+  expect(screen.queryByTestId('indexing-contended')).toBeNull();
 });
 
 test('a run with nothing counted yet says so instead of reading as nothing to do', async () => {

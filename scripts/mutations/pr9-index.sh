@@ -129,3 +129,47 @@ case_ "the moment on the wire must be read from the index, not sent as a constan
   's~        last_indexed_at: db\.last_indexed_at\(\)\?,~        last_indexed_at: None, // mutant: a constant that looks like a fresh index~' \
   'last_indexed_at: None, // mutant: a constant that looks like a fresh index' \
   mnema-desktop 'the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment' --test commands
+
+# ── `contended`: the seam, and the sentence it draws ─────────────────────────
+#
+# Three cases for one field crossing three layers. The first is the wire: the
+# shell dropping the walk's own number. The other two are the strip, and they
+# are the pair that makes the line a *statement about part of the skipped
+# count* rather than a second count of its own — one for drawing it when there
+# was no contention, one for folding it into the number it is supposed to
+# explain.
+#
+# ⚠️ The first case's oracle takes about twenty seconds by construction: the
+# only fixture that puts a non-zero `contended` on the wire holds the index's
+# write lock through every busy retry. That is not slack in the test.
+
+# The shell forwards `0` instead of what the walk reported. Everything else on
+# the wire is unchanged, so nothing but a walk that actually met a held lock
+# can tell the difference — the mirror case (`an_uncontended_walk_reports_no_
+# contention_on_any_event`) passes under this mutant, which is the point of it.
+case_ "the shell must forward the walk's own contention, not a zero" \
+  src-tauri/src/walk_job.rs \
+  's~                            contended: progress\.contended,~                            contended: 0, // mutant: the busy index never reaches the window~' \
+  'contended: 0, // mutant: the busy index never reaches the window' \
+  mnema-desktop 'a_walk_that_meets_a_busy_index_says_so_on_the_wire' --test commands
+
+# The line drawn on every running pass. It reads as an explanation of the
+# skipped number, so on a scan that met no lock at all it is simply false — and
+# it would be on screen for the whole of every ordinary run.
+case_ "the busy-index line must be drawn only when the scan actually met the lock" \
+  ui/src/settings/Indexing.svelte \
+  "s~    if \(phase\.kind !== 'running' \|\| phase\.counts\.contended === 0\) return null;~    if (phase.kind !== 'running') return null; // mutant: drawn whether or not the index was busy~" \
+  "if (phase.kind !== 'running') return null; // mutant: drawn whether or not the index was busy" \
+  src/settings/Indexing.test.ts 'a scan that met no busy index says nothing about one' runner=vitest
+
+# 🔴 The decision guard. `contended` counts files that are journalled as skips
+# a moment later and counted in `skipped` too, so adding the two counts one
+# file twice — and the sentence beside the number would then be explaining a
+# total that already contains what it is explaining. This mutant is the tidier
+# arithmetic and the wrong one, and only an assertion that reads the whole
+# rendered counts line can tell them apart. A testid could not.
+case_ "the skipped number must not absorb the contended files it already counts" \
+  ui/src/settings/Indexing.svelte \
+  's~    const common = \{ done: counts\.done, skipped: counts\.skipped, refused: counts\.refused \};~    const common = { done: counts.done, skipped: counts.skipped + counts.contended, refused: counts.refused }; // mutant: one file counted twice~' \
+  'skipped: counts.skipped + counts.contended, refused: counts.refused }; // mutant: one file counted twice' \
+  src/settings/Indexing.test.ts 'a scan that met a busy index says so, in both languages, without touching the counts' runner=vitest

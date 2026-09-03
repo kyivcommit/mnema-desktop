@@ -76,7 +76,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_masks_already_stored'
   | 'indexing_walk_starting' | 'indexing_walk_running'
   | 'indexing_embed_starting' | 'indexing_embed_running'
-  | 'indexing_counts_ratio' | 'indexing_counts_counting'
+  | 'indexing_counts_ratio' | 'indexing_counts_counting' | 'indexing_counts_contended'
   | 'indexing_eta' | 'indexing_eta_unknown'
   | 'indexing_walk_ended_completed' | 'indexing_walk_ended_partly_read'
   | 'indexing_walk_ended_cancelled' | 'indexing_walk_ended_failed'
@@ -618,6 +618,18 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `total: 0` is not an edge case: a walk reports it before phase 1 has
     // counted anything. "0 з 0" would read as "нема чого робити".
     indexing_counts_counting: 'Опрацьовано {done}. Скільки їх усього, поки не відомо. Пропущено: {skipped}. Відхилено: {refused}.',
+    // 🔴 Carries NO number of its own, on purpose. `contended` counts files
+    // that are also counted in «Пропущено» a moment later, so a number here
+    // would read as a second group of files beside that one — and in the one
+    // event that arrives before the skip is journalled it would contradict it
+    // outright («Пропущено: 0» beside «з них 1»). The line explains part of
+    // that number instead.
+    //
+    // It promises the NEXT scan and nothing else. It must not say the file was
+    // recorded: the skip write meets the same lock and can fail too, leaving
+    // the file in neither the index nor the journal
+    // (`job::Progress::contended`).
+    indexing_counts_contended: 'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав. Наступне сканування спробує їх знову.',
     indexing_eta: 'Залишилось приблизно {seconds} с.',
     // `secondsLeft` is `Option<u64>`: "ще не відомо" is a real state, and it is
     // the ordinary one at the start of every run.
@@ -877,6 +889,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_embed_running: 'The whole index is being embedded.',
     indexing_counts_ratio: 'Processed {done} of {total}. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_counting: 'Processed {done}. How many there are in total is not known yet. Skipped: {skipped}. Given up on: {refused}.',
+    indexing_counts_contended: 'The index is busy with another write, so this scan did not write some files. The next scan will try them again.',
     indexing_eta: 'About {seconds} s left.',
     indexing_eta_unknown: 'How much time is left is not known yet.',
     indexing_walk_ended_completed: 'The folder was read in full.',

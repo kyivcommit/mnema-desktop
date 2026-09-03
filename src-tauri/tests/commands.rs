@@ -2140,6 +2140,128 @@ fn search_rejects_a_blank_query_before_any_retrieval() {
     );
 }
 
+/// Starts a real walk over `root_id` and returns every `progress` payload the
+/// window would have received, in order, followed by the `ended` one.
+///
+/// `run_walk_and_capture_ending` throws the progress events away, which is
+/// exactly what the two tests below are about.
+fn run_walk_capturing_progress(
+    app: &tauri::App<MockRuntime>,
+    root_id: i64,
+    within: Duration,
+) -> (Vec<Value>, Value) {
+    let state = app.state::<AppState>();
+    let (channel, events) = job_channel();
+    walk_job::start_walk_job(state, root_id, channel).expect("the walk would not start");
+
+    let mut progress = Vec::new();
+    loop {
+        match events.recv_timeout(within) {
+            Ok(event) if event["event"] == json!("ended") => {
+                return (progress, event["data"].clone());
+            }
+            Ok(event) => progress.push(event["data"].clone()),
+            Err(_) => panic!("the walk never told the window it ended: {progress:?}"),
+        }
+    }
+}
+
+/// `WalkProgress::contended` must reach the window as `Progress::contended`
+/// with the value the walk gave it.
+///
+/// The fixture is the real one and there is no cheaper way to build it: a
+/// second connection holds the index's write lock for the whole walk, so every
+/// busy retry on the one fixture file is refused and `walk_root` reports the
+/// file as contended before it tries to journal the skip. That report is the
+/// only place a non-zero `contended` can come from, so a shell that forwards
+/// `0` here cannot pass — and a `contended` field that merely exists cannot
+/// either.
+///
+/// The walk then ends `failed`: the skip write meets the same lock, which
+/// `mnema-ingest`'s own `a_skip_write_that_meets_the_same_lock_leaves_the_
+/// file_in_neither_place` is about. That ending is not this test's subject and
+/// is asserted only so the run is accounted for.
+#[test]
+fn a_walk_that_meets_a_busy_index_says_so_on_the_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    // A second connection to the same index, holding the write lock the way a
+    // folder being added in another window would. Taken AFTER the setup above,
+    // and released only once the walk has ended.
+    let window = app
+        .state::<AppState>()
+        .open_job_index()
+        .expect("a second connection to the index");
+    window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
+    window.insert_watched_root("/Volumes/Second").unwrap();
+
+    let (progress, ending) = run_walk_capturing_progress(&app, root, Duration::from_secs(60));
+    window.conn().execute_batch("COMMIT").unwrap();
+
+    assert!(
+        progress
+            .iter()
+            .any(|p| p["contended"].as_u64().unwrap_or(0) == 1),
+        "the walk met the held lock and no progress event carried it: \
+         {progress:?} (ending {ending})"
+    );
+    assert_eq!(
+        ending["reason"],
+        json!("failed"),
+        "the skip write met the same lock, so the walk cannot have completed: {ending}"
+    );
+}
+
+/// The mirror, and the half that makes the value above mean something: over a
+/// folder nothing holds a lock on, every event says `0`. A shell that hardcodes
+/// a number to satisfy the test above fails here.
+#[test]
+fn an_uncontended_walk_reports_no_contention_on_any_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let (progress, ending) = run_walk_capturing_progress(&app, root, Duration::from_secs(20));
+
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "the walk over the fixture folder did not complete: {ending}"
+    );
+    assert!(
+        !progress.is_empty(),
+        "the walk reported no progress at all, so nothing here is asserting anything"
+    );
+    assert!(
+        progress.iter().all(|p| p["contended"] == json!(0)),
+        "nothing held the index's write lock, so no event may report contention: {progress:?}"
+    );
+}
+
 /// The channel a real webview passes is a string of this shape. Nothing
 /// receives the messages here — `run_walk_to_completion` above is what
 /// proves the walk itself works, by calling the command function directly so

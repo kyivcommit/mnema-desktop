@@ -482,6 +482,14 @@ export type JobProgress = {
   total: number;
   skipped: number;
   refused: number;
+  /// Files this run found the index locked by another writer on, after every
+  /// busy retry was refused (`job::Progress::contended`). `0` for the probe and
+  /// for an embedding pass.
+  ///
+  /// Once such a file is journalled it is counted in `skipped` as well, so
+  /// `contended <= skipped` and the two must never be added: whatever a surface
+  /// says about this number explains part of `skipped`.
+  contended: number;
   secondsLeft: number | null;
 };
 

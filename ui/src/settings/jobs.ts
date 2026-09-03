@@ -107,6 +107,12 @@ export function chainsEmbedPass(kind: OutcomeKind): boolean {
 
 export type Counts = {
   done: number; total: number; skipped: number; refused: number;
+  /// Files whose every retry found the index locked by another writer
+  /// (`job::Progress::contended`). It is NOT a second count of different
+  /// files: the same file is journalled as a skip immediately afterwards, so
+  /// `contended <= skipped` and a surface drawing both explains one with the
+  /// other rather than adding them.
+  contended: number;
   /// `Option<u64>` on the Rust side, so `null` for the whole of an ordinary
   /// run's beginning: "not known yet" is a real state and must not render as 0.
   secondsLeft: number | null;

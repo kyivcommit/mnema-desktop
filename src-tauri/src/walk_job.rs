@@ -250,6 +250,12 @@ pub fn start_walk_job(
                             // `skipped` one line up. See
                             // `job::Progress::refused`.
                             refused: 0,
+                            // Forwarded, not merged into `skipped` the way
+                            // `progress.refused` is: the same file is
+                            // journalled as a skip a moment later and counted
+                            // there, so adding it here would count it twice.
+                            // `job::Progress::contended` says so in full.
+                            contended: progress.contended,
                             seconds_left: job::seconds_left(done, total, started.elapsed()),
                         }))
                         .is_ok()
