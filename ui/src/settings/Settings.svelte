@@ -4,7 +4,7 @@
   import Models from './Models.svelte';
   import Folders from './Folders.svelte';
   import Masks from './Masks.svelte';
-  import Indexing from './Indexing.svelte';
+  import JobStrip from './JobStrip.svelte';
   import { createJobController } from './jobs';
 
   // All four sections render; hiding the two not yet built would make the
@@ -80,7 +80,7 @@
        `.scols` exists so the CSS that lands later cannot make this a THIRD
        column beside the nav and the panel: the pair is the row, the status line
        is not part of it. -->
-  <Indexing {jobs} />
+  <JobStrip {jobs} />
   <div class="scols">
     <nav class="snav">
       {#each SECTIONS as item (item.id)}

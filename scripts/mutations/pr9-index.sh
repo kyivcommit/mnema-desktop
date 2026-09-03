@@ -157,10 +157,10 @@ case_ "the shell must forward the walk's own contention, not a zero" \
 # skipped number, so on a scan that met no lock at all it is simply false — and
 # it would be on screen for the whole of every ordinary run.
 case_ "the busy-index line must be drawn only when the scan actually met the lock" \
-  ui/src/settings/Indexing.svelte \
+  ui/src/settings/JobStrip.svelte \
   "s~    if \(phase\.kind !== 'running' \|\| phase\.counts\.contended === 0\) return null;~    if (phase.kind !== 'running') return null; // mutant: drawn whether or not the index was busy~" \
   "if (phase.kind !== 'running') return null; // mutant: drawn whether or not the index was busy" \
-  src/settings/Indexing.test.ts 'a scan that met no busy index says nothing about one' runner=vitest
+  src/settings/JobStrip.test.ts 'a scan that met no busy index says nothing about one' runner=vitest
 
 # 🔴 The decision guard. `contended` counts files that are journalled as skips
 # a moment later and counted in `skipped` too, so adding the two counts one
@@ -169,7 +169,7 @@ case_ "the busy-index line must be drawn only when the scan actually met the loc
 # arithmetic and the wrong one, and only an assertion that reads the whole
 # rendered counts line can tell them apart. A testid could not.
 case_ "the skipped number must not absorb the contended files it already counts" \
-  ui/src/settings/Indexing.svelte \
+  ui/src/settings/JobStrip.svelte \
   's~    const common = \{ done: counts\.done, skipped: counts\.skipped, refused: counts\.refused \};~    const common = { done: counts.done, skipped: counts.skipped + counts.contended, refused: counts.refused }; // mutant: one file counted twice~' \
   'skipped: counts.skipped + counts.contended, refused: counts.refused }; // mutant: one file counted twice' \
-  src/settings/Indexing.test.ts 'a scan that met a busy index says so, in both languages, without touching the counts' runner=vitest
+  src/settings/JobStrip.test.ts 'a scan that met a busy index says so, in both languages, without touching the counts' runner=vitest

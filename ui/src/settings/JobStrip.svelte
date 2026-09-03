@@ -7,6 +7,14 @@
   // §9.2 / Task 8 — the minimum indexing surface: one line saying what is
   // happening, what it ended as, and a control to stop it.
   //
+  // 🔴 This is the WINDOW's job strip, not the Indexing section. It is drawn
+  // above the nav and outside every `{#if section === …}` (`Settings.svelte`),
+  // so a running pass stays visible and stoppable from every section — the
+  // live run's finding 3. The §9.3 section, which says what the index HOLDS
+  // rather than what a pass is doing, is `Indexing.svelte`, a different file
+  // mounted inside the panel. The name was `Indexing.svelte` until PR 9, and
+  // it made this component read as that section's content.
+  //
   // The controller is a PROP, not something this component builds: it is
   // created once by `Settings.svelte`, above every section, because the channel
   // a job reports on belongs to whoever started it (`bridge.rs`). A controller

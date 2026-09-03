@@ -2213,7 +2213,7 @@ test('a row shut while the check is in flight raises no question when the reply 
 
 // ── PR 8a, Task 8: a job ending re-reads the panel, not only the row ─────────
 //
-// The live run's finding 1, in this file's own terms. `Indexing.test.ts` holds
+// The live run's finding 1, in this file's own terms. `JobStrip.test.ts` holds
 // the whole-window form — the renamed folder that went on reading "excluded by
 // your rule" while its text was being sent to the provider. What is here is the
 // machinery that form cannot reach: several roots open at once, and a question

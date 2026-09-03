@@ -1127,7 +1127,7 @@ test('a language switch after a WALK ending reaches its sentence, its counts and
   await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
   channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0, frozen: [...FROZEN] }));
   await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
-  // Task 7. `frozenHeading` (Indexing.svelte:148) is its own key inside this
+  // Task 7. `frozenHeading` (JobStrip.svelte:148) is its own key inside this
   // same `walkLines` block (line 139-140's `void $locale`) — the two
   // parameterized tests further down mount fresh under one locale each and so
   // cannot see whether this key itself re-renders on a LIVE switch, only that

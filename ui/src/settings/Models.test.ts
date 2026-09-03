@@ -1959,7 +1959,7 @@ test('the recovery pass is started through the window`s controller, not privatel
   await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
 
   await waitFor(() => expect(startEmbedJob).toHaveBeenCalled());
-  // The controller is watching it: this is the state `Indexing.svelte` draws
+  // The controller is watching it: this is the state `JobStrip.svelte` draws
   // the pass line and the Stop from.
   expect(get(jobs.state).phase).toEqual({ kind: 'starting', pass: 'embed' });
 });
@@ -2258,7 +2258,7 @@ test('a language switch after mount reaches the recovering-act sentence', async 
 // is no CSS in this project to put anything in that seam.
 //
 // What a person reads, with the markup's own indentation collapsed the way a
-// browser collapses it (Indexing.test.ts:79 uses the same normaliser, and for
+// browser collapses it (JobStrip.test.ts:79 uses the same normaliser, and for
 // the same reason: nobody sees the newline between two <span>s).
 // ---------------------------------------------------------------------------
 const visible = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
