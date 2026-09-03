@@ -97,9 +97,14 @@ test('Escape builds nothing and is not a modifier-only press, so the section can
 });
 
 test('the modifiers are emitted in the canonical order, whichever way the event states them', () => {
-  // Alt named first in the initialiser, Ctrl second — the string is still
-  // `Ctrl+Alt+A`. The event carries four booleans and no order at all, so the
-  // order can only come from this module.
+  // 🔴 (review, Minor 1) These next two calls build the SAME `KeyboardEvent` —
+  // `KeyboardEventInit` is a plain object, and property order carries no
+  // information at all, so naming Alt first and Ctrl first is not two
+  // different presses to construct from. They are written twice on purpose,
+  // to make that fact visible to a reader rather than assumed: whichever
+  // property order a browser or a test happens to write, this module cannot
+  // see it and does not try to. The assertion that actually discriminates
+  // anything is the one two lines down, over all four modifiers at once.
   expect(shortcutFromEvent(press({ altKey: true, ctrlKey: true }))).toBe('Ctrl+Alt+A');
   expect(shortcutFromEvent(press({ ctrlKey: true, altKey: true }))).toBe('Ctrl+Alt+A');
   expect(shortcutFromEvent(press({ metaKey: true, shiftKey: true, altKey: true, ctrlKey: true })))

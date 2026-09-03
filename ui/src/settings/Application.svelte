@@ -3,7 +3,7 @@
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
   import { appPrefs, setHotkey, setAutostart, type AppPrefs, type AutostartState } from '../lib/ipc';
-  import { formatShortcut, isModifierOnlyPress, shortcutFromEvent } from '../i18n/shortcut';
+  import { formatShortcut, isModifierOnlyPress, shortcutFromEvent, MODIFIER_KEY_NAME } from '../i18n/shortcut';
 
   // §9.4 — the Application section: the shortcut, autostart, and the version.
   //
@@ -83,7 +83,15 @@
   const shortcutLabelText = $derived.by(() => { void $locale; return t('application_shortcut_label'); });
   const recordLabel = $derived.by(() => { void $locale; return t('application_shortcut_record'); });
   const recordingText = $derived.by(() => { void $locale; return t('application_shortcut_recording'); });
-  const notUsableText = $derived.by(() => { void $locale; return t('application_shortcut_not_usable'); });
+  // Platform-aware (review, Minor 5): the sentence used to say "the command
+  // key" on every platform, which named the wrong key on Windows and Linux —
+  // this window already knows `platform` from the wire, the same fact
+  // `formatShortcut` draws its glyphs from.
+  const notUsableText = $derived.by(() => {
+    void $locale;
+    if (platform === null) return null;
+    return t('application_shortcut_not_usable', { mod: MODIFIER_KEY_NAME[platform] });
+  });
   const shortcutFailedLabel = $derived.by(() => { void $locale; return t('application_shortcut_failed'); });
 
   let recording = $state(false);
@@ -93,10 +101,28 @@
   // rejection in this product.
   let hotkeyError = $state<string | null>(null);
 
+  // 🔴 (review, Important 1) `onkeydown` below only ever reaches a FOCUSED
+  // element, and a click does not focus a `<button>` on every platform — macOS
+  // WebKit, which is what Tauri's WKWebView is, does not give a button focus
+  // on click at all. Without this reference and the `.focus()` call below, the
+  // recorder would listen on an element no real keypress on that platform ever
+  // reaches: the sentence saying "press the combination you want" would stay
+  // on screen through every keystroke, with no way out but a nav change.
+  let recordButton: HTMLButtonElement | undefined = $state();
+
   function startRecording() {
     recording = true;
     notUsable = false;
     hotkeyError = null;
+    recordButton?.focus();
+  }
+
+  // Losing focus by any route other than a captured key — a click elsewhere,
+  // the window losing focus itself — must not leave the "press a key" sentence
+  // standing over a control nothing is listening to any more.
+  function stopRecordingOnBlur() {
+    recording = false;
+    notUsable = false;
   }
 
   // 🔴 Three refusals, told apart before `shortcutFromEvent` is even called —
@@ -126,6 +152,13 @@
     hotkeyError = null;
     try {
       const reply = await setHotkey(shortcut);
+      // 🔴 (review, Important 2) The stamp is bumped HERE too, not only inside
+      // `refresh()`. Two writers share one `seq`: a rejected change earlier can
+      // have started a `refresh()` still in flight when THIS change succeeds,
+      // and without bumping the stamp that older read is not superseded — it
+      // resolves later and overwrites the state this line is about to write
+      // with the pre-change read, stating a shortcut the OS is not holding.
+      seq++;
       // The backend is the truth (D-b closing note): drawn from the REPLY, a
       // whole `HotkeyState`, never assembled from the string this window sent.
       if (prefs !== null) prefs = { ...prefs, hotkey: reply };
@@ -178,15 +211,25 @@
   const autostartFailedLabel = $derived.by(() => { void $locale; return t('application_autostart_failed'); });
 
   let autostartError = $state<string | null>(null);
+  // (review, Minor 3) No in-flight guard meant a double press sent two
+  // `set_autostart` calls — both carrying the same value, since the second
+  // read the same unchanged on-screen state, so no WRONG state resulted, but
+  // the OS was asked twice and a person got no sign the first press landed.
+  let autostartBusy = $state(false);
 
   async function toggleAutostart() {
-    if (autostart === null) return;
+    if (autostart === null || autostartBusy) return;
     // The opposite of the value ON SCREEN, not a constant — a second press
     // after the first one's reply follows what the OS has just reported.
     const target = !autostartIsEnabled;
     autostartError = null;
+    autostartBusy = true;
     try {
       const reply = await setAutostart(target);
+      // 🔴 (review, Important 2) Bumped here too, for the same reason as the
+      // hotkey success path above: a `refresh()` from an earlier rejection can
+      // still be in flight when this call lands.
+      seq++;
       // Drawn from the REPLY, never from `target`: `set_autostart` re-reads the
       // OS after the change (D-c), and a request that could not be confirmed
       // must not render as though it had been.
@@ -194,6 +237,8 @@
     } catch (err) {
       autostartError = err instanceof Error ? err.message : String(err);
       void refresh();
+    } finally {
+      autostartBusy = false;
     }
   }
 
@@ -236,8 +281,10 @@
   <button
     type="button"
     data-testid="application-shortcut-record"
+    bind:this={recordButton}
     onclick={startRecording}
     onkeydown={onRecorderKeydown}
+    onblur={stopRecordingOnBlur}
   >{recordLabel}</button>
   {#if recording}
     <p data-testid="application-shortcut-recording">{recordingText}</p>
@@ -258,6 +305,7 @@
   <button
     type="button"
     data-testid="application-autostart-toggle"
+    disabled={autostartBusy}
     onclick={toggleAutostart}
   >{autostartActionLabel}</button>
 

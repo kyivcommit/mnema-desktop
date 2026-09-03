@@ -800,7 +800,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_shortcut_tray: 'Пошук усе одно можна відкрити з піктограми застосунку в системному лотку.',
     application_shortcut_record: 'Змінити скорочення',
     application_shortcut_recording: 'Натисніть потрібне сполучення клавіш. Escape залишає скорочення без змін.',
-    application_shortcut_not_usable: 'Цю клавішу не можна використати в скороченні. Скорочення — це літера, цифра, функційна клавіша, стрілка або пробіл, натиснуті разом принаймні з однією з клавіш Ctrl, Alt, Shift чи командною.',
+    // {mod}: the platform's own name for the fourth modifier — Cmd/Win/Super
+    // (`shortcut.ts`'s `MODIFIER_KEY_NAME`) — never the platform-neutral
+    // "командною", which named the wrong key on Windows and Linux (review,
+    // Minor 5).
+    application_shortcut_not_usable: 'Цю клавішу не можна використати в скороченні. Скорочення — це літера, цифра, функційна клавіша, стрілка або пробіл, натиснуті разом принаймні з однією з клавіш Ctrl, Alt, Shift чи {mod}.',
     application_shortcut_failed: 'Скорочення не змінено. Ось що відповів застосунок:',
     application_autostart_label: 'Запуск під час входу в систему:',
     application_autostart_enabled: 'Mnema запускається під час входу в систему.',
@@ -1043,7 +1047,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_shortcut_tray: 'The search can still be opened from the application icon in the tray.',
     application_shortcut_record: 'Change the shortcut',
     application_shortcut_recording: 'Press the combination you want. Escape leaves the shortcut as it is.',
-    application_shortcut_not_usable: 'That key cannot be used in a shortcut. A shortcut is a letter, a digit, a function key, an arrow or the space bar, held together with at least one of Ctrl, Alt, Shift or the command key.',
+    application_shortcut_not_usable: 'That key cannot be used in a shortcut. A shortcut is a letter, a digit, a function key, an arrow or the space bar, held together with at least one of Ctrl, Alt, Shift or {mod}.',
     application_shortcut_failed: 'The shortcut was not changed. This is what the application answered:',
     application_autostart_label: 'Starting when you sign in:',
     application_autostart_enabled: 'Mnema starts when you sign in.',

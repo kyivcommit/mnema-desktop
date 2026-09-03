@@ -146,11 +146,19 @@ export function shortcutFromEvent(e: KeyboardEvent): string | null {
   if (isModifierOnlyPress(e)) return null;
   if (e.key === 'Escape' || e.code === 'Escape') return null;
 
+  // 🔴 Pushed in an order that is deliberately NOT `ORDER` — Super first, Ctrl
+  // last — so the join below cannot pass by coincidence. An earlier version
+  // pushed Ctrl/Alt/Shift/Super, which is `ORDER` itself, so `held` and
+  // `ORDER.filter(...)` produced the identical array for every input and
+  // deleting the `.filter` below (joining `held` directly) survived the whole
+  // suite (review, Important 3). This order is arbitrary and unrelated to
+  // anything the parser or the glyphs care about — its only job is to make
+  // sure the canonical order in the return below is doing the work.
   const held: Modifier[] = [];
-  if (e.ctrlKey) held.push('Ctrl');
-  if (e.altKey) held.push('Alt');
-  if (e.shiftKey) held.push('Shift');
   if (e.metaKey) held.push('Super');
+  if (e.shiftKey) held.push('Shift');
+  if (e.altKey) held.push('Alt');
+  if (e.ctrlKey) held.push('Ctrl');
   if (held.length === 0) return null;
 
   const key = keyName(e.code);
@@ -158,6 +166,32 @@ export function shortcutFromEvent(e: KeyboardEvent): string | null {
 
   // Built from ORDER rather than from the sequence the flags were read in: the
   // event carries four booleans and no order at all, so the order can only come
-  // from this module, and it must be the same one every time.
+  // from this module, and it must be the same one every time. `held`'s own
+  // order is deliberately scrambled above for exactly this line's sake.
   return [...ORDER.filter((m) => held.includes(m)), key].join('+');
 }
+
+// M-4/M-5 (review): the keys this recorder accepts are a CLOSED enumeration —
+// letters, digits, `F1`-`F12`, the four arrows, `Space` — not "everything
+// `global-hotkey` parses". D-j names exactly this map; `Ctrl+Alt+,` is refused
+// here although the backend would accept it, and that is plan-mandated, not a
+// bug. The refusal sentence in `catalog.ts` (`application_shortcut_not_usable`)
+// enumerates what a shortcut IS in prose, and that enumeration has to move in
+// lockstep with `keyName` below — a key added to one without the other leaves
+// the sentence naming fewer keys than the recorder accepts, or refusing keys
+// the sentence claims are fine. Definition by enumeration is still a
+// definition: growing this map without also rereading that sentence recreates
+// the exact drift this comment exists to name.
+
+// The modifier key's own NAME, for use in prose — distinct from `SUPER_WORD`
+// above, which is unexported and only feeds `formatShortcut`'s glyph-less
+// branch. Mac gets the word `Cmd` here rather than the `⌘` glyph: this feeds a
+// sentence meant to be READ, and a glyph sitting mid-sentence reads as a typo
+// (review, Minor 5) — the platform-neutral "the command key" it replaces named
+// the wrong key on Windows and Linux, where the sentence's own screen already
+// knows which key it is.
+export const MODIFIER_KEY_NAME: Record<Platform, string> = {
+  mac: 'Cmd',
+  windows: 'Win',
+  linux: 'Super',
+};

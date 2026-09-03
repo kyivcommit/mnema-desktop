@@ -140,8 +140,15 @@ test('clicking Folders shows the Folders heading and removes the Models heading'
 // itself (that cleanup is a later task's, not this one's — see the task
 // brief), so what is still worth pinning here is the invariant the four
 // sections owe together now that all of them are built: none is disabled, and
-// none is described by an id nothing renders.
-test('no section claims to be disabled, and none is described by an id nothing renders', async () => {
+// none carries `aria-describedby` at all.
+//
+// 🔴 (review, Minor 7) Named for exactly what is asserted — `=== null` — rather
+// than "not described by an id nothing renders", which promised the WEAKER,
+// different check the old placeholder-era test made (that a referenced id, if
+// present, resolves to a real element). Under Task 8 the whole wiring is
+// removed, so this is cosmetic, but a name that promises more than its
+// assertion is the shape this project keeps getting bitten by.
+test('no section claims to be disabled, and no button carries aria-describedby', async () => {
   setLocale('en'); // seed, do not inherit
   render(Settings);
 
@@ -254,26 +261,39 @@ test('labels stay correct across a language switch after mount', async () => {
   setLocale('en'); // seed, do not inherit
   render(Settings);
 
-  // M1 (review): read a real sentence once under 'en' BEFORE switching, so a
-  // $derived missing `void $locale` still caches an English value here — the
-  // mutant only dies if the read after the switch is a genuinely later one.
-  // Task 7 built Application, so the placeholder this used to pin is gone; the
-  // shortcut status sentence is `Application.svelte`'s own `$derived.by`, which
-  // is the same shape `Indexing.svelte`'s strings below are read for.
+  // 🔴 (review, Important 4) Application, opened under 'en' and left MOUNTED
+  // across the switch below — the only shape that can guard a `$derived`
+  // missing `void $locale`. An earlier version of this test read the English
+  // sentence here, navigated to Models (destroying the component), and only
+  // came back to Application at the very end under a FRESH mount — which reads
+  // whatever locale is current whether or not `void $locale` is present, so it
+  // could not have caught its own removal. This is `Indexing`'s own shape,
+  // applied here first because it is the shorter case; `Indexing` gets the
+  // identical treatment two blocks down for the same reason.
   await fireEvent.click(screen.getByRole('button', { name: 'Application' }));
   await waitFor(() => expect(screen.getByTestId('application-shortcut-status')).toBeTruthy());
   expect(screen.getByText('This shortcut is registered with the system.')).toBeTruthy();
+
+  setLocale('uk');
+  await waitFor(() =>
+    expect(screen.getByText('Це скорочення зареєстровано в системі.')).toBeTruthy());
+  // Both directions: the English sentence is gone from the same mount, not
+  // merely joined by the Ukrainian one.
+  expect(screen.queryByText('This shortcut is registered with the system.')).toBeNull();
+
+  // Back to English — the rest of this test assumes it, and Application stays
+  // mounted through this second switch too, for the same reason as the first.
+  setLocale('en');
+  await waitFor(() => expect(screen.getByText('This shortcut is registered with the system.')).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Models' }));
 
-  // 🔴 The same lesson for the BUILT section, and it needs a different shape
-  // (review, Important 2). `Indexing.svelte`'s strings come from that
-  // component's own `$derived.by`, and the component is destroyed by every nav
-  // change — so a version of this that clicked Індексація AFTER the switch
-  // would mount it fresh under `uk` and read Ukrainian whether or not the
-  // anchor is there. The section is opened here, under 'en', and left mounted
-  // ACROSS `setLocale` so the read below is genuinely a later read of the same
-  // derived. Measured: with `void $locale` deleted from `filesLine`, this test
-  // fails on the Ukrainian assertion below and the English one still resolves.
+  // The same property, on `Indexing.svelte`'s own `$derived.by` strings. The
+  // component is destroyed by every nav change, so it too is opened under
+  // 'en' and left mounted ACROSS `setLocale` rather than re-opened after it —
+  // a version that clicked Індексація AFTER the switch would mount it fresh
+  // under `uk` and read Ukrainian whether or not the anchor is there. Measured:
+  // with `void $locale` deleted from `filesLine`, this test fails on the
+  // Ukrainian assertion below and the English one still resolves.
   await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));
   await waitFor(() => expect(screen.getByText('The index holds 0 files.')).toBeTruthy());
   expect(screen.getByText('Nothing has been indexed yet.')).toBeTruthy();

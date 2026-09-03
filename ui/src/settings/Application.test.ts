@@ -105,13 +105,24 @@ const shown = async (id: string) => {
 // The recorder is driven the way a person drives it: press the control, then
 // press keys at it. `code` is what the mapping reads, `key` is what the cancel
 // path and the modifier-only check read, so both are always stated.
+//
+// 🔴 (review, Important 1) `record()` asserts focus, and `pressKey` dispatches
+// on `document.activeElement` rather than on the testid directly. A real
+// keydown reaches only whatever the DOM currently has focused — on macOS
+// WebKit (Tauri's WKWebView) a click does NOT focus a `<button>`, so a suite
+// that dispatched straight at the testid element would pass against a
+// component no keypress on that platform could ever drive. Routing through
+// `activeElement` makes every fixture below prove the real path, not just the
+// callback.
 const record = async () => {
   await shown('application-shortcut-record');
-  await fireEvent.click(screen.getByTestId('application-shortcut-record'));
+  const button = screen.getByTestId('application-shortcut-record');
+  await fireEvent.click(button);
   await tick();
+  expect(document.activeElement).toBe(button);
 };
 const pressKey = async (init: KeyboardEventInit) => {
-  await fireEvent.keyDown(screen.getByTestId('application-shortcut-record'), init);
+  await fireEvent.keyDown(document.activeElement!, init);
   await tick();
 };
 
@@ -216,6 +227,36 @@ test('a mac reply is drawn with mac glyphs even though this window is not runnin
 // The recorder.
 // ---------------------------------------------------------------------------
 
+// 🔴 (review, Important 1) Named and asserted on its own, not only baked into
+// the `record()` helper every other fixture in this section shares. `onkeydown`
+// reaches only a FOCUSED element, and clicking a `<button>` does not focus it
+// on every platform — macOS WebKit (Tauri's WKWebView) leaves `activeElement`
+// as `<body>` after a click. Confirmed red before `Application.svelte` called
+// `.focus()`: `document.activeElement` was `<body>`, not the record button.
+test('starting the recorder truly focuses the control, so a real keypress reaches it', async () => {
+  appPrefs.mockResolvedValue(prefs());
+  renderSection();
+  await shown('application-shortcut-record');
+  const button = screen.getByTestId('application-shortcut-record');
+  expect(document.activeElement).not.toBe(button);
+
+  await fireEvent.click(button);
+
+  expect(document.activeElement).toBe(button);
+});
+
+test('losing focus by any other route ends the recording, so the sentence does not get stuck', async () => {
+  appPrefs.mockResolvedValue(prefs());
+  renderSection();
+  await record();
+  expect(screen.getByTestId('application-shortcut-recording')).toBeTruthy();
+
+  screen.getByTestId('application-shortcut-record').blur();
+  await tick();
+
+  expect(screen.queryByTestId('application-shortcut-recording')).toBeNull();
+});
+
 test('a recorded combination is sent as one canonical string, and the reply is what gets drawn', async () => {
   appPrefs.mockResolvedValue(prefs());
   setHotkey.mockResolvedValue({ shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } });
@@ -258,9 +299,22 @@ test('a key the recorder cannot map is refused in the window own words, and noth
   expect(setHotkey).not.toHaveBeenCalled();
   // 🔴 A refusal the WINDOW makes comes from the catalogue, in the active
   // language — not from the parser, whose sentence for this string asks the
-  // reader to report it on GitHub.
+  // reader to report it on GitHub. `Super` because the default fixture's
+  // platform is `linux` (review, Minor 5: the modifier's name is platform-aware
+  // now, never the platform-neutral "the command key").
   expect(at('application-shortcut-not-usable'))
-    .toBe('Цю клавішу не можна використати в скороченні. Скорочення — це літера, цифра, функційна клавіша, стрілка або пробіл, натиснуті разом принаймні з однією з клавіш Ctrl, Alt, Shift чи командною.');
+    .toBe('Цю клавішу не можна використати в скороченні. Скорочення — це літера, цифра, функційна клавіша, стрілка або пробіл, натиснуті разом принаймні з однією з клавіш Ctrl, Alt, Shift чи Super.');
+});
+
+test('the not-usable sentence names the platform`s own modifier key', async () => {
+  appPrefs.mockResolvedValue(prefs({ platform: 'mac' }));
+  renderSection();
+  await record();
+
+  await pressKey({ key: 'x', code: 'IntlBackslash', ctrlKey: true });
+
+  expect(at('application-shortcut-not-usable')).toContain('Cmd');
+  expect(at('application-shortcut-not-usable')).not.toContain('Super');
 });
 
 test('a key pressed with no modifier is refused, and nothing is sent', async () => {
@@ -362,6 +416,46 @@ test('a change that succeeds after one that was refused takes the failure senten
   expect(screen.queryByTestId('application-shortcut-failed')).toBeNull();
 });
 
+// 🔴 (review, Important 2) Two writers share one generation stamp. A rejected
+// `setHotkey` starts a `refresh()` (bumping `seq`) that this fixture holds
+// open; before it settles, a SECOND recording succeeds and writes `prefs`
+// directly. Without also bumping `seq` in that success path, the held-open
+// `refresh()` is not superseded — it resolves later with the STALE pre-change
+// read and overwrites the change that already landed, stating a shortcut the
+// operating system is not actually holding.
+test('a change that succeeds must supersede a refresh() still in flight from an earlier rejection', async () => {
+  const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
+  appPrefs.mockImplementation(() => {
+    const d = deferred<AppPrefs>();
+    queue.push(d);
+    return d.promise;
+  });
+  setHotkey.mockRejectedValueOnce(new Error('refused'));
+  renderSection();
+  await waitFor(() => expect(queue).toHaveLength(1));
+  queue[0].resolve(prefs());
+  await record();
+
+  // First attempt: refused, which starts a second `appPrefs()` read — held
+  // open rather than resolved.
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(queue).toHaveLength(2));
+
+  // Before that read settles, a second recording succeeds outright.
+  setHotkey.mockResolvedValue({ shortcut: 'Ctrl+Alt+A', status: { kind: 'registered' } });
+  await record();
+  await pressKey({ key: 'a', code: 'KeyA', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(at('application-shortcut')).toBe('Ctrl+Alt+A'));
+
+  // The stale re-read now resolves with the OLD, pre-change state. It must not
+  // repaint over the change that already landed.
+  queue[1].resolve(prefs());
+  await tick();
+  await tick();
+
+  expect(at('application-shortcut')).toBe('Ctrl+Alt+A');
+});
+
 // ---------------------------------------------------------------------------
 // Autostart.
 // ---------------------------------------------------------------------------
@@ -455,6 +549,48 @@ test('a refused autostart change shows the backend sentence beside the state it 
   // The state is re-read rather than assumed: a rejection carries no state.
   await waitFor(() => expect(appPrefs).toHaveBeenCalledTimes(2));
   expect(at('application-autostart-status')).toBe('Mnema не запускається під час входу в систему.');
+});
+
+// (review, Minor 2) The shortcut side already has this fixture
+// (`:415-417` above); the autostart side did not, though `autostartError =
+// null` runs at the top of `toggleAutostart` for exactly the same reason.
+test('a change that succeeds after a refused autostart change takes the failure sentence away with it', async () => {
+  appPrefs.mockResolvedValue(prefs({ autostart: { kind: 'disabled' } }));
+  setAutostart.mockRejectedValueOnce(new Error('refused once'));
+  renderSection();
+  await shown('application-autostart-toggle');
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+  await waitFor(() => expect(screen.getByTestId('application-autostart-error')).toBeTruthy());
+
+  setAutostart.mockResolvedValue({ kind: 'enabled' });
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+
+  await waitFor(() => expect(at('application-autostart-status'))
+    .toBe('Mnema запускається під час входу в систему.'));
+  expect(screen.queryByTestId('application-autostart-error')).toBeNull();
+  expect(screen.queryByTestId('application-autostart-failed')).toBeNull();
+});
+
+// (review, Minor 3) No in-flight guard meant a double press sent two
+// `set_autostart` calls, both carrying the same value — not a wrong state, but
+// the OS was asked twice for nothing and the person got no sign the first
+// press had already been received.
+test('the autostart control is busy while a change is in flight, so a double press sends one call', async () => {
+  appPrefs.mockResolvedValue(prefs({ autostart: { kind: 'disabled' } }));
+  const inFlight = deferred<{ kind: 'enabled' }>();
+  setAutostart.mockReturnValue(inFlight.promise);
+  renderSection();
+  const toggle = () => screen.getByTestId<HTMLButtonElement>('application-autostart-toggle');
+  await shown('application-autostart-toggle');
+
+  await fireEvent.click(toggle());
+  expect(toggle().disabled).toBe(true);
+  await fireEvent.click(toggle());
+
+  expect(setAutostart).toHaveBeenCalledTimes(1);
+
+  inFlight.resolve({ kind: 'enabled' });
+  await waitFor(() => expect(toggle().disabled).toBe(false));
 });
 
 // ---------------------------------------------------------------------------

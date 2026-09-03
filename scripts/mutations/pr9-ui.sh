@@ -261,3 +261,16 @@ case_ "the shortcut's platform must come from the wire, never guessed from the b
   "s~  const platform = \\\$derived\(prefs === null \? null : prefs\.platform\);~  const platform = \\\$derived(prefs === null ? null : (navigator.userAgent.includes('Mac') ? 'mac' : 'linux')); // mutant: platform read from navigator.userAgent instead of the wire~" \
   "const platform = \$derived(prefs === null ? null : (navigator.userAgent.includes('Mac') ? 'mac' : 'linux')); // mutant: platform read from navigator.userAgent instead of the wire" \
   src/settings/Application.test.ts 'a mac reply is drawn with mac glyphs even though this window is not running on a mac' runner=vitest
+
+# 🔴 (review, Important 3) The push order into `held` (`shortcut.ts:150-158`)
+# now reads Super/Shift/Alt/Ctrl — deliberately NOT `ORDER` — so this line's
+# `.filter` is what produces the canonical string, not a coincidence with the
+# push sequence. Before that reordering, `held` and `ORDER.filter(...)` were
+# the identical array for every input, and this exact mutant survived the
+# whole suite; it is written now because the fix that closes Important 3 is
+# what makes it expressible.
+case_ "the join must read the canonical ORDER, not the sequence the flags were pushed in" \
+  ui/src/i18n/shortcut.ts \
+  "s~return \[\.\.\.ORDER\.filter\(\(m\) => held\.includes\(m\)\), key\]\.join\('\+'\);~return [...held, key].join('+'); // mutant: joins the push order instead of the canonical one~" \
+  "return [...held, key].join('+'); // mutant: joins the push order instead of the canonical one" \
+  src/i18n/shortcut.test.ts 'the modifiers are emitted in the canonical order, whichever way the event states them' runner=vitest
