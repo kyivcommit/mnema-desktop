@@ -52,4 +52,18 @@ mod tests {
             PathBuf::from("/Users/x/Library/Application Support/com.mnema.desktop/index.sqlite")
         );
     }
+
+    #[test]
+    fn the_prefs_file_sits_beside_the_index_under_that_exact_name() {
+        // From PR 9 two subsystems write this file through `prefs.rs`, and the
+        // backup it makes of a malformed one is named from this path. The name
+        // is what they agree on, so it is pinned here rather than assumed at
+        // each call site.
+        let base = Path::new("/Users/x/Library/Application Support/com.mnema.desktop");
+        assert_eq!(
+            prefs_path(base),
+            PathBuf::from("/Users/x/Library/Application Support/com.mnema.desktop/prefs.json")
+        );
+        assert_eq!(prefs_path(base).parent(), index_path(base).parent());
+    }
 }

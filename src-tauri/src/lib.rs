@@ -12,6 +12,7 @@ pub mod job;
 pub mod locale;
 pub mod models;
 pub mod paths;
+pub mod prefs;
 pub mod state;
 pub mod tray;
 mod tree;

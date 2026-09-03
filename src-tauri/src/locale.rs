@@ -2,7 +2,6 @@
 //! app does not support (§D80, amended). This module owns the effective locale;
 //! `mnema-core::Coordinate::render` is prompt-only and deliberately untouched.
 
-use crate::paths;
 use serde::Serialize;
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -144,17 +143,9 @@ fn choice_from_str(s: &str) -> LocaleChoice {
 /// erroring, because this runs at start-up before there is anywhere to report
 /// an error to.
 pub fn read_choice(data_dir: &Path) -> LocaleChoice {
-    let raw = match std::fs::read_to_string(paths::prefs_path(data_dir)) {
-        Ok(s) => s,
-        Err(_) => return LocaleChoice::Auto,
-    };
-    let value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return LocaleChoice::Auto,
-    };
+    let all = crate::prefs::read_all(data_dir);
     choice_from_str(
-        value
-            .get(LOCALE_KEY)
+        all.get(LOCALE_KEY)
             .and_then(|v| v.as_str())
             .unwrap_or("auto"),
     )
@@ -162,29 +153,15 @@ pub fn read_choice(data_dir: &Path) -> LocaleChoice {
 
 /// Persists the locale choice, preserving whatever other keys are already in
 /// the file — forward-safe, so a field a newer version wrote survives a write
-/// from this one.
+/// from this one. The file itself, including the atomicity of the write and
+/// what happens to a malformed one, is [`crate::prefs`]'s concern: from PR 9
+/// the locale is no longer the only key in it.
 pub fn write_choice(data_dir: &Path, choice: LocaleChoice) -> std::io::Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-    let path = paths::prefs_path(data_dir);
-    // Preserve unknown fields a newer version may have written.
-    let mut obj = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s).ok())
-        .unwrap_or_default();
-    obj.insert(
-        LOCALE_KEY.into(),
+    crate::prefs::write_key(
+        data_dir,
+        LOCALE_KEY,
         serde_json::Value::String(choice_to_str(choice).into()),
-    );
-    let body = serde_json::to_vec_pretty(&serde_json::Value::Object(obj))?;
-    // Atomic: write a sibling temp file, then rename over the target. POSIX
-    // rename() is atomic, so a reader never observes a partially-written file.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &body)?;
-    // TODO(win): std::fs::rename errors on Windows when `path` already exists,
-    // instead of replacing it atomically. This project's CI does not run
-    // Windows; the win-pve live pass must confirm. If it fails there, replace
-    // this with remove-then-rename or the `ReplaceFileW` API.
-    std::fs::rename(&tmp, &path)
+    )
 }
 
 /// What the runtime seam carries: the persisted choice, and what it currently
@@ -321,6 +298,8 @@ pub fn set_locale<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The tests reach the file directly; the module itself no longer does.
+    use crate::paths;
 
     #[test]
     fn primary_subtag_handles_real_os_grammar() {
