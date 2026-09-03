@@ -428,3 +428,54 @@ case_ "a refused shortcut leaves the one already on disk alone" \
   's~    if let Err\(refusal\) = accept_shortcut\(&shortcut\) \{~    if let Err(refusal) = accept_shortcut(\&shortcut) \{\n        let _ = write_key(state.data_dir(), HOTKEY_KEY, serde_json::Value::String(shortcut.clone())); // mutant: a refused shortcut is persisted anyway~' \
   '// mutant: a refused shortcut is persisted anyway' \
   mnema-desktop 'set_hotkey_refuses_a_key_with_no_modifier' --test commands
+
+# ── Task 5: the tray's Stop item ──────────────────────────────────────────────
+#
+# 🔴 **There is no case for the dispatcher arm, and its absence is the finding.**
+# `"stop_indexing" => { … cancel_job() }` lives inside the closure `Builder::
+# on_menu_event` is given in `lib.rs::run`, and `run` is what a shipped binary
+# calls: no test in this repository builds it. `tests/commands.rs` builds its
+# applications with `mock_builder()`, which registers no menu-event handler at
+# all, and there is no seam to reach the closure through — a menu event cannot
+# be synthesised, and the arm is not a named function anything could call. A
+# case for it would be an un-killable case, which this file has a rule against
+# shipping; the arm is verified by pressing the item in Task 9's live run.
+#
+# The `set_enabled` side has no case either, for a different and sharper reason.
+# Under the mock runtime `send_message` runs a `Message::Task` inline while
+# `is_running` is false (`tauri-2.11.5/src/test/mock_runtime.rs:76-88`), and
+# `app_in` never calls `run()`, so a closure that dispatches through
+# `run_on_main_thread` and one that calls `set_enabled` straight out are
+# observationally identical headlessly. No test can tell them apart, so no
+# honest case can be written; what dispatching buys is a job thread that does
+# not block, which is a live-run property.
+
+# The claim goes unannounced: a job starts and the tray goes on offering a Stop
+# that is greyed out. The whole point of the observer, removed.
+case_ "claiming the job slot announces itself" \
+  src-tauri/src/state.rs \
+  's~        if let Some\(f\) = &observer \{\n            f\(true\);\n        \}~        // mutant: the claim is never announced~' \
+  '// mutant: the claim is never announced' \
+  mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
+
+# 🔴 The `false` edge moved from the job ENDING to the stop being REQUESTED —
+# the plausible wrong implementation, not a deletion. It greys the item out the
+# moment a person presses it, which looks right, and leaves the item enabled for
+# every job that finishes on its own, crashes, or is never cancelled at all. Two
+# substitutions in one expression on purpose: the marker proves the first
+# applied, the occurrence count proves the second did.
+case_ "the release is announced when the job ends, not when a stop is asked for" \
+  src-tauri/src/state.rs \
+  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f(false);\n        \}\n    \}~; s~        if let Some\(f\) = &self\.observer \{\n            f\(false\);\n        \}~        let _ = \&self.observer;~' \
+  '// mutant: the release is announced when a stop is requested' \
+  mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
+
+# The amended §8 undone: the deleted «Перевірити оновлення» back in the id list,
+# where it would rebuild a menu item no dispatcher arm answers and no catalog
+# key labels. This is the case that makes the spec assertion falsifiable, which
+# a list compared against itself would not be.
+case_ "the tray item list is the amended spec 8, not the one before it" \
+  src-tauri/src/tray.rs \
+  's~    "stop_indexing",\n    "quit",\n\];~    "stop_indexing",\n    "check_updates", // mutant: the deleted update check is back\n    "quit",\n];~' \
+  '// mutant: the deleted update check is back' \
+  mnema-desktop 'tray::tests::tray_item_ids_match_spec_order' --lib

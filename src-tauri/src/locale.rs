@@ -50,18 +50,17 @@ pub fn resolve(choice: LocaleChoice, os: Option<&str>) -> Lang {
 /// composed at the call site or, for endonyms, live in `endonym` below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
-    TrayStatus,        // "Проіндексовано —" / "Indexed —"
-    TrayShowSearch,    // "Показати пошук" / "Show search"
-    TrayOpenSettings,  // "Відкрити налаштування" / "Open settings"
-    TrayPauseIndexing, // "Пауза індексації" / "Pause indexing"
-    TrayCheckUpdates,  // "Перевірити оновлення" / "Check for updates"
-    TrayQuit,          // "Вийти" / "Quit"
-    MenuLanguage,      // submenu title "Мова" / "Language"
-    LangAuto,          // "Авто (система)" / "Auto (system)"
-    SettingsTitle,     // "Налаштування" / "Settings" (window title after "Mnema — ")
-    CloseSettings,     // "Закрити налаштування" / "Close Settings"
-    MenuEdit,          // "Редагувати" / "Edit"
-    MenuWindow,        // "Вікно" / "Window"
+    TrayStatus,       // "Проіндексовано —" / "Indexed —"
+    TrayShowSearch,   // "Показати пошук" / "Show search"
+    TrayOpenSettings, // "Відкрити налаштування" / "Open settings"
+    TrayStopIndexing, // "Зупинити індексацію" / "Stop indexing"
+    TrayQuit,         // "Вийти" / "Quit"
+    MenuLanguage,     // submenu title "Мова" / "Language"
+    LangAuto,         // "Авто (система)" / "Auto (system)"
+    SettingsTitle,    // "Налаштування" / "Settings" (window title after "Mnema — ")
+    CloseSettings,    // "Закрити налаштування" / "Close Settings"
+    MenuEdit,         // "Редагувати" / "Edit"
+    MenuWindow,       // "Вікно" / "Window"
     // The two hotkey refusals that are OURS rather than the parser's. They are
     // here, and not in `error.rs` with every other rejection sentence, because
     // each answers a PRESS a person made and there is a better sentence for it
@@ -78,8 +77,7 @@ pub const ALL_KEYS: &[Key] = &[
     Key::TrayStatus,
     Key::TrayShowSearch,
     Key::TrayOpenSettings,
-    Key::TrayPauseIndexing,
-    Key::TrayCheckUpdates,
+    Key::TrayStopIndexing,
     Key::TrayQuit,
     Key::MenuLanguage,
     Key::LangAuto,
@@ -100,10 +98,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, TrayShowSearch) => "Show search",
         (Lang::Uk, TrayOpenSettings) => "Відкрити налаштування",
         (Lang::En, TrayOpenSettings) => "Open settings",
-        (Lang::Uk, TrayPauseIndexing) => "Пауза індексації",
-        (Lang::En, TrayPauseIndexing) => "Pause indexing",
-        (Lang::Uk, TrayCheckUpdates) => "Перевірити оновлення",
-        (Lang::En, TrayCheckUpdates) => "Check for updates",
+        (Lang::Uk, TrayStopIndexing) => "Зупинити індексацію",
+        (Lang::En, TrayStopIndexing) => "Stop indexing",
         (Lang::Uk, TrayQuit) => "Вийти",
         (Lang::En, TrayQuit) => "Quit",
         (Lang::Uk, MenuLanguage) => "Мова",
@@ -286,11 +282,10 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
     let choice = app.state::<crate::state::AppState>().locale().choice;
     // The tray menu is rebuilt whole and swapped in via `set_menu`; the tray
     // icon and its `on_tray_icon_event` (the positioner) are left in place.
-    if let Some(tray) = app.tray_by_id("mnema-tray")
-        && let Ok(menu) = crate::tray::build_tray_menu(app, lang, choice)
-    {
-        let _ = tray.set_menu(Some(menu));
-    }
+    // The rebuild also replaces the Stop item a job may be about to disable,
+    // which is why the swap is `tray::swap_tray_menu` and not a `set_menu`
+    // here — see `tray::StopItem`.
+    crate::tray::swap_tray_menu(app, lang, choice);
     // The settings window's native OS title, re-set whether or not it is
     // visible so an already-open or merely-hidden window is right next time.
     if let Some(w) = app.get_webview_window("settings") {

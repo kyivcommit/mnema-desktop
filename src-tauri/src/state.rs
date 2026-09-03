@@ -6,6 +6,12 @@ use mnema_index::Db;
 
 use crate::error::Error;
 
+/// What the job slot says when it changes hands: `true` the moment a job has
+/// won the single slot, `false` the moment it gives it back. Named, rather
+/// than written out at each of the three places it appears, because those three
+/// have to agree — the field, the setter's argument and [`JobSlot`]'s own copy.
+pub type JobObserver = dyn Fn(bool) + Send + Sync;
+
 /// The core owns the truth; the window only draws it. A reload of the webview
 /// must not lose or contradict anything, so nothing lives on the JavaScript side
 /// that is not also here. G7.0 §4.
@@ -81,6 +87,15 @@ pub struct AppState {
     /// plugins" structural — see [`crate::os_services`]'s own header.
     shortcuts: Mutex<Box<dyn crate::os_services::ShortcutRegistrar>>,
     autolaunch: Mutex<Box<dyn crate::os_services::Autolaunch>>,
+    /// Who to tell when the job slot changes hands, if anybody asked.
+    ///
+    /// An `Arc` rather than the `Box` [`AppState::set_job_observer`] takes,
+    /// because [`JobSlot`] carries its own clone for the life of the job:
+    /// `Box<dyn Fn(…)>` is not `Clone`, and looking the observer up again at
+    /// drop time would need a reference back to this struct that `JobSlot`
+    /// deliberately does not hold. `None` is the default and stays the default
+    /// under `cargo test` — nothing but `.setup` installs one.
+    job_observer: Mutex<Option<Arc<JobObserver>>>,
     /// Serialises a whole hotkey change against another one.
     ///
     /// Separate from `hotkey` above, and that is the point: `hotkey` is held for
@@ -128,6 +143,7 @@ impl AppState {
             }),
             shortcuts: Mutex::new(Box::new(crate::os_services::NoOsServices)),
             autolaunch: Mutex::new(Box::new(crate::os_services::NoOsServices)),
+            job_observer: Mutex::new(None),
             hotkey_change: Mutex::new(()),
         }
     }
@@ -402,10 +418,38 @@ impl AppState {
         // Cleared only once the slot is ours: doing it earlier would clear a
         // cancellation aimed at the job that is still running.
         self.cancel.store(false, Ordering::SeqCst);
+        // After the `?` above, so a refused claim announces nothing: the caller
+        // that lost never held the slot, and a `true` from it would enable a
+        // control on behalf of a job that does not exist. Cloned out from under
+        // the lock before the call, so an observer is never run while this
+        // mutex is held.
+        let observer = self
+            .job_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(f) = &observer {
+            f(true);
+        }
         Ok(JobSlot {
             running: self.running.clone(),
             cancel: self.cancel.clone(),
+            observer,
         })
+    }
+
+    /// Registers who to tell when the job slot changes hands. Installed once,
+    /// from `.setup`, so that the tray can offer «Зупинити індексацію» only
+    /// while there is something to stop.
+    ///
+    /// Takes a `Box` and stores an `Arc`: the slot hands its holder a clone,
+    /// and a `Box` cannot be cloned. Replaces any previous observer rather than
+    /// accumulating a list, because there is exactly one tray.
+    pub fn set_job_observer(&self, f: Box<JobObserver>) {
+        *self
+            .job_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::from(f));
     }
 
     /// Asks the running job to stop. A no-op when nothing is running.
@@ -430,6 +474,12 @@ impl AppState {
 pub struct JobSlot {
     running: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
+    /// The observer as it stood when this slot was claimed, carried rather than
+    /// looked up: this struct holds no reference to [`AppState`], and giving it
+    /// one to reach a field at drop time would be a larger change than a clone
+    /// of an `Arc`. `None` when nobody registered, which is what keeps every
+    /// existing caller silent.
+    observer: Option<Arc<JobObserver>>,
 }
 
 impl JobSlot {
@@ -441,5 +491,116 @@ impl JobSlot {
 impl Drop for JobSlot {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
+        // After the slot is free, not before: an observer that asks
+        // `job_is_running()` back must be told the truth this drop has already
+        // made. This runs on the job's own thread, which is why the installed
+        // observer hands the work to the main thread and returns rather than
+        // blocking here — see `tray::StopItem`.
+        if let Some(f) = &self.observer {
+            f(false);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `AppState` with nothing but paths — the observer contract touches no
+    /// index, no provider and no credential store, so the four arguments are
+    /// only there to satisfy the constructor.
+    fn state() -> AppState {
+        AppState::new(
+            PathBuf::from("/nonexistent/mnema-observer-test"),
+            PathBuf::from("/nonexistent/mnema-observer-worker"),
+            "http://127.0.0.1:0".to_string(),
+            "mnema-desktop-state-observer-test".to_string(),
+        )
+    }
+
+    /// Everything the observer was told, in order, so a test can say what was
+    /// sent AND that nothing else was.
+    type Log = Arc<Mutex<Vec<bool>>>;
+
+    /// Poison-recovering rather than `unwrap`, and not for tidiness: a failed
+    /// assertion here poisons the log while `JobSlot` is still alive, and the
+    /// notification that `Drop` then fires as the stack unwinds would panic a
+    /// second time inside a panic. The test would still fail — with a
+    /// double-panic abort instead of the assertion that found the defect.
+    fn recorder(log: &Log) -> Box<JobObserver> {
+        let sink = log.clone();
+        Box::new(move |running| {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(running)
+        })
+    }
+
+    /// The whole contract in the order a job lives it: claiming the slot says
+    /// `true`, and giving it back says `false`. Both edges, because an
+    /// implementation that fired only the first would leave the tray offering
+    /// to stop a job that has finished — which is the failure this observer
+    /// exists to prevent, not a hypothetical.
+    #[test]
+    fn the_observer_hears_a_job_start_and_finish() {
+        let log = Log::default();
+        let state = state();
+        state.set_job_observer(recorder(&log));
+
+        let slot = state.claim_job().expect("the slot is free");
+        assert_eq!(
+            *log.lock().unwrap(),
+            [true],
+            "claiming must announce itself"
+        );
+
+        drop(slot);
+        assert_eq!(
+            *log.lock().unwrap(),
+            [true, false],
+            "releasing must announce itself too"
+        );
+    }
+
+    /// A refused claim announces NOTHING. This is the assertion that separates
+    /// "notify when the slot changes hands" from "notify on every call": the
+    /// second caller never held the slot, so a `true` here would enable a
+    /// control on behalf of a job that does not exist, and the first job's own
+    /// `Drop` would then be the only thing left to disable it.
+    #[test]
+    fn a_refused_claim_announces_nothing() {
+        let log = Log::default();
+        let state = state();
+        state.set_job_observer(recorder(&log));
+
+        let held = state.claim_job().expect("the slot is free");
+        assert!(
+            state.claim_job().is_err(),
+            "a second claim must be refused while the first is held"
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            [true],
+            "the refusal must not have announced anything"
+        );
+
+        // And the still-held slot is the one that speaks on the way out: one
+        // `false`, not two.
+        drop(held);
+        assert_eq!(*log.lock().unwrap(), [true, false]);
+    }
+
+    /// Silence is the default, and it has to be: seven of `AppState::new`'s
+    /// call sites are tests that install no observer, and the shipped
+    /// application runs without one until `.setup` reaches the tray.
+    #[test]
+    fn a_state_with_no_observer_claims_and_releases_as_before() {
+        let state = state();
+        let slot = state.claim_job().expect("the slot is free");
+        assert!(state.job_is_running());
+        assert!(state.claim_job().is_err());
+        drop(slot);
+        assert!(!state.job_is_running());
+        state.claim_job().expect("the slot is free again");
     }
 }

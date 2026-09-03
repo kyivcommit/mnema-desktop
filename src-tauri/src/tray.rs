@@ -18,8 +18,7 @@ pub fn tray_label(lang: Lang, id: &str) -> String {
         "status" => locale::t(lang, Key::TrayStatus).to_string(),
         "show_search" => format!("🔍 {} (⌥Space)", locale::t(lang, Key::TrayShowSearch)),
         "open_settings" => format!("⚙ {}", locale::t(lang, Key::TrayOpenSettings)),
-        "pause_indexing" => format!("⏸ {}", locale::t(lang, Key::TrayPauseIndexing)),
-        "check_updates" => format!("↻ {}", locale::t(lang, Key::TrayCheckUpdates)),
+        "stop_indexing" => format!("⏹ {}", locale::t(lang, Key::TrayStopIndexing)),
         "quit" => format!("⏻ {}", locale::t(lang, Key::TrayQuit)),
         other => panic!("unknown tray id {other}"),
     }
@@ -38,8 +37,7 @@ pub const TRAY_ITEM_IDS: &[&str] = &[
     "status",
     "show_search",
     "open_settings",
-    "pause_indexing",
-    "check_updates",
+    "stop_indexing",
     "quit",
 ];
 
@@ -78,11 +76,18 @@ fn lang_menu_items(lang: Lang, choice: LocaleChoice) -> [(&'static str, String, 
 /// (see `TRAY_ITEM_IDS`) and so is exercised only by the live run, not a
 /// headless test; from Task 6, it is also what a language change calls to
 /// relabel the live menu via `set_menu`.
+///
+/// Hands back the Stop item alongside the menu, because whoever swaps this
+/// menu in has to keep [`StopItem`]'s slot pointing at the item that is
+/// actually on screen — see [`swap_tray_menu`], which is the only caller that
+/// should be doing either. The item is built **disabled**: whether there is a
+/// job to stop is a fact about `AppState`, not about the menu, and reading it
+/// here would give this function a second, hidden input. The caller seeds it.
 pub fn build_tray_menu<R: Runtime>(
     app: &tauri::AppHandle<R>,
     lang: Lang,
     choice: LocaleChoice,
-) -> tauri::Result<Menu<R>> {
+) -> tauri::Result<(Menu<R>, MenuItem<R>)> {
     let status = MenuItem::with_id(
         app,
         "status",
@@ -125,23 +130,16 @@ pub fn build_tray_menu<R: Runtime>(
         &[&lang_auto, &lang_uk, &lang_en],
     )?;
 
-    let pause = MenuItem::with_id(
+    let stop = MenuItem::with_id(
         app,
-        "pause_indexing",
-        tray_label(lang, "pause_indexing"),
-        true,
-        None::<&str>,
-    )?;
-    let updates = MenuItem::with_id(
-        app,
-        "check_updates",
-        tray_label(lang, "check_updates"),
-        true,
+        "stop_indexing",
+        tray_label(lang, "stop_indexing"),
+        false,
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, "quit", tray_label(lang, "quit"), true, None::<&str>)?;
 
-    Menu::with_items(
+    let menu = Menu::with_items(
         app,
         &[
             &status,
@@ -150,12 +148,81 @@ pub fn build_tray_menu<R: Runtime>(
             &open_settings,
             &language_menu,
             &PredefinedMenuItem::separator(app)?,
-            &pause,
-            &updates,
+            &stop,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
-    )
+    )?;
+    Ok((menu, stop))
+}
+
+/// The handle to the tray's «Зупинити індексацію» item, as managed state.
+///
+/// It is here, and read out of here on every use, because the item on screen is
+/// replaced whenever the language changes: [`build_tray_menu`] builds a whole
+/// new menu and [`swap_tray_menu`] swaps it in. A caller that had captured one
+/// `MenuItem` would go on addressing an item that is in no menu, and the one a
+/// person can see would keep whatever state it was built with. `MenuItem<R>` is
+/// `Send + Sync` (Tauri unsafe-impls both on the inner type,
+/// `tauri-2.11.5/src/menu/mod.rs:90-91`), so holding it here is sound.
+pub struct StopItem<R: Runtime>(pub std::sync::Mutex<Option<MenuItem<R>>>);
+
+impl<R: Runtime> StopItem<R> {
+    /// Points the slot at a new item and seeds it from the job that is running
+    /// **now** — never from a boolean remembered across the rebuild, which is
+    /// the shape D136's repair deleted for surviving a remount as a lie.
+    fn replace(&self, app: &tauri::AppHandle<R>, item: MenuItem<R>) {
+        let _ = item.set_enabled(app.state::<crate::state::AppState>().job_is_running());
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item);
+    }
+}
+
+/// Enables or disables whichever Stop item the slot holds **right now**.
+///
+/// A function over the `AppHandle` rather than a method on a held item, which
+/// is the whole point of [`StopItem`]: between one call and the next, a
+/// language change may have put a different item there. Does nothing when the
+/// slot is unmanaged, which is every headless test and every moment before
+/// `.setup` reaches the tray.
+pub fn set_stop_enabled<R: Runtime>(app: &tauri::AppHandle<R>, enabled: bool) {
+    if let Some(slot) = app.try_state::<StopItem<R>>()
+        && let Some(item) = slot
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+    {
+        let _ = item.set_enabled(enabled);
+    }
+}
+
+/// Rebuilds the tray menu in `lang` and puts it on the live tray, keeping
+/// [`StopItem`]'s slot in step.
+///
+/// Both callers that relabel the tray go through here — `locale::apply_locale`
+/// on a language change, and `lib.rs`'s handler when a change failed to persist
+/// and the checkmark has to be put back. One predicate rather than two, because
+/// the half that is easy to forget is not the `set_menu`: it is that the old
+/// Stop item has just left the menu, and anything still holding it is now
+/// talking to nothing.
+///
+/// Best-effort throughout (`let _ =`), like everything else on the language
+/// path: this runs from a tray callback that has no error channel of its own
+/// (§6). Does nothing when there is no tray, which is every headless test.
+pub fn swap_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>, lang: Lang, choice: LocaleChoice) {
+    let Some(tray) = app.tray_by_id("mnema-tray") else {
+        return;
+    };
+    let Ok((menu, stop)) = build_tray_menu(app, lang, choice) else {
+        return;
+    };
+    if let Some(slot) = app.try_state::<StopItem<R>>() {
+        slot.replace(app, stop);
+    }
+    let _ = tray.set_menu(Some(menu));
 }
 
 /// Builds the tray icon and its menu. Reads `AppState`'s locale once — set by
@@ -168,9 +235,13 @@ pub fn build_tray_menu<R: Runtime>(
 /// bound to the tray itself would need re-attaching on every `set_menu`,
 /// which is how a language change re-labels this same menu. Until Task 6
 /// lands, the built menu is inert — clicking any item does nothing.
-pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
+///
+/// Hands the Stop item back to `.setup`, which is the one place that can put it
+/// into [`StopItem`]'s slot: the slot has to be managed before anything can be
+/// read out of it, and nothing before this call has an item to put there.
+pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<MenuItem<R>> {
     let locale_state = app.state::<crate::state::AppState>().locale();
-    let menu = build_tray_menu(app, locale_state.effective, locale_state.choice)?;
+    let (menu, stop) = build_tray_menu(app, locale_state.effective, locale_state.choice)?;
 
     TrayIconBuilder::with_id("mnema-tray")
         .icon(
@@ -184,7 +255,7 @@ pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
             tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
         })
         .build(app)?;
-    Ok(())
+    Ok(stop)
 }
 
 #[cfg(test)]
@@ -204,6 +275,22 @@ mod tests {
         );
     }
 
+    /// Both languages, because the glyph is composed once at this call site and
+    /// the text comes from the catalog: a label that lost either half would
+    /// still be non-empty, and `every_tray_id_has_a_non_empty_label...` would
+    /// go on passing.
+    #[test]
+    fn the_stop_item_composes_its_glyph_with_both_translations() {
+        assert_eq!(
+            tray_label(crate::locale::Lang::Uk, "stop_indexing"),
+            "⏹ Зупинити індексацію"
+        );
+        assert_eq!(
+            tray_label(crate::locale::Lang::En, "stop_indexing"),
+            "⏹ Stop indexing"
+        );
+    }
+
     #[test]
     fn tray_item_ids_match_spec_order() {
         assert_eq!(
@@ -212,9 +299,8 @@ mod tests {
                 "status",
                 "show_search",
                 "open_settings",
-                "pause_indexing",
-                "check_updates",
-                "quit",
+                "stop_indexing",
+                "quit"
             ],
             "the tray menu drifted from spec §8"
         );
@@ -235,6 +321,17 @@ mod tests {
     #[should_panic(expected = "unknown tray id")]
     fn tray_label_rejects_an_unknown_id() {
         tray_label(Lang::En, "not_a_real_id");
+    }
+
+    /// The amended §8 dropped «Перевірити оновлення», and dropping an item is
+    /// not the same as leaving its label behind: a `tray_label` that still
+    /// answered for `check_updates` would let a rebuilt menu carry the item
+    /// back with nothing complaining. Same shape as the unknown-id case above,
+    /// because after the amendment that is exactly what this id is.
+    #[test]
+    #[should_panic(expected = "unknown tray id")]
+    fn tray_label_rejects_the_deleted_update_check() {
+        tray_label(Lang::En, "check_updates");
     }
 
     #[test]

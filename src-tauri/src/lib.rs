@@ -461,6 +461,17 @@ pub fn run() -> anyhow::Result<()> {
                 }
                 sync_activation_policy(app);
             }
+            // §8: ask the running job to stop. There is no guard here and none
+            // is owed — `cancel_job` on an idle application returns `()` after
+            // storing the flag (`state.rs`'s `cancel_job`), and `claim_job`
+            // clears that flag *after* it has won the slot, so a press with
+            // nothing running cannot reach into the next job. The item is
+            // enabled only while a job runs (`tray::StopItem`) so as not to
+            // offer a control that does nothing, which is a different concern
+            // from safety.
+            "stop_indexing" => {
+                app.state::<state::AppState>().cancel_job();
+            }
             // §6: the tray's «Вийти» is the only real exit. `Some(0)` is what
             // the ExitRequested guard lets through.
             "quit" => app.exit(0),
@@ -488,12 +499,7 @@ pub fn run() -> anyhow::Result<()> {
                     // Restore the checkmark: the OS toggled it on click, but the
                     // choice never changed, so rebuild from the current state.
                     let current = state.locale();
-                    if let Some(tray) = app.tray_by_id("mnema-tray")
-                        && let Ok(menu) =
-                            crate::tray::build_tray_menu(app, current.effective, current.choice)
-                    {
-                        let _ = tray.set_menu(Some(menu));
-                    }
+                    crate::tray::swap_tray_menu(app, current.effective, current.choice);
                 }
             }
             _ => {}
@@ -557,7 +563,40 @@ pub fn run() -> anyhow::Result<()> {
                 );
                 let _ = prefs::install_hotkey(&state);
             }
-            tray::build_tray(app.handle())?;
+            // §8: the tray's «Зупинити індексацію». `build_tray` hands back the
+            // item so that it can be reached again later; the slot it goes into
+            // is what a language change replaces, so nothing here or below ever
+            // captures the item itself.
+            let stop = tray::build_tray(app.handle())?;
+            app.manage(tray::StopItem(std::sync::Mutex::new(Some(stop))));
+            {
+                // Seeded from the job that is running now rather than assumed
+                // idle. Nothing can have claimed the slot this early today, and
+                // asking is still cheaper than a comment promising it never
+                // will.
+                let state = app.state::<state::AppState>();
+                tray::set_stop_enabled(app.handle(), state.job_is_running());
+                // 🔴 The closure captures the handle and NOTHING else. The item
+                // is read out of managed state on every call, because a
+                // language change during a job rebuilds the whole tray menu and
+                // puts a different item in that slot; a captured one would
+                // outlive its own menu and the visible item would keep offering
+                // to stop a job that had finished.
+                //
+                // It dispatches and returns rather than calling `set_enabled`
+                // itself. `set_enabled` hops to the main thread and waits, and
+                // the `false` edge fires from `JobSlot::drop` on the job's own
+                // thread — where that wait would hold the job thread until the
+                // event loop got round to it. From the main thread Tauri runs
+                // the task inline, so the `true` edge costs nothing either way.
+                let handle = app.handle().clone();
+                state.set_job_observer(Box::new(move |running| {
+                    let inner = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        tray::set_stop_enabled(&inner, running);
+                    });
+                }));
+            }
             // The settings window's native title in the resolved language. It is
             // hidden at start-up, so this is what it shows the first time it is
             // opened; a later language change re-titles it via `apply_locale`.
