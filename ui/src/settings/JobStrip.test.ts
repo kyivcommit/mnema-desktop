@@ -4,7 +4,7 @@ import { tick } from 'svelte';
 import Settings from './Settings.svelte';
 import { setLocale, type Loc } from '../i18n';
 import { OUTCOME_KINDS, type OutcomeKind } from './jobs';
-import type { JobEnded, JobEvent, JobProgress } from '../lib/ipc';
+import type { JobEnded, JobEvent, JobProgress, ModelSettings } from '../lib/ipc';
 
 // Only Tauri's own modules are faked. The whole settings window renders — the
 // nav, the sections and the indexing strip — because the claim this file makes
@@ -30,11 +30,20 @@ const ROOTS = {
   recents: [],
 };
 
-const READY_SETTINGS = {
+// 🔴 Annotated `ModelSettings`, and the annotation is the guard rather than
+// documentation. This fixture crosses an UNTYPED mock (`invoke` answers
+// `unknown`), so until PR 9 the compiler never looked at it — and Task 3 made
+// `indexedFiles`, `lastIndexedAt` and `failedChunks` REQUIRED fields of the
+// `read` arm. Without the annotation the §9.3 section, which this window now
+// mounts, read `undefined` where a unix timestamp belongs and every test that
+// stood on the Indexing nav item died with `Invalid time value`. With it, a
+// forgotten field is a `npm run check` error instead.
+const READY_SETTINGS: ModelSettings = {
   key: { kind: 'present' },
   index: {
     kind: 'read', embeddingModel: 'openai/text-embedding-3-small', chatModel: null,
     embeddedChunks: 12, embeddedChunksEverywhere: 12, totalChunks: 12,
+    failedChunks: 0, indexedFiles: 9, lastIndexedAt: 1_700_000_000,
     searchTextArm: true, searchContentArm: true,
   },
   platform: 'linux',
@@ -664,11 +673,12 @@ const READY_UK = 'Підключено — OpenRouter, ключ і обрана 
 /// The window's settings as `model_settings` answers them: an index on `emb-1`
 /// holding `total` chunks of document text, with `active` of them embedded in
 /// the space it points at.
-const onModel = (active: number, everywhere = active, total = 12) => ({
+const onModel = (active: number, everywhere = active, total = 12): ModelSettings => ({
   key: { kind: 'present' },
   index: {
     kind: 'read', embeddingModel: 'emb-1', chatModel: null,
     embeddedChunks: active, embeddedChunksEverywhere: everywhere, totalChunks: total,
+    failedChunks: 0, indexedFiles: 9, lastIndexedAt: 1_700_000_000,
     searchTextArm: true, searchContentArm: true,
   },
   platform: 'linux',
@@ -1409,7 +1419,10 @@ async function reportOnScreen() {
   return rendered;
 }
 
-test.each(['indexing', 'application'])(
+// PR 9 Task 6 built the Indexing section, so `application` is the only panel
+// left that ends with the not-ready sentence. The built one keeps the same
+// claim in the case below, against its own last line rather than that sentence.
+test.each(['application'])(
   'standing on the unbuilt %s section, the report is not read as that section`s content',
   async (id) => {
     const { container } = await reportOnScreen();
@@ -1437,11 +1450,33 @@ test.each(['indexing', 'application'])(
   },
 );
 
-// The ruling the fix above must not break, on the path that now runs THROUGH an
-// unbuilt section: the strip is outside every section, so the job it is
+// 🔴 The same finding, on the section the live run actually stood on. It is
+// built now, so what used to follow the report is no longer a sentence saying
+// the panel is empty — it is the index's own numbers, and reading them straight
+// after «Додано документів: 5…» is exactly the confusion finding 3 named. The
+// strip is still drawn first, so the report is still ABOVE the panel, and this
+// case is what says so once the not-ready sentence has gone.
+test('standing on the built indexing section, the report is still read before the section owns numbers', async () => {
+  const { container } = await reportOnScreen();
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+
+  const text = visible(container);
+  // Not vacuous in either direction: both are on the window.
+  expect(text).toContain('Теку прочитано повністю.');
+  expect(text).toContain('В індексі 9 файлів.');
+  // The window's status line comes first; the section's own content last.
+  expect(text.indexOf('Теку прочитано повністю.'))
+    .toBeLessThan(text.indexOf('В індексі 9 файлів.'));
+  // And the panel no longer claims to be unbuilt.
+  expect(text).not.toContain('Ця секція ще не готова.');
+});
+
+// The ruling the fix above must not break, on the path that now runs THROUGH a
+// section that starts no job of its own: the strip is outside every section, so the job it is
 // reporting on survives being navigated away from — counters and all — and
 // `cancel_job` needs no channel, so Cancel works from a section that has none.
-test('Cancel survives a switch through an unbuilt section, in both directions', async () => {
+test('Cancel survives a switch through a section that starts nothing, in both directions', async () => {
   await openFolders();
   await fireEvent.click(scanButton(1));
   await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
@@ -1451,7 +1486,7 @@ test('Cancel survives a switch through an unbuilt section, in both directions', 
   await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
   await tick();
   // Still running, still counted, still stoppable — from a section that has no
-  // channel of its own and no content at all.
+  // channel of its own and starts no pass.
   expect(screen.getByTestId('indexing-counts').textContent)
     .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
   await fireEvent.click(screen.getByTestId('indexing-cancel'));
@@ -1475,7 +1510,7 @@ test('Cancel survives a switch through an unbuilt section, in both directions', 
 // running, an unbuilt section offers no Cancel and calls nothing.
 test('on an unbuilt section with no job running there is no Cancel and no strip', async () => {
   render(Settings);
-  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await fireEvent.click(screen.getByTestId('settings-nav-application'));
   await tick();
 
   expect(screen.queryByTestId('indexing-cancel')).toBeNull();

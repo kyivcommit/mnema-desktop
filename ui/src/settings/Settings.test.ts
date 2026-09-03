@@ -2,6 +2,22 @@ import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-li
 import { expect, test, afterEach, vi } from 'vitest';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
+import type { ModelSettings } from '../lib/ipc';
+
+// 🔴 Annotated, so the compiler checks it. This fixture crosses a `vi.mock`
+// factory, whose return type is `unknown` — Task 3's three new REQUIRED fields
+// on the `read` arm went unchecked here until the §9.3 section started reading
+// them, and a missing `lastIndexedAt` reached `Intl.DateTimeFormat` as
+// `undefined`.
+const SETTINGS: ModelSettings = {
+  key: { kind: 'absent' },
+  index: {
+    kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+    failedChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+    embeddingModel: null, searchTextArm: true, searchContentArm: false,
+  },
+  platform: 'linux',
+};
 
 // Task 4 mounts the real `Models` into the 'models' panel, and it calls
 // `model_settings` on mount — without this mock every test in this file would
@@ -16,12 +32,7 @@ import { setLocale } from '../i18n';
 // listing is enough, since nothing here exercises Folders' own behaviour
 // (that lives in Folders.test.ts).
 vi.mock('../lib/ipc', () => ({
-  modelSettings: () =>
-    Promise.resolve({
-      key: { kind: 'absent' },
-      index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
-      platform: 'linux',
-    }),
+  modelSettings: () => Promise.resolve(SETTINGS),
   setKey: vi.fn(),
   forgetKey: vi.fn(),
   providerModels: () => Promise.resolve({ entries: [], unreadable: 0, unreadableRecords: [] }),
@@ -102,7 +113,10 @@ test('clicking Folders shows the Folders heading and removes the Models heading'
 // empty. What replaces it is a description that RESOLVES: asserting the
 // attribute's presence would pass on a reference pointing at nothing, so the
 // test reads the referenced node's own text.
-test.each(['Indexing', 'Application'])(
+// Task 6 built Indexing, so `Application` is the only section left whose panel
+// carries the sentence — and `disabled: false` for the built one is what keeps
+// `aria-describedby` from pointing at an id nothing renders.
+test.each(['Application'])(
   '%s describes itself with the not-ready sentence, and no section claims to be disabled',
   async (name) => {
     setLocale('en'); // seed, do not inherit
@@ -111,10 +125,15 @@ test.each(['Indexing', 'Application'])(
     // A built section must carry no description WHILE IT IS SELECTED — that is
     // the state the condition branches on, and asserting it on a deselected
     // button instead passes even when the `disabled` half of the condition is
-    // gone and every selected section points at the sentence.
+    // gone and every selected section points at the sentence. Indexing joined
+    // this list in Task 6, and it is the newest evidence for it: a section whose
+    // panel is built while its nav row still says `disabled: true` would point
+    // at an id no element carries.
     expect(screen.getByRole('button', { name: 'Models' }).getAttribute('aria-describedby')).toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
     expect(screen.getByRole('button', { name: 'Folders' }).getAttribute('aria-describedby')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));
+    expect(screen.getByRole('button', { name: 'Indexing' }).getAttribute('aria-describedby')).toBeNull();
 
     // Before it is selected the sentence is not on the page, so nothing may
     // point at it — a reference to a missing id is worse than none.
@@ -202,14 +221,21 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
     + '     ',
   );
 
+  // Task 6: the Indexing panel is the §9.3 section now, and this fixture is an
+  // index nothing has ever been added to — so what a person reads is the count
+  // and the sentence that stands where a date would be, never a blank and never
+  // an epoch. Measured from a real render rather than hand-edited, the way every
+  // earlier version of this string was.
   await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));
-  expect(panel()?.textContent).toBe('Indexing This section is not ready yet.');
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(panel()?.textContent?.replace(/\s+/g, ' ').trim())
+    .toBe('Indexing The index holds 0 files. Nothing has been indexed yet.');
 });
 
 // M2 (review): the Застосунок branch was rendered by no test — a person
 // clicking it would get an empty panel and nothing would notice. Both
 // unbuilt sections carry the sentence, so both are exercised here.
-test.each(['Indexing', 'Application'])('clicking %s shows its one placeholder sentence', async (name) => {
+test.each(['Application'])('clicking %s shows its one placeholder sentence', async (name) => {
   setLocale('en'); // seed, do not inherit
   render(Settings);
   await fireEvent.click(screen.getByRole('button', { name }));
@@ -223,7 +249,9 @@ test('labels stay correct across a language switch after mount', async () => {
   // M1 (review): read the placeholder once under 'en' BEFORE switching, so a
   // $derived missing `void $locale` still caches an English value here — the
   // mutant only dies if the read after the switch is a genuinely later one.
-  await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));
+  // Application rather than Indexing since Task 6: it is the placeholder that
+  // is left.
+  await fireEvent.click(screen.getByRole('button', { name: 'Application' }));
   expect(screen.getByText('This section is not ready yet.')).toBeTruthy();
   await fireEvent.click(screen.getByRole('button', { name: 'Models' }));
 
@@ -233,6 +261,13 @@ test('labels stay correct across a language switch after mount', async () => {
   expect(nav.textContent).toBe('МоделіТекиІндексаціяЗастосунок');
   expect(screen.getByRole('heading', { name: 'Моделі' })).toBeTruthy();
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Індексація' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Застосунок' }));
   expect(screen.getByText('Ця секція ще не готова.')).toBeTruthy();
+
+  // …and the built section's own strings follow the switch too, which is the
+  // half a placeholder can never show: this text comes from `Indexing.svelte`'s
+  // `$derived.by`, not from the window's.
+  await fireEvent.click(screen.getByRole('button', { name: 'Індексація' }));
+  await waitFor(() => expect(screen.getByText('В індексі 0 файлів.')).toBeTruthy());
+  expect(screen.getByText('Ще нічого не проіндексовано.')).toBeTruthy();
 });

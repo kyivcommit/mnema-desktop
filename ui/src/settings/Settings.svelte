@@ -5,6 +5,7 @@
   import Folders from './Folders.svelte';
   import Masks from './Masks.svelte';
   import JobStrip from './JobStrip.svelte';
+  import Indexing from './Indexing.svelte';
   import { createJobController } from './jobs';
 
   // All four sections render; hiding the two not yet built would make the
@@ -14,7 +15,11 @@
   const SECTIONS: { id: SectionId; disabled: boolean }[] = [
     { id: 'models', disabled: false },
     { id: 'folders', disabled: false },
-    { id: 'indexing', disabled: true },
+    // `indexing` is built as of PR 9 Task 6, so it carries no not-ready
+    // description any more. `disabled` and the sentence are one condition, not
+    // two: leaving this `true` would point `aria-describedby` at an id nothing
+    // renders, which is worse than no description at all.
+    { id: 'indexing', disabled: false },
     { id: 'application', disabled: true },
   ];
 
@@ -109,7 +114,10 @@
         <Masks />
       {:else if section === 'indexing'}
         <h2>{indexingLabel}</h2>
-        <p id={NOT_READY_ID}>{notReadyLabel}</p>
+        <!-- §9.3 — what the index holds. It takes `jobs` to hear an ending,
+             which is the one moment its numbers can have changed; it starts
+             nothing itself. The running pass is the strip above the nav. -->
+        <Indexing {jobs} />
       {:else if section === 'application'}
         <h2>{applicationLabel}</h2>
         <p id={NOT_READY_ID}>{notReadyLabel}</p>

@@ -1,4 +1,4 @@
-import { t } from './index';
+import { t, type Loc } from './index';
 
 // How long ago a document was indexed, for the Recents tab (review Minor 5).
 //
@@ -40,4 +40,30 @@ export function formatIndexedAt(indexedAt: number, nowMs: number): string {
   if (delta < HOUR) return t('recent_minutes', { count: Math.floor(delta / MINUTE) });
   if (delta < DAY) return t('recent_hours', { count: Math.floor(delta / HOUR) });
   return t('recent_days', { count: Math.floor(delta / DAY) });
+}
+
+/**
+ * The same instant as a DATE, for §9.3's «останнє оновлення з датою» (D-e).
+ *
+ * It lives beside `formatIndexedAt` so one module still answers for one kind of
+ * time, and it is not a duplicate of it: «3 дні тому» is what a person feels,
+ * the date is what they compare against the file they edited this morning. The
+ * Recents card's argument for a relative phrase ONLY (the header above) held
+ * because that card has no zone to be right about; §9.3 does — it is a person
+ * reading their own index on their own machine, so the machine's own zone is
+ * the right one and `Intl.DateTimeFormat` is left to take it from the runtime.
+ *
+ * 🔴 `indexedAt` is SECONDS, the same unit and the same trap as above:
+ * `MAX(ingest_stage.updated_at)` is an `INTEGER … DEFAULT (unixepoch())` column
+ * (`crates/mnema-index/src/schema.sql:261`), and `Date` takes milliseconds. A
+ * body that passed the number straight through would render a date in January
+ * 1970 for every index ever built, and it would look like a date.
+ *
+ * The locale is an ARGUMENT rather than a read of the store, so the caller
+ * writes `formatIndexedDate(at, $locale)` inside its `$derived.by` and the
+ * string re-derives on a language switch — the same anchoring every other
+ * reactive string on that screen needs.
+ */
+export function formatIndexedDate(indexedAt: number, locale: Loc): string {
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'long' }).format(new Date(indexedAt * 1000));
 }

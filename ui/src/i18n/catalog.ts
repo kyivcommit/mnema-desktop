@@ -90,6 +90,10 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_frozen_unreadable_directory'
   | 'indexing_note_no_key' | 'indexing_note_no_model' | 'indexing_note_rejected'
   | 'indexing_unobserved' | 'indexing_cancel'
+  | 'indexing_index_files' | 'indexing_index_updated' | 'indexing_index_never'
+  | 'indexing_index_unreadable_not_open' | 'indexing_index_unreadable_read_failed'
+  | 'indexing_index_unreadable_reason' | 'indexing_index_load_failed'
+  | 'indexing_index_failed_chunks' | 'indexing_index_refused_run'
   | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
@@ -714,6 +718,53 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_note_rejected: 'Запит відхилено.',
     indexing_unobserved: 'Зараз виконується інше завдання. Це вікно не бачить, як далеко воно просунулося, але зупинити його можна.',
     indexing_cancel: 'Зупинити',
+    // §9.3, PR 9 Task 6 — the Indexing SECTION, which says what the index
+    // holds. Every key here is `indexing_index_*` so nothing confuses it with
+    // the `indexing_*` keys above, which belong to the window's job strip and
+    // say what a pass is doing right now.
+    //
+    // The count is of `path` rows, not of documents (D-e): a file in two
+    // watched folders counts twice, which is what makes this number the sum of
+    // the per-folder numbers the Folders rows draw beside it. The wording says
+    // «файл», the same word those rows' subject implies, rather than
+    // «документ» — the tidier definition is the one that would disagree with
+    // the screen next to it.
+    indexing_index_files: '{count, plural, one {В індексі # файл} few {В індексі # файли} many {В індексі # файлів} other {В індексі # файла}}.',
+    // The date and the relative phrase are two lines, not one sentence: the
+    // date is what a person compares against the file they edited this
+    // morning, the phrase is what they feel. `formatIndexedDate` fills {date}.
+    indexing_index_updated: 'Останнє оновлення: {date}.',
+    // `lastIndexedAt: null` is the backend's own statement that nothing has
+    // ever finished indexing. Never a blank, never an epoch date.
+    indexing_index_never: 'Ще нічого не проіндексовано.',
+    // Two causes, two sentences (`UnreadableCause`, models.rs:809-826). One
+    // sentence for both would be a surface that cannot tell a closed index
+    // from one that broke while being read.
+    indexing_index_unreadable_not_open: 'Не вдалося прочитати індекс: він не відкритий.',
+    indexing_index_unreadable_read_failed: 'Не вдалося прочитати індекс: спроба читання не вдалася.',
+    // 🔴 The backend's `reason` goes here VERBATIM, and that is deliberate —
+    // the opposite of the Models section's rule. `IndexSettings::Unreadable`'s
+    // own doc says `reason` "stays verbatim, for showing" (models.rs:932); this
+    // is the one screen whose job is to tell a person what is wrong with their
+    // index, the text never leaves the machine (D22), and the path inside it is
+    // the actionable part. `cause` above is what anything BRANCHES on.
+    indexing_index_unreadable_reason: 'Програма повідомила: {reason}',
+    // A rejected `model_settings` — §10: the backend's sentence is shown
+    // verbatim beside this lead-in, never branched on, and no numbers are drawn
+    // from a read that failed.
+    indexing_index_load_failed: 'Не вдалося прочитати стан індексу.',
+    // 🔴 The two scopes, owed since PR 7 (`job::Progress::refused` is THIS
+    // RUN's, `IndexRead::failed_chunks` is the SPACE's — job.rs:38-44 says so
+    // in as many words). Two sentences, each naming its own subject, because a
+    // person seeing one number under two meanings cannot tell which they got.
+    // This one is the space, and it states the rule the count exists to make
+    // defensible: the chunk has left the embedding queue for good until its
+    // text changes, so search by meaning stops answering for it while the
+    // document still shows it and word search still finds it.
+    indexing_index_failed_chunks: 'У цьому індексі провайдер відхилив {count, plural, one {# фрагмент} few {# фрагменти} many {# фрагментів} other {# фрагмента}} за весь час. Їх більше не пропонують, доки не зміниться їхній текст: пошук за змістом їх не знаходить, пошук по словах — знаходить.',
+    // And this one is the run that has just ended. Its subject is a pass, not
+    // the index.
+    indexing_index_refused_run: 'Останній прохід вбудовування відхилив {count, plural, one {# фрагмент} few {# фрагменти} many {# фрагментів} other {# фрагмента}}.',
   },
   en: {
     pin: 'Pin',
@@ -917,5 +968,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_note_rejected: 'The request was refused.',
     indexing_unobserved: 'Another job is running. This window cannot see how far it has got, but it can still be stopped.',
     indexing_cancel: 'Stop',
+    indexing_index_files: '{count, plural, one {The index holds # file} other {The index holds # files}}.',
+    indexing_index_updated: 'Last updated: {date}.',
+    indexing_index_never: 'Nothing has been indexed yet.',
+    indexing_index_unreadable_not_open: 'The index could not be read: it is not open.',
+    indexing_index_unreadable_read_failed: 'The index could not be read: the attempt to read it failed.',
+    indexing_index_unreadable_reason: 'The program reported: {reason}',
+    indexing_index_load_failed: 'The state of the index could not be read.',
+    indexing_index_failed_chunks: 'In this index the provider has given up on {count, plural, one {# chunk} other {# chunks}} in all. They are not offered again until their text changes: search by meaning does not find them, word search still does.',
+    indexing_index_refused_run: 'The last embedding pass gave up on {count, plural, one {# chunk} other {# chunks}}.',
   },
 };
