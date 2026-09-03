@@ -7,8 +7,11 @@
 //! to, and the loser's key would simply not be in the file — hence
 //! [`PREFS_LOCK`], which serialises the whole read → merge → write → rename.
 //!
-//! Nothing here is user-visible text: every string in this module is a JSON key
-//! or a file name (`tests/locale_guard.rs`).
+//! Nothing here is user-visible text: every string in this module's PRODUCTION
+//! code is a JSON key or a file name. That is the scope `tests/locale_guard.rs`
+//! checks — it stops at the first `#[cfg(test)]` — and it is the scope claimed
+//! here: the assertion messages in `mod tests` below are ordinary English prose
+//! and are not covered by either.
 
 use crate::paths;
 use std::path::Path;
@@ -36,6 +39,25 @@ fn temp_extension() -> String {
     format!("json.{}.{n}.tmp", std::process::id())
 }
 
+/// Replaces `to` with `from`. Both places this module puts one file where
+/// another already is go through here, and that is the point.
+///
+/// TODO(win): std::fs::rename errors on Windows when `to` already exists,
+/// instead of replacing it atomically. This project's CI does not run
+/// Windows; the win-pve live pass must confirm. If it fails there, replace
+/// this with remove-then-rename or the `ReplaceFileW` API.
+///
+/// The note above was written for the temp file replacing `prefs.json` and is
+/// just as true of `prefs.json` replacing a previous `prefs.json.corrupt`: a
+/// file malformed a SECOND time would fail its backup rename, and `write_key`
+/// would then refuse every write — neither the locale nor the hotkey could be
+/// saved until somebody deleted the file by hand. One helper, so the Windows
+/// workaround has one place to be written and the live pass has one site to
+/// aim at rather than one of two.
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}
+
 /// Everything the preferences file holds, or nothing.
 ///
 /// Every failure — a missing file, a directory that is not there, unreadable
@@ -60,7 +82,10 @@ pub fn read_all(data_dir: &Path) -> serde_json::Map<String, serde_json::Value> {
 ///
 /// **A file that is present but is not a JSON object is renamed to the sibling
 /// `prefs.json.corrupt` before it is replaced**, one generation kept — a
-/// previous backup is overwritten. Without it the write would silently destroy
+/// previous backup is overwritten **where [`replace_file`] can overwrite**,
+/// which today means everywhere but Windows; read its `TODO(win)` before
+/// relying on the second half of that sentence. Without it the write would
+/// silently destroy
 /// the only copy of a file somebody may have hand-edited, or that a newer
 /// version wrote in a shape this one cannot read; that is what-disappears item
 /// 2, and the rename is what makes it recoverable. A file that is merely
@@ -74,6 +99,11 @@ pub fn read_all(data_dir: &Path) -> serde_json::Map<String, serde_json::Value> {
 /// `a_file_of_invalid_utf8_is_backed_up_rather_than_overwritten` is the only
 /// test that can tell them apart.
 pub fn write_key(data_dir: &Path, key: &str, value: serde_json::Value) -> std::io::Result<()> {
+    // Poisoning is absorbed rather than propagated: a writer that panicked
+    // must not turn every later write into a panic. Nothing this lock protects
+    // is left inconsistent by a panic — it guards no shared value, and what
+    // holds the FILE's integrity is the temp-plus-rename below, which either
+    // lands whole or does not land.
     let _guard = PREFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::fs::create_dir_all(data_dir)?;
     let path = paths::prefs_path(data_dir);
@@ -87,7 +117,7 @@ pub fn write_key(data_dir: &Path, key: &str, value: serde_json::Value) -> std::i
     let mut obj = match parsed {
         Some(Ok(object)) => object,
         Some(Err(_)) => {
-            std::fs::rename(&path, path.with_extension("json.corrupt"))?;
+            replace_file(&path, &path.with_extension("json.corrupt"))?;
             serde_json::Map::new()
         }
         None => serde_json::Map::new(),
@@ -100,12 +130,22 @@ pub fn write_key(data_dir: &Path, key: &str, value: serde_json::Value) -> std::i
     // Atomic: write a sibling temp file, then rename over the target. POSIX
     // rename() is atomic, so a reader never observes a partially-written file.
     let tmp = path.with_extension(temp_extension());
-    std::fs::write(&tmp, &body)?;
-    // TODO(win): std::fs::rename errors on Windows when `path` already exists,
-    // instead of replacing it atomically. This project's CI does not run
-    // Windows; the win-pve live pass must confirm. If it fails there, replace
-    // this with remove-then-rename or the `ReplaceFileW` API.
-    std::fs::rename(&tmp, &path)
+    // Both failures clean up after themselves, and with a per-call unique name
+    // that is not optional. The fixed `prefs.json.tmp` this replaced was reused
+    // by the next attempt, so at most one stale file could exist; a unique name
+    // means nothing ever overwrites the leftover, and every failed write would
+    // add another file to the user's data directory permanently. The removal is
+    // best-effort — the error worth reporting is the one that got us here, not
+    // a failure to tidy up after it.
+    if let Err(e) = std::fs::write(&tmp, &body) {
+        let _ = std::fs::remove_file(&tmp); // a partial write leaves a file too
+        return Err(e);
+    }
+    if let Err(e) = replace_file(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// What a test installs to be called from inside [`write_key`]'s critical
@@ -276,6 +316,57 @@ mod tests {
     }
 
     #[test]
+    fn each_call_names_a_different_temp_file() {
+        // Two writers must never pick the same sibling to write into. The fixed
+        // `prefs.json.tmp` this replaced was safe only while one writer existed.
+        let first = temp_extension();
+        let second = temp_extension();
+        assert_ne!(
+            first, second,
+            "two writers would be writing into the same temp file"
+        );
+        assert!(
+            first.ends_with(".tmp") && second.ends_with(".tmp"),
+            "a temp name that is not a temp name: {first} / {second}"
+        );
+    }
+
+    #[test]
+    fn a_write_that_fails_at_the_rename_leaves_no_temp_file_behind() {
+        // The one path on which a temp file exists at the moment the write
+        // gives up. With a per-call unique name nothing later would ever
+        // overwrite it, so every failure would leave another
+        // `prefs.json.<pid>.<n>.tmp` in the user's data directory, forever —
+        // the fixed name this replaced cleaned up after itself by being reused.
+        //
+        // `prefs.json` as a DIRECTORY is what makes the rename fail while
+        // everything before it succeeds: reading it fails, so no backup is
+        // attempted; the data directory is writable, so the temp file really is
+        // created; and renaming a file onto a directory cannot succeed.
+        let dir = tempfile::tempdir().unwrap();
+        let occupied = paths::prefs_path(dir.path());
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("kept.txt"), b"not the preferences").unwrap();
+
+        let failed = write_key(dir.path(), "hotkey", json!("Ctrl+Space"));
+
+        assert!(
+            failed.is_err(),
+            "a rename onto a directory cannot have succeeded"
+        );
+        assert_eq!(
+            file_names(dir.path()),
+            vec!["prefs.json".to_string()],
+            "a failed write left something behind in the data directory"
+        );
+        assert_eq!(
+            std::fs::read(occupied.join("kept.txt")).unwrap(),
+            b"not the preferences",
+            "a failed write must not disturb what was already there"
+        );
+    }
+
+    #[test]
     fn a_missing_file_leaves_no_backup_behind() {
         // The mirror of the test above: absent is not malformed, and an
         // implementation that renames unconditionally passes that one alone.
@@ -355,12 +446,20 @@ mod tests {
             b_done_tx.send(()).unwrap();
             r
         });
+        // Read, release, THEN assert. A panic between the wait and the release
+        // would leave thread A parked with `PREFS_LOCK` held for the life of
+        // this test binary, and every later test that writes preferences would
+        // block on it — cargo would hit its timeout instead of reporting a
+        // failure. Releasing first costs the guard nothing: under a mutant, A
+        // still takes the release out of the channel's buffer and finishes, and
+        // the failure below is still a failure.
+        let b_finished_while_a_was_parked =
+            b_done_rx.recv_timeout(Duration::from_millis(500)).is_ok();
+        release_tx.send(()).unwrap();
         assert!(
-            b_done_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            !b_finished_while_a_was_parked,
             "the second writer finished while the first was still inside the critical section"
         );
-
-        release_tx.send(()).unwrap();
         a.join().unwrap().unwrap();
         assert!(
             b_done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),

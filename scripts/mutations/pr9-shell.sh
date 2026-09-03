@@ -3,13 +3,18 @@
 #
 #   scripts/mutation-check.sh scripts/mutations/pr9-shell.sh
 #
-# What is here, and it is two different kinds of claim. Three cases pin
+# What is here, and it is two different kinds of claim. Some cases pin
 # behaviour that already existed while `locale.rs` owned the file and that the
 # extraction had to carry across unchanged — the merge, and the temp-file-plus-
-# rename. Their oracle is deliberately the locale's OWN tests, unedited: a
+# rename. Those are the ones judged by a `locale::tests::` name below, and that
+# is deliberate: their oracle is the locale's OWN tests, unedited, because a
 # refactor whose evidence is a test the refactor also wrote has no evidence.
 # The rest pin what the extraction ADDED and nothing before it had: the
-# process-wide lock, and the backup of a malformed file.
+# process-wide lock, the backup of a malformed file, the unique temp name and
+# its removal on a failed write. Which case is which is re-derivable, so no
+# list of them is kept here:
+#
+#   grep -oE "mnema-(desktop|walk) 'locale::[^']+'" scripts/mutations/pr9-shell.sh
 #
 # No count of the cases here, deliberately — `pr8-exclusions.sh` explains what
 # that number costs when it goes stale. Re-derive:
@@ -22,10 +27,16 @@
 # / `locale::tests::` prefix. A name without it selects nothing and the harness
 # reports a BASELINE FAILURE for the whole file rather than a result.
 #
-# ⚠️ One case here (`a_write_into_a_read_only_directory…`'s sibling, the
-# temp-plus-rename one) names a test that is `#[cfg(unix)]`. Both of this
+# ⚠️ At least one case here names a `#[cfg(unix)]` test. Both of this
 # repository's CI legs are unix; a Windows leg would fail this file's baseline
-# whole, the way `pr8-exclusions-macos.sh` had to be split off for.
+# WHOLE — every case in it, before any mutation runs — the way
+# `pr8-exclusions-macos.sh` had to be split off for. Which tests those are is
+# taken from the code rather than from this sentence, which would go stale:
+#
+#   for t in $(grep -oE "mnema-desktop '[^']+'" scripts/mutations/pr9-shell.sh \
+#               | sed "s/.*'\(.*\)'/\1/" | sed 's/.*:://' | sort -u); do
+#     grep -rn -B3 "fn ${t}(" src-tauri | grep -q 'cfg(unix)' && echo "$t"
+#   done
 
 # The merge itself, removed: `write_key` builds a fresh object instead of the
 # one already in the file. Every key anybody else wrote is then dropped by the
@@ -57,7 +68,7 @@ case_ "the locale's own forward-safety test must still see the merge disappear" 
 # test, which is what that test was written for.
 case_ "a failed write must not be able to destroy what was already persisted" \
   src-tauri/src/prefs.rs \
-  's~    let tmp = path\.with_extension\(temp_extension\(\)\);\n    std::fs::write\(&tmp, &body\)\?;\n(?:    //[^\n]*\n)+    std::fs::rename\(&tmp, &path\)~    std::fs::write(\&path, \&body)~' \
+  's~    let tmp = path\.with_extension\(temp_extension\(\)\);\n(?:    //[^\n]*\n)+    if let Err\(e\) = std::fs::write\(&tmp, &body\) \{\n(?:.*?\n)+?    Ok\(\(\)\)~    std::fs::write(\&path, \&body)~' \
   'std::fs::write(&path, &body)' \
   mnema-desktop 'locale::tests::failed_write_keeps_the_previous_choice' --lib
 
@@ -93,7 +104,7 @@ case_ "the read-modify-write must be serialised, not merely usually uncontended"
 # is the `.corrupt` sibling's contents, asserted byte-for-byte, that dies.
 case_ "a malformed file must be kept before it is replaced, not destroyed" \
   src-tauri/src/prefs.rs \
-  's~        Some\(Err\(_\)\) => \{\n            std::fs::rename\(&path, path\.with_extension\("json\.corrupt"\)\)\?;\n            serde_json::Map::new\(\)\n        \}~        Some(Err(_)) => serde_json::Map::new(), // mutant: the malformed file is overwritten~' \
+  's~        Some\(Err\(_\)\) => \{\n            replace_file\(&path, &path\.with_extension\("json\.corrupt"\)\)\?;\n            serde_json::Map::new\(\)\n        \}~        Some(Err(_)) => serde_json::Map::new(), // mutant: the malformed file is overwritten~' \
   'Some(Err(_)) => serde_json::Map::new(), // mutant: the malformed file is overwritten' \
   mnema-desktop 'prefs::tests::a_malformed_file_is_kept_byte_for_byte_beside_the_one_that_replaces_it' --lib
 
@@ -116,3 +127,32 @@ case_ "a preferences file that is not valid UTF-8 must be malformed, not absent"
   's~    let existing = std::fs::read\(&path\)\.ok\(\);\n    let parsed = existing\n        \.as_deref\(\)\n        \.map\(serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>\);~    let existing = std::fs::read_to_string(\&path).ok(); // mutant: unreadable text, not malformed bytes\n    let parsed = existing\n        .as_deref()\n        .map(serde_json::from_str::<serde_json::Map<String, serde_json::Value>>);~' \
   'let existing = std::fs::read_to_string(&path).ok(); // mutant: unreadable text, not malformed bytes' \
   mnema-desktop 'prefs::tests::a_file_of_invalid_utf8_is_backed_up_rather_than_overwritten' --lib
+
+# ── Task review, fix round 1 ──────────────────────────────────────────────────
+#
+# Minor 3. The unique temp suffix, collapsed back to the one fixed name the
+# plan replaced. Two writers then pick the same sibling to write into, and the
+# uniqueness the plan asked for was until now a requirement nothing could
+# observe: this mutant survived all seven cases above.
+case_ "each writer must name its own temp file, not one shared name" \
+  src-tauri/src/prefs.rs \
+  's~fn temp_extension\(\) -> String \{\n    static SEQ: AtomicU64 = AtomicU64::new\(0\);\n    let n = SEQ\.fetch_add\(1, Ordering::Relaxed\);\n    format!\("json\.\{\}\.\{n\}\.tmp", std::process::id\(\)\)\n\}~fn temp_extension() -> String \{\n    "json.tmp".to_string() // mutant: one fixed temp name for every writer\n\}~' \
+  '"json.tmp".to_string() // mutant: one fixed temp name for every writer' \
+  mnema-desktop 'prefs::tests::each_call_names_a_different_temp_file' --lib
+
+# Important 2. The temp file's removal on the rename's error path, taken back
+# out — which is exactly what this task shipped in its first commit. The write
+# still fails and still reports the failure, so nothing above notices; what it
+# leaves behind is a `prefs.json.<pid>.<n>.tmp` that no later write will ever
+# reuse or overwrite, one per failure, in the user's data directory forever.
+#
+# ⚠️ The sibling removal on the PARTIAL-WRITE path (a full disk, a killed
+# process mid-`write`) is deliberately NOT a case here: this harness has no way
+# to fail a `std::fs::write` after it has created the file, so a case for it
+# could only be written against a test that does not exist. It is guarded by
+# the same reading of the same one-line idiom, and by nothing executable.
+case_ "a write that fails at the rename must take its temp file with it" \
+  src-tauri/src/prefs.rs \
+  's~    if let Err\(e\) = replace_file\(&tmp, &path\) \{\n        let _ = std::fs::remove_file\(&tmp\);\n        return Err\(e\);\n    \}\n    Ok\(\(\)\)~    replace_file(\&tmp, \&path) // mutant: the temp file is left behind on failure~' \
+  'replace_file(&tmp, &path) // mutant: the temp file is left behind on failure' \
+  mnema-desktop 'prefs::tests::a_write_that_fails_at_the_rename_leaves_no_temp_file_behind' --lib
