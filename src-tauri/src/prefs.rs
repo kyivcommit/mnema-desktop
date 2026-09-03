@@ -66,6 +66,13 @@ pub fn read_all(data_dir: &Path) -> serde_json::Map<String, serde_json::Value> {
 /// 2, and the rename is what makes it recoverable. A file that is merely
 /// *absent* is not malformed and leaves no backup. If the backup itself cannot
 /// be made, the write fails rather than proceeding without it.
+///
+/// **Present is decided from the bytes, not from text.** A file that is not
+/// valid UTF-8 is malformed and is kept; reading it as a string would put it on
+/// the same arm as a file that does not exist, and destroy it. That is the one
+/// state where the two readings differ, and
+/// `a_file_of_invalid_utf8_is_backed_up_rather_than_overwritten` is the only
+/// test that can tell them apart.
 pub fn write_key(data_dir: &Path, key: &str, value: serde_json::Value) -> std::io::Result<()> {
     let _guard = PREFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::fs::create_dir_all(data_dir)?;
@@ -233,6 +240,38 @@ mod tests {
             std::fs::read(corrupt_path(dir.path())).unwrap(),
             original,
             "the malformed file must survive byte-for-byte in its backup"
+        );
+    }
+
+    #[test]
+    fn a_file_of_invalid_utf8_is_backed_up_rather_than_overwritten() {
+        // Not text at all — so it is not "unreadable" in the sense a missing
+        // file is. It is a present file this build cannot parse, and it is the
+        // only copy of whatever wrote it. Reading the file as BYTES is what puts
+        // it on the malformed arm, where it is kept; reading it as a string puts
+        // it on the same arm as a file that is not there, and destroys it.
+        let dir = tempfile::tempdir().unwrap();
+        let original: &[u8] = b"\xff\xfe{";
+        std::fs::write(paths::prefs_path(dir.path()), original).unwrap();
+
+        assert!(
+            read_all(dir.path()).is_empty(),
+            "bytes that are not text must read as no preferences"
+        );
+
+        write_key(dir.path(), "hotkey", json!("Ctrl+Space")).unwrap();
+
+        let all = read_all(dir.path());
+        assert_eq!(all.len(), 1, "the replacement must hold one key: {all:?}");
+        assert_eq!(all.get("hotkey"), Some(&json!("Ctrl+Space")));
+        assert!(
+            corrupt_path(dir.path()).exists(),
+            "a file that is not text was replaced with no backup beside it"
+        );
+        assert_eq!(
+            std::fs::read(corrupt_path(dir.path())).unwrap(),
+            original,
+            "the unparseable bytes must survive byte-for-byte in the backup"
         );
     }
 

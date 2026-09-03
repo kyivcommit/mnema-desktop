@@ -96,3 +96,23 @@ case_ "a malformed file must be kept before it is replaced, not destroyed" \
   's~        Some\(Err\(_\)\) => \{\n            std::fs::rename\(&path, path\.with_extension\("json\.corrupt"\)\)\?;\n            serde_json::Map::new\(\)\n        \}~        Some(Err(_)) => serde_json::Map::new(), // mutant: the malformed file is overwritten~' \
   'Some(Err(_)) => serde_json::Map::new(), // mutant: the malformed file is overwritten' \
   mnema-desktop 'prefs::tests::a_malformed_file_is_kept_byte_for_byte_beside_the_one_that_replaces_it' --lib
+
+# ── Task review, concern 1 ────────────────────────────────────────────────────
+#
+# 🔴 The read reverted from bytes to text, which is exactly what the body moved
+# out of `locale.rs` used to do. `read_to_string` fails on a file that is not
+# valid UTF-8, so `existing` is `None` and the file lands on the same arm as a
+# file that DOES NOT EXIST: no backup, and the only copy of whatever wrote it is
+# gone. Nothing else in this file can see it — measured by running the whole
+# `--lib prefs` filter against this exact reversion, where thirteen tests stay
+# green and only the one named below dies:
+#
+#   a file that is not text was replaced with no backup beside it
+#
+# It is the arm, not the parse, that this case is about: both readings answer an
+# empty map from `read_all` and both write the same replacement file.
+case_ "a preferences file that is not valid UTF-8 must be malformed, not absent" \
+  src-tauri/src/prefs.rs \
+  's~    let existing = std::fs::read\(&path\)\.ok\(\);\n    let parsed = existing\n        \.as_deref\(\)\n        \.map\(serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>\);~    let existing = std::fs::read_to_string(\&path).ok(); // mutant: unreadable text, not malformed bytes\n    let parsed = existing\n        .as_deref()\n        .map(serde_json::from_str::<serde_json::Map<String, serde_json::Value>>);~' \
+  'let existing = std::fs::read_to_string(&path).ok(); // mutant: unreadable text, not malformed bytes' \
+  mnema-desktop 'prefs::tests::a_file_of_invalid_utf8_is_backed_up_rather_than_overwritten' --lib
