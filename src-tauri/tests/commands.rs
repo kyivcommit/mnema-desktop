@@ -2154,13 +2154,20 @@ fn run_walk_capturing_progress(
     let (channel, events) = job_channel();
     walk_job::start_walk_job(state, root_id, channel).expect("the walk would not start");
 
+    // Every arm named, and no catch-all. `JobEvent` has exactly two variants
+    // today (`job.rs`), so a catch-all filing anything non-`ended` under
+    // progress would be right by accident — and would go on being right-looking
+    // if a third variant were added and quietly counted as a progress report.
     let mut progress = Vec::new();
     loop {
         match events.recv_timeout(within) {
             Ok(event) if event["event"] == json!("ended") => {
                 return (progress, event["data"].clone());
             }
-            Ok(event) => progress.push(event["data"].clone()),
+            Ok(event) if event["event"] == json!("progress") => {
+                progress.push(event["data"].clone());
+            }
+            Ok(event) => panic!("the walk sent an event this test cannot classify: {event}"),
             Err(_) => panic!("the walk never told the window it ended: {progress:?}"),
         }
     }
@@ -2211,10 +2218,12 @@ fn a_walk_that_meets_a_busy_index_says_so_on_the_wire() {
     let (progress, ending) = run_walk_capturing_progress(&app, root, Duration::from_secs(60));
     window.conn().execute_batch("COMMIT").unwrap();
 
+    // Strictly, like the mirror below: a field that is absent arrives as
+    // `Null`, and `as_u64().unwrap_or(0)` would read that as a number. The
+    // comparison is against the JSON value itself, so a dropped field fails
+    // here rather than passing as a zero somebody has to notice is missing.
     assert!(
-        progress
-            .iter()
-            .any(|p| p["contended"].as_u64().unwrap_or(0) == 1),
+        progress.iter().any(|p| p["contended"] == json!(1)),
         "the walk met the held lock and no progress event carried it: \
          {progress:?} (ending {ending})"
     );

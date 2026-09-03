@@ -1802,7 +1802,7 @@ async function reembedding(after: ModelSettings) {
   });
   return { ...rendered, ended, progress: () => send({
     event: 'progress',
-    data: { done: 1, total: 4, skipped: 0, refused: 0, secondsLeft: null },
+    data: { done: 1, total: 4, skipped: 0, refused: 0, contended: 0, secondsLeft: null },
   }) };
 }
 

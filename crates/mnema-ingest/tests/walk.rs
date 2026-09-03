@@ -996,9 +996,16 @@ fn a_file_left_unwritten_by_a_busy_index_is_indexed_by_the_next_walk() {
         1,
         "the file is findable after the retry the sentence promises"
     );
+    // Journal hygiene, NOT the window's sentence. D-f promises only that the
+    // file is indexed again, which the three assertions above are what hold up.
+    // This one guards a separate behaviour with an owner of its own, so a
+    // deliberate change to how skips are cleared belongs in that decision and
+    // not in a re-reading of the strip's wording.
     assert!(
         f.db.skips_for_root(f.root).unwrap().is_empty(),
-        "the skip that explained the contention outlived the file's own repair"
+        "the skip that explained the contention outlived the file's own repair \
+         — this guards journal hygiene, not D-f's claim, which the `indexed` \
+         and `path_count` assertions above are the oracle for"
     );
 }
 

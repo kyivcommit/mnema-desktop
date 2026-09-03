@@ -372,6 +372,29 @@ test('a scan that met a busy index says so, in both languages, without touching 
   expect(visible(container)).not.toContain(CONTENDED_UK);
 });
 
+// 🔴 The one event the wording was chosen for, and the state the two tests
+// around it cannot reach. `contended` is reported BEFORE the skip is journalled
+// (`job::Progress::contended`), so exactly one event per contended file carries
+// `contended: 1` while `skipped` is still 0 — the only moment `contended <=
+// skipped` does not hold. A numbered wording would put «з них 1» beside
+// «Пропущено: 0» here and contradict itself under a person's own eye; a
+// number-free sentence is what survives it. This renders that event.
+test('the event that arrives before the skip is journalled does not contradict its own counts', async () => {
+  const { container } = await openFolders();
+  await fireEvent.click(scanButton(1));
+  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+
+  channelOf('start_walk_job')(progressEvent({ contended: 1, skipped: 0 }));
+  await tick();
+
+  // Both lines as a person reads them, together. The sentence is on screen and
+  // the number beside it is still the walk's own zero — nothing on the strip
+  // claims a file has been skipped that the walk has not journalled yet.
+  expect(screen.getByTestId('indexing-counts').textContent)
+    .toBe('Опрацьовано 3 з 8. Пропущено: 0. Відхилено: 0.');
+  expect(visible(container)).toContain(CONTENDED_UK);
+});
+
 // The other direction, and the one an unconditional line satisfies: an
 // ordinary scan met no lock and must say nothing about one.
 test('a scan that met no busy index says nothing about one', async () => {

@@ -174,10 +174,13 @@ pub struct WalkProgress {
     /// Files whose every busy retry found the index locked by another writer
     /// (`ingest_with_busy_retry`). Counted — and reported, in a callback of
     /// its own — **the moment the last retry is refused, before the skip is
-    /// journalled**: a caller that wanted to show "the index is busy" (none
-    /// in this repository does yet) would learn it then, rather than after
-    /// the skip write has spent a further `busy_timeout` of its own meeting
-    /// the same lock. In that one event the file is already in `contended`
+    /// journalled**: the caller that shows "the index is busy" (the desktop
+    /// shell's walk job, drawn as one sentence in the window's job strip)
+    /// learns it then, rather than after the skip write has spent a further
+    /// `busy_timeout` of its own meeting the same lock. That ordering is what
+    /// lets the sentence promise the *next* scan and nothing about the record:
+    /// the skip write may itself meet the lock and end the walk, leaving the
+    /// file in neither the index nor the journal. In that one event the file is already in `contended`
     /// and not yet in `skipped`; in every per-file event afterwards
     /// `contended <= skipped`. Because that callback runs *before* the skip
     /// write, a slow sink there delays the write towards the same lock —

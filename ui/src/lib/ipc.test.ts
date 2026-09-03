@@ -57,7 +57,7 @@ const ENDED_PAYLOAD = {
   reason: 'volumeMissing', done: 11, total: 11, skipped: 5, complete: true, frozen: [],
   indexed: 5, unchanged: 1, refused: 0, removed: 4, message: null,
 } as const;
-const PROGRESS_PAYLOAD = { done: 3, total: 8, skipped: 1, refused: 0, secondsLeft: null } as const;
+const PROGRESS_PAYLOAD = { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null } as const;
 
 test('startEmbedJob forwards every job event, whole, and takes no root', async () => {
   invoke.mockResolvedValue(undefined);
