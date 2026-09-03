@@ -1,11 +1,13 @@
 # The §9.3 Indexing SECTION's own guards — `ui/src/settings/Indexing.svelte`,
-# the file that says what the index holds. Run with:
+# the file that says what the index holds — and, from Task 7, the §9.4
+# Application section's own: `ui/src/settings/Application.svelte` and
+# `ui/src/i18n/shortcut.ts`. Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/pr9-ui.sh
 #
 # Not to be confused with `pr9-index.sh`, which covers the busy-index line in
 # the window's job strip (`JobStrip.svelte`) and the Rust that feeds it. This
-# file is PR 9 Task 6 only.
+# file is PR 9 Tasks 6 and 7.
 #
 # What is here, by name rather than by count, because a count in a comment is a
 # definition and drifts:
@@ -24,6 +26,19 @@
 #                            whether it resolves or is refused
 #   the cleared sentence — a read that succeeds takes the failure away with it
 #   the teardown         — the subscription dies with the component
+#   the no-modifier guard — the recorder refuses a press that carries no
+#                            modifier at all, same as `set_hotkey` step 3
+#   the canonical order   — the modifiers are joined in ONE fixed order, on
+#                            both the format side and the record side
+#   the autostart re-render — the toggle draws the OS's REPLY, never the
+#                            request it sent
+#   the two shortcut sentences — `registered` and `unavailable` say two
+#                            different things, never one drawn twice
+#   the re-read on rejection — a refused `set_hotkey` carries no state at all,
+#                            so what is drawn next can only come from a fresh
+#                            `appPrefs()`, never the pre-call value
+#   the platform source  — the shortcut's glyphs are drawn from the WIRE's
+#                            `Platform`, never guessed from `navigator.userAgent`
 #
 # ⚠️ **Why the discriminant is mutated the way it is, and not the obvious way.**
 # The obvious mutant is `const read = $derived(index)` — the section reading
@@ -166,3 +181,83 @@ case_ "the job subscription must die with the component, not outlive it" \
   "s~    return stop;~    void stop; // mutant: the subscription outlives the component~" \
   "    void stop; // mutant: the subscription outlives the component" \
   src/settings/Indexing.test.ts 'a section left behind by a nav change stops listening — three mounts, one ending, one re-read' runner=vitest
+
+# ---------------------------------------------------------------------------
+# PR 9 Task 7 — the Application section: the shortcut, autostart, the version.
+# `ui/src/i18n/shortcut.ts` first (the two pure functions), then
+# `ui/src/settings/Application.svelte`.
+# ---------------------------------------------------------------------------
+
+# D-b step 3, this side of it: `Space` alone parses on the Rust side and would
+# take the space bar away system-wide, so the recorder refuses a press that
+# carries no modifier before it ever reaches `set_hotkey`. Every fixture that
+# presses a key WITH a modifier passes under this mutant; only the bare-key
+# fixture can see the guard is gone.
+case_ "the recorder must refuse a press that carries no modifier" \
+  ui/src/i18n/shortcut.ts \
+  's~if \(held\.length === 0\) return null;~if (false) return null; // mutant: a press with no modifier is accepted~' \
+  'if (false) return null; // mutant: a press with no modifier is accepted' \
+  src/i18n/shortcut.test.ts 'a press with no modifier at all builds nothing' runner=vitest
+
+# The canonical order is shared by `formatShortcut` and `shortcutFromEvent`
+# through one constant, and it is canonical rather than incidental (D-j): what
+# it buys is that two people pressing the same keys store the same string and
+# read the same label. A press event carries four booleans and no order of its
+# own, so a wrong fixed order is indistinguishable from a right one on every
+# single-modifier fixture — only a combination of two or more modifiers sees it.
+case_ "the modifiers must be joined in the one canonical order, not some other fixed one" \
+  ui/src/i18n/shortcut.ts \
+  "s~const ORDER = \['Ctrl', 'Alt', 'Shift', 'Super'\] as const;~const ORDER = ['Alt', 'Ctrl', 'Shift', 'Super'] as const; // mutant: the canonical order is not the one the parser and the glyphs agree on~" \
+  "const ORDER = ['Alt', 'Ctrl', 'Shift', 'Super'] as const; // mutant: the canonical order is not the one the parser and the glyphs agree on" \
+  src/i18n/shortcut.test.ts 'the modifiers are emitted in the canonical order, whichever way the event states them' runner=vitest
+
+# D-c: `set_autostart` re-reads the OS after the change and answers THAT,
+# never the request. A mutant that draws the outgoing boolean instead is
+# invisible on every fixture where the reply happens to agree with the
+# request — which the "once" fixture's own reply does, on purpose, to test the
+# toggle direction rather than this. Only the fixture whose reply DISAGREES
+# with the request (a failed re-read reported as `unknown`) can tell them apart.
+case_ "the autostart control must draw the OS's reply, not the request it sent" \
+  ui/src/settings/Application.svelte \
+  "s~if \(prefs !== null\) prefs = \{ \.\.\.prefs, autostart: reply \};~if (prefs !== null) prefs = { ...prefs, autostart: target ? { kind: 'enabled' } : { kind: 'disabled' } }; // mutant: renders the request instead of the reply~" \
+  "// mutant: renders the request instead of the reply" \
+  src/settings/Application.test.ts 'the autostart state drawn after a press is the reply, not the request' runner=vitest
+
+# D128: `registered` and `unavailable` are two different facts about the
+# shortcut and must read as two different sentences — never one worded as
+# though it covered both. A mutant that always says "registered" is invisible
+# on every fixture that only ever renders ONE of the two states; only the case
+# that renders both and compares them can see the collapse.
+case_ "unavailable must not be worded as registered" \
+  ui/src/settings/Application.svelte \
+  "s~return hotkey\.status\.kind === 'registered'~return true // mutant: unavailable reads as registered~" \
+  "return true // mutant: unavailable reads as registered" \
+  src/settings/Application.test.ts 'the two shortcut states get two sentences, not one drawn twice' runner=vitest
+
+# 🔴 D-b's closing note: a rejected `set_hotkey` carries no `HotkeyState` at
+# all — which of the table's seven rows produced it is not recoverable from the
+# sentence alone, so the only honest source for what the screen draws next is a
+# fresh `appPrefs()`, never the value the window held before the call. Every
+# fixture whose fresh read happens to answer with the SAME shortcut the window
+# already held would pass under a mutant that skips the re-read entirely; only
+# the pair that changes the answer between the two reads can see it, and this is
+# the first of that pair.
+case_ "a rejected set_hotkey must trigger a fresh read, not keep the pre-call value" \
+  ui/src/settings/Application.svelte \
+  's~hotkeyError = err instanceof Error \? err\.message : String\(err\);.*?void refresh\(\);~hotkeyError = err instanceof Error ? err.message : String(err); // mutant: a rejected set_hotkey does not re-read appPrefs~s' \
+  '// mutant: a rejected set_hotkey does not re-read appPrefs' \
+  src/settings/Application.test.ts 'a refused change shows the sentence and then draws the NEW shortcut when a fresh read reports it' runner=vitest
+
+# D-i: `platform` comes from the WIRE — `Platform::of_this_build`, chosen at
+# compile time on the Rust side — and never from `navigator.userAgent`; that
+# type's own doc records this project measuring a plausible proxy wrong twice,
+# on two platforms. Every fixture whose reply platform happens to match the
+# TEST RUNNER's own platform would pass under a mutant that reads the browser
+# instead of the reply; jsdom's `navigator.userAgent` names neither `Mac OS X`
+# nor `Windows`, so only a fixture that sends `platform: 'mac'` over the wire —
+# while running in an environment that is not one — can tell the two apart.
+case_ "the shortcut's platform must come from the wire, never guessed from the browser" \
+  ui/src/settings/Application.svelte \
+  "s~  const platform = \\\$derived\(prefs === null \? null : prefs\.platform\);~  const platform = \\\$derived(prefs === null ? null : (navigator.userAgent.includes('Mac') ? 'mac' : 'linux')); // mutant: platform read from navigator.userAgent instead of the wire~" \
+  "const platform = \$derived(prefs === null ? null : (navigator.userAgent.includes('Mac') ? 'mac' : 'linux')); // mutant: platform read from navigator.userAgent instead of the wire" \
+  src/settings/Application.test.ts 'a mac reply is drawn with mac glyphs even though this window is not running on a mac' runner=vitest

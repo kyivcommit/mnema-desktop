@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import * as ipc from './ipc';
 import { camelOf, rustEnumVariants } from './rust-enum';
 import type {
+  AppPrefs,
+  AutostartState,
+  HotkeyState,
+  HotkeyStatus,
   IndexSettings,
   SourceAround,
   StoredExclusion,
@@ -499,4 +503,94 @@ test('the index read arm rejects Rust snake_case spellings', () => {
   };
 
   expect(read.indexedFiles).toBe(2);
+});
+
+// ---------------------------------------------------------------------------
+// PR 9 Task 7: the three commands the Application section calls
+// (`src-tauri/src/prefs.rs`). The reply shapes are mirrored WHOLE — the tagged
+// `status`, the tagged autostart state, the version and the platform — rather
+// than in the subset the section happens to draw today; `JobEnded`'s eleven
+// fields are the precedent and the reason is the same one.
+// ---------------------------------------------------------------------------
+
+const REGISTERED: AppPrefs = {
+  hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
+  autostart: { kind: 'disabled' },
+  version: '0.0.0',
+  platform: 'mac',
+};
+
+test('appPrefs invokes app_prefs and takes no arguments at all', async () => {
+  invoke.mockResolvedValue(REGISTERED);
+
+  const prefs = await ipc.appPrefs();
+
+  expect(invoke).toHaveBeenCalledWith('app_prefs');
+  // The whole reply crosses, not the shortcut alone: an earlier form of the
+  // job wrapper read one field and threw the rest away, which was invisible
+  // until something needed the rest.
+  expect(prefs).toEqual(REGISTERED);
+});
+
+test('setHotkey invokes set_hotkey with the shortcut under its camelCase name', async () => {
+  const reply: HotkeyState = { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } };
+  invoke.mockResolvedValue(reply);
+
+  const state = await ipc.setHotkey('Ctrl+Alt+Space');
+
+  expect(invoke).toHaveBeenCalledWith('set_hotkey', { shortcut: 'Ctrl+Alt+Space' });
+  expect(state).toEqual(reply);
+});
+
+test('setAutostart invokes set_autostart with the boolean, and answers the OS state rather than the request', async () => {
+  // The reply and the request disagree on purpose: `set_autostart` re-reads the
+  // operating system after the change (D-c), so a wrapper that echoed its own
+  // argument would be indistinguishable from one that returned the reply — on
+  // every fixture except this one.
+  const reply: AutostartState = { kind: 'unknown', reason: 'the login item list could not be read' };
+  invoke.mockResolvedValue(reply);
+
+  const state = await ipc.setAutostart(true);
+
+  expect(invoke).toHaveBeenCalledWith('set_autostart', { enabled: true });
+  expect(state).toEqual(reply);
+});
+
+test('the hotkey status is a tagged union of exactly two arms', () => {
+  // A `Record` over the discriminant rather than a list: an arm added on the
+  // Rust side and left unmapped here is a compile error, which is what keeps
+  // the window exhaustive over `HotkeyStatus` instead of falling through.
+  const sentence: Record<HotkeyStatus['kind'], string> = {
+    registered: 'the system holds it',
+    unavailable: 'the system does not hold it',
+  };
+  const unavailable: HotkeyStatus = { kind: 'unavailable', reason: 'already taken' };
+
+  expect(sentence[unavailable.kind]).toBe('the system does not hold it');
+  // `unavailable` carries its reason; `registered` carries nothing to show.
+  expect(unavailable.kind === 'unavailable' ? unavailable.reason : null).toBe('already taken');
+});
+
+test('the autostart state is a tagged union of exactly three arms, and unknown is not disabled', () => {
+  const sentence: Record<AutostartState['kind'], string> = {
+    enabled: 'it starts at sign-in',
+    disabled: 'it does not start at sign-in',
+    unknown: 'nobody could tell',
+  };
+  const unknown: AutostartState = { kind: 'unknown', reason: 'the read failed' };
+
+  expect(sentence[unknown.kind]).toBe('nobody could tell');
+  // 🔴 Three sentences, no two alike: a failed READ rendered as "off" would
+  // show a person a switch in the position opposite to the machine's.
+  expect(new Set(Object.values(sentence)).size).toBe(3);
+});
+
+test('app prefs reject Rust snake_case spellings', () => {
+  const prefs: AppPrefs = {
+    ...REGISTERED,
+    // @ts-expect-error TypeScript must reject a spelling the wire never sends.
+    hot_key: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
+  };
+
+  expect(prefs.hotkey.shortcut).toBe('Alt+Space');
 });

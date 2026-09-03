@@ -6,21 +6,23 @@
   import Masks from './Masks.svelte';
   import JobStrip from './JobStrip.svelte';
   import Indexing from './Indexing.svelte';
+  import Application from './Application.svelte';
   import { createJobController } from './jobs';
 
-  // All four sections render; hiding the two not yet built would make the
-  // window claim the product has two sections when the spec says four.
-  // Order matches the spec and the mockup's `snav` column.
+  // All four sections render; hiding one not yet built would make the window
+  // claim the product has fewer sections than the spec does. Order matches the
+  // spec and the mockup's `snav` column.
   type SectionId = 'models' | 'folders' | 'indexing' | 'application';
   const SECTIONS: { id: SectionId; disabled: boolean }[] = [
     { id: 'models', disabled: false },
     { id: 'folders', disabled: false },
-    // `indexing` is built as of PR 9 Task 6, so it carries no not-ready
-    // description any more. `disabled` and the sentence are one condition, not
-    // two: leaving this `true` would point `aria-describedby` at an id nothing
-    // renders, which is worse than no description at all.
+    // `indexing` is built as of PR 9 Task 6, `application` as of Task 7, so
+    // neither carries a not-ready description any more. `disabled` and the
+    // sentence are one condition, not two: leaving either `true` would point
+    // `aria-describedby` at an id nothing renders, which is worse than no
+    // description at all.
     { id: 'indexing', disabled: false },
-    { id: 'application', disabled: true },
+    { id: 'application', disabled: false },
   ];
 
   let section = $state<SectionId>('models');
@@ -120,7 +122,9 @@
         <Indexing {jobs} />
       {:else if section === 'application'}
         <h2>{applicationLabel}</h2>
-        <p id={NOT_READY_ID}>{notReadyLabel}</p>
+        <!-- §9.4 — the shortcut, autostart, and the version. It takes no
+             `jobs`: this section starts nothing and shares no controller. -->
+        <Application />
       {/if}
     </div>
   </div>

@@ -63,6 +63,20 @@ function reply(extra: Replies = {}) {
     start_walk_job: undefined,
     start_embed_job: undefined,
     cancel_job: undefined,
+    // PR 9 Task 7: `Settings` now mounts `Application` too, which reads
+    // `app_prefs` on mount. Left out of the default replies the wrapper
+    // resolves `undefined`, and every test in this file that ever visits that
+    // panel runs beside a component reading fields off it — `jobStatus`'s own
+    // reason above, once more. Nothing here exercises Application's own
+    // behaviour, that lives in Application.test.ts.
+    app_prefs: {
+      hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
+      autostart: { kind: 'disabled' },
+      version: '0.0.0',
+      platform: 'linux',
+    },
+    set_hotkey: undefined,
+    set_autostart: undefined,
     ...extra,
   };
 }
@@ -1419,36 +1433,26 @@ async function reportOnScreen() {
   return rendered;
 }
 
-// PR 9 Task 6 built the Indexing section, so `application` is the only panel
-// left that ends with the not-ready sentence. The built one keeps the same
-// claim in the case below, against its own last line rather than that sentence.
-test.each(['application'])(
-  'standing on the unbuilt %s section, the report is not read as that section`s content',
-  async (id) => {
-    const { container } = await reportOnScreen();
-    await fireEvent.click(screen.getByTestId(`settings-nav-${id}`));
-    await tick();
+// PR 9 Task 6 built the Indexing section and Task 7 built Application, so no
+// panel is left that ends with the not-ready sentence any more — the case
+// below used to stand on the last one left; it now stands on Application built,
+// the same way the case that follows already stood on Indexing built.
+test('standing on the built application section, the report is still read before the section owns content', async () => {
+  const { container } = await reportOnScreen();
+  await fireEvent.click(screen.getByTestId('settings-nav-application'));
+  await waitFor(() => expect(screen.getByTestId('application-version')).toBeTruthy());
 
-    const text = visible(container);
-    // Not vacuous: the report is still on the window. A fix that hid the strip
-    // on an unbuilt section would satisfy the ordering below and lose the
-    // counters and the Cancel button the ruling exists to keep.
-    expect(text).toContain('Теку прочитано повністю.');
-    expect(text).toContain('Додано документів: 5. Без змін: 1. Пропущено: 5. Вилучено з індексу: 4.');
-    // The sentence a person reads LAST. On the screen the live run found, the
-    // whole report followed it; here nothing does, so the sentence is about the
-    // panel it sits in and nothing else.
-    // Compared as the tail STRING rather than `endsWith(...) === true`: a
-    // boolean fails as "expected false to be true" and hides what a person is
-    // actually reading after the sentence, which is the whole finding.
-    const notReady = 'Ця секція ще не готова.';
-    expect(text.slice(-notReady.length)).toBe(notReady);
-    // Stated positively as well as by position: the report is above the
-    // sentence, not under it.
-    expect(text.indexOf('Теку прочитано повністю.'))
-      .toBeLessThan(text.indexOf('Ця секція ще не готова.'));
-  },
-);
+  const text = visible(container);
+  // Not vacuous in either direction: both are on the window.
+  expect(text).toContain('Теку прочитано повністю.');
+  expect(text).toContain('Додано документів: 5. Без змін: 1. Пропущено: 5. Вилучено з індексу: 4.');
+  expect(text).toContain('Версія 0.0.0');
+  // The window's status line comes first; the section's own content last.
+  expect(text.indexOf('Теку прочитано повністю.'))
+    .toBeLessThan(text.indexOf('Версія 0.0.0'));
+  // And the panel no longer claims to be unbuilt.
+  expect(text).not.toContain('Ця секція ще не готова.');
+});
 
 // 🔴 The same finding, on the section the live run actually stood on. It is
 // built now, so what used to follow the report is no longer a sentence saying
@@ -1507,16 +1511,16 @@ test('Cancel survives a switch through a section that starts nothing, in both di
 });
 
 // The other direction of the same control, on the same path: with nothing
-// running, an unbuilt section offers no Cancel and calls nothing.
-test('on an unbuilt section with no job running there is no Cancel and no strip', async () => {
+// running, the built Application section offers no Cancel and calls nothing
+// belonging to a job.
+test('on the built application section with no job running there is no Cancel and no strip', async () => {
   render(Settings);
   await fireEvent.click(screen.getByTestId('settings-nav-application'));
-  await tick();
+  await waitFor(() => expect(screen.getByTestId('application-version')).toBeTruthy());
 
   expect(screen.queryByTestId('indexing-cancel')).toBeNull();
   expect(screen.queryByTestId('indexing')).toBeNull();
   expect(calls('cancel_job')).toHaveLength(0);
-  expect(screen.getByText('Ця секція ще не готова.')).toBeTruthy();
 });
 
 // ---------------------------------------------------------------------------

@@ -95,6 +95,16 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_index_unreadable_not_open' | 'indexing_index_unreadable_read_failed'
   | 'indexing_index_unreadable_reason' | 'indexing_index_load_failed'
   | 'indexing_index_failed_chunks' | 'indexing_index_refused_run'
+  | 'application_shortcut_label' | 'application_shortcut_registered'
+  | 'application_shortcut_unavailable' | 'application_shortcut_reason'
+  | 'application_shortcut_tray' | 'application_shortcut_record'
+  | 'application_shortcut_recording' | 'application_shortcut_not_usable'
+  | 'application_shortcut_failed'
+  | 'application_autostart_label' | 'application_autostart_enabled'
+  | 'application_autostart_disabled' | 'application_autostart_unknown'
+  | 'application_autostart_reason' | 'application_autostart_enable'
+  | 'application_autostart_disable' | 'application_autostart_failed'
+  | 'application_version' | 'application_load_failed'
   | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
@@ -771,6 +781,42 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // And this one is the run that has just ended. Its subject is a pass, not
     // the index.
     indexing_index_refused_run: 'Останній прохід вбудовування відхилив {count, plural, one {# фрагмент} few {# фрагменти} many {# фрагментів} other {# фрагмента}}.',
+    // §9.4 — the Application section: the shortcut, autostart, and the version.
+    //
+    // 🔴 Two sentence sources, and they are kept apart on purpose. Everything
+    // below is a refusal or a statement the WINDOW makes, so it lives here in
+    // both languages. A refusal the BACKEND makes is shown verbatim beside
+    // these and is English, like every other rejection in this product.
+    application_shortcut_label: 'Скорочення для відкриття пошуку:',
+    // 🔴 «Зареєстровано» — і ніколи «працює» чи «належить лише вам». D128
+    // виміряв, що macOS реєструє скорочення, яке вже тримає інший застосунок:
+    // реєструються обидва і спрацьовують обидва. Речення не має права
+    // обіцяти більше, ніж повідомляє операційна система.
+    application_shortcut_registered: 'Це скорочення зареєстровано в системі.',
+    application_shortcut_unavailable: 'Це скорочення не зареєстровано в системі.',
+    application_shortcut_reason: 'Програма повідомила: {reason}',
+    // Стан, який нічого не пропонує далі, — це стан, про який пишуть у
+    // підтримку. Пошук залишається досяжним, і секція каже як саме.
+    application_shortcut_tray: 'Пошук усе одно можна відкрити з піктограми застосунку в системному лотку.',
+    application_shortcut_record: 'Змінити скорочення',
+    application_shortcut_recording: 'Натисніть потрібне сполучення клавіш. Escape залишає скорочення без змін.',
+    application_shortcut_not_usable: 'Цю клавішу не можна використати в скороченні. Скорочення — це літера, цифра, функційна клавіша, стрілка або пробіл, натиснуті разом принаймні з однією з клавіш Ctrl, Alt, Shift чи командною.',
+    application_shortcut_failed: 'Скорочення не змінено. Ось що відповів застосунок:',
+    application_autostart_label: 'Запуск під час входу в систему:',
+    application_autostart_enabled: 'Mnema запускається під час входу в систему.',
+    application_autostart_disabled: 'Mnema не запускається під час входу в систему.',
+    // 🔴 Третє речення, а не друге вдруге: невдале читання, показане як «не
+    // запускається», показало б людині перемикач у положенні, протилежному до
+    // того, у якому насправді перебуває машина.
+    application_autostart_unknown: 'Не вдалося дізнатися, чи запускається Mnema під час входу в систему.',
+    application_autostart_reason: 'Програма повідомила: {reason}',
+    application_autostart_enable: 'Запускати під час входу',
+    application_autostart_disable: 'Не запускати під час входу',
+    application_autostart_failed: 'Налаштування не змінено. Ось що відповів застосунок:',
+    // D-h: версію показано як є, включно з 0.0.0. Поруч немає «у вас найновіша
+    // версія» — цього ніхто не перевіряв.
+    application_version: 'Версія {version}',
+    application_load_failed: 'Не вдалося прочитати налаштування застосунку.',
   },
   en: {
     pin: 'Pin',
@@ -984,5 +1030,30 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_index_load_failed: 'The state of the index could not be read.',
     indexing_index_failed_chunks: 'In this index the provider has given up on {count, plural, one {# chunk} other {# chunks}} in all. They are not offered again until their text changes: search by meaning does not find them, word search still does.',
     indexing_index_refused_run: 'The last embedding pass gave up on {count, plural, one {# chunk} other {# chunks}}.',
+    // §9.4 — the Application section: the shortcut, autostart, and the version.
+    //
+    // 🔴 Two sentence sources, and they are kept apart on purpose. Everything
+    // below is a refusal or a statement the WINDOW makes, so it lives here in
+    // both languages. A refusal the BACKEND makes is shown verbatim beside
+    // these and is English, like every other rejection in this product.
+    application_shortcut_label: 'Shortcut for opening the search:',
+    application_shortcut_registered: 'This shortcut is registered with the system.',
+    application_shortcut_unavailable: 'This shortcut is not registered with the system.',
+    application_shortcut_reason: 'The program reported: {reason}',
+    application_shortcut_tray: 'The search can still be opened from the application icon in the tray.',
+    application_shortcut_record: 'Change the shortcut',
+    application_shortcut_recording: 'Press the combination you want. Escape leaves the shortcut as it is.',
+    application_shortcut_not_usable: 'That key cannot be used in a shortcut. A shortcut is a letter, a digit, a function key, an arrow or the space bar, held together with at least one of Ctrl, Alt, Shift or the command key.',
+    application_shortcut_failed: 'The shortcut was not changed. This is what the application answered:',
+    application_autostart_label: 'Starting when you sign in:',
+    application_autostart_enabled: 'Mnema starts when you sign in.',
+    application_autostart_disabled: 'Mnema does not start when you sign in.',
+    application_autostart_unknown: 'Whether Mnema starts when you sign in could not be read.',
+    application_autostart_reason: 'The program reported: {reason}',
+    application_autostart_enable: 'Start when I sign in',
+    application_autostart_disable: 'Do not start when I sign in',
+    application_autostart_failed: 'The setting was not changed. This is what the application answered:',
+    application_version: 'Version {version}',
+    application_load_failed: 'The application settings could not be read.',
   },
 };

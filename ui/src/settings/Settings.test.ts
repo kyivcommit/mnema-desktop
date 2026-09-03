@@ -2,7 +2,7 @@ import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-li
 import { expect, test, afterEach, vi } from 'vitest';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
-import type { ModelSettings } from '../lib/ipc';
+import type { AppPrefs, ModelSettings } from '../lib/ipc';
 
 // 🔴 Annotated, so the compiler checks it. This fixture crosses a `vi.mock`
 // factory, whose return type is `unknown` — Task 3's three new REQUIRED fields
@@ -16,6 +16,18 @@ const SETTINGS: ModelSettings = {
     failedChunks: 0, indexedFiles: 0, lastIndexedAt: null,
     embeddingModel: null, searchTextArm: true, searchContentArm: false,
   },
+  platform: 'linux',
+};
+
+// Task 7: `Application` mounts into the 'application' panel and reads
+// `app_prefs` on mount too. Annotated for the same reason as `SETTINGS` above
+// — a fixture behind a `vi.mock` factory sits where the compiler cannot check
+// it, and a missing field would render `undefined` in front of a person and
+// pass here silently.
+const APP_PREFS: AppPrefs = {
+  hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
+  autostart: { kind: 'disabled' },
+  version: '0.0.0',
   platform: 'linux',
 };
 
@@ -60,6 +72,15 @@ vi.mock('../lib/ipc', () => ({
   startWalkJob: vi.fn(),
   startEmbedJob: vi.fn(),
   cancelJob: vi.fn(),
+  // Task 7 mounts `Application` into the 'application' panel, for the same
+  // reason as `jobStatus` above: left out of this mock the wrapper is
+  // `undefined`, the call throws, and every test in this file that ever visits
+  // that panel runs beside an unhandled rejection. A fixed registered/disabled
+  // fixture is enough — nothing here exercises Application's own behaviour,
+  // that lives in Application.test.ts.
+  appPrefs: () => Promise.resolve(APP_PREFS),
+  setHotkey: vi.fn(),
+  setAutostart: vi.fn(),
 }));
 
 afterEach(() => {
@@ -110,47 +131,27 @@ test('clicking Folders shows the Folders heading and removes the Models heading'
 // operable — a click does switch the panel — so announcing them as disabled
 // was a claim the window could not back, and its cost fell on exactly the
 // people who would then never press them and never hear why the section is
-// empty. What replaces it is a description that RESOLVES: asserting the
-// attribute's presence would pass on a reference pointing at nothing, so the
-// test reads the referenced node's own text.
-// Task 6 built Indexing, so `Application` is the only section left whose panel
-// carries the sentence — and `disabled: false` for the built one is what keeps
-// `aria-describedby` from pointing at an id nothing renders.
-test.each(['Application'])(
-  '%s describes itself with the not-ready sentence, and no section claims to be disabled',
-  async (name) => {
-    setLocale('en'); // seed, do not inherit
-    const { container } = render(Settings);
+// empty.
+//
+// Task 7 built Application, so no section is left whose panel carries the
+// not-ready sentence — Indexing (Task 6) was the previous-to-last, and this
+// test's own history already predicted running out of them. `NOT_READY_ID`,
+// `notReadyLabel` and the `aria-describedby` wiring stay in `Settings.svelte`
+// itself (that cleanup is a later task's, not this one's — see the task
+// brief), so what is still worth pinning here is the invariant the four
+// sections owe together now that all of them are built: none is disabled, and
+// none is described by an id nothing renders.
+test('no section claims to be disabled, and none is described by an id nothing renders', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Settings);
 
-    // A built section must carry no description WHILE IT IS SELECTED — that is
-    // the state the condition branches on, and asserting it on a deselected
-    // button instead passes even when the `disabled` half of the condition is
-    // gone and every selected section points at the sentence. Indexing joined
-    // this list in Task 6, and it is the newest evidence for it: a section whose
-    // panel is built while its nav row still says `disabled: true` would point
-    // at an id no element carries.
-    expect(screen.getByRole('button', { name: 'Models' }).getAttribute('aria-describedby')).toBeNull();
-    await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
-    expect(screen.getByRole('button', { name: 'Folders' }).getAttribute('aria-describedby')).toBeNull();
-    await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));
-    expect(screen.getByRole('button', { name: 'Indexing' }).getAttribute('aria-describedby')).toBeNull();
-
-    // Before it is selected the sentence is not on the page, so nothing may
-    // point at it — a reference to a missing id is worse than none.
-    expect(screen.getByRole('button', { name }).getAttribute('aria-describedby')).toBeNull();
-
+  for (const name of ['Models', 'Folders', 'Indexing', 'Application']) {
     await fireEvent.click(screen.getByRole('button', { name }));
-
-    const id = screen.getByRole('button', { name }).getAttribute('aria-describedby');
-    expect(id).toBe('section-not-ready');
-    expect(container.querySelector(`#${id}`)?.textContent).toBe('This section is not ready yet.');
-
-    // And no section claims to be disabled any more — all four, positively.
-    for (const other of ['Models', 'Folders', 'Indexing', 'Application']) {
-      expect(screen.getByRole('button', { name: other }).getAttribute('aria-disabled')).toBeNull();
-    }
-  },
-);
+    const button = screen.getByRole('button', { name });
+    expect(button.getAttribute('aria-disabled')).toBeNull();
+    expect(button.getAttribute('aria-describedby')).toBeNull();
+  }
+});
 
 // M3 (review): aria-pressed is the only signal of which section is selected —
 // there is no CSS anywhere in this project. Both directions, before and after
@@ -232,29 +233,36 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
     .toBe('Indexing The index holds 0 files. Nothing has been indexed yet.');
 });
 
-// M2 (review): the Застосунок branch was rendered by no test — a person
-// clicking it would get an empty panel and nothing would notice. Both
-// unbuilt sections carry the sentence, so both are exercised here.
-test.each(['Application'])('clicking %s shows its one placeholder sentence', async (name) => {
+// M2 (review): the Застосунок branch was once rendered by no test — a person
+// clicking it would have got an empty panel and nothing would have noticed.
+// Task 7 built the section, so what this now guards is the same finding in
+// its new shape: clicking Application must show ITS OWN content, mounted
+// underneath the heading, not a heading standing over an empty panel.
+test('clicking Application shows its own content, not an empty panel', async () => {
   setLocale('en'); // seed, do not inherit
   render(Settings);
-  await fireEvent.click(screen.getByRole('button', { name }));
-  expect(screen.getByText('This section is not ready yet.')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Application' }));
+  expect(screen.getByRole('heading', { name: 'Application' })).toBeTruthy();
+  // Text only `Application.svelte` itself renders, once its own `app_prefs`
+  // read has settled — so a heading with nothing built underneath it fails
+  // here rather than passing quietly on the <h2> above.
+  await waitFor(() => expect(screen.getByTestId('application-version')).toBeTruthy());
+  expect(screen.queryByText('This section is not ready yet.')).toBeNull();
 });
 
 test('labels stay correct across a language switch after mount', async () => {
   setLocale('en'); // seed, do not inherit
   render(Settings);
 
-  // M1 (review): read the placeholder once under 'en' BEFORE switching, so a
+  // M1 (review): read a real sentence once under 'en' BEFORE switching, so a
   // $derived missing `void $locale` still caches an English value here — the
   // mutant only dies if the read after the switch is a genuinely later one.
-  // Application rather than Indexing since Task 6: it is the placeholder that
-  // is left. This one belongs to `Settings.svelte` itself, which stays mounted
-  // across every nav click, so the cached value really does survive to be
-  // re-read after the switch.
+  // Task 7 built Application, so the placeholder this used to pin is gone; the
+  // shortcut status sentence is `Application.svelte`'s own `$derived.by`, which
+  // is the same shape `Indexing.svelte`'s strings below are read for.
   await fireEvent.click(screen.getByRole('button', { name: 'Application' }));
-  expect(screen.getByText('This section is not ready yet.')).toBeTruthy();
+  await waitFor(() => expect(screen.getByTestId('application-shortcut-status')).toBeTruthy());
+  expect(screen.getByText('This shortcut is registered with the system.')).toBeTruthy();
   await fireEvent.click(screen.getByRole('button', { name: 'Models' }));
 
   // 🔴 The same lesson for the BUILT section, and it needs a different shape
@@ -283,6 +291,10 @@ test('labels stay correct across a language switch after mount', async () => {
   await fireEvent.click(screen.getByRole('button', { name: 'Моделі' }));
   expect(screen.getByRole('heading', { name: 'Моделі' })).toBeTruthy();
 
+  // Application, re-mounted fresh under 'uk' — this is a NEW mount (every nav
+  // change destroys the previous section), so it reads Ukrainian from its own
+  // first `app_prefs` resolution rather than from anything cached.
   await fireEvent.click(screen.getByRole('button', { name: 'Застосунок' }));
-  expect(screen.getByText('Ця секція ще не готова.')).toBeTruthy();
+  await waitFor(() => expect(screen.getByTestId('application-shortcut-status')).toBeTruthy());
+  expect(screen.getByText('Це скорочення зареєстровано в системі.')).toBeTruthy();
 });
