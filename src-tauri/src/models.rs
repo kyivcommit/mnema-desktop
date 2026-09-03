@@ -768,7 +768,7 @@ impl Platform {
     /// actually linked: `mnema_secrets::platform_store` selects its backend from
     /// the same three `cfg`s, and "everything that is not macOS or Windows" is
     /// the arm that crate uses too.
-    fn of_this_build() -> Self {
+    pub(crate) fn of_this_build() -> Self {
         #[cfg(target_os = "macos")]
         {
             Self::Mac

@@ -43,6 +43,51 @@ pub enum Error {
     /// first variant that needs `From<std::io::Error>` at all.
     #[error("could not write preferences: {0}")]
     Prefs(#[from] std::io::Error),
+    /// `set_hotkey` refused the string **before the parser ran**, by a guard of
+    /// this application's own: an empty or whitespace-only shortcut, one made
+    /// of modifiers with no key (`"Alt"`, `"Ctrl+Alt"`), or one with a key and
+    /// no modifier (`"Space"`).
+    ///
+    /// 🔴 **The payload is a sentence from `locale.rs`'s catalogue, in the
+    /// active language**, and that is why this variant carries a string rather
+    /// than wording the refusal itself. The three cases are all *presses a
+    /// person made*, so what they read is written where the rest of the
+    /// interface's words are; `#[error("{0}")]` passes it through, the same
+    /// shape [`Error::InvalidRule`] uses for `RulesError`'s own sentences.
+    ///
+    /// Measured, and the reason the guard exists at all: `global-hotkey`
+    /// **accepts** `"Space"` — a single token parses to `Ok` with empty
+    /// modifiers (`global-hotkey-0.8.0/src/hotkey.rs:174-178`), so binding it
+    /// would take the space bar away system-wide. And it refuses `"Alt"` as
+    /// `UnsupportedKey`, whose sentence (`hotkey.rs:40`) asks the reader to
+    /// open an issue against `github.com/tauri-apps/muda` — a request to file a
+    /// bug report, handed to somebody who held one modifier down.
+    #[error("{0}")]
+    HotkeyRefused(String),
+    /// The shortcut string reached the parser and the parser would not have it
+    /// — an unrecognised key (`"Alt+Qwerty"`), a key that is not last
+    /// (`"Ctrl+C+Shift"`), an empty token.
+    ///
+    /// Carries `HotKeyParseError`'s **verbatim** sentence, which is the one
+    /// case where "Couldn't recognize … as a valid key" is both true and
+    /// something a person can act on. [`Error::HotkeyRefused`] above is what
+    /// keeps every other refusal off this path.
+    #[error("{0}")]
+    HotkeyUnparsable(String),
+    /// The operating system would not register or unregister the shortcut, and
+    /// this carries the plugin's own sentence.
+    ///
+    /// ⚠️ Its **absence** is not a promise of exclusivity: D128 measured macOS
+    /// co-registering a shortcut another application already holds, where both
+    /// register successfully and both fire.
+    #[error("{0}")]
+    HotkeyUnavailable(String),
+    /// `set_autostart`'s enable or disable failed, carrying the plugin's own
+    /// sentence. Only the WRITE reaches this: a failed *read* is not a
+    /// rejection but [`crate::prefs::AutostartState::Unknown`], because a read
+    /// that will not answer must not render as "off".
+    #[error("{0}")]
+    Autostart(String),
     #[error("index: {0}")]
     Index(#[from] mnema_index::Error),
     /// A window sent a `root_id` `watched_root` has no row for — a folder

@@ -13,10 +13,73 @@
 //! here: the assertion messages in `mod tests` below are ordinary English prose
 //! and are not covered by either.
 
+use crate::error::Error;
 use crate::paths;
+use crate::state::AppState;
+use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tauri_plugin_global_shortcut::Shortcut;
+
+/// The shortcut a fresh installation gets, and what an absent or unparsable
+/// stored value falls back to — exactly as the locale falls back to `Auto`.
+pub const DEFAULT_HOTKEY: &str = "Alt+Space";
+
+/// The preferences key the shortcut is stored under.
+const HOTKEY_KEY: &str = "hotkey";
+
+/// What the operating system says about the shortcut, as a fact rather than an
+/// intention.
+///
+/// ⚠️ **`Registered` is not a claim of exclusivity, and may not be worded as
+/// one.** D128 measured macOS co-registering a shortcut another application
+/// already holds: both register successfully and both fire. So this says
+/// registered, never "works" or "is yours".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum HotkeyStatus {
+    Registered,
+    Unavailable { reason: String },
+}
+
+/// The shortcut the state believes the operating system is holding, and what
+/// happened when it was asked to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HotkeyState {
+    pub shortcut: String,
+    pub status: HotkeyStatus,
+}
+
+/// Whether this application launches at login, **read back from the operating
+/// system** after every change rather than echoed from the request.
+///
+/// `Unknown` exists because the read itself can fail, and a failed read must
+/// not render as "off" — that would show a person a switch in the position
+/// opposite to the one the machine is actually in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AutostartState {
+    Enabled,
+    Disabled,
+    Unknown { reason: String },
+}
+
+/// Everything the Application section draws.
+///
+/// `platform` is [`crate::models::Platform`], reused rather than re-derived, so
+/// the shortcut glyphs come from the build that was compiled and never from
+/// `navigator.userAgent` — that type's own doc records this project measuring a
+/// plausible proxy wrong twice, on two platforms.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPrefs {
+    pub hotkey: HotkeyState,
+    pub autostart: AutostartState,
+    pub version: String,
+    pub platform: crate::models::Platform,
+}
 
 /// Serialises every read-modify-write of the preferences file.
 ///
@@ -146,6 +209,242 @@ pub fn write_key(data_dir: &Path, key: &str, value: serde_json::Value) -> std::i
         return Err(e);
     }
     Ok(())
+}
+
+/// Every modifier spelling `global-hotkey` accepts, uppercased — the exact
+/// arms of the modifier `match` at `global-hotkey-0.8.0/src/hotkey.rs:198-224`,
+/// including the four `CmdOrCtrl` aliases it resolves per platform.
+///
+/// 🔴 **A list rather than "the token before the last `+`"**, because the guard
+/// below has to decide whether a string is modifiers *and nothing else*, and
+/// the parser's own answer for that is three different errors with three
+/// different sentences.
+const MODIFIER_SPELLINGS: [&str; 12] = [
+    "OPTION",
+    "ALT",
+    "CONTROL",
+    "CTRL",
+    "COMMAND",
+    "CMD",
+    "SUPER",
+    "SHIFT",
+    "COMMANDORCONTROL",
+    "COMMANDORCTRL",
+    "CMDORCTRL",
+    "CMDORCONTROL",
+];
+
+fn is_modifier_token(token: &str) -> bool {
+    MODIFIER_SPELLINGS.contains(&token.trim().to_uppercase().as_str())
+}
+
+/// Whether the string names no key at all — empty, whitespace, or modifiers
+/// only.
+///
+/// 🔴 **Over the token LIST, not over "does it contain a `+`"**, and the
+/// difference is the commoner press of the two. Measured:
+///
+/// - `""` and `"Alt"` are single tokens, never reach the modifier match
+///   (`hotkey.rs:174-178`), and come back as `UnsupportedKey` — whose sentence
+///   asks the reader to report the string to `github.com/tauri-apps/muda`.
+/// - `"Ctrl+Alt"` — two modifiers held down, which is what a person actually
+///   presses — takes the other path entirely and comes back as `InvalidFormat`
+///   from `key.ok_or_else(…)` (`hotkey.rs:229`), a third sentence with a third
+///   shape.
+///
+/// A guard written as "the string has no `+`" passes every other fixture in
+/// this module and lets that one through.
+fn names_no_key(shortcut: &str) -> bool {
+    shortcut.trim().is_empty() || shortcut.split('+').all(is_modifier_token)
+}
+
+/// Reads the stored shortcut and registers it, once, at start-up.
+///
+/// 🔴 **A free function rather than a block inside `.setup`, and that is a
+/// testability decision.** `tests/support/app.rs`'s `app_in` never runs
+/// `.setup`, so a boot written inline there is reachable from no test in
+/// `tests/commands.rs`: the stored-garbage fixtures would build a state nothing
+/// executes, and the mutant that makes a failed registration fatal could not be
+/// killed.
+///
+/// One parameter, not two. [`AppState`] already holds `data_dir`, and a second
+/// source for one fact lets a caller pass a directory the state does not use.
+///
+/// **A failed registration is not fatal, and this returns no `Result` so that
+/// it cannot become fatal by accident.** The plugin builder's
+/// `with_shortcut(…)?` is what made a shortcut another application already
+/// holds a reason not to start (D128); the product is degraded, not broken —
+/// the tray's «Показати пошук» still opens the launcher.
+///
+/// An absent **or unparsable** stored value falls back to [`DEFAULT_HOTKEY`],
+/// exactly as the locale falls back to `Auto`, and for the same reason: this
+/// runs before there is anywhere to report a complaint to.
+///
+/// 🔴 **Calling this from `.setup` does not deadlock, and the reason is worth
+/// writing down because the obvious reading says it should.** The real
+/// registrar's `register` goes through the plugin's `run_main_thread!`, which
+/// posts a task and then blocks on `rx.recv()` — and `.setup` already runs on
+/// the main thread, inside Tauri's `Ready` handler. It works because
+/// `run_on_main_thread` does not always post: `send_user_message` compares the
+/// calling thread against the event loop's and runs the task **inline** when
+/// they are the same (`tauri-runtime-wry-2.11.4/src/lib.rs:239-248`). So the
+/// boot's registration completes before `run_on_main_thread` returns. A command
+/// arriving later is on a worker thread, takes the other branch, and blocks
+/// until the event loop services it — which is why all three commands are
+/// `(async)`. ⚠️ Nothing here needs a thread of its own, and giving it one
+/// would move this call off the main thread and into exactly the wait it does
+/// not currently have.
+pub fn install_hotkey(state: &AppState) -> HotkeyState {
+    let stored = read_all(state.data_dir())
+        .get(HOTKEY_KEY)
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let shortcut = match stored {
+        Some(s) if !names_no_key(&s) && s.parse::<Shortcut>().is_ok() => s,
+        _ => DEFAULT_HOTKEY.to_string(),
+    };
+    let status = match state.with_shortcuts(|r| r.register(&shortcut)) {
+        Ok(()) => HotkeyStatus::Registered,
+        Err(reason) => HotkeyStatus::Unavailable { reason },
+    };
+    let installed = HotkeyState { shortcut, status };
+    state.set_hotkey_state(installed.clone());
+    installed
+}
+
+/// Everything the Application section draws, in one answer.
+///
+/// Not a `Result`: every state of the operating system is a state this reports
+/// — an unavailable shortcut and an unreadable autostart are values here, not
+/// rejections. `#[tauri::command(async)]` like its two siblings, because
+/// `is_enabled` reaches the operating system.
+#[tauri::command(async)]
+pub fn app_prefs<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> AppPrefs {
+    AppPrefs {
+        hotkey: state.hotkey(),
+        autostart: read_autostart(&state),
+        // The same version the About box shows (`build_app_menu`), which is the
+        // one the bundle carries rather than this crate's own constant.
+        version: app.package_info().version.to_string(),
+        platform: crate::models::Platform::of_this_build(),
+    }
+}
+
+/// Asks the operating system, and turns a failed read into `Unknown` rather
+/// than into "off".
+fn read_autostart(state: &AppState) -> AutostartState {
+    match state.with_autolaunch(|a| a.is_enabled()) {
+        Ok(true) => AutostartState::Enabled,
+        Ok(false) => AutostartState::Disabled,
+        Err(reason) => AutostartState::Unknown { reason },
+    }
+}
+
+/// Changes the global shortcut, in the order D-b's transition table fixes.
+///
+/// 🔴 **`(async)`, and that is correctness rather than performance.**
+/// `GlobalShortcut::register` and `unregister` post a closure with
+/// `run_on_main_thread` and then block on `rx.recv()`
+/// (`tauri-plugin-global-shortcut-2.3.2/src/lib.rs:75-86`). A blocking
+/// `#[tauri::command]` runs inline on the main thread, so it would post a task
+/// to the very thread it is occupying and wait for ever.
+///
+/// The steps, and each is a row of that table:
+///
+/// 1. refuse an empty or modifier-only string **in our own words, before the
+///    parser runs** — see [`names_no_key`];
+/// 2. parse, and pass the parser's own sentence through, now reserved for the
+///    one case it is right about;
+/// 3. refuse a shortcut with no modifier at all, again ours: the library
+///    accepts `"Space"`, and binding it takes the space bar away system-wide;
+/// 4. unregister the current shortcut **only if its status is `Registered`** —
+///    unregistering something that was never registered is an error the person
+///    did not cause, and from an `Unavailable` start there is no `unregister`
+///    call at all;
+/// 5. register the new one, and on failure best-effort re-register the old;
+/// 6. **update the state FIRST, then persist.**
+///
+/// 🔴 **Step 6's order is what makes the table consistent rather than a list of
+/// exceptions.** Whatever `prefs.json` ends up holding, `HotkeyState` reports
+/// the shortcut the operating system is actually holding, which is the only
+/// fact the window is entitled to state. A persist failure therefore leaves the
+/// new shortcut registered and the old one on disk — the named residual — and
+/// is reported as [`Error::Prefs`], which already exists.
+#[tauri::command(async)]
+pub fn set_hotkey(
+    state: tauri::State<'_, AppState>,
+    shortcut: String,
+) -> Result<HotkeyState, Error> {
+    let lang = state.locale().effective;
+    if names_no_key(&shortcut) {
+        return Err(Error::HotkeyRefused(
+            crate::locale::t(lang, crate::locale::Key::HotkeyNeedsAKey).to_string(),
+        ));
+    }
+    let parsed = shortcut
+        .parse::<Shortcut>()
+        .map_err(|e| Error::HotkeyUnparsable(e.to_string()))?;
+    if parsed.mods.is_empty() {
+        return Err(Error::HotkeyRefused(
+            crate::locale::t(lang, crate::locale::Key::HotkeyNeedsAModifier).to_string(),
+        ));
+    }
+
+    let current = state.hotkey();
+    if current.status == HotkeyStatus::Registered {
+        // The OS still holds the old one if this fails, so the state is left
+        // saying exactly that and the new shortcut is never attempted.
+        state
+            .with_shortcuts(|r| r.unregister(&current.shortcut))
+            .map_err(Error::HotkeyUnavailable)?;
+    }
+
+    if let Err(reason) = state.with_shortcuts(|r| r.register(&shortcut)) {
+        // Best-effort restoration. If it also fails, the operating system now
+        // holds NOTHING, and a state that went on claiming `Registered` would
+        // be a lie the window would draw — so it becomes `Unavailable` carrying
+        // the RE-REGISTRATION's sentence, while the reply carries the new
+        // shortcut's, which is the refusal the person actually asked about.
+        if let Err(restoring) = state.with_shortcuts(|r| r.register(&current.shortcut)) {
+            state.set_hotkey_state(HotkeyState {
+                shortcut: current.shortcut,
+                status: HotkeyStatus::Unavailable { reason: restoring },
+            });
+        }
+        return Err(Error::HotkeyUnavailable(reason));
+    }
+
+    let registered = HotkeyState {
+        shortcut: shortcut.clone(),
+        status: HotkeyStatus::Registered,
+    };
+    state.set_hotkey_state(registered.clone());
+    write_key(
+        state.data_dir(),
+        HOTKEY_KEY,
+        serde_json::Value::String(shortcut),
+    )?;
+    Ok(registered)
+}
+
+/// Turns launch-at-login on or off, and then **asks the operating system what
+/// it now says** instead of echoing the request.
+///
+/// The difference is a real state and not a nicety: an enable that reports
+/// success while the machine still has it off is what a person would otherwise
+/// see as a switch that stayed where they put it and did nothing.
+#[tauri::command(async)]
+pub fn set_autostart(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<AutostartState, Error> {
+    state
+        .with_autolaunch(|a| if enabled { a.enable() } else { a.disable() })
+        .map_err(Error::Autostart)?;
+    Ok(read_autostart(&state))
 }
 
 /// What a test installs to be called from inside [`write_key`]'s critical

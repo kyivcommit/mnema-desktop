@@ -62,6 +62,16 @@ pub enum Key {
     CloseSettings,     // "Закрити налаштування" / "Close Settings"
     MenuEdit,          // "Редагувати" / "Edit"
     MenuWindow,        // "Вікно" / "Window"
+    // The two hotkey refusals that are OURS rather than the parser's. They are
+    // here, and not in `error.rs` with every other rejection sentence, because
+    // each answers a PRESS a person made and there is a better sentence for it
+    // than the library's: `global-hotkey` accepts a bare `Space` outright
+    // (`hotkey.rs:174-178`) and refuses a modifier-only press by asking the
+    // reader to open an issue against `github.com/tauri-apps/muda`
+    // (`hotkey.rs:40`). `set_hotkey` renders these in the active language and
+    // hands them back through `Error::HotkeyRefused`.
+    HotkeyNeedsAKey,      // modifiers with no key, or nothing at all
+    HotkeyNeedsAModifier, // a key with no modifier
 }
 
 pub const ALL_KEYS: &[Key] = &[
@@ -77,6 +87,8 @@ pub const ALL_KEYS: &[Key] = &[
     Key::CloseSettings,
     Key::MenuEdit,
     Key::MenuWindow,
+    Key::HotkeyNeedsAKey,
+    Key::HotkeyNeedsAModifier,
 ];
 
 pub fn t(lang: Lang, key: Key) -> &'static str {
@@ -106,6 +118,16 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, MenuEdit) => "Edit",
         (Lang::Uk, MenuWindow) => "Вікно",
         (Lang::En, MenuWindow) => "Window",
+        (Lang::Uk, HotkeyNeedsAKey) => {
+            "Комбінація має закінчуватися клавішею, а не самими модифікаторами"
+        }
+        (Lang::En, HotkeyNeedsAKey) => "a shortcut has to end in a key, not in modifiers alone",
+        (Lang::Uk, HotkeyNeedsAModifier) => {
+            "Комбінація має містити щонайменше один модифікатор: Ctrl, Alt, Shift або Cmd"
+        }
+        (Lang::En, HotkeyNeedsAModifier) => {
+            "a shortcut needs at least one modifier: Ctrl, Alt, Shift or Cmd"
+        }
     }
 }
 

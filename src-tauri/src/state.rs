@@ -64,6 +64,23 @@ pub struct AppState {
     /// `locale::apply_choice` on every change; read by `get_locale` and by
     /// tray/menu construction so both agree with what was last written.
     locale: Mutex<crate::locale::LocaleState>,
+    /// The global shortcut, as the operating system last answered about it.
+    ///
+    /// Set once at start-up by [`crate::prefs::install_hotkey`] and again by
+    /// the `set_hotkey` command. Not `Copy` — it carries a `String` and a
+    /// failure's sentence — so the getter clones, which is the same trade every
+    /// other getter here makes for the same reason: no caller holds this lock
+    /// for the length of a command.
+    hotkey: Mutex<crate::prefs::HotkeyState>,
+    /// The two operating-system services, defaulted to inert.
+    ///
+    /// 🔴 **Installed rather than constructed** ([`AppState::install_os_services`]),
+    /// and that is what keeps `new`'s four arguments at four: it has eight call
+    /// sites and seven of them are tests that do not care which registrar is in
+    /// place. It is also what makes "nothing under `cargo test` touches the real
+    /// plugins" structural — see [`crate::os_services`]'s own header.
+    shortcuts: Mutex<Box<dyn crate::os_services::ShortcutRegistrar>>,
+    autolaunch: Mutex<Box<dyn crate::os_services::Autolaunch>>,
 }
 
 impl AppState {
@@ -88,7 +105,91 @@ impl AppState {
                 choice: crate::locale::LocaleChoice::Auto,
                 effective: crate::locale::Lang::En,
             }),
+            // 🔴 A STATED default, written here so that no test has to infer it
+            // from another test. `.setup` calls `prefs::install_hotkey` before
+            // any window exists, so the shipped application never shows this
+            // value — the state a person can read is always the one an actual
+            // registration produced. It is visible to `tests/commands.rs`,
+            // where `app_in` never runs `.setup`, and four fixtures assert
+            // against it. Changing this line changes what they assert.
+            hotkey: Mutex::new(crate::prefs::HotkeyState {
+                shortcut: crate::prefs::DEFAULT_HOTKEY.to_string(),
+                status: crate::prefs::HotkeyStatus::Unavailable {
+                    reason: "the shortcut has not been registered yet".to_string(),
+                },
+            }),
+            shortcuts: Mutex::new(Box::new(crate::os_services::NoOsServices)),
+            autolaunch: Mutex::new(Box::new(crate::os_services::NoOsServices)),
         }
+    }
+
+    /// Replaces the inert defaults with services that reach the operating
+    /// system. Called once from `.setup` with the real plugin wrappers, and
+    /// from the tests that want recording fakes.
+    pub fn install_os_services(
+        &self,
+        shortcuts: Box<dyn crate::os_services::ShortcutRegistrar>,
+        autolaunch: Box<dyn crate::os_services::Autolaunch>,
+    ) {
+        *self
+            .shortcuts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = shortcuts;
+        *self
+            .autolaunch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = autolaunch;
+    }
+
+    /// Runs `f` against the installed shortcut registrar.
+    ///
+    /// A closure rather than a getter for the reason [`AppState::with_index`]
+    /// gives: the value is behind a lock, and handing out a guard would let a
+    /// caller hold it for a whole command. Holding it across `register` is
+    /// deliberate and safe — that call blocks until the **main** thread services
+    /// it, and the main thread never takes this lock.
+    pub fn with_shortcuts<T>(
+        &self,
+        f: impl FnOnce(&dyn crate::os_services::ShortcutRegistrar) -> T,
+    ) -> T {
+        let guard = self
+            .shortcuts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(guard.as_ref())
+    }
+
+    /// Runs `f` against the installed autolaunch. Same shape and same reasoning
+    /// as [`AppState::with_shortcuts`].
+    pub fn with_autolaunch<T>(
+        &self,
+        f: impl FnOnce(&dyn crate::os_services::Autolaunch) -> T,
+    ) -> T {
+        let guard = self
+            .autolaunch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(guard.as_ref())
+    }
+
+    /// A copy of the hotkey state. Same poison-recovery trade as
+    /// [`AppState::locale`]: behind the lock is a struct of owned values with
+    /// no invariant a panicking holder could have left half-built, and one
+    /// wrong label is a smaller failure than losing the window over it.
+    pub fn hotkey(&self) -> crate::prefs::HotkeyState {
+        self.hotkey
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Overwrites the hotkey state — from [`crate::prefs::install_hotkey`] at
+    /// start-up and from `set_hotkey` on every change.
+    pub fn set_hotkey_state(&self, s: crate::prefs::HotkeyState) {
+        *self
+            .hotkey
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = s;
     }
 
     pub fn data_dir(&self) -> &Path {

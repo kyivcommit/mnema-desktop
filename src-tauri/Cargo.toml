@@ -67,6 +67,14 @@ tauri-plugin-single-instance = "2.4"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
+# Launch at login (D-c). Resolved to 2.5.1; its `AutoLaunchManager` is what
+# `os_services::PluginAutolaunch` wraps. It brings `auto-launch`, `dirs` and
+# `dirs-sys` into the shipped graph and NOTHING that speaks a network protocol
+# — no second TLS or HTTP stack — measured by running
+# `tests/dependency_boundary.rs` after adding it rather than read off this
+# comment. On Windows it also brings `winreg`, and on Redox `redox_users`;
+# neither is in this host's graph.
+tauri-plugin-autostart = "2.5"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

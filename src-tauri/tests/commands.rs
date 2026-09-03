@@ -339,23 +339,26 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     // for this sentence: the phrasing is not the class.
     //
     // ⚠️ **This list is not every `(async)` command, and saying so is part of
-    // the finding.** Re-derived from the attribute:
+    // the finding.** Re-derive it rather than trusting the arithmetic below,
+    // which has already gone stale once — it said 23 while the tree held 27,
+    // because four commands arrived between the measurement and the reading:
     //
     //     grep -c 'tauri::command(async)' src-tauri/src/*.rs
     //
-    // gives 23, against 5 deliberately blocking ones (`start_probe_job`,
+    // Measured on this branch: 31 lines, of which one (`prefs.rs:304`) names
+    // the attribute in a doc comment rather than using it, so 30 `(async)`
+    // commands — against 5 deliberately blocking ones (`start_probe_job`,
     // `job_status`, `cancel_job`, `get_locale`, `set_locale`; `cancel_job` is
-    // the counterweight below, and `models.rs:287` names the attribute in a
-    // doc comment rather than using it). So 15 `(async)` commands — every one
-    // in `models.rs`, plus `list_tree`, `source_around`, `ask`,
-    // `set_search_arms`, `skips`, `add_watched_folder` and
-    // `remove_watched_folder` — are checked by nothing here.
+    // the counterweight below, and `models.rs:287` and `prefs.rs:337` name
+    // `#[tauri::command]` in doc comments rather than using it). The loop below
+    // asks 11 of the 30, so 19 are checked by nothing here.
     //
     // That is a gap this branch did not create and does not close, written
     // down rather than left for the list's shape to imply it was considered.
-    // What the four below have in common with the four above them is that a
-    // person waits on them from the folder screen while a job holds the index
-    // mutex; the rest is one enumeration and belongs to whoever widens it.
+    // What the eight above have in common is that a person waits on them from
+    // the folder screen while a job holds the index mutex; the three PR 9 ones
+    // are here for the sharper reason written beside them. The rest is one
+    // enumeration and belongs to whoever widens it.
     for cmd in [
         "open_index",
         "search",
@@ -365,6 +368,19 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
         "exclude_subfolder",
         "include_subfolder",
         "list_subfolders",
+        // PR 9 Task 2. 🔴 These three are `(async)` for a reason that is not
+        // performance: `GlobalShortcut::register` and `unregister` post a
+        // closure with `run_on_main_thread` and then block on `rx.recv()`
+        // (`tauri-plugin-global-shortcut-2.3.2/src/lib.rs:75-86`). Run inline
+        // on the main thread, `set_hotkey` would post a task to the very thread
+        // it is occupying and wait for ever — a hang, not a slow window.
+        // `app_prefs` and `set_autostart` reach the autolaunch service, which
+        // on macOS reads and writes a LaunchAgent plist. The comment above
+        // records what it cost last time four new commands joined the shell and
+        // not this list; these three joined both.
+        "app_prefs",
+        "set_hotkey",
+        "set_autostart",
     ] {
         assert_ne!(
             responding_thread(&webview, cmd),
@@ -9662,5 +9678,717 @@ fn a_walk_applies_every_stored_mask_not_only_the_first() {
         vec!["archive.pdf/keep.txt".to_string(), "notes.txt".to_string()],
         "both stored masks must apply — a set truncated to the first would leave \
          draft.tmp indexed, and the folder sharing the mask's name must still survive"
+    );
+}
+
+// ── PR 9, Task 2: the Application section's backend ───────────────────────────
+//
+// The hotkey lifecycle, autostart, and `app_prefs`. Every fixture drives the
+// commands through the IPC, and every one that touches an operating-system
+// service installs a RECORDING FAKE first: `AppState::new` leaves the two slots
+// inert (`os_services::NoOsServices`, whose every method answers `Err`), and
+// nothing under `cargo test` may reach the real plugins — the registrar blocks
+// on the main thread and the autolaunch writes a LaunchAgent plist naming the
+// test binary. D-d.
+
+/// The first fixture, and the only one with no fake at all: it proves
+/// `app_prefs` is registered, and that the default services really are inert.
+#[test]
+fn app_prefs_answers_with_no_operating_system_services_installed() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let prefs = call(&webview, "app_prefs", json!({})).expect("app_prefs was rejected");
+
+    assert_eq!(
+        prefs["hotkey"]["status"]["kind"],
+        json!("unavailable"),
+        "with nothing registered the status cannot be `registered`: {prefs}"
+    );
+    assert_eq!(
+        prefs["autostart"]["kind"],
+        json!("unknown"),
+        "an inert autolaunch cannot answer enabled or disabled: {prefs}"
+    );
+    // The two fields nothing else in this file reads. `platform` comes from the
+    // BUILD (`models::Platform::of_this_build`) and never from the window, which
+    // is what the shortcut glyphs depend on; asserting it against this test
+    // binary's own `cfg` is the only way to say that without restating the
+    // implementation.
+    let expected_platform = if cfg!(target_os = "macos") {
+        "mac"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
+    assert_eq!(prefs["platform"], json!(expected_platform), "{prefs}");
+    assert!(
+        prefs["version"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty() && v.contains('.')),
+        "the version must be the one the bundle carries, not an empty string: {prefs}"
+    );
+}
+
+use mnema_desktop::locale::{Key, Lang};
+use mnema_desktop::os_services::{Autolaunch, ShortcutRegistrar};
+use mnema_desktop::prefs::{self, DEFAULT_HOTKEY};
+use std::sync::{Arc, Mutex};
+
+/// A registrar that records every call in order and answers as the fixture told
+/// it to.
+///
+/// 🔴 **The ordered list is the oracle, not two membership checks.** D-b's
+/// step 4 says the old shortcut is unregistered ONLY while its status is
+/// `Registered`, so from an `Unavailable` start a correct implementation
+/// records no `unregister` at all — an assertion that one is present would fail
+/// against the right code for the right reason. Every fixture below therefore
+/// states the whole sequence it expects.
+#[derive(Default)]
+struct FakeRegistrar {
+    calls: Mutex<Vec<String>>,
+    /// The shortcut whose `register` fails and the sentence it fails with.
+    /// `None` in the first slot means EVERY register fails, which is the
+    /// double-failure fixture's shape.
+    register_failure: Mutex<Option<(Option<String>, String)>>,
+    unregister_failure: Mutex<Option<String>>,
+}
+
+impl FakeRegistrar {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Only this one shortcut's registration fails, so the best-effort
+    /// re-registration of the old one can still succeed.
+    fn fail_registering(&self, shortcut: &str, sentence: &str) {
+        *self.register_failure.lock().unwrap() =
+            Some((Some(shortcut.to_string()), sentence.to_string()));
+    }
+
+    /// Every registration fails, including the restoration.
+    fn fail_every_register(&self, sentence: &str) {
+        *self.register_failure.lock().unwrap() = Some((None, sentence.to_string()));
+    }
+
+    fn fail_unregistering(&self, sentence: &str) {
+        *self.unregister_failure.lock().unwrap() = Some(sentence.to_string());
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+/// A local newtype so the trait impls below are not orphan impls on `Arc`.
+/// The fixture keeps one handle and the state holds another, which is what lets
+/// a test read back what its own registrar recorded.
+struct Shared<T>(Arc<T>);
+
+impl<T> Shared<T> {
+    fn boxed(handle: &Arc<T>) -> Box<Self> {
+        Box::new(Self(handle.clone()))
+    }
+}
+
+impl ShortcutRegistrar for Shared<FakeRegistrar> {
+    fn register(&self, shortcut: &str) -> Result<(), String> {
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("register({shortcut})"));
+        match &*self.0.register_failure.lock().unwrap() {
+            Some((None, sentence)) => Err(sentence.clone()),
+            Some((Some(only), sentence)) if only == shortcut => Err(sentence.clone()),
+            _ => Ok(()),
+        }
+    }
+
+    fn unregister(&self, shortcut: &str) -> Result<(), String> {
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("unregister({shortcut})"));
+        match &*self.0.unregister_failure.lock().unwrap() {
+            Some(sentence) => Err(sentence.clone()),
+            None => Ok(()),
+        }
+    }
+}
+
+/// An autolaunch whose `is_enabled` answers whatever the fixture set, whatever
+/// `enable` or `disable` was asked to do.
+///
+/// That independence is the whole point: it is what tells "re-read the
+/// operating system" apart from "echo the argument back", and without it both
+/// implementations pass.
+struct FakeAutolaunch {
+    answer: Mutex<Result<bool, String>>,
+}
+
+impl FakeAutolaunch {
+    fn answering(answer: Result<bool, String>) -> Arc<Self> {
+        Arc::new(Self {
+            answer: Mutex::new(answer),
+        })
+    }
+}
+
+impl Autolaunch for Shared<FakeAutolaunch> {
+    fn enable(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn disable(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn is_enabled(&self) -> Result<bool, String> {
+        self.0.answer.lock().unwrap().clone()
+    }
+}
+
+/// Puts a recording registrar and an inert-but-succeeding autolaunch into the
+/// state `app_in` manages, and hands the registrar back so the fixture can read
+/// what it recorded.
+fn install_fake_registrar(app: &tauri::App<MockRuntime>) -> Arc<FakeRegistrar> {
+    let fake = FakeRegistrar::new();
+    app.state::<AppState>().install_os_services(
+        Shared::boxed(&fake),
+        Shared::boxed(&FakeAutolaunch::answering(Ok(false))),
+    );
+    fake
+}
+
+/// What `prefs.json` holds right now, as bytes — so a fixture can say "byte for
+/// byte unchanged" rather than "the value I looked at is still there".
+fn prefs_bytes(dir: &std::path::Path) -> Vec<u8> {
+    std::fs::read(dir.join("prefs.json")).unwrap_or_default()
+}
+
+fn stored_hotkey(dir: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(dir.join("prefs.json")).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    value["hotkey"].as_str().map(str::to_string)
+}
+
+/// Drives the state to `Registered("Alt+Space")` through the command itself,
+/// which is the only way a fixture may reach that state: `AppState::new`
+/// installs `Unavailable` (`state.rs`, stated there rather than inferred here)
+/// and nothing else moves it.
+fn drive_to_registered(webview: &WebviewWindow<MockRuntime>) {
+    let state = call(webview, "set_hotkey", json!({ "shortcut": "Alt+Space" }))
+        .expect("the succeeding fake refused the first registration");
+    assert_eq!(
+        state["status"]["kind"],
+        json!("registered"),
+        "the fixture's starting state is not what it claims: {state}"
+    );
+}
+
+#[test]
+fn set_hotkey_from_an_unavailable_start_registers_and_never_unregisters() {
+    // D-b's step 4, asserted in the direction that can fail: an implementation
+    // that unregisters unconditionally records TWO calls here, and the second
+    // of them names a shortcut the operating system never held.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+
+    let reply = call(
+        &webview,
+        "set_hotkey",
+        json!({ "shortcut": "Ctrl+Alt+Space" }),
+    )
+    .expect("set_hotkey was rejected");
+
+    assert_eq!(reply["shortcut"], json!("Ctrl+Alt+Space"), "{reply}");
+    assert_eq!(reply["status"]["kind"], json!("registered"), "{reply}");
+    assert_eq!(
+        fake.calls(),
+        vec!["register(Ctrl+Alt+Space)".to_string()],
+        "from an Unavailable start there is nothing to unregister"
+    );
+}
+
+#[test]
+fn set_hotkey_unregisters_the_old_one_registers_the_new_one_and_persists_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+    drive_to_registered(&webview);
+
+    let reply = call(
+        &webview,
+        "set_hotkey",
+        json!({ "shortcut": "Ctrl+Alt+Space" }),
+    )
+    .expect("set_hotkey was rejected");
+
+    assert_eq!(reply["shortcut"], json!("Ctrl+Alt+Space"), "{reply}");
+    assert_eq!(reply["status"]["kind"], json!("registered"), "{reply}");
+    assert_eq!(
+        fake.calls(),
+        vec![
+            "register(Alt+Space)".to_string(),
+            "unregister(Alt+Space)".to_string(),
+            "register(Ctrl+Alt+Space)".to_string(),
+        ],
+        "the old shortcut must be given up before the new one is taken"
+    );
+    assert_eq!(
+        stored_hotkey(dir.path()).as_deref(),
+        Some("Ctrl+Alt+Space"),
+        "the new shortcut was not persisted"
+    );
+}
+
+#[test]
+fn a_failed_registration_restores_the_old_shortcut_and_leaves_prefs_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+    drive_to_registered(&webview);
+    let before = prefs_bytes(dir.path());
+    fake.fail_registering("Ctrl+Alt+Space", "another application already holds it");
+
+    let rejected = call(
+        &webview,
+        "set_hotkey",
+        json!({ "shortcut": "Ctrl+Alt+Space" }),
+    )
+    .expect_err("a registration the operating system refused answered Ok");
+
+    assert_eq!(
+        error_text(&rejected),
+        "another application already holds it",
+        "the reply must carry the sentence the NEW shortcut's registration produced"
+    );
+    assert_eq!(
+        fake.calls(),
+        vec![
+            "register(Alt+Space)".to_string(),
+            "unregister(Alt+Space)".to_string(),
+            "register(Ctrl+Alt+Space)".to_string(),
+            "register(Alt+Space)".to_string(),
+        ],
+        "the old shortcut must be taken back after the new one is refused"
+    );
+    // Asserted on the FILE, not on the reply: a reply says what the command
+    // believes, and the file says what a person gets back tomorrow.
+    assert_eq!(
+        prefs_bytes(dir.path()),
+        before,
+        "a refused registration must not have been persisted"
+    );
+    let prefs = call(&webview, "app_prefs", json!({})).expect("app_prefs was rejected");
+    assert_eq!(prefs["hotkey"]["shortcut"], json!("Alt+Space"), "{prefs}");
+    assert_eq!(
+        prefs["hotkey"]["status"]["kind"],
+        json!("registered"),
+        "the restoration succeeded, so the old shortcut is still held: {prefs}"
+    );
+}
+
+#[test]
+fn a_failed_unregister_stops_before_the_new_shortcut_is_ever_attempted() {
+    // D-b's third row. What can fail here is the ABSENCE of a third call: an
+    // implementation that carries on anyway would take the new shortcut while
+    // the operating system still holds the old one, and the person would have
+    // two.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+    drive_to_registered(&webview);
+    let before = prefs_bytes(dir.path());
+    fake.fail_unregistering("the old shortcut could not be given up");
+
+    let rejected = call(
+        &webview,
+        "set_hotkey",
+        json!({ "shortcut": "Ctrl+Alt+Space" }),
+    )
+    .expect_err("an unregister the operating system refused answered Ok");
+
+    assert_eq!(
+        error_text(&rejected),
+        "the old shortcut could not be given up",
+        "the reply must carry the plugin's own sentence"
+    );
+    assert_eq!(
+        fake.calls(),
+        vec![
+            "register(Alt+Space)".to_string(),
+            "unregister(Alt+Space)".to_string(),
+        ],
+        "nothing may be registered after an unregister that failed"
+    );
+    assert_eq!(
+        prefs_bytes(dir.path()),
+        before,
+        "nothing was to be persisted"
+    );
+    let prefs = call(&webview, "app_prefs", json!({})).expect("app_prefs was rejected");
+    assert_eq!(prefs["hotkey"]["shortcut"], json!("Alt+Space"), "{prefs}");
+    assert_eq!(
+        prefs["hotkey"]["status"]["kind"],
+        json!("registered"),
+        "the operating system still holds the old shortcut: {prefs}"
+    );
+}
+
+#[test]
+fn a_failed_restoration_leaves_the_state_unavailable_rather_than_registered() {
+    // D-b's double-failure row, and the only fixture that can catch a state
+    // that goes on claiming `Registered` while the operating system holds
+    // nothing at all.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+    drive_to_registered(&webview);
+    let before = prefs_bytes(dir.path());
+    fake.fail_every_register("nothing can be registered right now");
+
+    let rejected = call(
+        &webview,
+        "set_hotkey",
+        json!({ "shortcut": "Ctrl+Alt+Space" }),
+    )
+    .expect_err("a registration that failed twice answered Ok");
+
+    assert_eq!(
+        error_text(&rejected),
+        "nothing can be registered right now",
+        "the reply carries the NEW shortcut's sentence, which is what was asked about"
+    );
+    assert_eq!(
+        prefs_bytes(dir.path()),
+        before,
+        "nothing was to be persisted"
+    );
+    let prefs = call(&webview, "app_prefs", json!({})).expect("app_prefs was rejected");
+    assert_eq!(
+        prefs["hotkey"]["shortcut"],
+        json!("Alt+Space"),
+        "the shortcut is still the old one, which is the one that was lost: {prefs}"
+    );
+    assert_eq!(
+        prefs["hotkey"]["status"]["kind"],
+        json!("unavailable"),
+        "the operating system holds nothing, so the state must not claim otherwise: {prefs}"
+    );
+    assert_eq!(
+        prefs["hotkey"]["status"]["reason"],
+        json!("nothing can be registered right now"),
+        "the stored reason is the RE-REGISTRATION's own: {prefs}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_persist_failure_leaves_the_new_shortcut_registered_and_the_old_one_on_disk() {
+    // The named residual of D-b's last-but-one row, pinned rather than
+    // discovered — and it is the fixture that proves step 6 writes the STATE
+    // before the persist rather than after. Whatever `prefs.json` ends up
+    // holding, `HotkeyState` reports the shortcut the operating system is
+    // actually holding, which is the only fact the window may state.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    install_fake_registrar(&app);
+    drive_to_registered(&webview);
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let rejected = call(
+        &webview,
+        "set_hotkey",
+        json!({ "shortcut": "Ctrl+Alt+Space" }),
+    )
+    .expect_err("a write into a read-only directory answered Ok");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        error_text(&rejected).starts_with("could not write preferences: "),
+        "a failed persist is `Error::Prefs`, which already existed: {rejected}"
+    );
+    let prefs = call(&webview, "app_prefs", json!({})).expect("app_prefs was rejected");
+    assert_eq!(
+        prefs["hotkey"]["shortcut"],
+        json!("Ctrl+Alt+Space"),
+        "the operating system holds the NEW shortcut, so the state must say so: {prefs}"
+    );
+    assert_eq!(
+        prefs["hotkey"]["status"]["kind"],
+        json!("registered"),
+        "{prefs}"
+    );
+    assert_eq!(
+        stored_hotkey(dir.path()).as_deref(),
+        Some("Alt+Space"),
+        "the persist failed, so the file still holds the old value"
+    );
+}
+
+#[test]
+fn set_hotkey_refuses_a_key_with_no_modifier() {
+    // The library ACCEPTS `"Space"` — a single token parses to `Ok` with empty
+    // modifiers (`global-hotkey-0.8.0/src/hotkey.rs:174-178`) — so binding it
+    // would take the space bar away system-wide. This guard is ours.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+
+    let rejected = call(&webview, "set_hotkey", json!({ "shortcut": "Space" }))
+        .expect_err("`Space` was bound");
+
+    assert_eq!(
+        error_text(&rejected),
+        mnema_desktop::locale::t(Lang::En, Key::HotkeyNeedsAModifier),
+        "the refusal must be the catalogue's sentence in the active language"
+    );
+    assert!(
+        fake.calls().is_empty(),
+        "a refused shortcut must reach no operating-system service: {:?}",
+        fake.calls()
+    );
+    assert_eq!(
+        stored_hotkey(dir.path()),
+        None,
+        "a refused shortcut must not be written"
+    );
+}
+
+#[test]
+fn set_hotkey_refuses_one_modifier_with_no_key() {
+    // `"Alt"` IS refused by the library — as `UnsupportedKey`, whose sentence
+    // (`hotkey.rs:40`) asks the reader to open an issue against
+    // `github.com/tauri-apps/muda`. Handing that to somebody who held one
+    // modifier down is what our guard exists to prevent, so the absence of that
+    // URL is asserted as well as the presence of our own sentence.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+
+    let rejected =
+        call(&webview, "set_hotkey", json!({ "shortcut": "Alt" })).expect_err("`Alt` was bound");
+
+    let text = error_text(&rejected);
+    assert_eq!(
+        text,
+        mnema_desktop::locale::t(Lang::En, Key::HotkeyNeedsAKey),
+        "the refusal must be the catalogue's sentence"
+    );
+    assert!(
+        !text.contains("tauri-apps/muda"),
+        "the parser's bug-report request must not reach a person: {text}"
+    );
+    assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+}
+
+#[test]
+fn set_hotkey_refuses_the_empty_string() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+
+    let rejected = call(&webview, "set_hotkey", json!({ "shortcut": "" }))
+        .expect_err("the empty string was bound");
+
+    let text = error_text(&rejected);
+    assert_eq!(
+        text,
+        mnema_desktop::locale::t(Lang::En, Key::HotkeyNeedsAKey),
+        "the refusal must be the catalogue's sentence"
+    );
+    assert!(
+        !text.contains("tauri-apps/muda"),
+        "the parser's bug-report request must not reach a person: {text}"
+    );
+    // The row count of side effects, asserted rather than assumed.
+    assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+    assert_eq!(stored_hotkey(dir.path()), None);
+}
+
+#[test]
+fn set_hotkey_refuses_two_modifiers_with_no_key() {
+    // 🔴 The commoner press of the two, and the one that takes a DIFFERENT path
+    // through the library: `"Ctrl+Alt"` reaches `key.ok_or_else(…)`
+    // (`global-hotkey-0.8.0/src/hotkey.rs:229`) and is refused as
+    // `InvalidFormat`, a third sentence with a third shape. A guard written as
+    // "the string has no `+`" passes every other refusal fixture here and lets
+    // this one through.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+
+    let rejected = call(&webview, "set_hotkey", json!({ "shortcut": "Ctrl+Alt" }))
+        .expect_err("`Ctrl+Alt` was bound");
+
+    let text = error_text(&rejected);
+    assert_eq!(
+        text,
+        mnema_desktop::locale::t(Lang::En, Key::HotkeyNeedsAKey),
+        "the refusal must be the catalogue's sentence, not the parser's"
+    );
+    assert!(
+        !text.contains("Invalid hotkey format"),
+        "the library's `InvalidFormat` text must not reach a person: {text}"
+    );
+    assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+}
+
+#[test]
+fn set_hotkey_hands_an_unrecognised_key_the_parsers_own_sentence() {
+    // The mirror that stops the catalogue sentence from swallowing every
+    // refusal: this is the one case where "Couldn't recognize … as a valid key"
+    // is both true and something a person can act on.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+
+    let rejected = call(&webview, "set_hotkey", json!({ "shortcut": "Alt+Qwerty" }))
+        .expect_err("`Alt+Qwerty` was bound");
+
+    let text = error_text(&rejected);
+    assert!(
+        text.contains("Couldn't recognize") && text.contains("Qwerty"),
+        "an unrecognised key gets the parser's verbatim sentence: {text}"
+    );
+    assert_ne!(
+        text,
+        mnema_desktop::locale::t(Lang::En, Key::HotkeyNeedsAKey),
+        "our guard must not have swallowed a refusal the parser words better"
+    );
+    assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+}
+
+#[test]
+fn a_stored_hotkey_that_no_longer_parses_boots_without_a_registration() {
+    // 🔴 Both of this pair call `install_hotkey` DIRECTLY: `app_in` never runs
+    // `.setup` (`tests/support/app.rs`), so a fixture written against the boot
+    // block would assert about code no test executes. This is also the fixture
+    // that makes "a failed boot registration is fatal" killable — a boot that
+    // propagates the error cannot return a `HotkeyState` at all.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("prefs.json"),
+        br#"{"hotkey":"Ctrl+???+Nonsense"}"#,
+    )
+    .unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+    fake.fail_every_register("the shortcut is not available on this machine");
+
+    let booted = prefs::install_hotkey(&app.state::<AppState>());
+
+    assert_eq!(
+        booted,
+        mnema_desktop::prefs::HotkeyState {
+            shortcut: DEFAULT_HOTKEY.to_string(),
+            status: mnema_desktop::prefs::HotkeyStatus::Unavailable {
+                reason: "the shortcut is not available on this machine".to_string(),
+            },
+        },
+        "a boot whose registration failed must still answer with a state"
+    );
+    let prefs = call(&webview, "app_prefs", json!({})).expect("app_prefs was rejected");
+    assert_eq!(prefs["hotkey"]["shortcut"], json!("Alt+Space"), "{prefs}");
+    assert_eq!(
+        prefs["hotkey"]["status"]["reason"],
+        json!("the shortcut is not available on this machine"),
+        "the boot's failure must be what the window reads back: {prefs}"
+    );
+}
+
+#[test]
+fn a_stored_hotkey_that_no_longer_parses_registers_the_default_and_never_the_garbage() {
+    // The other half of the pair, and it names the fake it installs: under the
+    // `app_in` default the registrar answers `Err`, so a fixture expecting
+    // `Registered` with no fake named would be asserting against correct code.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("prefs.json"),
+        br#"{"hotkey":"Ctrl+???+Nonsense"}"#,
+    )
+    .unwrap();
+    let app = app_in(dir.path());
+    let fake = install_fake_registrar(&app);
+
+    let booted = prefs::install_hotkey(&app.state::<AppState>());
+
+    assert_eq!(booted.shortcut, DEFAULT_HOTKEY);
+    assert_eq!(
+        booted.status,
+        mnema_desktop::prefs::HotkeyStatus::Registered,
+        "a succeeding registrar must leave the boot registered"
+    );
+    assert_eq!(
+        fake.calls(),
+        vec!["register(Alt+Space)".to_string()],
+        "the unparsable stored value must never be handed to the operating system"
+    );
+}
+
+#[test]
+fn set_autostart_reports_what_the_operating_system_says_not_what_was_asked() {
+    // The state that tells "re-read the OS" apart from "echo the argument":
+    // told to enable, the machine still says off. Without this fixture both
+    // implementations pass.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    app.state::<AppState>().install_os_services(
+        Shared::boxed(&FakeRegistrar::new()),
+        Shared::boxed(&FakeAutolaunch::answering(Ok(false))),
+    );
+
+    let reply = call(&webview, "set_autostart", json!({ "enabled": true }))
+        .expect("set_autostart rejected");
+
+    assert_eq!(
+        reply["kind"],
+        json!("disabled"),
+        "the answer must come from the operating system, not from the request: {reply}"
+    );
+}
+
+#[test]
+fn set_autostart_reports_unknown_when_the_read_fails() {
+    // A failed read must not render as "off" — that would show a person a
+    // switch in the position opposite to the one the machine is in.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    app.state::<AppState>().install_os_services(
+        Shared::boxed(&FakeRegistrar::new()),
+        Shared::boxed(&FakeAutolaunch::answering(Err(
+            "the login items could not be read".to_string(),
+        ))),
+    );
+
+    let reply = call(&webview, "set_autostart", json!({ "enabled": true }))
+        .expect("set_autostart rejected");
+
+    assert_eq!(reply["kind"], json!("unknown"), "{reply}");
+    assert_eq!(
+        reply["reason"],
+        json!("the login items could not be read"),
+        "the reason must be the service's own sentence: {reply}"
     );
 }
