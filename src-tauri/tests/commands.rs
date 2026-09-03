@@ -345,13 +345,20 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     //
     //     grep -c 'tauri::command(async)' src-tauri/src/*.rs
     //
-    // Measured on this branch: 31 lines, of which one (`prefs.rs:304`) names
-    // the attribute in a doc comment rather than using it, so 30 `(async)`
+    // 🔴 Function names below, not line numbers. The version of this paragraph
+    // that fix round 1 replaced cited two lines for these, and both had already
+    // moved by the time it was read — the same staleness the paragraph above is
+    // about, committed one paragraph later.
+    //
+    // Measured on this branch: 31 lines, of which one is `app_prefs`' own doc
+    // comment naming the attribute rather than carrying it, so 30 `(async)`
     // commands — against 5 deliberately blocking ones (`start_probe_job`,
-    // `job_status`, `cancel_job`, `get_locale`, `set_locale`; `cancel_job` is
-    // the counterweight below, and `models.rs:287` and `prefs.rs:337` name
-    // `#[tauri::command]` in doc comments rather than using it). The loop below
-    // asks 11 of the 30, so 19 are checked by nothing here.
+    // `job_status`, `cancel_job`, `get_locale`, `set_locale`), of which
+    // `cancel_job` is the counterweight below. A grep for the bare
+    // `#[tauri::command]` overcounts in the same way and for the same reason:
+    // three doc comments name it without carrying it, `set_hotkey`'s,
+    // `change_hotkey`'s and the one above `models::key`. The loop below asks 11
+    // of the 30, so 19 are checked by nothing here.
     //
     // That is a gap this branch did not create and does not close, written
     // down rather than left for the list's shape to imply it was considered.
@@ -9749,10 +9756,15 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 struct FakeRegistrar {
     calls: Mutex<Vec<String>>,
-    /// The shortcut whose `register` fails and the sentence it fails with.
-    /// `None` in the first slot means EVERY register fails, which is the
-    /// double-failure fixture's shape.
-    register_failure: Mutex<Option<(Option<String>, String)>>,
+    /// Which shortcuts fail to register, and **with which sentence each**.
+    ///
+    /// 🔴 Per shortcut rather than one sentence for every failure, and the
+    /// double-failure fixture is why. D-b says the reply carries the NEW
+    /// shortcut's sentence while the stored state carries the RE-REGISTRATION's
+    /// own; with one string for both, an implementation that swapped them, or
+    /// that stored the new one twice, passed a fixture whose comment claimed to
+    /// check exactly that.
+    register_failures: Mutex<Vec<(String, String)>>,
     unregister_failure: Mutex<Option<String>>,
 }
 
@@ -9761,16 +9773,14 @@ impl FakeRegistrar {
         Arc::new(Self::default())
     }
 
-    /// Only this one shortcut's registration fails, so the best-effort
-    /// re-registration of the old one can still succeed.
+    /// This one shortcut's registration fails, with this sentence. Called once
+    /// per shortcut a fixture wants to fail, so a fixture that fails two can
+    /// tell the two sentences apart afterwards.
     fn fail_registering(&self, shortcut: &str, sentence: &str) {
-        *self.register_failure.lock().unwrap() =
-            Some((Some(shortcut.to_string()), sentence.to_string()));
-    }
-
-    /// Every registration fails, including the restoration.
-    fn fail_every_register(&self, sentence: &str) {
-        *self.register_failure.lock().unwrap() = Some((None, sentence.to_string()));
+        self.register_failures
+            .lock()
+            .unwrap()
+            .push((shortcut.to_string(), sentence.to_string()));
     }
 
     fn fail_unregistering(&self, sentence: &str) {
@@ -9800,10 +9810,16 @@ impl ShortcutRegistrar for Shared<FakeRegistrar> {
             .lock()
             .unwrap()
             .push(format!("register({shortcut})"));
-        match &*self.0.register_failure.lock().unwrap() {
-            Some((None, sentence)) => Err(sentence.clone()),
-            Some((Some(only), sentence)) if only == shortcut => Err(sentence.clone()),
-            _ => Ok(()),
+        match self
+            .0
+            .register_failures
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(named, _)| named == shortcut)
+        {
+            Some((_, sentence)) => Err(sentence.clone()),
+            None => Ok(()),
         }
     }
 
@@ -9828,23 +9844,57 @@ impl ShortcutRegistrar for Shared<FakeRegistrar> {
 /// implementations pass.
 struct FakeAutolaunch {
     answer: Mutex<Result<bool, String>>,
+    /// 🔴 **What was actually asked of the operating system**, in order.
+    ///
+    /// Without this the fixtures assert only the read-back, and an
+    /// implementation of `set_autostart` that dropped the write entirely and
+    /// answered `read_autostart(&state)` passes every one of them. That is the
+    /// command's primary effect, and the one a person cannot check from inside
+    /// the application: the switch moves, the reply agrees with the machine, and
+    /// the machine was never asked.
+    calls: Mutex<Vec<String>>,
+    /// `Some(sentence)` → `enable` and `disable` fail with it. The only way to
+    /// reach `Error::Autostart`.
+    write_failure: Mutex<Option<String>>,
 }
 
 impl FakeAutolaunch {
     fn answering(answer: Result<bool, String>) -> Arc<Self> {
         Arc::new(Self {
             answer: Mutex::new(answer),
+            calls: Mutex::new(Vec::new()),
+            write_failure: Mutex::new(None),
         })
+    }
+
+    fn failing_writes(sentence: &str) -> Arc<Self> {
+        let fake = Self::answering(Ok(false));
+        *fake.write_failure.lock().unwrap() = Some(sentence.to_string());
+        fake
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl Shared<FakeAutolaunch> {
+    fn write(&self, what: &str) -> Result<(), String> {
+        self.0.calls.lock().unwrap().push(what.to_string());
+        match &*self.0.write_failure.lock().unwrap() {
+            Some(sentence) => Err(sentence.clone()),
+            None => Ok(()),
+        }
     }
 }
 
 impl Autolaunch for Shared<FakeAutolaunch> {
     fn enable(&self) -> Result<(), String> {
-        Ok(())
+        self.write("enable")
     }
 
     fn disable(&self) -> Result<(), String> {
-        Ok(())
+        self.write("disable")
     }
 
     fn is_enabled(&self) -> Result<bool, String> {
@@ -10056,7 +10106,14 @@ fn a_failed_restoration_leaves_the_state_unavailable_rather_than_registered() {
     let fake = install_fake_registrar(&app);
     drive_to_registered(&webview);
     let before = prefs_bytes(dir.path());
-    fake.fail_every_register("nothing can be registered right now");
+    // 🔴 **Two different sentences, and that is the whole fixture.** D-b bolds
+    // the provenance: the reply carries the NEW shortcut's, the stored state
+    // carries the RE-REGISTRATION's. With one sentence for both failures the
+    // two assertions below compare against the same string, and an
+    // implementation that stored the new one, or swapped the two, passes a
+    // fixture whose own comment says it checks exactly that.
+    fake.fail_registering("Ctrl+Alt+Space", "the new shortcut is already taken");
+    fake.fail_registering("Alt+Space", "the old shortcut could not be taken back");
 
     let rejected = call(
         &webview,
@@ -10067,8 +10124,18 @@ fn a_failed_restoration_leaves_the_state_unavailable_rather_than_registered() {
 
     assert_eq!(
         error_text(&rejected),
-        "nothing can be registered right now",
+        "the new shortcut is already taken",
         "the reply carries the NEW shortcut's sentence, which is what was asked about"
+    );
+    assert_eq!(
+        fake.calls(),
+        vec![
+            "register(Alt+Space)".to_string(),
+            "unregister(Alt+Space)".to_string(),
+            "register(Ctrl+Alt+Space)".to_string(),
+            "register(Alt+Space)".to_string(),
+        ],
+        "the restoration must still have been attempted"
     );
     assert_eq!(
         prefs_bytes(dir.path()),
@@ -10088,8 +10155,8 @@ fn a_failed_restoration_leaves_the_state_unavailable_rather_than_registered() {
     );
     assert_eq!(
         prefs["hotkey"]["status"]["reason"],
-        json!("nothing can be registered right now"),
-        "the stored reason is the RE-REGISTRATION's own: {prefs}"
+        json!("the old shortcut could not be taken back"),
+        "the stored reason is the RE-REGISTRATION's own, not the new shortcut's: {prefs}"
     );
 }
 
@@ -10145,6 +10212,12 @@ fn set_hotkey_refuses_a_key_with_no_modifier() {
     // modifiers (`global-hotkey-0.8.0/src/hotkey.rs:174-178`) — so binding it
     // would take the space bar away system-wide. This guard is ours.
     let dir = tempfile::tempdir().unwrap();
+    // 🔴 A value is put in the file FIRST, and that is the whole reason this
+    // line exists. Asserting `stored_hotkey(…) == None` against a fixture that
+    // never wrote a `prefs.json` is satisfied by any implementation that does
+    // not write, including one that writes nothing anywhere — it cannot fail.
+    // Asserting the OLD value is still there can.
+    std::fs::write(dir.path().join("prefs.json"), br#"{"hotkey":"Alt+Space"}"#).unwrap();
     let app = app_in(dir.path());
     let webview = main_webview(&app);
     let fake = install_fake_registrar(&app);
@@ -10163,9 +10236,9 @@ fn set_hotkey_refuses_a_key_with_no_modifier() {
         fake.calls()
     );
     assert_eq!(
-        stored_hotkey(dir.path()),
-        None,
-        "a refused shortcut must not be written"
+        stored_hotkey(dir.path()).as_deref(),
+        Some("Alt+Space"),
+        "a refused shortcut must not overwrite the one already on disk"
     );
 }
 
@@ -10293,7 +10366,10 @@ fn a_stored_hotkey_that_no_longer_parses_boots_without_a_registration() {
     let app = app_in(dir.path());
     let webview = main_webview(&app);
     let fake = install_fake_registrar(&app);
-    fake.fail_every_register("the shortcut is not available on this machine");
+    fake.fail_registering(
+        DEFAULT_HOTKEY,
+        "the shortcut is not available on this machine",
+    );
 
     let booted = prefs::install_hotkey(&app.state::<AppState>());
 
@@ -10346,6 +10422,37 @@ fn a_stored_hotkey_that_no_longer_parses_registers_the_default_and_never_the_gar
 }
 
 #[test]
+fn a_stored_shortcut_with_no_modifier_is_not_registered_at_boot_either() {
+    // 🔴 The two sites used to answer this question differently. `"Space"`
+    // PARSES — a single token comes back `Ok` with empty modifiers
+    // (`global-hotkey-0.8.0/src/hotkey.rs:174-178`) — so a boot that asked only
+    // "does it parse?" re-registered it at every start-up and took the space
+    // bar away system-wide, while `set_hotkey` refused to set it. The person
+    // could undo it in a text editor and nowhere else.
+    //
+    // Nothing this build writes produces such a file: `set_hotkey` is the only
+    // writer of the key and it refuses this value. A file hand-edited or left
+    // by another version does, and the boot is the site that acts on it without
+    // asking anybody.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("prefs.json"), br#"{"hotkey":"Space"}"#).unwrap();
+    let app = app_in(dir.path());
+    let fake = install_fake_registrar(&app);
+
+    let booted = prefs::install_hotkey(&app.state::<AppState>());
+
+    assert_eq!(
+        booted.shortcut, DEFAULT_HOTKEY,
+        "a stored shortcut the settings window would refuse must not survive a boot"
+    );
+    assert_eq!(
+        fake.calls(),
+        vec!["register(Alt+Space)".to_string()],
+        "the space bar must never be handed to the operating system"
+    );
+}
+
+#[test]
 fn set_autostart_reports_what_the_operating_system_says_not_what_was_asked() {
     // The state that tells "re-read the OS" apart from "echo the argument":
     // told to enable, the machine still says off. Without this fixture both
@@ -10353,10 +10460,9 @@ fn set_autostart_reports_what_the_operating_system_says_not_what_was_asked() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let webview = main_webview(&app);
-    app.state::<AppState>().install_os_services(
-        Shared::boxed(&FakeRegistrar::new()),
-        Shared::boxed(&FakeAutolaunch::answering(Ok(false))),
-    );
+    let fake = FakeAutolaunch::answering(Ok(false));
+    app.state::<AppState>()
+        .install_os_services(Shared::boxed(&FakeRegistrar::new()), Shared::boxed(&fake));
 
     let reply = call(&webview, "set_autostart", json!({ "enabled": true }))
         .expect("set_autostart rejected");
@@ -10365,6 +10471,44 @@ fn set_autostart_reports_what_the_operating_system_says_not_what_was_asked() {
         reply["kind"],
         json!("disabled"),
         "the answer must come from the operating system, not from the request: {reply}"
+    );
+    // 🔴 The command's PRIMARY effect, and the half the read-back cannot see.
+    // An implementation that dropped the write and answered `read_autostart`
+    // passes every assertion above: the switch moves, the reply agrees with the
+    // machine, and the machine was never asked.
+    assert_eq!(
+        fake.calls(),
+        vec!["enable".to_string()],
+        "`set_autostart(true)` must have asked the operating system to enable it"
+    );
+}
+
+#[test]
+fn set_autostart_reports_the_services_own_sentence_when_the_write_fails() {
+    // `Error::Autostart`'s only fixture, and the other direction of the
+    // dispatch: `false` must reach `disable`, not `enable`. A failed write is
+    // reported as a rejection rather than folded into the read-back, because
+    // the read-back would then say "off" about a machine nobody managed to
+    // change and a person would read that as success.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = FakeAutolaunch::failing_writes("the login item could not be removed");
+    app.state::<AppState>()
+        .install_os_services(Shared::boxed(&FakeRegistrar::new()), Shared::boxed(&fake));
+
+    let rejected = call(&webview, "set_autostart", json!({ "enabled": false }))
+        .expect_err("a failed write was reported as success");
+
+    assert_eq!(
+        error_text(&rejected),
+        "the login item could not be removed",
+        "the rejection must be the service's own sentence"
+    );
+    assert_eq!(
+        fake.calls(),
+        vec!["disable".to_string()],
+        "`set_autostart(false)` must have asked the operating system to disable it"
     );
 }
 

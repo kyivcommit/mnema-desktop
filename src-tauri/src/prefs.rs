@@ -7,9 +7,18 @@
 //! to, and the loser's key would simply not be in the file — hence
 //! [`PREFS_LOCK`], which serialises the whole read → merge → write → rename.
 //!
-//! Nothing here is user-visible text: every string in this module's PRODUCTION
-//! code is a JSON key or a file name. That is the scope `tests/locale_guard.rs`
-//! checks — it stops at the first `#[cfg(test)]` — and it is the scope claimed
+//! **No user-visible SENTENCE lives here**, which is a narrower claim than the
+//! one this header used to make and is the one that is still true. The strings
+//! in this module's production code are JSON keys, file names, and — since PR 9
+//! — protocol tokens: [`DEFAULT_HOTKEY`] and the twelve spellings in
+//! [`MODIFIER_SPELLINGS`], which are `global-hotkey`'s own vocabulary rather
+//! than prose, even though `DEFAULT_HOTKEY` is drawn in the settings window.
+//! Every sentence a person reads from this module comes from somewhere else:
+//! the catalogue in `locale.rs` for the two refusals that are ours, and the
+//! library's or the plugin's own `Display` for the rest.
+//!
+//! That is the scope `tests/locale_guard.rs` checks — it stops at the first
+//! `#[cfg(test)]`, and it checks Cyrillic only — and it is the scope claimed
 //! here: the assertion messages in `mod tests` below are ordinary English prose
 //! and are not covered by either.
 
@@ -258,6 +267,54 @@ fn names_no_key(shortcut: &str) -> bool {
     shortcut.trim().is_empty() || shortcut.split('+').all(is_modifier_token)
 }
 
+/// Why a shortcut string was not accepted, and therefore which sentence a
+/// person reads. Three refusals, three provenances, and keeping them apart is
+/// the whole reason this is an enum rather than a `bool`.
+enum Refusal {
+    /// Empty, whitespace, or modifiers with no key. **Ours**, and it runs
+    /// before the parser: the library refuses these too, but as `UnsupportedKey`
+    /// (single token) or `InvalidFormat` (several), and the first of those asks
+    /// the reader to open an issue against `github.com/tauri-apps/muda`.
+    NoKey,
+    /// The parser would not have it — an unrecognised key, a key that is not
+    /// last, an empty token. Carries **its** sentence, which is the one case
+    /// where "Couldn't recognize … as a valid key" is worth showing.
+    Unparsable(String),
+    /// A key with no modifier. **Ours**, and it has to be: `"Space"` parses to
+    /// `Ok` with empty modifiers (`global-hotkey-0.8.0/src/hotkey.rs:174-178`),
+    /// so the library would let a person bind the space bar system-wide.
+    NoModifier,
+}
+
+/// 🔴 **The one definition of a shortcut this application will bind**, used by
+/// both sites that decide: [`set_hotkey`], which turns a refusal into a
+/// sentence, and [`install_hotkey`], which turns one into a fallback.
+///
+/// It is one function because it was once two, and they disagreed. The boot
+/// accepted anything that parsed, so a `prefs.json` holding `"Space"` was
+/// re-registered at every start-up while the settings window refused to set it
+/// — the space bar taken system-wide by a value no command in this application
+/// could undo, only a text editor. Nothing this build writes can produce that
+/// file, since `set_hotkey` is the only writer of the key; a file hand-edited
+/// or written by another version can, and the boot is the site that acts on it
+/// unconditionally.
+///
+/// The guards run in D-b's order, and the order is what decides the sentence
+/// rather than merely the verdict: step 1 before the parser, the parser, then
+/// step 3.
+fn accept_shortcut(shortcut: &str) -> Result<Shortcut, Refusal> {
+    if names_no_key(shortcut) {
+        return Err(Refusal::NoKey);
+    }
+    let parsed = shortcut
+        .parse::<Shortcut>()
+        .map_err(|e| Refusal::Unparsable(e.to_string()))?;
+    if parsed.mods.is_empty() {
+        return Err(Refusal::NoModifier);
+    }
+    Ok(parsed)
+}
+
 /// Reads the stored shortcut and registers it, once, at start-up.
 ///
 /// 🔴 **A free function rather than a block inside `.setup`, and that is a
@@ -276,9 +333,15 @@ fn names_no_key(shortcut: &str) -> bool {
 /// holds a reason not to start (D128); the product is degraded, not broken —
 /// the tray's «Показати пошук» still opens the launcher.
 ///
-/// An absent **or unparsable** stored value falls back to [`DEFAULT_HOTKEY`],
-/// exactly as the locale falls back to `Auto`, and for the same reason: this
-/// runs before there is anywhere to report a complaint to.
+/// An absent stored value, or one [`accept_shortcut`] refuses, falls back to
+/// [`DEFAULT_HOTKEY`], exactly as the locale falls back to `Auto`, and for the
+/// same reason: this runs before there is anywhere to report a complaint to.
+///
+/// 🔴 **The predicate is [`accept_shortcut`], the same one [`set_hotkey`] asks,
+/// and it used to be a different one here.** The boot accepted anything that
+/// parsed, so a `prefs.json` holding `"Space"` was re-registered at every
+/// start-up while the settings window refused to set it — the space bar taken
+/// system-wide by a value no command in this application could give back.
 ///
 /// 🔴 **Calling this from `.setup` does not deadlock, and the reason is worth
 /// writing down because the obvious reading says it should.** The real
@@ -300,7 +363,7 @@ pub fn install_hotkey(state: &AppState) -> HotkeyState {
         .and_then(|v| v.as_str())
         .map(str::to_string);
     let shortcut = match stored {
-        Some(s) if !names_no_key(&s) && s.parse::<Shortcut>().is_ok() => s,
+        Some(s) if accept_shortcut(&s).is_ok() => s,
         _ => DEFAULT_HOTKEY.to_string(),
     };
     let status = match state.with_shortcuts(|r| r.register(&shortcut)) {
@@ -352,7 +415,11 @@ fn read_autostart(state: &AppState) -> AutostartState {
 /// `#[tauri::command]` runs inline on the main thread, so it would post a task
 /// to the very thread it is occupying and wait for ever.
 ///
-/// The steps, and each is a row of that table:
+/// The steps, and each is a row of that table. Steps 1 to 3 are
+/// [`accept_shortcut`], shared verbatim with [`install_hotkey`] so that the two
+/// sites cannot answer "is this a shortcut this application will bind?"
+/// differently; this one turns its [`Refusal`] into a sentence, the boot turns
+/// the same refusal into a fallback:
 ///
 /// 1. refuse an empty or modifier-only string **in our own words, before the
 ///    parser runs** — see [`names_no_key`];
@@ -378,19 +445,42 @@ pub fn set_hotkey(
     state: tauri::State<'_, AppState>,
     shortcut: String,
 ) -> Result<HotkeyState, Error> {
+    change_hotkey(&state, shortcut)
+}
+
+/// [`set_hotkey`]'s body, as a free function over `&AppState`.
+///
+/// Split out for one reason: the critical section below is what makes the whole
+/// change atomic, and a `#[tauri::command]` taking `tauri::State` cannot be
+/// driven from a unit test — so the guard that proves the serialisation
+/// (`tests::two_hotkey_changes_cannot_interleave`, below) would have had
+/// nothing to call.
+pub fn change_hotkey(state: &AppState, shortcut: String) -> Result<HotkeyState, Error> {
+    // 🔴 **The whole read → unregister → register → store → persist is one
+    // critical section, and it has to be.** Without this the state is read at
+    // entry and written several operating-system calls later, so two changes
+    // arriving together interleave: the second asks the operating system to
+    // give up a shortcut the first has already given up, and gets a refusal
+    // about a shortcut nobody is holding. It also puts the persist inside the
+    // section, so the file and the state cannot be written in opposite orders
+    // by two callers.
+    //
+    // ⚠️ This lock is taken by this function and nothing else, always on a
+    // command's worker thread, and it is released before the function returns.
+    // Nothing on the main thread takes it, so the blocking `register` inside it
+    // cannot be waiting on a thread that is waiting on this.
+    let _change = state.lock_hotkey_change();
     let lang = state.locale().effective;
-    if names_no_key(&shortcut) {
-        return Err(Error::HotkeyRefused(
-            crate::locale::t(lang, crate::locale::Key::HotkeyNeedsAKey).to_string(),
-        ));
-    }
-    let parsed = shortcut
-        .parse::<Shortcut>()
-        .map_err(|e| Error::HotkeyUnparsable(e.to_string()))?;
-    if parsed.mods.is_empty() {
-        return Err(Error::HotkeyRefused(
-            crate::locale::t(lang, crate::locale::Key::HotkeyNeedsAModifier).to_string(),
-        ));
+    if let Err(refusal) = accept_shortcut(&shortcut) {
+        return Err(match refusal {
+            Refusal::NoKey => Error::HotkeyRefused(
+                crate::locale::t(lang, crate::locale::Key::HotkeyNeedsAKey).to_string(),
+            ),
+            Refusal::Unparsable(sentence) => Error::HotkeyUnparsable(sentence),
+            Refusal::NoModifier => Error::HotkeyRefused(
+                crate::locale::t(lang, crate::locale::Key::HotkeyNeedsAModifier).to_string(),
+            ),
+        });
     }
 
     let current = state.hotkey();
@@ -787,6 +877,133 @@ mod tests {
         std::fs::write(paths::prefs_path(dir.path()), b"[1,2]").unwrap();
 
         assert!(read_all(dir.path()).is_empty());
+    }
+
+    /// A registrar that only counts, for the one test below. The recording
+    /// fakes with failure modes live in `tests/commands.rs`, where the fixtures
+    /// that need them are; this one exists because `change_hotkey`'s critical
+    /// section cannot be driven through the IPC.
+    #[derive(Default)]
+    struct CountingRegistrar {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl crate::os_services::ShortcutRegistrar for std::sync::Arc<CountingRegistrar> {
+        fn register(&self, shortcut: &str) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("register({shortcut})"));
+            Ok(())
+        }
+
+        fn unregister(&self, shortcut: &str) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("unregister({shortcut})"));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn two_hotkey_changes_cannot_interleave() {
+        // The lock's absence made observable, the same shape
+        // `a_second_writer_waits_for_the_first_to_leave_the_critical_section`
+        // uses one function up — and for the same reason: a "two threads, N
+        // changes each, then check the state is consistent" test passes on an
+        // unserialised implementation whenever the interleaving happens not to
+        // occur. This one parks the first change INSIDE its persist and asserts
+        // that the second has not yet touched the operating system.
+        //
+        // 🔴 The discriminator is the REGISTRAR's call list, not the file.
+        // Without the lock the second caller does not block until `write_key`,
+        // which is several operating-system calls later — so by the time it
+        // waits it has already unregistered a shortcut the first caller gave up
+        // and registered one over the top. The file would look the same either
+        // way; the recorded calls do not.
+        use std::sync::Arc;
+        use std::sync::mpsc::sync_channel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let state = Arc::new(crate::state::AppState::new(
+            dir_path.clone(),
+            PathBuf::new(),
+            String::new(),
+            String::new(),
+        ));
+        let registrar = Arc::new(CountingRegistrar::default());
+        state.install_os_services(
+            Box::new(registrar.clone()),
+            Box::new(crate::os_services::NoOsServices),
+        );
+
+        // Reach `Registered("Alt+Space")` through the function itself, before
+        // the hook is installed — otherwise this write would park too.
+        change_hotkey(&state, "Alt+Space".to_string()).unwrap();
+        let after_drive = registrar.calls.lock().unwrap().len();
+
+        let (parked_tx, parked_rx) = sync_channel::<()>(1);
+        let (release_tx, release_rx) = sync_channel::<()>(1);
+        let release_rx = Mutex::new(release_rx);
+        let hook_dir = dir_path.clone();
+        let hook: Hook = Arc::new(move |p: &Path| {
+            if p != hook_dir {
+                return;
+            }
+            parked_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+        });
+        set_test_hook(Some(hook));
+
+        let a_state = state.clone();
+        let a = std::thread::spawn(move || change_hotkey(&a_state, "Ctrl+Alt+Space".to_string()));
+        parked_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first change never reached the persist");
+        // Cleared while the first is still parked in it, so no other test in
+        // this binary can be caught by it.
+        set_test_hook(None);
+
+        let b_state = state.clone();
+        let b = std::thread::spawn(move || change_hotkey(&b_state, "Ctrl+Shift+Space".to_string()));
+        // Long enough for an unserialised second caller to have finished both
+        // of its operating-system calls, which take no time against a fake.
+        std::thread::sleep(Duration::from_millis(300));
+        let while_parked = registrar.calls.lock().unwrap().clone();
+        // Read, then release, THEN assert — a panic between the two would leave
+        // thread A parked holding `PREFS_LOCK` for the life of this binary and
+        // every later test that writes preferences would block on it, so cargo
+        // would report a timeout instead of this failure.
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            while_parked.len(),
+            after_drive + 2,
+            "the second change reached the operating system while the first was still \
+             inside its critical section: {while_parked:?}"
+        );
+
+        let a = a.join().unwrap().expect("the first change failed");
+        let b = b.join().unwrap().expect("the second change failed");
+        assert_eq!(a.shortcut, "Ctrl+Alt+Space");
+        assert_eq!(b.shortcut, "Ctrl+Shift+Space");
+        assert_eq!(
+            read_all(&dir_path).get(HOTKEY_KEY),
+            Some(&json!("Ctrl+Shift+Space")),
+            "the change that finished last must be the one on disk"
+        );
+        assert_eq!(
+            *registrar.calls.lock().unwrap(),
+            vec![
+                "register(Alt+Space)".to_string(),
+                "unregister(Alt+Space)".to_string(),
+                "register(Ctrl+Alt+Space)".to_string(),
+                "unregister(Ctrl+Alt+Space)".to_string(),
+                "register(Ctrl+Shift+Space)".to_string(),
+            ],
+            "serialised, the two changes are one sequence with no shortcut given up twice"
+        );
     }
 
     #[cfg(unix)]

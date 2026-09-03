@@ -81,6 +81,14 @@ pub struct AppState {
     /// plugins" structural — see [`crate::os_services`]'s own header.
     shortcuts: Mutex<Box<dyn crate::os_services::ShortcutRegistrar>>,
     autolaunch: Mutex<Box<dyn crate::os_services::Autolaunch>>,
+    /// Serialises a whole hotkey change against another one.
+    ///
+    /// Separate from `hotkey` above, and that is the point: `hotkey` is held for
+    /// one read or one write, while this is held across the read, both
+    /// operating-system calls, the store and the persist. Merging them would
+    /// mean holding the state's own lock for the length of a command, which is
+    /// what every other getter here exists to avoid.
+    hotkey_change: Mutex<()>,
 }
 
 impl AppState {
@@ -120,6 +128,7 @@ impl AppState {
             }),
             shortcuts: Mutex::new(Box::new(crate::os_services::NoOsServices)),
             autolaunch: Mutex::new(Box::new(crate::os_services::NoOsServices)),
+            hotkey_change: Mutex::new(()),
         }
     }
 
@@ -145,9 +154,23 @@ impl AppState {
     ///
     /// A closure rather than a getter for the reason [`AppState::with_index`]
     /// gives: the value is behind a lock, and handing out a guard would let a
-    /// caller hold it for a whole command. Holding it across `register` is
-    /// deliberate and safe — that call blocks until the **main** thread services
-    /// it, and the main thread never takes this lock.
+    /// caller hold it for a whole command.
+    ///
+    /// 🔴 **Why holding this lock across the blocking `register` is safe, stated
+    /// as the argument that is actually true.** The real registrar's `register`
+    /// blocks until the main thread services it, so a main thread waiting on
+    /// this lock while a worker holds it and waits on the main thread would
+    /// deadlock. It cannot happen today because **the only main-thread
+    /// acquisitions are in `.setup`** — `install_os_services` and
+    /// `install_hotkey`'s call to this method — and `.setup` runs before the
+    /// event loop can dispatch any command, so no worker can be holding the
+    /// lock at that moment. (An earlier draft of this comment said "the main
+    /// thread never takes this lock", which the same commit contradicted twice.)
+    ///
+    /// ⚠️ **The obligation that follows: nothing on the main thread may take
+    /// this lock after start-up.** A menu item, a tray callback or a window
+    /// event that reaches `with_shortcuts` would be exactly the deadlock above,
+    /// and it would be built under a comment saying it was impossible.
     pub fn with_shortcuts<T>(
         &self,
         f: impl FnOnce(&dyn crate::os_services::ShortcutRegistrar) -> T,
@@ -181,6 +204,22 @@ impl AppState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Takes the hotkey-change lock, held for a whole `set_hotkey` rather than
+    /// for one read or one write. A guard rather than a closure because what it
+    /// spans is the length of a command — which is the one thing every other
+    /// lock here refuses to do, and the one thing this lock is for.
+    ///
+    /// Poison is recovered rather than propagated, the trade [`AppState::locale`]
+    /// spells out: this guards no value at all, only an ordering, and a caller
+    /// that panicked half-way through a change has left the state and the file
+    /// exactly as consistent as they were — the state is written before the
+    /// persist and each is one operation.
+    pub fn lock_hotkey_change(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.hotkey_change
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Overwrites the hotkey state — from [`crate::prefs::install_hotkey`] at
