@@ -135,12 +135,11 @@ test('clicking Folders shows the Folders heading and removes the Models heading'
 //
 // Task 7 built Application, so no section is left whose panel carries the
 // not-ready sentence — Indexing (Task 6) was the previous-to-last, and this
-// test's own history already predicted running out of them. `NOT_READY_ID`,
-// `notReadyLabel` and the `aria-describedby` wiring stay in `Settings.svelte`
-// itself (that cleanup is a later task's, not this one's — see the task
-// brief), so what is still worth pinning here is the invariant the four
-// sections owe together now that all of them are built: none is disabled, and
-// none carries `aria-describedby` at all.
+// test's own history already predicted running out of them. Task 8 removed
+// `NOT_READY_ID`, `notReadyLabel` and the `aria-describedby` wiring from
+// `Settings.svelte` itself, so what is still worth pinning here is the
+// invariant the four sections owe together now that all of them are built:
+// none is disabled, and none carries `aria-describedby` at all.
 //
 // 🔴 (review, Minor 7) Named for exactly what is asserted — `=== null` — rather
 // than "not described by an id nothing renders", which promised the WEAKER,
@@ -253,8 +252,12 @@ test('clicking Application shows its own content, not an empty panel', async () 
   // Text only `Application.svelte` itself renders, once its own `app_prefs`
   // read has settled — so a heading with nothing built underneath it fails
   // here rather than passing quietly on the <h2> above.
+  // The `getByTestId('application-version')` wait above already proves the
+  // section's own content mounted — a stronger, positive claim than "the
+  // placeholder sentence is absent" ever was, and the only one this task can
+  // still make: `settings_section_not_ready` is gone from the catalogue, so a
+  // `queryByText` against its old sentence could never fail again.
   await waitFor(() => expect(screen.getByTestId('application-version')).toBeTruthy());
-  expect(screen.queryByText('This section is not ready yet.')).toBeNull();
 });
 
 test('labels stay correct across a language switch after mount', async () => {

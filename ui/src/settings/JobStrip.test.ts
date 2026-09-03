@@ -1450,8 +1450,11 @@ test('standing on the built application section, the report is still read before
   // The window's status line comes first; the section's own content last.
   expect(text.indexOf('Теку прочитано повністю.'))
     .toBeLessThan(text.indexOf('Версія 0.0.0'));
-  // And the panel no longer claims to be unbuilt.
-  expect(text).not.toContain('Ця секція ще не готова.');
+  // `toContain('Версія 0.0.0')` above already proves the panel holds the
+  // section's own content, not the placeholder — a stronger, positive claim
+  // than a `not.toContain` against a sentence the catalogue no longer has
+  // could ever make (Task 8 removed `settings_section_not_ready`, so that
+  // string can no longer be produced by the app at all).
 });
 
 // 🔴 The same finding, on the section the live run actually stood on. It is
@@ -1472,8 +1475,10 @@ test('standing on the built indexing section, the report is still read before th
   // The window's status line comes first; the section's own content last.
   expect(text.indexOf('Теку прочитано повністю.'))
     .toBeLessThan(text.indexOf('В індексі 9 файлів.'));
-  // And the panel no longer claims to be unbuilt.
-  expect(text).not.toContain('Ця секція ще не готова.');
+  // `toContain('В індексі 9 файлів.')` above already proves the panel holds
+  // the section's own numbers, not the placeholder — the same reasoning as
+  // the Application case above: `settings_section_not_ready` is gone from the
+  // catalogue, so a `not.toContain` against its old sentence could not fail.
 });
 
 // The ruling the fix above must not break, on the path that now runs THROUGH a

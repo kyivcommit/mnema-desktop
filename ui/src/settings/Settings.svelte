@@ -13,16 +13,11 @@
   // claim the product has fewer sections than the spec does. Order matches the
   // spec and the mockup's `snav` column.
   type SectionId = 'models' | 'folders' | 'indexing' | 'application';
-  const SECTIONS: { id: SectionId; disabled: boolean }[] = [
-    { id: 'models', disabled: false },
-    { id: 'folders', disabled: false },
-    // `indexing` is built as of PR 9 Task 6, `application` as of Task 7, so
-    // neither carries a not-ready description any more. `disabled` and the
-    // sentence are one condition, not two: leaving either `true` would point
-    // `aria-describedby` at an id nothing renders, which is worse than no
-    // description at all.
-    { id: 'indexing', disabled: false },
-    { id: 'application', disabled: false },
+  const SECTIONS: { id: SectionId }[] = [
+    { id: 'models' },
+    { id: 'folders' },
+    { id: 'indexing' },
+    { id: 'application' },
   ];
 
   let section = $state<SectionId>('models');
@@ -49,16 +44,6 @@
   const foldersLabel = $derived.by(() => { void $locale; return t('settings_nav_folders'); });
   const indexingLabel = $derived.by(() => { void $locale; return t('settings_nav_indexing'); });
   const applicationLabel = $derived.by(() => { void $locale; return t('settings_nav_application'); });
-  // One catalogue sentence, shared by both unbuilt sections. An unbuilt
-  // section's button is `aria-describedby` this sentence, so the reason its
-  // panel is empty reaches a screen reader as the button's own description.
-  // The condition is the same one that renders the sentence: the reference is
-  // set only while the element it names exists, never dangling.
-  // `aria-disabled` was removed here on the owner's ruling — these buttons are
-  // fully operable, and telling assistive technology they are disabled meant
-  // its users would never press them and so never hear the sentence at all.
-  const NOT_READY_ID = 'section-not-ready';
-  const notReadyLabel = $derived.by(() => { void $locale; return t('settings_section_not_ready'); });
 
   function labelFor(id: SectionId): string {
     switch (id) {
@@ -96,7 +81,6 @@
           class="item"
           data-testid={`settings-nav-${item.id}`}
           aria-pressed={section === item.id}
-          aria-describedby={section === item.id && item.disabled ? NOT_READY_ID : undefined}
           onclick={() => (section = item.id)}
         >{labelFor(item.id)}</button>
       {/each}

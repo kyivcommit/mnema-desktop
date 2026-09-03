@@ -1,6 +1,5 @@
 export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_indexing' | 'settings_nav_application'
-  | 'settings_section_not_ready'
   | 'settings_folders_empty' | 'settings_folders_add' | 'settings_folders_remove'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
@@ -115,8 +114,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_folders: 'Теки',
     settings_nav_indexing: 'Індексація',
     settings_nav_application: 'Застосунок',
-    // Shared by both unbuilt sections — one sentence, promises nothing.
-    settings_section_not_ready: 'Ця секція ще не готова.',
     // §9.2, Task 7. `TreeRoot` (ipc.ts) carries no flag for "walked and found
     // empty" vs. "not walked yet" — a folder just added and one genuinely
     // empty are the same value on the wire — so this sentence names only the
@@ -829,7 +826,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_folders: 'Folders',
     settings_nav_indexing: 'Indexing',
     settings_nav_application: 'Application',
-    settings_section_not_ready: 'This section is not ready yet.',
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
     settings_folders_remove: 'Remove',
