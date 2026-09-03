@@ -515,6 +515,10 @@ test('a person who opens Indexing in the settings window reads what the index ho
     + ' Це було 1 годину тому.'
     + ` ${SPACE_SENTENCE}`,
   );
-  // The section replaced the placeholder rather than joining it.
-  expect(pageText()).not.toContain('Ця секція ще не готова.');
+  // (review, Important 1) A `not.toContain` against `settings_section_not_ready`'s
+  // old sentence stood here — Task 8 removed that key from the catalogue, so
+  // the string can no longer be produced by anything and the assertion could
+  // not fail. The equality check above is strictly stronger: it is exact over
+  // the whole panel, not a containment claim over one page, so a placeholder
+  // sentence appearing anywhere in the panel would already break it.
 });

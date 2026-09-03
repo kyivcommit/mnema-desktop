@@ -147,6 +147,16 @@ test('clicking Folders shows the Folders heading and removes the Models heading'
 // present, resolves to a real element). Under Task 8 the whole wiring is
 // removed, so this is cosmetic, but a name that promises more than its
 // assertion is the shape this project keeps getting bitten by.
+//
+// (review, Minor 5) Both `toBeNull()` claims below cannot fail today either,
+// same as the sentence-level assertions Task 8 deleted elsewhere — but the
+// two classes are not the same risk. The deleted ones stood on a catalogue key
+// that no longer exists anywhere in the source; nothing can reintroduce that
+// string without a `Key` union arm reappearing first, which `tsc` would flag.
+// These two stand on ordinary DOM attributes that any future edit to this
+// component can set again with no compiler in the way — `aria-disabled` and
+// `aria-describedby` are still valid attributes on a `<button>`, just unwired
+// today — so the assertion stays as a regression guard against exactly that.
 test('no section claims to be disabled, and no button carries aria-describedby', async () => {
   setLocale('en'); // seed, do not inherit
   render(Settings);
@@ -252,12 +262,12 @@ test('clicking Application shows its own content, not an empty panel', async () 
   // Text only `Application.svelte` itself renders, once its own `app_prefs`
   // read has settled — so a heading with nothing built underneath it fails
   // here rather than passing quietly on the <h2> above.
-  // The `getByTestId('application-version')` wait above already proves the
-  // section's own content mounted — a stronger, positive claim than "the
-  // placeholder sentence is absent" ever was, and the only one this task can
-  // still make: `settings_section_not_ready` is gone from the catalogue, so a
-  // `queryByText` against its old sentence could never fail again.
   await waitFor(() => expect(screen.getByTestId('application-version')).toBeTruthy());
+  // The wait above already proves the section's own content mounted — a
+  // stronger, positive claim than "the placeholder sentence is absent" ever
+  // was, and the only one this task can still make: `settings_section_not_ready`
+  // is gone from the catalogue, so a `queryByText` against its old sentence
+  // could never fail again.
 });
 
 test('labels stay correct across a language switch after mount', async () => {

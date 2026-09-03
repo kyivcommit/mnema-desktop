@@ -13,12 +13,7 @@
   // claim the product has fewer sections than the spec does. Order matches the
   // spec and the mockup's `snav` column.
   type SectionId = 'models' | 'folders' | 'indexing' | 'application';
-  const SECTIONS: { id: SectionId }[] = [
-    { id: 'models' },
-    { id: 'folders' },
-    { id: 'indexing' },
-    { id: 'application' },
-  ];
+  const SECTIONS: SectionId[] = ['models', 'folders', 'indexing', 'application'];
 
   let section = $state<SectionId>('models');
 
@@ -75,14 +70,14 @@
   <JobStrip {jobs} />
   <div class="scols">
     <nav class="snav">
-      {#each SECTIONS as item (item.id)}
+      {#each SECTIONS as id (id)}
         <button
           type="button"
           class="item"
-          data-testid={`settings-nav-${item.id}`}
-          aria-pressed={section === item.id}
-          onclick={() => (section = item.id)}
-        >{labelFor(item.id)}</button>
+          data-testid={`settings-nav-${id}`}
+          aria-pressed={section === id}
+          onclick={() => (section = id)}
+        >{labelFor(id)}</button>
       {/each}
     </nav>
 
