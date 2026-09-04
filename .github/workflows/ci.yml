@@ -499,11 +499,14 @@ jobs:
           - pr8-subfolders
           - pr8-subfolders-linux
           - pr8-ui-folders
+          - pr8-ui-masks
           - pr9-shell
           - pr9-index
           - pr9-ui
         include:
           - file: pr8-ui-folders
+            node: true
+          - file: pr8-ui-masks
             node: true
           - file: pr9-index
             node: true
@@ -575,7 +578,7 @@ jobs:
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
       # For the legs whose matrix entry says `node: true` and no other —
-      # `pr8-ui-folders`, `pr9-index` and `pr9-ui` today, and the flag lives on
+      # `pr8-ui-folders`, `pr8-ui-masks`, `pr9-index` and `pr9-ui` today, and the flag lives on
       # the entry so a renamed file cannot leave the gate pointing at the old
       # name: their cases run
       # vitest, and `mutation-check.sh` links `ui/node_modules` into its
