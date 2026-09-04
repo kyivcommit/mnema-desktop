@@ -1,15 +1,20 @@
-# The settings window's two whole-index numbers — §9.3's file count and its
-# last-indexed moment. Run with:
+# The settings window's whole-index numbers — §9.3's file count, its
+# last-indexed moment, and the busy-index line in the window's job strip. Run
+# with:
 #
 #   scripts/mutation-check.sh scripts/mutations/pr9-index.sh
 #
-# Two files are mutated and they carry two different kinds of claim. The
-# `crates/mnema-index/src/write.rs` cases pin the DEFINITIONS: each of the two
-# helpers is one of the tree listing's own queries with a filter dropped, and
-# every case here breaks exactly the term that makes it that query rather than
-# a plausible neighbour. The `src-tauri/src/models.rs` cases pin the WIRING:
-# that `read_settings` actually asks the index, rather than sending a constant
-# the window would draw as a measured claim.
+# The files mutated are named below rather than counted, for the reason this
+# file's own advice gives a few lines down, and they carry three kinds of claim.
+# The `crates/mnema-index/src/write.rs` cases pin the DEFINITIONS: each of the
+# two helpers is one of the tree listing's own queries with a filter dropped,
+# and every case here breaks exactly the term that makes it that query rather
+# than a plausible neighbour. The `src-tauri/src/models.rs` and
+# `src-tauri/src/walk_job.rs` cases pin the WIRING: that `read_settings` and the
+# walk's progress actually ask, rather than sending a constant the window would
+# draw as a measured claim. The `ui/src/settings/JobStrip.svelte` cases pin what
+# the strip SAYS about a contended write, and they run vitest — which is why
+# this file's matrix leg carries `node: true` in `.github/workflows/ci.yml`.
 #
 # 🔴 **The one that is not a bug-hunt but a decision guard.** `indexed_file_count`
 # counts `path` rows, so one file present in two watched folders counts twice.

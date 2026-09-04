@@ -385,3 +385,37 @@ case_ "the shared fixture kills a wrong per-platform spelling of the command key
   "s~const SUPER_WORD: Record<Exclude<Platform, 'mac'>, string> = \{\n  windows: 'Win',~const SUPER_WORD: Record<Exclude<Platform, 'mac'>, string> = {\n  windows: 'Super', // mutant: the parsers spelling on a platform that prints Win~" \
   "windows: 'Super', // mutant: the parsers spelling on a platform that prints Win" \
   src/i18n/shortcut.test.ts 'the shared fixture is what this formatter produces' runner=vitest
+
+# ── The final whole-branch review's two Application-section fixes ─────────────
+
+# 🔴 D-I1: the per-field stamps collapsed back into one, which is the shape the
+# review found. Three writers share this guard and they write DISJOINT fields,
+# so a single generation is field-blind: a `setAutostart` that succeeds while
+# the corrective `appPrefs()` a refused `setHotkey` started is still in flight
+# discards that read whole, and the window goes on drawing the old shortcut
+# beside "the shortcut was not changed" while the operating system holds the new
+# one (D-b's persist-failure row).
+#
+# Every fixture that drives ONE writer survives this mutant, including the one
+# that pins the stamp itself — hotkey against hotkey, where superseding IS
+# correct. Only a fixture that drives both writers can see it, which is why
+# there had to be a new one. The mirror case (`a successful shortcut change …`)
+# goes red under the same mutant, from the other direction.
+case_ "one stamp per field, because a write to one field says nothing about another" \
+  ui/src/settings/Application.svelte \
+  's~      const takeAutostart = myAutostart === autostartSeq;~      const takeAutostart = myHotkey === hotkeySeq; // mutant: one stamp decides both fields~' \
+  'const takeAutostart = myHotkey === hotkeySeq; // mutant: one stamp decides both fields' \
+  src/settings/Application.test.ts 'a successful autostart change must not discard the re-read a refused shortcut change started' runner=vitest
+
+# 🔴 D-I2: the record control's in-flight guard, never armed — so the button
+# stays enabled and focused across the whole of `setHotkey`, and a second
+# recording sends a second call. The backend serialises the two behind
+# `change_hotkey`'s critical section; the window paints whichever reply resolves
+# last, which need not be the one the operating system kept. One assignment
+# rather than the `disabled` attribute alone: this deletes both halves of the
+# guard, which is what "no in-flight guard" was.
+case_ "the record control must be busy while a shortcut change is in flight" \
+  ui/src/settings/Application.svelte \
+  's~    hotkeyBusy = true;~    hotkeyBusy = false; // mutant: the record control is never busy~' \
+  'hotkeyBusy = false; // mutant: the record control is never busy' \
+  src/settings/Application.test.ts 'the record control is busy while a change is in flight, so a second press sends one call and does not reopen the recorder' runner=vitest

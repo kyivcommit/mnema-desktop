@@ -12,11 +12,13 @@ import type { Platform } from '../lib/ipc';
 // is what `recency.ts` and the catalogue beside it do, and both halves are pure
 // functions unit-tested with no component in sight.
 //
-// ⚠️ The strings below are `global-hotkey`'s own vocabulary — `Ctrl`, `Alt`,
-// `Shift`, `Super`, `Space`, `F1`, `ArrowUp` — and protocol tokens rather than
-// prose, exactly as `prefs.rs` says of `MODIFIER_SPELLINGS` on the Rust side.
-// Nothing here is a sentence; every sentence this section shows comes from
-// `catalog.ts` or verbatim from the backend.
+// ⚠️ The strings below are protocol tokens rather than prose — `Ctrl`, `Alt`,
+// `Shift`, `Super`, `Space`, `F1`, `ArrowUp` — the DISPLAY vocabulary this
+// formatter and its Rust mirror agree on. It is not the parser's own list,
+// which is `prefs.rs`'s `MODIFIER_SPELLINGS`; `MODIFIER_ALIASES` below says
+// where the two differ and what that difference costs a person. Nothing here is
+// a sentence; every sentence this section shows comes from `catalog.ts` or
+// verbatim from the backend.
 
 // The canonical order, and it is canonical rather than incidental. The parser
 // is indifferent to the order of the modifiers AMONG THEMSELVES but not to the
@@ -41,11 +43,22 @@ const SUPER_WORD: Record<Exclude<Platform, 'mac'>, string> = {
   linux: 'Super',
 };
 
-// Every spelling `global-hotkey` accepts for a modifier, folded onto the one
-// this module emits. A stored string need not be one this window built —
-// `prefs.json` is a file on the person's own disk, and the parser accepts any
-// order of modifiers as long as the key is last — so two spellings of one
-// shortcut must not read as two different shortcuts.
+// The spellings the two FORMATTERS fold onto the one this module emits, so that
+// two spellings of one shortcut do not read as two different shortcuts. A
+// stored string need not be one this window built — `prefs.json` is a file on
+// the person's own disk, and the parser accepts any order of modifiers as long
+// as the key is last.
+//
+// ⚠️ **This is a display vocabulary, and it is NOT the parser's.** The parser's
+// own twelve are `prefs.rs`'s `MODIFIER_SPELLINGS`. The two sets overlap and
+// neither contains the other: this table adds `ctl`, `altgr`, `meta` and `win`,
+// which the parser refuses, and omits `CommandOrControl`, `CommandOrCtrl`,
+// `CmdOrCtrl` and `CmdOrCommand`, which it accepts and resolves per platform.
+// So a stored `CmdOrCtrl+Space` registers and is then drawn as the literal
+// `CmdOrCtrl+Space` rather than as `⌘Space` — the passthrough rule below doing
+// exactly what it says, not a falsehood. Widening this table is a decision about
+// what a person reads, and it would have to be made on both sides and given a
+// row in `shortcut.fixtures.json`.
 const MODIFIER_ALIASES: Record<string, Modifier> = {
   ctrl: 'Ctrl', control: 'Ctrl', ctl: 'Ctrl',
   alt: 'Alt', option: 'Alt', altgr: 'Alt',

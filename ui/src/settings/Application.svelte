@@ -24,17 +24,44 @@
   // guard and its reason: a rejected `set_hotkey` or `set_autostart` triggers a
   // second `appPrefs()` while the mount's own first read may still be in
   // flight, and the two can settle in either order.
-  let seq = 0;
+  //
+  // 🔴 **One stamp PER FIELD, not one for the section** (final review, D-I1).
+  // Three writers share this guard and they write disjoint fields, so a single
+  // stamp is field-blind: a `setAutostart` that succeeds cancels the corrective
+  // `appPrefs()` a refused `setHotkey` started, and nothing about autostart says
+  // anything about the shortcut. The state that leaves wrong is D-b's
+  // persist-failure row — `set_hotkey` rejects with `Error::Prefs` while the
+  // operating system IS holding the new shortcut, so the window would go on
+  // drawing the old one beside "the shortcut was not changed". A read claims
+  // both stamps because it re-reads both fields, and applies each field only
+  // where its own stamp survived.
+  let hotkeySeq = 0;
+  let autostartSeq = 0;
 
   async function refresh() {
-    const my = ++seq;
+    const myHotkey = ++hotkeySeq;
+    const myAutostart = ++autostartSeq;
     try {
       const p = await appPrefs();
-      if (my !== seq) return; // superseded before this reply arrived
-      prefs = p;
+      const takeHotkey = myHotkey === hotkeySeq;
+      const takeAutostart = myAutostart === autostartSeq;
+      // Superseded on every field this read could have written. `version` and
+      // `platform` are decided at compile time and cannot have changed, so
+      // there is nothing left for it to say.
+      if (!takeHotkey && !takeAutostart) return;
+      prefs = {
+        ...p,
+        // A writer that landed while this read was in flight holds the truth
+        // for ITS field: it carries the operating system's own reply, and this
+        // read was issued before it.
+        hotkey: takeHotkey || prefs === null ? p.hotkey : prefs.hotkey,
+        autostart: takeAutostart || prefs === null ? p.autostart : prefs.autostart,
+      };
       loadError = null;
     } catch (e) {
-      if (my !== seq) return;
+      // A rejection is about the read as a whole, so it is shown only where the
+      // read still had something to say — the same test both directions get.
+      if (myHotkey !== hotkeySeq && myAutostart !== autostartSeq) return;
       loadError = e instanceof Error ? e.message : String(e);
     }
   }
@@ -109,8 +136,22 @@
   // reaches: the sentence saying "press the combination you want" would stay
   // on screen through every keystroke, with no way out but a nav change.
   let recordButton: HTMLButtonElement | undefined = $state();
+  // 🔴 (final review, D-I2) The in-flight guard its autostart sibling already
+  // had, and the argument that deferred it here does not carry over: two presses
+  // of the toggle send the same value, two recorded combinations send two
+  // DIFFERENT ones. `change_hotkey` serialises the calls behind one critical
+  // section (`prefs.rs`, `two_hotkey_changes_cannot_interleave`), so the
+  // operating system keeps whichever went through the lock last while this
+  // window would paint whichever reply resolved last — and those need not be the
+  // same one. The screen would then name a shortcut the operating system is not
+  // holding, which is the one thing D-b exists to prevent.
+  let hotkeyBusy = $state(false);
 
   function startRecording() {
+    // Both halves, like the toggle: `disabled` is what a person sees, and the
+    // early return is what actually holds — a `click` dispatched at a disabled
+    // element still reaches a listener.
+    if (hotkeyBusy) return;
     recording = true;
     notUsable = false;
     hotkeyError = null;
@@ -150,15 +191,20 @@
     notUsable = false;
     recording = false;
     hotkeyError = null;
+    hotkeyBusy = true;
     try {
       const reply = await setHotkey(shortcut);
       // 🔴 (review, Important 2) The stamp is bumped HERE too, not only inside
-      // `refresh()`. Two writers share one `seq`: a rejected change earlier can
+      // `refresh()`. Two writers share this guard: a rejected change earlier can
       // have started a `refresh()` still in flight when THIS change succeeds,
       // and without bumping the stamp that older read is not superseded — it
       // resolves later and overwrites the state this line is about to write
       // with the pre-change read, stating a shortcut the OS is not holding.
-      seq++;
+      //
+      // The SHORTCUT's stamp and no other (final review, D-I1): what this reply
+      // supersedes is what a read would have said about the field it just
+      // changed, and a read still owes its answer about the other one.
+      hotkeySeq++;
       // The backend is the truth (D-b closing note): drawn from the REPLY, a
       // whole `HotkeyState`, never assembled from the string this window sent.
       if (prefs !== null) prefs = { ...prefs, hotkey: reply };
@@ -169,6 +215,10 @@
       // the only honest source for what the screen draws next is a fresh read,
       // never the value this window held before the call.
       void refresh();
+    } finally {
+      // Released whichever way the call went: a refusal that left the control
+      // disabled would cost a person the only way to change the shortcut.
+      hotkeyBusy = false;
     }
   }
 
@@ -228,8 +278,9 @@
       const reply = await setAutostart(target);
       // 🔴 (review, Important 2) Bumped here too, for the same reason as the
       // hotkey success path above: a `refresh()` from an earlier rejection can
-      // still be in flight when this call lands.
-      seq++;
+      // still be in flight when this call lands — and, D-I1, only AUTOSTART's
+      // stamp, because that is the only field this reply is about.
+      autostartSeq++;
       // Drawn from the REPLY, never from `target`: `set_autostart` re-reads the
       // OS after the change (D-c), and a request that could not be confirmed
       // must not render as though it had been.
@@ -282,6 +333,7 @@
     type="button"
     data-testid="application-shortcut-record"
     bind:this={recordButton}
+    disabled={hotkeyBusy}
     onclick={startRecording}
     onkeydown={onRecorderKeydown}
     onblur={stopRecordingOnBlur}

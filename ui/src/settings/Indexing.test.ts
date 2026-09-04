@@ -450,6 +450,40 @@ test('a queue is not offered while a job is running unobserved', async () => {
   expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
 });
 
+// 🔴 (final review, C-M7) …and it must not stay hidden for the life of the
+// window. `runningUnobserved` is written by `syncFromStatus` alone, which ran
+// once at the window's mount, so a pass this window has no channel for could
+// end and nothing here would ever learn: the strip goes on saying a pass is
+// running and F4's queue line and its Continue button stay suppressed. The
+// recovery existed — pressing Cancel re-reads `job_status` — but nobody would
+// guess it, and the affordance it costs is the one F4 was added for.
+//
+// The re-check is on this section's own mount, beside the `model_settings`
+// re-read that is already there for the same reason: both facts this section
+// draws from can have changed while it was off screen, and it re-reads BOTH
+// when a person comes back to it. The controller is careful to write only over
+// `idle`/`runningUnobserved`, so a pass this window IS watching cannot be
+// clobbered by the extra read.
+test('a pass this window could not hear ends, and the section offers the queue again on the next visit', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
+  // The settings window was opened while a pass started elsewhere was running.
+  jobStatus.mockResolvedValue({ running: true });
+  const { container } = render(Settings);
+  const panel = () => container.querySelector('.spane');
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
+
+  // The pass ends. No ending arrives here — this window has no channel for it —
+  // so the only thing that can say so is a fresh `job_status`.
+  jobStatus.mockResolvedValue({ running: false });
+  await fireEvent.click(screen.getByTestId('settings-nav-models'));
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
+  expect(visible(panel())).toContain('Ще не вбудовано 5 фрагментів.');
+});
+
 // Through the controller, exactly the way `Models.svelte:468`'s own `reembed`
 // argues: the pass this button starts belongs on the window's strip, where its
 // progress and its Cancel stay reachable from every section, not to a listener

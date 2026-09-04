@@ -54,16 +54,21 @@
   <!-- Live run, finding 3, and it is a correction to this plan's own ruling.
        Task 8 put the strip OUTSIDE the section conditional so a job survives
        Folders -> Models -> Folders with its counters and its Cancel; that half
-       is right and is untouched here. What it did not weigh is that two of the
-       four sections are placeholders: rendered last, the strip landed directly
-       under the not-ready sentence, so a person standing on the Indexing
-       section read a section declaring itself unbuilt and, immediately below
-       it, the full indexing report.
+       is right and is untouched here. What it did not weigh is WHERE outside:
+       rendered last, the strip sat under whatever the panel ended with, so a
+       person standing on a section read that section's closing line and,
+       immediately below it, the full indexing report.
        The strip is the WINDOW's status line, not a section's content, so it is
-       drawn before the nav and the panel both — and the placeholder sentence is
-       then the last thing inside the panel it is about. Nothing about the
-       controller moved: it is still created above every section, `<Indexing>`
-       is still outside every `{#if}`, and `cancel_job` still needs no channel.
+       drawn before the nav and the panel both. Nothing about the controller
+       moved: it is still created above every section, and `cancel_job` still
+       needs no channel.
+       ⚠️ The component outside every `{#if}` is this one, `<JobStrip>`.
+       `<Indexing>` is INSIDE the conditional below and depends on being there:
+       its per-mount `refresh()` is the only re-read of `model_settings` after a
+       change made while that section was off screen, and the store subscription
+       it opens is torn down by the unmount a nav change causes. Hoisting it out
+       would quietly cost both — the sentence that stood here said the opposite
+       and would have invited exactly that.
        `.scols` exists so the CSS that lands later cannot make this a THIRD
        column beside the nav and the panel: the pair is the row, the status line
        is not part of it. -->

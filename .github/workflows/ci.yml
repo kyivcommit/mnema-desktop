@@ -350,8 +350,8 @@ jobs:
     # self-test carry `if: always()`, so two findings on one commit are two
     # red lines and not the first one hiding the second. They used to open the
     # `mutations` job for exactly that reason ("first, and before anything is
-    # provisioned"); when that job became a matrix they would have run six
-    # times, and six green lines about the same directory are no more
+    # provisioned"); when that job became a matrix they would have run once per
+    # leg, and a green line per leg about the same directory is no more
     # evidence than one.
     #
     # No `needs:` anywhere in this file, and none here: every job starts from
@@ -438,16 +438,16 @@ jobs:
     # 33671866360, and 13m42s on run 33684364310 once they shared one target
     # directory — 5m38s of baselines and 8m04s of cases, and the cases are
     # what is left. A file's cases depend on nothing another file does, so
-    # six runners make the job as long as its slowest file plus that leg's
-    # own setup, rather than the sum of all six: on that run `source.sh`
+    # one runner per file makes the job as long as its slowest file plus that
+    # leg's own setup, rather than the sum of them all: on that run `source.sh`
     # (2:25 + 1:45 = 4:10) and `embedding.sh` (0:59 + 2:02 = 3:01) were the
     # two longest. What every leg now pays for itself: `apt-get`, the
     # Pdfium download and the sidecar build — `mnema-extract` is a
     # workspace crate, which the cache never holds — about two minutes on
     # that run with the dependencies restored. On a COLD key (a
-    # `Cargo.lock`, `rust-toolchain.toml` or rustc change) the six legs build
-    # the dependencies at the same time and none can see another's: six
-    # times the compute of one cold build, 3:02–3:23 each on run
+    # `Cargo.lock`, `rust-toolchain.toml` or rustc change) every leg builds
+    # the dependencies at the same time and none can see another's: one cold
+    # build's compute per leg, 3:02–3:23 each on run
     # 33671866360, in front of the slowest file. The warm case is the steady
     # state; the first run of this matrix is the measurement of it.
     #
@@ -472,10 +472,20 @@ jobs:
     # `pr8-ui-folders.sh` has no such split and needs none: its tests run in
     # jsdom, nothing in them is behind a platform condition, and the whole
     # file is green on this leg. What it does need is a node and
-    # `ui/node_modules`, provisioned below for that leg alone — a case whose
-    # runner is not installed fails its baseline for a reason that is not the
-    # mutation, which is the same defect the vendored libraries and the
-    # staged sidecar are copied into the worktree to avoid.
+    # `ui/node_modules`, provisioned below for the legs whose entry asks for
+    # it — a case whose runner is not installed fails its baseline for a
+    # reason that is not the mutation, which is the same defect the vendored
+    # libraries and the staged sidecar are copied into the worktree to avoid.
+    #
+    # ⚠️ **The flag belongs to whichever files HOLD a vitest case, and a file
+    # can gain one after the flag was placed.** `pr9-index.sh` did: it was
+    # Rust-only when its entry was written and now carries cases that mutate
+    # `ui/src/settings/JobStrip.svelte`, which without `node: true` fail their
+    # baseline with `127` and take the whole file's Rust cases down with them
+    # (`mutation-check.sh` exits 1 for the FILE before pass two). Re-derive
+    # rather than trust this sentence:
+    #
+    #   grep -l 'runner=vitest' scripts/mutations/*.sh
     strategy:
       # One file's survivor must not cancel the others: they are
       # independent evidence, and the second failure is the one a cancelled
@@ -494,6 +504,8 @@ jobs:
           - pr9-ui
         include:
           - file: pr8-ui-folders
+            node: true
+          - file: pr9-index
             node: true
           - file: pr9-ui
             node: true
@@ -563,9 +575,9 @@ jobs:
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
       # For the legs whose matrix entry says `node: true` and no other —
-      # `pr8-ui-folders` and `pr9-ui` today, and the flag lives on the entry
-      # so a renamed file cannot leave the gate pointing at the old name:
-      # their cases run
+      # `pr8-ui-folders`, `pr9-index` and `pr9-ui` today, and the flag lives on
+      # the entry so a renamed file cannot leave the gate pointing at the old
+      # name: their cases run
       # vitest, and `mutation-check.sh` links `ui/node_modules` into its
       # worktree rather than installing there, so the directory has to exist
       # in this checkout first. Same `lts/*` and same `npm ci` as `check` —

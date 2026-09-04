@@ -73,11 +73,16 @@
   }
 
   onMount(() => {
-    // 🔴 Subscribed BEFORE the first read is issued, and the order is the
-    // guard. An ending that lands while the initial `model_settings` is in
-    // flight would otherwise be heard by nobody, and the screen would sit on
-    // numbers taken before the pass finished — D130's F1 in another component
-    // (`requirements.md:977`).
+    // ⚠️ **The order of these two lines is NOT the guard, and a case pinning it
+    // would pin nothing** (final review, C-M4). `subscribe(...)` and
+    // `refresh()` run in one synchronous block — `refresh()` suspends at its
+    // first `await` — so the subscription is installed before any emission can
+    // be delivered whichever line comes first. What protects the screen when an
+    // ending lands while the initial `model_settings` is in flight is
+    // `settingsSeq` above: the mount's read is stamped first, the ending's
+    // second, and the older answer is dropped whether it succeeds or is refused
+    // (`Indexing.test.ts`, both directions). That is D130's F1 in another
+    // component (`requirements.md:977`), and the counter is what answers it.
     //
     // Compared by phase IDENTITY, not by kind: the controller writes a fresh
     // phase object per event, so a progress report changes the object without
@@ -90,6 +95,25 @@
       if (phase.kind === 'ended') void refresh();
     });
     void refresh();
+    // 🔴 The OTHER fact this section draws from, re-read for the same reason
+    // (final review, C-M7). `runningUnobserved` — a pass this window has no
+    // channel for, `job_status` being the only thing that can report it — is
+    // written by `syncFromStatus` alone, and that ran once at the window's own
+    // mount. Without this line a pass that ends after the window opened is
+    // never noticed: the phase stays `runningUnobserved` for the life of the
+    // window, and F4's queue line and its Continue button below stay suppressed
+    // with no way for a person to guess that pressing Cancel would fix it.
+    //
+    // Safe on every other path, and that is the controller's doing rather than
+    // this line's: `syncFromStatus` writes only over `idle`/`runningUnobserved`,
+    // so a pass this window IS watching keeps its counts and its Cancel.
+    //
+    // ⚠️ It does NOT close the state, only the affordance: a person parked on
+    // this section while such a pass ends still sees nothing change until the
+    // next visit, because a mount is the only thing that asks. Closing that
+    // needs something that asks over time, which is a controller lifetime this
+    // window does not have — booked, not silently half-done.
+    void jobs.syncFromStatus();
     // 🔴 Returned, so Svelte tears the subscription down on destroy. This
     // section is inside `Settings.svelte`'s `{#if section === …}` chain, so
     // every nav change unmounts it: without this line each visit leaves a live

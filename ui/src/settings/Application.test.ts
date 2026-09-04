@@ -456,6 +456,134 @@ test('a change that succeeds must supersede a refresh() still in flight from an 
   expect(at('application-shortcut')).toBe('Ctrl+Alt+A');
 });
 
+// 🔴 (final review, D-I2) The record control had no in-flight guard while its
+// autostart sibling did, and the reasoning that justified deferring the twin
+// does not transfer: two presses of the toggle carry the same value, two
+// recorded combinations carry two DIFFERENT ones. `change_hotkey` serialises
+// them behind one critical section — `two_hotkey_changes_cannot_interleave` —
+// so the operating system and `prefs.json` end up holding whichever went
+// through the lock last, while this window paints whichever reply resolved
+// last. Those need not be the same one, and the result is a screen naming a
+// shortcut the operating system is not holding.
+test('the record control is busy while a change is in flight, so a second press sends one call and does not reopen the recorder', async () => {
+  appPrefs.mockResolvedValue(prefs());
+  const inFlight = deferred<AppPrefs['hotkey']>();
+  setHotkey.mockReturnValue(inFlight.promise);
+  renderSection();
+  const button = () => screen.getByTestId<HTMLButtonElement>('application-shortcut-record');
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  expect(setHotkey).toHaveBeenCalledTimes(1);
+  expect(button().disabled).toBe(true);
+
+  // The second press, and then a second combination at whatever is listening:
+  // the click alone only reopens the recorder, and it is the keypress after it
+  // that would send the second call.
+  await fireEvent.click(button());
+  expect(screen.queryByTestId('application-shortcut-recording')).toBeNull();
+  await pressKey({ key: 'a', code: 'KeyA', altKey: true, ctrlKey: true });
+  expect(setHotkey).toHaveBeenCalledTimes(1);
+
+  // And the control comes back, so a refusal does not cost a person the only
+  // way to change the shortcut.
+  inFlight.resolve({ shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } });
+  await waitFor(() => expect(button().disabled).toBe(false));
+  await record();
+  expect(screen.getByTestId('application-shortcut-recording')).toBeTruthy();
+});
+
+// 🔴 (final review, D-I1) One stamp for three writers over DISJOINT fields, and
+// the two that matter are driven together here for the first time. A refused
+// `setHotkey` starts the re-read D-b requires — a rejection carries no
+// `HotkeyState`, so a fresh `appPrefs()` is the only honest source for what the
+// screen draws next. A field-blind stamp lets an unrelated `setAutostart` that
+// succeeds in the meantime discard that whole read, and the state it leaves
+// wrong is D-b's persist-failure row: `set_hotkey` rejects with `Error::Prefs`
+// while the operating system IS holding the new shortcut, so the window goes on
+// drawing the old one beside "the shortcut was not changed".
+//
+// Both halves are asserted, because either alone is satisfied by a wrong
+// implementation: keeping the read whole would draw the pre-toggle autostart,
+// and dropping it whole draws the pre-change shortcut.
+test('a successful autostart change must not discard the re-read a refused shortcut change started', async () => {
+  const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
+  appPrefs.mockImplementation(() => {
+    const d = deferred<AppPrefs>();
+    queue.push(d);
+    return d.promise;
+  });
+  setHotkey.mockRejectedValue(new Error('the shortcut could not be saved'));
+  setAutostart.mockResolvedValue({ kind: 'enabled' });
+  renderSection();
+  await waitFor(() => expect(queue).toHaveLength(1));
+  queue[0].resolve(prefs({ autostart: { kind: 'disabled' } }));
+  await record();
+
+  // The change is refused, so the corrective read starts — held open.
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(queue).toHaveLength(2));
+
+  // Before it settles, the OTHER writer succeeds. Nothing about autostart says
+  // anything about the shortcut.
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+  await waitFor(() => expect(at('application-autostart-status'))
+    .toBe('Mnema запускається під час входу в систему.'));
+
+  // The held-open read now answers with what the operating system actually
+  // holds: the registration succeeded and only the persist failed, so the
+  // shortcut is the NEW one. It carries the pre-toggle autostart with it,
+  // because it was issued before that press.
+  queue[1].resolve(prefs({
+    hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } },
+    autostart: { kind: 'disabled' },
+  }));
+  await tick();
+  await tick();
+
+  expect(at('application-shortcut')).toBe('Ctrl+Alt+Space');
+  expect(at('application-autostart-status')).toBe('Mnema запускається під час входу в систему.');
+});
+
+// The mirror, so the stamps are not merely two names for one order: a refused
+// `setAutostart` starts its own re-read, and a `setHotkey` that succeeds while
+// it is in flight must not discard it either. Without a stamp per field this
+// direction is the one that passes by accident, since the surviving read would
+// happen to carry the right autostart.
+test('a successful shortcut change must not discard the re-read a refused autostart change started', async () => {
+  const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
+  appPrefs.mockImplementation(() => {
+    const d = deferred<AppPrefs>();
+    queue.push(d);
+    return d.promise;
+  });
+  setAutostart.mockRejectedValue(new Error('the login item list could not be written'));
+  setHotkey.mockResolvedValue({ shortcut: 'Ctrl+Alt+A', status: { kind: 'registered' } });
+  renderSection();
+  await waitFor(() => expect(queue).toHaveLength(1));
+  queue[0].resolve(prefs({ autostart: { kind: 'disabled' } }));
+  await waitFor(() => expect(screen.getByTestId('application-autostart-toggle')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+  await waitFor(() => expect(queue).toHaveLength(2));
+
+  await record();
+  await pressKey({ key: 'a', code: 'KeyA', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(at('application-shortcut')).toBe('Ctrl+Alt+A'));
+
+  // What the operating system says about autostart, which is the only thing a
+  // refused `set_autostart` leaves knowable.
+  queue[1].resolve(prefs({
+    hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
+    autostart: { kind: 'unknown', reason: 'the login item list could not be read' },
+  }));
+  await tick();
+  await tick();
+
+  expect(at('application-autostart-status')).toBe('Не вдалося дізнатися, чи запускається Mnema під час входу в систему.');
+  expect(at('application-shortcut')).toBe('Ctrl+Alt+A');
+});
+
 // ---------------------------------------------------------------------------
 // Autostart.
 // ---------------------------------------------------------------------------
