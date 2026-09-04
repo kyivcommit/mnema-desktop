@@ -78,7 +78,19 @@ export function formatIndexedAt(indexedAt: number, nowMs: number): string {
  * Node without its locale data. Official Node builds have shipped full-ICU
  * since v13 and CI uses `actions/setup-node` with `lts/*`, so this is a note
  * for whoever hits it on a distro-packaged Node, not a known failure.
+ *
+ * 🔴 **F1 (measured live, 2026-09-04): a trailing stop stripped, unconditionally.**
+ * ICU's own `uk` long-date form ends in «р.» — an abbreviation stop that is
+ * part of the date, not of any sentence — and `indexing_index_updated`
+ * (`catalog.ts`) wraps this in a sentence with a full stop of its own:
+ * «Останнє оновлення: 1 вересня 2026 р..» read with two stops where a reader
+ * expects one. One rule for every locale, here rather than in the catalogue
+ * or the caller, so the sentence's own stop is the only one regardless of
+ * which locale's CLDR data happens to end a long date in punctuation. `en`'s
+ * form ends in a bare year and is unaffected either way.
  */
 export function formatIndexedDate(indexedAt: number, locale: Loc): string {
-  return new Intl.DateTimeFormat(locale, { dateStyle: 'long' }).format(new Date(indexedAt * 1000));
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'long' })
+    .format(new Date(indexedAt * 1000))
+    .replace(/\.$/, '');
 }

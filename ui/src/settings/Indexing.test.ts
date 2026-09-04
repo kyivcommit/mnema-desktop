@@ -71,8 +71,14 @@ const HOUR_AGO = () => Math.floor(Date.now() / 1000) - 3600;
 
 // Computed here, never written out: the test machine's zone is not the CI
 // machine's, and the section formats in the machine's own zone on purpose.
+//
+// The trailing-stop strip mirrors `formatIndexedDate` (F1): ICU's own `uk`
+// long-date form ends in «р.», and the sentence these composed assertions
+// build supplies its own final stop — `recency.test.ts` covers the strip
+// itself in full, so this oracle only needs to agree with production on the
+// shape the composed sentence is checked against.
 const dateIn = (loc: string, at: number) =>
-  new Intl.DateTimeFormat(loc, { dateStyle: 'long' }).format(new Date(at * 1000));
+  new Intl.DateTimeFormat(loc, { dateStyle: 'long' }).format(new Date(at * 1000)).replace(/\.$/, '');
 
 const EMPTY_CATALOGUE = { entries: [], unreadable: 0, unreadableRecords: [] };
 
