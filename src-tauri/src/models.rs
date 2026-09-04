@@ -1093,7 +1093,7 @@ pub struct IndexRead {
     /// **The same query the strip's own progress bar divides by, so the two
     /// cannot come to disagree about what "queued" means.** A running pass's
     /// denominator is `db.queued_chunk_count(space)?` too
-    /// (`crates/mnema-embed/src/lib.rs:227`, `EmbedTally::total`) — one method,
+    /// (`crates/mnema-embed/src/lib.rs:227`, `EmbedProgress::total`) — one method,
     /// read from two call sites. They can only differ by MOMENT, never by
     /// definition, and `ui/src/settings/Indexing.svelte` closes that gap the
     /// only way it can from a value that is already a snapshot: this section

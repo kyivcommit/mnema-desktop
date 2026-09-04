@@ -201,9 +201,10 @@ case_ "the job subscription must die with the component, not outlive it" \
 # `IndexRead.pendingChunks` — a tray Stop mid-pass, then a restart, left
 # thousands of chunks un-embedded with nothing on any screen saying so; the
 # only resume was the Scan button beside the right folder happening to chain
-# into an embed. Three cases: the button must start the right pass, the line
-# must not claim a queue that is empty, and neither must show while the strip
-# above already owns a running pass.
+# into an embed. The cases: the button must start the right pass, the line
+# must not claim a queue that is empty, neither may show while the strip
+# above already owns a running pass, and the `ended` phase alone must keep
+# them visible.
 # ---------------------------------------------------------------------------
 
 # `scan` chains an embed only if the walk actually reads the folder and both
