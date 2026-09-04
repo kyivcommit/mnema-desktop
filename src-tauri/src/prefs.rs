@@ -25,11 +25,13 @@
 use crate::error::Error;
 use crate::paths;
 use crate::state::AppState;
-// For `AppHandle::state` in `set_hotkey`'s rebuild closure.
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+// For `AppHandle::state` in `set_hotkey`'s rebuild closure. rustfmt's ordering
+// put this here and the comment stayed five lines up, where it said something
+// false about `serde` (review round 1, Minor 2).
 use tauri::Manager as _;
 use tauri_plugin_global_shortcut::Shortcut;
 

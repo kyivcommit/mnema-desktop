@@ -275,7 +275,16 @@ pub fn swap_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>, lang: Lang, choice:
     let Some(tray) = app.tray_by_id("mnema-tray") else {
         return;
     };
-    let hotkey = app.state::<crate::state::AppState>().hotkey();
+    // `try_state`, like `set_stop_enabled` twenty lines up and for its reason:
+    // `state` panics on an unmanaged type, and the sentence above promises
+    // best-effort throughout (review round 1, Minor 3). Nothing reachable gets
+    // here without the state — `manage_state` runs at `lib.rs:524`, long before
+    // any tray exists for `tray_by_id` to find — so this is the claim being
+    // made true rather than a failure being handled.
+    let Some(state) = app.try_state::<crate::state::AppState>() else {
+        return;
+    };
+    let hotkey = state.hotkey();
     let Ok((menu, stop)) = build_tray_menu(app, lang, choice, &hotkey) else {
         return;
     };
@@ -286,7 +295,7 @@ pub fn swap_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>, lang: Lang, choice:
 }
 
 /// Builds the tray icon and its menu. Reads `AppState`'s locale once — set by
-/// `manage_state`, which `lib.rs`'s `setup` hook runs first (`lib.rs:314-315`),
+/// `manage_state`, which `lib.rs`'s `setup` hook runs first (`lib.rs:524`),
 /// so the state is already managed here.
 ///
 /// It reads the hotkey the same way and in the same breath, and the boot order

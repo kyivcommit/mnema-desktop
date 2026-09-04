@@ -83,6 +83,14 @@ impl Modifier {
 /// `prefs.json` is a file on the person's own disk, and the parser accepts any
 /// order of modifiers as long as the key is last — so two spellings of one
 /// shortcut must not read as two different shortcuts.
+///
+/// ⚠️ A `match` and not a map lookup, which is where the mirror on the
+/// TypeScript side needed a guard this one never did: its table is an object
+/// literal and inherits `Object.prototype`, so a bare index answered truthy for
+/// `constructor`, `__proto__` and four more, and swallowed them as modifiers
+/// mapping to nothing (review round 1, Minor 1). The fixture carries a row for
+/// that class now, so the two answers are pinned together rather than argued
+/// about here.
 fn alias(token: &str) -> Option<Modifier> {
     match token.to_ascii_lowercase().as_str() {
         "ctrl" | "control" | "ctl" => Some(Modifier::Ctrl),

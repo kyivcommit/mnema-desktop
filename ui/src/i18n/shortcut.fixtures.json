@@ -58,5 +58,17 @@
     "shortcut": "Space",
     "platform": "mac",
     "expected": "Space"
+  },
+  {
+    "note": "review round 1, Minor 1: a lowercased Object.prototype member name is an unknown token like any other. The TypeScript alias table is an object literal, so a bare index answered truthy for it and swallowed the token; the Rust match never could. This row is what keeps the two answering the same thing",
+    "shortcut": "Constructor+A",
+    "platform": "mac",
+    "expected": "Constructor+A"
+  },
+  {
+    "note": "review round 1, Minor 1: the same class, and the spelling that reaches the prototype without being lowercased first",
+    "shortcut": "__proto__+A",
+    "platform": "linux",
+    "expected": "__proto__+A"
   }
 ]

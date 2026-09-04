@@ -72,7 +72,18 @@ export function formatShortcut(shortcut: string, platform: Platform): string {
   const held = new Set<Modifier>();
   const unknown: string[] = [];
   for (const token of tokens.slice(0, -1)) {
-    const known = MODIFIER_ALIASES[token.toLowerCase()];
+    // 🔴 `Object.hasOwn` and not a bare index (review round 1, Minor 1). This
+    // record is an object literal, so it inherits `Object.prototype`, and a
+    // bare lookup answers truthy for any lowercase member name of it —
+    // `constructor`, `__proto__`, `__definegetter__` and its three siblings.
+    // Each came back as a modifier that maps to nothing at all and was
+    // swallowed: `Constructor+A` formatted to `A`, measured. The Rust mirror in
+    // `src-tauri/src/shortcut.rs` is a `match` and never could, so the two
+    // formatters disagreed for six spellings while both module docs claimed a
+    // token-for-token mirror. `shortcut.fixtures.json` now carries a row for
+    // each, which is what keeps this settled rather than this comment.
+    const lower = token.toLowerCase();
+    const known = Object.hasOwn(MODIFIER_ALIASES, lower) ? MODIFIER_ALIASES[lower] : undefined;
     if (known) held.add(known);
     else unknown.push(token);
   }

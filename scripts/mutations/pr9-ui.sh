@@ -346,3 +346,28 @@ case_ "the join must read the canonical ORDER, not the sequence the flags were p
   "s~return \[\.\.\.ORDER\.filter\(\(m\) => held\.includes\(m\)\), key\]\.join\('\+'\);~return [...held, key].join('+'); // mutant: joins the push order instead of the canonical one~" \
   "return [...held, key].join('+'); // mutant: joins the push order instead of the canonical one" \
   src/i18n/shortcut.test.ts 'the modifiers are emitted in the canonical order, whichever way the event states them' runner=vitest
+
+# ── Task 11a, fix round 1 (review, Minor 4): the fixture binds BOTH halves ────
+#
+# `scripts/mutations/pr9-shell.sh` carries a case judged by the Rust loop over
+# `ui/src/i18n/shortcut.fixtures.json`, on the argument that a case the
+# fixture's own loop could not kill would say the sharing is decorative. That
+# argument is symmetric and only one half had a case: nothing in the harness
+# would have noticed the TypeScript loop quietly ceasing to bind. This is the
+# mirror, and it is deliberately the SAME property the Rust case mutates — the
+# command key's per-platform spelling — so the two cases say the one fixture row
+# is load-bearing on both sides rather than each testing something of its own.
+#
+# The mac and linux fixture rows survive this mutant untouched, and so does
+# every `shortcutFromEvent` test in the file: the recorder never reads
+# `SUPER_WORD`.
+#
+# ⚠️ Anchored on the `const SUPER_WORD` line above it, because `windows: 'Win',`
+# on its own is NOT unique in that file — `MODIFIER_KEY_NAME` at the bottom
+# spells it the same way, for prose rather than for the formatter. An
+# unanchored pattern matches twice and this harness refuses it.
+case_ "the shared fixture kills a wrong per-platform spelling of the command key, this side too" \
+  ui/src/i18n/shortcut.ts \
+  "s~const SUPER_WORD: Record<Exclude<Platform, 'mac'>, string> = \{\n  windows: 'Win',~const SUPER_WORD: Record<Exclude<Platform, 'mac'>, string> = {\n  windows: 'Super', // mutant: the parsers spelling on a platform that prints Win~" \
+  "windows: 'Super', // mutant: the parsers spelling on a platform that prints Win" \
+  src/i18n/shortcut.test.ts 'the shared fixture is what this formatter produces' runner=vitest

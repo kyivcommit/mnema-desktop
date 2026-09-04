@@ -326,10 +326,10 @@ impl AppState {
     /// `None` for a success.
     ///
     /// **Total, not conditional** — it is called with `outcome.err().map(...)`
-    /// (`lib.rs:169`) rather than only from an `if let Err(e)`, so it always
+    /// (`lib.rs:198`) rather than only from an `if let Err(e)`, so it always
     /// writes a definite answer, success included, instead of writing only on
     /// failure and leaving a caller to remember to clear the field on the other
-    /// path. `boot_index` (`lib.rs:169`) is this setter's only caller today, run
+    /// path. `boot_index` (`lib.rs:198`) is this setter's only caller today, run
     /// once per process, so nothing here actually recovers from an earlier
     /// failure — what the total shape buys is that a future second caller (a
     /// retry, a manual re-open exposed from the settings screen) cannot leave a
