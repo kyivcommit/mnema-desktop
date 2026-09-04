@@ -446,20 +446,24 @@ test('the index read arm carries the file count, the moment, and the refusal cou
   const read: IndexRead = {
     kind: 'read', embeddingModel: 'emb-1', chatModel: null,
     embeddedChunks: 3, embeddedChunksEverywhere: 3, totalChunks: 4,
-    failedChunks: 1, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
+    failedChunks: 1, pendingChunks: 2, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
     searchTextArm: true, searchContentArm: true,
   };
 
   expect(read.indexedFiles).toBe(2);
   expect(read.lastIndexedAt).toBe(1_700_000_000);
   expect(read.failedChunks).toBe(1);
+  // F4 (spec §9.3 amended 2026-09-04): the embedding queue's own count,
+  // beside `failedChunks` rather than folded into it — the two are different
+  // scopes of the same space and `models.rs` reads each from its own query.
+  expect(read.pendingChunks).toBe(2);
 });
 
 test('an index that has never finished indexing states that as null, not as an absence', () => {
   const read: IndexRead = {
     kind: 'read', embeddingModel: null, chatModel: null,
     embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-    failedChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+    failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
     searchTextArm: true, searchContentArm: true,
   };
 
@@ -469,13 +473,13 @@ test('an index that has never finished indexing states that as null, not as an a
   expect('lastIndexedAt' in read).toBe(true);
 });
 
-// 🔴 Each of the three omitted on its own, because "the object is missing
+// 🔴 Each of the four omitted on its own, because "the object is missing
 // something" is satisfied by any one of them and would not notice the other
-// two turning optional. Required and not optional for the reason `ipc.ts`
+// three turning optional. Required and not optional for the reason `ipc.ts`
 // gives over the type: the only substitute for a missing count is `0`, and `0`
 // in front of a person reads as a measured claim this build has not made —
 // a fail-quiet field is a number that is silently always wrong.
-test('the three counts are required, so no fixture can leave one to a default', () => {
+test('the four counts are required, so no fixture can leave one to a default', () => {
   const rest = {
     kind: 'read' as const, embeddingModel: null, chatModel: null,
     embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
@@ -483,20 +487,23 @@ test('the three counts are required, so no fixture can leave one to a default', 
   };
 
   // @ts-expect-error `indexedFiles` is required.
-  const noFiles: IndexRead = { ...rest, failedChunks: 0, lastIndexedAt: null };
+  const noFiles: IndexRead = { ...rest, failedChunks: 0, pendingChunks: 0, lastIndexedAt: null };
   // @ts-expect-error `lastIndexedAt` is required.
-  const noMoment: IndexRead = { ...rest, failedChunks: 0, indexedFiles: 0 };
+  const noMoment: IndexRead = { ...rest, failedChunks: 0, pendingChunks: 0, indexedFiles: 0 };
   // @ts-expect-error `failedChunks` is required.
-  const noRefusals: IndexRead = { ...rest, indexedFiles: 0, lastIndexedAt: null };
+  const noRefusals: IndexRead = { ...rest, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null };
+  // @ts-expect-error `pendingChunks` is required.
+  const noQueue: IndexRead = { ...rest, failedChunks: 0, indexedFiles: 0, lastIndexedAt: null };
 
-  expect([noFiles.kind, noMoment.kind, noRefusals.kind]).toEqual(['read', 'read', 'read']);
+  expect([noFiles.kind, noMoment.kind, noRefusals.kind, noQueue.kind])
+    .toEqual(['read', 'read', 'read', 'read']);
 });
 
 test('the index read arm rejects Rust snake_case spellings', () => {
   const read: IndexRead = {
     kind: 'read', embeddingModel: null, chatModel: null,
     embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-    failedChunks: 0, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
+    failedChunks: 0, pendingChunks: 0, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
     searchTextArm: true, searchContentArm: true,
     // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
     indexed_files: 2,

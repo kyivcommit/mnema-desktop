@@ -279,10 +279,16 @@ export type UnreadableCause = 'notOpen' | 'readFailed';
 // finished indexing, and the section renders a sentence for it. An absent
 // field would collapse that into whatever the reader defaulted to — an epoch
 // date, or a blank where a sentence belongs.
+//
+// `pendingChunks` (F4, spec §9.3 amended 2026-09-04) is required for the same
+// reason `failedChunks` is: it is `models.rs`'s `Db::queued_chunk_count`, the
+// embedding queue counted the way the pass itself counts it, and `0` in front
+// of a person reads as "nothing is owed" — which is exactly the false claim a
+// missing field would default into after a tray Stop left a run unfinished.
 export type IndexSettings =
   | { kind: 'read'; embeddingModel: string | null; chatModel?: string | null;
       embeddedChunks: number; embeddedChunksEverywhere: number; totalChunks: number;
-      failedChunks: number; indexedFiles: number; lastIndexedAt: number | null;
+      failedChunks: number; pendingChunks: number; indexedFiles: number; lastIndexedAt: number | null;
       searchTextArm: boolean; searchContentArm: boolean }
   | { kind: 'unreadable'; cause: UnreadableCause; reason: string };
 

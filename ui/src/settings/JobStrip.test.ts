@@ -43,7 +43,7 @@ const READY_SETTINGS: ModelSettings = {
   index: {
     kind: 'read', embeddingModel: 'openai/text-embedding-3-small', chatModel: null,
     embeddedChunks: 12, embeddedChunksEverywhere: 12, totalChunks: 12,
-    failedChunks: 0, indexedFiles: 9, lastIndexedAt: 1_700_000_000,
+    failedChunks: 0, pendingChunks: 0, indexedFiles: 9, lastIndexedAt: 1_700_000_000,
     searchTextArm: true, searchContentArm: true,
   },
   platform: 'linux',
@@ -692,7 +692,7 @@ const onModel = (active: number, everywhere = active, total = 12): ModelSettings
   index: {
     kind: 'read', embeddingModel: 'emb-1', chatModel: null,
     embeddedChunks: active, embeddedChunksEverywhere: everywhere, totalChunks: total,
-    failedChunks: 0, indexedFiles: 9, lastIndexedAt: 1_700_000_000,
+    failedChunks: 0, pendingChunks: 0, indexedFiles: 9, lastIndexedAt: 1_700_000_000,
     searchTextArm: true, searchContentArm: true,
   },
   platform: 'linux',

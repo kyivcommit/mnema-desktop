@@ -94,6 +94,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_index_unreadable_not_open' | 'indexing_index_unreadable_read_failed'
   | 'indexing_index_unreadable_reason' | 'indexing_index_load_failed'
   | 'indexing_index_failed_chunks' | 'indexing_index_refused_run'
+  | 'indexing_index_pending_chunks' | 'indexing_index_resume_embedding'
   | 'application_shortcut_label' | 'application_shortcut_registered'
   | 'application_shortcut_unavailable' | 'application_shortcut_reason'
   | 'application_shortcut_tray' | 'application_shortcut_record'
@@ -778,6 +779,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // And this one is the run that has just ended. Its subject is a pass, not
     // the index.
     indexing_index_refused_run: 'Останній прохід вбудовування відхилив {count, plural, one {# фрагмент} few {# фрагменти} many {# фрагментів} other {# фрагмента}}.',
+    // F4 (spec §9.3, amended 2026-09-04): the embedding queue, `IndexRead.
+    // pendingChunks` — a tray Stop mid-pass, then a restart, left thousands of
+    // chunks un-embedded with nothing on screen saying so. Shown only while no
+    // run is under way (`Indexing.svelte`'s own gate on `jobs.state`'s phase),
+    // beside a button that resumes it.
+    indexing_index_pending_chunks: '{count, plural, one {Ще не вбудовано # фрагмент} few {Ще не вбудовано # фрагменти} many {Ще не вбудовано # фрагментів} other {Ще не вбудовано # фрагмента}}.',
+    indexing_index_resume_embedding: 'Продовжити вбудовування',
     // §9.4 — the Application section: the shortcut, autostart, and the version.
     //
     // 🔴 Two sentence sources, and they are kept apart on purpose. Everything
@@ -1030,6 +1038,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_index_load_failed: 'The state of the index could not be read.',
     indexing_index_failed_chunks: 'In this index the provider has given up on {count, plural, one {# chunk} other {# chunks}} in all. They are not offered again until their text changes: search by meaning does not find them, word search still does.',
     indexing_index_refused_run: 'The last embedding pass gave up on {count, plural, one {# chunk} other {# chunks}}.',
+    indexing_index_pending_chunks: '{count, plural, one {# chunk is not embedded yet} other {# chunks are not embedded yet}}.',
+    indexing_index_resume_embedding: 'Continue embedding',
     // §9.4 — the Application section: the shortcut, autostart, and the version.
     //
     // 🔴 Two sentence sources, and they are kept apart on purpose. Everything

@@ -13,7 +13,7 @@ const SETTINGS: ModelSettings = {
   key: { kind: 'absent' },
   index: {
     kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-    failedChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+    failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
     embeddingModel: null, searchTextArm: true, searchContentArm: false,
   },
   platform: 'linux',

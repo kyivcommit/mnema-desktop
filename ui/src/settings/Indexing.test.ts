@@ -52,7 +52,7 @@ function settings(over: Partial<ModelSettings> = {}): ModelSettings {
       kind: 'read',
       embeddingModel: 'openai/text-embedding-3-small', chatModel: null,
       embeddedChunks: 12, embeddedChunksEverywhere: 12, totalChunks: 12,
-      failedChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+      failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
       searchTextArm: true, searchContentArm: true,
     },
     platform: 'linux',
