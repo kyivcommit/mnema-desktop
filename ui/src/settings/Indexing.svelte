@@ -201,7 +201,42 @@
     return t('indexing_index_refused_run', { count: phase.ending.refused });
   });
 
+  // F4 (spec §9.3, amended 2026-09-04): the embedding queue —
+  // `IndexRead.pendingChunks`, `Db::queued_chunk_count`'s own count. A tray
+  // Stop mid-pass, then a restart, left thousands of chunks un-embedded with
+  // nothing on any screen saying so; the only resume was the Scan button
+  // beside the right folder happening to chain into an embed.
+  //
+  // Gated on the phase, not only on the count: the number on screen is a
+  // moment-old read and does not shrink as a resumed run works through the
+  // queue, so once a pass is under way the strip above owns that state and
+  // this line and its button step aside rather than show a count a running
+  // pass is already changing.
+  const showPending = $derived(
+    read !== null && read.pendingChunks > 0
+      && ($jobState.phase.kind === 'idle' || $jobState.phase.kind === 'ended'),
+  );
+  const pendingLine = $derived.by(() => {
+    void $locale;
+    if (!showPending || read === null) return null;
+    return t('indexing_index_pending_chunks', { count: read.pendingChunks });
+  });
+  const resumeEmbeddingLabel = $derived.by(() => {
+    void $locale;
+    return t('indexing_index_resume_embedding');
+  });
+
   const loadFailedLabel = $derived.by(() => { void $locale; return t('indexing_index_load_failed'); });
+
+  // Through the controller, never `startEmbedJob` directly — `Models.svelte`'s
+  // own `reembed` (`:468-484`) argues why: the pass this button starts belongs
+  // on the window's strip, where its progress and its Cancel stay reachable
+  // from every section. Nothing is caught here for the same reason that
+  // argument gives: a refusal is the controller's to report, in the same words
+  // and the same place as every other refused command.
+  function resumeEmbedding() {
+    void jobs.embed();
+  }
 </script>
 
 <!-- The failed read leads, and it does NOT gate what follows: this is an `{#if}`,
@@ -226,3 +261,7 @@
 {#if neverLine}<p data-testid="indexing-index-never">{neverLine}</p>{/if}
 {#if failedChunksLine}<p data-testid="indexing-index-failed-chunks">{failedChunksLine}</p>{/if}
 {#if refusedRunLine}<p data-testid="indexing-index-refused-run">{refusedRunLine}</p>{/if}
+{#if showPending}
+  <p data-testid="indexing-index-pending-chunks">{pendingLine}</p>
+  <button data-testid="indexing-resume-embedding" onclick={resumeEmbedding}>{resumeEmbeddingLabel}</button>
+{/if}

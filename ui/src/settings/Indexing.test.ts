@@ -337,6 +337,98 @@ test('an index that stops being readable still says what the pass that just ende
 });
 
 // ---------------------------------------------------------------------------
+// F4 (spec §9.3, amended 2026-09-04): the embedding queue. A tray Stop on the
+// embedding pass, then a restart, left thousands of chunks un-embedded with
+// nothing on any screen saying so — the only resume was «Сканувати» beside the
+// right folder happening to chain into an embed. `IndexRead.pendingChunks` is
+// the queue itself; this section says how many chunks are owed and offers to
+// resume, but only while no run is already under way — the strip above owns
+// that state once one starts.
+// ---------------------------------------------------------------------------
+
+const PENDING_SENTENCE = 'Ще не вбудовано 5 фрагментів.';
+
+test('an index with a queue and no run under way names it and offers to resume', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
+
+  renderSection();
+
+  await waitFor(() => expect(screen.getByTestId('indexing-index-pending-chunks')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-index-pending-chunks'))).toBe(PENDING_SENTENCE);
+  expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy();
+});
+
+test('an empty queue says nothing and offers nothing', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 0 }));
+
+  renderSection();
+
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull();
+  expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
+  expect(pageText()).not.toContain('вбудовано');
+});
+
+// A queue does not vanish the moment a run starts on it — the count on the
+// screen is stale until the next re-read — so the section hides the line and
+// the button itself rather than trusting the backend to zero the count first.
+// The strip above already owns "a pass is running" for every section; a
+// second button offering to start ANOTHER embed here would race it.
+test('a queue is not offered again while a run is already under way', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
+  const { jobs } = renderSection();
+  await waitFor(() => expect(screen.getByTestId('indexing-index-pending-chunks')).toBeTruthy());
+
+  const send = await embedChannel(jobs);
+  await send(progress());
+
+  expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull();
+  expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
+});
+
+// Through the controller, exactly the way `Models.svelte:468`'s own `reembed`
+// argues: the pass this button starts belongs on the window's strip, where its
+// progress and its Cancel stay reachable from every section, not to a listener
+// this component alone can hear. `scan` is asserted never-called specifically
+// because the folder-scan chain is the OTHER way to reach this same pass, and
+// a button that quietly called the wrong one would still leave the queue
+// embedding — just from underneath a walk nobody asked for.
+test('the resume button starts the embedding pass through the controller, never a scan', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
+  renderSection();
+  await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('indexing-resume-embedding'));
+
+  await waitFor(() => expect(startEmbedJob).toHaveBeenCalledTimes(1));
+  expect(startWalkJob).not.toHaveBeenCalled();
+});
+
+// The line and the button re-derive once the pass they started ends, the same
+// re-read every other ending on this section already triggers
+// (`refresh()` on `phase.kind === 'ended'`) — reusing the phase fixtures and
+// the `modelSettings` call-count pattern the refresh tests below pin.
+test('once the resumed pass ends, the section re-reads and the queue reflects what is left', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
+  const { jobs } = renderSection();
+  await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
+
+  // Taken AFTER `embedChannel` rather than after the mount: starting an embed
+  // makes its own precondition read of `model_settings` (`jobs.ts`'s `chain`),
+  // which is not the read this test is about. What it pins is the ONE further
+  // read the ending itself triggers — the same `refresh()` on `phase.kind ===
+  // 'ended'` every other ending on this section already causes.
+  const send = await embedChannel(jobs);
+  const beforeEnding = modelSettings.mock.calls.length;
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 0 }));
+  await send(ended({ reason: 'completed', complete: true }));
+
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBe(beforeEnding + 1));
+  await waitFor(() => expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull());
+  expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
 // The refresh, its trigger, and its lifetime.
 // ---------------------------------------------------------------------------
 
