@@ -46,14 +46,21 @@ pub fn resolve(choice: LocaleChoice, os: Option<&str>) -> Lang {
 /// resolve in both languages — the `match` in `t` is exhaustive over `(Lang,
 /// Key)`, so a new variant without both arms fails to compile; the completeness
 /// test below is the belt to that compiler-enforced brace. Translatable TEXT
-/// only: no emoji, no shortcut hints (e.g. `(⌥Space)`), no endonyms — those are
-/// composed at the call site or, for endonyms, live in `endonym` below.
+/// only: no emoji, no shortcut hints, no endonyms — those are composed at the
+/// call site or, for endonyms, live in `endonym` below.
+///
+/// The shortcut hint is the one worth naming, because it is no longer a
+/// literal anywhere: `tray.rs`'s `tray_label` derives `(⌥Space)` and every
+/// other form of it from the `HotkeyState` the operating system reports,
+/// through `shortcut::format_shortcut`. It was a fixed string in this
+/// catalogue's neighbour until Task 11a, and a person who changed the shortcut
+/// read the old one off the tray.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     TrayStatus,       // "Проіндексовано —" / "Indexed —"
     TrayShowSearch,   // "Показати пошук" / "Show search"
     TrayOpenSettings, // "Відкрити налаштування" / "Open settings"
-    TrayStopIndexing, // "Зупинити індексацію" / "Stop indexing"
+    TrayStopIndexing, // "Зупинити сканування" / "Stop scanning"
     TrayQuit,         // "Вийти" / "Quit"
     MenuLanguage,     // submenu title "Мова" / "Language"
     LangAuto,         // "Авто (система)" / "Auto (system)"
@@ -98,8 +105,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, TrayShowSearch) => "Show search",
         (Lang::Uk, TrayOpenSettings) => "Відкрити налаштування",
         (Lang::En, TrayOpenSettings) => "Open settings",
-        (Lang::Uk, TrayStopIndexing) => "Зупинити індексацію",
-        (Lang::En, TrayStopIndexing) => "Stop indexing",
+        (Lang::Uk, TrayStopIndexing) => "Зупинити сканування",
+        (Lang::En, TrayStopIndexing) => "Stop scanning",
         (Lang::Uk, TrayQuit) => "Вийти",
         (Lang::En, TrayQuit) => "Quit",
         (Lang::Uk, MenuLanguage) => "Мова",

@@ -439,7 +439,7 @@ impl AppState {
     }
 
     /// Registers who to tell when the job slot changes hands. Installed once,
-    /// from `.setup`, so that the tray can offer «Зупинити індексацію» only
+    /// from `.setup`, so that the tray can offer «Зупинити сканування» only
     /// while there is something to stop.
     ///
     /// Takes a `Box` and stores an `Arc`: the slot hands its holder a clone,

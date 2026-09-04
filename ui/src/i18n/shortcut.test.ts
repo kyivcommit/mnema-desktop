@@ -1,4 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { expect, test } from 'vitest';
+import type { Platform } from '../lib/ipc';
 import { formatShortcut, isModifierOnlyPress, shortcutFromEvent } from './shortcut';
 
 // A `keydown` as the recorder receives it. `code` is the physical key and is
@@ -19,6 +22,40 @@ const press = (over: Partial<KeyboardEventInit> = {}): KeyboardEvent =>
 // A suite that only ever asked about its own platform would pass on a formatter
 // that had no other branch at all.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The shared fixture, and why a file rather than a table in this suite.
+//
+// 🔴 From Task 11a the tray menu draws the same stored shortcut, and the tray
+// is native: it cannot call this module and has a formatter of its own in
+// `src-tauri/src/shortcut.rs`. Two implementations of one function that agree
+// only because somebody kept them in step drift the moment nobody does. So the
+// expected values live in `shortcut.fixtures.json`, this suite iterates it and
+// the Rust unit test `include_str!`s it — an expected value edited there has to
+// go red on BOTH sides, and a side that has quietly stopped reading the file
+// stays green alone, which is the state this arrangement exists to expose.
+//
+// Read with `readFileSync` rather than imported: `resolveJsonModule` is off in
+// this project's `tsconfig.json`, and turning it on to load one fixture would
+// change how every other module may import. The path is built from
+// `import.meta.dirname` and NOT from `new URL('./…', import.meta.url)`, which
+// Vite recognises as an asset reference and rewrites into a served URL — that
+// spelling fails here with `The URL must be of scheme file`, measured. Nor from
+// `process.cwd()`: the mutation harness runs this suite from a copied worktree.
+type Fixture = { note: string; shortcut: string; platform: Platform; expected: string };
+const FIXTURES: Fixture[] = JSON.parse(
+  readFileSync(join(import.meta.dirname, 'shortcut.fixtures.json'), 'utf-8'),
+);
+
+test('the shared fixture is what this formatter produces', () => {
+  // An empty array is valid JSON and would make the loop below assert nothing
+  // at all. A floor rather than the count, so adding a row does not edit this.
+  expect(FIXTURES.length).toBeGreaterThanOrEqual(10);
+  for (const { shortcut, platform, expected, note } of FIXTURES) {
+    expect(formatShortcut(shortcut, platform), `${shortcut} on ${platform} — ${note}`)
+      .toBe(expected);
+  }
+});
 
 test('the default shortcut is drawn with mac glyphs on mac and with words elsewhere', () => {
   expect(formatShortcut('Alt+Space', 'mac')).toBe('⌥Space');

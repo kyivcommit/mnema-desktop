@@ -479,3 +479,54 @@ case_ "the tray item list is the amended spec 8, not the one before it" \
   's~    "stop_indexing",\n    "quit",\n\];~    "stop_indexing",\n    "check_updates", // mutant: the deleted update check is back\n    "quit",\n];~' \
   '// mutant: the deleted update check is back' \
   mnema-desktop 'tray::tests::tray_item_ids_match_spec_order' --lib
+
+# ── Task 11a: the tray hint follows the registered hotkey ─────────────────────
+#
+# The measured defect, put back. Until Task 11a the hint was the literal
+# `(⌥Space)`, written when the shortcut could not be changed; PR 9 made it
+# changeable and the label did not follow, so a person who moved it to ⌃⌥Space
+# and restarted read the old combination off the menu bar. Every OTHER label
+# assertion in `tray::tests` survives this — the default shortcut IS `Alt+Space`
+# and on a mac that is exactly what the literal says — so only a fixture holding
+# a shortcut that is not the default can see it.
+case_ "the search hint is read off the hotkey state, not written into the label" \
+  src-tauri/src/tray.rs \
+  's~                crate::shortcut::format_shortcut\(\n                    &hotkey\.shortcut,\n                    crate::models::Platform::of_this_build\(\)\n                \)~                "⌥Space" // mutant: the hint is a literal again~' \
+  '"⌥Space" // mutant: the hint is a literal again' \
+  mnema-desktop 'tray::tests::the_search_hint_follows_the_registered_shortcut' --lib
+
+# The plausible wrong implementation rather than a deletion: the hint is drawn
+# from the state, correctly, and drawn in the one state where there is nothing
+# to press. D128 measured `Unavailable` as a real start — another application
+# holding the shortcut — and a menu promising a combination that does nothing is
+# the same class of defect this task exists for, one step smaller. Every
+# `Registered` fixture passes under this mutant.
+case_ "a shortcut the operating system refused is named by no hint at all" \
+  src-tauri/src/tray.rs \
+  's~                format!\("🔍 \{\}", locale::t\(lang, Key::TrayShowSearch\)\)~                // mutant: an unusable shortcut is named anyway\n                format!(\n                    "🔍 \{\} (\{\})",\n                    locale::t(lang, Key::TrayShowSearch),\n                    crate::shortcut::format_shortcut(\n                        \&hotkey.shortcut,\n                        crate::models::Platform::of_this_build()\n                    )\n                )~' \
+  '// mutant: an unusable shortcut is named anyway' \
+  mnema-desktop 'tray::tests::an_unregistered_shortcut_is_named_by_no_hint_at_all' --lib
+
+# The canonical order dropped from the Rust formatter: the modifiers come out in
+# whatever order the stored string happens to hold them. `prefs.json` is a file
+# on the person's own disk and the parser takes any order as long as the key is
+# last, so this is invisible on every fixture that was already canonical — which
+# is every one the recorder itself builds. Only a stored string written the
+# other way round can see it.
+case_ "the tray formatter draws the modifiers in the canonical order, not the stored one" \
+  src-tauri/src/shortcut.rs \
+  's~    let modifiers: Vec<Modifier> = ORDER\.into_iter\(\)\.filter\(\|m\| held\.contains\(m\)\)\.collect\(\);~    let modifiers: Vec<Modifier> = held.clone(); // mutant: the order the tokens arrived in~' \
+  '// mutant: the order the tokens arrived in' \
+  mnema-desktop 'shortcut::tests::the_modifiers_are_drawn_in_the_canonical_order_whichever_order_the_store_holds' --lib
+
+# The command key spelled the parser's way on the platform that prints `Win` on
+# the key itself. Judged by the test that reads
+# `ui/src/i18n/shortcut.fixtures.json`, and deliberately so: that file is the
+# only thing holding this formatter and `ui/src/i18n/shortcut.ts` to one
+# answer, and a case its own loop cannot kill would say the sharing is
+# decorative. The mac and linux rows survive this mutant untouched.
+case_ "the shared fixture kills a wrong per-platform spelling of the command key" \
+  src-tauri/src/shortcut.rs \
+  's~            \(Modifier::Super, Platform::Windows\) => "Win",~            (Modifier::Super, Platform::Windows) => "Super", // mutant: the parsers spelling on a platform that prints Win~' \
+  '// mutant: the parsers spelling on a platform that prints Win' \
+  mnema-desktop 'shortcut::tests::the_shared_fixture_is_what_this_formatter_produces' --lib

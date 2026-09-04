@@ -1,5 +1,16 @@
 //! The menu-bar tray: the resident's only always-present surface and, by §6,
 //! the only way to quit. Built in `lib.rs::run`'s `setup` hook.
+//!
+//! Nothing here holds a user-facing sentence — the text comes from `locale.rs`
+//! and the emoji are composed onto it in [`tray_label`]. The one value that is
+//! neither is the shortcut hint on «Показати пошук», and from Task 11a it is
+//! not a literal either: it is the `prefs::HotkeyState` the operating system
+//! answered with, drawn by `shortcut::format_shortcut`, which mirrors the
+//! settings window's own formatter against `ui/src/i18n/shortcut.fixtures.json`
+//! — one fixture, two implementations, so neither can drift alone. Three
+//! entry points read that state and so three menus can change with it:
+//! [`build_tray`] at boot, [`swap_tray_menu`] on a language change, and
+//! `prefs::set_hotkey` when the shortcut itself moves.
 
 use tauri::Manager as _;
 use tauri::{
@@ -9,14 +20,47 @@ use tauri::{
 };
 
 use crate::locale::{self, Key, Lang, LocaleChoice};
+use crate::prefs::{HotkeyState, HotkeyStatus};
 
-/// Composes one tray item's label from the catalog (§D129). The emoji and the
-/// `(⌥Space)` hint are literals here, not in the catalog: the same glyph and
-/// the same shortcut in both languages, not translatable text.
-pub fn tray_label(lang: Lang, id: &str) -> String {
+/// Composes one tray item's label from the catalog (§D129). The emoji is a
+/// literal here and not in the catalog: the same glyph in both languages, not
+/// translatable text.
+///
+/// 🔴 **The shortcut hint is DERIVED, and that is the whole of Task 11a.** It
+/// used to be the literal `(⌥Space)`, written when the shortcut could not be
+/// changed. PR 9 made it changeable and the label did not follow: measured on
+/// 2026-09-04, a shortcut moved to ⌃⌥Space in the Application section left the
+/// tray reading «Показати пошук (⌥Space)» after a restart — a sentence
+/// contradicting the data beside it. The hint now comes from the same
+/// [`HotkeyState`] the settings window is drawn from, through
+/// [`crate::shortcut::format_shortcut`], which mirrors the window's own
+/// formatter against a fixture both read.
+///
+/// And it is drawn ONLY when the operating system says `Registered`. From an
+/// `Unavailable` start there is no shortcut to press, so the label names none:
+/// parentheses around a combination that does nothing is the same class of
+/// defect one step smaller.
+pub fn tray_label(lang: Lang, id: &str, hotkey: &HotkeyState) -> String {
     match id {
         "status" => locale::t(lang, Key::TrayStatus).to_string(),
-        "show_search" => format!("🔍 {} (⌥Space)", locale::t(lang, Key::TrayShowSearch)),
+        "show_search" => match hotkey.status {
+            // `Platform::of_this_build` and NOT a `cfg!` written out here: the
+            // same constant already answers this question for the settings
+            // window, chosen at compile time and sent over the wire, and a
+            // second derivation of one fact is how the two halves of a label
+            // start disagreeing. See `models::Platform`.
+            HotkeyStatus::Registered => format!(
+                "🔍 {} ({})",
+                locale::t(lang, Key::TrayShowSearch),
+                crate::shortcut::format_shortcut(
+                    &hotkey.shortcut,
+                    crate::models::Platform::of_this_build()
+                )
+            ),
+            HotkeyStatus::Unavailable { .. } => {
+                format!("🔍 {}", locale::t(lang, Key::TrayShowSearch))
+            }
+        },
         "open_settings" => format!("⚙ {}", locale::t(lang, Key::TrayOpenSettings)),
         "stop_indexing" => format!("⏹ {}", locale::t(lang, Key::TrayStopIndexing)),
         "quit" => format!("⏻ {}", locale::t(lang, Key::TrayQuit)),
@@ -87,25 +131,26 @@ pub fn build_tray_menu<R: Runtime>(
     app: &tauri::AppHandle<R>,
     lang: Lang,
     choice: LocaleChoice,
+    hotkey: &HotkeyState,
 ) -> tauri::Result<(Menu<R>, MenuItem<R>)> {
     let status = MenuItem::with_id(
         app,
         "status",
-        tray_label(lang, "status"),
+        tray_label(lang, "status", hotkey),
         false,
         None::<&str>,
     )?;
     let show_search = MenuItem::with_id(
         app,
         "show_search",
-        tray_label(lang, "show_search"),
+        tray_label(lang, "show_search", hotkey),
         true,
         None::<&str>,
     )?;
     let open_settings = MenuItem::with_id(
         app,
         "open_settings",
-        tray_label(lang, "open_settings"),
+        tray_label(lang, "open_settings", hotkey),
         true,
         None::<&str>,
     )?;
@@ -133,11 +178,17 @@ pub fn build_tray_menu<R: Runtime>(
     let stop = MenuItem::with_id(
         app,
         "stop_indexing",
-        tray_label(lang, "stop_indexing"),
+        tray_label(lang, "stop_indexing", hotkey),
         false,
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(app, "quit", tray_label(lang, "quit"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        tray_label(lang, "quit", hotkey),
+        true,
+        None::<&str>,
+    )?;
 
     let menu = Menu::with_items(
         app,
@@ -156,7 +207,7 @@ pub fn build_tray_menu<R: Runtime>(
     Ok((menu, stop))
 }
 
-/// The handle to the tray's «Зупинити індексацію» item, as managed state.
+/// The handle to the tray's «Зупинити сканування» item, as managed state.
 ///
 /// It is here, and read out of here on every use, because the item on screen is
 /// replaced whenever the language changes: [`build_tray_menu`] builds a whole
@@ -202,12 +253,20 @@ pub fn set_stop_enabled<R: Runtime>(app: &tauri::AppHandle<R>, enabled: bool) {
 /// Rebuilds the tray menu in `lang` and puts it on the live tray, keeping
 /// [`StopItem`]'s slot in step.
 ///
-/// Both callers that relabel the tray go through here — `locale::apply_locale`
-/// on a language change, and `lib.rs`'s handler when a change failed to persist
-/// and the checkmark has to be put back. One predicate rather than two, because
-/// the half that is easy to forget is not the `set_menu`: it is that the old
-/// Stop item has just left the menu, and anything still holding it is now
-/// talking to nothing.
+/// Every caller that relabels the tray goes through here — `locale::apply_locale`
+/// on a language change, `lib.rs`'s handler when a change failed to persist and
+/// the checkmark has to be put back, and from Task 11a `prefs::set_hotkey`,
+/// whose label change is the shortcut hint rather than the language. One
+/// predicate rather than three, because the half that is easy to forget is not
+/// the `set_menu`: it is that the old Stop item has just left the menu, and
+/// anything still holding it is now talking to nothing.
+///
+/// The hotkey is read from `AppState` here rather than passed in, for the same
+/// reason the locale is read inside `apply_locale`: the caller that has just
+/// changed it and the caller that has not must produce the same menu, and a
+/// parameter is one more thing a caller can hand in stale. The read happens
+/// AFTER the tray lookup, so a headless test — which has no tray — returns
+/// before touching state at all.
 ///
 /// Best-effort throughout (`let _ =`), like everything else on the language
 /// path: this runs from a tray callback that has no error channel of its own
@@ -216,7 +275,8 @@ pub fn swap_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>, lang: Lang, choice:
     let Some(tray) = app.tray_by_id("mnema-tray") else {
         return;
     };
-    let Ok((menu, stop)) = build_tray_menu(app, lang, choice) else {
+    let hotkey = app.state::<crate::state::AppState>().hotkey();
+    let Ok((menu, stop)) = build_tray_menu(app, lang, choice, &hotkey) else {
         return;
     };
     if let Some(slot) = app.try_state::<StopItem<R>>() {
@@ -229,6 +289,12 @@ pub fn swap_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>, lang: Lang, choice:
 /// `manage_state`, which `lib.rs`'s `setup` hook runs first (`lib.rs:314-315`),
 /// so the state is already managed here.
 ///
+/// It reads the hotkey the same way and in the same breath, and the boot order
+/// is what makes that a fact rather than a hope: `.setup` runs
+/// `prefs::install_hotkey` BEFORE this call, so the first menu this application
+/// ever draws already names the shortcut the operating system answered about —
+/// including an `Unavailable` one, which is named by no hint at all.
+///
 /// Menu-event handling (`show_search` → `crate::focus_launcher`,
 /// `open_settings`, `quit`, and the language items) is wired at the app level
 /// instead of here (`lib.rs`'s `on_menu_event`, Task 6): an event closure
@@ -240,8 +306,10 @@ pub fn swap_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>, lang: Lang, choice:
 /// into [`StopItem`]'s slot: the slot has to be managed before anything can be
 /// read out of it, and nothing before this call has an item to put there.
 pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<MenuItem<R>> {
-    let locale_state = app.state::<crate::state::AppState>().locale();
-    let (menu, stop) = build_tray_menu(app, locale_state.effective, locale_state.choice)?;
+    let state = app.state::<crate::state::AppState>();
+    let locale_state = state.locale();
+    let hotkey = state.hotkey();
+    let (menu, stop) = build_tray_menu(app, locale_state.effective, locale_state.choice, &hotkey)?;
 
     TrayIconBuilder::with_id("mnema-tray")
         .icon(
@@ -261,17 +329,122 @@ pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<MenuIt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Platform;
+    use crate::shortcut::format_shortcut;
+
+    /// The state the operating system is holding `shortcut`, which is the only
+    /// state in which the label carries a hint at all.
+    fn registered(shortcut: &str) -> HotkeyState {
+        HotkeyState {
+            shortcut: shortcut.to_string(),
+            status: HotkeyStatus::Registered,
+        }
+    }
+
+    /// The other state D128 made real: the shortcut is stored and the operating
+    /// system refused it, so nothing on the keyboard opens the launcher.
+    fn unavailable(shortcut: &str) -> HotkeyState {
+        HotkeyState {
+            shortcut: shortcut.to_string(),
+            status: HotkeyStatus::Unavailable {
+                reason: "taken by another application".into(),
+            },
+        }
+    }
 
     #[test]
     fn tray_labels_compose_emoji_and_translation() {
         assert_eq!(
-            tray_label(crate::locale::Lang::En, "show_search"),
-            "🔍 Show search (⌥Space)"
+            tray_label(
+                crate::locale::Lang::En,
+                "show_search",
+                &registered(crate::prefs::DEFAULT_HOTKEY)
+            ),
+            format!(
+                "🔍 Show search ({})",
+                format_shortcut("Alt+Space", Platform::of_this_build())
+            )
         );
-        assert_eq!(tray_label(crate::locale::Lang::Uk, "quit"), "⏻ Вийти");
         assert_eq!(
-            tray_label(crate::locale::Lang::En, "open_settings"),
+            tray_label(crate::locale::Lang::Uk, "quit", &registered("Alt+Space")),
+            "⏻ Вийти"
+        );
+        assert_eq!(
+            tray_label(
+                crate::locale::Lang::En,
+                "open_settings",
+                &registered("Alt+Space")
+            ),
             "⚙ Open settings"
+        );
+    }
+
+    /// 🔴 The defect this task exists for, as a pair of states rather than one
+    /// value: the SAME language, two different registered shortcuts, two
+    /// different labels. The literal `(⌥Space)` this replaced satisfies the
+    /// first of these and nothing else — which is exactly what a person saw
+    /// after changing the shortcut to ⌃⌥Space and restarting (measured
+    /// 2026-09-04).
+    ///
+    /// Written through `format_shortcut(.., Platform::of_this_build())` rather
+    /// than against a glyph, so it asserts the same thing on the CI's Linux and
+    /// on a mac. The platform-pinned forms are `shortcut::tests`' own; the one
+    /// mac literal this file still pins is the row below.
+    #[test]
+    fn the_search_hint_follows_the_registered_shortcut() {
+        let default = tray_label(Lang::Uk, "show_search", &registered("Alt+Space"));
+        let changed = tray_label(Lang::Uk, "show_search", &registered("Ctrl+Alt+Space"));
+        assert_eq!(
+            changed,
+            format!(
+                "🔍 {} ({})",
+                locale::t(Lang::Uk, Key::TrayShowSearch),
+                format_shortcut("Ctrl+Alt+Space", Platform::of_this_build())
+            )
+        );
+        // Both directions, and this is the assertion the literal died on: the
+        // label for one shortcut is not the label for another.
+        assert_ne!(changed, default);
+    }
+
+    /// The form the literal used to be, now derived — pinned to mac because
+    /// that is the platform the literal was written on and the one whose
+    /// rendering a reader of this file recognises. On the other two builds the
+    /// same call answers `Alt+Space`, which `shortcut::tests` pins.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn on_a_mac_the_default_shortcut_still_reads_exactly_as_it_used_to() {
+        assert_eq!(
+            tray_label(
+                Lang::Uk,
+                "show_search",
+                &registered(crate::prefs::DEFAULT_HOTKEY)
+            ),
+            "🔍 Показати пошук (⌥Space)"
+        );
+    }
+
+    /// An `Unavailable` shortcut is not a shortcut a person can press, so the
+    /// label promises none. Positive first — the item still says what it does
+    /// and in the right language — then the absence, because a label that had
+    /// lost its text entirely would also contain no parenthesis.
+    #[test]
+    fn an_unregistered_shortcut_is_named_by_no_hint_at_all() {
+        let label = tray_label(Lang::Uk, "show_search", &unavailable("Ctrl+Alt+Space"));
+        assert_eq!(
+            label,
+            format!("🔍 {}", locale::t(Lang::Uk, Key::TrayShowSearch))
+        );
+        assert!(
+            !label.contains('('),
+            "an unusable shortcut was drawn: {label}"
+        );
+        // Both directions: the very same shortcut, registered, does get one —
+        // so the missing parenthesis is about the status and not about the
+        // string beside it.
+        assert!(
+            tray_label(Lang::Uk, "show_search", &registered("Ctrl+Alt+Space")).contains('('),
+            "a registered shortcut lost its hint"
         );
     }
 
@@ -282,12 +455,20 @@ mod tests {
     #[test]
     fn the_stop_item_composes_its_glyph_with_both_translations() {
         assert_eq!(
-            tray_label(crate::locale::Lang::Uk, "stop_indexing"),
-            "⏹ Зупинити індексацію"
+            tray_label(
+                crate::locale::Lang::Uk,
+                "stop_indexing",
+                &registered("Alt+Space")
+            ),
+            "⏹ Зупинити сканування"
         );
         assert_eq!(
-            tray_label(crate::locale::Lang::En, "stop_indexing"),
-            "⏹ Stop indexing"
+            tray_label(
+                crate::locale::Lang::En,
+                "stop_indexing",
+                &registered("Alt+Space")
+            ),
+            "⏹ Stop scanning"
         );
     }
 
@@ -312,15 +493,23 @@ mod tests {
         // `locale::t`/`locale::endonym` directly in `build_tray_menu` — and
         // are covered by locale.rs's own `every_key_has_both_languages...`.
         for &id in TRAY_ITEM_IDS {
-            assert!(!tray_label(Lang::Uk, id).is_empty(), "UK missing for {id}");
-            assert!(!tray_label(Lang::En, id).is_empty(), "EN missing for {id}");
+            for state in [registered("Alt+Space"), unavailable("Alt+Space")] {
+                assert!(
+                    !tray_label(Lang::Uk, id, &state).is_empty(),
+                    "UK missing for {id}"
+                );
+                assert!(
+                    !tray_label(Lang::En, id, &state).is_empty(),
+                    "EN missing for {id}"
+                );
+            }
         }
     }
 
     #[test]
     #[should_panic(expected = "unknown tray id")]
     fn tray_label_rejects_an_unknown_id() {
-        tray_label(Lang::En, "not_a_real_id");
+        tray_label(Lang::En, "not_a_real_id", &registered("Alt+Space"));
     }
 
     /// The amended §8 dropped «Перевірити оновлення», and dropping an item is
@@ -331,7 +520,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "unknown tray id")]
     fn tray_label_rejects_the_deleted_update_check() {
-        tray_label(Lang::En, "check_updates");
+        tray_label(Lang::En, "check_updates", &registered("Alt+Space"));
     }
 
     #[test]

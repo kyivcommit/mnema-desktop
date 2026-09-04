@@ -14,6 +14,7 @@ pub mod models;
 pub mod os_services;
 pub mod paths;
 pub mod prefs;
+pub mod shortcut;
 pub mod state;
 pub mod tray;
 mod tree;
@@ -563,7 +564,7 @@ pub fn run() -> anyhow::Result<()> {
                 );
                 let _ = prefs::install_hotkey(&state);
             }
-            // §8: the tray's «Зупинити індексацію». `build_tray` hands back the
+            // §8: the tray's «Зупинити сканування». `build_tray` hands back the
             // item so that it can be reached again later; the slot it goes into
             // is what a language change replaces, so nothing here or below ever
             // captures the item itself.

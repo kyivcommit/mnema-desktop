@@ -25,10 +25,12 @@
 use crate::error::Error;
 use crate::paths;
 use crate::state::AppState;
+// For `AppHandle::state` in `set_hotkey`'s rebuild closure.
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tauri::Manager as _;
 use tauri_plugin_global_shortcut::Shortcut;
 
 /// The shortcut a fresh installation gets, and what an absent or unparsable
@@ -440,12 +442,45 @@ fn read_autostart(state: &AppState) -> AutostartState {
 /// fact the window is entitled to state. A persist failure therefore leaves the
 /// new shortcut registered and the old one on disk — the named residual — and
 /// is reported as [`Error::Prefs`], which already exists.
+/// 🔴 **The tray is relabelled here, and on the failure path too.** The tray's
+/// «Показати пошук» names the registered shortcut, so every row of the table
+/// above except the parse refusal changes what that item should read — rows 4
+/// and 5 fail and still leave the state somewhere new (`Unavailable` after a
+/// failed re-registration, which the label draws as no hint at all). Booking
+/// the rebuild to `Ok` alone would have left the one case a person most needs
+/// to see unrepaired. The parse refusal changes nothing and pays for one extra
+/// rebuild of an identical menu, which is cheaper than a condition that has to
+/// stay correct.
+///
+/// Through `run_on_main_thread` because this command is `(async)` and therefore
+/// on a worker thread, while `build_tray_menu` needs the main one on macOS
+/// (`tray::TRAY_ITEM_IDS` records why). The locale is read INSIDE the closure
+/// rather than captured beside it: between the dispatch and the run, a language
+/// change may have gone the other way.
+///
+/// ⚠️ **No headless test distinguishes this from not doing it, and that is a
+/// property of the runtime rather than a gap somebody left.** `swap_tray_menu`
+/// returns at its first line when there is no tray, and `mock_builder()` builds
+/// no tray at all — so under the mock this dispatch and its absence are
+/// observationally identical. It is verified by changing the shortcut in the
+/// running application and reading the menu bar, which is Task 9's live run.
 #[tauri::command(async)]
-pub fn set_hotkey(
+pub fn set_hotkey<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     shortcut: String,
 ) -> Result<HotkeyState, Error> {
-    change_hotkey(&state, shortcut)
+    let outcome = change_hotkey(&state, shortcut);
+    let handle = app.clone();
+    // Best-effort, like every other relabel: a tray that could not be redrawn
+    // is a stale label, and returning the change's own answer to the window
+    // matters more than that. `run_on_main_thread` posts and returns — it does
+    // not wait — so nothing here holds the worker thread on the event loop.
+    let _ = app.run_on_main_thread(move || {
+        let locale = handle.state::<AppState>().locale();
+        crate::tray::swap_tray_menu(&handle, locale.effective, locale.choice);
+    });
+    outcome
 }
 
 /// [`set_hotkey`]'s body, as a free function over `&AppState`.
