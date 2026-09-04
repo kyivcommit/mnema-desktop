@@ -330,7 +330,7 @@ case_ "unavailable must not be worded as registered" \
 # the first of that pair.
 case_ "a rejected set_hotkey must trigger a fresh read, not keep the pre-call value" \
   ui/src/settings/Application.svelte \
-  's~hotkeyError = err instanceof Error \? err\.message : String\(err\);.*?void refresh\(\);~hotkeyError = err instanceof Error ? err.message : String(err); // mutant: a rejected set_hotkey does not re-read appPrefs~s' \
+  's~hotkeyError = err instanceof Error \? err\.message : String\(err\);.*?void refresh\(\)\.then\(.*?\}\);~hotkeyError = err instanceof Error ? err.message : String(err); // mutant: a rejected set_hotkey does not re-read appPrefs~s' \
   '// mutant: a rejected set_hotkey does not re-read appPrefs' \
   src/settings/Application.test.ts 'a refused change shows the sentence and then draws the NEW shortcut when a fresh read reports it' runner=vitest
 
@@ -429,7 +429,7 @@ case_ "the record control must be busy while a shortcut change is in flight" \
 # them is in the state it is about.
 case_ "an unreadable autostart offers both directions, not the one Enable" \
   ui/src/settings/Application.svelte \
-  's~  const autostartOffersBothDirections = \$derived(autostartUnknown !== null);~  const autostartOffersBothDirections = $derived(false); // mutant: the unknown arm renders one button~' \
+  's~  const autostartOffersBothDirections = \$derived\(autostartUnknown !== null\);~  const autostartOffersBothDirections = \$derived(false); // mutant: the unknown arm renders one button~' \
   'const autostartOffersBothDirections = $derived(false); // mutant: the unknown arm renders one button' \
   src/settings/Application.test.ts 'an unreadable autostart offers both directions, not just the one' runner=vitest
 
@@ -440,6 +440,6 @@ case_ "an unreadable autostart offers both directions, not the one Enable" \
 # survives this mutant, which is every one that existed before the finding.
 case_ "a shortcut the system kept but could not save is not called unchanged" \
   ui/src/settings/Application.svelte \
-  's~    return t(shortcutNotSaved \? .application_shortcut_not_saved. : .application_shortcut_failed.);~    return t("application_shortcut_failed"); // mutant: always the old heading~' \
+  's~    return t\(shortcutNotSaved \? .application_shortcut_not_saved. : .application_shortcut_failed.\);~    return t("application_shortcut_failed"); // mutant: always the old heading~' \
   'return t("application_shortcut_failed"); // mutant: always the old heading' \
   src/settings/Application.test.ts 'a shortcut the system kept but could not save is not reported as unchanged' runner=vitest
