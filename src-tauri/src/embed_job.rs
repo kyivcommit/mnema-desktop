@@ -194,6 +194,17 @@ pub fn start_embed_job(
         // `mnema_embed::run` answers `Ok(tally)` to both and says nothing about
         // which. See `ended_from_tally` for what the narrow race costs and why
         // it is broken this way round.
+        //
+        // This is also the symmetrical half of `walk_job.rs`'s post-walk read,
+        // and it was already here — but it carries less weight, and the
+        // difference is worth naming rather than leaving to be rediscovered.
+        // **This ending has no successor.** Nothing chains a further pass off
+        // an embedding pass: `jobs.ts` chains only off a `walk` (`if (pass ===
+        // 'walk' && chainsEmbedPass(...))`), so a Stop lost here would cost a
+        // mislabelled report and nothing else, where a Stop lost at the end of
+        // a WALK sends the person's text to a provider they had just told the
+        // application not to send it to. If a pass is ever chained after this
+        // one, that asymmetry ends and this read becomes load-bearing.
         let cancelled = slot.cancel_flag().load(Ordering::SeqCst);
         let total = queue_total.load(Ordering::Relaxed);
         let ending = match caught {

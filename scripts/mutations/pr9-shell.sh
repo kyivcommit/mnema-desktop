@@ -567,3 +567,17 @@ case_ "the shared fixture kills a wrong per-platform spelling of the command key
   's~            \(Modifier::Super, Platform::Windows\) => "Win",~            (Modifier::Super, Platform::Windows) => "Super", // mutant: the parsers spelling on a platform that prints Win~' \
   '// mutant: the parsers spelling on a platform that prints Win' \
   mnema-desktop 'shortcut::tests::the_shared_fixture_is_what_this_formatter_produces' --lib
+
+# External review P1. The post-walk read of the cancellation flag dropped:
+# `walk_root` observes the flag only between files, so a Stop raised after the
+# last observation is never seen by it and the walk returns `Completed`. Under
+# this mutant the walk ends `completed` while the person is looking at a Stop
+# they pressed, `jobs.ts` chains the embedding pass off `completed`, and
+# `claim_job` clears the flag as it takes the slot — so the Stop is erased and
+# the text goes to a provider. Every existing walk test survives it: none of
+# them raises the flag inside the last progress report.
+case_ "a Stop that lands after the walks last cancellation check is honoured" \
+  src-tauri/src/walk_job.rs \
+  's~        let stopped_late = slot\.cancel_flag\(\)\.load\(Ordering::SeqCst\);~        let stopped_late = false; // mutant: the walk stops reading the flag it was given~' \
+  '// mutant: the walk stops reading the flag it was given' \
+  mnema-desktop 'a_stop_after_the_last_file_is_not_lost_to_the_walk_ending_completed' --test commands

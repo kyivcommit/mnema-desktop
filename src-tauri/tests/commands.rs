@@ -2271,6 +2271,118 @@ fn an_uncontended_walk_reports_no_contention_on_any_event() {
     );
 }
 
+/// Runs a real walk over `root_id` and raises the cancellation flag from
+/// inside the progress callback of the LAST file, returning the ending.
+///
+/// The interleaving is built, not waited for. `walk_root` calls its progress
+/// callback synchronously on the walk's own thread, and `Channel::new`'s
+/// closure runs on whichever thread sends — so the `cancel_job()` below
+/// happens *inside* `walk_root`, on the walk's thread, at a point this
+/// function chooses. `walk.rs:450` is the only place the flag is read between
+/// files, and it is read at the TOP of the loop: a report with `done == total`
+/// is emitted at the BOTTOM of the last iteration, after which no further read
+/// ever happens. That is the exact gap a person's Stop falls into, and there
+/// is no sleep anywhere in it.
+///
+/// `total > 0` guards the pre-loop report, which sends `done == 0` with
+/// `total == 0` for an empty root and would otherwise cancel before phase 2
+/// had begun — the ordinary cancel, not the one this is about.
+fn run_walk_cancelling_on_the_last_report(
+    app: &tauri::App<MockRuntime>,
+    root_id: i64,
+    within: Duration,
+) -> Value {
+    let handle = app.handle().clone();
+    let (tx, rx) = mpsc::channel();
+    let channel = Channel::new(move |body| {
+        let json: Value = body.deserialize().expect("the job event was not JSON");
+        if json["event"] == json!("progress") {
+            let done = json["data"]["done"]
+                .as_u64()
+                .expect("progress without done");
+            let total = json["data"]["total"]
+                .as_u64()
+                .expect("progress without total");
+            if total > 0 && done == total {
+                handle.state::<AppState>().cancel_job();
+            }
+        }
+        let _ = tx.send(json);
+        Ok(())
+    });
+
+    let state = app.state::<AppState>();
+    walk_job::start_walk_job(state, root_id, channel).expect("the walk would not start");
+
+    loop {
+        match rx.recv_timeout(within) {
+            Ok(event) if event["event"] == json!("ended") => return event["data"].clone(),
+            Ok(_) => continue,
+            Err(_) => panic!("the walk never told the window it ended"),
+        }
+    }
+}
+
+/// A Stop that lands after the walk's last look at the flag is still a Stop.
+///
+/// What this distinguishes: a walk that saw every file and then heard Stop,
+/// against the same walk that heard nothing. Both traverse identically and
+/// both make `walk_root` return `StopReason::Completed`; only the flag differs.
+/// Without the post-walk read in `walk_job.rs` the first ends `completed`, the
+/// window chains the embedding pass (`jobs.ts`, `chainsEmbedPass`), `claim_job`
+/// clears the flag on the way in, and the person's explicit Stop has been spent
+/// sending their text to a provider.
+///
+/// The mirror below is the half that makes it mean something: the same root,
+/// the same fixture, no late cancel, ends `completed`. A shell that simply
+/// reported every walk as cancelled would pass the first assertion and fail
+/// that one.
+#[test]
+fn a_stop_after_the_last_file_is_not_lost_to_the_walk_ending_completed() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    // One file, so there is exactly one bottom-of-loop report and no top-of-loop
+    // read after it.
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let ending = run_walk_cancelling_on_the_last_report(&app, root, Duration::from_secs(20));
+    assert_eq!(
+        ending["reason"],
+        json!("cancelled"),
+        "a Stop that landed after the walk's last cancellation check was forgotten: {ending}"
+    );
+
+    // The other direction, on a second root of the same shape: nothing raises
+    // the flag, and the very same code path must report the walk it really was.
+    let untouched = fixture_dir();
+    let second = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": untouched.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let ending = run_walk_and_capture_ending(&app, second);
+    assert_eq!(
+        ending["reason"],
+        json!("completed"),
+        "a walk nobody stopped must still complete: {ending}"
+    );
+}
+
 /// The channel a real webview passes is a string of this shape. Nothing
 /// receives the messages here — `run_walk_to_completion` above is what
 /// proves the walk itself works, by calling the command function directly so

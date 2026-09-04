@@ -267,8 +267,29 @@ pub fn start_walk_job(
             )
         }));
 
+        // Read once, here, after `walk_root` has returned and while the slot is
+        // still held — the same shape `embed_job.rs` already uses for the same
+        // reason, and deliberately NOT pushed down into `walk_root`: the flag
+        // belongs to the job that owns the slot, and `mnema-ingest` is a
+        // library that is handed a flag rather than the owner of one.
+        //
+        // What it repairs: `walk_root` reads the flag between files, at the top
+        // of its phase-2 loop (`walk.rs:450`). A Stop raised after the last
+        // read — by the tray's `stop_indexing` or the strip's Stop, both of
+        // which only set this flag (`lib.rs`, `AppState::cancel_job`) — is
+        // never seen there, and the walk returns `StopReason::Completed`. The
+        // window chains the embedding pass on `completed` (`jobs.ts`,
+        // `chainsEmbedPass`) and `AppState::claim_job` clears the flag as it
+        // takes the slot, so the person's explicit Stop does not merely arrive
+        // late: it is erased, and their text goes to the provider.
+        //
+        // Only `Completed` is reinterpreted. Every other `StopReason` already
+        // names something the walk itself decided — a broken worker, an
+        // unavailable root — and a Stop arriving alongside one of those does
+        // not make that reason less true.
+        let stopped_late = slot.cancel_flag().load(Ordering::SeqCst);
         let ending = match caught {
-            Ok(Ok(report)) => ended_from_report(&report),
+            Ok(Ok(report)) => ended_from_report(&report, stopped_late),
             // Neither arm below has a `WalkReport` to read `frozen` or the
             // counters from — `walk_root` returned `Err`, or never returned
             // at all — so both fall back to the same "last count the window
@@ -356,10 +377,23 @@ pub fn start_walk_job(
 /// `Ok(Ok(report))`, the one outcome where the walk itself decided the
 /// ending rather than failing unexplained, so there is no failure text to
 /// carry — see `Ended::message`'s own doc comment for where one comes from.
-fn ended_from_report(report: &WalkReport) -> Ended {
+/// `stopped_late` is the cancellation flag as it stood when `walk_root`
+/// returned, and it changes exactly one thing: a walk that finished everything
+/// it was given, with a Stop raised too late for `walk_root` to have seen it,
+/// is reported as cancelled rather than completed. The caller's own comment
+/// says why that matters more than it looks; here it is enough that the `Ended`
+/// this produces is byte-for-byte the one an ordinary cancel produces from the
+/// same counters, so nothing downstream needs a third case to tell them apart.
+///
+/// `complete` still crosses as the walk reported it, and for a late Stop that
+/// is `true`: phase 1 really did read every entry. The two fields answer
+/// different questions — `complete` is about what was SEEN, `reason` about why
+/// the run ENDED — and a late Stop is only ever an answer to the second.
+fn ended_from_report(report: &WalkReport, stopped_late: bool) -> Ended {
     let total = report.found + report.refused;
     let done = report.indexed + report.unchanged + report.skipped + report.refused;
     let reason = match report.stopped {
+        StopReason::Completed if stopped_late => EndReason::Cancelled,
         StopReason::Completed => EndReason::Completed,
         StopReason::Cancelled => EndReason::Cancelled,
         StopReason::BrokenWorker => EndReason::BrokenWorker,
@@ -447,7 +481,7 @@ mod tests {
         ];
         for (stopped, expected) in cases {
             assert_eq!(
-                ended_from_report(&report(stopped)).reason,
+                ended_from_report(&report(stopped), false).reason,
                 expected,
                 "StopReason::{stopped:?} did not become EndReason::{expected:?}"
             );
@@ -462,11 +496,11 @@ mod tests {
     fn completeness_crosses_the_seam_unchanged() {
         let mut walked = report(StopReason::Completed);
         walked.complete = true;
-        assert!(ended_from_report(&walked).complete);
+        assert!(ended_from_report(&walked, false).complete);
 
         walked.complete = false;
         assert!(
-            !ended_from_report(&walked).complete,
+            !ended_from_report(&walked, false).complete,
             "an incomplete walk must not report as one that saw everything, \
              even when it otherwise stopped `Completed`"
         );
@@ -480,7 +514,7 @@ mod tests {
             why: FrozenReason::EmptyDirectory,
         }];
 
-        let ended = ended_from_report(&walked);
+        let ended = ended_from_report(&walked, false);
         assert_eq!(ended.frozen.len(), 1);
         assert_eq!(ended.frozen[0].prefix, "mnt/share");
         // The exact variant, not merely `Some`: `each_frozen_reason_maps_to_
@@ -522,7 +556,7 @@ mod tests {
     /// swapped field would show up here rather than in `done` alone.
     #[test]
     fn indexed_and_unchanged_cross_the_seam_separately_from_done() {
-        let ended = ended_from_report(&report(StopReason::Completed));
+        let ended = ended_from_report(&report(StopReason::Completed), false);
         assert_eq!(ended.indexed, 5);
         assert_eq!(ended.unchanged, 1);
         assert_ne!(ended.indexed, ended.done);
@@ -537,7 +571,7 @@ mod tests {
     /// field on `report(..)` so a swap — not only a drop — would fail here.
     #[test]
     fn removed_crosses_the_seam_separately_from_done() {
-        let ended = ended_from_report(&report(StopReason::Completed));
+        let ended = ended_from_report(&report(StopReason::Completed), false);
         assert_eq!(ended.removed, 4);
         assert_ne!(ended.removed, ended.done);
     }
@@ -549,14 +583,14 @@ mod tests {
     #[test]
     fn a_walk_reported_by_ended_from_report_carries_no_failure_message() {
         assert_eq!(
-            ended_from_report(&report(StopReason::Completed)).message,
+            ended_from_report(&report(StopReason::Completed), false).message,
             None
         );
     }
 
     #[test]
     fn done_and_total_include_phase_one_refusals_and_skipped_merges_both_kinds() {
-        let ended = ended_from_report(&report(StopReason::Completed));
+        let ended = ended_from_report(&report(StopReason::Completed), false);
         // found: 8, refused: 3
         assert_eq!(ended.total, 11);
         // indexed: 5, unchanged: 1, skipped: 2, refused: 3
@@ -577,7 +611,7 @@ mod tests {
         walked.skipped = 0;
         walked.refused = 0;
 
-        let ended = ended_from_report(&walked);
+        let ended = ended_from_report(&walked, false);
         assert_eq!(ended.done, 0);
         assert_eq!(ended.total, 0);
         assert_eq!(ended.reason, EndReason::RootUnavailable);

@@ -370,7 +370,13 @@ test('a refused change shows the sentence and then draws the NEW shortcut when a
   await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
 
   expect(await shown('application-shortcut-error')).toBe(SENTENCE);
-  expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:');
+  // 🔴 The heading changed with external review P3 and the fixture did not:
+  // this test's own preamble names row 6, where the operating system IS holding
+  // the new combination, so «не змінено» was never true here. The subject of
+  // this test is the SHORTCUT drawn below, and that is unchanged; the assertion
+  // that moved is the one this fixture was always contradicting.
+  await waitFor(() => expect(at('application-shortcut-failed'))
+    .toBe('Скорочення діє, але зберегти його не вдалося: після перезапуску повернеться попереднє. Ось що відповів застосунок:'));
   // Strict equality on the dedicated testid, not `toContain` on the page: the
   // new shortcut, 'Ctrl+Alt+Space', contains the old one, 'Alt+Space', as a
   // literal substring, so a page-wide `.not.toContain('Alt+Space')` could never
@@ -840,4 +846,195 @@ test('the section speaks the window language, both directions', async () => {
   expect(pageText()).not.toContain('Mnema не запускається під час входу в систему.');
   // D-h in the other language too.
   expect(pageText()).not.toContain('up to date');
+});
+
+// ---------------------------------------------------------------------------
+// External review P2 — `Unknown` is not `Disabled`.
+//
+// `Unknown` means the login item list could not be READ (`prefs.rs`), so the
+// item may be there or may not. A section that derives one action from
+// "enabled?" answers `false` for `Unknown` and offers Enable alone: somebody
+// whose machine really does start Mnema, and whose read merely failed, is given
+// no way to turn it off at all.
+// ---------------------------------------------------------------------------
+
+test('an unreadable autostart offers both directions, not just the one', async () => {
+  appPrefs.mockResolvedValue(prefs({
+    autostart: { kind: 'unknown', reason: 'the login item list could not be read' },
+  }));
+  renderSection();
+
+  expect(await shown('application-autostart-enable')).toBe('Запускати під час входу');
+  expect(at('application-autostart-disable')).toBe('Не запускати під час входу');
+  // The single toggle belongs to the two states that know their own answer.
+  expect(screen.queryByTestId('application-autostart-toggle')).toBeNull();
+});
+
+// Both directions, and the distinguishing pair: a shell that wired both buttons
+// to the same value passes one of these two assertions and fails the other.
+test('each unreadable-autostart button sends its own value, not the other one', async () => {
+  appPrefs.mockResolvedValue(prefs({
+    autostart: { kind: 'unknown', reason: 'unreadable' },
+  }));
+  setAutostart.mockResolvedValue({ kind: 'unknown', reason: 'unreadable' });
+  renderSection();
+  await shown('application-autostart-disable');
+
+  await fireEvent.click(screen.getByTestId('application-autostart-disable'));
+  await waitFor(() => expect(setAutostart).toHaveBeenCalledTimes(1));
+  expect(setAutostart).toHaveBeenLastCalledWith(false);
+
+  await fireEvent.click(screen.getByTestId('application-autostart-enable'));
+  await waitFor(() => expect(setAutostart).toHaveBeenCalledTimes(2));
+  expect(setAutostart).toHaveBeenLastCalledWith(true);
+});
+
+// The reply is the truth here as everywhere else (D-c), and leaving `Unknown`
+// is what the two buttons are FOR — so the section has to be able to draw the
+// state it lands in. Both directions in one test, because a section that
+// re-rendered on `enabled` alone would look right in half the cases.
+test('the state an unreadable autostart resolves into is drawn from the reply, both ways', async () => {
+  for (const [reply, sentence] of [
+    [{ kind: 'enabled' } as const, 'Mnema запускається під час входу в систему.'],
+    [{ kind: 'disabled' } as const, 'Mnema не запускається під час входу в систему.'],
+  ] as const) {
+    cleanup();
+    appPrefs.mockReset();
+    setAutostart.mockReset();
+    appPrefs.mockResolvedValue(prefs({
+      autostart: { kind: 'unknown', reason: 'unreadable' },
+    }));
+    setAutostart.mockResolvedValue(reply);
+    renderSection();
+    await shown('application-autostart-enable');
+
+    await fireEvent.click(screen.getByTestId(
+      reply.kind === 'enabled' ? 'application-autostart-enable' : 'application-autostart-disable',
+    ));
+
+    await waitFor(() => expect(at('application-autostart-status')).toBe(sentence));
+    // Back to one control: the state is known again, so the pair has no reason
+    // to be on screen.
+    expect(await shown('application-autostart-toggle')).toBeTruthy();
+    expect(screen.queryByTestId('application-autostart-enable')).toBeNull();
+  }
+});
+
+// The guard the single toggle already had, owed by the pair for the same
+// reason: a double press asks the operating system twice and tells the person
+// nothing about the first.
+test('a press on one unreadable-autostart button disables the other while it is in flight', async () => {
+  appPrefs.mockResolvedValue(prefs({
+    autostart: { kind: 'unknown', reason: 'unreadable' },
+  }));
+  let settle: (v: unknown) => void = () => {};
+  setAutostart.mockReturnValue(new Promise((res) => { settle = res; }));
+  renderSection();
+  await shown('application-autostart-enable');
+
+  await fireEvent.click(screen.getByTestId('application-autostart-enable'));
+  await tick();
+
+  expect((screen.getByTestId('application-autostart-disable') as HTMLButtonElement).disabled).toBe(true);
+  await fireEvent.click(screen.getByTestId('application-autostart-disable'));
+  expect(setAutostart).toHaveBeenCalledTimes(1);
+
+  settle({ kind: 'enabled' });
+  await waitFor(() => expect(at('application-autostart-status'))
+    .toBe('Mnema запускається під час входу в систему.'));
+});
+
+// ---------------------------------------------------------------------------
+// External review P3 — «не змінено» beside the shortcut that IS in effect.
+//
+// Transition-table row 6 (`prefs.rs`): the operating system registered the new
+// combination and the write to `prefs.json` then failed, so `set_hotkey`
+// rejects with `Error::Prefs`. The section re-reads (D-b) and draws the NEW
+// shortcut — under a heading that says nothing was changed. Both halves of that
+// screen are true on their own and the pair is a lie.
+//
+// Which sentence is drawn is decided from the RE-READ and never from parsing
+// the rejection: the backend's sentence is a free-text `Display` this window
+// does not own, and branching on it would break the moment its wording moved.
+// ---------------------------------------------------------------------------
+
+test('a shortcut the system kept but could not save is not reported as unchanged', async () => {
+  appPrefs
+    .mockResolvedValueOnce(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }))
+    // The corrective read: the OS is holding the NEW combination, because
+    // registration succeeded and only the persist failed.
+    .mockResolvedValue(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
+  const SENTENCE = 'prefs.json could not be written';
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(at('application-shortcut')).toBe('Ctrl+Alt+Space'));
+  expect(at('application-shortcut-failed'))
+    .toBe('Скорочення діє, але зберегти його не вдалося: після перезапуску повернеться попереднє. Ось що відповів застосунок:');
+  // The backend's own words still cross verbatim; only the lead-in changed.
+  expect(at('application-shortcut-error')).toBe(SENTENCE);
+  expect(pageText()).not.toContain('Скорочення не змінено.');
+});
+
+// The other direction, and the one that keeps the sentence above honest: a
+// refusal that changed nothing at all — the OS declined the registration — is
+// still «не змінено». A shell that swapped the heading unconditionally passes
+// the test above and fails this one.
+test('a shortcut refused outright is still reported as unchanged', async () => {
+  const OLD = { shortcut: 'Alt+Space', status: { kind: 'registered' } } as const;
+  appPrefs.mockResolvedValue(prefs({ hotkey: OLD }));
+  const SENTENCE = 'the operating system refused the combination';
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(screen.getByTestId('application-shortcut-error')).toBeTruthy());
+  expect(at('application-shortcut')).toBe('Alt+Space');
+  expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:');
+  expect(at('application-shortcut-error')).toBe(SENTENCE);
+});
+
+// 🔴 The re-read is what decides, and this is the fixture that says so. The
+// per-field stamp (D-I1) can leave the corrective read's hotkey UNAPPLIED: a
+// `setHotkey` that succeeds while it is in flight supersedes it. The heading
+// must then follow the state that actually reached the screen — the successful
+// change — and not a comparison against a read whose answer was discarded.
+test('a corrective read the stamp discarded does not get to choose the sentence', async () => {
+  const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
+  appPrefs.mockImplementation(() => {
+    const d = deferred<AppPrefs>();
+    queue.push(d);
+    return d.promise;
+  });
+  setHotkey.mockRejectedValueOnce(new Error('prefs.json could not be written'));
+  renderSection();
+  await waitFor(() => expect(queue).toHaveLength(1));
+  queue[0].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
+  await record();
+
+  // Refused: the corrective read starts, and is held open.
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(queue).toHaveLength(2));
+
+  // A second recording, which succeeds. It bumps the shortcut's stamp, so the
+  // held-open read may no longer write the hotkey field.
+  setHotkey.mockResolvedValue({ shortcut: 'Ctrl+Shift+Space', status: { kind: 'registered' } });
+  await record();
+  await pressKey({ key: ' ', code: 'Space', ctrlKey: true, shiftKey: true });
+  await waitFor(() => expect(at('application-shortcut')).toBe('Ctrl+Shift+Space'));
+
+  // Now the stale read answers, naming the shortcut the FIRST attempt sent. It
+  // is superseded, so it changes nothing — including the heading, which the
+  // successful change had already taken off screen.
+  queue[1].resolve(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
+  await tick();
+  await tick();
+
+  expect(at('application-shortcut')).toBe('Ctrl+Shift+Space');
+  expect(screen.queryByTestId('application-shortcut-failed')).toBeNull();
 });

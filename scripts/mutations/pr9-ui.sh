@@ -419,3 +419,27 @@ case_ "the record control must be busy while a shortcut change is in flight" \
   's~    hotkeyBusy = true;~    hotkeyBusy = false; // mutant: the record control is never busy~' \
   'hotkeyBusy = false; // mutant: the record control is never busy' \
   src/settings/Application.test.ts 'the record control is busy while a change is in flight, so a second press sends one call and does not reopen the recorder' runner=vitest
+
+# External review P2. The `Unknown` arm collapsed back into the single toggle:
+# `autostartOffersBothDirections` answers `false`, so a state the operating
+# system could not be READ for gets one button, and `autostartIsEnabled` is
+# `false` there — so that button is Enable. Somebody whose machine really does
+# start Mnema, and whose read merely failed, is offered no way to turn it off.
+# Every `Enabled`/`Disabled` fixture in the file survives this mutant: none of
+# them is in the state it is about.
+case_ "an unreadable autostart offers both directions, not the one Enable" \
+  ui/src/settings/Application.svelte \
+  's~  const autostartOffersBothDirections = \$derived(autostartUnknown !== null);~  const autostartOffersBothDirections = $derived(false); // mutant: the unknown arm renders one button~' \
+  'const autostartOffersBothDirections = $derived(false); // mutant: the unknown arm renders one button' \
+  src/settings/Application.test.ts 'an unreadable autostart offers both directions, not just the one' runner=vitest
+
+# External review P3. The heading is the old one whatever the corrective re-read
+# says: «Скорочення не змінено» drawn beside the new shortcut the operating
+# system is holding (transition-table row 6, `prefs.rs`) — the persist failed,
+# the registration did not. Every fixture whose re-read reports the OLD shortcut
+# survives this mutant, which is every one that existed before the finding.
+case_ "a shortcut the system kept but could not save is not called unchanged" \
+  ui/src/settings/Application.svelte \
+  's~    return t(shortcutNotSaved \? .application_shortcut_not_saved. : .application_shortcut_failed.);~    return t("application_shortcut_failed"); // mutant: always the old heading~' \
+  'return t("application_shortcut_failed"); // mutant: always the old heading' \
+  src/settings/Application.test.ts 'a shortcut the system kept but could not save is not reported as unchanged' runner=vitest

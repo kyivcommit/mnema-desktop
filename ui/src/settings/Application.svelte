@@ -38,7 +38,14 @@
   let hotkeySeq = 0;
   let autostartSeq = 0;
 
-  async function refresh() {
+  // Answers with the `hotkey` this read actually WROTE to the screen, or `null`
+  // when it wrote none — superseded by a later writer, or rejected outright.
+  // Only the caller that started a corrective read after a refused `set_hotkey`
+  // reads the answer; see `shortcutNotSaved` for what it decides. The
+  // distinction matters and it is the stamp's: a read whose hotkey the stamp
+  // discarded never reached the screen, so it must not get to choose the
+  // sentence drawn beside what did.
+  async function refresh(): Promise<AppPrefs['hotkey'] | null> {
     const myHotkey = ++hotkeySeq;
     const myAutostart = ++autostartSeq;
     try {
@@ -48,7 +55,7 @@
       // Superseded on every field this read could have written. `version` and
       // `platform` are decided at compile time and cannot have changed, so
       // there is nothing left for it to say.
-      if (!takeHotkey && !takeAutostart) return;
+      if (!takeHotkey && !takeAutostart) return null;
       prefs = {
         ...p,
         // A writer that landed while this read was in flight holds the truth
@@ -58,11 +65,13 @@
         autostart: takeAutostart || prefs === null ? p.autostart : prefs.autostart,
       };
       loadError = null;
+      return takeHotkey ? p.hotkey : null;
     } catch (e) {
       // A rejection is about the read as a whole, so it is shown only where the
       // read still had something to say — the same test both directions get.
-      if (myHotkey !== hotkeySeq && myAutostart !== autostartSeq) return;
+      if (myHotkey !== hotkeySeq && myAutostart !== autostartSeq) return null;
       loadError = e instanceof Error ? e.message : String(e);
+      return null;
     }
   }
 
@@ -119,7 +128,23 @@
     if (platform === null) return null;
     return t('application_shortcut_not_usable', { mod: MODIFIER_KEY_NAME[platform] });
   });
-  const shortcutFailedLabel = $derived.by(() => { void $locale; return t('application_shortcut_failed'); });
+  // 🔴 External review P3. Transition-table row 6 (`prefs.rs`): the operating
+  // system registered the NEW combination and the write to `prefs.json` then
+  // failed, so `set_hotkey` rejects with `Error::Prefs` while the shortcut is
+  // in effect. The corrective re-read D-b requires then draws that new
+  // shortcut — under a heading saying nothing was changed. Each half is true
+  // alone; the pair is not, and what a person does about it differs: one is
+  // "try again", the other is "it works until you restart".
+  //
+  // Decided from the RE-READ and never from the rejection's sentence. That
+  // sentence is a free-text `Display` this window does not own, and every
+  // wording of it is one refactor away from moving; the state the operating
+  // system reports is the fact.
+  let shortcutNotSaved = $state(false);
+  const shortcutFailedLabel = $derived.by(() => {
+    void $locale;
+    return t(shortcutNotSaved ? 'application_shortcut_not_saved' : 'application_shortcut_failed');
+  });
 
   let recording = $state(false);
   let notUsable = $state(false);
@@ -155,6 +180,7 @@
     recording = true;
     notUsable = false;
     hotkeyError = null;
+    shortcutNotSaved = false;
     recordButton?.focus();
   }
 
@@ -191,6 +217,7 @@
     notUsable = false;
     recording = false;
     hotkeyError = null;
+    shortcutNotSaved = false;
     hotkeyBusy = true;
     try {
       const reply = await setHotkey(shortcut);
@@ -214,7 +241,15 @@
       // table's seven rows produced it is not recoverable from the sentence, so
       // the only honest source for what the screen draws next is a fresh read,
       // never the value this window held before the call.
-      void refresh();
+      //
+      // And that read is what tells row 6 from the rows that changed nothing:
+      // if it comes back naming the combination THIS call sent, the operating
+      // system kept it and only the file did not. `applied === null` means the
+      // read never reached the screen, and a read that wrote nothing decides
+      // nothing — the heading stays the one that assumes the ordinary refusal.
+      void refresh().then((applied) => {
+        shortcutNotSaved = applied !== null && applied.shortcut === shortcut;
+      });
     } finally {
       // Released whichever way the call went: a refusal that left the control
       // disabled would cost a person the only way to change the shortcut.
@@ -267,11 +302,23 @@
   // the OS was asked twice and a person got no sign the first press landed.
   let autostartBusy = $state(false);
 
-  async function toggleAutostart() {
+  // 🔴 External review P2. `Unknown` is not `Disabled`: `prefs.rs` documents it
+  // as "reading the OS state failed", so the login item may be registered or
+  // may not. `autostartIsEnabled` answers `false` for it, and a single action
+  // derived from that answer offers Enable and only Enable — so somebody whose
+  // machine really does start Mnema, and whose READ merely failed, has no way
+  // to turn it off. The two known states keep one toggle, because there the
+  // opposite of what is on screen is a real answer; `Unknown` gets both
+  // directions offered explicitly, because from there neither is.
+  const autostartOffersBothDirections = $derived(autostartUnknown !== null);
+  const autostartEnableLabel = $derived.by(() => { void $locale; return t('application_autostart_enable'); });
+  const autostartDisableLabel = $derived.by(() => { void $locale; return t('application_autostart_disable'); });
+
+  // Takes the target rather than deriving it, so the two buttons above can each
+  // send the value they are named for. `toggleAutostart` keeps the derivation
+  // it always had and hands it here.
+  async function setAutostartTo(target: boolean) {
     if (autostart === null || autostartBusy) return;
-    // The opposite of the value ON SCREEN, not a constant — a second press
-    // after the first one's reply follows what the OS has just reported.
-    const target = !autostartIsEnabled;
     autostartError = null;
     autostartBusy = true;
     try {
@@ -291,6 +338,14 @@
     } finally {
       autostartBusy = false;
     }
+  }
+
+  function toggleAutostart() {
+    // The opposite of the value ON SCREEN, not a constant — a second press
+    // after the first one's reply follows what the OS has just reported. Only
+    // reached from the `Enabled`/`Disabled` arm, where "the opposite" is a
+    // question the screen can answer.
+    void setAutostartTo(!autostartIsEnabled);
   }
 
   // ---------------------------------------------------------------------------
@@ -354,12 +409,29 @@
     <p data-testid="application-autostart-failed">{autostartFailedLabel}</p>
     <p data-testid="application-autostart-error">{autostartError}</p>
   {/if}
-  <button
-    type="button"
-    data-testid="application-autostart-toggle"
-    disabled={autostartBusy}
-    onclick={toggleAutostart}
-  >{autostartActionLabel}</button>
+  {#if autostartOffersBothDirections}
+    <!-- Both disabled by the one flag: a press on either asks the operating
+         system once, and the other must not be able to ask again over it. -->
+    <button
+      type="button"
+      data-testid="application-autostart-enable"
+      disabled={autostartBusy}
+      onclick={() => setAutostartTo(true)}
+    >{autostartEnableLabel}</button>
+    <button
+      type="button"
+      data-testid="application-autostart-disable"
+      disabled={autostartBusy}
+      onclick={() => setAutostartTo(false)}
+    >{autostartDisableLabel}</button>
+  {:else}
+    <button
+      type="button"
+      data-testid="application-autostart-toggle"
+      disabled={autostartBusy}
+      onclick={toggleAutostart}
+    >{autostartActionLabel}</button>
+  {/if}
 
   <p data-testid="application-version">{versionText}</p>
 {/if}
