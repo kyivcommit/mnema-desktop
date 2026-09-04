@@ -477,7 +477,7 @@ jobs:
     # mutation, which is the same defect the vendored libraries and the
     # staged sidecar are copied into the worktree to avoid.
     strategy:
-      # One file's survivor must not cancel the other five: they are
+      # One file's survivor must not cancel the others: they are
       # independent evidence, and the second failure is the one a cancelled
       # run hides.
       fail-fast: false
@@ -489,8 +489,13 @@ jobs:
           - pr8-subfolders
           - pr8-subfolders-linux
           - pr8-ui-folders
+          - pr9-shell
+          - pr9-index
+          - pr9-ui
         include:
           - file: pr8-ui-folders
+            node: true
+          - file: pr9-ui
             node: true
     runs-on: ubuntu-24.04
     # Thirty was a guess when this leg was written, and it stayed one until the
@@ -520,8 +525,8 @@ jobs:
       # build there rather than in a throwaway directory of its own. The
       # dependencies are what the cache keeps — the action drops the
       # workspace's own artefacts before saving — and they are the same
-      # dependencies for every leg of the matrix, and one cache serves all
-      # six: the action's automatic key carries the job id (`mutations`),
+      # dependencies for every leg of the matrix, and one cache serves every
+      # leg: the action's automatic key carries the job id (`mutations`),
       # the rustc version and a hash of the manifests, lockfile and
       # toolchain file, and NOT the matrix value — its README says
       # "keyed by the github job_id", and `GITHUB_JOB` is the same in every
@@ -557,9 +562,10 @@ jobs:
         run: scripts/stage-sidecar.sh debug
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
-      # For the leg whose matrix entry says `node: true` and no other —
-      # `pr8-ui-folders` today, and the flag lives on the entry so a renamed
-      # file cannot leave the gate pointing at the old name: its cases run
+      # For the legs whose matrix entry says `node: true` and no other —
+      # `pr8-ui-folders` and `pr9-ui` today, and the flag lives on the entry
+      # so a renamed file cannot leave the gate pointing at the old name:
+      # their cases run
       # vitest, and `mutation-check.sh` links `ui/node_modules` into its
       # worktree rather than installing there, so the directory has to exist
       # in this checkout first. Same `lts/*` and same `npm ci` as `check` —
