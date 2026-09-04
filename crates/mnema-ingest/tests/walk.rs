@@ -934,6 +934,150 @@ fn a_file_still_busy_after_every_retry_is_skipped_not_lost() {
     assert_eq!((last.contended, last.skipped), (1, 1), "{events:?}");
 }
 
+/// The window's contended line makes exactly one promise — that the next scan
+/// will try the file again — and this is that promise, tested where it can be
+/// falsified rather than where it is worded.
+///
+/// A busy-exhausted file is journalled as a skip under `SkipRule::Unreadable`,
+/// and a journal entry is the sort of thing a walk can consult and decline to
+/// re-read. So "the next scan will try again" is a claim about the *second*
+/// walk, and nothing above this line makes it: every existing contention test
+/// stops at the first one. If the second walk left the file unindexed, the
+/// sentence would be the thing to change.
+///
+/// The lock is released on the walk's own `contended` signal, exactly as
+/// `walk_releasing_on_contention` describes — a hold that outlived the skip
+/// write would cost three busy timeouts and build a different state, which is
+/// the *next* test's subject and not this one's.
+#[test]
+fn a_file_left_unwritten_by_a_busy_index_is_indexed_by_the_next_walk() {
+    let f = Fixture::new();
+    f.write("contract.txt", "hello");
+    let document_id = f.document_id_of("contract.txt");
+
+    f.warm_pool();
+    let window = open(&f.index_path).unwrap();
+    window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
+    window.insert_watched_root("/Volumes/Second").unwrap();
+
+    let (first, events) = f.walk_releasing_on_contention(&window);
+
+    // The state the second walk has to start from, stated rather than assumed:
+    // the file was reported as contended, is not in the index, and IS in the
+    // journal as a skip. Without this the second walk's success could be a
+    // walk that never met contention at all.
+    assert_eq!(
+        events.last().unwrap().contended,
+        1,
+        "the walk never reported the file as contended: {events:?}"
+    );
+    assert_eq!(first.indexed, 0, "the write never landed under contention");
+    assert_eq!(first.skipped, 1);
+    assert_eq!(
+        f.db.path_count(&document_id).unwrap(),
+        0,
+        "a file the index was too busy to write must not be searchable"
+    );
+    let skips = f.db.skips_for_root(f.root).unwrap();
+    assert_eq!(skips.len(), 1);
+    assert_eq!(skips[0].relative_path, "contract.txt");
+
+    // Nothing holds the write lock now, which is what "the next scan" means.
+    let second = f.walk();
+
+    assert_eq!(
+        second.indexed, 1,
+        "the next scan must try the contended file again; if it does not, the \
+         window's sentence is what changes, not this test"
+    );
+    assert_eq!(second.skipped, 0, "nothing was skipped the second time");
+    assert_eq!(
+        f.db.path_count(&document_id).unwrap(),
+        1,
+        "the file is findable after the retry the sentence promises"
+    );
+    // Journal hygiene, NOT the window's sentence. D-f promises only that the
+    // file is indexed again, which the three assertions above are what hold up.
+    // This one guards a separate behaviour with an owner of its own, so a
+    // deliberate change to how skips are cleared belongs in that decision and
+    // not in a re-reading of the strip's wording.
+    assert!(
+        f.db.skips_for_root(f.root).unwrap().is_empty(),
+        "the skip that explained the contention outlived the file's own repair \
+         — this guards journal hygiene, not D-f's claim, which the `indexed` \
+         and `path_count` assertions above are the oracle for"
+    );
+}
+
+/// The state the test above cannot reach, and the reason the window's sentence
+/// says nothing about the file having been recorded.
+///
+/// `record_skip` is a write like any other and meets the same lock
+/// (`walk.rs`'s `?` on it, and the `?` at the call site that ends the walk).
+/// Releasing the lock on the first `contended` event — what every other test
+/// here does — means that write always succeeds, so only a hold that outlives
+/// it builds the state where the file is in **neither** the index nor the
+/// journal.
+///
+/// 🔴 **`Err(Busy)` on its own does not build that state.** Under a whole-run
+/// hold *any* write ends the walk `Err(Busy)`, and in every one of those the
+/// file is in neither place too — so that assertion alone cannot tell the
+/// failed skip write from a failure earlier. The premise is the ordering: an
+/// event carrying `contended == 1` was delivered before the walk returned, and
+/// that event is `exhausted()` firing one line before `record_skip`. It is the
+/// only witness that the write which met the lock was the skip write. Same
+/// shape as the file's own warning about assertions on a consequence with the
+/// premise unchecked.
+#[test]
+fn a_skip_write_that_meets_the_same_lock_leaves_the_file_in_neither_place() {
+    let f = Fixture::new();
+    f.write("contract.txt", "hello");
+    let document_id = f.document_id_of("contract.txt");
+
+    f.warm_pool();
+    let window = open(&f.index_path).unwrap();
+    window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
+    window.insert_watched_root("/Volumes/Second").unwrap();
+
+    // Held for the whole walk: released only after `walk_root` has returned,
+    // whatever it returned, so the skip write meets the lock too.
+    let mut events = Vec::new();
+    let result = walk_root(
+        &f.pool,
+        &f.db,
+        f.root,
+        f.dir(),
+        &WalkRules::none(),
+        &AtomicBool::new(false),
+        &mut |p| events.push(p),
+    );
+    window.conn().execute_batch("COMMIT").unwrap();
+
+    // The premise. Every event in this vector was delivered before `walk_root`
+    // returned, because the callback is the walk's own and runs on its thread.
+    assert!(
+        events.iter().any(|p| p.contended == 1),
+        "no event reported the file as contended, so whatever ended this walk \
+         was not the skip write: {events:?}"
+    );
+    let error = result
+        .expect_err("the skip write met the held lock and must end the walk, not be swallowed");
+    assert!(
+        matches!(error, IngestError::Busy(_)),
+        "the walk ended for some reason other than a busy index: {error:?}"
+    );
+    assert_eq!(
+        f.db.path_count(&document_id).unwrap(),
+        0,
+        "nothing was written to the index"
+    );
+    assert!(
+        f.db.skips_for_root(f.root).unwrap().is_empty(),
+        "the skip write is what met the lock, so there can be no journal row \
+         explaining this file"
+    );
+}
+
 /// Cancellation is checked between busy retries too, not only between files
 /// in the outer loop — a single contended file can span up to three
 /// busy-timeout attempts, and a cancel that arrives partway through must not

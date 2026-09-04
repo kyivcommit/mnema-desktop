@@ -43,6 +43,36 @@ pub struct Progress {
     /// either be read as the other. Neither is on screen today — `ui/src/
     /// settings/Settings.svelte` is a stub and the settings surfaces are PR 7's.
     pub refused: u64,
+    /// How many files this run has so far found the index locked by another
+    /// writer on, after every busy retry was refused
+    /// (`mnema_ingest::WalkProgress::contended`). Always `0` for the probe and
+    /// for an embedding pass; written only by `walk_job.rs`.
+    ///
+    /// **Not [`Progress::refused`]**, which is a chunk the provider refused and
+    /// will not be offered again, and **not `mnema_ingest::WalkProgress::
+    /// refused`**, which is a file phase 1 declined to open — the two are told
+    /// apart above. This is neither a refusal nor a property of the file at
+    /// all: it is evidence about whoever else holds the write lock, and the
+    /// same file walked a second later, with the lock free, is indexed like any
+    /// other (`mnema-ingest`'s `a_file_left_unwritten_by_a_busy_index_is_
+    /// indexed_by_the_next_walk`).
+    ///
+    /// 🔴 **`contended <= skipped` in every event after the file is
+    /// journalled**, because the file counted here is journalled as a skip
+    /// immediately afterwards and counted there too. A surface showing both
+    /// must therefore explain part of `skipped` with this number and must never
+    /// add the two: that would count one file twice. The one event in which the
+    /// inequality does not yet hold is the contended file's own — the callback
+    /// fires before the skip write — and it is not an exception to the rule, it
+    /// is the moment before the rule applies.
+    ///
+    /// **It says nothing about the file having been recorded.** The skip write
+    /// meets the same lock and can fail too, ending the walk and leaving the
+    /// file in neither the index nor the journal (`mnema-ingest`'s
+    /// `a_skip_write_that_meets_the_same_lock_leaves_the_file_in_neither_
+    /// place`), so whatever a surface says about this number may promise the
+    /// next scan and nothing more.
+    pub contended: u64,
     pub seconds_left: Option<u64>,
 }
 
@@ -449,6 +479,10 @@ where
                 total,
                 skipped: 0,
                 refused: 0,
+                // `0` contended for the same reason: the probe writes to no
+                // index, so there is no lock for anyone to be holding against
+                // it.
+                contended: 0,
                 seconds_left: seconds_left(done, total, started.elapsed()),
             });
         }

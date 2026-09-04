@@ -1,0 +1,74 @@
+[
+  {
+    "note": "the default shortcut, on all three platforms: the mac form is glyphs with no separator, the other two are the parser's own words",
+    "shortcut": "Alt+Space",
+    "platform": "mac",
+    "expected": "⌥Space"
+  },
+  {
+    "note": "same string, windows",
+    "shortcut": "Alt+Space",
+    "platform": "windows",
+    "expected": "Alt+Space"
+  },
+  {
+    "note": "same string, linux",
+    "shortcut": "Alt+Space",
+    "platform": "linux",
+    "expected": "Alt+Space"
+  },
+  {
+    "note": "two modifiers, in the canonical order they were written in — the pair below is the one that can tell a fixed order from a passthrough",
+    "shortcut": "Ctrl+Alt+Space",
+    "platform": "mac",
+    "expected": "⌃⌥Space"
+  },
+  {
+    "note": "the same combination spelled the way global-hotkey also accepts it; two spellings of one shortcut must not read as two different shortcuts",
+    "shortcut": "Control+Option+Space",
+    "platform": "mac",
+    "expected": "⌃⌥Space"
+  },
+  {
+    "note": "the command/meta key is spelled Win on windows, which is what is printed on the key a person is looking at",
+    "shortcut": "Super+K",
+    "platform": "windows",
+    "expected": "Win+K"
+  },
+  {
+    "note": "and Super on linux, which keeps the parser's own spelling — the pair with the row above is what makes the platform argument load-bearing",
+    "shortcut": "Super+K",
+    "platform": "linux",
+    "expected": "Super+K"
+  },
+  {
+    "note": "stored out of canonical order and drawn back into it: Shift before Ctrl in, ⌃ before ⇧ out",
+    "shortcut": "Shift+Ctrl+A",
+    "platform": "mac",
+    "expected": "⌃⇧A"
+  },
+  {
+    "note": "a token neither side understands is passed through in place rather than dropped, ahead of the key and joined to it with +",
+    "shortcut": "Hyper+Alt+X",
+    "platform": "mac",
+    "expected": "⌥Hyper+X"
+  },
+  {
+    "note": "a bare key with no modifier at all: neither formatter refuses it, because a string the store holds is drawn as it is",
+    "shortcut": "Space",
+    "platform": "mac",
+    "expected": "Space"
+  },
+  {
+    "note": "review round 1, Minor 1: a lowercased Object.prototype member name is an unknown token like any other. The TypeScript alias table is an object literal, so a bare index answered truthy for it and swallowed the token; the Rust match never could. This row is what keeps the two answering the same thing",
+    "shortcut": "Constructor+A",
+    "platform": "mac",
+    "expected": "Constructor+A"
+  },
+  {
+    "note": "review round 1, Minor 1: the same class, and the spelling that reaches the prototype without being lowercased first",
+    "shortcut": "__proto__+A",
+    "platform": "linux",
+    "expected": "__proto__+A"
+  }
+]

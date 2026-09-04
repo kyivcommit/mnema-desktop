@@ -1,0 +1,583 @@
+# The preferences file — `src-tauri/src/prefs.rs`, the one place the app reads
+# and writes `prefs.json` from PR 9 onward. Run with:
+#
+#   scripts/mutation-check.sh scripts/mutations/pr9-shell.sh
+#
+# What is here, and it is two different kinds of claim. Some cases pin
+# behaviour that already existed while `locale.rs` owned the file and that the
+# extraction had to carry across unchanged — the merge, and the temp-file-plus-
+# rename. Those are the ones judged by a `locale::tests::` name below, and that
+# is deliberate: their oracle is the locale's OWN tests, unedited, because a
+# refactor whose evidence is a test the refactor also wrote has no evidence.
+# The rest pin what the extraction ADDED and nothing before it had: the
+# process-wide lock, the backup of a malformed file, the unique temp name and
+# its removal on a failed write. Which case is which is re-derivable, so no
+# list of them is kept here:
+#
+#   grep -oE "mnema-(desktop|walk) 'locale::[^']+'" scripts/mutations/pr9-shell.sh
+#
+# No count of the cases here, deliberately — `pr8-exclusions.sh` explains what
+# that number costs when it goes stale. Re-derive:
+#
+#   grep -c '^case_ ' scripts/mutations/pr9-shell.sh                     # cases
+#   grep -oE "mnema-desktop '[^']+'" scripts/mutations/pr9-shell.sh | sort -u
+#
+# ⚠️ **Two test shapes, and the selector is what tells them apart.** The `--lib`
+# cases name unit tests: `prefs.rs` and `locale.rs` both keep theirs in their own
+# `mod tests`, so those names carry the `prefs::tests::` / `locale::tests::`
+# prefix, and a name without it selects nothing — the harness then reports a
+# BASELINE FAILURE for the whole file rather than a result. The `--test commands`
+# cases name integration tests in `src-tauri/tests/commands.rs`, which sit at the
+# top level of that file and carry NO prefix. Getting the two the wrong way round
+# fails the same way. Re-derive which is which:
+#
+#   grep -oE "mnema-desktop '''[^''']+''' --(lib|test [a-z_]+)" scripts/mutations/pr9-shell.sh
+#
+# ⚠️ At least one case here names a `#[cfg(unix)]` test. Both of this
+# repository's CI legs are unix; a Windows leg would fail this file's baseline
+# WHOLE — every case in it, before any mutation runs — the way
+# `pr8-exclusions-macos.sh` had to be split off for. Which tests those are is
+# taken from the code rather than from this sentence, which would go stale:
+#
+#   for t in $(grep -oE "mnema-desktop '[^']+'" scripts/mutations/pr9-shell.sh \
+#               | sed "s/.*'\(.*\)'/\1/" | sed 's/.*:://' | sort -u); do
+#     grep -rn -B3 "fn ${t}(" src-tauri | grep -q 'cfg(unix)' && echo "$t"
+#   done
+#
+# 🔴 **Where those guards live, and what is unguarded without them.** Fix round
+# 1, I9. Both `#[cfg(unix)]` tests are read-only-directory fixtures — they make
+# a persist FAIL, which on unix is one `chmod` and on Windows is not that at
+# all. Everything they guard is therefore about what happens when `write_key`
+# refuses: that a persist failure still leaves the operating system's own answer
+# in `HotkeyState`, and so the ordering of step 6 that makes it true. On a
+# Windows leg those mutants have no guard, and the honest reading is that they
+# are unprotected there rather than protected by a file that will not build.
+# The list is the loop above, run on the day it is asked; this paragraph says
+# what class they are so the loop's answer means something.
+
+# The merge itself, removed: `write_key` builds a fresh object instead of the
+# one already in the file. Every key anybody else wrote is then dropped by the
+# next write of any single key — the hotkey erases the locale and the locale
+# erases the hotkey — while the file stays valid JSON holding exactly what was
+# last written, which is why nothing but a two-key fixture can see it.
+case_ "a key already in the file must survive a write of a different key" \
+  src-tauri/src/prefs.rs \
+  's~        Some\(Ok\(object\)\) => object,~        Some(Ok(_)) => serde_json::Map::new(),~' \
+  'Some(Ok(_)) => serde_json::Map::new(),' \
+  mnema-desktop 'prefs::tests::a_new_key_joins_the_one_already_in_the_file' --lib
+
+# The same mutation, judged by the oracle the refactor did not write. This is
+# the case that says the extraction is behaviour-preserving rather than merely
+# self-consistent: `write_preserves_unknown_fields` was written against the
+# code that used to live in `locale.rs`, has not been edited, and still dies
+# when the merge it was written for goes away.
+case_ "the locale's own forward-safety test must still see the merge disappear" \
+  src-tauri/src/prefs.rs \
+  's~        Some\(Ok\(object\)\) => object,~        Some(Ok(_)) => serde_json::Map::new(),~' \
+  'Some(Ok(_)) => serde_json::Map::new(),' \
+  mnema-desktop 'locale::tests::write_preserves_unknown_fields' --lib
+
+# Temp-file-plus-rename collapsed to a write straight at the target. A write
+# that fails part-way then leaves a truncated file where the preferences were:
+# in a read-only directory the sibling temp file cannot be created at all, but
+# the existing file is still writable through its own mode, so the mutant
+# truncates it and reports success. Again judged by the locale's own unedited
+# test, which is what that test was written for.
+case_ "a failed write must not be able to destroy what was already persisted" \
+  src-tauri/src/prefs.rs \
+  's~    let tmp = path\.with_extension\(temp_extension\(\)\);\n(?:    //[^\n]*\n)+    if let Err\(e\) = std::fs::write\(&tmp, &body\) \{\n(?:.*?\n)+?    Ok\(\(\)\)~    std::fs::write(\&path, \&body)~' \
+  'std::fs::write(&path, &body)' \
+  mnema-desktop 'locale::tests::failed_write_keeps_the_previous_choice' --lib
+
+# `read_all`'s promise that nothing it meets is an error. A file that is not
+# JSON, or is JSON of the wrong shape, then takes the process down — and the
+# first caller of this function is start-up, before there is anywhere to report
+# anything to. The named test's first assertion is what sees it.
+case_ "a malformed file must read as no preferences, not as a panic" \
+  src-tauri/src/prefs.rs \
+  's~    serde_json::from_slice\(&bytes\)\.unwrap_or_default\(\)~    serde_json::from_slice(\&bytes).unwrap()~' \
+  'serde_json::from_slice(&bytes).unwrap()' \
+  mnema-desktop 'prefs::tests::a_malformed_file_is_kept_byte_for_byte_beside_the_one_that_replaces_it' --lib
+
+# 🔴 The lock, gone. Everything still compiles, every other test in this file
+# stays green, and two writers that interleave each write an object computed
+# before the other's key was added — so the loser's key is simply not in the
+# file, with nothing to say it ever was. This is the one fixture in the task
+# that can see it: the named test parks the first writer INSIDE the critical
+# section and watches the second one walk past. A "two threads, N writes each,
+# then check nothing was lost" test would pass against this mutant whenever the
+# interleaving happened not to occur.
+case_ "the read-modify-write must be serialised, not merely usually uncontended" \
+  src-tauri/src/prefs.rs \
+  's~    let _guard = PREFS_LOCK\.lock\(\)\.unwrap_or_else\(\|e\| e\.into_inner\(\)\);~    let _guard = (); // mutant: the critical section is not serialised~' \
+  'let _guard = (); // mutant: the critical section is not serialised' \
+  mnema-desktop 'prefs::tests::a_second_writer_waits_for_the_first_to_leave_the_critical_section' --lib
+
+# 🔴 The backup, skipped: a file that does not parse is simply overwritten. The
+# malformed file may be the only copy of something a person hand-edited, or
+# something a newer version wrote in a shape this build cannot read, and after
+# this mutant it is gone with nothing recording that it existed. Nothing above
+# can see this — the file it replaces it with is byte-identical either way; it
+# is the `.corrupt` sibling's contents, asserted byte-for-byte, that dies.
+case_ "a malformed file must be kept before it is replaced, not destroyed" \
+  src-tauri/src/prefs.rs \
+  's~        Some\(Err\(_\)\) => \{\n            replace_file\(&path, &path\.with_extension\("json\.corrupt"\)\)\?;\n            serde_json::Map::new\(\)\n        \}~        Some(Err(_)) => serde_json::Map::new(), // mutant: the malformed file is overwritten~' \
+  'Some(Err(_)) => serde_json::Map::new(), // mutant: the malformed file is overwritten' \
+  mnema-desktop 'prefs::tests::a_malformed_file_is_kept_byte_for_byte_beside_the_one_that_replaces_it' --lib
+
+# ── Task review, concern 1 ────────────────────────────────────────────────────
+#
+# 🔴 The read reverted from bytes to text, which is exactly what the body moved
+# out of `locale.rs` used to do. `read_to_string` fails on a file that is not
+# valid UTF-8, so `existing` is `None` and the file lands on the same arm as a
+# file that DOES NOT EXIST: no backup, and the only copy of whatever wrote it is
+# gone. Nothing else in this file can see it — measured by running the whole
+# `--lib prefs` filter against this exact reversion, where thirteen tests stay
+# green and only the one named below dies:
+#
+#   a file that is not text was replaced with no backup beside it
+#
+# It is the arm, not the parse, that this case is about: both readings answer an
+# empty map from `read_all` and both write the same replacement file.
+case_ "a preferences file that is not valid UTF-8 must be malformed, not absent" \
+  src-tauri/src/prefs.rs \
+  's~    let existing = std::fs::read\(&path\)\.ok\(\);\n    let parsed = existing\n        \.as_deref\(\)\n        \.map\(serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>\);~    let existing = std::fs::read_to_string(\&path).ok(); // mutant: unreadable text, not malformed bytes\n    let parsed = existing\n        .as_deref()\n        .map(serde_json::from_str::<serde_json::Map<String, serde_json::Value>>);~' \
+  'let existing = std::fs::read_to_string(&path).ok(); // mutant: unreadable text, not malformed bytes' \
+  mnema-desktop 'prefs::tests::a_file_of_invalid_utf8_is_backed_up_rather_than_overwritten' --lib
+
+# ── Task review, fix round 1 ──────────────────────────────────────────────────
+#
+# Minor 3. The unique temp suffix, collapsed back to the one fixed name the
+# plan replaced. Two writers then pick the same sibling to write into, and the
+# uniqueness the plan asked for was until now a requirement nothing could
+# observe: this mutant survived all seven cases above.
+case_ "each writer must name its own temp file, not one shared name" \
+  src-tauri/src/prefs.rs \
+  's~fn temp_extension\(\) -> String \{\n    static SEQ: AtomicU64 = AtomicU64::new\(0\);\n    let n = SEQ\.fetch_add\(1, Ordering::Relaxed\);\n    format!\("json\.\{\}\.\{n\}\.tmp", std::process::id\(\)\)\n\}~fn temp_extension() -> String \{\n    "json.tmp".to_string() // mutant: one fixed temp name for every writer\n\}~' \
+  '"json.tmp".to_string() // mutant: one fixed temp name for every writer' \
+  mnema-desktop 'prefs::tests::each_call_names_a_different_temp_file' --lib
+
+# Important 2. The temp file's removal on the rename's error path, taken back
+# out — which is exactly what this task shipped in its first commit. The write
+# still fails and still reports the failure, so nothing above notices; what it
+# leaves behind is a `prefs.json.<pid>.<n>.tmp` that no later write will ever
+# reuse or overwrite, one per failure, in the user's data directory forever.
+#
+# ⚠️ The sibling removal on the PARTIAL-WRITE path (a full disk, a killed
+# process mid-`write`) is deliberately NOT a case here: this harness has no way
+# to fail a `std::fs::write` after it has created the file, so a case for it
+# could only be written against a test that does not exist. It is guarded by
+# the same reading of the same one-line idiom, and by nothing executable.
+case_ "a write that fails at the rename must take its temp file with it" \
+  src-tauri/src/prefs.rs \
+  's~    if let Err\(e\) = replace_file\(&tmp, &path\) \{\n        let _ = std::fs::remove_file\(&tmp\);\n        return Err\(e\);\n    \}\n    Ok\(\(\)\)~    replace_file(\&tmp, \&path) // mutant: the temp file is left behind on failure~' \
+  'replace_file(&tmp, &path) // mutant: the temp file is left behind on failure' \
+  mnema-desktop 'prefs::tests::a_write_that_fails_at_the_rename_leaves_no_temp_file_behind' --lib
+
+# ── PR 9, Task 2: the hotkey lifecycle, autostart, and the three commands ─────
+#
+# ⚠️ Every case below names a test in `tests/commands.rs`, so the selector is
+# `--test commands` and the name carries NO module prefix — unlike the
+# `--lib` cases above, whose names are `prefs::tests::…`. The two shapes live in
+# one file because they mutate one file; the selector is what tells them apart.
+#
+# ⚠️ One of them (`a_persist_failure_leaves_the_new_shortcut_registered_and_the_
+# old_one_on_disk`) is `#[cfg(unix)]`, which the file header's warning already
+# covers: a Windows leg would fail this file's baseline WHOLE.
+
+# 🔴 The persist moved in front of the registration. On the success path nothing
+# changes — the same value is written, twice — but a registration the operating
+# system refuses is then already on disk, and the shortcut a person gets back
+# tomorrow is one this application never managed to take. Only an assertion on
+# the FILE can see it: the reply still reports the refusal either way.
+case_ "a shortcut must not be persisted before the operating system has taken it" \
+  src-tauri/src/prefs.rs \
+  's~    let current = state\.hotkey\(\);~    let current = state.hotkey();\n    // mutant: persisted before it is registered\n    write_key(state.data_dir(), HOTKEY_KEY, serde_json::Value::String(shortcut.clone()))?;~' \
+  '// mutant: persisted before it is registered' \
+  mnema-desktop 'a_failed_registration_restores_the_old_shortcut_and_leaves_prefs_untouched' --test commands
+
+# 🔴 The best-effort restoration, deleted. The old shortcut was given up in step
+# 4 and the new one was refused in step 5, so after this mutant the application
+# holds NOTHING and never asks for anything back — the person's shortcut is gone
+# and no message says so. The reply is byte-identical to the correct one, which
+# is why only the recorded sequence can see it: its last entry is the
+# re-registration.
+case_ "a refused registration must hand the old shortcut back" \
+  src-tauri/src/prefs.rs \
+  's~        if gave_up_the_old_one\n            && let Err\(restoring\) = state\.with_shortcuts\(\|r\| r\.register\(&current\.shortcut\)\)\n        \{\n            state\.set_hotkey_state\(HotkeyState \{\n                shortcut: current\.shortcut,\n                status: HotkeyStatus::Unavailable \{ reason: restoring \},\n            \}\);\n        \}~        // mutant: the old shortcut is never taken back~' \
+  '// mutant: the old shortcut is never taken back' \
+  mnema-desktop 'a_failed_registration_restores_the_old_shortcut_and_leaves_prefs_untouched' --test commands
+
+# 🔴 The unregister made unconditional. D-b step 4 is "only if its status is
+# `Registered`", and from an `Unavailable` start there is nothing the operating
+# system holds — so this mutant asks it to give up a shortcut it never took.
+# Every fixture that starts from `Registered` survives it; the one that starts
+# where the application actually starts records two calls instead of one.
+case_ "the old shortcut is given up only when the operating system holds it" \
+  src-tauri/src/prefs.rs \
+  's~    if gave_up_the_old_one \{~    if true \{ // mutant: unregister whatever the status says~' \
+  'if true { // mutant: unregister whatever the status says' \
+  mnema-desktop 'set_hotkey_from_an_unavailable_start_registers_and_never_unregisters' --test commands
+
+# 🔴 The no-modifier guard, deleted. The library ACCEPTS a bare `Space` — a
+# single token parses to `Ok` with empty modifiers
+# (`global-hotkey-0.8.0/src/hotkey.rs:174-178`) — so after this mutant a person
+# can bind the space bar and lose it in every application on the machine. There
+# is no error anywhere; the command answers `Ok`.
+case_ "a shortcut with no modifier at all must be refused" \
+  src-tauri/src/prefs.rs \
+  's~    if parsed\.mods\.is_empty\(\) \{\n        return Err\(Refusal::NoModifier\);\n    \}~    // mutant: a shortcut with no modifier is accepted~' \
+  '// mutant: a shortcut with no modifier is accepted' \
+  mnema-desktop 'set_hotkey_refuses_a_key_with_no_modifier' --test commands
+
+# 🔴 The modifier-only guard, deleted, judged by the single-token press. `"Alt"`
+# is still refused — by the PARSER, as `UnsupportedKey`, whose sentence
+# (`hotkey.rs:40`) asks the reader to report the string to
+# `github.com/tauri-apps/muda`. So the mutant does not let a bad shortcut
+# through; it hands somebody who held one modifier down a request to file a bug
+# report against a library they have never heard of. The test asserts both
+# halves: our sentence present, that URL absent.
+case_ "one modifier with no key is refused in our own words, not the parser's" \
+  src-tauri/src/prefs.rs \
+  's~    if names_no_key\(shortcut\) \{\n        return Err\(Refusal::NoKey\);\n    \}~    // mutant: an empty or modifier-only string falls through to the parser~' \
+  '// mutant: an empty or modifier-only string falls through to the parser' \
+  mnema-desktop 'set_hotkey_refuses_one_modifier_with_no_key' --test commands
+
+# The same mutation, judged by the empty string — a different token shape
+# through the same guard, and the one a window sends when a recorder is cleared.
+case_ "the empty string is refused in our own words too" \
+  src-tauri/src/prefs.rs \
+  's~    if names_no_key\(shortcut\) \{\n        return Err\(Refusal::NoKey\);\n    \}~    // mutant: an empty or modifier-only string falls through to the parser~' \
+  '// mutant: an empty or modifier-only string falls through to the parser' \
+  mnema-desktop 'set_hotkey_refuses_the_empty_string' --test commands
+
+# 🔴 The guard narrowed to a SINGLE token, which is the shape an implementer
+# reaches for first and the one that misses the commoner press. `"Ctrl+Alt"` —
+# two modifiers held with no key — does not take the single-token path at all:
+# it reaches `key.ok_or_else(…)` (`global-hotkey-0.8.0/src/hotkey.rs:229`) and
+# comes back as `InvalidFormat`, a third sentence with a third shape. Every
+# other refusal fixture in this task survives this mutant; measured by running
+# the whole `--test commands` filter against it, where only the case below dies.
+case_ "two modifiers with no key are refused by the same guard as one" \
+  src-tauri/src/prefs.rs \
+  's~    shortcut\.trim\(\)\.is_empty\(\) \|\| shortcut\.split\(.\+.\)\.all\(is_modifier_token\)~    shortcut.trim().is_empty() || is_modifier_token(shortcut) // mutant: only a single token is refused~' \
+  'is_modifier_token(shortcut) // mutant: only a single token is refused' \
+  mnema-desktop 'set_hotkey_refuses_two_modifiers_with_no_key' --test commands
+
+# 🔴 The answer echoed from the request instead of read back from the operating
+# system. Everything looks right: the switch moves, the reply agrees with it,
+# and the machine does not launch the application at login. The fixture that
+# sees it is the one whose fake DISAGREES with what it was told to do — without
+# that state both implementations pass.
+case_ "autostart is what the operating system says, not what was asked for" \
+  src-tauri/src/prefs.rs \
+  's~    Ok\(read_autostart\(&state\)\)~    Ok(if enabled \{ AutostartState::Enabled \} else \{ AutostartState::Disabled \}) // mutant: the request is echoed~' \
+  '// mutant: the request is echoed' \
+  mnema-desktop 'set_autostart_reports_what_the_operating_system_says_not_what_was_asked' --test commands
+
+# 🔴 Step 6's two lines swapped: the persist first, the state only if it
+# succeeded. The operating system is then holding the NEW shortcut while the
+# window is told the old one is bound — the state stops reporting the only fact
+# it is entitled to report. Only the read-only-directory fixture can see it,
+# because it is the only one where the persist fails at all.
+case_ "the state is written before the persist, not after it" \
+  src-tauri/src/prefs.rs \
+  's~    state\.set_hotkey_state\(registered\.clone\(\)\);\n    write_key\(\n        state\.data_dir\(\),\n        HOTKEY_KEY,\n        serde_json::Value::String\(shortcut\),\n    \)\?;~    write_key(\n        state.data_dir(),\n        HOTKEY_KEY,\n        serde_json::Value::String(shortcut),\n    )?;\n    state.set_hotkey_state(registered.clone()); // mutant: the state lands only after the persist~' \
+  'state.set_hotkey_state(registered.clone()); // mutant: the state lands only after the persist' \
+  mnema-desktop 'a_persist_failure_leaves_the_new_shortcut_registered_and_the_old_one_on_disk' --test commands
+
+# 🔴 A failed `unregister(old)` ignored, and the new shortcut taken anyway. The
+# operating system then holds BOTH, and one press fires the launcher twice —
+# and the state records only the new one, so nothing will ever give the old one
+# back. The reply is an `Ok` where the correct code refuses, but the assertion
+# that discriminates is the sequence's length: exactly two entries, no third.
+case_ "a failed unregister stops the change rather than adding a second shortcut" \
+  src-tauri/src/prefs.rs \
+  's~        state\n            \.with_shortcuts\(\|r\| r\.unregister\(&current\.shortcut\)\)\n            \.map_err\(Error::HotkeyUnavailable\)\?;~        let _ = state.with_shortcuts(\|r\| r.unregister(\&current.shortcut)); // mutant: a failed unregister is ignored~' \
+  '// mutant: a failed unregister is ignored' \
+  mnema-desktop 'a_failed_unregister_stops_before_the_new_shortcut_is_ever_attempted' --test commands
+
+# 🔴 The restoration's own guard, dropped — the mutant that puts back the shape
+# the final review found. Step 4 gives the old shortcut up ONLY where the state
+# says the operating system is holding it, and this is that step's undo, so it
+# may run only where that step ran. Unguarded, from an `Unavailable` start it
+# does not restore anything: it ACQUIRES a shortcut nothing was holding, under a
+# state that goes on saying `Unavailable`. The next change then reads
+# `status != Registered`, skips step 4, and the operating system is left holding
+# both — with nothing in the application naming the stale one.
+#
+# Every fixture that starts from `Registered` survives this, and so does every
+# assertion about the STATE: a restoration that succeeds writes no state at all,
+# so both implementations leave the same one behind. Only the recorded call
+# sequence from an `Unavailable` start can see it.
+case_ "the restoration runs only where the old shortcut was actually given up" \
+  src-tauri/src/prefs.rs \
+  's~        if gave_up_the_old_one\n            && let Err\(restoring\)~        if true // mutant: the restoration runs where step 4 gave nothing up\n            \&\& let Err(restoring)~' \
+  'if true // mutant: the restoration runs where step 4 gave nothing up' \
+  mnema-desktop 'a_refused_registration_from_an_unavailable_start_takes_nothing_back' --test commands
+
+# 🔴 The double-failure row, and the state left claiming `Registered` while the
+# operating system holds nothing at all. The reply is identical to the correct
+# one — it carries the NEW shortcut's sentence either way — so the only fixture
+# that can see this is the one that asks `app_prefs` afterwards. Every other
+# refusal fixture in this task survives it.
+case_ "a restoration that also failed must not leave the state claiming Registered" \
+  src-tauri/src/prefs.rs \
+  's~            state\.set_hotkey_state\(HotkeyState \{\n                shortcut: current\.shortcut,\n                status: HotkeyStatus::Unavailable \{ reason: restoring \},\n            \}\);~            let _ = restoring; // mutant: the status stays Registered with nothing behind it~' \
+  'let _ = restoring; // mutant: the status stays Registered with nothing behind it' \
+  mnema-desktop 'a_failed_restoration_leaves_the_state_unavailable_rather_than_registered' --test commands
+
+# 🔴 The boot made fatal by a failed registration — the D128 defect moving house
+# out of the plugin builder and into `.setup`. A shortcut another application
+# already holds would once again be a reason this one does not start, and a
+# person who cannot start it cannot be told why.
+#
+# ⚠️ **Not a literal `?`, and that is not a shortcut taken.** `install_hotkey`
+# returns `HotkeyState`, not a `Result`, so `?` does not compile — and a mutant
+# that will not build is a broken baseline this harness reports as a gate, not a
+# guard that held. `.expect(…)` is the shape that compiles and is what "fatal"
+# means at a boot with nowhere to report to. The named fixture calls
+# `install_hotkey` DIRECTLY, which is the whole reason the boot is a free
+# function: inline in `.setup` it would be reachable from no test here, and this
+# case could not exist.
+case_ "a registration the operating system refuses must not be fatal at start-up" \
+  src-tauri/src/prefs.rs \
+  's~    let status = match state\.with_shortcuts\(\|r\| r\.register\(&shortcut\)\) \{\n        Ok\(\(\)\) => HotkeyStatus::Registered,\n        Err\(reason\) => HotkeyStatus::Unavailable \{ reason \},\n    \};~    let status = state\n        .with_shortcuts(\|r\| r.register(\&shortcut))\n        .map(\|()\| HotkeyStatus::Registered)\n        .expect("mutant: a failed boot registration is fatal");~' \
+  '.expect("mutant: a failed boot registration is fatal");' \
+  mnema-desktop 'a_stored_hotkey_that_no_longer_parses_boots_without_a_registration' --test commands
+
+# The other half of the stored-garbage pair: the fallback itself. A boot that
+# handed the unparsable stored string to the operating system would ask for a
+# shortcut nobody can press, and the recorded sequence is what says it never
+# does.
+case_ "an unparsable stored shortcut falls back and is never handed to the OS" \
+  src-tauri/src/prefs.rs \
+  's~        Some\(s\) if accept_shortcut\(&s\)\.is_ok\(\) => s,~        Some(s) => s, // mutant: whatever is stored is registered as it stands~' \
+  'Some(s) => s, // mutant: whatever is stored is registered as it stands' \
+  mnema-desktop 'a_stored_hotkey_that_no_longer_parses_registers_the_default_and_never_the_garbage' --test commands
+
+# ── Fix round 1 ───────────────────────────────────────────────────────────────
+#
+# Six cases, and each one exists because a review found an assertion that could
+# not fail or a behaviour with no assertion at all. Two of them name tests this
+# round wrote; four name tests that were already there and could not tell the
+# two implementations apart until this round changed what their fakes record or
+# what they put on disk first.
+
+# 🔴 The boot asking a NARROWER question than the settings window. `"Space"`
+# PARSES — a single token comes back `Ok` with empty modifiers
+# (`global-hotkey-0.8.0/src/hotkey.rs:174-178`) — so this mutant re-registers
+# the space bar at every start-up and takes it away in every application on the
+# machine, while `set_hotkey` goes on refusing to set it. Nothing in the
+# application can undo that; a text editor can. This is the two-site
+# disagreement that `accept_shortcut` exists to make impossible, and the fixture
+# that sees it is the only one whose stored value parses.
+case_ "the boot refuses the shortcuts the settings window refuses" \
+  src-tauri/src/prefs.rs \
+  's~        Some\(s\) if accept_shortcut\(&s\)\.is_ok\(\) => s,~        Some(s) if s.parse::<Shortcut>().is_ok() => s, // mutant: the boot asks only whether it parses~' \
+  '// mutant: the boot asks only whether it parses' \
+  mnema-desktop 'a_stored_shortcut_with_no_modifier_is_not_registered_at_boot_either' --test commands
+
+# 🔴 The two sentences of the double-failure row swapped, which is the defect
+# living in a STRING rather than in control flow. D-b bolds the provenance: the
+# reply carries the NEW shortcut's sentence, because that is the refusal the
+# person asked about, while the stored state carries the RE-REGISTRATION's,
+# because that is why the operating system now holds nothing. Store the new
+# one's and the window shows a person the reason the shortcut they wanted was
+# refused as though it were the reason the one they had is gone.
+#
+# ⚠️ Killable only because the fake now fails each shortcut with its OWN
+# sentence. While one string answered every failed `register`, both assertions
+# in the fixture compared against the same bytes and this mutant survived under
+# a comment claiming to check exactly it.
+case_ "the stored reason is the restorations own, not the new shortcuts" \
+  src-tauri/src/prefs.rs \
+  's~                status: HotkeyStatus::Unavailable \{ reason: restoring \},~                status: HotkeyStatus::Unavailable \{\n                    reason: \{ let _ = restoring; reason.clone() \}, // mutant: the stored reason is the new one\n                \},~' \
+  '// mutant: the stored reason is the new one' \
+  mnema-desktop 'a_failed_restoration_leaves_the_state_unavailable_rather_than_registered' --test commands
+
+# 🔴 The write dropped entirely: `set_autostart` asks the operating system
+# nothing and answers what it reads back. This is the command's primary effect,
+# and it is the one a person cannot check from inside the application — the
+# switch moves, the reply agrees with the machine, and the machine was never
+# asked. Case 8 above mutates the ANSWER; this one mutates the act.
+#
+# ⚠️ Killable only because `FakeAutolaunch` now records `enable` and `disable`.
+# Until it did, both autostart fixtures asserted the read-back alone and this
+# mutant passed the whole suite.
+case_ "set_autostart asks the operating system rather than only reading it" \
+  src-tauri/src/prefs.rs \
+  's~    state\n        \.with_autolaunch\(\|a\| if enabled \{ a\.enable\(\) \} else \{ a\.disable\(\) \}\)\n        \.map_err\(Error::Autostart\)\?;~    let _ = enabled; // mutant: the operating system is never asked~' \
+  'let _ = enabled; // mutant: the operating system is never asked' \
+  mnema-desktop 'set_autostart_reports_what_the_operating_system_says_not_what_was_asked' --test commands
+
+# The same mutant judged by the other arm and the other outcome: `false` must
+# reach `disable`, and a write that fails must be a rejection carrying the
+# service's own sentence rather than a read-back that renders as "off". This is
+# `Error::Autostart`'s only guard.
+case_ "a failed enable or disable is a rejection, not a read-back" \
+  src-tauri/src/prefs.rs \
+  's~    state\n        \.with_autolaunch\(\|a\| if enabled \{ a\.enable\(\) \} else \{ a\.disable\(\) \}\)\n        \.map_err\(Error::Autostart\)\?;~    let _ = enabled; // mutant: the operating system is never asked~' \
+  'let _ = enabled; // mutant: the operating system is never asked' \
+  mnema-desktop 'set_autostart_reports_the_services_own_sentence_when_the_write_fails' --test commands
+
+# 🔴 The change lock removed, so two `set_hotkey` calls interleave again. The
+# state is read at entry and written several operating-system calls later, so
+# the second caller asks the machine to give up a shortcut the first has already
+# given up and is refused about a shortcut nobody holds. A `--lib` case, and the
+# only one in this file that names a test in `prefs`'s own `mod tests`: the
+# critical section cannot be driven through the IPC, because a
+# `#[tauri::command]` taking `tauri::State` is not callable from a unit test —
+# which is why `change_hotkey` is a free function over `&AppState`.
+case_ "two hotkey changes are serialised against each other" \
+  src-tauri/src/prefs.rs \
+  's~    let _change = state\.lock_hotkey_change\(\);~    // mutant: two changes are free to interleave~' \
+  '// mutant: two changes are free to interleave' \
+  mnema-desktop 'prefs::tests::two_hotkey_changes_cannot_interleave' --lib
+
+# A refused shortcut persisted anyway, so the refusal a person reads is undone
+# by the next start-up. This case exists to make one assertion falsifiable: the
+# no-modifier fixture used to say `stored_hotkey(…) == None` about a directory
+# where it had never written a `prefs.json` at all, which no implementation that
+# does not write can fail. It now puts `Alt+Space` in the file first and says
+# that value is still there, and this is the mutant that reads it back as
+# `Space`.
+case_ "a refused shortcut leaves the one already on disk alone" \
+  src-tauri/src/prefs.rs \
+  's~    if let Err\(refusal\) = accept_shortcut\(&shortcut\) \{~    if let Err(refusal) = accept_shortcut(\&shortcut) \{\n        let _ = write_key(state.data_dir(), HOTKEY_KEY, serde_json::Value::String(shortcut.clone())); // mutant: a refused shortcut is persisted anyway~' \
+  '// mutant: a refused shortcut is persisted anyway' \
+  mnema-desktop 'set_hotkey_refuses_a_key_with_no_modifier' --test commands
+
+# ── Task 5: the tray's Stop item ──────────────────────────────────────────────
+#
+# 🔴 **There is no case for the dispatcher arm, and its absence is the finding.**
+# `"stop_indexing" => { … cancel_job() }` lives inside the closure `Builder::
+# on_menu_event` is given in `lib.rs::run`, and `run` is what a shipped binary
+# calls: no test in this repository builds it. `tests/commands.rs` builds its
+# applications with `mock_builder()`, which registers no menu-event handler at
+# all, and there is no seam to reach the closure through — a menu event cannot
+# be synthesised, and the arm is not a named function anything could call. A
+# case for it would be an un-killable case, which this file has a rule against
+# shipping; the arm is verified by pressing the item in Task 9's live run.
+#
+# The `set_enabled` side has no case either, for a different and sharper reason.
+# Under the mock runtime `send_message` runs a `Message::Task` inline while
+# `is_running` is false (`tauri-2.11.5/src/test/mock_runtime.rs:76-88`), and
+# `app_in` never calls `run()`, so a closure that dispatches through
+# `run_on_main_thread` and one that calls `set_enabled` straight out are
+# observationally identical headlessly. No test can tell them apart, so no
+# honest case can be written; what dispatching buys is a job thread that does
+# not block, which is a live-run property.
+
+# The claim goes unannounced: a job starts and the tray goes on offering a Stop
+# that is greyed out. The whole point of the observer, removed.
+case_ "claiming the job slot announces itself" \
+  src-tauri/src/state.rs \
+  's~        if let Some\(f\) = &slot\.observer \{\n            f\(\);\n        \}~        // mutant: the claim is never announced~' \
+  '// mutant: the claim is never announced' \
+  mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
+
+# 🔴 The store and the announcement swapped, which is the ordering the whole
+# observer contract rests on. `JobSlot::drop` frees the slot and only then says
+# so, and that order is what lets an incoming job claim the slot in between: the
+# handoff then announces `true` from the incoming claim and, last, the outgoing
+# drop — where a look finds a job running. Announce first and the slot is still
+# taken when anybody looks, so the incoming claim in the named fixture is
+# refused outright and the state a person's tray is drawn from is the outgoing
+# job's for as long as it takes the next event to arrive.
+#
+# The named test is the one whose fixture builds the handoff; its neighbour
+# `the_observer_hears_a_job_start_and_finish` also goes red here, which is what
+# a swapped pair of statements should do to both.
+case_ "the outgoing job frees the slot before it announces, never after" \
+  src-tauri/src/state.rs \
+  's~        self\.running\.store\(false, Ordering::Release\);.*?if let Some\(f\) = &self\.observer \{\n            f\(\);\n        \}~        if let Some(f) = \&self.observer \{ f(); \} // mutant: the outgoing job announces before it frees the slot\n        self.running.store(false, Ordering::Release);~s' \
+  '// mutant: the outgoing job announces before it frees the slot' \
+  mnema-desktop 'state::tests::an_announcement_is_read_as_the_fact_not_replayed_as_the_edge' --lib
+
+# 🔴 The `false` edge moved from the job ENDING to the stop being REQUESTED —
+# the plausible wrong implementation, not a deletion. It greys the item out the
+# moment a person presses it, which looks right, and leaves the item enabled for
+# every job that finishes on its own, crashes, or is never cancelled at all. Two
+# substitutions in one expression on purpose: the marker proves the first
+# applied, the occurrence count proves the second did.
+case_ "the release is announced when the job ends, not when a stop is asked for" \
+  src-tauri/src/state.rs \
+  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        if let Some\(f\) = &self\.observer \{\n            f\(\);\n        \}~        let _ = \&self.observer;~' \
+  '// mutant: the release is announced when a stop is requested' \
+  mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
+
+# The amended §8 undone: the deleted «Перевірити оновлення» back in the id list,
+# where it would rebuild a menu item no dispatcher arm answers and no catalog
+# key labels. This is the case that makes the spec assertion falsifiable, which
+# a list compared against itself would not be.
+case_ "the tray item list is the amended spec 8, not the one before it" \
+  src-tauri/src/tray.rs \
+  's~    "stop_indexing",\n    "quit",\n\];~    "stop_indexing",\n    "check_updates", // mutant: the deleted update check is back\n    "quit",\n];~' \
+  '// mutant: the deleted update check is back' \
+  mnema-desktop 'tray::tests::tray_item_ids_match_spec_order' --lib
+
+# ── Task 11a: the tray hint follows the registered hotkey ─────────────────────
+#
+# The measured defect, put back. Until Task 11a the hint was the literal
+# `(⌥Space)`, written when the shortcut could not be changed; PR 9 made it
+# changeable and the label did not follow, so a person who moved it to ⌃⌥Space
+# and restarted read the old combination off the menu bar. Every OTHER label
+# assertion in `tray::tests` survives this — the default shortcut IS `Alt+Space`
+# and on a mac that is exactly what the literal says — so only a fixture holding
+# a shortcut that is not the default can see it.
+case_ "the search hint is read off the hotkey state, not written into the label" \
+  src-tauri/src/tray.rs \
+  's~                crate::shortcut::format_shortcut\(\n                    &hotkey\.shortcut,\n                    crate::models::Platform::of_this_build\(\)\n                \)~                "⌥Space" // mutant: the hint is a literal again~' \
+  '"⌥Space" // mutant: the hint is a literal again' \
+  mnema-desktop 'tray::tests::the_search_hint_follows_the_registered_shortcut' --lib
+
+# The plausible wrong implementation rather than a deletion: the hint is drawn
+# from the state, correctly, and drawn in the one state where there is nothing
+# to press. D128 measured `Unavailable` as a real start — another application
+# holding the shortcut — and a menu promising a combination that does nothing is
+# the same class of defect this task exists for, one step smaller. Every
+# `Registered` fixture passes under this mutant.
+case_ "a shortcut the operating system refused is named by no hint at all" \
+  src-tauri/src/tray.rs \
+  's~                format!\("🔍 \{\}", locale::t\(lang, Key::TrayShowSearch\)\)~                // mutant: an unusable shortcut is named anyway\n                format!(\n                    "🔍 \{\} (\{\})",\n                    locale::t(lang, Key::TrayShowSearch),\n                    crate::shortcut::format_shortcut(\n                        \&hotkey.shortcut,\n                        crate::models::Platform::of_this_build()\n                    )\n                )~' \
+  '// mutant: an unusable shortcut is named anyway' \
+  mnema-desktop 'tray::tests::an_unregistered_shortcut_is_named_by_no_hint_at_all' --lib
+
+# The canonical order dropped from the Rust formatter: the modifiers come out in
+# whatever order the stored string happens to hold them. `prefs.json` is a file
+# on the person's own disk and the parser takes any order as long as the key is
+# last, so this is invisible on every fixture that was already canonical — which
+# is every one the recorder itself builds. Only a stored string written the
+# other way round can see it.
+case_ "the tray formatter draws the modifiers in the canonical order, not the stored one" \
+  src-tauri/src/shortcut.rs \
+  's~    let modifiers: Vec<Modifier> = ORDER\.into_iter\(\)\.filter\(\|m\| held\.contains\(m\)\)\.collect\(\);~    let modifiers: Vec<Modifier> = held.clone(); // mutant: the order the tokens arrived in~' \
+  '// mutant: the order the tokens arrived in' \
+  mnema-desktop 'shortcut::tests::the_modifiers_are_drawn_in_the_canonical_order_whichever_order_the_store_holds' --lib
+
+# The command key spelled the parser's way on the platform that prints `Win` on
+# the key itself. Judged by the test that reads
+# `ui/src/i18n/shortcut.fixtures.json`, and deliberately so: that file is the
+# only thing holding this formatter and `ui/src/i18n/shortcut.ts` to one
+# answer, and a case its own loop cannot kill would say the sharing is
+# decorative. The mac and linux rows survive this mutant untouched.
+case_ "the shared fixture kills a wrong per-platform spelling of the command key" \
+  src-tauri/src/shortcut.rs \
+  's~            \(Modifier::Super, Platform::Windows\) => "Win",~            (Modifier::Super, Platform::Windows) => "Super", // mutant: the parsers spelling on a platform that prints Win~' \
+  '// mutant: the parsers spelling on a platform that prints Win' \
+  mnema-desktop 'shortcut::tests::the_shared_fixture_is_what_this_formatter_produces' --lib
+
+# External review P1. The post-walk read of the cancellation flag dropped:
+# `walk_root` observes the flag only between files, so a Stop raised after the
+# last observation is never seen by it and the walk returns `Completed`. Under
+# this mutant the walk ends `completed` while the person is looking at a Stop
+# they pressed, `jobs.ts` chains the embedding pass off `completed`, and
+# `claim_job` clears the flag as it takes the slot — so the Stop is erased and
+# the text goes to a provider. Every existing walk test survives it: none of
+# them raises the flag inside the last progress report.
+case_ "a Stop that lands after the walks last cancellation check is honoured" \
+  src-tauri/src/walk_job.rs \
+  's~        let stopped_late = slot\.cancel_flag\(\)\.load\(Ordering::SeqCst\);~        let stopped_late = false; // mutant: the walk stops reading the flag it was given~' \
+  '// mutant: the walk stops reading the flag it was given' \
+  mnema-desktop 'a_stop_after_the_last_file_is_not_lost_to_the_walk_ending_completed' --test commands

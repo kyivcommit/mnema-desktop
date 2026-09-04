@@ -6,6 +6,24 @@ use mnema_index::Db;
 
 use crate::error::Error;
 
+/// That the job slot has changed hands — a signal to go and look, carrying
+/// NOTHING about which way it went. Named, rather than written out at each of
+/// the three places it appears, because those three have to agree — the field,
+/// the setter's argument and [`JobSlot`]'s own copy.
+///
+/// 🔴 **It carried a `bool` and could not.** [`JobSlot::drop`] stores `false`
+/// before it announces, so an incoming job can claim the slot in between and
+/// announce its own start first: the two announcements then arrive `true`,
+/// `false` while the slot is HELD, and a consumer replaying the last edge
+/// disables «Зупинити сканування» for the whole of a job that is running. The
+/// walk → embed handoff is exactly that sequence. Every consumer must therefore
+/// ask [`AppState::job_is_running`] at the moment it acts, which is what
+/// [`crate::tray::StopItem::replace`] already does for the same reason and what
+/// `state::tests::an_announcement_is_read_as_the_fact_not_replayed_as_the_edge`
+/// pins. With no boolean to replay, the ordering of two announcements cannot
+/// decide what the tray ends up saying.
+pub type JobObserver = dyn Fn() + Send + Sync;
+
 /// The core owns the truth; the window only draws it. A reload of the webview
 /// must not lose or contradict anything, so nothing lives on the JavaScript side
 /// that is not also here. G7.0 §4.
@@ -64,6 +82,40 @@ pub struct AppState {
     /// `locale::apply_choice` on every change; read by `get_locale` and by
     /// tray/menu construction so both agree with what was last written.
     locale: Mutex<crate::locale::LocaleState>,
+    /// The global shortcut, as the operating system last answered about it.
+    ///
+    /// Set once at start-up by [`crate::prefs::install_hotkey`] and again by
+    /// the `set_hotkey` command. Not `Copy` — it carries a `String` and a
+    /// failure's sentence — so the getter clones, which is the same trade every
+    /// other getter here makes for the same reason: no caller holds this lock
+    /// for the length of a command.
+    hotkey: Mutex<crate::prefs::HotkeyState>,
+    /// The two operating-system services, defaulted to inert.
+    ///
+    /// 🔴 **Installed rather than constructed** ([`AppState::install_os_services`]),
+    /// and that is what keeps `new`'s four arguments at four: it has eight call
+    /// sites and seven of them are tests that do not care which registrar is in
+    /// place. It is also what makes "nothing under `cargo test` touches the real
+    /// plugins" structural — see [`crate::os_services`]'s own header.
+    shortcuts: Mutex<Box<dyn crate::os_services::ShortcutRegistrar>>,
+    autolaunch: Mutex<Box<dyn crate::os_services::Autolaunch>>,
+    /// Who to tell when the job slot changes hands, if anybody asked.
+    ///
+    /// An `Arc` rather than the `Box` [`AppState::set_job_observer`] takes,
+    /// because [`JobSlot`] carries its own clone for the life of the job:
+    /// `Box<dyn Fn(…)>` is not `Clone`, and looking the observer up again at
+    /// drop time would need a reference back to this struct that `JobSlot`
+    /// deliberately does not hold. `None` is the default and stays the default
+    /// under `cargo test` — nothing but `.setup` installs one.
+    job_observer: Mutex<Option<Arc<JobObserver>>>,
+    /// Serialises a whole hotkey change against another one.
+    ///
+    /// Separate from `hotkey` above, and that is the point: `hotkey` is held for
+    /// one read or one write, while this is held across the read, both
+    /// operating-system calls, the store and the persist. Merging them would
+    /// mean holding the state's own lock for the length of a command, which is
+    /// what every other getter here exists to avoid.
+    hotkey_change: Mutex<()>,
 }
 
 impl AppState {
@@ -88,7 +140,123 @@ impl AppState {
                 choice: crate::locale::LocaleChoice::Auto,
                 effective: crate::locale::Lang::En,
             }),
+            // 🔴 A STATED default, written here so that no test has to infer it
+            // from another test. `.setup` calls `prefs::install_hotkey` before
+            // any window exists, so the shipped application never shows this
+            // value — the state a person can read is always the one an actual
+            // registration produced. It is visible to `tests/commands.rs`,
+            // where `app_in` never runs `.setup`, and four fixtures assert
+            // against it. Changing this line changes what they assert.
+            hotkey: Mutex::new(crate::prefs::HotkeyState {
+                shortcut: crate::prefs::DEFAULT_HOTKEY.to_string(),
+                status: crate::prefs::HotkeyStatus::Unavailable {
+                    reason: "the shortcut has not been registered yet".to_string(),
+                },
+            }),
+            shortcuts: Mutex::new(Box::new(crate::os_services::NoOsServices)),
+            autolaunch: Mutex::new(Box::new(crate::os_services::NoOsServices)),
+            job_observer: Mutex::new(None),
+            hotkey_change: Mutex::new(()),
         }
+    }
+
+    /// Replaces the inert defaults with services that reach the operating
+    /// system. Called once from `.setup` with the real plugin wrappers, and
+    /// from the tests that want recording fakes.
+    pub fn install_os_services(
+        &self,
+        shortcuts: Box<dyn crate::os_services::ShortcutRegistrar>,
+        autolaunch: Box<dyn crate::os_services::Autolaunch>,
+    ) {
+        *self
+            .shortcuts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = shortcuts;
+        *self
+            .autolaunch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = autolaunch;
+    }
+
+    /// Runs `f` against the installed shortcut registrar.
+    ///
+    /// A closure rather than a getter for the reason [`AppState::with_index`]
+    /// gives: the value is behind a lock, and handing out a guard would let a
+    /// caller hold it for a whole command.
+    ///
+    /// 🔴 **Why holding this lock across the blocking `register` is safe, stated
+    /// as the argument that is actually true.** The real registrar's `register`
+    /// blocks until the main thread services it, so a main thread waiting on
+    /// this lock while a worker holds it and waits on the main thread would
+    /// deadlock. It cannot happen today because **the only main-thread
+    /// acquisitions are in `.setup`** — `install_os_services` and
+    /// `install_hotkey`'s call to this method — and `.setup` runs before the
+    /// event loop can dispatch any command, so no worker can be holding the
+    /// lock at that moment. (An earlier draft of this comment said "the main
+    /// thread never takes this lock", which the same commit contradicted twice.)
+    ///
+    /// ⚠️ **The obligation that follows: nothing on the main thread may take
+    /// this lock after start-up.** A menu item, a tray callback or a window
+    /// event that reaches `with_shortcuts` would be exactly the deadlock above,
+    /// and it would be built under a comment saying it was impossible.
+    pub fn with_shortcuts<T>(
+        &self,
+        f: impl FnOnce(&dyn crate::os_services::ShortcutRegistrar) -> T,
+    ) -> T {
+        let guard = self
+            .shortcuts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(guard.as_ref())
+    }
+
+    /// Runs `f` against the installed autolaunch. Same shape and same reasoning
+    /// as [`AppState::with_shortcuts`].
+    pub fn with_autolaunch<T>(
+        &self,
+        f: impl FnOnce(&dyn crate::os_services::Autolaunch) -> T,
+    ) -> T {
+        let guard = self
+            .autolaunch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(guard.as_ref())
+    }
+
+    /// A copy of the hotkey state. Same poison-recovery trade as
+    /// [`AppState::locale`]: behind the lock is a struct of owned values with
+    /// no invariant a panicking holder could have left half-built, and one
+    /// wrong label is a smaller failure than losing the window over it.
+    pub fn hotkey(&self) -> crate::prefs::HotkeyState {
+        self.hotkey
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Takes the hotkey-change lock, held for a whole `set_hotkey` rather than
+    /// for one read or one write. A guard rather than a closure because what it
+    /// spans is the length of a command — which is the one thing every other
+    /// lock here refuses to do, and the one thing this lock is for.
+    ///
+    /// Poison is recovered rather than propagated, the trade [`AppState::locale`]
+    /// spells out: this guards no value at all, only an ordering, and a caller
+    /// that panicked half-way through a change has left the state and the file
+    /// exactly as consistent as they were — the state is written before the
+    /// persist and each is one operation.
+    pub fn lock_hotkey_change(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.hotkey_change
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Overwrites the hotkey state — from [`crate::prefs::install_hotkey`] at
+    /// start-up and from `set_hotkey` on every change.
+    pub fn set_hotkey_state(&self, s: crate::prefs::HotkeyState) {
+        *self
+            .hotkey
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = s;
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -170,10 +338,10 @@ impl AppState {
     /// `None` for a success.
     ///
     /// **Total, not conditional** — it is called with `outcome.err().map(...)`
-    /// (`lib.rs:169`) rather than only from an `if let Err(e)`, so it always
+    /// (`lib.rs:198`) rather than only from an `if let Err(e)`, so it always
     /// writes a definite answer, success included, instead of writing only on
     /// failure and leaving a caller to remember to clear the field on the other
-    /// path. `boot_index` (`lib.rs:169`) is this setter's only caller today, run
+    /// path. `boot_index` (`lib.rs:198`) is this setter's only caller today, run
     /// once per process, so nothing here actually recovers from an earlier
     /// failure — what the total shape buys is that a future second caller (a
     /// retry, a manual re-open exposed from the settings screen) cannot leave a
@@ -262,10 +430,43 @@ impl AppState {
         // Cleared only once the slot is ours: doing it earlier would clear a
         // cancellation aimed at the job that is still running.
         self.cancel.store(false, Ordering::SeqCst);
-        Ok(JobSlot {
+        // After the `?` above, so a refused claim announces nothing: the caller
+        // that lost never held the slot, and an announcement from it would
+        // enable a control on behalf of a job that does not exist. Cloned out
+        // from under the lock before the call, so an observer is never run while
+        // this mutex is held.
+        let observer = self
+            .job_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        // The slot exists BEFORE anything is told the slot is taken. An observer
+        // is free to act on the state the moment it hears — including claiming
+        // and releasing it again — and the struct that gives the slot back must
+        // be built by then, not after the announcement has returned.
+        let slot = JobSlot {
             running: self.running.clone(),
             cancel: self.cancel.clone(),
-        })
+            observer,
+        };
+        if let Some(f) = &slot.observer {
+            f();
+        }
+        Ok(slot)
+    }
+
+    /// Registers who to tell when the job slot changes hands. Installed once,
+    /// from `.setup`, so that the tray can offer «Зупинити сканування» only
+    /// while there is something to stop.
+    ///
+    /// Takes a `Box` and stores an `Arc`: the slot hands its holder a clone,
+    /// and a `Box` cannot be cloned. Replaces any previous observer rather than
+    /// accumulating a list, because there is exactly one tray.
+    pub fn set_job_observer(&self, f: Box<JobObserver>) {
+        *self
+            .job_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::from(f));
     }
 
     /// Asks the running job to stop. A no-op when nothing is running.
@@ -290,6 +491,12 @@ impl AppState {
 pub struct JobSlot {
     running: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
+    /// The observer as it stood when this slot was claimed, carried rather than
+    /// looked up: this struct holds no reference to [`AppState`], and giving it
+    /// one to reach a field at drop time would be a larger change than a clone
+    /// of an `Arc`. `None` when nobody registered, which is what keeps every
+    /// existing caller silent.
+    observer: Option<Arc<JobObserver>>,
 }
 
 impl JobSlot {
@@ -301,5 +508,210 @@ impl JobSlot {
 impl Drop for JobSlot {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
+        // After the slot is free, not before: an observer asks
+        // `job_is_running()` for itself, and it must find the truth this drop
+        // has already made. It is also what lets an incoming job claim the slot
+        // between the store and the announcement — the handoff whose ordering is
+        // the reason nothing is passed here (see [`JobObserver`]). This runs on
+        // the job's own thread, which is why the installed observer hands the
+        // work to the main thread and returns rather than blocking here — see
+        // `tray::StopItem`.
+        if let Some(f) = &self.observer {
+            f();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `AppState` with nothing but paths — the observer contract touches no
+    /// index, no provider and no credential store, so the four arguments are
+    /// only there to satisfy the constructor.
+    ///
+    /// In an `Arc` because an observer that records what it READ has to be able
+    /// to ask this state; it holds a `Weak`, so the state does not own an
+    /// observer that owns the state back.
+    fn state() -> Arc<AppState> {
+        Arc::new(AppState::new(
+            PathBuf::from("/nonexistent/mnema-observer-test"),
+            PathBuf::from("/nonexistent/mnema-observer-worker"),
+            "http://127.0.0.1:0".to_string(),
+            "mnema-desktop-state-observer-test".to_string(),
+        ))
+    }
+
+    /// What the observer FOUND when it looked, once per announcement and in
+    /// order, so a test can say what was there AND that nothing else was
+    /// announced.
+    ///
+    /// It records a read rather than an argument because there is no argument:
+    /// see [`JobObserver`] for the handoff that took it away.
+    type Log = Arc<Mutex<Vec<bool>>>;
+
+    /// Poison-recovering rather than `unwrap`, and not for tidiness: a failed
+    /// assertion here poisons the log while `JobSlot` is still alive, and the
+    /// notification that `Drop` then fires as the stack unwinds would panic a
+    /// second time inside a panic. The test would still fail — with a
+    /// double-panic abort instead of the assertion that found the defect.
+    fn recorder(log: &Log, state: &Arc<AppState>) -> Box<JobObserver> {
+        let sink = log.clone();
+        let weak = Arc::downgrade(state);
+        Box::new(move || {
+            let running = weak
+                .upgrade()
+                .expect("the state outlives its own observer")
+                .job_is_running();
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(running)
+        })
+    }
+
+    /// The whole contract in the order a job lives it: a look after the claim
+    /// finds the slot taken, and a look after it is given back finds it free.
+    /// Both announcements, because an implementation that fired only the first
+    /// would leave the tray offering to stop a job that has finished — which is
+    /// the failure this observer exists to prevent, not a hypothetical.
+    #[test]
+    fn the_observer_hears_a_job_start_and_finish() {
+        let log = Log::default();
+        let state = state();
+        state.set_job_observer(recorder(&log, &state));
+
+        let slot = state.claim_job().expect("the slot is free");
+        assert_eq!(
+            *log.lock().unwrap(),
+            [true],
+            "claiming must announce itself"
+        );
+
+        drop(slot);
+        assert_eq!(
+            *log.lock().unwrap(),
+            [true, false],
+            "releasing must announce itself too"
+        );
+    }
+
+    /// A refused claim announces NOTHING. This is the assertion that separates
+    /// "notify when the slot changes hands" from "notify on every call": the
+    /// second caller never held the slot, so an announcement from it would
+    /// enable a control on behalf of a job that does not exist, and the first
+    /// job's own `Drop` would then be the only thing left to disable it.
+    #[test]
+    fn a_refused_claim_announces_nothing() {
+        let log = Log::default();
+        let state = state();
+        state.set_job_observer(recorder(&log, &state));
+
+        let held = state.claim_job().expect("the slot is free");
+        assert!(
+            state.claim_job().is_err(),
+            "a second claim must be refused while the first is held"
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            [true],
+            "the refusal must not have announced anything"
+        );
+
+        // And the still-held slot is the one that speaks on the way out: one
+        // announcement, not two.
+        drop(held);
+        assert_eq!(*log.lock().unwrap(), [true, false]);
+    }
+
+    /// 🔴 **The walk → embed handoff, with the outgoing job announcing LAST.**
+    ///
+    /// `JobSlot::drop` stores `false` and only then announces, so between those
+    /// two an incoming job can claim the slot and announce its own `true`. The
+    /// announcements then arrive in the order `true`, `true`, `false` while the
+    /// slot is HELD, and a consumer that replays the last edge disables
+    /// «Зупинити сканування» for the whole of a job that is running — the tray
+    /// then offers no way to stop a scan until the next job boundary.
+    ///
+    /// The interleaving is driven from inside the second announcement rather
+    /// than from a second thread on purpose: what makes the window reachable is
+    /// the ORDER of the two announcements, and the store that precedes them is
+    /// what lets the incoming claim win. A thread would add a schedule to wait
+    /// on and prove the same thing.
+    ///
+    /// What the fake records is what it READ, never what it was passed. That is
+    /// the whole assertion: an announcement is a signal to go and look, and the
+    /// fact a look finds after the handoff is that a job is running.
+    #[test]
+    fn an_announcement_is_read_as_the_fact_not_replayed_as_the_edge() {
+        let log = Log::default();
+        let state = Arc::new(state());
+        // Where the incoming job's slot is parked so that it is still HELD when
+        // the outgoing announcement is read. Dropping it inside the observer
+        // would put the fact back to `false` and the fixture would pass for the
+        // wrong reason.
+        let incoming: Arc<Mutex<Option<JobSlot>>> = Arc::default();
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink = log.clone();
+        let held = incoming.clone();
+        let counter = seen.clone();
+        // A `Weak`, so the observer the state owns does not own the state back.
+        let weak = Arc::downgrade(&state);
+        state.set_job_observer(Box::new(move || {
+            let st = weak.upgrade().expect("the state outlives its own observer");
+            // Announcement 1 (0-based) is the outgoing job's `Drop`: the slot is
+            // already free here, which is what lets the incoming claim win.
+            if counter.fetch_add(1, Ordering::SeqCst) == 1 {
+                *held
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
+                    st.claim_job()
+                        .expect("the outgoing slot is free before it announces"),
+                );
+            }
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(st.job_is_running());
+        }));
+
+        let outgoing = state.claim_job().expect("the slot is free");
+        drop(outgoing);
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            [true, true, true],
+            "the outgoing job announced last, and what a look finds then is the \
+             incoming job: replaying the edge disables Stop for a running job"
+        );
+        assert!(
+            state.job_is_running(),
+            "the incoming job still holds the slot"
+        );
+
+        // The other direction, and the reason the incoming slot was parked: when
+        // it is finally given back the fact is false, and an announcement that
+        // said nothing but `true` would be no better than one that said nothing
+        // but `false`.
+        drop(
+            incoming
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+        assert_eq!(*log.lock().unwrap(), [true, true, true, false]);
+        assert!(!state.job_is_running());
+    }
+
+    /// Silence is the default, and it has to be: seven of `AppState::new`'s
+    /// call sites are tests that install no observer, and the shipped
+    /// application runs without one until `.setup` reaches the tray.
+    #[test]
+    fn a_state_with_no_observer_claims_and_releases_as_before() {
+        let state = state();
+        let slot = state.claim_job().expect("the slot is free");
+        assert!(state.job_is_running());
+        assert!(state.claim_job().is_err());
+        drop(slot);
+        assert!(!state.job_is_running());
+        state.claim_job().expect("the slot is free again");
     }
 }

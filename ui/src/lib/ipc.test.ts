@@ -4,7 +4,17 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ipc from './ipc';
 import { camelOf, rustEnumVariants } from './rust-enum';
-import type { SourceAround, StoredExclusion, SubfolderListing, SubfolderState } from './ipc';
+import type {
+  AppPrefs,
+  AutostartState,
+  HotkeyState,
+  HotkeyStatus,
+  IndexSettings,
+  SourceAround,
+  StoredExclusion,
+  SubfolderListing,
+  SubfolderState,
+} from './ipc';
 import {
   generated,
   generatedArchived,
@@ -51,7 +61,7 @@ const ENDED_PAYLOAD = {
   reason: 'volumeMissing', done: 11, total: 11, skipped: 5, complete: true, frozen: [],
   indexed: 5, unchanged: 1, refused: 0, removed: 4, message: null,
 } as const;
-const PROGRESS_PAYLOAD = { done: 3, total: 8, skipped: 1, refused: 0, secondsLeft: null } as const;
+const PROGRESS_PAYLOAD = { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null } as const;
 
 test('startEmbedJob forwards every job event, whole, and takes no root', async () => {
   invoke.mockResolvedValue(undefined);
@@ -418,4 +428,176 @@ test('the subfolder wire types reject Rust snake_case spellings', () => {
 
   expect(listing.entries[0].relativePath).toBe('Work/private');
   expect(rule.existsOnDisk).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// The Indexing section's own fields on `model_settings`' index read arm
+// (`src-tauri/src/models.rs`, §9.3). The Rust side pins that the wire carries
+// them, against a really walked index, in
+// `the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment`
+// (`src-tauri/tests/commands.rs`); this side pins that this module asks for
+// them and asks for them in the spelling serde sends. Neither half closes the
+// gap alone — a hand-written type and a hand-written fixture can carry the
+// same mistake and pass together.
+
+type IndexRead = Extract<IndexSettings, { kind: 'read' }>;
+
+test('the index read arm carries the file count, the moment, and the refusal count', () => {
+  const read: IndexRead = {
+    kind: 'read', embeddingModel: 'emb-1', chatModel: null,
+    embeddedChunks: 3, embeddedChunksEverywhere: 3, totalChunks: 4,
+    failedChunks: 1, pendingChunks: 2, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
+    searchTextArm: true, searchContentArm: true,
+  };
+
+  expect(read.indexedFiles).toBe(2);
+  expect(read.lastIndexedAt).toBe(1_700_000_000);
+  expect(read.failedChunks).toBe(1);
+  // F4 (spec §9.3 amended 2026-09-04): the embedding queue's own count,
+  // beside `failedChunks` rather than folded into it — the two are different
+  // scopes of the same space and `models.rs` reads each from its own query.
+  expect(read.pendingChunks).toBe(2);
+});
+
+test('an index that has never finished indexing states that as null, not as an absence', () => {
+  const read: IndexRead = {
+    kind: 'read', embeddingModel: null, chatModel: null,
+    embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+    failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+    searchTextArm: true, searchContentArm: true,
+  };
+
+  // `null` is the backend's own statement, and it is a value this arm holds —
+  // not the same thing as the field being missing, which the test below pins.
+  expect(read.lastIndexedAt).toBeNull();
+  expect('lastIndexedAt' in read).toBe(true);
+});
+
+// 🔴 Each of the four omitted on its own, because "the object is missing
+// something" is satisfied by any one of them and would not notice the other
+// three turning optional. Required and not optional for the reason `ipc.ts`
+// gives over the type: the only substitute for a missing count is `0`, and `0`
+// in front of a person reads as a measured claim this build has not made —
+// a fail-quiet field is a number that is silently always wrong.
+test('the four counts are required, so no fixture can leave one to a default', () => {
+  const rest = {
+    kind: 'read' as const, embeddingModel: null, chatModel: null,
+    embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+    searchTextArm: true, searchContentArm: true,
+  };
+
+  // @ts-expect-error `indexedFiles` is required.
+  const noFiles: IndexRead = { ...rest, failedChunks: 0, pendingChunks: 0, lastIndexedAt: null };
+  // @ts-expect-error `lastIndexedAt` is required.
+  const noMoment: IndexRead = { ...rest, failedChunks: 0, pendingChunks: 0, indexedFiles: 0 };
+  // @ts-expect-error `failedChunks` is required.
+  const noRefusals: IndexRead = { ...rest, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null };
+  // @ts-expect-error `pendingChunks` is required.
+  const noQueue: IndexRead = { ...rest, failedChunks: 0, indexedFiles: 0, lastIndexedAt: null };
+
+  expect([noFiles.kind, noMoment.kind, noRefusals.kind, noQueue.kind])
+    .toEqual(['read', 'read', 'read', 'read']);
+});
+
+test('the index read arm rejects Rust snake_case spellings', () => {
+  const read: IndexRead = {
+    kind: 'read', embeddingModel: null, chatModel: null,
+    embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+    failedChunks: 0, pendingChunks: 0, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
+    searchTextArm: true, searchContentArm: true,
+    // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
+    indexed_files: 2,
+  };
+
+  expect(read.indexedFiles).toBe(2);
+});
+
+// ---------------------------------------------------------------------------
+// PR 9 Task 7: the three commands the Application section calls
+// (`src-tauri/src/prefs.rs`). The reply shapes are mirrored WHOLE — the tagged
+// `status`, the tagged autostart state, the version and the platform — rather
+// than in the subset the section happens to draw today; `JobEnded`'s eleven
+// fields are the precedent and the reason is the same one.
+// ---------------------------------------------------------------------------
+
+const REGISTERED: AppPrefs = {
+  hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
+  autostart: { kind: 'disabled' },
+  version: '0.0.0',
+  platform: 'mac',
+};
+
+test('appPrefs invokes app_prefs and takes no arguments at all', async () => {
+  invoke.mockResolvedValue(REGISTERED);
+
+  const prefs = await ipc.appPrefs();
+
+  expect(invoke).toHaveBeenCalledWith('app_prefs');
+  // The whole reply crosses, not the shortcut alone: an earlier form of the
+  // job wrapper read one field and threw the rest away, which was invisible
+  // until something needed the rest.
+  expect(prefs).toEqual(REGISTERED);
+});
+
+test('setHotkey invokes set_hotkey with the shortcut under its camelCase name', async () => {
+  const reply: HotkeyState = { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } };
+  invoke.mockResolvedValue(reply);
+
+  const state = await ipc.setHotkey('Ctrl+Alt+Space');
+
+  expect(invoke).toHaveBeenCalledWith('set_hotkey', { shortcut: 'Ctrl+Alt+Space' });
+  expect(state).toEqual(reply);
+});
+
+test('setAutostart invokes set_autostart with the boolean, and answers the OS state rather than the request', async () => {
+  // The reply and the request disagree on purpose: `set_autostart` re-reads the
+  // operating system after the change (D-c), so a wrapper that echoed its own
+  // argument would be indistinguishable from one that returned the reply — on
+  // every fixture except this one.
+  const reply: AutostartState = { kind: 'unknown', reason: 'the login item list could not be read' };
+  invoke.mockResolvedValue(reply);
+
+  const state = await ipc.setAutostart(true);
+
+  expect(invoke).toHaveBeenCalledWith('set_autostart', { enabled: true });
+  expect(state).toEqual(reply);
+});
+
+test('the hotkey status is a tagged union of exactly two arms', () => {
+  // A `Record` over the discriminant rather than a list: an arm added on the
+  // Rust side and left unmapped here is a compile error, which is what keeps
+  // the window exhaustive over `HotkeyStatus` instead of falling through.
+  const sentence: Record<HotkeyStatus['kind'], string> = {
+    registered: 'the system holds it',
+    unavailable: 'the system does not hold it',
+  };
+  const unavailable: HotkeyStatus = { kind: 'unavailable', reason: 'already taken' };
+
+  expect(sentence[unavailable.kind]).toBe('the system does not hold it');
+  // `unavailable` carries its reason; `registered` carries nothing to show.
+  expect(unavailable.kind === 'unavailable' ? unavailable.reason : null).toBe('already taken');
+});
+
+test('the autostart state is a tagged union of exactly three arms, and unknown is not disabled', () => {
+  const sentence: Record<AutostartState['kind'], string> = {
+    enabled: 'it starts at sign-in',
+    disabled: 'it does not start at sign-in',
+    unknown: 'nobody could tell',
+  };
+  const unknown: AutostartState = { kind: 'unknown', reason: 'the read failed' };
+
+  expect(sentence[unknown.kind]).toBe('nobody could tell');
+  // 🔴 Three sentences, no two alike: a failed READ rendered as "off" would
+  // show a person a switch in the position opposite to the machine's.
+  expect(new Set(Object.values(sentence)).size).toBe(3);
+});
+
+test('app prefs reject Rust snake_case spellings', () => {
+  const prefs: AppPrefs = {
+    ...REGISTERED,
+    // @ts-expect-error TypeScript must reject a spelling the wire never sends.
+    hot_key: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
+  };
+
+  expect(prefs.hotkey.shortcut).toBe('Alt+Space');
 });

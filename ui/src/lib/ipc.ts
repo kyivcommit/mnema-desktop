@@ -262,9 +262,32 @@ export type UnreadableCause = 'notOpen' | 'readFailed';
 // class this file already refuses elsewhere — and the two copies would
 // eventually be read as though they could disagree. `embeddingModel !== null`
 // is how "there is an active space" is spelled on this side.
+//
+// PR 9's Indexing section (§9.3) widens the subset by four, and all four are
+// REQUIRED for the argument `totalChunks` above already makes: the only
+// substitute for a missing count is `0`, and `0` in front of a person reads as
+// a measured claim this build has not made. `indexedFiles` says how many files
+// the index holds — `models.rs` counts `path` rows, so a file in two watched
+// folders counts twice, which is what makes it agree with the Folders rows
+// rather than with a tidier definition. `failedChunks` is the third of
+// `models.rs`'s counts and the one §9.3's refusal sentence is written from;
+// it was left out while nothing rendered it, and `?? 0` for it would say "the
+// provider refused nothing" about a run nobody measured. `pendingChunks` (F4,
+// spec §9.3 amended 2026-09-04) is required for the same reason: it is
+// `models.rs`'s `Db::queued_chunk_count`, the embedding queue counted the way
+// the pass itself counts it, and `0` in front of a person reads as "nothing is
+// owed" — which is exactly the false claim a missing field would default into
+// after a tray Stop left a run unfinished.
+//
+// `lastIndexedAt` is `number | null` and required, which is not the same as
+// optional: `null` is the backend's own statement that nothing has ever
+// finished indexing, and the section renders a sentence for it. An absent
+// field would collapse that into whatever the reader defaulted to — an epoch
+// date, or a blank where a sentence belongs.
 export type IndexSettings =
   | { kind: 'read'; embeddingModel: string | null; chatModel?: string | null;
       embeddedChunks: number; embeddedChunksEverywhere: number; totalChunks: number;
+      failedChunks: number; pendingChunks: number; indexedFiles: number; lastIndexedAt: number | null;
       searchTextArm: boolean; searchContentArm: boolean }
   | { kind: 'unreadable'; cause: UnreadableCause; reason: string };
 
@@ -464,6 +487,14 @@ export type JobProgress = {
   total: number;
   skipped: number;
   refused: number;
+  /// Files this run found the index locked by another writer on, after every
+  /// busy retry was refused (`job::Progress::contended`). `0` for the probe and
+  /// for an embedding pass.
+  ///
+  /// Once such a file is journalled it is counted in `skipped` as well, so
+  /// `contended <= skipped` and the two must never be added: whatever a surface
+  /// says about this number explains part of `skipped`.
+  contended: number;
   secondsLeft: number | null;
 };
 
@@ -517,3 +548,77 @@ export const startEmbedJob = (onEvent: (event: JobEvent) => void) => {
 // the channel it reports on, which is why a page that has lost the channel must
 // still offer this.
 export const cancelJob = () => invoke<void>('cancel_job');
+
+// ---------------------------------------------------------------------------
+// The application's own preferences (`src-tauri/src/prefs.rs`) — the shortcut,
+// autostart, the version and the platform this build was compiled for.
+//
+// Mirrored IN FULL rather than in the subset the Application section draws
+// today, for `JobEnded`'s reason: a partial mirror in front of a screen that
+// draws states looks authoritative while being incomplete.
+// ---------------------------------------------------------------------------
+
+// What the operating system says about the shortcut, as a fact rather than an
+// intention.
+//
+// ⚠️ `registered` is NOT a claim of exclusivity and may not be worded as one.
+// D128 measured macOS co-registering a shortcut another application already
+// holds: both register successfully and both fire. Whatever draws this says
+// registered, never "works" and never "is yours".
+//
+// `unavailable` carries the plugin's own sentence, and it is shown verbatim: a
+// degraded state whose reason is swallowed leaves a person nothing to act on.
+export type HotkeyStatus = { kind: 'registered' } | { kind: 'unavailable'; reason: string };
+
+// The shortcut the state believes the operating system is holding, and what
+// happened when it was asked to hold it. A rejection of `set_hotkey` carries
+// NONE of this — it crosses as a sentence alone — which is why a refused change
+// has to be followed by a fresh `appPrefs()` rather than by redrawing whatever
+// the window held before the call.
+export type HotkeyState = { shortcut: string; status: HotkeyStatus };
+
+// Whether this application launches at login, read back FROM the operating
+// system after every change rather than echoed from the request.
+//
+// 🔴 Three arms and not a boolean. `unknown` exists because the read itself can
+// fail, and a failed read rendered as "off" would show a person a switch in the
+// position opposite to the one their machine is actually in.
+export type AutostartState =
+  | { kind: 'enabled' }
+  | { kind: 'disabled' }
+  | { kind: 'unknown'; reason: string };
+
+// Everything the Application section draws.
+//
+// `platform` is the same `Platform` the model settings carry, and it comes from
+// the BUILD (`Platform::of_this_build`). The shortcut glyphs are derived from
+// it and never from `navigator.userAgent` — that type's own doc records this
+// project measuring a plausible proxy wrong twice, on two platforms.
+//
+// `version` is shown as it is, `0.0.0` included: that is an honest statement
+// about a development build, and there is no "you are up to date" beside it
+// (D-h) because nothing in this application has asked anybody.
+export type AppPrefs = {
+  hotkey: HotkeyState;
+  autostart: AutostartState;
+  version: string;
+  platform: Platform;
+};
+
+// Not a `Result` on the Rust side: every state of the operating system is a
+// state this reports. An unavailable shortcut and an unreadable autostart are
+// values here, not rejections.
+export const appPrefs = () => invoke<AppPrefs>('app_prefs');
+
+// Rejects with a sentence and nothing else — our own catalogue refusal for an
+// empty, modifier-only or unmodified string, the parser's for an unrecognised
+// key, the plugin's for a registration the operating system refused. The caller
+// shows it and then re-reads `appPrefs()`, because which of D-b's seven rows it
+// came from is not recoverable from the text and the state differs between them.
+export const setHotkey = (shortcut: string) => invoke<HotkeyState>('set_hotkey', { shortcut });
+
+// Answers what the operating system says AFTER the change, not what was asked
+// for. A caller that renders its own request instead of this reply would show a
+// switch that moved while the machine stayed where it was.
+export const setAutostart = (enabled: boolean) =>
+  invoke<AutostartState>('set_autostart', { enabled });

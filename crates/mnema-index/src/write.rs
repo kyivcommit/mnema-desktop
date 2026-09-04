@@ -305,6 +305,69 @@ impl Db {
         Ok(rows)
     }
 
+    /// How many indexed files the whole index holds — the settings window's
+    /// own number (§9.3).
+    ///
+    /// **Exactly [`Db::indexed_files_under_root`] with the root filter
+    /// dropped, and the equality is the definition rather than an
+    /// implementation detail.** The Folders section draws one row per watched
+    /// folder carrying that helper's row count (`root.files.length`,
+    /// `ui/src/settings/Folders.svelte:1242`), one click from this number, so
+    /// this must be those numbers added up or the two halves of one screen
+    /// contradict each other.
+    ///
+    /// ⚠️ **These are `path` rows, not `document` rows, and the name says
+    /// "file" for that reason.** One document reachable from two watched
+    /// folders — the same bytes in two places, which content addressing makes
+    /// one `document` row — is counted **twice**, because it draws two folder
+    /// rows each claiming a file. A `COUNT(*) FROM document` would be a
+    /// defensible number that disagreed with the rows beside it; agreement is
+    /// the property chosen here.
+    pub fn indexed_file_count(&self) -> Result<i64, Error> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*)
+               FROM path p
+               JOIN document d ON d.id = p.document_id
+              WHERE d.status = 'indexed'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// When the index last finished indexing anything, or `None` if nothing
+    /// ever has — the settings window's second number (§9.3).
+    ///
+    /// **[`Db::recent_indexed_documents`]' own join, aggregated instead of
+    /// ordered**, so this cannot name a moment the Recents list disagrees
+    /// with: it is `recent_indexed_documents(1)[0].indexed_at` whenever that
+    /// row exists. Everything that doc comment says about the join holds here
+    /// unchanged — recency is the chunk/done checkpoint's `updated_at` and not
+    /// `document.created_at`, `'chunk'`/`'done'` are hardcoded rather than
+    /// imported from `mnema-ingest` because that dependency edge would be a
+    /// cycle, and the INNER JOIN excludes an `indexed` document that never
+    /// recorded the stage, so a test must record it.
+    ///
+    /// `s.status = 'done'` and not merely a stage row: a rebuild in flight
+    /// writes `rebuilding` over a finished stage with a fresh `updated_at`
+    /// (`mnema-ingest`'s `STATUS_REBUILDING`), and reporting that as "last
+    /// indexed" would say the index is up to date at the one moment it is
+    /// being written again.
+    ///
+    /// `None` is the empty index and never an error: `MAX()` over no rows is
+    /// SQL `NULL`, which is the honest answer to "when did this last finish"
+    /// before anything has.
+    pub fn last_indexed_at(&self) -> Result<Option<i64>, Error> {
+        Ok(self.conn().query_row(
+            "SELECT MAX(s.updated_at)
+               FROM document d
+               JOIN path p ON p.document_id = d.id
+               JOIN ingest_stage s ON s.content_hash = d.id AND s.stage = 'chunk' AND s.status = 'done'
+              WHERE d.status = 'indexed'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The chunk's own identity and where it sits in the document's reading
     /// order, or `None` if no chunk carries this id.
     ///

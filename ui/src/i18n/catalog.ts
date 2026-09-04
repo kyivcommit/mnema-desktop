@@ -1,6 +1,5 @@
 export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_indexing' | 'settings_nav_application'
-  | 'settings_section_not_ready'
   | 'settings_folders_empty' | 'settings_folders_add' | 'settings_folders_remove'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
@@ -76,7 +75,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_masks_already_stored'
   | 'indexing_walk_starting' | 'indexing_walk_running'
   | 'indexing_embed_starting' | 'indexing_embed_running'
-  | 'indexing_counts_ratio' | 'indexing_counts_counting'
+  | 'indexing_counts_ratio' | 'indexing_counts_counting' | 'indexing_counts_contended'
   | 'indexing_eta' | 'indexing_eta_unknown'
   | 'indexing_walk_ended_completed' | 'indexing_walk_ended_partly_read'
   | 'indexing_walk_ended_cancelled' | 'indexing_walk_ended_failed'
@@ -90,6 +89,22 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_frozen_unreadable_directory'
   | 'indexing_note_no_key' | 'indexing_note_no_model' | 'indexing_note_rejected'
   | 'indexing_unobserved' | 'indexing_cancel'
+  | 'indexing_index_files' | 'indexing_index_updated' | 'indexing_index_updated_ago'
+  | 'indexing_index_never'
+  | 'indexing_index_unreadable_not_open' | 'indexing_index_unreadable_read_failed'
+  | 'indexing_index_unreadable_reason' | 'indexing_index_load_failed'
+  | 'indexing_index_failed_chunks' | 'indexing_index_refused_run'
+  | 'indexing_index_pending_chunks' | 'indexing_index_resume_embedding'
+  | 'application_shortcut_label' | 'application_shortcut_registered'
+  | 'application_shortcut_unavailable' | 'application_shortcut_reason'
+  | 'application_shortcut_tray' | 'application_shortcut_record'
+  | 'application_shortcut_recording' | 'application_shortcut_not_usable'
+  | 'application_shortcut_failed' | 'application_shortcut_not_saved'
+  | 'application_autostart_label' | 'application_autostart_enabled'
+  | 'application_autostart_disabled' | 'application_autostart_unknown'
+  | 'application_autostart_reason' | 'application_autostart_enable'
+  | 'application_autostart_disable' | 'application_autostart_failed'
+  | 'application_version' | 'application_load_failed'
   | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
@@ -100,8 +115,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_folders: 'Теки',
     settings_nav_indexing: 'Індексація',
     settings_nav_application: 'Застосунок',
-    // Shared by both unbuilt sections — one sentence, promises nothing.
-    settings_section_not_ready: 'Ця секція ще не готова.',
     // §9.2, Task 7. `TreeRoot` (ipc.ts) carries no flag for "walked and found
     // empty" vs. "not walked yet" — a folder just added and one genuinely
     // empty are the same value on the wire — so this sentence names only the
@@ -618,6 +631,18 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `total: 0` is not an edge case: a walk reports it before phase 1 has
     // counted anything. "0 з 0" would read as "нема чого робити".
     indexing_counts_counting: 'Опрацьовано {done}. Скільки їх усього, поки не відомо. Пропущено: {skipped}. Відхилено: {refused}.',
+    // 🔴 Carries NO number of its own, on purpose. `contended` counts files
+    // that are also counted in «Пропущено» a moment later, so a number here
+    // would read as a second group of files beside that one — and in the one
+    // event that arrives before the skip is journalled it would contradict it
+    // outright («Пропущено: 0» beside «з них 1»). The line explains part of
+    // that number instead.
+    //
+    // It promises the NEXT scan and nothing else. It must not say the file was
+    // recorded: the skip write meets the same lock and can fail too, leaving
+    // the file in neither the index nor the journal
+    // (`job::Progress::contended`).
+    indexing_counts_contended: 'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав. Наступне сканування спробує їх знову.',
     indexing_eta: 'Залишилось приблизно {seconds} с.',
     // `secondsLeft` is `Option<u64>`: "ще не відомо" is a real state, and it is
     // the ordinary one at the start of every run.
@@ -702,6 +727,111 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_note_rejected: 'Запит відхилено.',
     indexing_unobserved: 'Зараз виконується інше завдання. Це вікно не бачить, як далеко воно просунулося, але зупинити його можна.',
     indexing_cancel: 'Зупинити',
+    // §9.3, PR 9 Task 6 — the Indexing SECTION, which says what the index
+    // holds. Every key here is `indexing_index_*` so nothing confuses it with
+    // the `indexing_*` keys above, which belong to the window's job strip and
+    // say what a pass is doing right now.
+    //
+    // The count is of `path` rows, not of documents (D-e): a file in two
+    // watched folders counts twice, which is what makes this number the sum of
+    // the per-folder numbers the Folders rows draw beside it. The wording says
+    // «файл», the same word those rows' subject implies, rather than
+    // «документ» — the tidier definition is the one that would disagree with
+    // the screen next to it.
+    indexing_index_files: '{count, plural, one {В індексі # файл} few {В індексі # файли} many {В індексі # файлів} other {В індексі # файла}}.',
+    // The date and the relative phrase are two lines, not one sentence: the
+    // date is what a person compares against the file they edited this
+    // morning, the phrase is what they feel. `formatIndexedDate` fills {date}.
+    indexing_index_updated: 'Останнє оновлення: {date}.',
+    // The phrase gets a subject and a full stop of its own. `formatIndexedAt`
+    // returns «1 годину тому», which the Recents card can render bare because a
+    // filename sits beside it supplying the subject; last on this panel, with
+    // nothing beside it, it read as an orphan fragment (review, Minor 4).
+    indexing_index_updated_ago: 'Це було {ago}.',
+    // `lastIndexedAt: null` is the backend's own statement that nothing has
+    // ever finished indexing. Never a blank, never an epoch date.
+    indexing_index_never: 'Ще нічого не проіндексовано.',
+    // Two causes, two sentences (`UnreadableCause`, models.rs:809-826). One
+    // sentence for both would be a surface that cannot tell a closed index
+    // from one that broke while being read.
+    indexing_index_unreadable_not_open: 'Не вдалося прочитати індекс: він не відкритий.',
+    indexing_index_unreadable_read_failed: 'Не вдалося прочитати індекс: спроба читання не вдалася.',
+    // 🔴 The backend's `reason` goes here VERBATIM, and that is deliberate —
+    // the opposite of the Models section's rule. `IndexSettings::Unreadable`'s
+    // own doc says `reason` "stays verbatim, for showing" (models.rs:932); this
+    // is the one screen whose job is to tell a person what is wrong with their
+    // index, the text never leaves the machine (D22), and the path inside it is
+    // the actionable part. `cause` above is what anything BRANCHES on.
+    indexing_index_unreadable_reason: 'Програма повідомила: {reason}',
+    // A rejected `model_settings` — §10: the backend's sentence is shown
+    // verbatim beside this lead-in, never branched on, and no numbers are drawn
+    // from a read that failed.
+    indexing_index_load_failed: 'Не вдалося прочитати стан індексу.',
+    // 🔴 The two scopes, owed since PR 7 (`job::Progress::refused` is THIS
+    // RUN's, `IndexRead::failed_chunks` is the SPACE's — job.rs:38-44 says so
+    // in as many words). Two sentences, each naming its own subject, because a
+    // person seeing one number under two meanings cannot tell which they got.
+    // This one is the space, and it states the rule the count exists to make
+    // defensible: the chunk has left the embedding queue for good until its
+    // text changes, so search by meaning stops answering for it while the
+    // document still shows it and word search still finds it.
+    indexing_index_failed_chunks: 'У цьому індексі провайдер відхилив {count, plural, one {# фрагмент} few {# фрагменти} many {# фрагментів} other {# фрагмента}} за весь час. Їх більше не пропонують, доки не зміниться їхній текст: пошук за змістом їх не знаходить, пошук по словах — знаходить.',
+    // And this one is the run that has just ended. Its subject is a pass, not
+    // the index.
+    indexing_index_refused_run: 'Останній прохід вбудовування відхилив {count, plural, one {# фрагмент} few {# фрагменти} many {# фрагментів} other {# фрагмента}}.',
+    // F4 (spec §9.3, amended 2026-09-04): the embedding queue, `IndexRead.
+    // pendingChunks` — a tray Stop mid-pass, then a restart, left thousands of
+    // chunks un-embedded with nothing on screen saying so. Shown only while no
+    // run is under way (`Indexing.svelte`'s own gate on `jobs.state`'s phase),
+    // beside a button that resumes it.
+    indexing_index_pending_chunks: '{count, plural, one {Ще не вбудовано # фрагмент} few {Ще не вбудовано # фрагменти} many {Ще не вбудовано # фрагментів} other {Ще не вбудовано # фрагмента}}.',
+    indexing_index_resume_embedding: 'Продовжити вбудовування',
+    // §9.4 — the Application section: the shortcut, autostart, and the version.
+    //
+    // 🔴 Two sentence sources, and they are kept apart on purpose. Everything
+    // below is a refusal or a statement the WINDOW makes, so it lives here in
+    // both languages. A refusal the BACKEND makes is shown verbatim beside
+    // these and is English, like every other rejection in this product.
+    application_shortcut_label: 'Скорочення для відкриття пошуку:',
+    // 🔴 «Зареєстровано» — і ніколи «працює» чи «належить лише вам». D128
+    // виміряв, що macOS реєструє скорочення, яке вже тримає інший застосунок:
+    // реєструються обидва і спрацьовують обидва. Речення не має права
+    // обіцяти більше, ніж повідомляє операційна система.
+    application_shortcut_registered: 'Це скорочення зареєстровано в системі.',
+    application_shortcut_unavailable: 'Це скорочення не зареєстровано в системі.',
+    application_shortcut_reason: 'Програма повідомила: {reason}',
+    // Стан, який нічого не пропонує далі, — це стан, про який пишуть у
+    // підтримку. Пошук залишається досяжним, і секція каже як саме.
+    application_shortcut_tray: 'Пошук усе одно можна відкрити з піктограми застосунку в системному лотку.',
+    application_shortcut_record: 'Змінити скорочення',
+    application_shortcut_recording: 'Натисніть потрібне сполучення клавіш. Escape залишає скорочення без змін.',
+    // {mod}: the platform's own name for the fourth modifier — Cmd/Win/Super
+    // (`shortcut.ts`'s `MODIFIER_KEY_NAME`) — never the platform-neutral
+    // "командною", which named the wrong key on Windows and Linux (review,
+    // Minor 5).
+    application_shortcut_not_usable: 'Цю клавішу не можна використати в скороченні. Скорочення — це літера, цифра, функційна клавіша, стрілка або пробіл, натиснуті разом принаймні з однією з клавіш Ctrl, Alt, Shift чи {mod}.',
+    application_shortcut_failed: 'Скорочення не змінено. Ось що відповів застосунок:',
+    // 🔴 Зовнішнє рев'ю P3. Рядок 6 таблиці переходів (`prefs.rs`): операційна
+    // система вже зареєструвала НОВЕ скорочення, а запис у `prefs.json` не
+    // вдався. Скорочення діє просто зараз і зникне після перезапуску — тож
+    // «не змінено» поруч із ним є неправдою в обидва боки. Обирається за
+    // ПЕРЕЧИТАНИМ станом, ніколи за розбором речення відмови.
+    application_shortcut_not_saved: 'Скорочення діє, але зберегти його не вдалося: після перезапуску повернеться попереднє. Ось що відповів застосунок:',
+    application_autostart_label: 'Запуск під час входу в систему:',
+    application_autostart_enabled: 'Mnema запускається під час входу в систему.',
+    application_autostart_disabled: 'Mnema не запускається під час входу в систему.',
+    // 🔴 Третє речення, а не друге вдруге: невдале читання, показане як «не
+    // запускається», показало б людині перемикач у положенні, протилежному до
+    // того, у якому насправді перебуває машина.
+    application_autostart_unknown: 'Не вдалося дізнатися, чи запускається Mnema під час входу в систему.',
+    application_autostart_reason: 'Програма повідомила: {reason}',
+    application_autostart_enable: 'Запускати під час входу',
+    application_autostart_disable: 'Не запускати під час входу',
+    application_autostart_failed: 'Налаштування не змінено. Ось що відповів застосунок:',
+    // D-h: версію показано як є, включно з 0.0.0. Поруч немає «у вас найновіша
+    // версія» — цього ніхто не перевіряв.
+    application_version: 'Версія {version}',
+    application_load_failed: 'Не вдалося прочитати налаштування застосунку.',
   },
   en: {
     pin: 'Pin',
@@ -710,7 +840,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_folders: 'Folders',
     settings_nav_indexing: 'Indexing',
     settings_nav_application: 'Application',
-    settings_section_not_ready: 'This section is not ready yet.',
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
     settings_folders_remove: 'Remove',
@@ -877,6 +1006,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_embed_running: 'The whole index is being embedded.',
     indexing_counts_ratio: 'Processed {done} of {total}. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_counting: 'Processed {done}. How many there are in total is not known yet. Skipped: {skipped}. Given up on: {refused}.',
+    indexing_counts_contended: 'The index is busy with another write, so this scan did not write some files. The next scan will try them again.',
     indexing_eta: 'About {seconds} s left.',
     indexing_eta_unknown: 'How much time is left is not known yet.',
     indexing_walk_ended_completed: 'The folder was read in full.',
@@ -904,5 +1034,43 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_note_rejected: 'The request was refused.',
     indexing_unobserved: 'Another job is running. This window cannot see how far it has got, but it can still be stopped.',
     indexing_cancel: 'Stop',
+    indexing_index_files: '{count, plural, one {The index holds # file} other {The index holds # files}}.',
+    indexing_index_updated: 'Last updated: {date}.',
+    indexing_index_updated_ago: 'That was {ago}.',
+    indexing_index_never: 'Nothing has been indexed yet.',
+    indexing_index_unreadable_not_open: 'The index could not be read: it is not open.',
+    indexing_index_unreadable_read_failed: 'The index could not be read: the attempt to read it failed.',
+    indexing_index_unreadable_reason: 'The program reported: {reason}',
+    indexing_index_load_failed: 'The state of the index could not be read.',
+    indexing_index_failed_chunks: 'In this index the provider has given up on {count, plural, one {# chunk} other {# chunks}} in all. They are not offered again until their text changes: search by meaning does not find them, word search still does.',
+    indexing_index_refused_run: 'The last embedding pass gave up on {count, plural, one {# chunk} other {# chunks}}.',
+    indexing_index_pending_chunks: '{count, plural, one {# chunk is not embedded yet} other {# chunks are not embedded yet}}.',
+    indexing_index_resume_embedding: 'Continue embedding',
+    // §9.4 — the Application section: the shortcut, autostart, and the version.
+    //
+    // 🔴 Two sentence sources, and they are kept apart on purpose. Everything
+    // below is a refusal or a statement the WINDOW makes, so it lives here in
+    // both languages. A refusal the BACKEND makes is shown verbatim beside
+    // these and is English, like every other rejection in this product.
+    application_shortcut_label: 'Shortcut for opening the search:',
+    application_shortcut_registered: 'This shortcut is registered with the system.',
+    application_shortcut_unavailable: 'This shortcut is not registered with the system.',
+    application_shortcut_reason: 'The program reported: {reason}',
+    application_shortcut_tray: 'The search can still be opened from the application icon in the tray.',
+    application_shortcut_record: 'Change the shortcut',
+    application_shortcut_recording: 'Press the combination you want. Escape leaves the shortcut as it is.',
+    application_shortcut_not_usable: 'That key cannot be used in a shortcut. A shortcut is a letter, a digit, a function key, an arrow or the space bar, held together with at least one of Ctrl, Alt, Shift or {mod}.',
+    application_shortcut_failed: 'The shortcut was not changed. This is what the application answered:',
+    application_shortcut_not_saved: 'The shortcut is in effect, but it could not be saved: the previous one returns after a restart. This is what the application answered:',
+    application_autostart_label: 'Starting when you sign in:',
+    application_autostart_enabled: 'Mnema starts when you sign in.',
+    application_autostart_disabled: 'Mnema does not start when you sign in.',
+    application_autostart_unknown: 'Whether Mnema starts when you sign in could not be read.',
+    application_autostart_reason: 'The program reported: {reason}',
+    application_autostart_enable: 'Start when I sign in',
+    application_autostart_disable: 'Do not start when I sign in',
+    application_autostart_failed: 'The setting was not changed. This is what the application answered:',
+    application_version: 'Version {version}',
+    application_load_failed: 'The application settings could not be read.',
   },
 };

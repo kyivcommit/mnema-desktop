@@ -23,7 +23,7 @@
 //! **One test, one spawn — not two.** An earlier version of this file spawned
 //! two real binaries, each `#[ignore]`d and each proving one fact. CI runs the
 //! whole file with one command and no thread limit (`ci.yml:316`), so libtest
-//! ran both concurrently, and `tauri_plugin_single_instance` (`lib.rs:322`) is
+//! ran both concurrently, and `tauri_plugin_single_instance` (`lib.rs:413`) is
 //! registered before anything else the app does: its second-instance callback
 //! calls `focus_launcher` and lets the process exit, keyed on a socket path
 //! under `/tmp` derived from the bundle identifier — a path that does **not**

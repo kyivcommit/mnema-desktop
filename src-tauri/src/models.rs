@@ -768,7 +768,7 @@ impl Platform {
     /// actually linked: `mnema_secrets::platform_store` selects its backend from
     /// the same three `cfg`s, and "everything that is not macOS or Windows" is
     /// the arm that crate uses too.
-    fn of_this_build() -> Self {
+    pub(crate) fn of_this_build() -> Self {
         #[cfg(target_os = "macos")]
         {
             Self::Mac
@@ -1070,6 +1070,37 @@ pub struct IndexRead {
     /// same way it is for `embedded_chunks` — and for the same reason, told
     /// apart by `active_space` and never by the zero.
     pub failed_chunks: i64,
+    /// How many chunks the active space still owes a vector — the embedding
+    /// queue, counted the way the pass itself counts it (F4, spec §9.3
+    /// amended 2026-09-04).
+    ///
+    /// `Db::queued_chunk_count(space_id)` (`crates/mnema-index/src/space.rs:1015`),
+    /// never `total_chunks − embedded_chunks − failed_chunks`. That
+    /// subtraction's own doc comment names why: it also contains every chunk
+    /// this space has given up on and every chunk of a document that is not
+    /// `indexed`, which are [`IndexRead::failed_chunks`] and the pass's own
+    /// business respectively — folding all three into one difference is how
+    /// "8 400 of 9 000" comes to mean four things at once. This field exists
+    /// so a person who stopped a run mid-pass (a tray Stop, then a restart)
+    /// sees what is left rather than a screen that fell silent about it; the
+    /// only prior signal was "Сканувати" beside the right folder happening to
+    /// chain into an embed.
+    ///
+    /// `0` with `active_space == None` is "the question does not arise", the
+    /// same way it is for `embedded_chunks` and `failed_chunks` above — told
+    /// apart by `active_space`, never by the zero.
+    ///
+    /// **The same query the strip's own progress bar divides by, so the two
+    /// cannot come to disagree about what "queued" means.** A running pass's
+    /// denominator is `db.queued_chunk_count(space)?` too
+    /// (`crates/mnema-embed/src/lib.rs:227`, `EmbedProgress::total`) — one method,
+    /// read from two call sites. They can only differ by MOMENT, never by
+    /// definition, and `ui/src/settings/Indexing.svelte` closes that gap the
+    /// only way it can from a value that is already a snapshot: this section
+    /// hides itself for the whole interval a run is under way (gated on
+    /// `JobPhase.kind`, not merely on this count), so the two numbers never sit
+    /// on one screen at once for a person to compare.
+    pub pending_chunks: i64,
     /// How many vector spaces the index holds at all, empty ones included.
     ///
     /// **It is here so the window can tell what `embedded_chunks` is a count
@@ -1120,6 +1151,27 @@ pub struct IndexRead {
     /// the arm that actually ran on the next search cannot disagree.
     pub search_text_arm: bool,
     pub search_content_arm: bool,
+    /// How many indexed files the whole index holds, and when it last finished
+    /// indexing anything — §9.3's two numbers, `null` for the second when
+    /// nothing ever has.
+    ///
+    /// Read from [`mnema_index::Db::indexed_file_count`] and
+    /// [`mnema_index::Db::last_indexed_at`], each of which is one of the tree
+    /// listing's own queries with a filter dropped. That is what keeps this
+    /// section from contradicting the Folders and Recents lists the same
+    /// window draws one click away, and both doc comments over there say so.
+    ///
+    /// ⚠️ **`indexed_files` counts `path` rows.** One file present in two
+    /// watched folders counts twice, because it draws two folder rows each
+    /// claiming a file. The alternative is a number that is defensible on its
+    /// own and disagrees with the rows beside it.
+    ///
+    /// Read inside the same snapshot as the chunk counts above, for the reason
+    /// the comment on `failed_chunks` gives: a job committing between two
+    /// reads would leave this section describing a state the index never held.
+    pub indexed_files: i64,
+    /// Unix seconds. See [`IndexRead::indexed_files`].
+    pub last_indexed_at: Option<i64>,
 }
 
 /// The index half, read or refused — and never an `Err`, which is the whole
@@ -1166,11 +1218,16 @@ fn index_settings(state: &AppState) -> IndexSettings {
     }
 }
 
-/// The seven values the settings screen draws, read from one index.
+/// The values the settings screen draws, read from one index.
+///
+/// No count of them, deliberately. This sentence said "seven" while `IndexRead`
+/// carried twelve fields, so the number was already a definition that had gone
+/// stale and could only go staler — the fields are added one task at a time and
+/// nothing makes a total in prose move with them.
 ///
 /// A named function rather than a closure inside [`index_settings`] for a reason
 /// that is not style: it is passed to `Db::read_snapshot`, which is what makes
-/// the seven one moment, and nesting the body in a second closure would have
+/// them one moment, and nesting the body in a second closure would have
 /// shifted every line of it four columns to the right. Two mutation cases quote
 /// this code with its indentation — measured, they broke — and a case file that
 /// has to be re-indented every time a wrapper appears is a case file that will
@@ -1209,6 +1266,14 @@ fn read_settings(db: &mnema_index::Db) -> Result<IndexSettings, mnema_index::Err
             Some(id) => db.failed_chunk_count(id)?,
             None => 0,
         },
+        // Inside the same snapshot as the counts above, for the reason
+        // `failed_chunks`'s own comment gives: a job committing between two
+        // reads would leave the queue and the settled counts describing two
+        // different moments of the index.
+        pending_chunks: match active_space {
+            Some(id) => db.queued_chunk_count(id)?,
+            None => 0,
+        },
         space_count: db.space_count()?,
         embedded_chunks_everywhere: db.embedded_chunks_everywhere()?,
         rerank_model: db.meta_get(mnema_index::META_RERANK_MODEL)?,
@@ -1217,6 +1282,11 @@ fn read_settings(db: &mnema_index::Db) -> Result<IndexSettings, mnema_index::Err
         search_content_arm: crate::bridge::arm_is_on(
             db.meta_get(mnema_index::META_SEARCH_CONTENT_ARM)?,
         ),
+        // Inside this snapshot with everything above, so the Indexing section's
+        // two numbers and the Models section's three counts describe one state
+        // of the index rather than five.
+        indexed_files: db.indexed_file_count()?,
+        last_indexed_at: db.last_indexed_at()?,
     }))
 }
 
@@ -1319,12 +1389,15 @@ mod tests {
             embedded_chunks: 0,
             total_chunks: 0,
             failed_chunks: 0,
+            pending_chunks: 0,
             space_count: 0,
             embedded_chunks_everywhere: 0,
             rerank_model: None,
             chat_model: None,
             search_text_arm: true,
             search_content_arm: true,
+            indexed_files: 0,
+            last_indexed_at: None,
         }
     }
 

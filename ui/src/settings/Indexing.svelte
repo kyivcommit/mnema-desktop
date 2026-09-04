@@ -1,222 +1,291 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
-  import type { Frozen, FrozenReason } from '../lib/ipc';
-  import { progressShape, type Ending, type JobController, type OutcomeKind } from './jobs';
+  import { formatIndexedAt, formatIndexedDate } from '../i18n/recency';
+  import { modelSettings, type ModelSettings, type UnreadableCause } from '../lib/ipc';
+  import type { JobController, JobPhase } from './jobs';
 
-  // §9.2 / Task 8 — the minimum indexing surface: one line saying what is
-  // happening, what it ended as, and a control to stop it.
+  // §9.3 — the Indexing SECTION: what the index HOLDS, and when it last grew.
   //
-  // The controller is a PROP, not something this component builds: it is
-  // created once by `Settings.svelte`, above every section, because the channel
-  // a job reports on belongs to whoever started it (`bridge.rs`). A controller
-  // built here would die with the section and take the counters and the Cancel
-  // button with it — and `cancel_job` needs no channel at all, so that Cancel
-  // would be lost for nothing.
+  // 🔴 Not to be confused with `JobStrip.svelte`, which was called
+  // `Indexing.svelte` until this commit. That one is the window's status line,
+  // drawn above the nav and outside every section, and it says what a pass is
+  // doing right now. This one lives inside the panel and says nothing about a
+  // running pass — it reads `model_settings` and draws the index's own numbers.
+  //
+  // The controller arrives as a PROP for the same reason every other section
+  // takes it that way (`Settings.svelte`): it is created once, above every
+  // section, because the channel a job reports on belongs to whoever started
+  // it. This section does not start anything; it only listens, because an
+  // ending is the one moment the numbers below can have changed.
   let { jobs }: { jobs: JobController } = $props();
-  // Read once, on purpose: the controller is created above this component and
-  // its identity never changes for the life of the window, which is the whole
-  // point of it living there. `$jobState` is then ordinary store
-  // auto-subscription.
+  // Read once, on purpose: the controller's identity never changes for the life
+  // of the window. `$jobState` below is then ordinary auto-subscription.
   // svelte-ignore state_referenced_locally
   const jobState = jobs.state;
 
-  // A `Record` over the outcome kinds, not a `switch` with a default arm: a
-  // default that draws "completed" for an unmatched state is exactly how a
-  // failed pass reads as a finished one, and a `Record` makes a new kind a
-  // compile error instead.
+  let settings = $state<ModelSettings | null>(null);
+  // A rejected read of `model_settings`. §10: a rejection arrives as a
+  // SENTENCE, never as a kind — shown verbatim beside a catalogue lead-in, and
+  // never branched on. Held apart from the index's own `Unreadable` arm, which
+  // is a state the backend describes rather than a call that failed.
+  let loadError = $state<string | null>(null);
+
+  // A newer request always wins over an older one that resolves later. Copied
+  // by name from `Models.svelte:75-80` rather than re-derived: every call that
+  // writes `settings` stamps itself with the sequence current at the moment it
+  // was ISSUED, and applies its answer only while that stamp is still the
+  // latest. Two reads can be in flight here whenever endings arrive faster than
+  // the IPC answers, and without the stamp the older reply repaints the screen
+  // with numbers taken before the pass that triggered the newer one.
+  let settingsSeq = 0;
+
+  // Both exits live here rather than in the callers, and that is the point:
+  // there are two callers (the mount and every ending), a rejection is possible
+  // on both, and an error handled at one call site only is a section that goes
+  // quiet exactly when a re-read starts failing. The stamp guards BOTH
+  // directions — an older rejection must not put a failure sentence on a screen
+  // a newer read has already repainted, and an older success must not take one
+  // away that a newer rejection has just earned.
   //
-  // The four kinds after `failed` get sentences of their own because they are
-  // not malfunctions — `job.rs` says reporting them as `failed` tells a person
-  // something broke when instead a folder is unreadable, an exclusion rule did
-  // not take, or a volume may have gone missing.
-  const WALK_ENDED: Record<OutcomeKind, Key> = {
-    completed: 'indexing_walk_ended_completed',
-    partlyRead: 'indexing_walk_ended_partly_read',
-    cancelled: 'indexing_walk_ended_cancelled',
-    failed: 'indexing_walk_ended_failed',
-    brokenWorker: 'indexing_walk_ended_broken_worker',
-    rulesNotApplied: 'indexing_walk_ended_rules_not_applied',
-    rootUnavailable: 'indexing_walk_ended_root_unavailable',
-    volumeMissing: 'indexing_walk_ended_volume_missing',
-  };
-
-  // The embedding pass has its own table, and every sentence in it is about the
-  // WHOLE index: the pass takes no root (`embed_job.rs`), so a sentence
-  // borrowed from the walk would promise it embedded only the folder that was
-  // pressed. `walk_job.rs` is the only writer of the last four kinds, so they
-  // cannot arrive here — but they still get a sentence, carrying the state's
-  // own name, rather than a branch that quietly draws one of the three real
-  // ones.
-  const EMBED_ENDED: Record<OutcomeKind, Key> = {
-    completed: 'indexing_embed_ended_completed',
-    cancelled: 'indexing_embed_ended_cancelled',
-    failed: 'indexing_embed_ended_failed',
-    partlyRead: 'indexing_embed_ended_unexpected',
-    brokenWorker: 'indexing_embed_ended_unexpected',
-    rulesNotApplied: 'indexing_embed_ended_unexpected',
-    rootUnavailable: 'indexing_embed_ended_unexpected',
-    volumeMissing: 'indexing_embed_ended_unexpected',
-  };
-
-  const FROZEN_WHY: Record<FrozenReason, Key> = {
-    symlinkedSubtree: 'indexing_frozen_symlinked_subtree',
-    emptyDirectory: 'indexing_frozen_empty_directory',
-    unreadableDirectory: 'indexing_frozen_unreadable_directory',
-  };
-
-  function outcomeSentence(table: Record<OutcomeKind, Key>, ending: Ending): string {
-    return t(table[ending.outcome.kind], { reason: ending.outcome.kind });
+  // A successful read clears the sentence. Without that line the failure
+  // outlives the state it describes: one refused re-read would leave "the state
+  // of the index could not be read" standing over numbers that were re-read
+  // successfully a second later.
+  //
+  // The numbers themselves are KEPT across a failed re-read, which is
+  // `Tree.svelte`'s ruling and not a new one: a count that was true a moment
+  // ago probably still is, and blanking the panel costs a person information
+  // they had. What the sentence adds is that it is no longer confirmed.
+  async function refresh() {
+    const seq = ++settingsSeq;
+    try {
+      const s = await modelSettings();
+      if (seq !== settingsSeq) return; // a newer read has already spoken
+      settings = s;
+      loadError = null;
+    } catch (e) {
+      if (seq !== settingsSeq) return; // superseded before this rejection arrived
+      loadError = e instanceof Error ? e.message : String(e);
+    }
   }
 
-  // `message` is shown, not dropped: a broken pool, a missing worker binary and
-  // a panic all arrive as `failed`, and this field is the only thing that tells
-  // them apart (`job.rs`). It is `Option<String>` on the wire, so its absence
-  // is a shape this has to survive rather than a case that cannot happen.
-  function failureMessage(ending: Ending): string | null {
-    const outcome = ending.outcome;
-    if (outcome.kind !== 'failed' || outcome.message === null) return null;
-    return t('indexing_failure_message', { message: outcome.message });
-  }
+  onMount(() => {
+    // ⚠️ **The order of these two lines is NOT the guard, and a case pinning it
+    // would pin nothing** (final review, C-M4). `subscribe(...)` and
+    // `refresh()` run in one synchronous block — `refresh()` suspends at its
+    // first `await` — so the subscription is installed before any emission can
+    // be delivered whichever line comes first. What protects the screen when an
+    // ending lands while the initial `model_settings` is in flight is
+    // `settingsSeq` above: the mount's read is stamped first, the ending's
+    // second, and the older answer is dropped whether it succeeds or is refused
+    // (`Indexing.test.ts`, both directions). That is D130's F1 in another
+    // component (`requirements.md:977`), and the counter is what answers it.
+    //
+    // Compared by phase IDENTITY, not by kind: the controller writes a fresh
+    // phase object per event, so a progress report changes the object without
+    // ever being an ending. Seeded with what the store already holds, so a
+    // section switch back does not re-read on the same mount.
+    let seen: JobPhase = get(jobs.state).phase;
+    const stop = jobs.state.subscribe(({ phase }) => {
+      if (phase === seen) return;
+      seen = phase;
+      if (phase.kind === 'ended') void refresh();
+    });
+    void refresh();
+    // 🔴 The OTHER fact this section draws from, re-read for the same reason
+    // (final review, C-M7). `runningUnobserved` — a pass this window has no
+    // channel for, `job_status` being the only thing that can report it — is
+    // written by `syncFromStatus` alone, and that ran once at the window's own
+    // mount. Without this line a pass that ends after the window opened is
+    // never noticed: the phase stays `runningUnobserved` for the life of the
+    // window, and F4's queue line and its Continue button below stay suppressed
+    // with no way for a person to guess that pressing Cancel would fix it.
+    //
+    // Safe on every other path, and that is the controller's doing rather than
+    // this line's: `syncFromStatus` writes only over `idle`/`runningUnobserved`,
+    // so a pass this window IS watching keeps its counts and its Cancel.
+    //
+    // ⚠️ It does NOT close the state, only the affordance: a person parked on
+    // this section while such a pass ends still sees nothing change until the
+    // next visit, because a mount is the only thing that asks. Closing that
+    // needs something that asks over time, which is a controller lifetime this
+    // window does not have — booked, not silently half-done.
+    void jobs.syncFromStatus();
+    // 🔴 Returned, so Svelte tears the subscription down on destroy. This
+    // section is inside `Settings.svelte`'s `{#if section === …}` chain, so
+    // every nav change unmounts it: without this line each visit leaves a live
+    // listener behind and one ending fans out to all of them.
+    return stop;
+  });
 
-  function frozenRows(frozen: Frozen[]) {
-    return frozen.map((f) => ({
-      prefix: f.prefix,
-      text: t('indexing_frozen_row', { prefix: f.prefix, why: t(FROZEN_WHY[f.reason]) }),
-    }));
-  }
+  // §10: the union is discriminated HERE, before any field of `IndexRead` is
+  // touched. Everything below reads `read` or `unreadable`, each of which is
+  // null on the other arm — so no line can be drawn from a field that does not
+  // exist on the branch the backend actually sent.
+  const index = $derived(settings === null ? null : settings.index);
+  const read = $derived(index !== null && index.kind === 'read' ? index : null);
+  const unreadable = $derived(index !== null && index.kind === 'unreadable' ? index : null);
 
-  const phase = $derived($jobState.phase);
-  const walk = $derived($jobState.walk);
-  const note = $derived($jobState.note);
+  // The moment the index last grew, as the backend states it. `null` is not a
+  // missing value — it is `MAX(ingest_stage.updated_at)` over an index in which
+  // nothing has ever finished, and it gets a sentence of its own rather than a
+  // default. A `?? 0` here would render 1 January 1970 beside a relative phrase
+  // counting twenty thousand days, and both of those look like measurements.
+  const lastIndexedAt = $derived(read === null ? null : read.lastIndexedAt);
 
-  // Nothing to say, nothing on screen. A strip that is always there, saying it
-  // is idle, is noise on a window somebody opened to change a model.
-  const anything = $derived(phase.kind !== 'idle' || walk !== null || note !== null);
+  const filesLine = $derived.by(() => {
+    void $locale;
+    if (read === null) return null;
+    return t('indexing_index_files', { count: read.indexedFiles });
+  });
 
-  // Offered for every phase in which a job may still be running — including the
-  // one this window has no channel for, because `cancel_job` needs none either.
-  const cancellable = $derived(
-    phase.kind === 'starting' || phase.kind === 'running' || phase.kind === 'runningUnobserved',
+  // Two lines, not one sentence, and they answer two different questions. The
+  // date is what a person compares against the file they edited this morning;
+  // the phrase is what they feel. Neither stands in for the other, which is why
+  // §9.3 asks for the date and this project already had the phrase.
+  const dateLine = $derived.by(() => {
+    void $locale;
+    if (lastIndexedAt === null) return null;
+    return t('indexing_index_updated', { date: formatIndexedDate(lastIndexedAt, $locale) });
+  });
+  // Wrapped in a catalogue sentence rather than rendered bare. `formatIndexedAt`
+  // answers "how long ago" and nothing else — the Recents card can print it
+  // alone because a filename sits beside it supplying the subject. Last on this
+  // panel it had neither subject nor full stop while every line above it had
+  // both, and read as a fragment somebody forgot to finish.
+  const agoLine = $derived.by(() => {
+    void $locale;
+    if (lastIndexedAt === null) return null;
+    return t('indexing_index_updated_ago', { ago: formatIndexedAt(lastIndexedAt, Date.now()) });
+  });
+  const neverLine = $derived.by(() => {
+    void $locale;
+    if (read === null || lastIndexedAt !== null) return null;
+    return t('indexing_index_never');
+  });
+
+  // A `Record` over the two causes rather than a ternary, for the reason
+  // `JobStrip.svelte`'s own tables give: a third cause added to
+  // `UnreadableCause` becomes a compile error instead of silently drawing one
+  // of the two sentences that already exist.
+  const UNREADABLE: Record<UnreadableCause, Key> = {
+    notOpen: 'indexing_index_unreadable_not_open',
+    readFailed: 'indexing_index_unreadable_read_failed',
+  };
+
+  const unreadableLines = $derived.by(() => {
+    void $locale;
+    if (unreadable === null) return null;
+    return {
+      sentence: t(UNREADABLE[unreadable.cause]),
+      // 🔴 VERBATIM, and deliberately the opposite of the Models section's rule
+      // (`Models.svelte:177-186` never shows it). `IndexSettings::Unreadable`'s
+      // own doc says `reason` "stays verbatim, for showing" and `cause` is what
+      // anything branches on (`models.rs:932`). This is the one screen whose
+      // job is to tell a person what is wrong with their index; the text is
+      // shown to the person who owns the machine it names, and by decision
+      // there is no service between this product and any other (D22).
+      reason: t('indexing_index_unreadable_reason', { reason: unreadable.reason }),
+    };
+  });
+
+  // 🔴 The two scopes, owed since PR 7. `IndexRead::failed_chunks` is
+  // cumulative for the SPACE; `job::Progress::refused` is what the run that has
+  // just ended gave up on (`job.rs:22-44` holds them apart and says whichever
+  // surface shows them owes each its own words). Two sentences with two
+  // subjects, never one key drawn twice.
+  const failedChunksLine = $derived.by(() => {
+    void $locale;
+    if (read === null || read.failedChunks === 0) return null;
+    return t('indexing_index_failed_chunks', { count: read.failedChunks });
+  });
+
+  // The run's own number. Gated on the count rather than on the pass: `refused`
+  // is written only by `embed_job.rs` and is always `0` for a walk (`job.rs:25`),
+  // so a non-zero value already names the pass this sentence names — a
+  // `pass === 'embed'` beside it would be a condition that cannot be false.
+  //
+  // 🔴 And deliberately NOT gated on `read`, which is a decision rather than an
+  // omission (review, Minor 5). The pass really did refuse those chunks, and
+  // that fact does not stop being true when the next read of the index fails.
+  // The sequence is a real one and not a contrived pairing: a pass ends, the
+  // ending triggers the re-read, and the re-read comes back `Unreadable`. Gated
+  // on `read`, the window would answer "the index could not be read" and delete,
+  // in the same breath, the only surviving report of what the pass just did.
+  // The subject is a pass, not the index, so the sentence stands on its own —
+  // and the cumulative sentence beside it does not, because that one IS about
+  // the index and has no arm to be read from.
+  const refusedRunLine = $derived.by(() => {
+    void $locale;
+    const phase = $jobState.phase;
+    if (phase.kind !== 'ended' || phase.ending.refused === 0) return null;
+    return t('indexing_index_refused_run', { count: phase.ending.refused });
+  });
+
+  // F4 (spec §9.3, amended 2026-09-04): the embedding queue —
+  // `IndexRead.pendingChunks`, `Db::queued_chunk_count`'s own count. A tray
+  // Stop mid-pass, then a restart, left thousands of chunks un-embedded with
+  // nothing on any screen saying so; the only resume was the Scan button
+  // beside the right folder happening to chain into an embed.
+  //
+  // Gated on the phase, not only on the count: the number on screen is a
+  // moment-old read and does not shrink as a resumed run works through the
+  // queue, so once a pass is under way the strip above owns that state and
+  // this line and its button step aside rather than show a count a running
+  // pass is already changing.
+  const showPending = $derived(
+    read !== null && read.pendingChunks > 0
+      && ($jobState.phase.kind === 'idle' || $jobState.phase.kind === 'ended'),
   );
-
-  const passLabel = $derived.by(() => {
+  const pendingLine = $derived.by(() => {
     void $locale;
-    if (phase.kind === 'starting') {
-      return t(phase.pass === 'walk' ? 'indexing_walk_starting' : 'indexing_embed_starting');
-    }
-    if (phase.kind === 'running') {
-      return t(phase.pass === 'walk' ? 'indexing_walk_running' : 'indexing_embed_running');
-    }
-    return null;
+    if (!showPending || read === null) return null;
+    return t('indexing_index_pending_chunks', { count: read.pendingChunks });
+  });
+  const resumeEmbeddingLabel = $derived.by(() => {
+    void $locale;
+    return t('indexing_index_resume_embedding');
   });
 
-  const countsLabel = $derived.by(() => {
-    void $locale;
-    if (phase.kind !== 'running') return null;
-    const counts = phase.counts;
-    const shape = progressShape(counts);
-    const common = { done: counts.done, skipped: counts.skipped, refused: counts.refused };
-    return shape.kind === 'ratio'
-      ? t('indexing_counts_ratio', { ...common, total: shape.total })
-      : t('indexing_counts_counting', common);
-  });
+  const loadFailedLabel = $derived.by(() => { void $locale; return t('indexing_index_load_failed'); });
 
-  const etaLabel = $derived.by(() => {
-    void $locale;
-    if (phase.kind !== 'running') return null;
-    const seconds = phase.counts.secondsLeft;
-    // Not `seconds ? …` — zero seconds left is a number, and the nullish check
-    // is the one this field's `Option<u64>` actually asks for.
-    return seconds === null
-      ? t('indexing_eta_unknown')
-      : t('indexing_eta', { seconds });
-  });
-
-  const unobservedLabel = $derived.by(() => { void $locale; return t('indexing_unobserved'); });
-  const cancelLabel = $derived.by(() => { void $locale; return t('indexing_cancel'); });
-
-  const walkLines = $derived.by(() => {
-    void $locale;
-    if (walk === null) return null;
-    return {
-      sentence: outcomeSentence(WALK_ENDED, walk),
-      failure: failureMessage(walk),
-      result: t('indexing_walk_result', {
-        indexed: walk.indexed, unchanged: walk.unchanged, skipped: walk.skipped, removed: walk.removed,
-      }),
-      frozenHeading: t('indexing_frozen_heading'),
-      frozen: frozenRows(walk.frozen),
-    };
-  });
-
-  const embedLines = $derived.by(() => {
-    void $locale;
-    if (phase.kind !== 'ended' || phase.pass !== 'embed') return null;
-    const ending = phase.ending;
-    return {
-      sentence: outcomeSentence(EMBED_ENDED, ending),
-      failure: failureMessage(ending),
-      result: t('indexing_embed_result', {
-        done: ending.done, total: ending.total, refused: ending.refused,
-      }),
-    };
-  });
-
-  const noteLabel = $derived.by(() => {
-    void $locale;
-    if (note === null) return null;
-    switch (note.kind) {
-      case 'noKey': return t('indexing_note_no_key');
-      case 'noModel': return t('indexing_note_no_model');
-      case 'rejected': return t('indexing_note_rejected');
-    }
-  });
+  // Through the controller, never `startEmbedJob` directly — `Models.svelte`'s
+  // own `reembed` (`:468-484`) argues why: the pass this button starts belongs
+  // on the window's strip, where its progress and its Cancel stay reachable
+  // from every section. Nothing is caught here for the same reason that
+  // argument gives: a refusal is the controller's to report, in the same words
+  // and the same place as every other refused command.
+  function resumeEmbedding() {
+    void jobs.embed();
+  }
 </script>
 
-{#if anything}
-  <div class="indexing" data-testid="indexing">
-    {#if phase.kind === 'runningUnobserved'}
-      <p data-testid="indexing-unobserved">{unobservedLabel}</p>
-    {/if}
-    {#if passLabel}<p data-testid="indexing-pass">{passLabel}</p>{/if}
-    {#if countsLabel}<p data-testid="indexing-counts">{countsLabel}</p>{/if}
-    {#if etaLabel}<p data-testid="indexing-eta">{etaLabel}</p>{/if}
-    {#if cancellable}
-      <button type="button" data-testid="indexing-cancel" onclick={() => jobs.cancel()}>{cancelLabel}</button>
-    {/if}
-    {#if walkLines}
-      <div data-testid="indexing-walk-outcome">
-        <span>{walkLines.sentence}</span>
-        {#if walkLines.failure}<span data-testid="indexing-walk-failure">{walkLines.failure}</span>{/if}
-      </div>
-      <p data-testid="indexing-walk-result">{walkLines.result}</p>
-      {#if walkLines.frozen.length > 0}
-        <div data-testid="indexing-frozen">
-          <p>{walkLines.frozenHeading}</p>
-          <ul>
-            <!-- Unkeyed on purpose. Two prefixes in one report CAN be equal:
-                 `walk.rs` skips the climb when an existing entry covers
-                 `parent`, but pushes `resolve_ancestor`'s answer, which is a
-                 different string when `parent` itself is not on disk — so two
-                 parents can resolve to one prefix and both be reported. Keying
-                 by it would throw and take the whole section down. The rows
-                 carry no state of their own, so there is nothing to keep. -->
-            {#each walkLines.frozen as row}<li>{row.text}</li>{/each}
-          </ul>
-        </div>
-      {/if}
-    {/if}
-    {#if embedLines}
-      <div data-testid="indexing-embed-outcome">
-        <span>{embedLines.sentence}</span>
-        {#if embedLines.failure}<span data-testid="indexing-embed-failure">{embedLines.failure}</span>{/if}
-      </div>
-      <p data-testid="indexing-embed-result">{embedLines.result}</p>
-    {/if}
-    {#if noteLabel}
-      <p data-testid="indexing-note">{noteLabel}</p>
-      {#if note?.kind === 'rejected'}<p data-testid="indexing-rejection">{note.sentence}</p>{/if}
-    {/if}
-  </div>
+<!-- The failed read leads, and it does NOT gate what follows: this is an `{#if}`,
+     not an `{:else}`. On the FIRST read's rejection there is nothing below it
+     anyway, because `settings` is still null. On a refused RE-read the previous
+     answer is still there and stays on screen — the ruling recorded beside
+     `refresh()` above — so the sentence sits over the numbers it could not
+     confirm, which is the whole of what it is for. Do not turn this into a
+     gate: blanking the panel would take away a count that was true a moment ago
+     and probably still is. -->
+{#if loadError}
+  <p data-testid="indexing-index-load-failed">{loadFailedLabel}</p>
+  <p data-testid="indexing-index-load-error">{loadError}</p>
+{/if}
+{#if unreadableLines}
+  <p data-testid="indexing-index-unreadable">{unreadableLines.sentence}</p>
+  <p data-testid="indexing-index-unreadable-reason">{unreadableLines.reason}</p>
+{/if}
+{#if filesLine}<p data-testid="indexing-index-files">{filesLine}</p>{/if}
+{#if dateLine}<p data-testid="indexing-index-date">{dateLine}</p>{/if}
+{#if agoLine}<p data-testid="indexing-index-ago">{agoLine}</p>{/if}
+{#if neverLine}<p data-testid="indexing-index-never">{neverLine}</p>{/if}
+{#if failedChunksLine}<p data-testid="indexing-index-failed-chunks">{failedChunksLine}</p>{/if}
+{#if refusedRunLine}<p data-testid="indexing-index-refused-run">{refusedRunLine}</p>{/if}
+{#if showPending}
+  <p data-testid="indexing-index-pending-chunks">{pendingLine}</p>
+  <button type="button" data-testid="indexing-resume-embedding" onclick={resumeEmbedding}>{resumeEmbeddingLabel}</button>
 {/if}

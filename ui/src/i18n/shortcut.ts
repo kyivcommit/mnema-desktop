@@ -1,0 +1,221 @@
+import type { Platform } from '../lib/ipc';
+
+// The global shortcut, in both directions: the string the backend stores turned
+// into something a person reads, and a keypress turned back into that string.
+//
+// 🔴 **Why this module is filed under `src/i18n/` — the reason is filing, not
+// the guard.** Every `.ts` file anywhere under `ui/src` is already outside the
+// F3 Latin sweep by construction (`guard.test.ts` walks `.svelte` files only),
+// so this directory buys nothing there and a reader must not take it for a way
+// of skipping a check. What it is: a locale-shaped mapping module. It turns one
+// stored value into the words and glyphs of the platform a person is on, which
+// is what `recency.ts` and the catalogue beside it do, and both halves are pure
+// functions unit-tested with no component in sight.
+//
+// ⚠️ The strings below are protocol tokens rather than prose — `Ctrl`, `Alt`,
+// `Shift`, `Super`, `Space`, `F1`, `ArrowUp` — the DISPLAY vocabulary this
+// formatter and its Rust mirror agree on. It is not the parser's own list,
+// which is `prefs.rs`'s `MODIFIER_SPELLINGS`; `MODIFIER_ALIASES` below says
+// where the two differ and what that difference costs a person. Nothing here is
+// a sentence; every sentence this section shows comes from `catalog.ts` or
+// verbatim from the backend.
+
+// The canonical order, and it is canonical rather than incidental. The parser
+// is indifferent to the order of the modifiers AMONG THEMSELVES but not to the
+// key, which must come last; what one fixed order buys is that two people who
+// press the same keys store the same string and read the same label.
+const ORDER = ['Ctrl', 'Alt', 'Shift', 'Super'] as const;
+type Modifier = (typeof ORDER)[number];
+
+// ⌃⌥⇧⌘ — the order Apple prints them in, which is the order above.
+const MAC_GLYPH: Record<Modifier, string> = {
+  Ctrl: '⌃',
+  Alt: '⌥',
+  Shift: '⇧',
+  Super: '⌘',
+};
+
+// How the command/meta key is written where it is not a glyph. Linux keeps the
+// parser's own spelling; Windows says `Win`, which is what is printed on the
+// key a person is looking at.
+const SUPER_WORD: Record<Exclude<Platform, 'mac'>, string> = {
+  windows: 'Win',
+  linux: 'Super',
+};
+
+// The spellings the two FORMATTERS fold onto the one this module emits, so that
+// two spellings of one shortcut do not read as two different shortcuts. A
+// stored string need not be one this window built — `prefs.json` is a file on
+// the person's own disk, and the parser accepts any order of modifiers as long
+// as the key is last.
+//
+// ⚠️ **This is a display vocabulary, and it is NOT the parser's.** The parser's
+// own twelve are `prefs.rs`'s `MODIFIER_SPELLINGS`. The two sets overlap and
+// neither contains the other: this table adds `ctl`, `altgr`, `meta` and `win`,
+// which the parser refuses, and omits `CommandOrControl`, `CommandOrCtrl`,
+// `CmdOrCtrl` and `CmdOrCommand`, which it accepts and resolves per platform.
+// So a stored `CmdOrCtrl+Space` registers and is then drawn as the literal
+// `CmdOrCtrl+Space` rather than as `⌘Space` — the passthrough rule below doing
+// exactly what it says, not a falsehood. Widening this table is a decision about
+// what a person reads, and it would have to be made on both sides and given a
+// row in `shortcut.fixtures.json`.
+const MODIFIER_ALIASES: Record<string, Modifier> = {
+  ctrl: 'Ctrl', control: 'Ctrl', ctl: 'Ctrl',
+  alt: 'Alt', option: 'Alt', altgr: 'Alt',
+  shift: 'Shift',
+  super: 'Super', meta: 'Super', cmd: 'Super', command: 'Super', win: 'Super',
+};
+
+/**
+ * The stored shortcut, as the person on `platform` reads it.
+ *
+ * `platform` comes from the WIRE (`AppPrefs.platform`, chosen at compile time by
+ * `Platform::of_this_build`) and never from `navigator.userAgent` — that type's
+ * own doc records this project measuring a plausible proxy wrong twice, on two
+ * platforms.
+ *
+ * Unknown tokens are passed through as they are rather than dropped: a string
+ * this module does not fully understand is still the string the operating
+ * system is holding, and showing less of it than there is would be the one
+ * mistake worse than showing it awkwardly.
+ */
+export function formatShortcut(shortcut: string, platform: Platform): string {
+  const tokens = shortcut.split('+');
+  const key = tokens[tokens.length - 1] ?? '';
+  const held = new Set<Modifier>();
+  const unknown: string[] = [];
+  for (const token of tokens.slice(0, -1)) {
+    // 🔴 `Object.hasOwn` and not a bare index (review round 1, Minor 1). This
+    // record is an object literal, so it inherits `Object.prototype`, and a
+    // bare lookup answers truthy for any lowercase member name of it —
+    // `constructor`, `__proto__`, `__definegetter__` and its three siblings.
+    // Each came back as a modifier that maps to nothing at all and was
+    // swallowed: `Constructor+A` formatted to `A`, measured. The Rust mirror in
+    // `src-tauri/src/shortcut.rs` is a `match` and never could, so the two
+    // formatters disagreed for six spellings while both module docs claimed a
+    // token-for-token mirror. `shortcut.fixtures.json` now carries a row for
+    // each, which is what keeps this settled rather than this comment.
+    const lower = token.toLowerCase();
+    const known = Object.hasOwn(MODIFIER_ALIASES, lower) ? MODIFIER_ALIASES[lower] : undefined;
+    if (known) held.add(known);
+    else unknown.push(token);
+  }
+  const modifiers = ORDER.filter((m) => held.has(m));
+
+  if (platform === 'mac') {
+    // No separator at all: `⌥Space` is how the combination is written on this
+    // platform, and a `+` between glyphs reads as a key of its own.
+    return modifiers.map((m) => MAC_GLYPH[m]).join('') + [...unknown, key].join('+');
+  }
+  const words = modifiers.map((m) => (m === 'Super' ? SUPER_WORD[platform] : m));
+  return [...words, ...unknown, key].join('+');
+}
+
+// The logical keys a press consists of nothing but. Read from `key` rather than
+// from `code`, because `key` is where "this press carries no character" is
+// stated; the codes are listed beside it so a keyboard that reports one without
+// the other is still understood.
+const MODIFIER_KEYS = new Set(['Control', 'Alt', 'AltGraph', 'Shift', 'Meta', 'OS', 'CapsLock']);
+const MODIFIER_CODES = new Set([
+  'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight',
+  'ShiftLeft', 'ShiftRight', 'MetaLeft', 'MetaRight', 'CapsLock',
+]);
+
+/**
+ * Whether this press is a modifier and nothing else.
+ *
+ * 🔴 The reason this is exported beside [`shortcutFromEvent`] rather than folded
+ * into it: both come back `null` from that function, and the section says two
+ * different things about them. Holding Ctrl on the way to Ctrl+A must not put a
+ * refusal on the screen — the press is ignored, and the recording goes on. A
+ * key the map does not carry must, or a person presses it, sees nothing happen,
+ * and has no way to learn why.
+ */
+export function isModifierOnlyPress(e: KeyboardEvent): boolean {
+  return MODIFIER_KEYS.has(e.key) || MODIFIER_CODES.has(e.code);
+}
+
+// `event.code` — the physical key — folded onto the plugin's key names. Read
+// from `code` and never from `key`, so that a shortcut recorded on one keyboard
+// layout is the same physical combination on another, and so that Shift does
+// not turn `1` into `!` halfway through building a string.
+function keyName(code: string): string | null {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (/^F([1-9]|1[0-2])$/.test(code)) return code;
+  if (/^Arrow(Up|Down|Left|Right)$/.test(code)) return code;
+  if (code === 'Space') return 'Space';
+  return null;
+}
+
+/**
+ * The string to send to `set_hotkey`, or `null` when this press cannot make one.
+ *
+ * Three refusals, and each of them has to be here rather than left to the
+ * backend:
+ *
+ *   - a press that is nothing but a modifier — there is no key yet;
+ *   - a press with no modifier at all — `Space` alone parses on the Rust side
+ *     and would take the space bar away system-wide, which is why the guard
+ *     exists on both sides (D-b step 3);
+ *   - a key this map does not carry — the parser refuses those with a sentence
+ *     asking the reader to report the string on GitHub, and handing that to a
+ *     person who pressed a dead key would be this window's fault, not theirs.
+ *
+ * `Escape` is deliberately in none of the maps: it is the recorder's cancel, and
+ * a `Ctrl+Escape` a person could store would take that cancel away from every
+ * later recording.
+ */
+export function shortcutFromEvent(e: KeyboardEvent): string | null {
+  if (isModifierOnlyPress(e)) return null;
+  if (e.key === 'Escape' || e.code === 'Escape') return null;
+
+  // 🔴 Pushed in an order that is deliberately NOT `ORDER` — Super first, Ctrl
+  // last — so the join below cannot pass by coincidence. An earlier version
+  // pushed Ctrl/Alt/Shift/Super, which is `ORDER` itself, so `held` and
+  // `ORDER.filter(...)` produced the identical array for every input and
+  // deleting the `.filter` below (joining `held` directly) survived the whole
+  // suite (review, Important 3). This order is arbitrary and unrelated to
+  // anything the parser or the glyphs care about — its only job is to make
+  // sure the canonical order in the return below is doing the work.
+  const held: Modifier[] = [];
+  if (e.metaKey) held.push('Super');
+  if (e.shiftKey) held.push('Shift');
+  if (e.altKey) held.push('Alt');
+  if (e.ctrlKey) held.push('Ctrl');
+  if (held.length === 0) return null;
+
+  const key = keyName(e.code);
+  if (key === null) return null;
+
+  // Built from ORDER rather than from the sequence the flags were read in: the
+  // event carries four booleans and no order at all, so the order can only come
+  // from this module, and it must be the same one every time. `held`'s own
+  // order is deliberately scrambled above for exactly this line's sake.
+  return [...ORDER.filter((m) => held.includes(m)), key].join('+');
+}
+
+// M-4/M-5 (review): the keys this recorder accepts are a CLOSED enumeration —
+// letters, digits, `F1`-`F12`, the four arrows, `Space` — not "everything
+// `global-hotkey` parses". D-j names exactly this map; `Ctrl+Alt+,` is refused
+// here although the backend would accept it, and that is plan-mandated, not a
+// bug. The refusal sentence in `catalog.ts` (`application_shortcut_not_usable`)
+// enumerates what a shortcut IS in prose, and that enumeration has to move in
+// lockstep with `keyName` below — a key added to one without the other leaves
+// the sentence naming fewer keys than the recorder accepts, or refusing keys
+// the sentence claims are fine. Definition by enumeration is still a
+// definition: growing this map without also rereading that sentence recreates
+// the exact drift this comment exists to name.
+
+// The modifier key's own NAME, for use in prose — distinct from `SUPER_WORD`
+// above, which is unexported and only feeds `formatShortcut`'s glyph-less
+// branch. Mac gets the word `Cmd` here rather than the `⌘` glyph: this feeds a
+// sentence meant to be READ, and a glyph sitting mid-sentence reads as a typo
+// (review, Minor 5) — the platform-neutral "the command key" it replaces named
+// the wrong key on Windows and Linux, where the sentence's own screen already
+// knows which key it is.
+export const MODIFIER_KEY_NAME: Record<Platform, string> = {
+  mac: 'Cmd',
+  windows: 'Win',
+  linux: 'Super',
+};

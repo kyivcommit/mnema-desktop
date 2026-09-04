@@ -71,7 +71,7 @@
 # `listTree()`), one leaks across the file's fixtures and kills eight, and one
 # is green by design. Task 6's catalogue-key reverts (#9-12) are pins on a
 # locale string, not a `$locale` anchor — no case here covers that class.
-# Every guard in `Indexing.svelte`, `Models.svelte` and the i18n catalogue has
+# Every guard in `JobStrip.svelte`, `Models.svelte` and the i18n catalogue has
 # no case file at all. `stale: 0` still says nothing about any of them.
 #
 # ⚠️ **Task 6's reverts 5 and 6 are not covered by any class above**, and
@@ -187,7 +187,7 @@ case_ "a finished scan must re-read the panel, not only the row above it" \
   ui/src/settings/Folders.svelte \
   "s{    refresh\(\)\.then\(rereadPanels\)\.catch\(\(e\) => \{}{    refresh().catch((e) => \{}" \
   "    refresh().catch((e) => {" \
-  src/settings/Indexing.test.ts 'a finished scan re-reads the open panel, so a renamed folder stops reading as excluded' runner=vitest
+  src/settings/JobStrip.test.ts 'a finished scan re-reads the open panel, so a renamed folder stops reading as excluded' runner=vitest
 
 # The half of `rereadPanels` that reads. Deleting it leaves the withdrawal
 # behind, which is why the withdrawal test is NOT the one named here: measured,

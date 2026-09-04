@@ -814,3 +814,298 @@ fn removing_a_watched_root_leaves_the_masks_alone() {
         "a mask is global: it survives the removal of any one watched folder"
     );
 }
+
+// ── The settings window's two whole-index numbers (§9.3) ─────────────────────
+//
+// `indexed_file_count` and `last_indexed_at` are each defined as one of the
+// two listings above with a filter dropped, and the tests below assert that
+// relationship rather than only the number: an equality against
+// `indexed_files_under_root` and an equality against `recent_indexed_documents`
+// are what keep the settings screen from contradicting the folder list and the
+// recents list drawn one click away.
+
+/// One indexed document with one path under `root`, completed at `updated_at`.
+///
+/// `record_stage` stamps `unixepoch()`, so a test that wants a known moment
+/// overwrites it — the same `UPDATE ingest_stage` the recents tests above use.
+fn seed_indexed(db: &Db, root: i64, id: &str, relative_path: &str, updated_at: Option<i64>) {
+    db.insert_document(id, "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    db.set_document_status(id, DocumentStatus::Indexed).unwrap();
+    db.insert_path(
+        root,
+        relative_path,
+        id,
+        OnDisk {
+            size_bytes: 1,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+    if let Some(at) = updated_at {
+        db.record_stage(id, "chunk", "done").unwrap();
+        db.conn()
+            .execute(
+                "UPDATE ingest_stage SET updated_at = ?2 WHERE content_hash = ?1 AND stage = 'chunk'",
+                rusqlite::params![id, at],
+            )
+            .unwrap();
+    }
+}
+
+/// The whole-index count is the sum of the per-folder counts, not a number
+/// arrived at some other way.
+///
+/// The second assertion is the load-bearing one: the first would be satisfied
+/// by any query that happens to answer 5 on this fixture, and only the equality
+/// against `indexed_files_under_root` — the very rows `Folders.svelte` counts
+/// into its own label — says the two surfaces cannot disagree.
+#[test]
+fn the_whole_index_count_is_the_sum_of_every_folder_s_own_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let a = db.insert_watched_root("/tmp/a").unwrap();
+    let b = db.insert_watched_root("/tmp/b").unwrap();
+
+    for (i, (root, name)) in [
+        (a, "a1.txt"),
+        (a, "a2.txt"),
+        (b, "b1.txt"),
+        (b, "b2.txt"),
+        (b, "b3.txt"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        seed_indexed(&db, *root, &format!("{i:064x}"), name, Some(1000));
+    }
+
+    let count = db.indexed_file_count().unwrap();
+
+    assert_eq!(count, 5);
+    assert_eq!(
+        count,
+        (db.indexed_files_under_root(a).unwrap().len()
+            + db.indexed_files_under_root(b).unwrap().len()) as i64,
+        "the settings number must be exactly the folder rows' numbers added up"
+    );
+}
+
+/// 🔴 The deliberate departure from a `COUNT(*) FROM document` (D-e). One
+/// document reachable from two watched folders draws TWO folder rows, each
+/// claiming a file, so the whole-index number says two as well.
+///
+/// Asserted positively, with the number: a later change that de-duplicates by
+/// document goes red here and has to argue with this comment rather than be
+/// slipped in as a tidy-up.
+#[test]
+fn a_document_reachable_from_two_folders_counts_once_for_each_folder_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let a = db.insert_watched_root("/tmp/a").unwrap();
+    let b = db.insert_watched_root("/tmp/b").unwrap();
+
+    let shared = "a".repeat(64);
+    seed_indexed(&db, a, &shared, "copy.txt", Some(1000));
+    // The SAME document (one sha256) under the second root — two copies of one
+    // file, which is one `document` row and two `path` rows.
+    db.insert_path(
+        b,
+        "copy.txt",
+        &shared,
+        OnDisk {
+            size_bytes: 1,
+            mtime: 1,
+        },
+        "text",
+        1,
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.indexed_file_count().unwrap(),
+        2,
+        "one document, two folder rows, two files claimed on the screen"
+    );
+    assert_eq!(
+        db.indexed_file_count().unwrap(),
+        (db.indexed_files_under_root(a).unwrap().len()
+            + db.indexed_files_under_root(b).unwrap().len()) as i64,
+    );
+}
+
+/// Only `indexed` counts: a pending document has nothing searchable in it yet
+/// and a failed one never will, and neither is drawn under a folder.
+///
+/// Two assertions, because "the count is 1" alone is also satisfied by a
+/// fixture that never inserted the two rows the filter is supposed to remove.
+/// So the count of path rows is asserted first, and it can fail on its own: the
+/// index holds 3, and the helper answers 1.
+#[test]
+fn a_pending_or_failed_document_is_not_an_indexed_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/root").unwrap();
+
+    seed_indexed(&db, root, &"a".repeat(64), "done.txt", Some(1000));
+    for (id, status) in [
+        (&"b".repeat(64), DocumentStatus::Pending),
+        (&"c".repeat(64), DocumentStatus::Failed),
+    ] {
+        db.insert_document(id, "text/plain", 1, SourceKind::Document)
+            .unwrap();
+        db.set_document_status(id, status).unwrap();
+        db.insert_path(
+            root,
+            &format!("{status:?}.txt"),
+            id,
+            OnDisk {
+                size_bytes: 1,
+                mtime: 1,
+            },
+            "text",
+            1,
+        )
+        .unwrap();
+    }
+
+    // The fixture really holds the state this test is about, asserted before the
+    // number is: three path rows, of which the status filter must keep two out.
+    // `assert_ne!(count, 3)` stood here and could not fail while the equality
+    // below passed — it named the wrong answer without discriminating anything,
+    // and a fixture whose two extra rows had silently failed to insert would
+    // have satisfied it. This one goes red on that, which is the direction the
+    // brief was asking for.
+    let path_rows: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM path", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        path_rows, 3,
+        "the fixture must hold three path rows for the filter to have work to do"
+    );
+
+    assert_eq!(
+        db.indexed_file_count().unwrap(),
+        1,
+        "only the indexed document is a file on the screen, and the pending and \
+         failed rows beside it are the other two of the {path_rows} path rows"
+    );
+}
+
+/// An index nobody has walked yet answers both questions rather than failing
+/// either — the state the settings window is first opened in.
+#[test]
+fn an_empty_index_reports_no_files_and_no_moment() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+
+    assert_eq!(db.indexed_file_count().unwrap(), 0);
+    assert_eq!(db.last_indexed_at().unwrap(), None);
+}
+
+/// 🔴 The reason `last_indexed_at` reuses `recent_indexed_documents`' join
+/// rather than writing a second one: the moment the settings line names is the
+/// moment the top of the Recents list carries. The second assertion is what
+/// makes that a property instead of a coincidence of this fixture.
+#[test]
+fn the_last_indexed_moment_is_the_one_at_the_top_of_recents() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/root").unwrap();
+
+    seed_indexed(&db, root, &"a".repeat(64), "old.txt", Some(1000));
+    seed_indexed(&db, root, &"b".repeat(64), "newest.txt", Some(3000));
+    seed_indexed(&db, root, &"c".repeat(64), "middle.txt", Some(2000));
+
+    let last = db.last_indexed_at().unwrap();
+
+    assert_eq!(last, Some(3000), "the newest completion, not the oldest");
+    assert_eq!(
+        last,
+        Some(db.recent_indexed_documents(1).unwrap()[0].indexed_at),
+        "the settings line and the top of Recents must name one moment"
+    );
+}
+
+/// An `indexed` document with no chunk/done stage row is outside
+/// `recent_indexed_documents`' INNER JOIN, and this number is outside it in
+/// exactly the same way — the two surfaces stay in step even in the state
+/// neither expects.
+///
+/// Both directions, and they are what makes this fixture distinguish anything:
+/// the document IS present and IS indexed, so the count sees it; only the
+/// moment is absent, because nothing ever recorded a completion.
+#[test]
+fn an_indexed_document_that_never_recorded_a_completion_names_no_moment() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/root").unwrap();
+
+    seed_indexed(&db, root, &"a".repeat(64), "silent.txt", None);
+
+    assert_eq!(
+        db.indexed_file_count().unwrap(),
+        1,
+        "the document is there and it is indexed"
+    );
+    assert_eq!(
+        db.last_indexed_at().unwrap(),
+        None,
+        "no chunk/done stage, so nothing has finished indexing"
+    );
+}
+
+/// A rebuild in flight has not finished. `STATUS_REBUILDING` exists precisely
+/// so a document whose rows are being written again cannot read as done, and
+/// the settings line must not report its newer `updated_at` as the moment the
+/// index was last brought up to date.
+///
+/// Two assertions, and the first can fail on its own: the rebuilding stage
+/// really stands at 3000, so it was the newest moment available, and the helper
+/// answers the completed document's 1000 anyway.
+#[test]
+fn a_rebuild_in_flight_is_not_a_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/root").unwrap();
+
+    seed_indexed(&db, root, &"a".repeat(64), "finished.txt", Some(1000));
+    let rebuilding = "b".repeat(64);
+    seed_indexed(&db, root, &rebuilding, "rebuilding.txt", None);
+    db.record_stage(&rebuilding, "chunk", "rebuilding").unwrap();
+    db.conn()
+        .execute(
+            "UPDATE ingest_stage SET updated_at = 3000 WHERE content_hash = ?1 AND stage = 'chunk'",
+            [&rebuilding],
+        )
+        .unwrap();
+
+    // The rebuilding stage really carries the newer moment, asserted before the
+    // helper is asked anything. `assert_ne!(last, Some(3000))` stood here and
+    // could not fail while the equality below passed; worse, it read as a guard
+    // against a 3000 that a fixture whose UPDATE had quietly matched no row
+    // would never have held in the first place. This assertion is the one that
+    // goes red on that, and it is what makes the equality below mean "the newer
+    // moment was there to be picked and was not picked".
+    let rebuilding_at: i64 = db
+        .conn()
+        .query_row(
+            "SELECT updated_at FROM ingest_stage WHERE content_hash = ?1 AND stage = 'chunk'",
+            [&rebuilding],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rebuilding_at, 3000,
+        "the rebuild in flight must be the NEWEST stage row, or this test proves nothing"
+    );
+
+    assert_eq!(
+        db.last_indexed_at().unwrap(),
+        Some(1000),
+        "the finished document's completion, not the rebuild's newer {rebuilding_at}"
+    );
+}

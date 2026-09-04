@@ -11,7 +11,10 @@ pub mod error;
 pub mod job;
 pub mod locale;
 pub mod models;
+pub mod os_services;
 pub mod paths;
+pub mod prefs;
+pub mod shortcut;
 pub mod state;
 pub mod tray;
 mod tree;
@@ -61,6 +64,9 @@ pub fn invoke_handler<R: tauri::Runtime>()
         embed_job::start_embed_job,
         locale::get_locale,
         locale::set_locale,
+        prefs::app_prefs,
+        prefs::set_hotkey,
+        prefs::set_autostart,
     ]
 }
 
@@ -371,15 +377,28 @@ pub fn run() -> anyhow::Result<()> {
     // nothing, which is what makes it safe to do unconditionally. G7.0 §5.7.
     mnema_index::register_vector_extension().context("registering the sqlite-vec extension")?;
 
-    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
+    use tauri_plugin_global_shortcut::ShortcutState;
 
-    let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
+    // 🔴 **No `.with_shortcut(…)`, and `.with_handler(…)` stays.** The
+    // shortcut is registered from `.setup`, through `prefs::install_hotkey`,
+    // because a builder registration that fails is fatal — `with_shortcut(…)?`
+    // is exactly the D128 defect this removes: a shortcut another application
+    // already holds became a reason for this one not to start.
+    //
+    // The handler must NOT move with it. `GlobalShortcut::register` attaches
+    // none at all — it passes `None::<fn(&AppHandle<R>, &Shortcut,
+    // ShortcutEvent)>` to `register_internal`
+    // (`tauri-plugin-global-shortcut-2.3.2/src/lib.rs:131-140`) — and this
+    // builder handler (`:380-385`) is the other source; both are dispatched
+    // together at `:416-423`, so this ONE closure serves every shortcut the
+    // registrar ever takes, including one the person picks later. Delete it and
+    // call `register`, and the operating system grabs the shortcut while
+    // nothing in this application hears it — which no headless test can catch,
+    // since D-d forbids driving the real registrar.
     let global_shortcut = tauri_plugin_global_shortcut::Builder::new()
-        .with_shortcut(alt_space)
-        .context("registering the ⌥Space shortcut")?
         .with_handler(|app, _shortcut, event| {
-            // Only one shortcut is registered, so no need to match it; act on
-            // the press edge, not the release.
+            // Whatever shortcut is bound, there is only ever one; act on the
+            // press edge, not the release.
             if event.state() == ShortcutState::Pressed {
                 toggle_launcher(app);
             }
@@ -403,6 +422,15 @@ pub fn run() -> anyhow::Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(global_shortcut)
+        // Launch at login (D-c). The macOS launcher variant and no arguments:
+        // the application starts the same way from a login item as from the
+        // Dock. The webview never calls this plugin — it calls `set_autostart`,
+        // which is this application's own command — so no `autostart:allow-*`
+        // capability entry is expected.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .menu(|app| build_app_menu(app, crate::locale::boot_lang()))
         // All menu events — the app menu's ⌘Q AND every tray item — dispatch to
         // this one app-level handler. `muda` registers `Builder::on_menu_event`
@@ -434,6 +462,17 @@ pub fn run() -> anyhow::Result<()> {
                 }
                 sync_activation_policy(app);
             }
+            // §8: ask the running job to stop. There is no guard here and none
+            // is owed — `cancel_job` on an idle application returns `()` after
+            // storing the flag (`state.rs`'s `cancel_job`), and `claim_job`
+            // clears that flag *after* it has won the slot, so a press with
+            // nothing running cannot reach into the next job. The item is
+            // enabled only while a job runs (`tray::StopItem`) so as not to
+            // offer a control that does nothing, which is a different concern
+            // from safety.
+            "stop_indexing" => {
+                app.state::<state::AppState>().cancel_job();
+            }
             // §6: the tray's «Вийти» is the only real exit. `Some(0)` is what
             // the ExitRequested guard lets through.
             "quit" => app.exit(0),
@@ -461,12 +500,7 @@ pub fn run() -> anyhow::Result<()> {
                     // Restore the checkmark: the OS toggled it on click, but the
                     // choice never changed, so rebuild from the current state.
                     let current = state.locale();
-                    if let Some(tray) = app.tray_by_id("mnema-tray")
-                        && let Ok(menu) =
-                            crate::tray::build_tray_menu(app, current.effective, current.choice)
-                    {
-                        let _ = tray.set_menu(Some(menu));
-                    }
+                    crate::tray::swap_tray_menu(app, current.effective, current.choice);
                 }
             }
             _ => {}
@@ -510,7 +544,71 @@ pub fn run() -> anyhow::Result<()> {
             if let Ok(menu) = build_app_menu(app.handle(), st.effective) {
                 let _ = app.handle().set_menu(menu);
             }
-            tray::build_tray(app.handle())?;
+            // The operating-system services, and then the one boot the hotkey
+            // has. Installed AFTER `manage_state` (there is no state to install
+            // into before it) and after the locale is seeded, because a
+            // registration failure's sentence is the plugin's own and the state
+            // it lands in is read back by the settings window.
+            //
+            // 🔴 `install_hotkey` returns a `HotkeyState` and CANNOT fail the
+            // boot. A `?` here would be the D128 defect moving house: a
+            // shortcut another application already holds would once again stop
+            // this application from starting, and a person who cannot start it
+            // cannot be told why. Degraded, not broken — the tray's
+            // «Показати пошук» still opens the launcher.
+            {
+                let state = app.state::<state::AppState>();
+                state.install_os_services(
+                    Box::new(os_services::PluginShortcuts::new(app.handle().clone())),
+                    Box::new(os_services::PluginAutolaunch::new(app.handle().clone())),
+                );
+                let _ = prefs::install_hotkey(&state);
+            }
+            // §8: the tray's «Зупинити сканування». `build_tray` hands back the
+            // item so that it can be reached again later; the slot it goes into
+            // is what a language change replaces, so nothing here or below ever
+            // captures the item itself.
+            let stop = tray::build_tray(app.handle())?;
+            app.manage(tray::StopItem(std::sync::Mutex::new(Some(stop))));
+            {
+                let state = app.state::<state::AppState>();
+                // 🔴 The closure captures the handle and NOTHING else. The item
+                // is read out of managed state on every call, because a
+                // language change during a job rebuilds the whole tray menu and
+                // puts a different item in that slot; a captured one would
+                // outlive its own menu and the visible item would keep offering
+                // to stop a job that had finished.
+                //
+                // It dispatches and returns rather than calling `set_enabled`
+                // itself. `set_enabled` hops to the main thread and waits, and
+                // the announcement from `JobSlot::drop` fires on the job's own
+                // thread — where that wait would hold the job thread until the
+                // event loop got round to it. From the main thread Tauri runs
+                // the task inline, so a claim's own announcement costs nothing
+                // either way.
+                //
+                // 🔴 **The task asks `job_is_running()` where it acts, and is
+                // handed nothing to replay** — `state::JobObserver`'s own doc
+                // has the handoff that took the boolean away. Two announcements
+                // posted in either order then leave the item saying the same
+                // thing, because the last task to run reads the fact as it
+                // stands rather than the edge that woke it.
+                let handle = app.handle().clone();
+                state.set_job_observer(Box::new(move || {
+                    let inner = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        let running = inner.state::<state::AppState>().job_is_running();
+                        tray::set_stop_enabled(&inner, running);
+                    });
+                }));
+                // Seeded AFTER the observer is installed, which is what makes
+                // "nothing is missed between the two" a fact about the order
+                // rather than a claim that nothing can have claimed the slot
+                // this early. A claim arriving between these two statements
+                // announces itself, and this seed then reads the same fact its
+                // task would.
+                tray::set_stop_enabled(app.handle(), state.job_is_running());
+            }
             // The settings window's native title in the resolved language. It is
             // hidden at start-up, so this is what it shows the first time it is
             // opened; a later language change re-titles it via `apply_locale`.

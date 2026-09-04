@@ -2,7 +2,6 @@
 //! app does not support (§D80, amended). This module owns the effective locale;
 //! `mnema-core::Coordinate::render` is prompt-only and deliberately untouched.
 
-use crate::paths;
 use serde::Serialize;
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -47,30 +46,45 @@ pub fn resolve(choice: LocaleChoice, os: Option<&str>) -> Lang {
 /// resolve in both languages — the `match` in `t` is exhaustive over `(Lang,
 /// Key)`, so a new variant without both arms fails to compile; the completeness
 /// test below is the belt to that compiler-enforced brace. Translatable TEXT
-/// only: no emoji, no shortcut hints (e.g. `(⌥Space)`), no endonyms — those are
-/// composed at the call site or, for endonyms, live in `endonym` below.
+/// only: no emoji, no shortcut hints, no endonyms — those are composed at the
+/// call site or, for endonyms, live in `endonym` below.
+///
+/// The shortcut hint is the one worth naming, because it is no longer a
+/// literal anywhere: `tray.rs`'s `tray_label` derives `(⌥Space)` and every
+/// other form of it from the `HotkeyState` the operating system reports,
+/// through `shortcut::format_shortcut`. It was a fixed string in this
+/// catalogue's neighbour until Task 11a, and a person who changed the shortcut
+/// read the old one off the tray.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
-    TrayStatus,        // "Проіндексовано —" / "Indexed —"
-    TrayShowSearch,    // "Показати пошук" / "Show search"
-    TrayOpenSettings,  // "Відкрити налаштування" / "Open settings"
-    TrayPauseIndexing, // "Пауза індексації" / "Pause indexing"
-    TrayCheckUpdates,  // "Перевірити оновлення" / "Check for updates"
-    TrayQuit,          // "Вийти" / "Quit"
-    MenuLanguage,      // submenu title "Мова" / "Language"
-    LangAuto,          // "Авто (система)" / "Auto (system)"
-    SettingsTitle,     // "Налаштування" / "Settings" (window title after "Mnema — ")
-    CloseSettings,     // "Закрити налаштування" / "Close Settings"
-    MenuEdit,          // "Редагувати" / "Edit"
-    MenuWindow,        // "Вікно" / "Window"
+    TrayStatus,       // "Проіндексовано —" / "Indexed —"
+    TrayShowSearch,   // "Показати пошук" / "Show search"
+    TrayOpenSettings, // "Відкрити налаштування" / "Open settings"
+    TrayStopIndexing, // "Зупинити сканування" / "Stop scanning"
+    TrayQuit,         // "Вийти" / "Quit"
+    MenuLanguage,     // submenu title "Мова" / "Language"
+    LangAuto,         // "Авто (система)" / "Auto (system)"
+    SettingsTitle,    // "Налаштування" / "Settings" (window title after "Mnema — ")
+    CloseSettings,    // "Закрити налаштування" / "Close Settings"
+    MenuEdit,         // "Редагувати" / "Edit"
+    MenuWindow,       // "Вікно" / "Window"
+    // The two hotkey refusals that are OURS rather than the parser's. They are
+    // here, and not in `error.rs` with every other rejection sentence, because
+    // each answers a PRESS a person made and there is a better sentence for it
+    // than the library's: `global-hotkey` accepts a bare `Space` outright
+    // (`hotkey.rs:174-178`) and refuses a modifier-only press by asking the
+    // reader to open an issue against `github.com/tauri-apps/muda`
+    // (`hotkey.rs:40`). `set_hotkey` renders these in the active language and
+    // hands them back through `Error::HotkeyRefused`.
+    HotkeyNeedsAKey,      // modifiers with no key, or nothing at all
+    HotkeyNeedsAModifier, // a key with no modifier
 }
 
 pub const ALL_KEYS: &[Key] = &[
     Key::TrayStatus,
     Key::TrayShowSearch,
     Key::TrayOpenSettings,
-    Key::TrayPauseIndexing,
-    Key::TrayCheckUpdates,
+    Key::TrayStopIndexing,
     Key::TrayQuit,
     Key::MenuLanguage,
     Key::LangAuto,
@@ -78,6 +92,8 @@ pub const ALL_KEYS: &[Key] = &[
     Key::CloseSettings,
     Key::MenuEdit,
     Key::MenuWindow,
+    Key::HotkeyNeedsAKey,
+    Key::HotkeyNeedsAModifier,
 ];
 
 pub fn t(lang: Lang, key: Key) -> &'static str {
@@ -89,10 +105,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, TrayShowSearch) => "Show search",
         (Lang::Uk, TrayOpenSettings) => "Відкрити налаштування",
         (Lang::En, TrayOpenSettings) => "Open settings",
-        (Lang::Uk, TrayPauseIndexing) => "Пауза індексації",
-        (Lang::En, TrayPauseIndexing) => "Pause indexing",
-        (Lang::Uk, TrayCheckUpdates) => "Перевірити оновлення",
-        (Lang::En, TrayCheckUpdates) => "Check for updates",
+        (Lang::Uk, TrayStopIndexing) => "Зупинити сканування",
+        (Lang::En, TrayStopIndexing) => "Stop scanning",
         (Lang::Uk, TrayQuit) => "Вийти",
         (Lang::En, TrayQuit) => "Quit",
         (Lang::Uk, MenuLanguage) => "Мова",
@@ -107,6 +121,16 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, MenuEdit) => "Edit",
         (Lang::Uk, MenuWindow) => "Вікно",
         (Lang::En, MenuWindow) => "Window",
+        (Lang::Uk, HotkeyNeedsAKey) => {
+            "Комбінація має закінчуватися клавішею, а не самими модифікаторами"
+        }
+        (Lang::En, HotkeyNeedsAKey) => "a shortcut has to end in a key, not in modifiers alone",
+        (Lang::Uk, HotkeyNeedsAModifier) => {
+            "Комбінація має містити щонайменше один модифікатор: Ctrl, Alt, Shift або Cmd"
+        }
+        (Lang::En, HotkeyNeedsAModifier) => {
+            "a shortcut needs at least one modifier: Ctrl, Alt, Shift or Cmd"
+        }
     }
 }
 
@@ -144,17 +168,9 @@ fn choice_from_str(s: &str) -> LocaleChoice {
 /// erroring, because this runs at start-up before there is anywhere to report
 /// an error to.
 pub fn read_choice(data_dir: &Path) -> LocaleChoice {
-    let raw = match std::fs::read_to_string(paths::prefs_path(data_dir)) {
-        Ok(s) => s,
-        Err(_) => return LocaleChoice::Auto,
-    };
-    let value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return LocaleChoice::Auto,
-    };
+    let all = crate::prefs::read_all(data_dir);
     choice_from_str(
-        value
-            .get(LOCALE_KEY)
+        all.get(LOCALE_KEY)
             .and_then(|v| v.as_str())
             .unwrap_or("auto"),
     )
@@ -162,29 +178,15 @@ pub fn read_choice(data_dir: &Path) -> LocaleChoice {
 
 /// Persists the locale choice, preserving whatever other keys are already in
 /// the file — forward-safe, so a field a newer version wrote survives a write
-/// from this one.
+/// from this one. The file itself, including the atomicity of the write and
+/// what happens to a malformed one, is [`crate::prefs`]'s concern: from PR 9
+/// the locale is no longer the only key in it.
 pub fn write_choice(data_dir: &Path, choice: LocaleChoice) -> std::io::Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-    let path = paths::prefs_path(data_dir);
-    // Preserve unknown fields a newer version may have written.
-    let mut obj = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s).ok())
-        .unwrap_or_default();
-    obj.insert(
-        LOCALE_KEY.into(),
+    crate::prefs::write_key(
+        data_dir,
+        LOCALE_KEY,
         serde_json::Value::String(choice_to_str(choice).into()),
-    );
-    let body = serde_json::to_vec_pretty(&serde_json::Value::Object(obj))?;
-    // Atomic: write a sibling temp file, then rename over the target. POSIX
-    // rename() is atomic, so a reader never observes a partially-written file.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &body)?;
-    // TODO(win): std::fs::rename errors on Windows when `path` already exists,
-    // instead of replacing it atomically. This project's CI does not run
-    // Windows; the win-pve live pass must confirm. If it fails there, replace
-    // this with remove-then-rename or the `ReplaceFileW` API.
-    std::fs::rename(&tmp, &path)
+    )
 }
 
 /// What the runtime seam carries: the persisted choice, and what it currently
@@ -287,11 +289,10 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
     let choice = app.state::<crate::state::AppState>().locale().choice;
     // The tray menu is rebuilt whole and swapped in via `set_menu`; the tray
     // icon and its `on_tray_icon_event` (the positioner) are left in place.
-    if let Some(tray) = app.tray_by_id("mnema-tray")
-        && let Ok(menu) = crate::tray::build_tray_menu(app, lang, choice)
-    {
-        let _ = tray.set_menu(Some(menu));
-    }
+    // The rebuild also replaces the Stop item a job may be about to disable,
+    // which is why the swap is `tray::swap_tray_menu` and not a `set_menu`
+    // here — see `tray::StopItem`.
+    crate::tray::swap_tray_menu(app, lang, choice);
     // The settings window's native OS title, re-set whether or not it is
     // visible so an already-open or merely-hidden window is right next time.
     if let Some(w) = app.get_webview_window("settings") {
@@ -321,6 +322,8 @@ pub fn set_locale<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The tests reach the file directly; the module itself no longer does.
+    use crate::paths;
 
     #[test]
     fn primary_subtag_handles_real_os_grammar() {

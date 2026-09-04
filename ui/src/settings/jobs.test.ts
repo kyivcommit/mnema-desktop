@@ -41,7 +41,10 @@ const REAL: Record<string, JobEvent> = {
   partlyRead: { event: 'ended', data: { reason: 'completed', done: 11, total: 11, skipped: 5, complete: false, frozen: [{ prefix: 'notes/archive', reason: 'unreadableDirectory' }, { prefix: 'notes/link', reason: 'symlinkedSubtree' }, { prefix: 'notes/void', reason: 'emptyDirectory' }], indexed: 5, unchanged: 1, refused: 0, removed: 4, message: null } },
   failedWithMessage: { event: 'ended', data: { reason: 'failed', done: 7, total: 11, skipped: 0, complete: false, frozen: [], indexed: 0, unchanged: 0, refused: 0, removed: 0, message: 'the worker binary could not be started' } },
   failedNoMessage: { event: 'ended', data: { reason: 'failed', done: 7, total: 11, skipped: 0, complete: false, frozen: [], indexed: 0, unchanged: 0, refused: 0, removed: 0, message: null } },
-  progress: { event: 'progress', data: { done: 3, total: 8, skipped: 1, refused: 0, secondsLeft: null } },
+  progress: { event: 'progress', data: { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null } },
+  // The same event as a walk that met the index locked by another writer sends
+  // it. `contended` is the only field that differs, and it is not `0`.
+  progressContended: { event: 'progress', data: { done: 3, total: 8, skipped: 1, refused: 0, contended: 2, secondsLeft: null } },
 };
 
 function ended(name: keyof typeof REAL): JobEnded {
@@ -145,11 +148,11 @@ test('only a folder that was read — in full or in part — chains the embeddin
 // phase 1 has counted anything, and `RootUnavailable` reports zero of zero for
 // good. Nothing here divides by it; the shape says which sentence can be told.
 test('a run with nothing counted yet states no ratio, and one with a total does', () => {
-  expect(progressShape({ done: 0, total: 0, skipped: 0, refused: 0, secondsLeft: null }))
+  expect(progressShape({ done: 0, total: 0, skipped: 0, refused: 0, contended: 0, secondsLeft: null }))
     .toEqual({ kind: 'countingUp', done: 0 });
-  expect(progressShape({ done: 4, total: 0, skipped: 0, refused: 0, secondsLeft: null }))
+  expect(progressShape({ done: 4, total: 0, skipped: 0, refused: 0, contended: 0, secondsLeft: null }))
     .toEqual({ kind: 'countingUp', done: 4 });
-  expect(progressShape({ done: 3, total: 8, skipped: 1, refused: 0, secondsLeft: null }))
+  expect(progressShape({ done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null }))
     .toEqual({ kind: 'ratio', done: 3, total: 8 });
 });
 
@@ -217,7 +220,24 @@ test('a progress report becomes a running state carrying every count, `secondsLe
   expect(phase).toEqual({
     kind: 'running',
     pass: 'walk',
-    counts: { done: 3, total: 8, skipped: 1, refused: 0, secondsLeft: null },
+    counts: { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null },
+  });
+});
+
+// `contended` crosses the reducer with the value the walk gave it. `toEqual`
+// pins the whole object, so a reducer that enumerates the fields it keeps and
+// forgets this one fails here rather than in the component.
+test('a walk that met a busy index carries `contended` into the counts', async () => {
+  const jobs = createJobController();
+  await jobs.scan(7);
+
+  channelOf('start_walk_job')(REAL.progressContended);
+
+  const phase = get(jobs.state).phase;
+  expect(phase).toEqual({
+    kind: 'running',
+    pass: 'walk',
+    counts: { done: 3, total: 8, skipped: 1, refused: 0, contended: 2, secondsLeft: null },
   });
 });
 
