@@ -41,10 +41,20 @@
   // Answers with the `hotkey` this read actually WROTE to the screen, or `null`
   // when it wrote none — superseded by a later writer, or rejected outright.
   // Only the caller that started a corrective read after a refused `set_hotkey`
-  // reads the answer; see `shortcutNotSaved` for what it decides. The
-  // distinction matters and it is the stamp's: a read whose hotkey the stamp
-  // discarded never reached the screen, so it must not get to choose the
-  // sentence drawn beside what did.
+  // reads the answer; see `shortcutNotSaved` for what it decides. A read whose
+  // hotkey the stamp discarded never reached the screen, so it must not get to
+  // choose the sentence drawn beside what did.
+  //
+  // 🔴 The fixture that holds this is `a corrective read the stamp discarded
+  // does not get to choose the sentence`, and fix round 2 had to REBUILD it
+  // before that sentence was true. Its first version superseded the held-open
+  // read with a successful recording, which sets `hotkeyError = null` and takes
+  // the heading off screen on its own — so it asserted an absence that the
+  // write-side stamp was already producing, and the `null` return could be
+  // removed without it noticing. It now supersedes with a SECOND REJECTION, so
+  // the heading stays on screen and the sentence it holds is the live
+  // rejection's own. Judged by `pr9-ui.sh`, "a discarded corrective read must
+  // not choose the sentence".
   async function refresh(): Promise<AppPrefs['hotkey'] | null> {
     const myHotkey = ++hotkeySeq;
     const myAutostart = ++autostartSeq;
@@ -52,10 +62,25 @@
       const p = await appPrefs();
       const takeHotkey = myHotkey === hotkeySeq;
       const takeAutostart = myAutostart === autostartSeq;
+      // 🔴 The answer this read is ENTITLED to give about the shortcut,
+      // computed once and returned from both exits below. It was written twice,
+      // and fix round 2 measured what that cost: the second copy sat behind the
+      // early return, reachable only when `takeHotkey` is false while
+      // `takeAutostart` is true — which needs a SUCCESSFUL `setHotkey` as the
+      // superseder, because any `refresh()` claims both stamps and would leave
+      // through the early return instead. A successful `setHotkey` sets
+      // `hotkeyError = null`, and the sentence this value chooses is drawn only
+      // under `hotkeyError !== null`. So the second copy could not be observed
+      // at all: mutated to `p.hotkey`, it survived all 665 tests, and no
+      // fixture could have killed it. One name, one site, one thing to get
+      // wrong — the project's "two truths, one message" in the small.
+      const appliedHotkey = takeHotkey ? p.hotkey : null;
       // Superseded on every field this read could have written. `version` and
       // `platform` are decided at compile time and cannot have changed, so
-      // there is nothing left for it to say.
-      if (!takeHotkey && !takeAutostart) return null;
+      // there is nothing left for it to say. It returns `appliedHotkey` rather
+      // than a bare `null` — the same thing by construction here, and one
+      // expression fewer that a later edit could make disagree with the other.
+      if (!takeHotkey && !takeAutostart) return appliedHotkey;
       prefs = {
         ...p,
         // A writer that landed while this read was in flight holds the truth
@@ -65,7 +90,7 @@
         autostart: takeAutostart || prefs === null ? p.autostart : prefs.autostart,
       };
       loadError = null;
-      return takeHotkey ? p.hotkey : null;
+      return appliedHotkey;
     } catch (e) {
       // A rejection is about the read as a whole, so it is shown only where the
       // read still had something to say — the same test both directions get.
@@ -246,7 +271,12 @@
       // if it comes back naming the combination THIS call sent, the operating
       // system kept it and only the file did not. `applied === null` means the
       // read never reached the screen, and a read that wrote nothing decides
-      // nothing — the heading stays the one that assumes the ordinary refusal.
+      // nothing — the heading stays whatever the writer that DID reach the
+      // screen earned. That is not hypothetical: two rejections in flight at
+      // once leave this callback holding the first one's shortcut long after
+      // the second one's read has drawn its own sentence, and without the
+      // `null` the stale one would rewrite it. `refresh`'s own comment names
+      // the fixture.
       void refresh().then((applied) => {
         shortcutNotSaved = applied !== null && applied.shortcut === shortcut;
       });

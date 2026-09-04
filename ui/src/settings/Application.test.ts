@@ -999,11 +999,24 @@ test('a shortcut refused outright is still reported as unchanged', async () => {
   expect(at('application-shortcut-error')).toBe(SENTENCE);
 });
 
-// 🔴 The re-read is what decides, and this is the fixture that says so. The
-// per-field stamp (D-I1) can leave the corrective read's hotkey UNAPPLIED: a
-// `setHotkey` that succeeds while it is in flight supersedes it. The heading
-// must then follow the state that actually reached the screen — the successful
-// change — and not a comparison against a read whose answer was discarded.
+// 🔴 The re-read is what decides, and this is the fixture that says so.
+//
+// Fix round 2, and the rebuild is the finding. The first version superseded the
+// held-open read with a SUCCESSFUL recording, which sets `hotkeyError = null` —
+// so the heading it then asserted absent was absent because no rejection was on
+// screen at all, and a `refresh()` that ignored its own stamp survived it
+// untouched. The project's named "test stands on a neighbouring defence": the
+// guard doing the work was the write-side stamp, already pinned elsewhere.
+//
+// Here BOTH acts are rejections, so `hotkeyError` never goes null and the
+// heading stays on screen throughout. The second rejection's own re-read
+// resolves FIRST and reports the OLD shortcut, so «не змінено» is what is drawn.
+// Then the FIRST rejection's re-read — long superseded — answers naming the
+// shortcut ITS call sent. A `refresh()` that returned that answer instead of
+// `null` would compare it against the shortcut that call sent, find them equal,
+// and rewrite the heading of a rejection it knows nothing about. The assertion
+// is positive: the sentence on screen is still the one the LIVE rejection
+// earned.
 test('a corrective read the stamp discarded does not get to choose the sentence', async () => {
   const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
   appPrefs.mockImplementation(() => {
@@ -1011,30 +1024,42 @@ test('a corrective read the stamp discarded does not get to choose the sentence'
     queue.push(d);
     return d.promise;
   });
-  setHotkey.mockRejectedValueOnce(new Error('prefs.json could not be written'));
+  const OLD = { shortcut: 'Alt+Space', status: { kind: 'registered' } } as const;
+  setHotkey.mockRejectedValue(new Error('prefs.json could not be written'));
   renderSection();
   await waitFor(() => expect(queue).toHaveLength(1));
-  queue[0].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
+  queue[0].resolve(prefs({ hotkey: OLD }));
   await record();
 
-  // Refused: the corrective read starts, and is held open.
+  // First rejection, for Ctrl+Alt+Space. Its corrective read is held open.
   await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
   await waitFor(() => expect(queue).toHaveLength(2));
 
-  // A second recording, which succeeds. It bumps the shortcut's stamp, so the
-  // held-open read may no longer write the hotkey field.
-  setHotkey.mockResolvedValue({ shortcut: 'Ctrl+Shift+Space', status: { kind: 'registered' } });
+  // Second rejection, for Ctrl+Shift+Space. It supersedes the read above —
+  // `refresh()` claims both stamps on the way in — and starts one of its own.
+  const SECOND = 'the operating system refused the combination';
+  setHotkey.mockRejectedValue(new Error(SECOND));
   await record();
   await pressKey({ key: ' ', code: 'Space', ctrlKey: true, shiftKey: true });
-  await waitFor(() => expect(at('application-shortcut')).toBe('Ctrl+Shift+Space'));
+  await waitFor(() => expect(queue).toHaveLength(3));
 
-  // Now the stale read answers, naming the shortcut the FIRST attempt sent. It
-  // is superseded, so it changes nothing — including the heading, which the
-  // successful change had already taken off screen.
+  // The LIVE read answers first, and reports the old shortcut: nothing was
+  // changed, so «не змінено» is the true sentence and it is on screen.
+  queue[2].resolve(prefs({ hotkey: OLD }));
+  await waitFor(() => expect(at('application-shortcut-failed'))
+    .toBe('Скорочення не змінено. Ось що відповів застосунок:'));
+  expect(at('application-shortcut-error')).toBe(SECOND);
+
+  // Now the discarded read answers, naming the shortcut the FIRST attempt sent.
   queue[1].resolve(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
   await tick();
   await tick();
+  await tick();
 
-  expect(at('application-shortcut')).toBe('Ctrl+Shift+Space');
-  expect(screen.queryByTestId('application-shortcut-failed')).toBeNull();
+  // Positive, not an absence: the heading is still the live rejection's own.
+  expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:');
+  expect(pageText()).not.toContain('Скорочення діє, але зберегти його не вдалося');
+  // And the read wrote no field either, so the shortcut is the one the live
+  // read put there.
+  expect(at('application-shortcut')).toBe('Alt+Space');
 });

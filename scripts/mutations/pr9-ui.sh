@@ -443,3 +443,29 @@ case_ "a shortcut the system kept but could not save is not called unchanged" \
   's~    return t\(shortcutNotSaved \? .application_shortcut_not_saved. : .application_shortcut_failed.\);~    return t("application_shortcut_failed"); // mutant: always the old heading~' \
   'return t("application_shortcut_failed"); // mutant: always the old heading' \
   src/settings/Application.test.ts 'a shortcut the system kept but could not save is not reported as unchanged' runner=vitest
+
+# 🔴 Fix round 2. The corrective re-read's own stamp ignored: a read that was
+# superseded still answers with the shortcut it found, and the rejection that
+# started it then compares that answer against the shortcut ITS call sent. With
+# two rejections in flight the stale one wins the comparison and rewrites the
+# heading of a rejection it knows nothing about — «Скорочення діє…» drawn over a
+# refusal that changed nothing at all.
+#
+# The judging test had to be rebuilt before this case could exist. Its first
+# version superseded the held-open read with a SUCCESSFUL recording, which sets
+# `hotkeyError = null` and takes the heading off screen by itself, so it
+# asserted an absence the write-side stamp was already producing and this mutant
+# survived it. It now supersedes with a second REJECTION, so the heading stays
+# on screen and the assertion is positive: the sentence is still the live
+# rejection's own.
+#
+# One site, deliberately. The same expression stood twice until fix round 2, and
+# the second copy was unobservable — reachable only behind a successful
+# `setHotkey`, which nulls the very error the sentence is drawn under. Mutated,
+# it survived all 665 tests. Collapsing the pair is what makes this mutant
+# killable at all.
+case_ "a discarded corrective read must not choose the sentence" \
+  ui/src/settings/Application.svelte \
+  's~      const appliedHotkey = takeHotkey \? p\.hotkey : null;~      const appliedHotkey = p.hotkey; // mutant: a superseded read answers anyway~' \
+  '// mutant: a superseded read answers anyway' \
+  src/settings/Application.test.ts 'a corrective read the stamp discarded does not get to choose the sentence' runner=vitest

@@ -287,6 +287,24 @@ pub fn start_walk_job(
         // names something the walk itself decided — a broken worker, an
         // unavailable root — and a Stop arriving alongside one of those does
         // not make that reason less true.
+        //
+        // ⚠️ **This narrows the window; it does not close it.** The read is
+        // before `drop(slot)` below, so no other job's `claim_job()` can clear
+        // the flag underneath it — but a Stop pressed AFTER this line still
+        // finds a walk whose ending is already decided, and the slot is
+        // released a few lines later. Between that release and the window's
+        // decision to chain, a `claim_job()` clears the flag, and a Stop landing
+        // in there is lost exactly as it was before. The gap is now
+        // microseconds rather than the whole of a walk's last file, which is
+        // worth having on its own, and it is as far as one job can get: the
+        // flag this job owns stops meaning anything the moment its slot does.
+        //
+        // What actually closes it is the follow-up PR's single scanning job —
+        // walk and embed under ONE claim, so there is no handoff to lose a Stop
+        // across and no second `claim_job()` to clear the flag. **Do not attempt
+        // to close it here**: any fix at this level means holding the slot
+        // across a boundary this job does not own, which is the shape that
+        // makes a stuck slot lock the application out of indexing.
         let stopped_late = slot.cancel_flag().load(Ordering::SeqCst);
         let ending = match caught {
             Ok(Ok(report)) => ended_from_report(&report, stopped_late),
