@@ -263,5 +263,5 @@
 {#if refusedRunLine}<p data-testid="indexing-index-refused-run">{refusedRunLine}</p>{/if}
 {#if showPending}
   <p data-testid="indexing-index-pending-chunks">{pendingLine}</p>
-  <button data-testid="indexing-resume-embedding" onclick={resumeEmbedding}>{resumeEmbeddingLabel}</button>
+  <button type="button" data-testid="indexing-resume-embedding" onclick={resumeEmbedding}>{resumeEmbeddingLabel}</button>
 {/if}

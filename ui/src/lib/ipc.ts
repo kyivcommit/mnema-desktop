@@ -263,7 +263,7 @@ export type UnreadableCause = 'notOpen' | 'readFailed';
 // eventually be read as though they could disagree. `embeddingModel !== null`
 // is how "there is an active space" is spelled on this side.
 //
-// PR 9's Indexing section (§9.3) widens the subset by three, and all three are
+// PR 9's Indexing section (§9.3) widens the subset by four, and all four are
 // REQUIRED for the argument `totalChunks` above already makes: the only
 // substitute for a missing count is `0`, and `0` in front of a person reads as
 // a measured claim this build has not made. `indexedFiles` says how many files
@@ -272,19 +272,18 @@ export type UnreadableCause = 'notOpen' | 'readFailed';
 // rather than with a tidier definition. `failedChunks` is the third of
 // `models.rs`'s counts and the one §9.3's refusal sentence is written from;
 // it was left out while nothing rendered it, and `?? 0` for it would say "the
-// provider refused nothing" about a run nobody measured.
+// provider refused nothing" about a run nobody measured. `pendingChunks` (F4,
+// spec §9.3 amended 2026-09-04) is required for the same reason: it is
+// `models.rs`'s `Db::queued_chunk_count`, the embedding queue counted the way
+// the pass itself counts it, and `0` in front of a person reads as "nothing is
+// owed" — which is exactly the false claim a missing field would default into
+// after a tray Stop left a run unfinished.
 //
 // `lastIndexedAt` is `number | null` and required, which is not the same as
 // optional: `null` is the backend's own statement that nothing has ever
 // finished indexing, and the section renders a sentence for it. An absent
 // field would collapse that into whatever the reader defaulted to — an epoch
 // date, or a blank where a sentence belongs.
-//
-// `pendingChunks` (F4, spec §9.3 amended 2026-09-04) is required for the same
-// reason `failedChunks` is: it is `models.rs`'s `Db::queued_chunk_count`, the
-// embedding queue counted the way the pass itself counts it, and `0` in front
-// of a person reads as "nothing is owed" — which is exactly the false claim a
-// missing field would default into after a tray Stop left a run unfinished.
 export type IndexSettings =
   | { kind: 'read'; embeddingModel: string | null; chatModel?: string | null;
       embeddedChunks: number; embeddedChunksEverywhere: number; totalChunks: number;

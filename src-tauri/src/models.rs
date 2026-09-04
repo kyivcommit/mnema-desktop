@@ -1089,6 +1089,17 @@ pub struct IndexRead {
     /// `0` with `active_space == None` is "the question does not arise", the
     /// same way it is for `embedded_chunks` and `failed_chunks` above — told
     /// apart by `active_space`, never by the zero.
+    ///
+    /// **The same query the strip's own progress bar divides by, so the two
+    /// cannot come to disagree about what "queued" means.** A running pass's
+    /// denominator is `db.queued_chunk_count(space)?` too
+    /// (`crates/mnema-embed/src/lib.rs:227`, `EmbedTally::total`) — one method,
+    /// read from two call sites. They can only differ by MOMENT, never by
+    /// definition, and `ui/src/settings/Indexing.svelte` closes that gap the
+    /// only way it can from a value that is already a snapshot: this section
+    /// hides itself for the whole interval a run is under way (gated on
+    /// `JobPhase.kind`, not merely on this count), so the two numbers never sit
+    /// on one screen at once for a person to compare.
     pub pending_chunks: i64,
     /// How many vector spaces the index holds at all, empty ones included.
     ///

@@ -358,6 +358,28 @@ test('an index with a queue and no run under way names it and offers to resume',
   expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy();
 });
 
+// Minor 4, review: both `pendingLine` and `resumeEmbeddingLabel` read
+// `void $locale` inside their `$derived.by`, the same anchor every other
+// string on this section carries — and until this test, nothing here drove a
+// language switch while a queue was on screen, so removing either anchor left
+// the suite green. Both directions, both testids, the way `the date follows
+// the language, not the machine` already covers the two lines above these.
+test('the pending-queue line and its button follow the language, not the machine', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
+
+  renderSection();
+  await waitFor(() => expect(screen.getByTestId('indexing-index-pending-chunks')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-index-pending-chunks'))).toBe(PENDING_SENTENCE);
+  expect(visible(screen.getByTestId('indexing-resume-embedding'))).toBe('Продовжити вбудовування');
+
+  setLocale('en');
+  await tick();
+
+  expect(visible(screen.getByTestId('indexing-index-pending-chunks')))
+    .toBe('5 chunks are not embedded yet.');
+  expect(visible(screen.getByTestId('indexing-resume-embedding'))).toBe('Continue embedding');
+});
+
 test('an empty queue says nothing and offers nothing', async () => {
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 0 }));
 
@@ -386,6 +408,48 @@ test('a queue is not offered again while a run is already under way', async () =
   expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
 });
 
+// The other `starting`/`running`/`runningUnobserved` arm review found
+// unasserted (Important 1): a press has been made and `chain`'s own
+// precondition read of `model_settings` may still be in flight, or
+// `startEmbedJob` itself has not yet called back — the window's own opening
+// answer (`jobs.ts`'s `store.set` before either await), and the callback
+// `onEvent` reacts to has not fired even once. `deferredPromise` (below)
+// leaves `startEmbedJob`'s own promise unsettled so the phase cannot advance
+// past `starting` on its own.
+test('a queue is not offered while the pass is still starting', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
+  const { jobs } = renderSection();
+  await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
+
+  const deferred = deferredPromise<void>();
+  startEmbedJob.mockReturnValue(deferred.promise);
+  void jobs.embed();
+  await waitFor(() => expect(startEmbedJob).toHaveBeenCalled());
+  await tick();
+
+  expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull();
+  expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
+});
+
+// `runningUnobserved` — the settings window reopened while a pass this
+// window has no channel for is still going (`jobs.ts:344-357`,
+// `syncFromStatus`), which is the same F4 scenario one step later: a person
+// who stopped a run, closed the window, reopened it, and started another
+// pass from elsewhere before checking back. No counts are drawn for it and
+// none arrive, so the queue's own line must not either.
+test('a queue is not offered while a job is running unobserved', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
+  const { jobs } = renderSection();
+  await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
+
+  jobStatus.mockResolvedValue({ running: true });
+  await jobs.syncFromStatus();
+  await tick();
+
+  expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull();
+  expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
+});
+
 // Through the controller, exactly the way `Models.svelte:468`'s own `reembed`
 // argues: the pass this button starts belongs on the window's strip, where its
 // progress and its Cancel stay reachable from every section, not to a listener
@@ -402,6 +466,29 @@ test('the resume button starts the embedding pass through the controller, never 
 
   await waitFor(() => expect(startEmbedJob).toHaveBeenCalledTimes(1));
   expect(startWalkJob).not.toHaveBeenCalled();
+});
+
+// The `ended` half of the gate (Important 1, review) — the state the button
+// was written FOR. `refresh()` fires on `phase.kind === 'ended'` and nothing
+// afterwards moves the phase back to `idle`, so a pass cancelled from the
+// window's own strip with chunks still owed lands here and stays here: this
+// is the ordinary resting state after a stop, not a transient one. The queue
+// stays positive across the ending's own re-read on purpose — a completed
+// pass that did not clear the whole queue, or a cancelled one — so this test
+// is told apart from "the empty queue hid it" the other `ended` test already
+// covers.
+test('an ended pass with chunks still owed still shows the line and the button', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
+  const { jobs } = renderSection();
+  await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
+
+  const send = await embedChannel(jobs);
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
+  await send(ended({ reason: 'completed', complete: true }));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-index-pending-chunks')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-index-pending-chunks'))).toBe(PENDING_SENTENCE);
+  expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy();
 });
 
 // The line and the button re-derive once the pass they started ends, the same

@@ -239,6 +239,19 @@ case_ "the pending line and its button must step aside while a run is under way"
   "&& true, // mutant: shows regardless of the running pass" \
   src/settings/Indexing.test.ts 'a queue is not offered again while a run is already under way' runner=vitest
 
+# The narrower half of the same gate, dropped on its own (review, Important 1):
+# the whole `|| 'ended'` disjunct, not the phase check as a whole. The mutant
+# above is killed by the RUNNING fixture regardless of whether `ended` was
+# ever reachable, so it says nothing about this arm — a body that never shows
+# the line again once a pass has ended even once would still pass every case
+# before this one. Only a fixture that drives the controller all the way to
+# `ended` and then asserts PRESENCE can tell the two apart.
+case_ "the pending line and its button must survive the phase reaching ended, not only idle" \
+  ui/src/settings/Indexing.svelte \
+  "s~      && \(\\\$jobState\.phase\.kind === 'idle' \|\| \\\$jobState\.phase\.kind === 'ended'\),~      \&\& (\\\$jobState\.phase\.kind === 'idle'), // mutant: the ended arm never shows again~" \
+  "(\$jobState.phase.kind === 'idle'), // mutant: the ended arm never shows again" \
+  src/settings/Indexing.test.ts 'an ended pass with chunks still owed still shows the line and the button' runner=vitest
+
 # ---------------------------------------------------------------------------
 # F1 (measured live, 2026-09-04): `formatIndexedDate`'s own trailing-stop
 # strip. `ui/src/i18n/recency.ts`, not `Indexing.svelte` — the two other files

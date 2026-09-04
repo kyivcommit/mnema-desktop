@@ -1010,19 +1010,30 @@ case_ "embed_job: a stopped run must not be reported as a finished one (T8)" \
 # last seam before the window. `Db::failed_chunk_count` goes back to having no
 # production caller, and with it the justification for a chunk being allowed to
 # leave the embedding queue for good.
-# 🔴 Marker narrowed to the one line the mutation actually writes (Task 11b
-# review): it used to assert `failed_chunks: 0,` was immediately followed by
-# `space_count: db.space_count()?,`, which was true only by the accident of
-# nothing sitting between the two fields. Task 11b's `pending_chunks` now does
-# — its own match arm reads `Db::queued_chunk_count`, right where this
-# adjacency assumed `space_count` came next — and `mutation-staleness.sh`
-# caught the marker going stale the moment that insertion landed. The
-# single line is what this case's sed expression actually produces and all
-# it ever needed to prove.
+# 🔴 Marker fix, round 2 (Task 11b re-review, Important 2). Round 1 narrowed
+# the marker to `        failed_chunks: 0,` (8 spaces) after Task 11b's
+# `pending_chunks` broke the old two-line adjacency marker — but that
+# narrower marker is a SUBSTRING of `models.rs`'s own `empty_read()` test
+# helper, which holds `            failed_chunks: 0,` at 12 spaces
+# (`src-tauri/src/models.rs:1380` at the time this was measured). `contains`
+# is an exact substring test with no anchoring, so the 8-space marker reads
+# as present in the file WHETHER OR NOT this mutation ever ran — round 1's
+# own claim that "the single line ... is all it ever needed to prove" was
+# false, and the fix below is the same one already applied to every other
+# case in this task's own diff: give the replacement a `// mutant: …` tail
+# nothing else in the file can produce by accident, and make that the marker.
+#
+# Verified absent from the file this fixes, unmutated, the way the review
+# measured its presence:
+#
+#   MUTATION_MARKER='failed_chunks: 0, // mutant: the refusal count is never asked' \
+#     perl -0777 -ne 'print(index($_, $ENV{MUTATION_MARKER}) >= 0 ? "PRESENT\n" : "absent\n")' \
+#     src-tauri/src/models.rs
+#   → absent
 case_ "models: the settings must read the refusal count, not report zero (T8)" \
   src-tauri/src/models.rs \
-  's{        failed_chunks: match active_space \{\n            Some\(id\) => db\.failed_chunk_count\(id\)\?,\n            None => 0,\n        \},}{        failed_chunks: 0,}' \
-  '        failed_chunks: 0,' \
+  's{        failed_chunks: match active_space \{\n            Some\(id\) => db\.failed_chunk_count\(id\)\?,\n            None => 0,\n        \},}{        failed_chunks: 0, // mutant: the refusal count is never asked}' \
+  'failed_chunks: 0, // mutant: the refusal count is never asked' \
   mnema-desktop 'a_chunk_the_provider_refused_is_counted_where_a_person_can_read_it' --test model_commands
 
 # The ordering `start_walk_job` argues for and this command inherits: every
