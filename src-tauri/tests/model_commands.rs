@@ -1514,6 +1514,64 @@ fn a_chunk_the_provider_refused_is_counted_where_a_person_can_read_it() {
     assert_eq!(read.total_chunks, CHUNKS as i64);
 }
 
+/// The embedding queue, counted the way the pass itself counts it —
+/// `Db::queued_chunk_count`, not `total_chunks − embedded_chunks −
+/// failed_chunks` (F4, spec §9.3 amended 2026-09-04). A space carrying one of
+/// each state — embedded, failed, and untouched — is what tells the two
+/// apart: the subtraction would land on the same integer here by coincidence,
+/// since one embedded, one failed and two untouched out of four also happens
+/// to be `4 − 1 − 1`. What distinguishes them is `total_chunks` and
+/// `failed_chunks` asserted on their own terms below, not only `pending_chunks`.
+#[test]
+fn pending_chunks_counts_the_queue_a_run_still_owes() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    fx.adopt_default_model();
+    let space = fx.active_space().expect("a model was adopted");
+    let ids = fx.write_indexed_chunks(4);
+
+    let dim = {
+        let settings = model_settings(fx.state());
+        read_index(&settings.index)
+            .embedding_dim
+            .expect("a model was adopted") as usize
+    };
+    fx.state()
+        .with_index(|db| {
+            db.insert_vector(space, ids[0], &vec![1.0_f32; dim])?;
+            db.record_embedding_failure(space, ids[1])?;
+            Ok(())
+        })
+        .expect("the index answers");
+    // `ids[2]` and `ids[3]` are left untouched: indexed, never embedded, never
+    // failed — the two chunks a run still owes.
+
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(
+        read.pending_chunks, 2,
+        "the two untouched chunks are what the queue still owes: {read:?}"
+    );
+    assert_eq!(read.embedded_chunks, 1);
+    assert_eq!(read.failed_chunks, 1);
+    assert_eq!(read.total_chunks, 4);
+}
+
+/// `0` with `active_space == None` is "the question does not arise", the same
+/// way it is for `embedded_chunks` and `failed_chunks` beside it — told apart
+/// by `active_space`, never by the zero.
+#[test]
+fn pending_chunks_is_zero_with_no_active_space() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(read.active_space, None, "this test needs no model chosen");
+    assert_eq!(read.pending_chunks, 0);
+}
+
 /// A person who has entered a key but chosen no model gets a sentence, not a
 /// silence and not a panic. The pass reads `meta.active_space` itself and
 /// refuses; this is that refusal reaching the window as an ending it can render.
