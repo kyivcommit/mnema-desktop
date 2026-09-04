@@ -10179,6 +10179,72 @@ fn a_failed_registration_restores_the_old_shortcut_and_leaves_prefs_untouched() 
 }
 
 #[test]
+fn a_refused_registration_from_an_unavailable_start_takes_nothing_back() {
+    // The row between the two rows that were already here. Step 4 gives the old
+    // shortcut up ONLY where the state says the operating system is holding it,
+    // and the restoration is that step's undo — so it may run only where step 4
+    // ran. Unguarded, the `register(Alt+Space)` it makes from an `Unavailable`
+    // start is not a restoration at all: it ACQUIRES a shortcut nothing was
+    // holding, the state goes on saying `Unavailable` while the operating
+    // system fires it, and the next `set_hotkey` reads `status != Registered`
+    // and so never gives it back. The invariant asserted here is that
+    // `HotkeyState` names every shortcut this process holds.
+    //
+    // The registrar's ordered log is what can fail: the state below is what BOTH
+    // implementations leave behind, because a restoration that SUCCEEDS writes
+    // no state at all. So the call sequence is the discriminator and the state
+    // is the second direction — an implementation that answered the acquisition
+    // by recording `Registered` would fail those instead.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fake = install_fake_registrar(&app);
+    // No `drive_to_registered` here, deliberately: the state `AppState::new`
+    // installs is `Unavailable { shortcut: DEFAULT_HOTKEY }`, which is exactly
+    // the start this row is about — a boot registration the operating system
+    // refused. Only the NEW shortcut is made to fail, so a restoration would
+    // succeed, which is what makes the missing guard visible rather than silent.
+    fake.fail_registering("Ctrl+Alt+Space", "another application already holds it");
+    let before = prefs_bytes(dir.path());
+
+    let rejected = call(
+        &webview,
+        "set_hotkey",
+        json!({ "shortcut": "Ctrl+Alt+Space" }),
+    )
+    .expect_err("a registration the operating system refused answered Ok");
+
+    assert_eq!(
+        error_text(&rejected),
+        "another application already holds it",
+        "the reply must carry the sentence the NEW shortcut's registration produced"
+    );
+    assert_eq!(
+        fake.calls(),
+        vec!["register(Ctrl+Alt+Space)".to_string()],
+        "nothing was given up, so there is nothing to take back: a `register` of \
+         the old shortcut here acquires one the operating system never held"
+    );
+    assert_eq!(
+        prefs_bytes(dir.path()),
+        before,
+        "a refused registration must not have been persisted"
+    );
+    let prefs = call(&webview, "app_prefs", json!({})).expect("app_prefs was rejected");
+    assert_eq!(prefs["hotkey"]["shortcut"], json!("Alt+Space"), "{prefs}");
+    assert_eq!(
+        prefs["hotkey"]["status"]["kind"],
+        json!("unavailable"),
+        "the operating system is holding nothing, and the state says so: {prefs}"
+    );
+    assert_eq!(
+        prefs["hotkey"]["status"]["reason"],
+        json!("the shortcut has not been registered yet"),
+        "the untouched starting sentence, not one a restoration produced: {prefs}"
+    );
+}
+
+#[test]
 fn a_failed_unregister_stops_before_the_new_shortcut_is_ever_attempted() {
     // D-b's third row. What can fail here is the ABSENCE of a third call: an
     // implementation that carries on anyway would take the new shortcut while
@@ -10766,8 +10832,27 @@ fn the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment() {
         "the refusal count must reach the window under its camelCase name: {after}"
     );
 
+    // The fourth, and it arrived one task later than the three above with the
+    // same `rename_all` behind it and nothing else. `pending_chunks` reaches the
+    // window as `pendingChunks` on that attribute alone: the TypeScript side
+    // pins the field as required and rejects the snake_case spelling, but that
+    // is `npm run check`'s opinion of what the wire SHOULD carry, never a real
+    // serialisation. Were the Rust spelling to drift, `read.pendingChunks` would
+    // be `undefined`, `showPending` would be permanently false, and F4's queue
+    // line and its resume button would silently never render — which is the
+    // silence F4 exists to end. `0` is the value it must carry here: no model
+    // has been adopted, so there is no active space and the queue does not
+    // arise (`pending_chunks_is_zero_with_no_active_space` asserts that on the
+    // struct); what this line adds is the spelling arriving at all.
+    assert_eq!(
+        after["index"]["pendingChunks"],
+        json!(0),
+        "the queue count must reach the window under its camelCase name: {after}"
+    );
+
     // Wire shape, both directions: the camelCase spellings above are present and
     // Rust's pre-serialization names are not (guards `rename_all`).
     assert!(after["index"].get("indexed_files").is_none(), "{after}");
     assert!(after["index"].get("last_indexed_at").is_none(), "{after}");
+    assert!(after["index"].get("pending_chunks").is_none(), "{after}");
 }

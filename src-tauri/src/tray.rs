@@ -238,14 +238,23 @@ impl<R: Runtime> StopItem<R> {
 /// language change may have put a different item there. Does nothing when the
 /// slot is unmanaged, which is every headless test and every moment before
 /// `.setup` reaches the tray.
+/// ⚠️ **The item is cloned out and the guard dropped BEFORE `set_enabled` is
+/// called.** `MenuItem<R>` is an `Arc` inside (`tauri-2.11.5/src/menu/mod.rs`'s
+/// `gen_wrappers!`), so the clone costs a refcount and addresses the same item.
+/// `set_enabled` hops to the main thread and waits there, and this function is
+/// `pub`: holding the slot's mutex across that wait invites a caller on another
+/// thread to block the whole tray behind an event loop that is itself waiting.
+/// `StopItem::replace` twenty lines up already orders it this way.
 pub fn set_stop_enabled<R: Runtime>(app: &tauri::AppHandle<R>, enabled: bool) {
-    if let Some(slot) = app.try_state::<StopItem<R>>()
-        && let Some(item) = slot
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-    {
+    let Some(slot) = app.try_state::<StopItem<R>>() else {
+        return;
+    };
+    let item = slot
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(item) = item {
         let _ = item.set_enabled(enabled);
     }
 }

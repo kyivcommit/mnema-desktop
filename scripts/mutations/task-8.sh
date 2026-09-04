@@ -212,8 +212,8 @@ case_ "commands: job_status is registered" \
 
 case_ "commands: a new job does not inherit the last cancellation" \
   src-tauri/src/state.rs \
-  's{        self\.cancel\.store\(false, Ordering::SeqCst\);}{}' \
-  'Ok(JobSlot {' \
+  's{        self\.cancel\.store\(false, Ordering::SeqCst\);}{        // mutant: a new job inherits the last cancellation}' \
+  '// mutant: a new job inherits the last cancellation' \
   mnema-desktop 'a_job_started_after_a_cancelled_one_is_not_born_cancelled' --test commands
 
 case_ "commands: only one job at a time" \

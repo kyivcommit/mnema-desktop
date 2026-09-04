@@ -192,7 +192,7 @@ case_ "a write that fails at the rename must take its temp file with it" \
 # the FILE can see it: the reply still reports the refusal either way.
 case_ "a shortcut must not be persisted before the operating system has taken it" \
   src-tauri/src/prefs.rs \
-  's~    let current = state\.hotkey\(\);\n    if current\.status == HotkeyStatus::Registered \{~    let current = state.hotkey();\n    // mutant: persisted before it is registered\n    write_key(state.data_dir(), HOTKEY_KEY, serde_json::Value::String(shortcut.clone()))?;\n    if current.status == HotkeyStatus::Registered \{~' \
+  's~    let current = state\.hotkey\(\);~    let current = state.hotkey();\n    // mutant: persisted before it is registered\n    write_key(state.data_dir(), HOTKEY_KEY, serde_json::Value::String(shortcut.clone()))?;~' \
   '// mutant: persisted before it is registered' \
   mnema-desktop 'a_failed_registration_restores_the_old_shortcut_and_leaves_prefs_untouched' --test commands
 
@@ -204,7 +204,7 @@ case_ "a shortcut must not be persisted before the operating system has taken it
 # re-registration.
 case_ "a refused registration must hand the old shortcut back" \
   src-tauri/src/prefs.rs \
-  's~        if let Err\(restoring\) = state\.with_shortcuts\(\|r\| r\.register\(&current\.shortcut\)\) \{\n            state\.set_hotkey_state\(HotkeyState \{\n                shortcut: current\.shortcut,\n                status: HotkeyStatus::Unavailable \{ reason: restoring \},\n            \}\);\n        \}~        // mutant: the old shortcut is never taken back~' \
+  's~        if gave_up_the_old_one\n            && let Err\(restoring\) = state\.with_shortcuts\(\|r\| r\.register\(&current\.shortcut\)\)\n        \{\n            state\.set_hotkey_state\(HotkeyState \{\n                shortcut: current\.shortcut,\n                status: HotkeyStatus::Unavailable \{ reason: restoring \},\n            \}\);\n        \}~        // mutant: the old shortcut is never taken back~' \
   '// mutant: the old shortcut is never taken back' \
   mnema-desktop 'a_failed_registration_restores_the_old_shortcut_and_leaves_prefs_untouched' --test commands
 
@@ -215,7 +215,7 @@ case_ "a refused registration must hand the old shortcut back" \
 # where the application actually starts records two calls instead of one.
 case_ "the old shortcut is given up only when the operating system holds it" \
   src-tauri/src/prefs.rs \
-  's~    if current\.status == HotkeyStatus::Registered \{~    if true \{ // mutant: unregister whatever the status says~' \
+  's~    if gave_up_the_old_one \{~    if true \{ // mutant: unregister whatever the status says~' \
   'if true { // mutant: unregister whatever the status says' \
   mnema-desktop 'set_hotkey_from_an_unavailable_start_registers_and_never_unregisters' --test commands
 
@@ -296,6 +296,25 @@ case_ "a failed unregister stops the change rather than adding a second shortcut
   's~        state\n            \.with_shortcuts\(\|r\| r\.unregister\(&current\.shortcut\)\)\n            \.map_err\(Error::HotkeyUnavailable\)\?;~        let _ = state.with_shortcuts(\|r\| r.unregister(\&current.shortcut)); // mutant: a failed unregister is ignored~' \
   '// mutant: a failed unregister is ignored' \
   mnema-desktop 'a_failed_unregister_stops_before_the_new_shortcut_is_ever_attempted' --test commands
+
+# 🔴 The restoration's own guard, dropped — the mutant that puts back the shape
+# the final review found. Step 4 gives the old shortcut up ONLY where the state
+# says the operating system is holding it, and this is that step's undo, so it
+# may run only where that step ran. Unguarded, from an `Unavailable` start it
+# does not restore anything: it ACQUIRES a shortcut nothing was holding, under a
+# state that goes on saying `Unavailable`. The next change then reads
+# `status != Registered`, skips step 4, and the operating system is left holding
+# both — with nothing in the application naming the stale one.
+#
+# Every fixture that starts from `Registered` survives this, and so does every
+# assertion about the STATE: a restoration that succeeds writes no state at all,
+# so both implementations leave the same one behind. Only the recorded call
+# sequence from an `Unavailable` start can see it.
+case_ "the restoration runs only where the old shortcut was actually given up" \
+  src-tauri/src/prefs.rs \
+  's~        if gave_up_the_old_one\n            && let Err\(restoring\)~        if true // mutant: the restoration runs where step 4 gave nothing up\n            \&\& let Err(restoring)~' \
+  'if true // mutant: the restoration runs where step 4 gave nothing up' \
+  mnema-desktop 'a_refused_registration_from_an_unavailable_start_takes_nothing_back' --test commands
 
 # 🔴 The double-failure row, and the state left claiming `Registered` while the
 # operating system holds nothing at all. The reply is identical to the correct
@@ -454,9 +473,27 @@ case_ "a refused shortcut leaves the one already on disk alone" \
 # that is greyed out. The whole point of the observer, removed.
 case_ "claiming the job slot announces itself" \
   src-tauri/src/state.rs \
-  's~        if let Some\(f\) = &observer \{\n            f\(true\);\n        \}~        // mutant: the claim is never announced~' \
+  's~        if let Some\(f\) = &slot\.observer \{\n            f\(\);\n        \}~        // mutant: the claim is never announced~' \
   '// mutant: the claim is never announced' \
   mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
+
+# 🔴 The store and the announcement swapped, which is the ordering the whole
+# observer contract rests on. `JobSlot::drop` frees the slot and only then says
+# so, and that order is what lets an incoming job claim the slot in between: the
+# handoff then announces `true` from the incoming claim and, last, the outgoing
+# drop — where a look finds a job running. Announce first and the slot is still
+# taken when anybody looks, so the incoming claim in the named fixture is
+# refused outright and the state a person's tray is drawn from is the outgoing
+# job's for as long as it takes the next event to arrive.
+#
+# The named test is the one whose fixture builds the handoff; its neighbour
+# `the_observer_hears_a_job_start_and_finish` also goes red here, which is what
+# a swapped pair of statements should do to both.
+case_ "the outgoing job frees the slot before it announces, never after" \
+  src-tauri/src/state.rs \
+  's~        self\.running\.store\(false, Ordering::Release\);.*?if let Some\(f\) = &self\.observer \{\n            f\(\);\n        \}~        if let Some(f) = \&self.observer \{ f(); \} // mutant: the outgoing job announces before it frees the slot\n        self.running.store(false, Ordering::Release);~s' \
+  '// mutant: the outgoing job announces before it frees the slot' \
+  mnema-desktop 'state::tests::an_announcement_is_read_as_the_fact_not_replayed_as_the_edge' --lib
 
 # 🔴 The `false` edge moved from the job ENDING to the stop being REQUESTED —
 # the plausible wrong implementation, not a deletion. It greys the item out the
@@ -466,7 +503,7 @@ case_ "claiming the job slot announces itself" \
 # applied, the occurrence count proves the second did.
 case_ "the release is announced when the job ends, not when a stop is asked for" \
   src-tauri/src/state.rs \
-  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f(false);\n        \}\n    \}~; s~        if let Some\(f\) = &self\.observer \{\n            f\(false\);\n        \}~        let _ = \&self.observer;~' \
+  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        if let Some\(f\) = &self\.observer \{\n            f\(\);\n        \}~        let _ = \&self.observer;~' \
   '// mutant: the release is announced when a stop is requested' \
   mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
 

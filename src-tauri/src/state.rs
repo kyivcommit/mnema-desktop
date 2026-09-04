@@ -6,11 +6,23 @@ use mnema_index::Db;
 
 use crate::error::Error;
 
-/// What the job slot says when it changes hands: `true` the moment a job has
-/// won the single slot, `false` the moment it gives it back. Named, rather
-/// than written out at each of the three places it appears, because those three
-/// have to agree — the field, the setter's argument and [`JobSlot`]'s own copy.
-pub type JobObserver = dyn Fn(bool) + Send + Sync;
+/// That the job slot has changed hands — a signal to go and look, carrying
+/// NOTHING about which way it went. Named, rather than written out at each of
+/// the three places it appears, because those three have to agree — the field,
+/// the setter's argument and [`JobSlot`]'s own copy.
+///
+/// 🔴 **It carried a `bool` and could not.** [`JobSlot::drop`] stores `false`
+/// before it announces, so an incoming job can claim the slot in between and
+/// announce its own start first: the two announcements then arrive `true`,
+/// `false` while the slot is HELD, and a consumer replaying the last edge
+/// disables «Зупинити сканування» for the whole of a job that is running. The
+/// walk → embed handoff is exactly that sequence. Every consumer must therefore
+/// ask [`AppState::job_is_running`] at the moment it acts, which is what
+/// [`crate::tray::StopItem::replace`] already does for the same reason and what
+/// `state::tests::an_announcement_is_read_as_the_fact_not_replayed_as_the_edge`
+/// pins. With no boolean to replay, the ordering of two announcements cannot
+/// decide what the tray ends up saying.
+pub type JobObserver = dyn Fn() + Send + Sync;
 
 /// The core owns the truth; the window only draws it. A reload of the webview
 /// must not lose or contradict anything, so nothing lives on the JavaScript side
@@ -419,23 +431,28 @@ impl AppState {
         // cancellation aimed at the job that is still running.
         self.cancel.store(false, Ordering::SeqCst);
         // After the `?` above, so a refused claim announces nothing: the caller
-        // that lost never held the slot, and a `true` from it would enable a
-        // control on behalf of a job that does not exist. Cloned out from under
-        // the lock before the call, so an observer is never run while this
-        // mutex is held.
+        // that lost never held the slot, and an announcement from it would
+        // enable a control on behalf of a job that does not exist. Cloned out
+        // from under the lock before the call, so an observer is never run while
+        // this mutex is held.
         let observer = self
             .job_observer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        if let Some(f) = &observer {
-            f(true);
-        }
-        Ok(JobSlot {
+        // The slot exists BEFORE anything is told the slot is taken. An observer
+        // is free to act on the state the moment it hears — including claiming
+        // and releasing it again — and the struct that gives the slot back must
+        // be built by then, not after the announcement has returned.
+        let slot = JobSlot {
             running: self.running.clone(),
             cancel: self.cancel.clone(),
             observer,
-        })
+        };
+        if let Some(f) = &slot.observer {
+            f();
+        }
+        Ok(slot)
     }
 
     /// Registers who to tell when the job slot changes hands. Installed once,
@@ -491,13 +508,16 @@ impl JobSlot {
 impl Drop for JobSlot {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
-        // After the slot is free, not before: an observer that asks
-        // `job_is_running()` back must be told the truth this drop has already
-        // made. This runs on the job's own thread, which is why the installed
-        // observer hands the work to the main thread and returns rather than
-        // blocking here — see `tray::StopItem`.
+        // After the slot is free, not before: an observer asks
+        // `job_is_running()` for itself, and it must find the truth this drop
+        // has already made. It is also what lets an incoming job claim the slot
+        // between the store and the announcement — the handoff whose ordering is
+        // the reason nothing is passed here (see [`JobObserver`]). This runs on
+        // the job's own thread, which is why the installed observer hands the
+        // work to the main thread and returns rather than blocking here — see
+        // `tray::StopItem`.
         if let Some(f) = &self.observer {
-            f(false);
+            f();
         }
     }
 }
@@ -509,17 +529,25 @@ mod tests {
     /// An `AppState` with nothing but paths — the observer contract touches no
     /// index, no provider and no credential store, so the four arguments are
     /// only there to satisfy the constructor.
-    fn state() -> AppState {
-        AppState::new(
+    ///
+    /// In an `Arc` because an observer that records what it READ has to be able
+    /// to ask this state; it holds a `Weak`, so the state does not own an
+    /// observer that owns the state back.
+    fn state() -> Arc<AppState> {
+        Arc::new(AppState::new(
             PathBuf::from("/nonexistent/mnema-observer-test"),
             PathBuf::from("/nonexistent/mnema-observer-worker"),
             "http://127.0.0.1:0".to_string(),
             "mnema-desktop-state-observer-test".to_string(),
-        )
+        ))
     }
 
-    /// Everything the observer was told, in order, so a test can say what was
-    /// sent AND that nothing else was.
+    /// What the observer FOUND when it looked, once per announcement and in
+    /// order, so a test can say what was there AND that nothing else was
+    /// announced.
+    ///
+    /// It records a read rather than an argument because there is no argument:
+    /// see [`JobObserver`] for the handoff that took it away.
     type Log = Arc<Mutex<Vec<bool>>>;
 
     /// Poison-recovering rather than `unwrap`, and not for tidiness: a failed
@@ -527,25 +555,30 @@ mod tests {
     /// notification that `Drop` then fires as the stack unwinds would panic a
     /// second time inside a panic. The test would still fail — with a
     /// double-panic abort instead of the assertion that found the defect.
-    fn recorder(log: &Log) -> Box<JobObserver> {
+    fn recorder(log: &Log, state: &Arc<AppState>) -> Box<JobObserver> {
         let sink = log.clone();
-        Box::new(move |running| {
+        let weak = Arc::downgrade(state);
+        Box::new(move || {
+            let running = weak
+                .upgrade()
+                .expect("the state outlives its own observer")
+                .job_is_running();
             sink.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(running)
         })
     }
 
-    /// The whole contract in the order a job lives it: claiming the slot says
-    /// `true`, and giving it back says `false`. Both edges, because an
-    /// implementation that fired only the first would leave the tray offering
-    /// to stop a job that has finished — which is the failure this observer
-    /// exists to prevent, not a hypothetical.
+    /// The whole contract in the order a job lives it: a look after the claim
+    /// finds the slot taken, and a look after it is given back finds it free.
+    /// Both announcements, because an implementation that fired only the first
+    /// would leave the tray offering to stop a job that has finished — which is
+    /// the failure this observer exists to prevent, not a hypothetical.
     #[test]
     fn the_observer_hears_a_job_start_and_finish() {
         let log = Log::default();
         let state = state();
-        state.set_job_observer(recorder(&log));
+        state.set_job_observer(recorder(&log, &state));
 
         let slot = state.claim_job().expect("the slot is free");
         assert_eq!(
@@ -564,14 +597,14 @@ mod tests {
 
     /// A refused claim announces NOTHING. This is the assertion that separates
     /// "notify when the slot changes hands" from "notify on every call": the
-    /// second caller never held the slot, so a `true` here would enable a
-    /// control on behalf of a job that does not exist, and the first job's own
-    /// `Drop` would then be the only thing left to disable it.
+    /// second caller never held the slot, so an announcement from it would
+    /// enable a control on behalf of a job that does not exist, and the first
+    /// job's own `Drop` would then be the only thing left to disable it.
     #[test]
     fn a_refused_claim_announces_nothing() {
         let log = Log::default();
         let state = state();
-        state.set_job_observer(recorder(&log));
+        state.set_job_observer(recorder(&log, &state));
 
         let held = state.claim_job().expect("the slot is free");
         assert!(
@@ -585,9 +618,87 @@ mod tests {
         );
 
         // And the still-held slot is the one that speaks on the way out: one
-        // `false`, not two.
+        // announcement, not two.
         drop(held);
         assert_eq!(*log.lock().unwrap(), [true, false]);
+    }
+
+    /// 🔴 **The walk → embed handoff, with the outgoing job announcing LAST.**
+    ///
+    /// `JobSlot::drop` stores `false` and only then announces, so between those
+    /// two an incoming job can claim the slot and announce its own `true`. The
+    /// announcements then arrive in the order `true`, `true`, `false` while the
+    /// slot is HELD, and a consumer that replays the last edge disables
+    /// «Зупинити сканування» for the whole of a job that is running — the tray
+    /// then offers no way to stop a scan until the next job boundary.
+    ///
+    /// The interleaving is driven from inside the second announcement rather
+    /// than from a second thread on purpose: what makes the window reachable is
+    /// the ORDER of the two announcements, and the store that precedes them is
+    /// what lets the incoming claim win. A thread would add a schedule to wait
+    /// on and prove the same thing.
+    ///
+    /// What the fake records is what it READ, never what it was passed. That is
+    /// the whole assertion: an announcement is a signal to go and look, and the
+    /// fact a look finds after the handoff is that a job is running.
+    #[test]
+    fn an_announcement_is_read_as_the_fact_not_replayed_as_the_edge() {
+        let log = Log::default();
+        let state = Arc::new(state());
+        // Where the incoming job's slot is parked so that it is still HELD when
+        // the outgoing announcement is read. Dropping it inside the observer
+        // would put the fact back to `false` and the fixture would pass for the
+        // wrong reason.
+        let incoming: Arc<Mutex<Option<JobSlot>>> = Arc::default();
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink = log.clone();
+        let held = incoming.clone();
+        let counter = seen.clone();
+        // A `Weak`, so the observer the state owns does not own the state back.
+        let weak = Arc::downgrade(&state);
+        state.set_job_observer(Box::new(move || {
+            let st = weak.upgrade().expect("the state outlives its own observer");
+            // Announcement 1 (0-based) is the outgoing job's `Drop`: the slot is
+            // already free here, which is what lets the incoming claim win.
+            if counter.fetch_add(1, Ordering::SeqCst) == 1 {
+                *held
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
+                    st.claim_job()
+                        .expect("the outgoing slot is free before it announces"),
+                );
+            }
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(st.job_is_running());
+        }));
+
+        let outgoing = state.claim_job().expect("the slot is free");
+        drop(outgoing);
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            [true, true, true],
+            "the outgoing job announced last, and what a look finds then is the \
+             incoming job: replaying the edge disables Stop for a running job"
+        );
+        assert!(
+            state.job_is_running(),
+            "the incoming job still holds the slot"
+        );
+
+        // The other direction, and the reason the incoming slot was parked: when
+        // it is finally given back the fact is false, and an announcement that
+        // said nothing but `true` would be no better than one that said nothing
+        // but `false`.
+        drop(
+            incoming
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+        assert_eq!(*log.lock().unwrap(), [true, true, true, false]);
+        assert!(!state.job_is_running());
     }
 
     /// Silence is the default, and it has to be: seven of `AppState::new`'s

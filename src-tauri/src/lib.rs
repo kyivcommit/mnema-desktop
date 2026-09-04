@@ -571,12 +571,7 @@ pub fn run() -> anyhow::Result<()> {
             let stop = tray::build_tray(app.handle())?;
             app.manage(tray::StopItem(std::sync::Mutex::new(Some(stop))));
             {
-                // Seeded from the job that is running now rather than assumed
-                // idle. Nothing can have claimed the slot this early today, and
-                // asking is still cheaper than a comment promising it never
-                // will.
                 let state = app.state::<state::AppState>();
-                tray::set_stop_enabled(app.handle(), state.job_is_running());
                 // 🔴 The closure captures the handle and NOTHING else. The item
                 // is read out of managed state on every call, because a
                 // language change during a job rebuilds the whole tray menu and
@@ -586,17 +581,33 @@ pub fn run() -> anyhow::Result<()> {
                 //
                 // It dispatches and returns rather than calling `set_enabled`
                 // itself. `set_enabled` hops to the main thread and waits, and
-                // the `false` edge fires from `JobSlot::drop` on the job's own
+                // the announcement from `JobSlot::drop` fires on the job's own
                 // thread — where that wait would hold the job thread until the
                 // event loop got round to it. From the main thread Tauri runs
-                // the task inline, so the `true` edge costs nothing either way.
+                // the task inline, so a claim's own announcement costs nothing
+                // either way.
+                //
+                // 🔴 **The task asks `job_is_running()` where it acts, and is
+                // handed nothing to replay** — `state::JobObserver`'s own doc
+                // has the handoff that took the boolean away. Two announcements
+                // posted in either order then leave the item saying the same
+                // thing, because the last task to run reads the fact as it
+                // stands rather than the edge that woke it.
                 let handle = app.handle().clone();
-                state.set_job_observer(Box::new(move |running| {
+                state.set_job_observer(Box::new(move || {
                     let inner = handle.clone();
                     let _ = handle.run_on_main_thread(move || {
+                        let running = inner.state::<state::AppState>().job_is_running();
                         tray::set_stop_enabled(&inner, running);
                     });
                 }));
+                // Seeded AFTER the observer is installed, which is what makes
+                // "nothing is missed between the two" a fact about the order
+                // rather than a claim that nothing can have claimed the slot
+                // this early. A claim arriving between these two statements
+                // announces itself, and this seed then reads the same fact its
+                // task would.
+                tray::set_stop_enabled(app.handle(), state.job_is_running());
             }
             // The settings window's native title in the resolved language. It is
             // hidden at start-up, so this is what it shows the first time it is

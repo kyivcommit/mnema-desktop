@@ -18,10 +18,11 @@
 //! Everything below is a token-for-token mirror of that module: the same
 //! canonical [`ORDER`], the same four glyphs, the same per-platform word for
 //! the command key, the same twelve aliases, and the same rule for a token
-//! neither side understands. The strings are `global-hotkey`'s own vocabulary
-//! and the glyphs Apple prints — protocol tokens rather than prose, which is
-//! what `prefs.rs` says of `MODIFIER_SPELLINGS` and why nothing here belongs
-//! in the catalogue.
+//! neither side understands. The strings are the DISPLAY vocabulary the two
+//! formatters agree on — not the parser's, which is a different set of twelve
+//! (`prefs.rs`'s `MODIFIER_SPELLINGS`; see [`alias`] for where the two differ
+//! and what that costs) — plus the glyphs Apple prints. Protocol tokens rather
+//! than prose either way, which is why nothing here belongs in the catalogue.
 
 use crate::models::Platform;
 
@@ -78,11 +79,23 @@ impl Modifier {
     }
 }
 
-/// Every spelling `global-hotkey` accepts for a modifier, folded onto the one
-/// this module emits. A stored string need not be one this application built —
-/// `prefs.json` is a file on the person's own disk, and the parser accepts any
-/// order of modifiers as long as the key is last — so two spellings of one
-/// shortcut must not read as two different shortcuts.
+/// The spellings the two FORMATTERS fold onto the one this module emits, so
+/// that two spellings of one shortcut do not read as two different shortcuts. A
+/// stored string need not be one this application built — `prefs.json` is a file
+/// on the person's own disk, and the parser accepts any order of modifiers as
+/// long as the key is last.
+///
+/// ⚠️ **This is a display vocabulary, and it is NOT the parser's.** The parser's
+/// own twelve are `prefs::MODIFIER_SPELLINGS`, transcribed from the modifier
+/// arms of `global-hotkey-0.8.0/src/hotkey.rs`. The two sets overlap and neither
+/// contains the other: this table adds `ctl`, `altgr`, `meta` and `win`, which
+/// the parser refuses, and omits `CommandOrControl`, `CommandOrCtrl`,
+/// `CmdOrCtrl` and `CmdOrCommand`, which it accepts and resolves per platform.
+/// So a `prefs.json` holding `CmdOrCtrl+Space` is accepted by `accept_shortcut`,
+/// registered, and then drawn as the literal `CmdOrCtrl+Space` rather than as
+/// `⌘Space` — the passthrough rule below doing exactly what it says, not a
+/// falsehood. Widening this table is a decision about what a person reads, and
+/// it would have to be made on both sides and given a fixture row.
 ///
 /// ⚠️ A `match` and not a map lookup, which is where the mirror on the
 /// TypeScript side needed a guard this one never did: its table is an object

@@ -492,7 +492,11 @@ pub fn set_hotkey<R: tauri::Runtime>(
 /// driven from a unit test — so the guard that proves the serialisation
 /// (`tests::two_hotkey_changes_cannot_interleave`, below) would have had
 /// nothing to call.
-pub fn change_hotkey(state: &AppState, shortcut: String) -> Result<HotkeyState, Error> {
+/// `pub(crate)` rather than `pub`, and that is the visibility the lock argument
+/// below needs: nothing outside this crate calls it, its own tests are a child
+/// module, and a wider door is what would let a future main-thread caller turn
+/// that argument into the deadlock it rules out.
+pub(crate) fn change_hotkey(state: &AppState, shortcut: String) -> Result<HotkeyState, Error> {
     // 🔴 **The whole read → unregister → register → store → persist is one
     // critical section, and it has to be.** Without this the state is read at
     // entry and written several operating-system calls later, so two changes
@@ -502,10 +506,15 @@ pub fn change_hotkey(state: &AppState, shortcut: String) -> Result<HotkeyState, 
     // section, so the file and the state cannot be written in opposite orders
     // by two callers.
     //
-    // ⚠️ This lock is taken by this function and nothing else, always on a
-    // command's worker thread, and it is released before the function returns.
-    // Nothing on the main thread takes it, so the blocking `register` inside it
-    // cannot be waiting on a thread that is waiting on this.
+    // ⚠️ This lock is taken by this function and nothing else, and it is
+    // released before the function returns. **The rest is an obligation on
+    // callers, not a description of them: this may not be called from the main
+    // thread.** `set_hotkey` is `#[tauri::command(async)]`, so it arrives on a
+    // worker, and `tests::two_hotkey_changes_cannot_interleave` drives it from
+    // spawned threads — but neither fact is what makes the argument hold. A
+    // main-thread caller would sit on the event loop inside the blocking
+    // `register` below while a worker holds this, which is the deadlock the
+    // visibility above keeps within this crate's reach to check.
     let _change = state.lock_hotkey_change();
     let lang = state.locale().effective;
     if let Err(refusal) = accept_shortcut(&shortcut) {
@@ -521,7 +530,11 @@ pub fn change_hotkey(state: &AppState, shortcut: String) -> Result<HotkeyState, 
     }
 
     let current = state.hotkey();
-    if current.status == HotkeyStatus::Registered {
+    // Step 4, kept as a fact rather than re-derived below: whether THIS call
+    // gave the old shortcut up. The restoration further down is this step's
+    // undo, so it is conditioned on the same thing — see there.
+    let gave_up_the_old_one = current.status == HotkeyStatus::Registered;
+    if gave_up_the_old_one {
         // The OS still holds the old one if this fails, so the state is left
         // saying exactly that and the new shortcut is never attempted.
         state
@@ -530,12 +543,25 @@ pub fn change_hotkey(state: &AppState, shortcut: String) -> Result<HotkeyState, 
     }
 
     if let Err(reason) = state.with_shortcuts(|r| r.register(&shortcut)) {
-        // Best-effort restoration. If it also fails, the operating system now
-        // holds NOTHING, and a state that went on claiming `Registered` would
-        // be a lie the window would draw — so it becomes `Unavailable` carrying
-        // the RE-REGISTRATION's sentence, while the reply carries the new
-        // shortcut's, which is the refusal the person actually asked about.
-        if let Err(restoring) = state.with_shortcuts(|r| r.register(&current.shortcut)) {
+        // 🔴 **Best-effort restoration, and only where there is something to
+        // restore.** From an `Unavailable` start step 4 unregistered nothing, so
+        // the same call here would not take a shortcut back — it would ACQUIRE
+        // one the operating system was never holding, under a state that goes on
+        // saying `Unavailable`. The next `set_hotkey` then reads
+        // `status != Registered`, skips step 4, and leaves the operating system
+        // holding both that shortcut and the new one, with nothing in the
+        // application naming the stale one any more: only quitting releases it.
+        // The invariant this guard keeps is that `HotkeyState` names every
+        // shortcut this process holds.
+        //
+        // If the restoration itself fails, the operating system now holds
+        // NOTHING, and a state that went on claiming `Registered` would be a lie
+        // the window would draw — so it becomes `Unavailable` carrying the
+        // RE-REGISTRATION's sentence, while the reply carries the new shortcut's,
+        // which is the refusal the person actually asked about.
+        if gave_up_the_old_one
+            && let Err(restoring) = state.with_shortcuts(|r| r.register(&current.shortcut))
+        {
             state.set_hotkey_state(HotkeyState {
                 shortcut: current.shortcut,
                 status: HotkeyStatus::Unavailable { reason: restoring },
