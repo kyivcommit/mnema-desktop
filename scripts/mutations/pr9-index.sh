@@ -130,6 +130,29 @@ case_ "the moment on the wire must be read from the index, not sent as a constan
   'last_indexed_at: None, // mutant: a constant that looks like a fresh index' \
   mnema-desktop 'the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment' --test commands
 
+# ── `pending_chunks`: the embedding queue (F4, spec §9.3 amended 2026-09-04) ──
+#
+# A tray Stop on the embedding pass, then a restart, left thousands of chunks
+# un-embedded with nothing on any screen saying so. `Db::queued_chunk_count`'s
+# own doc comment argues why it is NOT `total_chunks − embedded_chunks −
+# failed_chunks`: that difference also folds in every chunk this space has
+# given up on. The killer for both cases below is one fixture —
+# `pending_chunks_counts_the_queue_a_run_still_owes` — carrying one chunk of
+# each state (embedded, failed, untouched × 2), which is what a same-number
+# coincidence with the forbidden subtraction cannot satisfy.
+
+case_ "pending_chunks must read the queue, not the space's own failure count" \
+  src-tauri/src/models.rs \
+  's~            Some\(id\) => db\.queued_chunk_count\(id\)\?,~            Some(id) => db.failed_chunk_count(id)?, // mutant: the queue reads the space\x27s own refusals~' \
+  'Some(id) => db.failed_chunk_count(id)?, // mutant: the queue reads the space' \
+  mnema-desktop 'pending_chunks_counts_the_queue_a_run_still_owes' --test model_commands
+
+case_ "pending_chunks must be read from the index, not sent as a constant" \
+  src-tauri/src/models.rs \
+  's~        pending_chunks: match active_space \{\n            Some\(id\) => db\.queued_chunk_count\(id\)\?,\n            None => 0,\n        \},~        pending_chunks: 0, // mutant: the queue is never asked~' \
+  'pending_chunks: 0, // mutant: the queue is never asked' \
+  mnema-desktop 'pending_chunks_counts_the_queue_a_run_still_owes' --test model_commands
+
 # ── `contended`: the seam, and the sentence it draws ─────────────────────────
 #
 # Three cases for one field crossing three layers. The first is the wire: the

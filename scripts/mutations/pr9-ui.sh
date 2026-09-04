@@ -1,13 +1,15 @@
 # The §9.3 Indexing SECTION's own guards — `ui/src/settings/Indexing.svelte`,
 # the file that says what the index holds — and, from Task 7, the §9.4
 # Application section's own: `ui/src/settings/Application.svelte` and
-# `ui/src/i18n/shortcut.ts`. Run with:
+# `ui/src/i18n/shortcut.ts`. From Task 11b, `ui/src/i18n/recency.ts` too — the
+# fix is one function shared by every locale, and reached from here rather
+# than given a case file of its own. Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/pr9-ui.sh
 #
 # Not to be confused with `pr9-index.sh`, which covers the busy-index line in
 # the window's job strip (`JobStrip.svelte`) and the Rust that feeds it. This
-# file is PR 9 Tasks 6 and 7.
+# file is PR 9 Tasks 6, 7 and 11b.
 #
 # What is here, by name rather than by count, because a count in a comment is a
 # definition and drifts:
@@ -26,6 +28,18 @@
 #                            whether it resolves or is refused
 #   the cleared sentence — a read that succeeds takes the failure away with it
 #   the teardown         — the subscription dies with the component
+#   the resume act       — the pending-chunks button starts the embedding
+#                            pass through the controller, never a scan
+#   the empty-queue guard — the pending line and its button do not draw when
+#                            pendingChunks is 0
+#   the running-pass guard — the pending line and its button step aside
+#                            while the strip above owns a run already
+#                            under way
+#   the trailing-stop strip — `formatIndexedDate` (`ui/src/i18n/recency.ts`,
+#                            reached from here rather than from its own file)
+#                            drops ICU's own stop, so a locale whose long-date
+#                            form ends in one is not doubled by the sentence
+#                            wrapped around it
 #   the no-modifier guard — the recorder refuses a press that carries no
 #                            modifier at all, same as `set_hotkey` step 3
 #   the canonical order   — the modifiers are joined in ONE fixed order, on
@@ -181,6 +195,64 @@ case_ "the job subscription must die with the component, not outlive it" \
   "s~    return stop;~    void stop; // mutant: the subscription outlives the component~" \
   "    void stop; // mutant: the subscription outlives the component" \
   src/settings/Indexing.test.ts 'a section left behind by a nav change stops listening — three mounts, one ending, one re-read' runner=vitest
+
+# ---------------------------------------------------------------------------
+# F4 (spec §9.3, amended 2026-09-04): the embedding queue.
+# `IndexRead.pendingChunks` — a tray Stop mid-pass, then a restart, left
+# thousands of chunks un-embedded with nothing on any screen saying so; the
+# only resume was the Scan button beside the right folder happening to chain
+# into an embed. Three cases: the button must start the right pass, the line
+# must not claim a queue that is empty, and neither must show while the strip
+# above already owns a running pass.
+# ---------------------------------------------------------------------------
+
+# `scan` chains an embed only if the walk actually reads the folder and both
+# preconditions hold — so a button that called it instead would sometimes
+# still end up embedding, sometimes not, and always run a walk nobody asked
+# for. Killed by asserting BOTH sides: `startEmbedJob` called and
+# `startWalkJob` never.
+case_ "the resume button must start the embedding pass, not a folder scan" \
+  ui/src/settings/Indexing.svelte \
+  "s~    void jobs\.embed\(\);~    void jobs.scan(1); // mutant: resumes by scanning instead of embedding~" \
+  "    void jobs.scan(1); // mutant: resumes by scanning instead of embedding" \
+  src/settings/Indexing.test.ts 'the resume button starts the embedding pass through the controller, never a scan' runner=vitest
+
+# `>= 0` is true of an empty queue too, so this is the mutant that draws
+# "0 chunks not embedded yet" beside a button that would resume nothing. Every
+# fixture with a real queue passes under it; only the empty-queue state can
+# tell the two conditions apart.
+case_ "the pending line must not draw when the queue is empty" \
+  ui/src/settings/Indexing.svelte \
+  's~    read !== null && read\.pendingChunks > 0~    read !== null \&\& read.pendingChunks >= 0 // mutant: an empty queue still shows~' \
+  'read !== null && read.pendingChunks >= 0 // mutant: an empty queue still shows' \
+  src/settings/Indexing.test.ts 'an empty queue says nothing and offers nothing' runner=vitest
+
+# The phase half of the gate, dropped: the count on screen is a moment-old
+# read that does not shrink as a resumed run works through the queue, so
+# without this the line and the button would sit beside the strip's own
+# progress, both claiming the same chunks. Every idle/ended fixture passes
+# under this mutant; only a fixture that drives the controller into `running`
+# can see the gate is gone.
+case_ "the pending line and its button must step aside while a run is under way" \
+  ui/src/settings/Indexing.svelte \
+  "s~      && \(\\\$jobState\.phase\.kind === 'idle' \|\| \\\$jobState\.phase\.kind === 'ended'\),~      \&\& true, // mutant: shows regardless of the running pass~" \
+  "&& true, // mutant: shows regardless of the running pass" \
+  src/settings/Indexing.test.ts 'a queue is not offered again while a run is already under way' runner=vitest
+
+# ---------------------------------------------------------------------------
+# F1 (measured live, 2026-09-04): `formatIndexedDate`'s own trailing-stop
+# strip. `ui/src/i18n/recency.ts`, not `Indexing.svelte` — the two other files
+# this case file already reaches beyond its own header's list
+# (`ui/src/i18n/shortcut.ts` below) — because the fix is one function used by
+# every locale, and the fixture that tells "uk ends in «р.»" apart from "the
+# rest of the sentence" lives beside that function.
+# ---------------------------------------------------------------------------
+
+case_ "the date must not carry its own trailing stop into the sentence around it" \
+  ui/src/i18n/recency.ts \
+  's~    \.format\(new Date\(indexedAt \* 1000\)\)\n    \.replace\(/\\\.\$/, \x27\x27\);~    .format(new Date(indexedAt * 1000)); // mutant: the trailing stop survives~' \
+  '.format(new Date(indexedAt * 1000)); // mutant: the trailing stop survives' \
+  src/i18n/recency.test.ts 'carries no trailing stop, so the sentence around it supplies the only one' runner=vitest
 
 # ---------------------------------------------------------------------------
 # PR 9 Task 7 — the Application section: the shortcut, autostart, the version.
