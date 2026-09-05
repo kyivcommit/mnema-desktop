@@ -91,8 +91,9 @@
     // so a section switch back does not re-read on the same mount.
     //
     // ⚠️ Task 8 keys this on `readSeq` as well, which is the fact these numbers
-    // actually follow: an ended snapshot is also what a probe and a folder
-    // removal leave behind, and neither reads a document.
+    // actually follow: an ended snapshot fires for every scan job, an
+    // `embedOnly` run included, and `readSeq` is the only field that says a
+    // reading pass was one of them.
     let seen: ScanSnapshot = get(jobs.state).scan.snapshot;
     const stop = jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seen) return;

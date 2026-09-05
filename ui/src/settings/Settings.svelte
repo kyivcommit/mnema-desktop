@@ -19,13 +19,18 @@
 
   // 🔴 ONE controller, here, above every section — not inside the one that
   // starts the job. Four nav items make Folders -> Models -> Folders two
-  // clicks, and the channel a job reports on belongs to whoever started it
-  // (`bridge.rs`): a controller living in `Folders.svelte` would be destroyed
-  // by the first of those clicks, taking the counters AND the Cancel button
-  // with it. `cancel_job` needs no channel at all, so that Cancel would be lost
-  // for nothing. The strip renders outside the panel for the same reason — a
-  // running job stays visible and stoppable from every section. WHERE outside
-  // is the live run's finding 3; see the markup below.
+  // clicks, and a controller living in `Folders.svelte` would be destroyed by
+  // the first of them: `mount` opens a `scan-progress` subscription and
+  // `destroy` closes it, so the counters AND the Stop button would go with
+  // that click. `cancel_job` needs nothing but the command, so that Stop would
+  // be lost for nothing.
+  //
+  // The argument used to be the CHANNEL's — a job reported on a channel
+  // belonging to whoever started it — and the conclusion outlived it: what
+  // dies with a section now is the subscription, not the only way to hear the
+  // job. The strip renders outside the panel for the same reason, so a running
+  // scan stays visible and stoppable from every section. WHERE outside is the
+  // live run's finding 3; see the markup below.
   const jobs = createJobController();
 
   // The settings window can be opened in the middle of a run it never started,

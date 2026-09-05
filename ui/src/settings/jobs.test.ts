@@ -121,12 +121,18 @@ beforeEach(() => {
   replies({ job_status: IDLE });
 });
 
-// Mount, and wait until the controller has asked for the snapshot — which it
-// does only after the subscription is registered, so this is also the point at
-// which an event may be delivered.
+// Both halves in place: the snapshot has been asked for and the subscription is
+// registered. They are started independently, so neither alone says the
+// controller is ready to be driven — waiting on `job_status` used to imply the
+// listener existed and no longer does.
+const started = () => vi.waitFor(() => {
+  expect(calls('job_status')).toHaveLength(1);
+  expect(listen).toHaveBeenCalled();
+});
+
 async function mounted(controller = createJobController()) {
   const destroy = controller.mount();
-  await vi.waitFor(() => expect(calls('job_status')).toHaveLength(1));
+  await started();
   return { jobs: controller, destroy };
 }
 
@@ -313,23 +319,44 @@ test('a resumption in the report and a marker in the index are one offer, on the
 // The controller.
 // ---------------------------------------------------------------------------
 
-// 🔴 The order `bootLocale` established for the locale and this owes for the
-// same reason (`i18n/index.ts`): a change landing between the snapshot reply
-// and a later `listen` falls in the gap and is lost until the next one. Held
-// open in both directions — nothing is asked while the subscription is still
-// being registered, and it is asked the moment that finishes.
-test('the subscription is registered before the snapshot is asked for', async () => {
-  let register!: (fn: () => void) => void;
-  listen.mockReturnValue(new Promise<() => void>((resolve) => { register = resolve; }));
+// 🔴 The two are STARTED independently, and this is the state that says so: a
+// `listen` that never settles — no rejection, no resolution, nothing to catch —
+// must not take the snapshot with it. Chained behind it, the window would show
+// nothing at all about a scan that is running, with no timeout and nothing else
+// to ask.
+//
+// This is where the controller parts company with `bootLocale` (`i18n/index.ts`),
+// which must register before it asks because a locale reply carries no version
+// and only the order can say which of the two is newer. A `ScanState` carries
+// its revision, so `apply` sorts them however they arrive, and the ordering buys
+// nothing to pay for with this failure mode.
+test('a subscription that never settles does not stop the snapshot being read', async () => {
+  listen.mockReturnValue(new Promise<() => void>(() => {}));
+  replies({ job_status: runningAt(4) });
   const jobs = createJobController();
 
   jobs.mount();
-  await Promise.resolve();
-  expect(calls('job_status')).toHaveLength(0);
 
-  register(unlisten);
+  await vi.waitFor(() => expect(get(jobs.state).scan.revision).toBe(4));
+  expect(get(jobs.state).scan.snapshot.kind).toBe('running');
+  expect(get(jobs.state).note).toBeNull();
+});
 
-  await vi.waitFor(() => expect(calls('job_status')).toHaveLength(1));
+// The other shape a broken boundary takes, and the one that reaches this code as
+// a value rather than as a rejection: a wrapper that is `undefined`, or one that
+// answers with something that is not a promise. It throws SYNCHRONOUSLY inside
+// `mount`, which returns no promise to reject — so without a guard it escapes
+// `onMount` and takes the whole window down with it.
+test('a snapshot read that throws instead of rejecting is a sentence, not a broken window', async () => {
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'job_status') throw new Error('the job_status wrapper is not a function');
+    return Promise.resolve(undefined);
+  });
+  const jobs = createJobController();
+
+  expect(() => jobs.mount()).not.toThrow();
+
+  await vi.waitFor(() => expect(get(jobs.state).note).toBe('the job_status wrapper is not a function'));
 });
 
 // 🔴 The race the revision exists for. The reply was true when it was asked and
@@ -343,7 +370,7 @@ test('a late job_status reply cannot overwrite a newer event', async () => {
     : Promise.resolve(undefined)));
   const jobs = createJobController();
   jobs.mount();
-  await vi.waitFor(() => expect(calls('job_status')).toHaveLength(1));
+  await started();
 
   emit(runningAt(3));
   answer(idleAt(2));
@@ -376,7 +403,7 @@ test('a snapshot newer than the event that preceded it is applied', async () => 
     : Promise.resolve(undefined)));
   const jobs = createJobController();
   jobs.mount();
-  await vi.waitFor(() => expect(calls('job_status')).toHaveLength(1));
+  await started();
 
   emit(runningAt(2));
   answer(endedAt(4));
@@ -500,7 +527,7 @@ test('destroying while the snapshot is in flight drops the reply', async () => {
     : Promise.resolve(undefined)));
   const jobs = createJobController();
   const destroy = jobs.mount();
-  await vi.waitFor(() => expect(calls('job_status')).toHaveLength(1));
+  await started();
 
   destroy();
   answer(runningAt(6));
@@ -534,8 +561,9 @@ test('a subscription that could not be registered is a sentence, and the snapsho
   replies({ job_status: runningAt(2) });
   const { jobs } = await mounted();
 
-  expect(get(jobs.state).note).toBe('the event system is unavailable');
+  await vi.waitFor(() => expect(get(jobs.state).note).toBe('the event system is unavailable'));
   expect(get(jobs.state).scan.revision).toBe(2);
+  expect(get(jobs.state).scan.snapshot.kind).toBe('running');
 });
 
 // The event name and the envelope, exercised through the real wrapper: a

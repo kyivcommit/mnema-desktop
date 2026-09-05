@@ -946,10 +946,7 @@
     // so there is nothing to narrow the re-read BY in any case. Endings are
     // rare: at most a handful per run, never one per progress tick.
     //
-    // The WITHDRAWAL inside `rereadPanels` is narrower — see its own comment.
-    // `phase.pass` is passed through here rather than dropped, because that is
-    // the one fact `rereadPanels` needs and this subscription is the only place
-    // that has it.
+    // The WITHDRAWAL is narrower — see `withdrawQuestions`' own comment.
     //
     // Compared by snapshot IDENTITY, not by kind: the controller replaces the
     // whole state on every change, so a progress tick changes the object
@@ -957,9 +954,13 @@
     // Seeded with what the store already holds so a section switch back to this
     // list does not read it twice on the same mount.
     //
-    // ⚠️ Task 9 keys this on `ScanState.readSeq` instead, which is the fact
-    // this list is really after: how many reading passes have ENDED. An ended
-    // snapshot is also what a probe and a removal leave behind.
+    // ⚠️ Task 9 keys the WITHDRAWAL on `ScanState.readSeq` instead, which is
+    // the fact it is really after: how many reading passes have ENDED. An
+    // ended snapshot fires for every scan job, an `embedOnly` run included,
+    // and that run reads no folder — so nothing about a pending question's
+    // frozen numbers has been made wrong by it. `readSeq` is the only field
+    // that tells the two apart. The RE-READ below stays on the ending, where
+    // it is right: any phase can move what the panels draw.
     let seen: ScanSnapshot = get(jobs.state).scan.snapshot;
     return jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seen) return;

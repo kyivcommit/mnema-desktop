@@ -23,8 +23,14 @@ import {
 
 /// The state a window holds before anything has told it otherwise, and the
 /// exact shape `ScanState::default()` serialises to: idle, nothing counted,
-/// nothing read. `revision: 0` is what makes the first snapshot or event of the
-/// process, whatever its revision, newer than this.
+/// nothing read.
+///
+/// `revision: 0` is the DEFAULT state's own revision, and not a floor that
+/// anything can equal: `apply` needs strictly greater, so a state arriving at
+/// revision 0 is dropped as stale. That is safe because of a fact about the
+/// core rather than about this line — every write to `ScanState` bumps the
+/// revision before announcing (`state.rs`) — so no state but the default one
+/// can ever carry 0. A core that announced at 0 would be invisible here.
 ///
 /// Not exported: a test asserting against this very constant would agree with
 /// the code by construction. `jobs.test.ts` writes the same shape itself.
@@ -167,12 +173,22 @@ export function createJobController(): JobController {
       if (fn !== null) fn();
     };
 
-    // 🔴 The snapshot is asked for INSIDE the subscription's `then`, not beside
-    // it, and that order is `bootLocale`'s (`i18n/index.ts`): a change landing
-    // between the reply and a later `listen` falls in the gap between them and
-    // is lost until the next one. Registering first closes it — an event that
-    // arrives during the read is simply the newer of the two, which is what
-    // `apply` is for.
+    // 🔴 The two are started INDEPENDENTLY, and neither waits on the other.
+    //
+    // The obvious alternative is `bootLocale`'s (`i18n/index.ts`): register the
+    // listener, and only then take the snapshot, so a change landing between the
+    // reply and a later subscription cannot fall in the gap. That order is right
+    // THERE and buys nothing here, because the two files carry different values.
+    // A locale reply is a bare choice with no version, so the order is the only
+    // thing that can say which of two answers is newer. A `ScanState` states its
+    // own revision, and `apply` picks the newer of any two however they arrive —
+    // so the gap that ordering exists to close does not exist for this value.
+    //
+    // What ordering would cost is a real failure: `listenScanProgress` awaits a
+    // dynamic import, and a promise that never settles is neither a rejection
+    // nor a resolution. Chained, it would take the snapshot down with it, and
+    // the window would say nothing at all about a scan that is running — with no
+    // timeout and nothing else that asks.
     void listenScanProgress((incoming) => {
       if (destroyed) return;
       absorb(incoming);
@@ -184,18 +200,21 @@ export function createJobController(): JobController {
         if (destroyed) fn();
         else unlisten = fn;
       })
-      // A subscription that could not be registered is a sentence like any
-      // other rejection, and it does not stop the snapshot below: a window with
-      // no live updates AND no state would say nothing at all about a scan that
-      // is running.
-      .catch((e) => { if (!destroyed) say(e); })
-      .then(() => {
-        if (destroyed) return undefined;
-        return jobStatus().then(
-          (state) => { if (!destroyed) absorb(state); },
-          (e) => { if (!destroyed) say(e); },
-        );
-      });
+      // Trailing, so it covers the handler above as well as the subscription
+      // itself. A subscription that could not be registered is a sentence like
+      // any other rejection.
+      .catch((e) => { if (!destroyed) say(e); });
+
+    // `async` so that a wrapper which throws SYNCHRONOUSLY — one that is
+    // `undefined`, or that answers with something that is not a promise — comes
+    // back as a rejection this catch can turn into a sentence. Called bare, that
+    // throw would escape `mount`, and `mount` is what `onMount` calls: the whole
+    // window would fail to render over a boundary that only failed to answer.
+    const readSnapshot = async () => {
+      const state = await jobStatus();
+      if (!destroyed) absorb(state);
+    };
+    void readSnapshot().catch((e) => { if (!destroyed) say(e); });
 
     return destroy;
   }
