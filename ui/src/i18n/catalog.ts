@@ -62,6 +62,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_folders_confirm_cancel_named'
   | 'settings_folders_confirm_remove' | 'settings_folders_confirm_remove_named'
   | 'settings_folders_removing' | 'settings_folders_remove_blocked'
+  | 'settings_folders_remove_question_withdrawn'
   | 'settings_folders_added_note'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
@@ -514,7 +515,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // файлів цієї теки зараз в індексі. Воно не обіцяє нижньої межі й не
     // рахує того, що сканування ще не встигло проіндексувати, — саме тому
     // речення говорить «файли цієї теки», а не «все, що зникне».
-    settings_folders_confirm_remove: '{files, plural, one {Видалити теку {path} з індексу? # файл цієї теки зникне з пошуку.} few {Видалити теку {path} з індексу? # файли цієї теки зникнуть з пошуку.} many {Видалити теку {path} з індексу? # файлів цієї теки зникнуть з пошуку.} other {Видалити теку {path} з індексу? # файла цієї теки зникнуть з пошуку.}}',
+    //
+    // 🔴 Рев'ю раунду 1 (m1): в арці `other` іменник у родовому однини, тож і
+    // дієслово однини — «зникне», як у власній арці `other` ключа
+    // `settings_folders_indexed`. Для цілих чисел українське CLDR цієї арки не
+    // добирає взагалі, тож на екрані вона не з'являється; вона все одно має
+    // бути узгодженою — неузгоджений рядок читається як помилка перекладу
+    // всюди, де його побачать.
+    settings_folders_confirm_remove: '{files, plural, one {Видалити теку {path} з індексу? # файл цієї теки зникне з пошуку.} few {Видалити теку {path} з індексу? # файли цієї теки зникнуть з пошуку.} many {Видалити теку {path} з індексу? # файлів цієї теки зникнуть з пошуку.} other {Видалити теку {path} з індексу? # файла цієї теки зникне з пошуку.}}',
     // Дві теки на екрані — дві кнопки «Підтвердити» з тим самим написом; шлях у
     // доступній назві лишає їх розрізненними, як у трьох ключах вище.
     settings_folders_confirm_remove_named: 'Підтвердити видалення {path}',
@@ -526,6 +534,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // видалення, доки завдання тримає слот (`bridge.rs:97-180`), тож кнопки
     // вимкнені й тут сказано чому. Не текст відмови — до неї не доходить.
     settings_folders_remove_blocked: 'Спершу зупиніть сканування',
+    // 🔴 Рев'ю раунду 1 (m3). Власний ключ, а не `settings_folders_question_withdrawn`.
+    // Речення те саме за змістом, але останнє підрядне називає, ЩО перечитано:
+    // питання про підтеку живе в панелі, і панель справді перечитують; питання
+    // про видалення живе під списком, і рядок, до якого воно належить, у
+    // звичайному випадку згорнутий — жодної панелі на екрані немає й жодної не
+    // читали. Спільний рядок казав людині про панель, якої вона не бачить.
+    settings_folders_remove_question_withdrawn: 'Питання про теку «{path}» знято: сканування закінчилося, і список перечитано. Натисніть ще раз, якщо це досі потрібно.',
     // §9.2, Task 8. Owner's ruling: adding a folder starts no scan — excluding
     // subfolders and setting masks are moves a person may still want to make
     // first — so this sentence stands where the old per-row Scan button's
@@ -1061,6 +1076,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_remove_named: 'Confirm removing {path}',
     settings_folders_removing: 'Removing…',
     settings_folders_remove_blocked: 'Stop the scan first',
+    settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: a scan ended and the list was read again. Press again if you still want to.',
     settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.',
     settings_masks_heading: 'File masks',
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',

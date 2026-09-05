@@ -817,6 +817,32 @@
     // `loadError`. See `refreshes` for what overlaps and why.
     if (refreshes !== generation) return;
     roots = listing.roots;
+    // 🔴 Fix round 1, I1. The removal question is held to the SAME identity
+    // rule as the panels below, against the same listing and through the same
+    // `namesFolder`, because it is drawn under a row and can outlive it. It is
+    // withdrawn only by `readSeq` growth, so a plain re-read — a mount, an add,
+    // a removal's own answer, or any ending that moves no reading counter —
+    // leaves it standing by design; and the identity underneath it can move
+    // between two of them. `watched_root.id` is a rowid alias (see the panel
+    // prune below), so a remove-and-add elsewhere hands this id to another
+    // folder.
+    //
+    // Both cases the one comparison answers are real and neither is quiet: with
+    // the id still present and naming something else, a question saying
+    // "Remove folder /synthetic/root — 3 files" is drawn directly beneath a row
+    // that now reads another path, and its Confirm can only earn a refusal
+    // (`bridge.rs` compares the frozen path). With the root gone from the
+    // listing, NO row renders the question at all, so the press disappears with
+    // no word — the falsehood `withdrawQuestions` exists to prevent.
+    //
+    // The note and not `rootChanged`: this one names the folder the question
+    // was about, which is the fact a person needs to press again, and
+    // `rootChanged` is a boolean that cannot carry it.
+    if (removeQuestion !== null
+        && !namesFolder(listing, removeQuestion.rootId, removeQuestion.path)) {
+      removeWithdrawn = removeQuestion.path;
+      removeQuestion = null;
+    }
     // An expansion belongs to a row, and outlives it for no longer than the
     // row itself: `remove_watched_folder` deletes a database row whose id
     // SQLite may hand out again, and an expansion left behind under that id
@@ -925,7 +951,7 @@
   // fact, and it is the only field that tells apart the two endings a person
   // sees as one. See the subscription below for where it is compared.
 
-  // 🔴 The question goes, and not in silence, when a scan ends.
+  // 🔴 The question goes, and not in silence, when a READING PASS ends.
   // Its two numbers were read from a `list_tree` taken BEFORE that scan,
   // and `Pending` freezes them on purpose: they cannot be corrected in
   // place without renumbering a sentence somebody is part way through
@@ -1502,15 +1528,17 @@
     void $locale;
     return scanRunning ? t('settings_folders_remove_blocked') : null;
   });
-  // The same sentence the panel's own withdrawn note uses, about a different
-  // subject: a watched folder's absolute path rather than a subfolder's
-  // relative one. One key, because it says one thing — the question you asked
-  // is gone, and why.
+  // 🔴 Fix round 1, m3. Its OWN key, not the panel note's. The two say the same
+  // thing about two different places, and the difference is in the clause that
+  // says what was re-read: the panel note says "this panel was read again", and
+  // this question's row is collapsed in the common case — no panel is on screen and
+  // none was read. The list was. Reusing one string here told a person a panel
+  // they cannot see had been re-read.
   const removeWithdrawnLabel = $derived.by(() => {
     void $locale;
     return removeWithdrawn === null
       ? null
-      : t('settings_folders_question_withdrawn', { path: removeWithdrawn });
+      : t('settings_folders_remove_question_withdrawn', { path: removeWithdrawn });
   });
 </script>
 
@@ -1595,8 +1623,14 @@
               disabled={removing !== null || scanRunning}
               onclick={() => askRemove(root)}>{removeLabel}</button>
           {/if}
-          <!-- Directly under the row it is about, so the folder named in the
-               sentence is the one the eye is already on. -->
+          <!-- Directly under the row it is about, and that is true by
+               construction rather than by hope: the question is drawn only
+               while `refresh` still finds its id naming its frozen path, and
+               it is taken away with a note the moment either half moves (see
+               the `namesFolder` check in `refresh`). Without that check this
+               sentence was false in exactly one state — a re-read handing this
+               id to another folder — and quietly false in another, where the
+               row is gone and nothing renders the question at all. -->
           {#if removeConfirm}
             <div data-testid={`folder-remove-confirm-${root.rootId}`}>
               <p>{removeConfirm.question}</p>
@@ -1693,7 +1727,16 @@
        notice that went with it would leave a press looking like a press that
        did nothing. One sentence for the whole list, not one per row: every
        "Remove" is disabled by the same fact. -->
-  {#if removeBlockedLabel}
+  <!-- Fix round 1, m2: only where there is a disabled button to explain. The
+       sentence says why every «Remove» is refused, so with no «Remove» on
+       screen it names a control the person cannot see.
+
+       BOTH halves of "on screen", because the list above is drawn on both: a
+       `loadError` replaces the whole list with its own two lines while `roots`
+       still holds the previous listing, so `roots.length > 0` alone would
+       leave this sentence standing over a list that is not there. The two
+       conditions are the same ones the `<ul>` above is gated on. -->
+  {#if removeBlockedLabel && loadError === null && roots.length > 0}
     <p data-testid="folders-remove-blocked">{removeBlockedLabel}</p>
   {/if}
   {#if removeWithdrawnLabel}

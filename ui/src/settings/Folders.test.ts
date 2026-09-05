@@ -4,6 +4,7 @@ import Folders from './Folders.svelte';
 import { setLocale, t } from '../i18n';
 import { createJobController } from './jobs';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 import type {
   Counts, ScanState, StoredExclusion, Subfolder, SubfolderListing, SubfolderState, TreeFile,
   TreeListing, TreeRoot,
@@ -2582,9 +2583,15 @@ test('the embedding phase of a run withdraws the question once the reading count
   void jobs.scan('full');
   await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
 
+  // Fix round 1, m4: "nothing" is not only "the question stands". A component
+  // that re-read the list on every progress tick would satisfy the two
+  // assertions below and still be wrong — the re-read is what an ENDING earns,
+  // and this snapshot is neither an ending nor a moved counter.
+  const readsBefore = listTree.mock.calls.length;
   await runEmbeddingAt(0);
   await tick();
   await tick();
+  expect(listTree.mock.calls.length).toBe(readsBefore);
   expect(screen.getByTestId('folder-confirm-1')).toBeTruthy();
   expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
 
@@ -3058,12 +3065,42 @@ async function goIdle() {
   deliver!({ ...IDLE_SCAN, revision: (revision += 1) });
 }
 
-async function showTwoRoots(roots: TreeRoot[] = THREE_AND_FIVE) {
+async function showTwoRoots(roots: TreeRoot[] = THREE_AND_FIVE, waitFor_ = '/synthetic/root') {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing(roots));
   const rendered = renderWatching();
-  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(waitFor_)).toBeTruthy());
   return rendered;
+}
+
+// 🔴 Fix round 1, m8. A process in which a reading pass has ALREADY ended
+// before this component mounted — `job_status` answers a state whose `readSeq`
+// is 1, which is what a window opened mid-life reads.
+//
+// The store is awaited BEFORE the component renders, and that IS the fixture:
+// the seeding under test happens in `onMount`, so a render that ran while the
+// store still held the default would seed 0 from an empty store and the test
+// would pass against the very mutant it exists to kill.
+async function renderAfterAReading() {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
+    root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
+  ]));
+  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
+  listExclusions.mockResolvedValue([]);
+  invoke.mockImplementation((cmd: string) =>
+    Promise.resolve(cmd === 'job_status' ? { ...IDLE_SCAN, revision: 1, readSeq: 1 } : undefined));
+
+  const jobs = createJobController();
+  jobs.mount();
+  await waitFor(() => expect(get(jobs.state).scan.readSeq).toBe(1));
+  // The deliveries below have to be newer than what the store now holds.
+  revision = 1;
+
+  const rendered = render(Folders, { props: { jobs } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  return { jobs, ...rendered };
 }
 
 function removeButton(path: string): HTMLButtonElement {
@@ -3127,32 +3164,31 @@ test('«Cancel» takes the removal question away and removes nothing', async () 
   expect(removeButton('/synthetic/root').disabled).toBe(false);
 });
 
-// 🔴 The states separated: "the folder the person was asked about" and
-// "whatever is at that id now". A re-read lands between the question and the
-// answer — a job ending is enough, and this one moves no reading counter, so
-// the question is not withdrawn — and it renames the row and changes its count.
-// What is sent, and what the sentence goes on saying, is the row the person
-// read: a confirm that re-derived either from `roots` would send
-// `/synthetic/renamed` and renumber the sentence under somebody mid-read.
-test('«Confirm» sends the id and the path the question was asked with, not the ones the row shows after a re-read', async () => {
+// 🔴 The states separated: "the question was answered" and "the list re-read
+// behind it has landed". They are independent, and the answer must not wait for
+// the second: what `remove_watched_folder` is sent is the pair frozen at the
+// click, read from the question and from nothing on screen.
+//
+// Fix round 1, I1, split this test in two and this is the half that keeps its
+// original subject. Its old fixture let the re-read land first and asserted the
+// question still drawn under a row that had been renamed underneath it — a
+// state the identity check in `refresh` now makes unreachable, and the test
+// below is what pins that instead.
+test('«Confirm» sends the frozen id and path while the list re-read behind it is still on the wire', async () => {
   const { jobs } = await showTwoRoots();
   removeWatchedFolder.mockResolvedValue(1);
 
   await fireEvent.click(removeButton('/synthetic/root'));
   await screen.findByTestId('folder-remove-confirm-1');
 
-  // The same id, a different path and a different count.
-  listTree.mockResolvedValue(listing([
-    root({ rootId: 1, absolutePath: '/synthetic/renamed', files: [file('z.md', 'doc-z')] }),
-    THREE_AND_FIVE[1],
-  ]));
+  // The ending's own re-read, held open: nothing has been compared against a
+  // fresh listing when the answer below is given.
+  let release: (v: TreeListing) => void = () => {};
+  listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => { release = r; }));
   void jobs.scan('full');
   await endScan(); // a job ended; no reading pass did
-  await waitFor(() => expect(screen.getByText('/synthetic/renamed')).toBeTruthy());
-
-  // Frozen: both halves of the sentence are the ones that were read.
-  expect(visibleText(screen.getByTestId('folder-remove-confirm-1')))
-    .toBe([REMOVE_QUESTION_EN, 'Confirm', 'Cancel'].join(' '));
+  await tick();
+  expect(screen.getByTestId('folder-remove-confirm-1')).toBeTruthy();
 
   await fireEvent.click(screen.getByRole('button', { name: 'Confirm removing /synthetic/root' }));
 
@@ -3161,6 +3197,94 @@ test('«Confirm» sends the id and the path the question was asked with, not the
   // Answered, so the question goes: a confirmation left on screen invites a
   // second press against a list that has already changed.
   await waitFor(() => expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull());
+
+  release(listing(THREE_AND_FIVE)); // let the held read settle
+  await tick();
+});
+
+// 🔴 Fix round 1, I1. The states separated: "this id still names the folder the
+// question is about" and "it does not". `refresh` runs on a mount, an add, a
+// removal's answer and every ending that moves no reading counter, and the
+// question is withdrawn only by `readSeq` growth — so a plain re-read leaves it
+// standing by design, and `watched_root.id` is a rowid alias that a
+// remove-and-add elsewhere hands to another folder.
+//
+// Both directions, in one fixture, in the order a person meets them: a re-read
+// that keeps the identity leaves the question exactly as it was — frozen count
+// included, which is the half that is still distinguishable — and a re-read
+// that moves it takes the question away and names the folder it was about.
+//
+// Without the check in `refresh`, the second half draws "Remove folder
+// /synthetic/root — 3 files" directly beneath a row reading /synthetic/renamed.
+test('a re-read that keeps this row\'s identity leaves the removal question standing; one that moves it withdraws it by name', async () => {
+  const { jobs } = await showTwoRoots();
+
+  await fireEvent.click(removeButton('/synthetic/root'));
+  await screen.findByTestId('folder-remove-confirm-1');
+
+  // Same id, same path, a DIFFERENT count: the identity is intact, so the
+  // question stands — and it goes on stating the number it was asked with,
+  // which a question re-deriving `files` per render would not.
+  listTree.mockResolvedValue(listing([
+    root({
+      rootId: 1,
+      absolutePath: '/synthetic/root',
+      files: [
+        file('a.md', 'doc-a'), file('b.md', 'doc-b'), file('c.md', 'doc-c'),
+        file('d.md', 'doc-d'), file('e.md', 'doc-e'), file('f.md', 'doc-f'),
+        file('g.md', 'doc-g'),
+      ],
+    }),
+    THREE_AND_FIVE[1],
+  ]));
+  void jobs.scan('full');
+  await endScan();
+  await waitFor(() => expect(screen.getByText('Indexed: 7 documents')).toBeTruthy());
+
+  expect(visibleText(screen.getByTestId('folder-remove-confirm-1')))
+    .toBe([REMOVE_QUESTION_EN, 'Confirm', 'Cancel'].join(' '));
+  expect(screen.queryByTestId('folders-remove-withdrawn')).toBeNull();
+
+  // The same id, now naming another folder — what a remove-and-add elsewhere
+  // does to this window between two reads.
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/renamed', files: [file('z.md', 'doc-z')] }),
+    THREE_AND_FIVE[1],
+  ]));
+  await endScan();
+
+  await waitFor(() => expect(screen.getByText('/synthetic/renamed')).toBeTruthy());
+  expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
+  expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
+    'The question about folder “/synthetic/root” has been withdrawn: a scan ended and'
+    + ' the list was read again. Press again if you still want to.',
+  );
+  expect(removeWatchedFolder).not.toHaveBeenCalled();
+});
+
+// 🔴 Fix round 1, I1, the quieter half of the same finding. When the root
+// simply LEAVES the listing, no row renders the question at all — so without
+// the check the press vanishes with no word, which is the falsehood
+// `withdrawQuestions` exists to prevent. One comparison answers both cases,
+// which is why `namesFolder` compares against a value that is `undefined` when
+// the id has gone.
+test('a removal question about a root that leaves the listing is withdrawn by name, not in silence', async () => {
+  const { jobs } = await showTwoRoots();
+
+  await fireEvent.click(removeButton('/synthetic/root'));
+  await screen.findByTestId('folder-remove-confirm-1');
+
+  listTree.mockResolvedValue(listing([THREE_AND_FIVE[1]])); // root 1 is gone
+  void jobs.scan('full');
+  await endScan();
+
+  await waitFor(() => expect(screen.queryByText('/synthetic/root')).toBeNull());
+  expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
+  expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
+    'The question about folder “/synthetic/root” has been withdrawn: a scan ended and'
+    + ' the list was read again. Press again if you still want to.',
+  );
+  expect(removeWatchedFolder).not.toHaveBeenCalled();
 });
 
 // The states separated: "the removal is in flight" and "the backend has
@@ -3308,19 +3432,24 @@ test('the removal question is withdrawn when a reading pass ends, and says which
   await endScanAt(1);
 
   await waitFor(() => expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull());
+  // 🔴 Fix round 1, m3. Its own sentence, and the clause that makes it its own
+  // is the last one: the LIST was read again, not a panel. This question's row
+  // is collapsed here, as it is in the common case, so a note claiming a panel
+  // had been re-read named something nobody could see.
   expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
-    'The question about “/synthetic/root” has been withdrawn: a scan ended and this'
-    + ' panel was read again. Press again if you still want to.',
+    'The question about folder “/synthetic/root” has been withdrawn: a scan ended and'
+    + ' the list was read again. Press again if you still want to.',
   );
+  // And the panel's own note is not on screen at all: two keys, two subjects.
+  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
   expect(removeWatchedFolder).not.toHaveBeenCalled();
 
-  // The same catalogue sentence the panel's note uses, but a SECOND call site
-  // with its own `void $locale` — so it owes its own switch, exactly as the
-  // panel's did (`M1`, above).
+  // A `t()` call site of its own with its own `void $locale`, so it owes its
+  // own switch — exactly as the panel's note did (`M1`, above).
   setLocale('uk');
   await tick();
   expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
-    'Питання про «/synthetic/root» знято: сканування закінчилося, і цю панель перечитано.'
+    'Питання про теку «/synthetic/root» знято: сканування закінчилося, і список перечитано.'
     + ' Натисніть ще раз, якщо це досі потрібно.',
   );
   setLocale('en');
@@ -3358,8 +3487,11 @@ test('the removal question switches language and keeps the number it was asked w
 // moved on to something else". A question left standing under a press about a
 // different thing is a question whose subject the screen no longer shows.
 test('a press elsewhere in this list abandons the removal question', async () => {
-  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
-  listExclusions.mockResolvedValue([]);
+  // Fix round 1, m6: the panel carries BOTH controls, so all three of the
+  // presses that call `abandonRemoveQuestion` are driven here. Deleting the
+  // call at any one site now kills this test.
+  listSubfolders.mockResolvedValue(subfolders([sub('drop'), sub('Archive', { kind: 'excluded' })]));
+  listExclusions.mockResolvedValue([{ prefix: 'Archive', existsOnDisk: true }]);
   await showTwoRoots();
 
   await fireEvent.click(removeButton('/synthetic/root'));
@@ -3372,6 +3504,18 @@ test('a press elsewhere in this list abandons the removal question', async () =>
   await waitFor(() => expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull());
   expect(removeWatchedFolder).not.toHaveBeenCalled();
 
+  // 🔴 And the include press, which is a different function with its own copy
+  // of the call — `askInclude`, the one that takes a person's rule away. An
+  // exclude fixture alone leaves that site's deletion silent.
+  await fireEvent.click(removeButton('/synthetic/root'));
+  await screen.findByTestId('folder-remove-confirm-1');
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive' }));
+
+  await waitFor(() => expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull());
+  expect(removeWatchedFolder).not.toHaveBeenCalled();
+  expect(includeSubfolder).not.toHaveBeenCalled(); // the question was abandoned, not answered
+
   // And an add, which is the other press this list carries.
   await fireEvent.click(removeButton('/synthetic/other'));
   await screen.findByTestId('folder-remove-confirm-2');
@@ -3380,4 +3524,128 @@ test('a press elsewhere in this list abandons the removal question', async () =>
 
   await waitFor(() => expect(screen.queryByTestId('folder-remove-confirm-2')).toBeNull());
   expect(removeWatchedFolder).not.toHaveBeenCalled();
+});
+
+// 🔴 Fix round 1, m2. The states separated: "there is a disabled «Remove» on
+// screen" and "there is not". The sentence explains why every «Remove» is
+// refused, so over an empty list it names a control the person cannot see —
+// and over a `loadError` it does the same, because that branch replaces the
+// whole list with its own two lines while `roots` still holds what was read
+// before it.
+test('the blocked sentence is drawn only where there is a «Remove» for it to explain', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([]));
+  renderWatching();
+  await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
+
+  await runEmbeddingAt(0);
+  await tick();
+
+  expect(screen.queryByTestId('folders-remove-blocked')).toBeNull();
+
+  // One root, the same running job: now there is a button, and the sentence
+  // says why it cannot be pressed.
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  await endScan(); // re-reads the list; the counter does not move
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await runEmbeddingAt(0);
+  await tick();
+
+  expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('Stop the scan first');
+  expect(removeButton('/synthetic/root').disabled).toBe(true);
+
+  // And the third state, which `roots.length` alone cannot tell from the
+  // second: the list is unreadable, so it is off the screen entirely while
+  // `roots` still remembers the row — `refresh` throws before it assigns.
+  //
+  // 🔴 The failure has to be taken while the job is NOT running and the run
+  // resumed afterwards, because only an ending re-reads: a rejection delivered
+  // during the run would leave the snapshot `ended` and take the sentence off
+  // the screen for the wrong reason, and this arm would pass against the very
+  // guard it is here to pin.
+  listTree.mockRejectedValueOnce(new Error('The index is not open yet.'));
+  await endScan();
+  await waitFor(() => expect(screen.getByText('The list of folders could not be read.')).toBeTruthy());
+  await runEmbeddingAt(0);
+  await tick();
+
+  expect(screen.getByText('The list of folders could not be read.')).toBeTruthy(); // still off screen
+  expect(screen.queryByTestId('folders-remove-blocked')).toBeNull();
+});
+
+// 🔴 Fix round 1, m5. The arms the component itself renders, rather than the
+// arms `t()` renders when a test calls it directly: the fixtures elsewhere in
+// this file reach `other` (en 3, en 5) and `few` (uk 3) only, so the singular
+// was never drawn in either language and Ukrainian `many` never at all. A
+// `files` handed to `t()` as a constant, or dropped, shows up here.
+test('the rendered removal question reaches the singular and the Ukrainian many arm, in both locales', async () => {
+  await showTwoRoots([
+    root({ rootId: 1, absolutePath: '/synthetic/one', files: [file('a.md', 'doc-a')] }),
+    root({
+      rootId: 2,
+      absolutePath: '/synthetic/many',
+      files: [
+        file('p.md', 'doc-p'), file('q.md', 'doc-q'), file('r.md', 'doc-r'),
+        file('s.md', 'doc-s'), file('t.md', 'doc-t'),
+      ],
+    }),
+  ], '/synthetic/one');
+
+  await fireEvent.click(removeButton('/synthetic/one'));
+
+  expect(visibleText(await screen.findByTestId('folder-remove-confirm-1'))).toBe([
+    'Remove folder /synthetic/one from the index? 1 file from this folder will disappear from search.',
+    'Confirm', 'Cancel',
+  ].join(' '));
+
+  setLocale('uk');
+  await tick();
+  expect(visibleText(screen.getByTestId('folder-remove-confirm-1'))).toBe([
+    'Видалити теку /synthetic/one з індексу? 1 файл цієї теки зникне з пошуку.',
+    'Підтвердити', 'Скасувати',
+  ].join(' '));
+
+  // The `many` arm, which no rendered question has reached before: 5 is not 5
+  // of anything the other fixtures count.
+  await fireEvent.click(screen.getByRole('button', { name: 'Видалити /synthetic/many' }));
+  expect(visibleText(await screen.findByTestId('folder-remove-confirm-2'))).toBe([
+    'Видалити теку /synthetic/many з індексу? 5 файлів цієї теки зникнуть з пошуку.',
+    'Підтвердити', 'Скасувати',
+  ].join(' '));
+
+  setLocale('en');
+  await tick();
+  expect(visibleText(screen.getByTestId('folder-remove-confirm-2'))).toBe([
+    'Remove folder /synthetic/many from the index? 5 files from this folder will disappear from search.',
+    'Confirm', 'Cancel',
+  ].join(' '));
+});
+
+// 🔴 Fix round 1, m8. The states separated: this window was opened AFTER a
+// reading pass had already ended, and this window saw that pass end. `readSeq`
+// is a count for the whole process and never resets, so a component that seeded
+// its own counter with 0 would read the first snapshot it ever receives as a
+// pass that ended under a question it never saw — and withdraw a question raised
+// seconds ago on numbers that are perfectly current.
+//
+// The pair is the seeding itself: from the store (this test passes) versus from
+// zero (this test fails, and nothing else in the file does).
+test('a window opened after a reading pass has already ended does not withdraw on the next ending', async () => {
+  const { jobs } = await renderAfterAReading();
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+
+  // The job whose reading pass ended BEFORE this component existed now ends.
+  // Its counter is where the store already had it, so nothing about the
+  // question's numbers has moved since they were read.
+  void jobs.scan('full');
+  const readsBefore = listTree.mock.calls.length;
+  await endScanAt(1);
+
+  await waitFor(() => expect(listTree.mock.calls.length).toBe(readsBefore + 1));
+  expect(screen.getByTestId('folder-confirm-1')).toBeTruthy();
+  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
 });
